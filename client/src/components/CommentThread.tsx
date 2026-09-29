@@ -19,8 +19,17 @@ import {
   handleEmojiAutocompleteKey,
 } from './EmojiAutocomplete'
 import { EmojiPickButton } from './EmojiPickButton'
+import {
+  MentionAutocomplete,
+  checkForMentionTrigger,
+  closeMentionAutocomplete,
+  handleMentionAutocompleteKey,
+  mentionInputAria,
+} from './MentionAutocomplete'
 import { TypingIndicator, sendTyping } from './TypingIndicator'
 import { currentUser } from '@/store/auth'
+import { spaceMentionRender } from '@/store/spaceMembers'
+import { splitMentions } from '@/utils/mentions'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { Comment } from '@/types'
 import { confirmDialog } from '@/components/confirm'
@@ -66,14 +75,39 @@ function spliceIntoSignal(
  *  signal AND fires the ``:foo`` autocomplete check. The autocomplete
  *  needs a splice callback so a single ``<EmojiAutocomplete>`` mount
  *  can route picks back to whichever input started the trigger. */
-function bindEmojiAwareInput(target: Signal<string>) {
+function bindEmojiAwareInput(target: Signal<string>, spaceId?: string | null) {
   const splice = (emoji: string, range: [number, number]) =>
     spliceIntoSignal(target, emoji, range)
   return (e: Event) => {
     const t = e.target as HTMLInputElement
     target.value = t.value
     checkForEmojiTrigger(t.value, t.selectionStart ?? 0, t, splice)
+    // Space threads only (``spaceId`` null → never opens): ``@`` picks a
+    // member of the space.
+    checkForMentionTrigger(t.value, t.selectionStart ?? 0, t, spaceId, splice)
   }
+}
+
+/** Autocomplete keys first (mention, then emoji); ``true`` = consumed. */
+function autocompleteKey(e: KeyboardEvent): boolean {
+  if (handleMentionAutocompleteKey(e) || handleEmojiAutocompleteKey(e)) {
+    e.preventDefault()
+    return true
+  }
+  return false
+}
+
+function closeAutocompletes(): void {
+  closeEmojiAutocomplete()
+  closeMentionAutocomplete()
+}
+
+/** Spread onto a comment input: live combobox ARIA while the mention
+ *  picker is anchored to that input (looked up by its id, so each input
+ *  only claims the picker it opened). */
+function mentionAria(id: string, spaceId?: string | null) {
+  if (!spaceId) return {}
+  return mentionInputAria(document.getElementById(id))
 }
 
 export function CommentThread(
@@ -119,18 +153,17 @@ export function CommentThread(
         )}
         <div class="sh-comment-new">
           <input placeholder="Add a comment…" value={newCommentContent.value}
+            id="sh-comment-new-input"
+            {...mentionAria('sh-comment-new-input', spaceId)}
             onInput={(e) => {
-              bindEmojiAwareInput(newCommentContent)(e)
+              bindEmojiAwareInput(newCommentContent, spaceId)(e)
               fireTyping()
             }}
             onKeyDown={(e) => {
-              if (handleEmojiAutocompleteKey(e)) {
-                e.preventDefault()
-                return
-              }
+              if (autocompleteKey(e)) return
               if (e.key === 'Enter') handleSubmit(null)
             }}
-            onBlur={() => closeEmojiAutocomplete()}
+            onBlur={closeAutocompletes}
             aria-label="New comment" />
           <EmojiPickButton target={newCommentContent} openKey="comment-new" />
           <Button onClick={() => handleSubmit(null)} loading={submitting.value}
@@ -139,6 +172,7 @@ export function CommentThread(
           </Button>
         </div>
         <EmojiAutocomplete />
+        {spaceId && <MentionAutocomplete />}
       </div>
     )
   }
@@ -162,20 +196,19 @@ export function CommentThread(
           {replyTo.value === c.id && (
             <div class="sh-comment-reply-form">
               <input placeholder={`Reply to ${c.author}…`}
+                id="sh-comment-reply-input"
+                {...mentionAria('sh-comment-reply-input', spaceId)}
                 value={replyContent.value} autoFocus
                 aria-label={`Reply to ${c.author}`}
                 onInput={(e) => {
-                  bindEmojiAwareInput(replyContent)(e)
+                  bindEmojiAwareInput(replyContent, spaceId)(e)
                   fireTyping()
                 }}
                 onKeyDown={(e) => {
-                  if (handleEmojiAutocompleteKey(e)) {
-                    e.preventDefault()
-                    return
-                  }
+                  if (autocompleteKey(e)) return
                   if (e.key === 'Enter') handleSubmit(c.id)
                 }}
-                onBlur={() => closeEmojiAutocomplete()} />
+                onBlur={closeAutocompletes} />
               <EmojiPickButton target={replyContent} openKey={`reply-${c.id}`} />
               <Button variant="secondary"
                       onClick={() => { replyTo.value = null; replyContent.value = '' }}>
@@ -195,18 +228,17 @@ export function CommentThread(
       )}
       <div class="sh-comment-new">
         <input placeholder="Add a comment…" value={newCommentContent.value}
+          id="sh-comment-new-input"
+          {...mentionAria('sh-comment-new-input', spaceId)}
           onInput={(e) => {
-            bindEmojiAwareInput(newCommentContent)(e)
+            bindEmojiAwareInput(newCommentContent, spaceId)(e)
             fireTyping()
           }}
           onKeyDown={(e) => {
-            if (handleEmojiAutocompleteKey(e)) {
-              e.preventDefault()
-              return
-            }
+            if (autocompleteKey(e)) return
             if (e.key === 'Enter') handleSubmit(null)
           }}
-          onBlur={() => closeEmojiAutocomplete()}
+          onBlur={closeAutocompletes}
           aria-label="New comment" />
         <EmojiPickButton target={newCommentContent} openKey="comment-new" />
         <Button onClick={() => handleSubmit(null)} loading={submitting.value}
@@ -216,8 +248,10 @@ export function CommentThread(
       </div>
       {/* Mounted once for the whole thread; module-level state keeps it
           singleton across all three input surfaces. Each input
-          registers its own splice target via :func:`checkForEmojiTrigger`. */}
+          registers its own splice target via :func:`checkForEmojiTrigger`
+          / :func:`checkForMentionTrigger`. */}
       <EmojiAutocomplete />
+      {spaceId && <MentionAutocomplete />}
     </div>
   )
 }
@@ -302,7 +336,9 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
       <div class="sh-comment-body">
         <div class="sh-comment-bubble">
           <span class="sh-comment-author">{authorName}</span>
-          <span class="sh-comment-text">{comment.content}</span>
+          <span class="sh-comment-text">
+            <MentionText text={comment.content ?? ''} spaceId={spaceId} />
+          </span>
         </div>
         <div class="sh-comment-actions">
           {onReplyClick && (
@@ -374,4 +410,25 @@ function formatRelative(iso: string): string {
   if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
   return `${days}d ago`
+}
+
+/** Plain comment text with the space's known @-mentions highlighted.
+ *  JSX all the way down — user text is never parsed as HTML. */
+function MentionText({ text, spaceId }: { text: string, spaceId?: string | null }) {
+  const { mentions, selfMention } = spaceMentionRender(spaceId)
+  const self = selfMention?.toLocaleLowerCase() ?? null
+  return (
+    <>
+      {splitMentions(text, mentions).map((p, i) => (
+        typeof p === 'string'
+          ? p
+          : (
+            <span key={i}
+              class={p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'}>
+              {p.raw}
+            </span>
+          )
+      ))}
+    </>
+  )
 }

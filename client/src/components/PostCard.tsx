@@ -19,6 +19,7 @@ import { PollUI } from './PollUI'
 import { ReactionPicker } from './ReactionPicker'
 import { ScheduleUI } from './ScheduleUI'
 import { currentUser } from '@/store/auth'
+import { spaceMentionRender } from '@/store/spaceMembers'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { FeedPost } from '@/types'
 
@@ -208,7 +209,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
                 own headline. Every other post type keeps the
                 markdown body. */}
             {post.content && post.type !== 'event' && (
-              <PostBody content={post.content} />
+              <PostBody content={post.content} spaceId={scopedSpaceId} />
             )}
             {post.type === 'file' && post.file_meta && <FileRenderer file={post.file_meta} />}
             {post.type === 'video' && post.media_url && (
@@ -427,14 +428,16 @@ function PostImageGrid({ urls, alt }: { urls: string[]; alt?: string }) {
  *  dominate the feed. */
 const SHOW_MORE_THRESHOLD = 600
 
-function PostBody({ content }: { content: string }) {
+function PostBody({ content, spaceId }: { content: string, spaceId?: string | null }) {
   const [expanded, setExpanded] = useState(false)
   const isLong = content.length > SHOW_MORE_THRESHOLD
+  // Space posts highlight @-mentions of the space's members.
+  const html = renderMarkdown(content, spaceMentionRender(spaceId))
   if (!isLong) {
     return (
       <div
         class="sh-post-body"
-        dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+        dangerouslySetInnerHTML={{ __html: html }}
       />
     )
   }
@@ -442,7 +445,7 @@ function PostBody({ content }: { content: string }) {
     <div class={`sh-post-body sh-post-body--clamp${expanded ? ' sh-post-body--expanded' : ''}`}>
       <div
         class="sh-post-body-inner"
-        dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+        dangerouslySetInnerHTML={{ __html: html }}
       />
       {!expanded && (
         <button

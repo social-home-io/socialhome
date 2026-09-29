@@ -145,6 +145,7 @@ from .space_crypto_service import (
     strip_authority_sig_fields,
 )
 from .space_member_guard import SpaceMemberGuardMixin
+from .space_mentions import SpaceMentionResolver
 
 
 log = logging.getLogger(__name__)
@@ -4569,9 +4570,21 @@ class SpaceService(SpaceMemberGuardMixin):
             SpacePostCreated(
                 post=post,
                 space_id=space_id,
+                mentions=await self._mentions().resolve(space_id, post.content),
             )
         )
         return post
+
+    def _mentions(self) -> SpaceMentionResolver:
+        """Mention resolver over this household's view of the space's
+        members. Built per call so a late ``attach_federation`` (which
+        brings the remote-member roster) is always honoured."""
+        return SpaceMentionResolver(self._spaces, self._users, self._remote_members)
+
+    async def mention_tokens(self, space_id: str) -> dict[str, str | None]:
+        """user_id → the @-token (without ``@``) a composer inserts to
+        mention that member so it resolves uniquely (``GET .../members``)."""
+        return await self._mentions().tokens(space_id)
 
     # ── Moderation queue admin API ─────────────────────────────────────
 
@@ -4833,7 +4846,12 @@ class SpaceService(SpaceMemberGuardMixin):
         await self._posts.add_comment(comment, space_id=space_id)
         await self._posts.increment_comment_count(post_id, space_id=space_id)
         await self._bus.publish(
-            CommentAdded(post_id=post_id, comment=comment, space_id=space_id),
+            CommentAdded(
+                post_id=post_id,
+                comment=comment,
+                space_id=space_id,
+                mentions=await self._mentions().resolve(space_id, content),
+            ),
         )
         return comment
 

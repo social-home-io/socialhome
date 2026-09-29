@@ -14,5 +14,8 @@
   "notification.calendar.event_created": "{author} voegde een evenement toe: {summary}",
   "notification.bazaar.bid_received": "Nieuw bod op je advertentie",
   "notification.bazaar.bid_placed": "Nieuw bod op je advertentie",
-  "notification.bazaar.offer_accepted": "Je bod is geaccepteerd"
+  "notification.bazaar.offer_accepted": "Je bod is geaccepteerd",
+  "notification.space.mention": "{author} noemde je in {space_name}",
+  "notification.space.comment.mention": "{author} noemde je in een reactie in {space_name}",
+  "notification.space.comment.added": "{author} reageerde in {space_name}"
 }

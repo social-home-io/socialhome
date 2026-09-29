@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
+from socialhome.app_keys import space_service_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
@@ -2770,3 +2771,107 @@ async def test_publish_failure_is_a_sentence_not_an_upstream_dump(
     assert "not the owner of this space" not in message
     # …but an operator can still find it.
     assert any(raw in r.getMessage() for r in caplog.records)
+
+
+async def _bob_content_bells(client) -> list[dict]:
+    r = await client.get("/api/notifications", headers=_auth(client._bob_token))
+    assert r.status == 200
+    return [
+        n
+        for n in await r.json()
+        if n["type"] in {"space_mention", "space_post_created", "space_comment_added"}
+    ]
+
+
+async def test_mentions_level_end_to_end_via_routes(client):
+    """The 'Only @mentions' level delivers: a plain post stays silent, a
+    post and a comment that @-mention bob each land one mention bell, and
+    the members API hands the composer the token that resolves to him."""
+    admin = _auth(client._admin_token)
+    r = await client.post("/api/spaces", json={"name": "Fam"}, headers=admin)
+    sid = (await r.json())["id"]
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.put(
+        f"/api/spaces/{sid}/notif-prefs",
+        json={"level": "mentions"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+
+    r = await client.get(f"/api/spaces/{sid}/members", headers=admin)
+    tokens = {m["user_id"]: m["mention"] for m in await r.json()}
+    assert tokens == {client._admin_uid: "pascal", client._bob_uid: "bob"}
+
+    r = await client.post(
+        f"/api/spaces/{sid}/posts",
+        json={"type": "text", "content": "hi"},
+        headers=admin,
+    )
+    assert r.status == 201
+    assert await _bob_content_bells(client) == []
+
+    r = await client.post(
+        f"/api/spaces/{sid}/posts",
+        json={"type": "text", "content": f"dinner @{tokens[client._bob_uid]}?"},
+        headers=admin,
+    )
+    assert r.status == 201
+    pid = (await r.json())["id"]
+    bells = await _bob_content_bells(client)
+    assert [(n["type"], n["title"]) for n in bells] == [
+        ("space_mention", "Pascal mentioned you in Fam")
+    ]
+
+    r = await client.post(
+        f"/api/spaces/{sid}/posts/{pid}/comments",
+        json={"content": "@bob bring dessert"},
+        headers=admin,
+    )
+    assert r.status == 201
+    bells = await _bob_content_bells(client)
+    assert [n["type"] for n in bells] == ["space_mention", "space_mention"]
+    assert "comment" in bells[0]["title"]
+
+
+async def test_members_mention_tokens_disambiguate_remote_and_label_household(
+    client,
+):
+    """A remote ``bob`` next to the local ``bob``: each row carries a
+    distinct qualified ``mention`` token that resolves back to exactly that
+    member, and the remote row names its household for the picker."""
+    db = client.app[_db_key]
+    admin = _auth(client._admin_token)
+    r = await client.post("/api/spaces", json={"name": "Mix"}, headers=admin)
+    sid = (await r.json())["id"]
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES('peer-m', 'The Smiths', ?,"
+        " 'k1', 'k2', 'https://peer-m/wh', 'wh-peer-m', 'confirmed', 'manual')",
+        ("00" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES('rbob9876543', 'peer-m', 'bob', 'Bob Smith')",
+        (),
+    )
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id,"
+        " display_name) VALUES(?,?,?,?)",
+        (sid, "peer-m", "rbob9876543", "Bob Smith"),
+    )
+    r = await client.get(f"/api/spaces/{sid}/members", headers=admin)
+    rows = {m["user_id"]: m for m in await r.json()}
+    local_tok = rows[client._bob_uid]["mention"]
+    remote_tok = rows["rbob9876543"]["mention"]
+    assert local_tok.startswith("bob@") and remote_tok == "bob@rbob98"
+    assert rows["rbob9876543"]["household_name"] == "The Smiths"
+    assert rows[client._bob_uid].get("household_name") is None
+
+    space_svc = client.app[space_service_key]
+    for uid, tok in ((client._bob_uid, local_tok), ("rbob9876543", remote_tok)):
+        got = await space_svc._mentions().resolve(sid, f"@{tok} hi")
+        assert [m.user_id for m in got] == [uid]
+    # The bare, ambiguous token reaches nobody.
+    assert await space_svc._mentions().resolve(sid, "@bob hi") == ()

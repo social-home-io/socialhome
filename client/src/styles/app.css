@@ -13491,6 +13491,80 @@ a.sh-welcome-card:hover {
   color: var(--sh-text-muted);
 }
 
+/* @-mention member picker (MentionAutocomplete). ``position: fixed`` in
+ * viewport coordinates (the component cancels any transformed / filtered
+ * ancestor's offset), so it isn't clipped by scroll containers and can
+ * flip above the input when the phone keyboard is up. Width + left are
+ * set inline, clamped to the visual viewport. */
+.sh-mention-autocomplete {
+  position: fixed;
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  box-shadow: var(--sh-shadow-lg);
+  padding: var(--sh-space-xs);
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: calc(var(--sh-z-modal) + 10);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sh-mention-autocomplete-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 40px;
+  padding: 4px 8px;
+  border-radius: var(--sh-radius-sm);
+  cursor: pointer;
+  color: inherit;
+}
+.sh-mention-autocomplete-row:hover,
+.sh-mention-autocomplete-row--active {
+  background: var(--sh-bg-secondary);
+}
+.sh-mention-autocomplete-row--active {
+  box-shadow: inset 2px 0 0 var(--sh-primary);
+}
+.sh-mention-autocomplete-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sh-mention-autocomplete-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-mention-autocomplete-meta,
+.sh-mention-autocomplete-note {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-mention-autocomplete-note {
+  padding: 8px;
+  white-space: normal;
+}
+
+/* A resolved @-mention in a rendered space post / comment. */
+.sh-mention {
+  color: var(--sh-primary);
+  background: var(--sh-primary-soft);
+  border-radius: var(--sh-radius-sm);
+  padding: 0 2px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.sh-mention--self {
+  background: var(--sh-primary);
+  color: var(--sh-bg);
+}
+
 /* Shared 😀 emoji-picker trigger button for any text input
  * (composer, comments, DM, bazaar). Replaces the per-component inline
  * versions; opens :class:`ReactionPicker` as a popover. */

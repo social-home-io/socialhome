@@ -45,6 +45,17 @@ export interface SpaceMemberProfile {
   space_display_name: string | null
   picture_hash: string | null
   picture_url: string | null
+  /** Household display name (``GET /api/spaces/{id}/members``). */
+  display_name?: string | null
+  /** Viewer-private rename (§4.1.6). */
+  personal_alias?: string | null
+  /** §23.42 — the exact @-token (no ``@``) that mentions this member and
+   *  resolves uniquely in the space; ``null`` when not mentionable. */
+  mention?: string | null
+  /** Set for a member from another household. */
+  instance_id?: string | null
+  /** Remote rows: the peer household's display name. */
+  household_name?: string | null
 }
 
 export interface FileAttachment {

@@ -745,6 +745,32 @@ disabled type buttons so members don't hit that wall.
   receiver defaults to **all types allowed** (the historical behaviour).
   **No new event type or capability bump** — additive and fail-soft.
 
+## @-mentions (resolved per household, nothing on the wire)
+
+`@handle` tokens in a space post or comment are resolved by **each
+household independently**, on the decrypted content it stores, against its
+**own view of the space's members** (local `space_members` seats +
+`space_remote_members` seats; `SpaceMentionResolver`). A token only ever
+resolves to a member, so a mention can never reach — or notify — a
+non-member. Every publisher runs it: local create (+ moderation approve),
+`SPACE_POST_CREATED` / `SPACE_COMMENT_CREATED` inbound, the GFS-relayed
+public post, and bot-bridge posts (calendar-feed posts carry no member
+text and are not parsed).
+
+- **Grammar:** `@base` matches a member's public `handle` or login /
+  remote username, case-insensitively. When two members share a base (an
+  `anna` on two households) the bare `@anna` resolves to nobody (silence
+  over the wrong person) and the composer inserts `@anna@<user_id prefix>`
+  instead — `user_id` is global, so every member household resolves the
+  qualified token identically. `GET /api/spaces/{id}/members` hands the SPA
+  the exact token per row (`mention`).
+- **`@here`** is recognised but **not notified** yet (owner decision
+  pending); it doesn't suppress the user mentions next to it.
+- **No wire / protocol change, no capability bump.** Content was already
+  end-to-end encrypted to members; mentions are derived from it on receipt.
+- **Notifications:** see `docs/api.md` → `/api/spaces/{id}/notif-prefs`
+  (`space_mention` bell, title only per §25.3).
+
 ## Bazaar tab + opt-in feed announcement
 
 The Bazaar is a first-class space tab (gated on `SpaceFeatures.bazaar`,

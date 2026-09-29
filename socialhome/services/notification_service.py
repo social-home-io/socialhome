@@ -15,10 +15,11 @@ itself is the persistence layer; push is fire-and-forget on top.
 | Event                 | Who is notified                       | Title pattern                                  |
 |----------------------|---------------------------------------|-------------------------------------------------|
 | PostCreated          | All active household members          | "{author} posted"                              |
-| CommentAdded         | Post author (if not the commenter)    | "{commenter} commented on your post"           |
+| CommentAdded         | Household users (feed) / space members (space comment, level + mentions as below) | "{commenter} commented on a post" / "{author} commented in {space}" |
 | TaskAssigned         | Each assignee (not the assigner)      | "You were assigned: {task title}"              |
 | TaskDeadlineDue      | All assignees                         | "Task due today: {task title}"                 |
 | SpacePostCreated     | Space members with notifications on   | "{author} posted in {space}"                   |
+| … mentioning a member | That member (level all / mentions)   | "{author} mentioned you in {space}"            |
 | SpaceModerationQueued| Space admins                          | "New content pending review in {space}"        |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
@@ -353,13 +354,26 @@ class NotificationService:
             )
 
     async def on_comment_added(self, event: CommentAdded) -> None:
-        """Notify the post author when someone else comments."""
-        # Resolve post author from the post_id → feed_posts.author
+        """Household-feed comment → notify every other active household
+        user. Space comment → the space's members only, honouring their
+        notification level and ``event.mentions`` exactly like a space post
+        (a household user outside the space must not hear about it)."""
         commenter_id = event.comment.author
-        # The event only carries post_id, not the post author. To resolve
-        # properly we'd query the post. For v1 we keep this simple:
-        # notify everyone except the commenter. This is slightly noisy but
-        # ensures the post author always gets notified.
+        if event.space_id is not None:
+            await self._notify_space_members(
+                space_id=event.space_id,
+                author_id=commenter_id,
+                mentions=event.mentions,
+                generic_type="space_comment_added",
+                generic_key="notification.space.comment.added",
+                generic_fallback="{author} commented in {space_name}",
+                mention_key="notification.space.comment.mention",
+                mention_fallback="{author} mentioned you in a comment in {space_name}",
+            )
+            return
+        # The event only carries post_id, not the post author. For v1 we
+        # keep this simple: notify everyone except the commenter. Slightly
+        # noisy, but the post author is always notified.
         commenter = await self._users.get_by_user_id(commenter_id)
         name = commenter.display_name if commenter else "Someone"
         users = await self._users.list_active()
@@ -664,42 +678,89 @@ class NotificationService:
         """Notify space members (except the author). Space name is included
         in the title for context. Body is omitted per §25.3.
 
-        Honours per-member :table:`space_notif_prefs`: ``muted`` skips the
-        member entirely, ``mentions`` only fires if the member's user_id
-        is in ``event.mentions``.
+        See :meth:`_notify_space_members` for how the per-member
+        :table:`space_notif_prefs` level and ``event.mentions`` combine.
         """
-        space = await self._spaces.get(event.space_id)
+        await self._notify_space_members(
+            space_id=event.space_id,
+            author_id=event.post.author,
+            mentions=event.mentions,
+            generic_type="space_post_created",
+            generic_key="notification.space.post.created",
+            generic_fallback="{author} posted in {space_name}",
+            mention_key="notification.space.mention",
+            mention_fallback="{author} mentioned you in {space_name}",
+        )
+
+    async def _notify_space_members(
+        self,
+        *,
+        space_id: str,
+        author_id: str,
+        mentions: tuple,
+        generic_type: str,
+        generic_key: str,
+        generic_fallback: str,
+        mention_key: str,
+        mention_fallback: str,
+    ) -> None:
+        """Fan a space-content bell out to this household's space members.
+
+        Per member (never the author, so a self-mention is silent):
+
+        * ``muted`` → nothing, mentioned or not.
+        * mentioned (a resolved ``MentionType.USER`` in *mentions*) → one
+          ``space_mention`` bell ("{author} mentioned you in …") instead of
+          the generic one — never both.
+        * ``mentions`` level and not mentioned → nothing.
+        * otherwise (``all``) → the generic bell.
+
+        ``@here`` (user_id ``None``) is deliberately not notified yet. The
+        member list is the local ``space_members`` roster, so a mention can
+        only ever reach a member — the resolver never resolves outsiders.
+        """
+        space = await self._spaces.get(space_id)
         if space is None:
             return
-        author_id = event.post.author
         author = await self._users.get_by_user_id(author_id)
-        name = author.display_name if author else "Someone"
-        mentioned = {m.user_id for m in event.mentions if m.user_id}
-        members = await self._spaces.list_members(event.space_id)
+        # A post federated from another household names a remote author.
+        remote_author = (
+            await self._users.get_remote(author_id) if author is None else None
+        )
+        name = (
+            author.display_name
+            if author
+            else remote_author.display_name
+            if remote_author and remote_author.display_name
+            else "Someone"
+        )
+        mentioned = {m.user_id for m in mentions if m.user_id}
+        members = await self._spaces.list_members(space_id)
         for member in members:
             if member.user_id == author_id:
                 continue
             level = await self._notifs.get_space_notif_level(
                 user_id=member.user_id,
-                space_id=event.space_id,
+                space_id=space_id,
             )
             if level == "muted":
                 continue
-            if level == "mentions" and member.user_id not in mentioned:
+            is_mentioned = member.user_id in mentioned
+            if level == "mentions" and not is_mentioned:
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
-                    type="space_post_created",
+                    type="space_mention" if is_mentioned else generic_type,
                     title=self._t(
-                        "notification.space.post.created",
+                        mention_key if is_mentioned else generic_key,
                         locale=self._locale(recipient),
-                        fallback="{author} posted in {space_name}",
+                        fallback=mention_fallback if is_mentioned else generic_fallback,
                         author=name,
                         space_name=space.name,
                     ),
-                    link_url=f"/spaces/{event.space_id}",
+                    link_url=f"/spaces/{space_id}",
                 )
             )
 

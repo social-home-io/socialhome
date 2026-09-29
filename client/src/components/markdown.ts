@@ -11,7 +11,47 @@
  * or embed syntax we'll swap for ``marked`` + ``DOMPurify``.
  */
 
+import { splitMentions } from '@/utils/mentions'
+
 const _SAFE_SCHEMES = /^(https?:|mailto:|\/)/i
+
+export interface RenderOptions {
+  /** Lower-cased @-tokens of the current space's members
+   *  (:func:`mentionTokenSet`). Matching ``@token``s are wrapped in
+   *  ``<span class="sh-mention">`` — only known members, so a stray ``@``
+   *  or an e-mail address stays plain text. */
+  mentions?: ReadonlySet<string>
+  /** The viewer's own token — that mention gets ``sh-mention--self``. */
+  selfMention?: string | null
+}
+
+/** Wrap known @-mentions in the already-escaped HTML ``html``.
+ *
+ *  Runs last, over text between tags only: every ``<…>`` in ``html`` was
+ *  produced by this module (user text was escaped first), so skipping tag
+ *  strings keeps attribute values (``href``) intact, and ``<code>`` /
+ *  ``<pre>`` bodies stay literal. The span carries no user-derived
+ *  attribute — only the matched text, which is token chars by grammar. */
+function _wrapMentions(
+  html: string,
+  tokens: ReadonlySet<string>,
+  self: string | null,
+): string {
+  let codeDepth = 0
+  return html.split(/(<[^>]*>)/).map((part) => {
+    if (part.startsWith('<')) {
+      if (/^<(code|pre)\b/i.test(part)) codeDepth += 1
+      else if (/^<\/(code|pre)>/i.test(part)) codeDepth = Math.max(0, codeDepth - 1)
+      return part
+    }
+    if (codeDepth > 0 || !part) return part
+    return splitMentions(part, tokens).map((p) => {
+      if (typeof p === 'string') return p
+      const cls = p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'
+      return `<span class="${cls}">${p.raw}</span>`
+    }).join('')
+  }).join('')
+}
 
 function _escape(raw: string): string {
   return raw
@@ -29,7 +69,7 @@ function _safeHref(href: string): string | null {
 }
 
 /** Render a markdown-ish string to safe HTML. */
-export function renderMarkdown(input: string): string {
+export function renderMarkdown(input: string, opts: RenderOptions = {}): string {
   if (!input) return ''
   // Escape first — everything we splice back in is intentional.
   let out = _escape(input)
@@ -58,5 +98,10 @@ export function renderMarkdown(input: string): string {
   // Soft line breaks — preserve newlines inside a single paragraph.
   out = out.replace(/\n/g, '<br>')
 
+  if (opts.mentions && opts.mentions.size > 0) {
+    out = _wrapMentions(
+      out, opts.mentions, opts.selfMention?.toLocaleLowerCase() ?? null,
+    )
+  }
   return out
 }

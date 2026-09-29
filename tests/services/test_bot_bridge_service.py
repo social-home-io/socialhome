@@ -7,10 +7,12 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import Conversation, ConversationType
+from socialhome.domain.events import SpacePostCreated
 from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
+    SpaceMember,
     SpaceType,
 )
 from socialhome.domain.space_bot import BotScope, SpaceBotDisabledError
@@ -20,11 +22,13 @@ from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.space_bot_repo import SqliteSpaceBotRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.bot_bridge_service import (
     BotBridgeInvalidError,
     BotBridgeService,
     MAX_MESSAGE_LEN,
 )
+from socialhome.services.space_mentions import SpaceMentionResolver
 
 
 @pytest.fixture
@@ -153,3 +157,43 @@ async def test_notify_conversation(stack):
             title=None,
             message="Blocked",
         )
+
+
+async def test_notify_space_resolves_member_mentions(stack):
+    """A bot post's text is member-authored automation copy; ``@anna``
+    resolves against the space's members (and only them)."""
+
+    for uname in ("anna", "dave"):
+        await stack.db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (uname, f"u-{uname}", uname.title()),
+        )
+    await stack.space_repo.save_member(
+        SpaceMember(space_id="sp-1", user_id="u-anna", role="member", joined_at="")
+    )
+    bus = EventBus()
+    captured: list[SpacePostCreated] = []
+    bus.subscribe(SpacePostCreated, captured.append)
+    svc = BotBridgeService(
+        stack.space_post_repo,
+        stack.space_repo,
+        stack.conv_repo,
+        bus,
+        mention_resolver=SpaceMentionResolver(
+            stack.space_repo, SqliteUserRepo(stack.db)
+        ),
+    )
+    await svc.notify_space(stack.bot, title=None, message="@anna @dave laundry done")
+    assert [m.user_id for m in captured[0].mentions] == ["u-anna"]
+
+
+async def test_notify_space_without_resolver_carries_no_mentions(stack):
+
+    bus = EventBus()
+    captured: list[SpacePostCreated] = []
+    bus.subscribe(SpacePostCreated, captured.append)
+    svc = BotBridgeService(
+        stack.space_post_repo, stack.space_repo, stack.conv_repo, bus
+    )
+    await svc.notify_space(stack.bot, title=None, message="@anna hi")
+    assert captured[0].mentions == ()

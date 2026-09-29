@@ -183,6 +183,7 @@ from .services.moment_public_outbound import MomentPublicOutbound
 from .services.space_config_outbound import SpaceConfigOutbound
 from .services.space_post_outbound import SpacePostOutbound
 from .services.space_public_inbound import SpacePublicInbound
+from .services.space_mentions import SpaceMentionResolver
 from .services.space_public_outbound import SpacePublicOutbound
 from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
 from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
@@ -2312,6 +2313,9 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo,
         conversation_repo,
         bus,
+        mention_resolver=SpaceMentionResolver(
+            space_repo, user_repo, repos.space_remote_member
+        ),
     )
     space_bot_service = SpaceBotService(
         space_bot_repo,
@@ -2595,6 +2599,9 @@ def create_app(config: Config | None = None) -> web.Application:
             space_repo=space_repo,
             space_crypto=space_crypto,
             space_post_repo=space_post_repo,
+            mention_resolver=SpaceMentionResolver(
+                space_repo, user_repo, repos.space_remote_member
+            ),
         )
         # The GFS fans a relay out to every subscriber (it can't identify the
         # publisher to exclude it any more) — our own id is what the self-echo

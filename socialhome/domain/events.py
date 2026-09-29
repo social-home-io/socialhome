@@ -95,6 +95,10 @@ class CommentAdded(DomainEvent):
     #: ``None`` when local-origination; set on inbound replay — see
     #: :class:`SpacePostCreated` for the loop-prevention rationale.
     origin_instance_id: str | None = None
+    #: Space comments only: @-mentions resolved against the space's members
+    #: by :class:`~socialhome.services.space_mentions.SpaceMentionResolver`.
+    #: Empty for household-feed comments.
+    mentions: tuple["Mention", ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -126,6 +130,11 @@ class CommentDeleted(DomainEvent):
 class SpacePostCreated(DomainEvent):
     post: "Post"
     space_id: str
+    #: @-mentions in ``post.content``, resolved against the space's members
+    #: by each household on its own member view
+    #: (:class:`~socialhome.services.space_mentions.SpaceMentionResolver`).
+    #: Never on the wire. May include one ``MentionType.HERE`` entry, which
+    #: is not notified yet.
     mentions: tuple["Mention", ...] = ()
     approved_by: str | None = None
     occurred_at: datetime = field(default_factory=_now)

@@ -39,6 +39,7 @@ from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class BotBridgeService:
         "_spaces",
         "_conversations",
         "_bus",
+        "_mentions",
     )
 
     def __init__(
@@ -80,11 +82,17 @@ class BotBridgeService:
         space_repo: AbstractSpaceRepo,
         conversation_repo: AbstractConversationRepo,
         bus: EventBus,
+        *,
+        mention_resolver: SpaceMentionResolver | None = None,
     ) -> None:
         self._space_posts = space_post_repo
         self._spaces = space_repo
         self._conversations = conversation_repo
         self._bus = bus
+        #: A bot post's text is written by the member who configured the
+        #: automation ("@anna the laundry is done"), so it is parsed for
+        #: @-mentions like any member post. ``None`` → no mentions.
+        self._mentions = mention_resolver
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -125,7 +133,14 @@ class BotBridgeService:
             # ``save`` refuses an id owned by another space; the id
             # is a fresh uuid4, so this only fires on real corruption.
             raise ValueError(f"post id {post.id!r} already exists in another space")
-        await self._bus.publish(SpacePostCreated(post=saved, space_id=bot.space_id))
+        mentions = (
+            await self._mentions.resolve(bot.space_id, saved.content)
+            if self._mentions is not None
+            else ()
+        )
+        await self._bus.publish(
+            SpacePostCreated(post=saved, space_id=bot.space_id, mentions=mentions)
+        )
         log.info(
             "bot-bridge: space post %s by bot %s (%s) in space %s",
             saved.id,

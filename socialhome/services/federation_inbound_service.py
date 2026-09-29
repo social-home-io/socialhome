@@ -116,6 +116,7 @@ from .inbound_media_store import (
     publish_once,
     remove_quietly,
 )
+from .space_mentions import SpaceMentionResolver
 from .space_crypto_service import (
     UnsupportedAuthoritySuite,
     strip_authority_sig_fields,
@@ -321,6 +322,7 @@ class FederationInboundService:
         "_space_cover_repo",
         "_space_icon_repo",
         "_groups",
+        "_mentions",
     )
 
     def __init__(
@@ -389,6 +391,13 @@ class FederationInboundService:
             )
             if space_remote_member_repo is not None
             else None
+        )
+        #: @-mentions in inbound space posts / comments resolve against
+        #: THIS household's view of the space's members (local + remote
+        #: seats) on the decrypted content — nothing mention-related is on
+        #: the wire.
+        self._mentions = SpaceMentionResolver(
+            space_repo, user_repo, space_remote_member_repo
         )
         #: §24.11 DM binding — ties the conversation, message and person a
         #: DM payload names to the household that signed it.
@@ -1506,6 +1515,7 @@ class FederationInboundService:
             SpacePostCreated(
                 post=post,
                 space_id=space_id,
+                mentions=await self._mentions.resolve(space_id, post.content),
                 origin_instance_id=event.from_instance,
                 public_relay=public_relay,
             )
@@ -1900,6 +1910,7 @@ class FederationInboundService:
                 comment=comment,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
+                mentions=await self._mentions.resolve(space_id, comment.content),
             ),
         )
 

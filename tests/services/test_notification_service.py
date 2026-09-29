@@ -8,18 +8,24 @@ import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.post import PostType
+from socialhome.domain.events import CommentAdded, SpacePostCreated
+from socialhome.domain.mention import Mention, MentionType
+from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
 from socialhome.domain.task import Task, TaskStatus
+from socialhome.domain.user import RemoteUser
 from socialhome.domain.events import TaskAssigned
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import SqliteCalendarRepo
 from socialhome.repositories.notification_repo import SqliteNotificationRepo
 from socialhome.repositories.post_repo import SqlitePostRepo
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.feed_service import FeedService
 from socialhome.services.notification_service import NotificationService
+from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
 
 
@@ -211,61 +217,219 @@ async def test_space_post_respects_muted_notif_pref(stack):
     assert not any("posted in Quiet" in n.title for n in bob_n)
 
 
-async def test_space_post_mentions_only_skips_non_mention(stack):
-    """level='mentions' — drops non-mention posts, keeps mentions."""
-    from socialhome.domain.events import SpacePostCreated
-    from socialhome.domain.mention import Mention, MentionType
-    from socialhome.domain.post import Post
-    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
-    from socialhome.services.space_service import SpaceService
+async def _mention_space(stack, *members, name="M", levels=None):
+    """Space owned by ``anna`` with *members* seated; returns
+    ``(space_svc, space, users_by_name)``. ``levels`` maps username →
+    notif level."""
 
-    a = await stack.provision_user("anna")
-    b = await stack.provision_user("bob")
-    space_repo = _space_repo(stack.db)
-    spost_repo = SqliteSpacePostRepo(stack.db)
+    users = {"anna": await stack.provision_user("anna")}
+    for m in members:
+        users[m] = await stack.provision_user(m)
     space_svc = SpaceService(
-        space_repo,
-        spost_repo,
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
         SqliteUserRepo(stack.db),
         stack.bus,
         own_instance_id="iid",
     )
-    space = await space_svc.create_space(owner_username="anna", name="M")
-    await space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
-    await stack.notif_repo.set_space_notif_level(
-        user_id=b.user_id,
-        space_id=space.id,
-        level="mentions",
-    )
-    # Plain post — should NOT notify bob.
+    space = await space_svc.create_space(owner_username="anna", name=name)
+    for m in members:
+        await space_svc.add_member(
+            space.id, actor_username="anna", user_id=users[m].user_id
+        )
+    for uname, level in (levels or {}).items():
+        await stack.notif_repo.set_space_notif_level(
+            user_id=users[uname].user_id, space_id=space.id, level=level
+        )
+    return space_svc, space, users
+
+
+_CONTENT_TYPES = {"space_mention", "space_post_created", "space_comment_added"}
+
+
+async def _types(stack, user):
+    """Content-bell types for *user* (ignores roster bells like
+    ``space_member_joined`` the setup itself produces), oldest first."""
+    notes = await stack.notif_repo.list(user.user_id, limit=50)
+    return [n.type for n in reversed(notes) if n.type in _CONTENT_TYPES]
+
+
+async def test_space_post_mentions_only_level_end_to_end(stack):
+    """level='mentions' — a real post via SpaceService: no bell for a plain
+    post, a "mentioned you" bell once the post @-mentions the member."""
+    space_svc, space, u = await _mention_space(stack, "bob", levels={"bob": "mentions"})
     await space_svc.create_post(
-        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="hi all"
-    )
-    bob_n = await stack.notif_repo.list(b.user_id, limit=50)
-    assert not any(n.type == "space_post_created" for n in bob_n)
-    # Post with bob mention — publish event directly with mentions=...
-    post = Post(
-        id="p-mention",
-        author=a.user_id,
+        space.id,
+        author_user_id=u["anna"].user_id,
         type=PostType.TEXT,
-        content="@bob!",
-        created_at=datetime.now(timezone.utc),
+        content="hi all",
     )
+    assert await _types(stack, u["bob"]) == []
+    await space_svc.create_post(
+        space.id,
+        author_user_id=u["anna"].user_id,
+        type=PostType.TEXT,
+        content="lunch, @bob?",
+    )
+    notes = [
+        n
+        for n in await stack.notif_repo.list(u["bob"].user_id, limit=50)
+        if n.type in _CONTENT_TYPES
+    ]
+    assert [n.type for n in notes] == ["space_mention"]
+    assert notes[0].title == "anna mentioned you in M"
+    assert notes[0].link_url == f"/spaces/{space.id}"
+
+
+async def test_space_post_mention_replaces_generic_for_level_all(stack):
+    """A mentioned member at level 'all' gets one distinct mention bell,
+    not a generic one on top; unmentioned members get the generic one."""
+    space_svc, space, u = await _mention_space(stack, "bob", "carl")
+    await space_svc.create_post(
+        space.id,
+        author_user_id=u["anna"].user_id,
+        type=PostType.TEXT,
+        content="@bob see this",
+    )
+    assert await _types(stack, u["bob"]) == ["space_mention"]
+    assert await _types(stack, u["carl"]) == ["space_post_created"]
+
+
+async def test_space_post_mention_muted_self_and_non_member(stack):
+    """Muted gets nothing even when mentioned; the author never notifies
+    themself; a household user outside the space is never reached."""
+    space_svc, space, u = await _mention_space(stack, "bob", levels={"bob": "muted"})
+    dave = await stack.provision_user("dave")  # not a member
+    await space_svc.create_post(
+        space.id,
+        author_user_id=u["anna"].user_id,
+        type=PostType.TEXT,
+        content="@bob @anna @dave",
+    )
+    assert await _types(stack, u["bob"]) == []
+    assert await _types(stack, u["anna"]) == []
+    assert await _types(stack, dave) == []
+
+
+async def test_space_post_at_here_does_not_notify_mentions_level(stack):
+    """@here is parsed but not notified yet (owner decision pending)."""
+    space_svc, space, u = await _mention_space(stack, "bob", levels={"bob": "mentions"})
+    await space_svc.create_post(
+        space.id,
+        author_user_id=u["anna"].user_id,
+        type=PostType.TEXT,
+        content="@here standup",
+    )
+    assert await _types(stack, u["bob"]) == []
+
+
+async def test_space_mention_push_is_title_only(stack):
+    """§25.3 — the push for a mention carries the title, never the body."""
+    space_svc, space, u = await _mention_space(stack, "bob")
+    sent = []
+
+    class _Push:
+        async def push_to_user(self, user_id, payload):
+            sent.append((user_id, payload))
+
+    stack.notif_svc.attach_push_service(_Push())
+    await space_svc.create_post(
+        space.id,
+        author_user_id=u["anna"].user_id,
+        type=PostType.TEXT,
+        content="@bob secret plans",
+    )
+    assert len(sent) == 1
+    user_id, payload = sent[0]
+    assert user_id == u["bob"].user_id
+    assert payload.title == "anna mentioned you in M"
+    assert "secret" not in payload.to_json()
+
+
+async def test_moderated_post_mentions_notify_on_approval(stack):
+    """A queued post's mentions fire when an admin approves it (same
+    ``_persist_post`` path), attributed to the submitter."""
+
+    space_svc, space, u = await _mention_space(stack, "bob", "carl")
+    await space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+    assert (
+        await space_svc.create_post(
+            space.id,
+            author_user_id=u["bob"].user_id,
+            type=PostType.TEXT,
+            content="@carl hello",
+        )
+        is None
+    )
+    item = (await space_svc.list_pending_moderation(space.id, actor_username="anna"))[0]
+    await space_svc.approve_moderation_item(space.id, item.id, actor_username="anna")
+    notes = await stack.notif_repo.list(u["carl"].user_id, limit=50)
+    assert [n.title for n in notes if n.type == "space_mention"] == [
+        "bob mentioned you in M"
+    ]
+
+
+async def test_space_comment_mentions_and_member_scope(stack):
+    """Space comments notify space members only (not the whole household),
+    honour the level, and a mention gets its own bell."""
+    space_svc, space, u = await _mention_space(
+        stack, "bob", "carl", "erin", levels={"carl": "mentions", "erin": "muted"}
+    )
+    dave = await stack.provision_user("dave")  # household, not in the space
+    post = await space_svc.create_post(
+        space.id,
+        author_user_id=u["anna"].user_id,
+        type=PostType.TEXT,
+        content="plain",
+    )
+    before = {k: await _types(stack, v) for k, v in u.items()}
+    await space_svc.add_comment(
+        post.id, author_user_id=u["bob"].user_id, content="agree @carl @erin"
+    )
+    # anna (level all, not mentioned) → generic comment bell.
+    assert (await _types(stack, u["anna"]))[len(before["anna"]) :] == [
+        "space_comment_added"
+    ]
+    # carl (level mentions, mentioned) → mention bell only.
+    carl = [
+        n
+        for n in await stack.notif_repo.list(u["carl"].user_id, limit=50)
+        if n.type in _CONTENT_TYPES
+    ]
+    assert [n.type for n in carl] == ["space_mention"]
+    assert carl[0].title == "bob mentioned you in a comment in M"
+    # erin muted, bob is the commenter, dave outside the space.
+    assert await _types(stack, u["erin"]) == []
+    assert (await _types(stack, u["bob"])) == before["bob"]
+    assert await _types(stack, dave) == []
+    # A plain comment skips the mentions-level member.
+    await space_svc.add_comment(post.id, author_user_id=u["bob"].user_id, content="k")
+    assert await _types(stack, u["carl"]) == ["space_mention"]
+
+
+async def test_space_comment_in_missing_space_is_silent(stack):
+    """A CommentAdded for a space this household no longer has → no-op."""
+
+    b = await stack.provision_user("bob")
     await stack.bus.publish(
-        SpacePostCreated(
-            post=post,
-            space_id=space.id,
-            mentions=(
-                Mention(
-                    type=MentionType.USER,
-                    raw="@bob",
-                    user_id=b.user_id,
-                ),
+        CommentAdded(
+            post_id="p1",
+            comment=Comment(
+                id="c1",
+                post_id="p1",
+                author="x",
+                type=CommentType.TEXT,
+                created_at=datetime.now(timezone.utc),
+                content="hi",
             ),
+            space_id="gone",
         )
     )
-    bob_n = await stack.notif_repo.list(b.user_id, limit=50)
-    assert any(n.type == "space_post_created" for n in bob_n)
+    assert await _types(stack, b) == []
 
 
 async def test_moderation_queued_notifies_admins(stack):
@@ -1429,3 +1593,46 @@ async def test_space_join_approved_for_a_non_local_user_saves_nothing(stack):
     )
     rows = await stack.notif_repo.list("remote-user-not-local", limit=50)
     assert rows == []
+
+
+async def test_space_mention_from_remote_author_names_them(stack):
+    """A federated post by a remote member names that member, not
+    "Someone" (the author lives in ``remote_users``)."""
+    space_svc, space, u = await _mention_space(stack, "bob")
+    await stack.db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES('peer-r', 'peer-r', ?, 'k1',"
+        " 'k2', 'https://peer-r/wh', 'wh-peer-r', 'confirmed', 'manual')",
+        ("00" * 32,),
+    )
+    await SqliteUserRepo(stack.db).upsert_remote(
+        RemoteUser(
+            user_id="r-zoe",
+            instance_id="peer-r",
+            remote_username="zoe",
+            display_name="Zoe Remote",
+        )
+    )
+    await stack.bus.publish(
+        SpacePostCreated(
+            post=Post(
+                id="p-remote",
+                author="r-zoe",
+                type=PostType.TEXT,
+                content="@bob hi",
+                created_at=datetime.now(timezone.utc),
+            ),
+            space_id=space.id,
+            mentions=(
+                Mention(type=MentionType.USER, raw="@bob", user_id=u["bob"].user_id),
+            ),
+            origin_instance_id="peer-r",
+        )
+    )
+    notes = [
+        n
+        for n in await stack.notif_repo.list(u["bob"].user_id, limit=50)
+        if n.type == "space_mention"
+    ]
+    assert [n.title for n in notes] == ["Zoe Remote mentioned you in M"]

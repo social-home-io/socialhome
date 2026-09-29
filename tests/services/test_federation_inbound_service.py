@@ -511,6 +511,76 @@ async def test_space_post_created_persists(db, bus, inbound):
     assert captured[0].space_id == "sp-1"
     # No public_relay in the payload ⇒ event carries None.
     assert captured[0].public_relay is None
+    # No @-tokens ⇒ no mentions.
+    assert captured[0].mentions == ()
+
+
+async def _seed_mention_space(db, space_id):
+    """Space hosted on peer-a with local member ``bob`` and a local
+    household user ``dave`` who is NOT in the space."""
+    await db.enqueue(_SEED_SPACE_SQL, _seed_space_args(space_id))
+    for username in ("bob", "dave"):
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (username, f"u-{username}", username.title()),
+        )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,?)",
+        (space_id, "u-bob", "member"),
+    )
+    await _seat(db, space_id, "user-remote")
+
+
+async def test_inbound_space_post_resolves_mentions_against_members(db, bus, inbound):
+    """The receiving household parses the decrypted content against its own
+    member view: ``@bob`` (member) resolves, ``@dave`` (household user,
+    not a member) never does."""
+    await _seed_mention_space(db, "sp-m")
+    captured: list[SpacePostCreated] = []
+    bus.subscribe(SpacePostCreated, captured.append)
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-m",
+                "author": "user-remote",
+                "type": "text",
+                "content": "hey @bob and @dave",
+            },
+            space_id="sp-m",
+        )
+    )
+    assert [m.user_id for m in captured[0].mentions] == ["u-bob"]
+
+
+async def test_inbound_space_comment_resolves_mentions(db, bus, inbound):
+    await _seed_mention_space(db, "sp-mc")
+    await SqliteSpacePostRepo(db).save(
+        "sp-mc",
+        Post(
+            id="p-mc",
+            author="user-remote",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="post",
+        ),
+    )
+    captured: list[CommentAdded] = []
+    bus.subscribe(CommentAdded, captured.append)
+    await inbound._on_space_comment_added(
+        _event(
+            FederationEventType.SPACE_COMMENT_CREATED,
+            {
+                "space_id": "sp-mc",
+                "post_id": "p-mc",
+                "comment_id": "c-mc",
+                "author": "user-remote",
+                "type": "text",
+                "content": "@Bob agreed, @dave?",
+            },
+        )
+    )
+    assert [m.user_id for m in captured[0].mentions] == ["u-bob"]
 
 
 _SEED_SPACE_SQL = """INSERT INTO spaces(id, name, owner_instance_id, owner_username,

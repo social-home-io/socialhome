@@ -450,6 +450,7 @@ def _member_to_dict(
     is_online: bool = False,
     is_idle: bool = False,
     last_seen_at: str | None = None,
+    mention: str | None = None,
 ) -> dict:
     picture_url = (
         f"/api/spaces/{space_id}/members/{m.user_id}/picture?v={m.picture_hash}"
@@ -479,6 +480,11 @@ def _member_to_dict(
         # state on a cold load even though the user IS sharing — the
         # backend keeps the opt-in across sessions.
         "location_share_enabled": bool(m.location_share_enabled),
+        # §23.42 — the exact @-token a composer inserts to mention this
+        # member; resolves uniquely in this space (qualified
+        # ``handle@<user_id prefix>`` when two members share a handle).
+        # ``None`` when the member has no token-safe handle.
+        "mention": mention,
     }
 
 
@@ -491,6 +497,8 @@ def _remote_member_to_dict(
     is_online: bool = False,
     is_idle: bool = False,
     last_seen_at: str | None = None,
+    mention: str | None = None,
+    household_name: str | None = None,
 ) -> dict:
     """Serialize a :class:`SpaceRemoteMember` (§D1b) into the same row
     shape ``SpaceMembersView`` returns for local members, so the SPA's
@@ -554,6 +562,10 @@ def _remote_member_to_dict(
         # "from another household" badge + suppress local-only
         # admin gestures.
         "instance_id": rm.instance_id,
+        # The peer household's display name (``None`` if not paired) — the
+        # @-mention picker labels remote members with it.
+        "household_name": household_name,
+        "mention": mention,
     }
 
 
@@ -567,6 +579,8 @@ def _remote_member_to_dict_signed(
     is_online: bool = False,
     is_idle: bool = False,
     last_seen_at: str | None = None,
+    mention: str | None = None,
+    household_name: str | None = None,
 ) -> dict:
     """:func:`_remote_member_to_dict` + sign the picture URL when set."""
     payload = _remote_member_to_dict(
@@ -577,6 +591,8 @@ def _remote_member_to_dict_signed(
         is_online=is_online,
         is_idle=is_idle,
         last_seen_at=last_seen_at,
+        mention=mention,
+        household_name=household_name,
     )
     signer = request.app.get(media_signer_key)
     if signer is not None:
@@ -594,6 +610,7 @@ def _member_to_dict_signed(
     is_online: bool = False,
     is_idle: bool = False,
     last_seen_at: str | None = None,
+    mention: str | None = None,
 ) -> dict:
     """:func:`_member_to_dict` + sign ``picture_url`` for the SPA."""
     payload = _member_to_dict(
@@ -604,6 +621,7 @@ def _member_to_dict_signed(
         is_online=is_online,
         is_idle=is_idle,
         last_seen_at=last_seen_at,
+        mention=mention,
     )
     signer = request.app.get(media_signer_key)
     if signer is not None:
@@ -660,6 +678,7 @@ class SpaceMembersView(BaseView):
         online_svc = self.request.app.get(online_status_service_key)
         online_ids = online_svc.online_user_ids() if online_svc else set()
         idle_ids = online_svc.idle_user_ids() if online_svc else set()
+        mention_tokens = await self.svc(space_service_key).mention_tokens(space_id)
         local_rows = [
             _member_to_dict_signed(
                 self.request,
@@ -676,6 +695,7 @@ class SpaceMembersView(BaseView):
                     and online_svc.last_seen(m.user_id) is not None
                     else last_seen_persisted.get(m.user_id)
                 ),
+                mention=mention_tokens.get(m.user_id),
             )
             for m in members
         ]
@@ -690,7 +710,18 @@ class SpaceMembersView(BaseView):
         #   inbound USER_ONLINE / USER_OFFLINE federation events, so
         #   the lookup just works without an extra repo call.
         remote_rows = []
+        fed_repo = self.request.app.get(federation_repo_key)
+        household_names: dict[str, str | None] = {}
         for rm in remote_members:
+            if rm.instance_id not in household_names:
+                inst = (
+                    await fed_repo.get_instance(rm.instance_id)
+                    if fed_repo is not None
+                    else None
+                )
+                household_names[rm.instance_id] = (
+                    inst.effective_display_name if inst is not None else None
+                )
             remote_user = await user_repo.get_remote(rm.user_id)
             override = (
                 remote_user.display_name
@@ -719,6 +750,8 @@ class SpaceMembersView(BaseView):
                     is_online=is_online,
                     is_idle=is_idle,
                     last_seen_at=last_seen_at,
+                    mention=mention_tokens.get(rm.user_id),
+                    household_name=household_names[rm.instance_id],
                 ),
             )
         return web.json_response(local_rows + remote_rows)
