@@ -122,6 +122,26 @@ class BazaarService(ProtectionGateMixin):
     ) -> list[BazaarListing]:
         return await self._repo.list_by_seller(seller_user_id)
 
+    async def _refuse_protected_buyer(self, buyer_user_id: str) -> None:
+        """§CP.R: nothing is sold to a protected account (an offer or bid it
+        made before protection). Worded for the seller — says nothing of why."""
+        if await self._is_restricted(buyer_user_id, ProtectedCapability.BAZAAR):
+            raise BazaarServiceError("This offer can no longer be accepted.")
+
+    async def on_account_protected(self, user_id: str) -> None:
+        """§CP.R retroactive: close the account's active listings.
+
+        They end as ``cancelled`` — an existing, federated state every
+        viewer already sees as closed — so nothing is bought from or sold
+        to the account. Its pending offers and bids go with the listing.
+        Not reopened when protection lifts: relisting is the seller's call.
+        """
+        for listing in await self._repo.list_by_seller(user_id):
+            if listing.status is BazaarStatus.ACTIVE:
+                await self.cancel_listing(
+                    post_id=listing.post_id, actor_user_id=user_id
+                )
+
     async def create_listing(
         self,
         *,
@@ -385,6 +405,10 @@ class BazaarService(ProtectionGateMixin):
         listing = await self.get_listing(bid.listing_post_id)
         if listing.seller_user_id != actor_user_id:
             raise PermissionError("Only the seller may accept this offer")
+        # §CP.R: nor sell — even from a listing made before protection —
+        # nor is anything sold to a protected account.
+        await self._require_unrestricted(actor_user_id, ProtectedCapability.BAZAAR)
+        await self._refuse_protected_buyer(bid.bidder_user_id)
         try:
             await self._repo.accept_offer(bid_id, space_id=listing.space_id)
         except BidStateError as exc:
@@ -534,6 +558,8 @@ class BazaarService(ProtectionGateMixin):
         listing = await self.get_listing(offer.listing_post_id)
         if actor_user_id != listing.seller_user_id:
             raise PermissionError("only the seller may accept offers")
+        await self._require_unrestricted(actor_user_id, ProtectedCapability.BAZAAR)
+        await self._refuse_protected_buyer(offer.offerer_user_id)
         if listing.status != BazaarStatus.ACTIVE:
             raise BazaarServiceError(
                 "listing is no longer active — cannot accept offers",
@@ -678,6 +704,11 @@ class BazaarService(ProtectionGateMixin):
         n = 0
         for listing in listings:
             highest = await self._repo.highest_bid(listing.post_id)
+            if highest is not None and await self._is_restricted(
+                highest.bidder_user_id, ProtectedCapability.BAZAAR
+            ):
+                # §CP.R: a bid placed before protection never wins.
+                highest = None
             if listing.mode.value == "auction" and highest is not None:
                 await self._repo.mark_sold(
                     listing.post_id,

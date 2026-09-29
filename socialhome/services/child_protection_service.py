@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date as _date
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..domain.child_protection import (
     PROTECTED_ACCOUNT_RESTRICTIONS,
@@ -51,6 +51,9 @@ from ..infrastructure.event_bus import EventBus
 from ..repositories.cp_repo import AbstractCpRepo
 from ..repositories.user_repo import AbstractUserRepo
 
+if TYPE_CHECKING:
+    from .protection_gate import ProtectionGateMixin
+
 log = logging.getLogger(__name__)
 
 
@@ -66,6 +69,12 @@ class ChildProtectionError(Exception):
 
 class GuardianRequiredError(ChildProtectionError):
     """Caller is not a guardian of the referenced minor."""
+
+
+class ProtectionIncompleteError(ChildProtectionError):
+    """Protection is on, but something the account shared earlier could not
+    be closed yet (a retroactive hook failed). Idempotent to retry; mapped to
+    422 by ``routes/base.py``."""
 
 
 class UserNotFoundError(ChildProtectionError):
@@ -90,7 +99,7 @@ class _PublishesEvents(Protocol):
 class ChildProtectionService:
     """V1 child-protection coordinator."""
 
-    __slots__ = ("_repo", "_users", "_bus", "_space_repo", "_conv_repo")
+    __slots__ = ("_repo", "_users", "_bus", "_space_repo", "_conv_repo", "_gates")
 
     def __init__(
         self,
@@ -103,6 +112,16 @@ class ChildProtectionService:
         self._bus = bus
         self._space_repo = None
         self._conv_repo = None
+        #: The services that enforce §CP (one per class — a service rebuilt
+        #: at startup replaces its create-time twin). They hear about a new
+        #: protection or guardian block through the
+        #: :class:`~socialhome.services.protection_gate.ProtectionGateMixin`
+        #: hooks, so what was set up *before* reacts too (§CP.R retroactive).
+        self._gates: dict[type, "ProtectionGateMixin"] = {}
+
+    def register_gate(self, gate: "ProtectionGateMixin") -> None:
+        """Called by :meth:`ProtectionGateMixin.attach_child_protection`."""
+        self._gates[type(gate)] = gate
 
     def attach_space_repo(self, space_repo) -> None:
         """Wire :class:`AbstractSpaceRepo` so ``kick_from_space`` can
@@ -157,12 +176,28 @@ class ChildProtectionService:
             declared_age=declared_age,
             date_of_birth=date_of_birth,
         )
+        minor = await self._users.get(minor_username)
+        failed: list[str] = []
+        if minor is not None:
+            minor_id = minor.user_id
+            failed = await self._run_gates(
+                "account_protected",
+                lambda gate: gate.on_account_protected(minor_id),
+            )
         await self._bus.publish(
             CpProtectionEnabled(
                 minor_username=minor_username,
                 declared_age=declared_age,
             )
         )
+        if failed:
+            # Protection itself is on and every surface refuses new use, but
+            # something set up earlier may still be live — the admin retries
+            # (each hook is idempotent). Which ones failed is in the log.
+            raise ProtectionIncompleteError(
+                "Protection is on, but some earlier sharing could not be "
+                "turned off yet. Try again."
+            )
 
     async def disable_protection(
         self,
@@ -270,6 +305,10 @@ class ChildProtectionService:
                 minor_user_id=minor_user_id,
                 blocked_user_id=blocked_user_id,
             )
+        )
+        await self._run_gates(
+            "guardian_block",
+            lambda gate: gate.on_guardian_block(minor_user_id, blocked_user_id),
         )
         # §CP.F2: drop the minor from any space that also has the
         # blocked user as a member. Failure here is logged but never
@@ -583,6 +622,23 @@ class ChildProtectionService:
             other_user_id,
         )
 
+    async def is_guardian_blocked(self, user_a: str, user_b: str) -> bool:
+        """§CP.F2 — whether a guardian block separates *user_a* and *user_b*.
+
+        Symmetric, like a personal block: the protected account can't reach
+        the blocked person and the blocked person can't reach it. Counts only
+        while the account is protected. Local or remote ids alike.
+        """
+        if not user_a or not user_b or user_a == user_b:
+            return False
+        return await self._repo.is_blocked_pair(user_a, user_b)
+
+    async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        """Everyone a guardian block separates from *user_id* (either way)."""
+        if not user_id:
+            return frozenset()
+        return await self._repo.list_block_counterparts(user_id)
+
     # ─── Space age gate ──────────────────────────────────────────────────
 
     async def update_space_age_gate(
@@ -741,6 +797,20 @@ class ChildProtectionService:
         return info["status"] == "confirmed" and info["source"] == "manual"
 
     # ─── Internals ────────────────────────────────────────────────────────
+
+    async def _run_gates(self, hook: str, call) -> list[str]:
+        """Run one hook on every registered gate. A failing gate is logged
+        (ids only) and named in the result; the others still run."""
+        failed: list[str] = []
+        for gate in list(self._gates.values()):
+            try:
+                await call(gate)
+            except Exception as exc:
+                failed.append(type(gate).__name__)
+                log.warning(
+                    "§CP %s hook failed in %s: %s", hook, type(gate).__name__, exc
+                )
+        return failed
 
     async def _require_admin(self, user_id: str) -> None:
         if not await self._repo.is_admin(user_id):

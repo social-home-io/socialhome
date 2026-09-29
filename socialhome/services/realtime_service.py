@@ -1426,7 +1426,16 @@ class RealtimeService:
     ) -> int:
         """§CP fan-out: household admins, the protected account itself and
         its guardians (plus ``also``). A child-protection frame names a
-        protected account, so the rest of the household must not see it."""
+        protected account, so the rest of the household must not see it.
+
+        The account itself also gets ``me.protection_changed`` — no data,
+        only that account — so its SPA reloads ``/api/me`` and
+        ``/api/me/protection`` instead of waiting for the next page load.
+        """
+        if minor_user_id:
+            await self._ws.broadcast_to_user(
+                minor_user_id, {"type": "me.protection_changed"}
+            )
         users = await self._user_repo.list_active()
         ids = {u.user_id for u in users if u.is_admin}
         ids.update(also)
@@ -2089,8 +2098,10 @@ class RealtimeService:
         message_id: str,
         conversation_id: str,
         media_url: str,
+        exclude_user_ids: frozenset[str] = frozenset(),
     ) -> None:
-        """Push ``dm.media_ready`` to local members of a conversation.
+        """Push ``dm.media_ready`` to local members of a conversation
+        (never to ``exclude_user_ids`` — §CP.F2 guardian blocks).
 
         Called by ``FederationInboundService._on_dm_media_blob`` once
         the full bytes for a cross-household media message have
@@ -2115,7 +2126,7 @@ class RealtimeService:
             if m.deleted_at is not None:
                 continue
             u = await self._user_repo.get(m.username)
-            if u is None:
+            if u is None or u.user_id in exclude_user_ids:
                 continue
             user_ids.append(u.user_id)
         if not user_ids:

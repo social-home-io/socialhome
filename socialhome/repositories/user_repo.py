@@ -109,6 +109,7 @@ class AbstractUserRepo(Protocol):
     ) -> str: ...
     async def revoke_api_token(self, token_id: str) -> None: ...
     async def revoke_api_token_for_user(self, user_id: str, token_id: str) -> None: ...
+    async def revoke_personal_api_tokens(self, user_id: str) -> None: ...
     async def get_user_by_token_hash(self, token_hash: str) -> User | None: ...
 
     # Blocks --------------------------------------------------------------
@@ -867,6 +868,20 @@ class SqliteUserRepo:
             "UPDATE api_tokens SET revoked_at=COALESCE(revoked_at, datetime('now')) "
             "WHERE token_id=? AND user_id=?",
             (token_id, user_id),
+        )
+
+    async def revoke_personal_api_tokens(self, user_id: str) -> None:
+        """Revoke every live token of ``user_id`` that isn't a sign-in.
+
+        A sign-in session is minted by the platform's password login, which
+        records the same hash in ``platform_tokens``; everything else in
+        ``api_tokens`` is a credential handed to an outside tool (§CP.R).
+        """
+        await self._db.enqueue(
+            "UPDATE api_tokens SET revoked_at=datetime('now') "
+            "WHERE user_id=? AND revoked_at IS NULL "
+            "AND token_hash NOT IN (SELECT token_hash FROM platform_tokens)",
+            (user_id,),
         )
 
     async def get_user_by_token_hash(self, token_hash: str) -> User | None:

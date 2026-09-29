@@ -265,6 +265,31 @@ class MomentPublicService(ProtectionGateMixin):
     async def list_follows(self, follower_user_id: str) -> list[MomentPublicFollow]:
         return await self._follows.list_for_follower(follower_user_id)
 
+    async def on_account_protected(self, user_id: str) -> None:
+        """§CP.R retroactive: leave every public directory and drop every
+        public follow. The local rows go even when a connection server
+        can't be reached (nothing is published or pulled without them)."""
+        for reg in await self._regs.list_for_user(user_id):
+            try:
+                await self.deregister(user_id=user_id, gfs_id=reg.gfs_id)
+            except MomentPublicError as exc:
+                log.warning("moment_public deregister on protection: %s", exc)
+                await self._regs.delete(user_id=user_id, gfs_id=reg.gfs_id)
+        for follow in await self._follows.list_for_follower(user_id):
+            try:
+                await self.unfollow(
+                    follower_user_id=user_id,
+                    gfs_id=follow.gfs_id,
+                    followed_user_id=follow.followed_user_id,
+                )
+            except MomentPublicError as exc:
+                log.warning("moment_public unfollow on protection: %s", exc)
+                await self._follows.delete(
+                    follower_user_id=user_id,
+                    followed_user_id=follow.followed_user_id,
+                    gfs_id=follow.gfs_id,
+                )
+
     async def fetch_directory(self, gfs_id: str, *, q: str | None = None) -> list[dict]:
         """Fetch the GFS public-user directory (anon GET).
 

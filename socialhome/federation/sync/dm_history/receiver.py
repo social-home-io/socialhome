@@ -6,10 +6,15 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ....domain.conversation import MESSAGE_TYPES, ConversationMessage
+from ....domain.conversation import (
+    MESSAGE_TYPES,
+    ConversationMessage,
+    ConversationType,
+)
 from ....domain.dm_location import normalise_location_content
 from ....domain.events import DmHistorySyncComplete
 from ....domain.federation import FederationEventType
+from ....services.protection_gate import ProtectionGateMixin
 from ...dm_scope import DmScope, refuse
 
 if TYPE_CHECKING:
@@ -23,7 +28,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class DmHistoryReceiver:
+class DmHistoryReceiver(ProtectionGateMixin):
     """Persists inbound DM history chunks and emits the sync-complete event.
 
     History only fills gaps: a chunk is taken from a household seated in
@@ -34,9 +39,16 @@ class DmHistoryReceiver:
     already here is updated from the chunk (its sender's later edit or
     delete) only when the stored row has that same sender in that same
     conversation — never anyone else's message.
+
+    Guardian blocks (§CP.F2) hold here as on a live ``DM_MESSAGE``: a
+    blocked sender's message is not stored when a protected account that
+    blocked them is its only local audience (a 1:1, or a group of only such
+    accounts); in a group with others it is stored, and hidden from them.
     """
 
     __slots__ = (
+        "_child_protection",
+        "_user_repo",
         "_conversation_repo",
         "_bus",
         "_counts",
@@ -53,6 +65,8 @@ class DmHistoryReceiver:
         federation_service: "FederationService | None" = None,
     ) -> None:
         self._conversation_repo = conversation_repo
+        self._user_repo = user_repo
+        self._child_protection = None
         self._bus = bus
         self._federation = federation_service
         self._dm_scope = DmScope(
@@ -101,6 +115,14 @@ class DmHistoryReceiver:
                     message=msg.id,
                 )
                 continue
+            if await self._guardian_blocked_here(conversation_id, msg.sender_user_id):
+                refuse(
+                    event,
+                    "guardian block",
+                    conversation=conversation_id,
+                    message=msg.id,
+                )
+                continue
             if await self._conversation_repo.insert_message_if_absent(msg):
                 saved += 1
                 continue
@@ -143,6 +165,30 @@ class DmHistoryReceiver:
             except Exception as exc:  # pragma: no cover
                 log.debug("DM_HISTORY_CHUNK_ACK send failed: %s", exc)
         return saved
+
+    async def _guardian_blocked_here(
+        self, conversation_id: str, sender_user_id: str
+    ) -> bool:
+        """Whether nobody here may receive *sender_user_id*'s messages in
+        this conversation (§CP.F2) — see the class docstring."""
+        blocked = await self._guardian_block_counterparts(sender_user_id)
+        if not blocked:
+            return False
+        conv = await self._conversation_repo.get(conversation_id)
+        audience: set[str] = set()
+        for m in await self._conversation_repo.list_members(conversation_id):
+            if m.deleted_at is not None:
+                continue
+            user = await self._user_repo.get(m.username)
+            if user is not None:
+                audience.add(user.user_id)
+        if not audience & blocked:
+            return False
+        return (
+            conv is None
+            or conv.type is not ConversationType.GROUP_DM
+            or audience <= blocked
+        )
 
     async def handle_complete(self, event: "FederationEvent") -> None:
         """Publish :class:`DmHistorySyncComplete` — for a seated sender only."""

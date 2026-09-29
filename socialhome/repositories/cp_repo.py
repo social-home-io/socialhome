@@ -26,6 +26,22 @@ import orjson
 from ..db import AsyncDatabase
 
 
+#: Every user a guardian block separates from a viewer, in either direction
+#: (§CP.F2): the people blocked for the viewer, and the protected accounts
+#: that have the viewer blocked. A block only counts while its account is
+#: protected. Bind the viewer's ``user_id`` twice. Shared by the repos whose
+#: read queries hide a blocked author (highlights, moments).
+GUARDIAN_BLOCK_COUNTERPARTS_SQL = """
+    SELECT b.blocked_user_id FROM cp_minor_blocks b
+      JOIN users m ON m.user_id = b.minor_user_id
+     WHERE b.minor_user_id = ? AND m.child_protection_enabled = 1
+    UNION
+    SELECT b.minor_user_id FROM cp_minor_blocks b
+      JOIN users m ON m.user_id = b.minor_user_id
+     WHERE b.blocked_user_id = ? AND m.child_protection_enabled = 1
+"""
+
+
 # ─── Protocol ────────────────────────────────────────────────────────────
 
 
@@ -86,6 +102,8 @@ class AbstractCpRepo(Protocol):
         minor_user_id: str,
         other_user_id: str,
     ) -> bool: ...
+    async def is_blocked_pair(self, user_a: str, user_b: str) -> bool: ...
+    async def list_block_counterparts(self, user_id: str) -> frozenset[str]: ...
     async def list_blocks_for_minor(
         self,
         minor_user_id: str,
@@ -280,6 +298,28 @@ class SqliteCpRepo:
             (minor_user_id, other_user_id),
         )
         return row is not None
+
+    async def is_blocked_pair(self, user_a: str, user_b: str) -> bool:
+        """Whether a guardian block stands between *user_a* and *user_b*
+        (either one the protected account). Only while protection is on."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM cp_minor_blocks b"
+            " JOIN users m ON m.user_id = b.minor_user_id"
+            " WHERE m.child_protection_enabled = 1 AND ("
+            " (b.minor_user_id = ? AND b.blocked_user_id = ?)"
+            " OR (b.minor_user_id = ? AND b.blocked_user_id = ?)) LIMIT 1",
+            (user_a, user_b, user_b, user_a),
+        )
+        return row is not None
+
+    async def list_block_counterparts(self, user_id: str) -> frozenset[str]:
+        """Everyone a guardian block separates from *user_id* (see
+        :data:`GUARDIAN_BLOCK_COUNTERPARTS_SQL`)."""
+        rows = await self._db.fetchall(
+            GUARDIAN_BLOCK_COUNTERPARTS_SQL,
+            (user_id, user_id),
+        )
+        return frozenset(str(r[0]) for r in rows)
 
     async def list_blocks_for_minor(
         self,

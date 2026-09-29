@@ -721,6 +721,11 @@ class UserService(ProtectionGateMixin):
         )
         return token_id, raw_token
 
+    async def on_account_protected(self, user_id: str) -> None:
+        """§CP.R retroactive: revoke the personal API tokens the account
+        created before protection. Its sign-in sessions keep working."""
+        await self._repo.revoke_personal_api_tokens(user_id)
+
     async def revoke_api_token(self, token_id: str) -> None:
         """Revoke any user's token — the admin path (``/api/admin/tokens``)."""
         await self._repo.revoke_api_token(token_id)

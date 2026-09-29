@@ -740,6 +740,12 @@ class _Cp:
     def __init__(self, protected: set[str]):
         self._protected = protected
 
+    def register_gate(self, gate):
+        pass
+
+    async def is_protected(self, user_id):
+        return user_id in self._protected
+
     async def require_unrestricted(self, user_id, capability):
         if user_id in self._protected:
             raise AccountProtectedError(capability)

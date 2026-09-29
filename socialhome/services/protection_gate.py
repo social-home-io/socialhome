@@ -18,6 +18,18 @@ Behaviour-only (``__slots__ = ()``): the consumer declares
 wires the service in ``app.py``; the ``None`` branch only serves unit
 tests that construct a service in isolation, matching the long-standing
 ``SpaceService`` age-gate hook.
+
+The same wiring carries the guardian-block reads (§CP.F2) —
+:meth:`_guardian_blocked` / :meth:`_guardian_block_counterparts` — and two
+hooks :class:`ChildProtectionService` calls on every attached service, so
+what was set up *before* a change reacts too:
+
+* :meth:`on_account_protected` — the account just became protected: revoke
+  or close what it shared earlier (tokens, public links, listings…).
+* :meth:`on_guardian_block` — a guardian just blocked someone for the
+  account: step out of what the two still share.
+
+Both default to no-ops; a service overrides the ones it owns.
 """
 
 from __future__ import annotations
@@ -44,6 +56,32 @@ class ProtectionGateMixin:
         # The slot lives on the consumer (see module docstring); mypy only
         # sees this class's empty ``__slots__``.
         self._child_protection = child_protection_service  # type: ignore[misc]
+        if child_protection_service is not None:
+            child_protection_service.register_gate(self)
+
+    async def on_account_protected(self, user_id: str) -> None:
+        """Hook: *user_id* just became a protected account (no-op here)."""
+
+    async def on_guardian_block(self, minor_user_id: str, blocked_user_id: str) -> None:
+        """Hook: a guardian blocked *blocked_user_id* for *minor_user_id*."""
+
+    async def _is_protected(self, user_id: str) -> bool:
+        """Whether *user_id* is a protected account."""
+        if self._child_protection is None:
+            return False
+        return await self._child_protection.is_protected(user_id)
+
+    async def _guardian_blocked(self, user_a: str, user_b: str) -> bool:
+        """Whether a guardian block separates the two users (§CP.F2)."""
+        if self._child_protection is None:
+            return False
+        return await self._child_protection.is_guardian_blocked(user_a, user_b)
+
+    async def _guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        """Everyone a guardian block separates from *user_id*."""
+        if self._child_protection is None:
+            return frozenset()
+        return await self._child_protection.guardian_block_counterparts(user_id)
 
     async def _is_restricted(
         self,

@@ -53,6 +53,7 @@ from ..federation.sdp_signing import (
 from ..repositories.call_repo import AbstractCallRepo
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
 
@@ -129,8 +130,17 @@ class CallRecord:
 # ─── Service ──────────────────────────────────────────────────────────────
 
 
-class CallSignalingService:
+#: A call a guardian block (§CP.F2) stands in the way of, as the protected
+#: account hears it. The person it blocks hears a personal block's words.
+GUARDIAN_BLOCK_CALL_DETAIL = "You can't call this person."
+BLOCKED_CALL_DETAIL = "Recipient has you blocked."
+
+
+class CallSignalingService(ProtectionGateMixin):
     """Relay backend for WebRTC calls.
+
+    Guardian blocks (§CP.F2) hold for calls as for messages: nobody rings,
+    joins or is rung across one, local or federated.
 
     The service is intentionally minimal: it does not negotiate SDP,
     decode media, or track quality. Everything flows through. The hot
@@ -159,6 +169,7 @@ class CallSignalingService:
     """
 
     __slots__ = (
+        "_child_protection",
         "_call_repo",
         "_conv_repo",
         "_user_repo",
@@ -190,6 +201,7 @@ class CallSignalingService:
         self._per_user: dict[str, set[str]] = {}
         # Optional push service for missed-call notifications (Phase CH).
         self._push = None
+        self._child_protection = None
 
     def attach_federation(self, federation_service) -> None:
         self._federation = federation_service
@@ -246,6 +258,21 @@ class CallSignalingService:
             conversation_id,
             exclude_username=caller_username,
         )
+        # §CP.F2: nobody a guardian block separates from the caller is rung;
+        # a protected caller can't call into a conversation seating one.
+        blocked = await self._guardian_block_counterparts(caller_user_id)
+        if (
+            blocked
+            and ({u.user_id for u in local_callees} | {r[1] for r in remote_callees})
+            & blocked
+        ):
+            protected = await self._is_protected(caller_user_id)
+            if len(local_callees) + len(remote_callees) == 1 or protected:
+                raise PermissionError(
+                    GUARDIAN_BLOCK_CALL_DETAIL if protected else BLOCKED_CALL_DETAIL
+                )
+            local_callees = [u for u in local_callees if u.user_id not in blocked]
+            remote_callees = [r for r in remote_callees if r[1] not in blocked]
         # A callee we hold no offer for can't be connected — don't ring them.
         local_callees = [u for u in local_callees if offers.get(u.user_id) or sdp_offer]
         remote_callees = [r for r in remote_callees if offers.get(r[1]) or sdp_offer]
@@ -389,6 +416,9 @@ class CallSignalingService:
             or answerer_user_id in record.left
         ):
             raise PermissionError("Only a participant may answer this call")
+        if await self._guardian_blocked(answerer_user_id, target):
+            # §CP.F2 — no leg across a guardian block, answered either way.
+            raise PermissionError(GUARDIAN_BLOCK_CALL_DETAIL)
         record.last_activity = time.time()
         signed = sign_rtc_offer(sdp_answer, "answer", identity_seed=self._own_seed)
         signed_dict = signed_sdp_to_dict(signed)
@@ -712,6 +742,14 @@ class CallSignalingService:
             )
 
         already = joiner_user_id in session.participant_user_ids
+        # §CP.F2: no leg ever opens across a guardian block. A protected
+        # account can't late-join a call seating a blocked person; a callee
+        # (rung by someone else) or anyone else just skips those legs.
+        blocked = await self._guardian_block_counterparts(joiner_user_id)
+        if blocked & set(session.participant_user_ids):
+            if not already and await self._is_protected(joiner_user_id):
+                raise PermissionError(GUARDIAN_BLOCK_CALL_DETAIL)
+            sdp_offers = {u: o for u, o in sdp_offers.items() if u not in blocked}
         participants = set(session.participant_user_ids) | {joiner_user_id}
         if len(participants) > MAX_CALL_PARTICIPANTS:
             raise CallTooLargeError(
@@ -1437,6 +1475,8 @@ class CallSignalingService:
                 break
         if caller is None:
             return "caller is not a user of the sending household"
+        if await self._guardian_blocked(callee_user_id, caller_user_id):
+            return "guardian block"
         if not conversation_id:
             return "missing conversation_id"
         members = await self._conv_repo.list_members(conversation_id)

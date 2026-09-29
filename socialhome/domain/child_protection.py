@@ -48,6 +48,16 @@ PROTECTED_ACCOUNT_RESTRICTIONS: tuple[ProtectedCapability, ...] = tuple(
     ProtectedCapability
 )
 
+#: Why a space owned by a protected account can't go public / global —
+#: whoever asks (an adult admin, a remote admin, a quorum). Deliberately
+#: says nothing about the owner.
+PROTECTED_OWNER_PUBLISH_DETAIL = "This space can't be made public."
+
+#: Why a public / global space can't be handed to a protected account.
+PROTECTED_OWNER_TRANSFER_DETAIL = (
+    "This member can't own a public space. Make the space private first."
+)
+
 
 class AccountProtectedError(PermissionError):
     """The caller's account is protected and may not use *capability*.

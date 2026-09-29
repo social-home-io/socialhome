@@ -509,3 +509,32 @@ async def test_prune_expired_sweeps_tombstones(db, repo):
     assert await repo.prune_expired() == 1
     assert await _raw(db, "m-old") is None
     assert await _raw(db, "m-fresh") is not None
+
+
+async def _guardian_block(db, *, minor: str, blocked: str) -> None:
+    """``minor`` is protected and a guardian blocked ``blocked`` (§CP.F2)."""
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name,"
+        " child_protection_enabled) VALUES(?, ?, 'Kid', 1)",
+        (minor, minor),
+    )
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?, ?, 'u-guardian')",
+        (minor, blocked),
+    )
+
+
+async def test_list_visible_hides_guardian_blocked_authors_both_ways(db, repo):
+    await _guardian_block(db, minor="u-kid", blocked="u-bad")
+    await repo.save(_moment(id="m-bad", author="u-bad", content="#spam"))
+    await repo.save(_moment(id="m-kid", author="u-kid", content="#mine"))
+    await repo.save(_moment(id="m-ok", author="u-ok", content="#fine"))
+    assert {m.id for m in await repo.list_visible_to("u-kid")} == {"m-kid", "m-ok"}
+    assert {m.id for m in await repo.list_visible_to("u-bad")} == {"m-bad", "m-ok"}
+    assert {m.id for m in await repo.list_visible_to("u-ok")} == {
+        "m-bad",
+        "m-kid",
+        "m-ok",
+    }
+    assert dict(await repo.list_top_hashtags("u-kid")) == {"mine": 1, "fine": 1}

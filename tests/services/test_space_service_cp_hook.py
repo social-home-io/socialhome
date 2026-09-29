@@ -237,3 +237,71 @@ async def test_ban_appends_blocked_audit_for_minor(env):
     )
     actions = [e["action"] for e in entries]
     assert "blocked" in actions
+
+
+# ─── §CP.R: a protected owner's space stays off the public tiers ─────────
+
+
+async def _kid_owned_space(space_svc, db_space_id: str = "sp-kid") -> None:
+    db = space_svc._spaces._db
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'Den', ?, 'lila', ?)",
+        (db_space_id, space_svc._own_instance_id, "cd" * 32),
+    )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, 'lila-id', 'owner')",
+        (db_space_id,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, 'admin-id', 'admin')",
+        (db_space_id,),
+    )
+
+
+@pytest.mark.parametrize("tier", ["public", "global"])
+async def test_update_config_never_publishes_a_protected_owners_space(env, tier):
+    space_svc, cp_svc = env
+    await _kid_owned_space(space_svc)
+    await cp_svc.enable_protection(
+        minor_username="lila", declared_age=12, actor_user_id="admin-id"
+    )
+    with pytest.raises(SpacePermissionError, match="can't be made public"):
+        await space_svc.update_config("sp-kid", actor_username="admin", space_type=tier)
+    # Other edits (and the private / household tiers) stay open.
+    updated = await space_svc.update_config(
+        "sp-kid", actor_username="admin", space_type="household"
+    )
+    assert updated.space_type.value == "household"
+
+
+async def test_update_config_publishes_an_adults_space(env):
+    space_svc, _ = env
+    await _kid_owned_space(space_svc)
+    # lila is not protected here.
+    updated = await space_svc.update_config(
+        "sp-kid", actor_username="admin", space_type="public"
+    )
+    assert updated.space_type.value == "public"
+
+
+async def test_public_space_is_not_transferred_to_a_protected_account(env):
+    space_svc, cp_svc = env
+    await space_svc.update_config(
+        "sp-adult", actor_username="admin", space_type="public"
+    )
+    await space_svc._spaces._db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES('sp-adult', 'lila-id', 'member')",
+    )
+    await cp_svc.enable_protection(
+        minor_username="lila", declared_age=12, actor_user_id="admin-id"
+    )
+    with pytest.raises(SpacePermissionError, match="private first"):
+        await space_svc.transfer_ownership(
+            "sp-adult", actor_username="admin", to_user_id="lila-id"
+        )
+    await cp_svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
+    await space_svc.transfer_ownership(
+        "sp-adult", actor_username="admin", to_user_id="lila-id"
+    )
