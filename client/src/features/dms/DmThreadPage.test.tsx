@@ -1113,3 +1113,60 @@ describe('DmThreadPage — location messages', () => {
     expect(container.textContent).not.toContain('"lat"')
   })
 })
+
+
+describe('DmThreadPage — @-mentions in a group chat', () => {
+  const group = {
+    id: 'conv-test', type: 'group_dm', name: 'Trip', last_message_at: null,
+    members: [{ user_id: 'u-bob', username: 'bob', display_name: 'Bob', picture_url: null }],
+    member_count: 3, unread: 0, last_read_at: null, muted_until: null,
+    notif_level: 'all',
+  }
+  const roster = [
+    { user_id: 'u-me', username: 'me', display_name: 'Me', picture_url: null, is_self: true, is_online: true, is_idle: false, last_seen_at: null, mention: 'me' },
+    { user_id: 'u-bob', username: 'bob', display_name: 'Bob', picture_url: null, is_self: false, is_online: false, is_idle: false, last_seen_at: null, mention: 'bob' },
+    { user_id: 'u-bea', username: 'bea', display_name: 'Beatrix', picture_url: null, is_self: false, is_online: false, is_idle: false, last_seen_at: null, mention: 'bea', instance_id: 'peer', household_name: 'The Smiths' },
+  ]
+  const textRow = (id: string, content: string) => ({
+    id, sender_user_id: 'u-bob', content, type: 'text',
+    media_url: null, file_name: null, mime_type: null, file_size_bytes: null,
+    reply_to_id: null, reactions: [], deleted: false,
+    created_at: '2026-05-17T13:00:42+00:00', edited_at: null,
+  })
+
+  it('highlights member tokens in bubbles, the viewer’s own one distinctly', async () => {
+    wireApiMock({
+      conversations: [group],
+      messages: [textRow('m1', 'hey @me and @bea, not @nobody')],
+      members: roster,
+    })
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { container } = render(<DmThreadPage />)
+    await waitFor(() => {
+      expect(container.querySelectorAll('.sh-mention').length).toBe(2)
+    }, { timeout: RENDER_WAIT })
+    const spans = [...container.querySelectorAll('.sh-mention')]
+    expect(spans.map(s => [s.textContent, s.classList.contains('sh-mention--self')]))
+      .toEqual([['@me', true], ['@bea', false]])
+  })
+
+  it('typing @ in the composer offers the other members (roster fetched once)', async () => {
+    wireApiMock({ conversations: [group], messages: [], members: roster })
+    const { render, fireEvent, waitFor } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { container, findByPlaceholderText } = render(<DmThreadPage />)
+    const ta = await findByPlaceholderText('Type a message...', {}, { timeout: RENDER_WAIT }) as HTMLTextAreaElement
+    await waitFor(() => expect(container.querySelector('.sh-thread-mute-btn')).toBeTruthy(), { timeout: RENDER_WAIT })
+    ta.value = 'hi @b'
+    ta.setSelectionRange(5, 5)
+    fireEvent.input(ta)
+    await waitFor(() => expect(document.getElementById('sh-mention-listbox')).toBeTruthy())
+    const opts = [...document.querySelectorAll('#sh-mention-listbox [role="option"]')]
+    expect(opts.map(o => o.textContent)).toEqual(['BOBob@bob', 'BEBeatrix@bea · The Smiths'])
+    fireEvent.keyDown(ta, { key: 'Enter' })
+    expect(ta.value).toBe('hi @bob ')
+    const rosterCalls = apiGet.mock.calls.filter(c => c[0] === '/api/conversations/conv-test/members')
+    expect(rosterCalls).toHaveLength(1)
+  })
+})

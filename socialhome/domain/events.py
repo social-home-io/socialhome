@@ -64,6 +64,11 @@ class PostEdited(DomainEvent):
     #: after receiving SPACE_POST_UPDATED. See ``SpacePostCreated``
     #: for the loop-prevention rationale.
     origin_instance_id: str | None = None
+    #: Space posts only: the @-mentions this edit newly ADDS (in the new
+    #: content, not in the old — :func:`~socialhome.domain.mention.mentions_added`),
+    #: resolved on this household's own member view. Only these people are
+    #: notified about an edit. Never on the wire.
+    new_mentions: tuple["Mention", ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -110,6 +115,9 @@ class CommentUpdated(DomainEvent):
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
     origin_instance_id: str | None = None
+    #: Space comments only: the @-mentions this edit newly adds (see
+    #: :attr:`PostEdited.new_mentions`).
+    new_mentions: tuple["Mention", ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1401,13 +1409,21 @@ class DmMessageCreated(DomainEvent):
     file_size_bytes: int | None = None
     reply_to_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
+    #: @-mentions in ``content`` resolved against the conversation's seats
+    #: on this household
+    #: (:class:`~socialhome.services.dm_mentions.DmMentionResolver`).
+    #: Drives the ``dm_mention`` bell and the group ``mentions`` level.
+    #: Never on the wire; never contains ``@here``.
+    mentions: tuple["Mention", ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
 class DmMessageUpdated(DomainEvent):
     """A DM's ``content`` was updated in place.
 
-    Fires on two paths today, both for voice notes:
+    Fires for voice-note transcripts and for a sender's text edit
+    (:meth:`DmService.edit_message` locally, a re-fanned ``DM_MESSAGE``
+    carrying ``edited_at`` inbound). The transcript paths:
 
     1. **Sender-side STT patch.** Right after the audio bubble is
        persisted with empty ``content``, the dm service runs the
@@ -1432,6 +1448,11 @@ class DmMessageUpdated(DomainEvent):
     content: str
     edited_at: datetime
     occurred_at: datetime = field(default_factory=_now)
+    #: A sender's edit: the @-mentions it newly adds (see
+    #: :attr:`PostEdited.new_mentions`). Empty for transcript patches.
+    new_mentions: tuple["Mention", ...] = ()
+    #: The sender's name for a mention bell ("{name} mentioned you …").
+    sender_display_name: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

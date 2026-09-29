@@ -6,11 +6,28 @@
  * the grammar: ``@base`` (word chars, ``.``, ``-``; trailing ``.``/``-`` is
  * punctuation) with an optional ``@<user_id prefix>`` qualifier, never
  * glued to a preceding word char (so ``bob@example.com`` is not a
- * mention). ``GET /api/spaces/{id}/members`` hands us each member's exact
+ * mention). ``GET /api/spaces/{id}/members`` and
+ * ``GET /api/conversations/{id}/members`` hand us each member's exact
  * token (``mention``), so the SPA never invents one — it inserts what the
  * server resolves and highlights only tokens it knows.
  */
-import type { SpaceMemberProfile } from '@/types'
+
+/** What the helpers need from a member row — satisfied by both a space
+ *  member (``GET /api/spaces/{id}/members``) and a conversation member
+ *  (``GET /api/conversations/{id}/members``). */
+export interface MentionMember {
+  user_id: string
+  /** The exact @-token (no ``@``); ``null``/absent → not mentionable. */
+  mention?: string | null
+  display_name?: string | null
+  picture_url?: string | null
+  /** Set for a member from another household. */
+  instance_id?: string | null
+  household_name?: string | null
+  /** Space-only names, preferred for display when set. */
+  space_display_name?: string | null
+  personal_alias?: string | null
+}
 
 /** A word char in the backend's sense (Python ``\w`` ≈ letters, digits,
  *  underscore — Unicode-aware). */
@@ -66,7 +83,7 @@ export function findMentionTrigger(text: string, cursor: number): MentionTrigger
   return { start: cursor - m[1].length - 1, query: m[1] }
 }
 
-function displayName(m: SpaceMemberProfile): string {
+function displayName(m: MentionMember): string {
   return (
     m.space_display_name || m.personal_alias || m.display_name || m.mention || m.user_id
   )
@@ -76,7 +93,7 @@ function displayName(m: SpaceMemberProfile): string {
  *  word of it; case-insensitive), minus the viewer and anyone without a
  *  token. Token matches rank first; capped at 8. */
 export function mentionCandidates(
-  members: Iterable<SpaceMemberProfile>,
+  members: Iterable<MentionMember>,
   query: string,
   excludeUserId: string | null | undefined,
   opts: { includeHere?: boolean } = {},
@@ -115,7 +132,7 @@ export function mentionCandidates(
 }
 
 /** Lower-cased set of every member's token — what the renderers highlight. */
-export function mentionTokenSet(members: Iterable<SpaceMemberProfile>): Set<string> {
+export function mentionTokenSet(members: Iterable<MentionMember>): Set<string> {
   const out = new Set<string>()
   for (const m of members) if (m.mention) out.add(m.mention.toLocaleLowerCase())
   return out

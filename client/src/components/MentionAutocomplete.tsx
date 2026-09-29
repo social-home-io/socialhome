@@ -1,19 +1,20 @@
 /**
- * MentionAutocomplete — ``@name`` member picker for a space composer
- * (§23.42).
+ * MentionAutocomplete — ``@name`` member picker for a space composer or a
+ * group-chat composer (§23.42).
  *
  * Same wiring shape as :mod:`EmojiAutocomplete`: the input owner calls
  * :func:`checkForMentionTrigger` on every input event with ``(text,
- * cursorPos, anchorEl, spaceId, splice)``, routes ``onKeyDown`` through
+ * cursorPos, anchorEl, scope, splice)``, routes ``onKeyDown`` through
  * :func:`handleMentionAutocompleteKey` first, spreads
  * :func:`mentionInputAria` onto the input, and mounts one
  * ``<MentionAutocomplete />`` next to it. Module-level state keeps a
  * single popover open across the page.
  *
- * Candidates come from the per-space member cache
- * (:mod:`store/spaceMembers` → ``GET /api/spaces/{id}/members``), loaded
- * once per space and filtered client-side — typing never hits the
- * network. Picking a member inserts the exact token the server resolves
+ * ``scope`` is a space id (string) or ``{ conversationId }``. Candidates
+ * come from the matching member cache (:mod:`store/spaceMembers` →
+ * ``GET /api/spaces/{id}/members``, or :mod:`store/conversationMembers`
+ * → ``GET /api/conversations/{id}/members``), loaded once per scope and
+ * filtered client-side — typing never hits the network. Picking a member inserts the exact token the server resolves
  * (``mention`` on the member row), so who you pick is who gets notified.
  */
 import { signal } from '@preact/signals'
@@ -26,6 +27,10 @@ import {
   viewerMayUseHere,
 } from '@/store/spaceMembers'
 import {
+  conversationMembers,
+  loadConversationMembers,
+} from '@/store/conversationMembers'
+import {
   findMentionTrigger,
   mentionCandidates,
   type MentionCandidate,
@@ -33,8 +38,22 @@ import {
 
 type SpliceCallback = (text: string, range: [number, number]) => void
 
+/** Where the ``@`` is typed: a space (its id) or a conversation. */
+export type MentionScope = string | { conversationId: string }
+
+interface ResolvedScope {
+  kind: 'space' | 'conversation'
+  id: string
+}
+
+function resolveScope(scope: MentionScope | null | undefined): ResolvedScope | null {
+  if (!scope) return null
+  if (typeof scope === 'string') return { kind: 'space', id: scope }
+  return scope.conversationId ? { kind: 'conversation', id: scope.conversationId } : null
+}
+
 interface MentionState {
-  spaceId: string
+  scope: ResolvedScope
   query: string
   /** ``[start, end)`` of the ``@partial`` token the pick replaces. */
   range: [number, number]
@@ -59,10 +78,14 @@ const MAX_WIDTH = 320
 const EDGE = 8
 
 function matchesFor(s: MentionState): MentionCandidate[] | null {
-  const members = spaceMembers.value[s.spaceId]
+  const { kind, id } = s.scope
+  const members = kind === 'space'
+    ? spaceMembers.value[id]
+    : conversationMembers.value[id]
   if (!members) return null
   return mentionCandidates(members.values(), s.query, currentUser.value?.user_id, {
-    includeHere: viewerMayUseHere(s.spaceId),
+    // ``@here`` pages a space; it has no meaning in a chat.
+    includeHere: kind === 'space' && viewerMayUseHere(id),
   })
 }
 
@@ -75,21 +98,24 @@ export function closeMentionAutocomplete(): void {
 }
 
 /** Open / refresh / close the picker for the ``@partial`` token ending at
- *  ``cursorPos``. ``spaceId`` null/undefined (household feed) → never. */
+ *  ``cursorPos``. ``scope`` null/undefined (household feed, 1:1 chat) →
+ *  never. */
 export function checkForMentionTrigger(
   text: string,
   cursorPos: number,
   anchor: HTMLInputElement | HTMLTextAreaElement,
-  spaceId: string | null | undefined,
+  scope: MentionScope | null | undefined,
   splice: SpliceCallback,
 ): void {
-  const trigger = spaceId ? findMentionTrigger(text, cursorPos) : null
-  if (!spaceId || !trigger) {
+  const resolved = resolveScope(scope)
+  const trigger = resolved ? findMentionTrigger(text, cursorPos) : null
+  if (!resolved || !trigger) {
     closeMentionAutocomplete()
     return
   }
-  // Cached per space: a no-op once the roster is loaded.
-  void loadSpaceMembers(spaceId)
+  // Cached per scope: a no-op once the roster is loaded.
+  if (resolved.kind === 'space') void loadSpaceMembers(resolved.id)
+  else void loadConversationMembers(resolved.id)
   const rect = anchor.getBoundingClientRect()
   const vv = window.visualViewport
   // The on-screen area is the visual viewport — on a phone with the
@@ -107,7 +133,7 @@ export function checkForMentionTrigger(
   const sameToken = prev !== null && prev.anchor === anchor
     && prev.range[0] === trigger.start
   state.value = {
-    spaceId,
+    scope: resolved,
     query: trigger.query,
     range: [trigger.start, cursorPos],
     active: sameToken && prev.query === trigger.query ? prev.active : 0,
@@ -244,7 +270,9 @@ export function MentionAutocomplete() {
     return (
       <div ref={ref} class="sh-mention-autocomplete" style={style} role="status">
         <div class="sh-mention-autocomplete-note">
-          No member of this space matches “@{s.query}”
+          {s.scope.kind === 'space'
+            ? `No member of this space matches “@${s.query}”`
+            : `Nobody in this chat matches “@${s.query}”`}
         </div>
       </div>
     )

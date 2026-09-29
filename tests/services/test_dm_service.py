@@ -10,7 +10,7 @@ import pytest
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import MUTED_FOREVER, ConversationType
-from socialhome.domain.events import DmMessageCreated
+from socialhome.domain.events import DmMessageCreated, DmMessageUpdated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -122,6 +122,93 @@ async def test_mute_rejects_unknown_duration(stack):
     with pytest.raises(ValueError):
         await stack.dm_svc.mute(dm.id, username="anna", duration="3d")
     assert await _mute_of(stack, dm.id, "anna") is None
+
+
+async def test_group_notif_level_round_trip(stack):
+    """A member sets their own group level; others keep ``all``."""
+    for u in ("anna", "bob", "carl"):
+        await stack.provision_user(u)
+    g = await stack.dm_svc.create_group_dm(
+        creator_username="anna", member_usernames=["bob", "carl"], name="Team"
+    )
+    assert (
+        await stack.dm_svc.set_notif_level(g.id, username="bob", level="mentions")
+        == "mentions"
+    )
+    levels = {
+        m.username: m.notif_level for m in await stack.dm_svc._convos.list_members(g.id)
+    }
+    assert levels == {"anna": "all", "bob": "mentions", "carl": "all"}
+    await stack.dm_svc.set_notif_level(g.id, username="bob", level="all")
+    levels = {
+        m.username: m.notif_level for m in await stack.dm_svc._convos.list_members(g.id)
+    }
+    assert levels["bob"] == "all"
+
+
+async def test_notif_level_rejects_bad_level_one_to_one_and_outsiders(stack):
+    for u in ("anna", "bob", "carl", "dora"):
+        await stack.provision_user(u)
+    g = await stack.dm_svc.create_group_dm(
+        creator_username="anna", member_usernames=["bob", "dora"], name="G"
+    )
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    with pytest.raises(ValueError):
+        await stack.dm_svc.set_notif_level(g.id, username="bob", level="muted")
+    with pytest.raises(ValueError):
+        # A 1:1 has one other person — every message is "for you".
+        await stack.dm_svc.set_notif_level(dm.id, username="bob", level="mentions")
+    with pytest.raises(PermissionError):
+        await stack.dm_svc.set_notif_level(g.id, username="carl", level="mentions")
+
+
+async def test_send_message_carries_resolved_mentions(stack):
+    """``DmMessageCreated.mentions`` lists seated members only."""
+    for u in ("anna", "bob", "carl", "dave"):
+        await stack.provision_user(u)
+    g = await stack.dm_svc.create_group_dm(
+        creator_username="anna", member_usernames=["bob", "carl"], name="G"
+    )
+    seen: list[DmMessageCreated] = []
+
+    async def _grab(ev: DmMessageCreated) -> None:
+        seen.append(ev)
+
+    stack.dm_svc._bus.subscribe(DmMessageCreated, _grab)
+    await stack.dm_svc.send_message(
+        g.id, sender_username="anna", content="@bob and @dave, lunch?"
+    )
+    bob = await stack.dm_svc._users.get("bob")
+    assert [m.user_id for m in seen[-1].mentions] == [bob.user_id]
+    # Location pins are structured JSON, never parsed for mentions.
+    assert seen[-1].message_type == "text"
+
+
+async def test_edit_message_publishes_only_newly_added_mentions(stack):
+    for u in ("anna", "bob", "carl"):
+        await stack.provision_user(u)
+    g = await stack.dm_svc.create_group_dm(
+        creator_username="anna", member_usernames=["bob", "carl"], name="G"
+    )
+    msg = await stack.dm_svc.send_message(
+        g.id, sender_username="anna", content="hey @bob"
+    )
+    seen: list[DmMessageUpdated] = []
+
+    async def _grab(ev: DmMessageUpdated) -> None:
+        seen.append(ev)
+
+    stack.dm_svc._bus.subscribe(DmMessageUpdated, _grab)
+    await stack.dm_svc.edit_message(
+        msg.id, editor_username="anna", new_content="hey @bob and @carl"
+    )
+    carl = await stack.dm_svc._users.get("carl")
+    assert len(seen) == 1
+    assert [m.user_id for m in seen[0].new_mentions] == [carl.user_id]
+    assert seen[0].content == "hey @bob and @carl"
+    assert seen[0].sender_display_name == "anna"
+    bob = await stack.dm_svc._users.get("bob")
+    assert set(seen[0].recipient_user_ids) == {bob.user_id, carl.user_id}
 
 
 async def test_mute_is_members_only(stack):

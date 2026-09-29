@@ -29,6 +29,7 @@ from ..domain.conversation import (
     Conversation,
     ConversationMember,
     ConversationMessage,
+    CONVERSATION_NOTIF_LEVELS,
     ConversationType,
     MESSAGE_TYPES,
     RemoteConversationMember,
@@ -49,6 +50,7 @@ from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .dm_group_service import DmGroupService, clean_group_name
+from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
@@ -745,6 +747,11 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                 file_size_bytes=file_size_bytes,
                 reply_to_id=reply_to_id,
                 occurred_at=msg.created_at,
+                mentions=(
+                    await self._mentions().resolve(conversation_id, content)
+                    if type in MENTIONABLE_TYPES
+                    else ()
+                ),
             )
         )
         # Stamp a monotonic sender_seq on the envelope when the
@@ -976,6 +983,35 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         if msg.type == "location":
             new_content = normalise_location_content(new_content)
         await self._convos.edit_message(message_id, new_content)
+        edited_at = datetime.now(timezone.utc)
+        # Every open thread tab swaps the bubble in place; the members an
+        # edit newly @-mentions (never those already mentioned) get a
+        # mention bell (NotificationService).
+        recipients: list[str] = []
+        for m in await self._convos.list_members(msg.conversation_id):
+            if m.username == editor_username:
+                continue
+            u = await self._users.get(m.username)
+            if u is not None:
+                recipients.append(u.user_id)
+        await self._bus.publish(
+            DmMessageUpdated(
+                conversation_id=msg.conversation_id,
+                message_id=msg.id,
+                sender_user_id=msg.sender_user_id,
+                recipient_user_ids=tuple(recipients),
+                content=new_content,
+                edited_at=edited_at,
+                new_mentions=(
+                    await self._mentions().added(
+                        msg.conversation_id, msg.content, new_content
+                    )
+                    if msg.type in MENTIONABLE_TYPES
+                    else ()
+                ),
+                sender_display_name=editor.display_name,
+            )
+        )
         # Receiver upserts on message_id (save_message ON CONFLICT UPDATE),
         # so a re-send of DM_MESSAGE with updated content + edited_at is
         # all the peer needs to reflect the edit.
@@ -992,7 +1028,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                 "media_url": msg.media_url,
                 "reply_to_id": msg.reply_to_id,
                 "occurred_at": msg.created_at.isoformat(),
-                "edited_at": datetime.now(timezone.utc).isoformat(),
+                "edited_at": edited_at.isoformat(),
             },
             sender_user_id=msg.sender_user_id,
         )
@@ -1160,6 +1196,41 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         until = mute_until_for(duration, now=now or datetime.now(timezone.utc))
         await self._convos.set_muted_until(conversation_id, username, until)
         return until
+
+    async def set_notif_level(
+        self,
+        conversation_id: str,
+        *,
+        username: str,
+        level: str,
+    ) -> str:
+        """Set ``username``'s own notification level for a group chat.
+
+        ``level`` is ``"all"`` (every message rings) or ``"mentions"``
+        (only messages that @-mention them). Group conversations only — a
+        1:1 has one other person, so every message is for the member.
+        ``ValueError`` (→ 422) for another level or a 1:1; members only.
+        An active mute still wins. Local only: never federated.
+        """
+        if level not in CONVERSATION_NOTIF_LEVELS:
+            raise ValueError(
+                f"level must be one of {', '.join(sorted(CONVERSATION_NOTIF_LEVELS))}"
+            )
+        conv = await self._require_conversation(conversation_id)
+        await self._require_membership(conversation_id, username)
+        if conv.type is not ConversationType.GROUP_DM:
+            raise ValueError("notification levels apply to group conversations")
+        await self._convos.set_notif_level(conversation_id, username, level)
+        return level
+
+    def _mentions(self) -> DmMentionResolver:
+        """Mention resolver over this household's seats of a conversation."""
+        return DmMentionResolver(self._convos, self._users)
+
+    async def mention_tokens(self, conversation_id: str) -> dict[str, str | None]:
+        """user_id → the @-token (without ``@``) a composer inserts to
+        mention that member (``GET .../members`` ``mention``)."""
+        return await self._mentions().tokens(conversation_id)
 
     async def unmute(self, conversation_id: str, *, username: str) -> None:
         """Clear ``username``'s own mute. Members only; a no-op when unmuted."""

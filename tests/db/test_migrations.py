@@ -416,6 +416,8 @@ async def test_0042_preserves_data(tmp_path):
             "left_version",
             # Added later, by 0060 (conversation mute).
             "muted_until",
+            # Added later, by 0062 (group notification level).
+            "notif_level",
         },
         "calendars": {"id", "name", "color", "owner_username", "calendar_type"},
         "platform_tokens": {

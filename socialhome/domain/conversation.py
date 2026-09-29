@@ -163,7 +163,16 @@ class ConversationMember:
     #: reads as unmuted — see :func:`mute_active`. Local only, never
     #: federated.
     muted_until: str | None = None
+    #: Group conversations: which messages ring this member —
+    #: ``"all"`` (default) or ``"mentions"`` (only messages that @-mention
+    #: them). One of :data:`CONVERSATION_NOTIF_LEVELS`. An active mute wins
+    #: over either. Local only, never federated.
+    notif_level: str = "all"
 
+
+#: Per-member notification levels of a group conversation (see
+#: :attr:`ConversationMember.notif_level`). Mirrors the column CHECK.
+CONVERSATION_NOTIF_LEVELS: frozenset[str] = frozenset({"all", "mentions"})
 
 #: ``muted_until`` for a mute with no end ("until I turn it back on").
 MUTED_FOREVER = "9999-12-31T23:59:59+00:00"

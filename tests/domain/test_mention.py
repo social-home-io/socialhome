@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from socialhome.domain.mention import (
+    Mention,
     MentionCandidate,
     MentionParser,
     MentionType,
     candidate_lookup,
     mention_tokens,
+    mentions_added,
 )
 
 
@@ -175,3 +177,29 @@ def test_qualified_token_for_unknown_prefix_is_none():
     assert lookup("anna@zzzz", "s") is None
     assert lookup("anna@k3f9", "s") == "k3f9x2"
     assert lookup("", "s") is None
+
+
+_ANNA = Mention(type=MentionType.USER, raw="@anna", user_id="u1")
+_BOB = Mention(type=MentionType.USER, raw="@bob", user_id="u2")
+_HERE_M = Mention(type=MentionType.HERE, raw="@here", user_id=None)
+
+
+def test_mentions_added_keeps_only_new_users():
+    """An edit that adds @bob next to an existing @anna → only bob."""
+    assert mentions_added((_ANNA,), (_ANNA, _BOB)) == (_BOB,)
+
+
+def test_mentions_added_matches_on_user_id_not_spelling():
+    """``@Anna`` → ``@anna@u1`` is the same person: not newly mentioned."""
+    respelled = Mention(type=MentionType.USER, raw="@anna@u1", user_id="u1")
+    assert mentions_added((_ANNA,), (respelled,)) == ()
+
+
+def test_mentions_added_here_only_when_newly_written():
+    assert mentions_added((), (_HERE_M, _ANNA)) == (_HERE_M, _ANNA)
+    assert mentions_added((_HERE_M,), (_HERE_M, _ANNA)) == (_ANNA,)
+
+
+def test_mentions_added_removed_or_unchanged_is_empty():
+    assert mentions_added((_ANNA, _BOB), (_ANNA,)) == ()
+    assert mentions_added((_ANNA,), ()) == ()

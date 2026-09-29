@@ -104,3 +104,88 @@ describe('MuteSection (Group info)', () => {
     ])
   })
 })
+
+
+describe('group notification level (§23.42)', () => {
+  it('header menu offers All / Only @mentions above the lengths; a pick saves it', async () => {
+    put.mockResolvedValue({ level: 'mentions' })
+    const onLevel = vi.fn()
+    const { getByLabelText, getAllByRole, queryByRole } = render(
+      <MuteButton
+        convId="g1" mutedUntil={null} onChange={vi.fn()}
+        level="all" onLevelChange={onLevel}
+      />,
+    )
+    fireEvent.click(getByLabelText('Mute notifications'))
+    const radios = getAllByRole('menuitemradio')
+    expect(radios.map(r => [r.textContent, r.getAttribute('aria-checked')])).toEqual([
+      ['✓All messages', 'true'],
+      ['Only @mentions', 'false'],
+    ])
+    // Focus lands on the first choice; the mute lengths are still there.
+    expect(document.activeElement).toBe(radios[0])
+    expect(getAllByRole('menuitem')).toHaveLength(4)
+    fireEvent.click(radios[1])
+    await waitFor(() => expect(onLevel).toHaveBeenCalledWith('mentions'))
+    expect(put).toHaveBeenCalledWith('/api/conversations/g1/notif-prefs', { level: 'mentions' })
+    expect(queryByRole('menu')).toBeNull()
+    expect(toast).toHaveBeenCalledWith(expect.stringMatching(/@mentions you/), 'success')
+  })
+
+  it('a mentions-only group shows the @ badge and says so on the bell', () => {
+    const { getByLabelText, container } = render(
+      <MuteButton
+        convId="g1" mutedUntil={null} onChange={vi.fn()}
+        level="mentions" onLevelChange={vi.fn()}
+      />,
+    )
+    const bell = getByLabelText(/only @mentions/)
+    expect(bell.classList.contains('sh-thread-mute-btn--mentions')).toBe(true)
+    expect(container.querySelector('.sh-thread-mute-btn__at')?.textContent).toBe('@')
+  })
+
+  it('a failed save keeps the level and toasts an error', async () => {
+    put.mockRejectedValue(new Error('boom'))
+    const onLevel = vi.fn()
+    const { getByLabelText, getAllByRole } = render(
+      <MuteButton
+        convId="g1" mutedUntil={null} onChange={vi.fn()}
+        level="all" onLevelChange={onLevel}
+      />,
+    )
+    fireEvent.click(getByLabelText('Mute notifications'))
+    fireEvent.click(getAllByRole('menuitemradio')[1])
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.any(String), 'error'))
+    expect(onLevel).not.toHaveBeenCalled()
+  })
+
+  it('Group info section: radios switch the level and the state line follows', async () => {
+    put.mockResolvedValue({ level: 'mentions' })
+    const onLevel = vi.fn()
+    const { getByLabelText, getByText, rerender } = render(
+      <MuteSection
+        convId="g1" mutedUntil={null} onChange={vi.fn()}
+        level="all" onLevelChange={onLevel}
+      />,
+    )
+    const only = getByLabelText('Only @mentions') as HTMLInputElement
+    expect((getByLabelText('All messages') as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(only)
+    await waitFor(() => expect(onLevel).toHaveBeenCalledWith('mentions'))
+    rerender(
+      <MuteSection
+        convId="g1" mutedUntil={null} onChange={vi.fn()}
+        level="mentions" onLevelChange={onLevel}
+      />,
+    )
+    expect(getByText(/notified when someone @mentions you/)).toBeTruthy()
+  })
+
+  it('1:1 surfaces (no level props) show no level choice', () => {
+    const { getByLabelText, queryAllByRole } = render(
+      <MuteButton convId="d1" mutedUntil={null} onChange={vi.fn()} />,
+    )
+    fireEvent.click(getByLabelText('Mute notifications'))
+    expect(queryAllByRole('menuitemradio')).toHaveLength(0)
+  })
+})

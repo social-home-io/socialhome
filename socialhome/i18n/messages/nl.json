@@ -18,5 +18,7 @@
   "notification.space.mention": "{author} noemde je in {space_name}",
   "notification.space.comment.mention": "{author} noemde je in een reactie in {space_name}",
   "notification.space.comment.added": "{author} reageerde in {space_name}",
-  "notification.space.here": "{author} heeft iedereen in {space_name} gewaarschuwd"
+  "notification.space.here": "{author} heeft iedereen in {space_name} gewaarschuwd",
+  "notification.dm.mention": "{author} noemde je in {chat_name}",
+  "notification.dm.mention_unnamed": "{author} noemde je in een groepschat"
 }

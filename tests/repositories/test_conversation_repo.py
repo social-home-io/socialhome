@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -224,6 +225,25 @@ async def test_set_muted_until_is_per_member_and_clears(env):
     await env.repo.set_muted_until("conv-mute", "alice", None)
     by_name = {m.username: m for m in await env.repo.list_members("conv-mute")}
     assert by_name["alice"].muted_until is None
+
+
+async def test_notif_level_defaults_to_all_and_is_per_member(env):
+    """``notif_level`` starts at ``all``; a change lands on one seat, survives
+    the ``add_member`` upsert, and the column CHECK refuses anything else."""
+    await env.repo.create(_conv("conv-lvl"))
+    await env.repo.add_member(_member("conv-lvl", "alice"))
+    await env.repo.add_member(_member("conv-lvl", "bob"))
+    by_name = {m.username: m for m in await env.repo.list_members("conv-lvl")}
+    assert by_name["alice"].notif_level == "all"
+
+    await env.repo.set_notif_level("conv-lvl", "alice", "mentions")
+    await env.repo.add_member(_member("conv-lvl", "alice"))
+    by_name = {m.username: m for m in await env.repo.list_members("conv-lvl")}
+    assert by_name["alice"].notif_level == "mentions"
+    assert by_name["bob"].notif_level == "all"
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await env.repo.set_notif_level("conv-lvl", "bob", "loud")
 
 
 # ── Messages ───────────────────────────────────────────────────────────────

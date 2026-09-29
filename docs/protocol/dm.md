@@ -527,6 +527,35 @@ GFS or a common peer HFS) using the `_VIA` pattern. The payload
 includes the sender's display name and a short message; recipients
 can `DM_CONTACT_ACCEPTED` or `DM_CONTACT_DECLINED`.
 
+## @-mentions (resolved per household, nothing on the wire)
+
+`@handle` tokens in a DM or group DM are resolved by **each household
+independently**, on the decrypted message, against its **own seats of the
+conversation** — local `conversation_members` plus
+`conversation_remote_members` (a paired peer's `remote_users` row, or the
+`user_id` a group roster seat names; `DmMentionResolver`). A token only
+ever resolves to someone seated in the conversation; a group member who
+left is no longer seated. The grammar and collision qualifier are the
+space ones (`docs/protocol/spaces.md` → @-mentions); `@here` has no
+meaning in a chat and is dropped. Text messages and media captions are
+parsed; location pins and voice-note transcripts are not.
+
+- **No wire / protocol change, no capability bump:** mentions are derived
+  from content every member household already decrypts. `GET
+  /api/conversations/{id}/members` hands the composer the exact token per
+  row (`mention`).
+- **Group notification level:** each local member picks `all` (default)
+  or `mentions` for a group (`PUT /api/conversations/{id}/notif-prefs`,
+  stored on `conversation_members.notif_level`, never federated). A
+  mentioned member at either level gets one `dm_mention` bell ("{sender}
+  mentioned you in {chat}") instead of the `dm_message` one; at
+  `mentions` an unmentioned message rings nothing. An active mute
+  (`/mute`) wins over both. In a 1:1 a mention is just a message.
+- **Edits:** a sender's edit (local `DmService.edit_message`, or an
+  inbound `DM_MESSAGE` re-fan carrying `edited_at`, diffed against the
+  stored body) rings only the members it **newly** mentions — never the
+  ones already mentioned, never a muted member.
+
 ## Push privacy (§25.3)
 
 Push notifications for DMs carry the title only — no message body.
