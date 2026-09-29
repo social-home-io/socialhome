@@ -394,6 +394,13 @@ class StandaloneAdapter(PlatformAdapter):
                 username=self._config.admin_username,
                 password=self._config.admin_password,
             )
+            # Admin provisioning is the wizard's only required step in
+            # standalone mode, so the headless seed completes setup too —
+            # otherwise ``setup_required`` stays true and the SPA shows the
+            # wizard over a household that already has its admin. Runs on
+            # every boot (idempotent) so a household seeded by a build that
+            # skipped this is repaired on its next start.
+            await app[K.setup_service_key].mark_complete()
 
     async def provision_admin(
         self,
