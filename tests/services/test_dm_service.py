@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.conversation import ConversationType
+from socialhome.domain.conversation import MUTED_FOREVER, ConversationType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -78,6 +80,57 @@ async def test_unread_and_mark_read(stack):
     assert await stack.dm_svc.count_unread(dm.id, username="bob") == 1
     await stack.dm_svc.mark_read(dm.id, username="bob")
     assert await stack.dm_svc.count_unread(dm.id, username="bob") == 0
+
+
+async def _mute_of(stack, conv_id: str, username: str) -> str | None:
+    members = await stack.dm_svc._convos.list_members(conv_id)
+    return next(m.muted_until for m in members if m.username == username)
+
+
+async def test_mute_and_unmute_own_seat_only(stack):
+    """Muting stamps the caller's seat only; unread still counts; unmute clears."""
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    now = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+    until = await stack.dm_svc.mute(dm.id, username="bob", duration="8h", now=now)
+    assert until == "2026-09-29T18:00:00+00:00"
+    assert await _mute_of(stack, dm.id, "bob") == until
+    assert await _mute_of(stack, dm.id, "anna") is None
+
+    await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
+    assert await stack.dm_svc.count_unread(dm.id, username="bob") == 1
+
+    await stack.dm_svc.unmute(dm.id, username="bob")
+    assert await _mute_of(stack, dm.id, "bob") is None
+
+
+async def test_mute_forever_uses_sentinel(stack):
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    until = await stack.dm_svc.mute(dm.id, username="anna", duration="forever")
+    assert until == MUTED_FOREVER
+
+
+async def test_mute_rejects_unknown_duration(stack):
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    with pytest.raises(ValueError):
+        await stack.dm_svc.mute(dm.id, username="anna", duration="3d")
+    assert await _mute_of(stack, dm.id, "anna") is None
+
+
+async def test_mute_is_members_only(stack):
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    await stack.provision_user("carl")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    with pytest.raises(PermissionError):
+        await stack.dm_svc.mute(dm.id, username="carl", duration="1h")
+    with pytest.raises(PermissionError):
+        await stack.dm_svc.unmute(dm.id, username="carl")
 
 
 async def test_edit_delete_sender_only(stack):

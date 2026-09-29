@@ -31,7 +31,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 
+from ..domain.conversation import mute_active
 from ..domain.events import (
     AppChallengeReceived,
     BazaarBidPlaced,
@@ -69,6 +71,7 @@ from ..domain.mention import MentionType
 from ..domain.space import SpaceRole
 from ..i18n import Catalog
 from ..infrastructure.event_bus import EventBus
+from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.notification_repo import (
     AbstractNotificationRepo,
     new_notification,
@@ -112,6 +115,7 @@ class NotificationService:
         "_ws_manager",
         "_clock",
         "_here_last",
+        "_convos",
     )
 
     def __init__(
@@ -122,8 +126,12 @@ class NotificationService:
         bus: EventBus,
         *,
         i18n: Catalog | None = None,
+        conversation_repo: AbstractConversationRepo | None = None,
     ) -> None:
         self._notifs = notification_repo
+        #: Per-member conversation mutes (``on_dm_message_created``).
+        #: Without it no conversation reads as muted.
+        self._convos = conversation_repo
         self._users = user_repo
         self._spaces = space_repo
         self._bus = bus
@@ -468,11 +476,17 @@ class NotificationService:
         ``WebSocketManager`` we degrade to the pre-fix behaviour
         (always notify) so unit tests that don't wire the manager
         don't have to mock it.
+
+        Muted conversations: a recipient who muted this conversation
+        (``conversation_members.muted_until`` still in the future) gets
+        neither the bell row nor the push. The message and its unread
+        count are untouched; the mute is theirs alone and never federated.
         """
         if not event.recipient_user_ids:
             return
         title = f"{event.sender_display_name} messaged you"
         link = f"/dms/{event.conversation_id}"
+        muted = await self._muted_usernames(event.conversation_id)
         for recipient_id in event.recipient_user_ids:
             # Notifications.user_id FK's into ``users`` (local accounts
             # only). Remote recipients' rows live in ``remote_users``;
@@ -483,6 +497,10 @@ class NotificationService:
             # cross-household DM.
             local = await self._users.get_by_user_id(recipient_id)
             if local is None:
+                continue
+            if local.username in muted:
+                # The recipient muted this conversation: the message still
+                # lands and counts unread, but no bell row and no push.
                 continue
             if self._ws_manager is not None and (
                 self._ws_manager.is_user_active_in_conversation(
@@ -500,6 +518,17 @@ class NotificationService:
                 ),
                 dedupe_by_link=True,
             )
+
+    async def _muted_usernames(self, conversation_id: str) -> frozenset[str]:
+        """Local usernames whose own mute on ``conversation_id`` is on now."""
+        if self._convos is None:
+            return frozenset()
+        now = datetime.now(timezone.utc)
+        return frozenset(
+            m.username
+            for m in await self._convos.list_members(conversation_id)
+            if mute_active(m.muted_until, now=now)
+        )
 
     async def mark_read_for_dm(
         self,

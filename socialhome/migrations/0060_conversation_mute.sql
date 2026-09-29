@@ -1,0 +1,19 @@
+-- §23.47 mute a conversation — per user, local only.
+--
+-- A member can silence one conversation (a 1:1 or a group) for an hour,
+-- eight hours, a week, or until they turn it back on. A muted
+-- conversation still delivers its messages and still counts them unread;
+-- it only stops the bell row and the push for that member.
+--
+-- The mute belongs to one (conversation, local user) pair, and
+-- ``conversation_members`` is exactly that row: it goes away with the
+-- conversation (ON DELETE CASCADE) and with the user, and it survives a
+-- 1:1 re-open (``add_member``'s upsert leaves the column alone). A mute is
+-- a personal preference, never federated, so no event carries it.
+--
+-- ``muted_until`` is a UTC ISO 8601 timestamp; a time in the past reads as
+-- unmuted (checked at read time — no scheduler clears it). "Until I turn
+-- it back on" is stored as the far-future sentinel
+-- ``9999-12-31T23:59:59+00:00``. Additive and NULL-defaulted: every
+-- existing seat starts unmuted.
+ALTER TABLE conversation_members ADD COLUMN muted_until TEXT;

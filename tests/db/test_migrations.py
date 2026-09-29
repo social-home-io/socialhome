@@ -414,6 +414,8 @@ async def test_0042_preserves_data(tmp_path):
             # Added later, by 0059 (group member versions).
             "joined_version",
             "left_version",
+            # Added later, by 0060 (conversation mute).
+            "muted_until",
         },
         "calendars": {"id", "name", "color", "owner_username", "calendar_type"},
         "platform_tokens": {

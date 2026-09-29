@@ -8,7 +8,13 @@ import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import CommentAdded, SpacePostCreated
+from socialhome.domain.conversation import (
+    MUTED_FOREVER,
+    Conversation,
+    ConversationMember,
+    ConversationType,
+)
+from socialhome.domain.events import CommentAdded, DmMessageCreated, SpacePostCreated
 from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
@@ -17,6 +23,7 @@ from socialhome.domain.user import RemoteUser
 from socialhome.domain.events import TaskAssigned
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import SqliteCalendarRepo
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.notification_repo import SqliteNotificationRepo
 from socialhome.repositories.post_repo import SqlitePostRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
@@ -54,7 +61,10 @@ async def stack(tmp_dir):
     calendar_repo = SqliteCalendarRepo(db)
     user_svc = UserService(user_repo, bus, own_instance_public_key=kp.public_key)
     feed_svc = FeedService(post_repo, user_repo, bus)
-    notif_svc = NotificationService(notif_repo, user_repo, space_repo, bus)
+    conv_repo = SqliteConversationRepo(db)
+    notif_svc = NotificationService(
+        notif_repo, user_repo, space_repo, bus, conversation_repo=conv_repo
+    )
     notif_svc.attach_personal_calendar_repo(calendar_repo)
     notif_svc.wire()
 
@@ -69,6 +79,7 @@ async def stack(tmp_dir):
     s.notif_repo = notif_repo
     s.space_repo = space_repo
     s.calendar_repo = calendar_repo
+    s.conv_repo = conv_repo
     s.bus = bus
 
     async def provision_user(username, **kw):
@@ -520,6 +531,95 @@ class _CapturingPush:
     async def push_to_user(self, user_id, payload):
         self.calls.append(([user_id], payload))
         return 1
+
+
+async def _group(stack, conv_id: str, *users) -> None:
+    await stack.conv_repo.create(
+        Conversation(
+            id=conv_id,
+            type=ConversationType.GROUP_DM,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    for u in users:
+        await stack.conv_repo.add_member(
+            ConversationMember(
+                conversation_id=conv_id,
+                username=u.username,
+                joined_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+
+async def test_dm_to_a_muted_recipient_makes_no_row_and_no_push(stack):
+    """Bob muted the conversation: no bell row and no push for him, while
+    Carol (not muted) is notified as usual."""
+    anna = await stack.provision_user("anna-m")
+    bob = await stack.provision_user("bob-m")
+    carol = await stack.provision_user("carol-m")
+    await _group(stack, "c-muted", anna, bob, carol)
+    await stack.conv_repo.set_muted_until("c-muted", bob.username, MUTED_FOREVER)
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+
+    await stack.bus.publish(
+        DmMessageCreated(
+            conversation_id="c-muted",
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            sender_display_name="Anna",
+            recipient_user_ids=(bob.user_id, carol.user_id),
+        )
+    )
+    assert await stack.notif_repo.list(bob.user_id) == []
+    assert len(await stack.notif_repo.list(carol.user_id)) == 1
+    pushed_to = [uid for ids, _ in push.calls for uid in ids]
+    assert pushed_to == [carol.user_id]
+
+
+async def test_dm_after_the_mute_ran_out_notifies_again(stack):
+    """A ``muted_until`` in the past reads as unmuted — no scheduler."""
+    anna = await stack.provision_user("anna-x")
+    bob = await stack.provision_user("bob-x")
+    await _group(stack, "c-expired", anna, bob)
+    await stack.conv_repo.set_muted_until(
+        "c-expired", bob.username, "2020-01-01T00:00:00+00:00"
+    )
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+
+    await stack.bus.publish(
+        DmMessageCreated(
+            conversation_id="c-expired",
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            sender_display_name="Anna",
+            recipient_user_ids=(bob.user_id,),
+        )
+    )
+    assert len(await stack.notif_repo.list(bob.user_id)) == 1
+    assert push.calls
+
+
+async def test_dm_without_a_conversation_repo_never_reads_as_muted(stack):
+    """No repo wired (older stacks): every recipient is notified."""
+    anna = await stack.provision_user("anna-n")
+    bob = await stack.provision_user("bob-n")
+    await _group(stack, "c-norepo", anna, bob)
+    await stack.conv_repo.set_muted_until("c-norepo", bob.username, MUTED_FOREVER)
+    svc = NotificationService(
+        stack.notif_repo, stack.notif_svc._users, stack.space_repo, EventBus()
+    )
+    await svc.on_dm_message_created(
+        DmMessageCreated(
+            conversation_id="c-norepo",
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            sender_display_name="Anna",
+            recipient_user_ids=(bob.user_id,),
+        )
+    )
+    assert len(await stack.notif_repo.list(bob.user_id)) == 1
 
 
 async def test_dm_message_creates_in_app_row_and_push(stack):
