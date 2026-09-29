@@ -10,7 +10,12 @@ import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
+from socialhome.domain.calendar import (
+    CalendarEvent,
+    CalendarEventCreate,
+    CalendarRSVP,
+    RSVPStatus,
+)
 from socialhome.federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
     OwnerBinding,
@@ -386,6 +391,63 @@ async def test_create_event_accepts_paired_remote_attendee(federated_cal_env):
     assert inst_id == "i_smith"
     assert "PERSONAL_CALENDAR_EVENT_CREATED" in str(evt_type).upper()
     assert payload["summary"] == "BBQ"
+    assert payload["attendee_user_ids"] == ["u-bob"]
+
+
+async def test_import_event_update_keeps_app_only_fields(federated_cal_env):
+    """An ICS file carries no attendees / cover / RSVP toggle, so a
+    re-import updating an existing row must keep the ones the household
+    set in the app — and keep federating the update to the invitee."""
+    e = federated_cal_env
+    cal = await e.cal_svc.create_calendar(name="Anna", owner_username="anna")
+    await _seed_paired(e.db, instance_id="i_smith")
+    await _seed_remote(
+        e.db,
+        instance_id="i_smith",
+        user_id="u-bob",
+        username="bob",
+        display_name="Bob",
+    )
+    now = datetime.now(timezone.utc)
+    key = uuid.uuid4().hex
+    imported, _ = await e.cal_svc.import_event(
+        calendar_id=cal.id,
+        created_by="uid-anna",
+        event=CalendarEventCreate(
+            summary="BBQ",
+            start=now,
+            end=now + timedelta(hours=2),
+            client_event_uuid=key,
+        ),
+    )
+    await e.cal_svc.update_event(
+        imported.id,
+        attendees=["u-bob"],
+        rsvp_enabled=True,
+        cover_url="/api/media/cover.webp",
+    )
+    e.sent.clear()
+
+    again, created = await e.cal_svc.import_event(
+        calendar_id=cal.id,
+        created_by="uid-anna",
+        event=CalendarEventCreate(
+            summary="BBQ (moved)",
+            start=now + timedelta(hours=1),
+            end=now + timedelta(hours=3),
+            client_event_uuid=key,
+        ),
+    )
+    assert created is False
+    assert again.id == imported.id
+    assert again.summary == "BBQ (moved)"
+    assert again.attendees == ("u-bob",)
+    assert again.rsvp_enabled is True
+    assert again.cover_url == "/api/media/cover.webp"
+    assert len(e.sent) == 1
+    inst_id, evt_type, payload = e.sent[0]
+    assert inst_id == "i_smith"
+    assert "PERSONAL_CALENDAR_EVENT_UPDATED" in str(evt_type).upper()
     assert payload["attendee_user_ids"] == ["u-bob"]
 
 
@@ -2179,6 +2241,88 @@ async def test_create_event_different_uuid_still_creates_second_row(env):
         created_by="uid-multi",
     )
     assert len({a.id, b.id, c.id, d.id}) == 4
+
+
+async def test_import_event_reports_created_then_updated(env):
+    """``import_event`` creates on first sight of a key and updates the
+    same row (file wins: cleared fields clear) on the next one."""
+    await _seed_user(env.db, "imp")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="imp")
+    now = datetime.now(timezone.utc)
+    key = uuid.uuid4().hex
+    first_in = CalendarEventCreate(
+        summary="Dentist",
+        start=now,
+        end=now + timedelta(hours=1),
+        description="bring card",
+        client_event_uuid=key,
+    )
+    first, created = await env.cal_svc.import_event(
+        calendar_id=cal.id, created_by="uid-imp", event=first_in
+    )
+    assert created is True
+    assert first.client_event_uuid == key
+
+    second, created = await env.cal_svc.import_event(
+        calendar_id=cal.id,
+        created_by="uid-imp",
+        event=CalendarEventCreate(
+            summary="Dentist (moved)",
+            start=now + timedelta(days=1),
+            end=now + timedelta(days=1, hours=1),
+            client_event_uuid=key,
+        ),
+    )
+    assert created is False
+    assert second.id == first.id
+    assert second.summary == "Dentist (moved)"
+    assert second.description is None
+
+
+async def test_import_event_without_key_always_creates(env):
+    await _seed_user(env.db, "imp2")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="imp2")
+    now = datetime.now(timezone.utc)
+    ev = CalendarEventCreate(summary="X", start=now, end=now + timedelta(hours=1))
+    a, ca = await env.cal_svc.import_event(
+        calendar_id=cal.id, created_by="uid-imp2", event=ev
+    )
+    b, cb = await env.cal_svc.import_event(
+        calendar_id=cal.id, created_by="uid-imp2", event=ev
+    )
+    assert (ca, cb) == (True, True)
+    assert a.id != b.id
+
+
+async def test_import_event_race_reports_updated(env):
+    """The concurrent-insert retry path of an import counts as an update."""
+    await _seed_user(env.db, "imprace")
+    cal = await env.cal_svc.create_calendar(name="C", owner_username="imprace")
+    now = datetime.now(timezone.utc)
+    ev = CalendarEventCreate(
+        summary="Race",
+        start=now,
+        end=now + timedelta(hours=1),
+        client_event_uuid=uuid.uuid4().hex,
+    )
+    first, _ = await env.cal_svc.import_event(
+        calendar_id=cal.id, created_by="uid-imprace", event=ev
+    )
+    real_find = env.cal_repo.find_by_client_event_uuid
+    calls = {"n": 0}
+
+    async def _racy_find(calendar_id, client_event_uuid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await real_find(calendar_id, client_event_uuid)
+
+    env.cal_repo.find_by_client_event_uuid = _racy_find  # type: ignore[method-assign]
+    second, created = await env.cal_svc.import_event(
+        calendar_id=cal.id, created_by="uid-imprace", event=ev
+    )
+    assert created is False
+    assert second.id == first.id
 
 
 async def test_create_event_integrity_error_retries_as_update(env):

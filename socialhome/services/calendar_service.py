@@ -23,6 +23,7 @@ from ..domain.calendar import (
     Calendar,
     CalendarEvent,
     CalendarEventCopy,
+    CalendarEventCreate,
     CalendarRSVP,
     EventReminder,
     RSVPStatus,
@@ -493,6 +494,83 @@ class CalendarService(BusPublisherMixin):
         tz: str | None = None,
         client_event_uuid: str | None = None,
     ) -> CalendarEvent:
+        event, _created = await self._create_or_update_event(
+            calendar_id=calendar_id,
+            summary=summary,
+            start=start,
+            end=end,
+            created_by=created_by,
+            all_day=all_day,
+            description=description,
+            attendees=attendees,
+            rrule=rrule,
+            rsvp_enabled=rsvp_enabled,
+            cover_url=cover_url,
+            location=location,
+            tz=tz,
+            client_event_uuid=client_event_uuid,
+        )
+        return event
+
+    async def import_event(
+        self,
+        *,
+        calendar_id: str,
+        created_by: str,
+        event: CalendarEventCreate,
+    ) -> tuple[CalendarEvent, bool]:
+        """Persist one parsed import (ICS / AI) onto ``calendar_id``.
+
+        Same create-or-update path as :meth:`create_event` — and so the
+        same authorization as creating or editing an event on that
+        calendar. An ``event.client_event_uuid`` already present on the
+        calendar (a re-import of the same ICS ``UID``) overwrites that
+        row with the file's fields instead of inserting a duplicate;
+        fields a file cannot carry (attendees, RSVP toggle, cover) keep
+        their stored values.
+        Returns ``(event, created)`` so the caller can report
+        added / updated counts.
+        """
+        return await self._create_or_update_event(
+            calendar_id=calendar_id,
+            summary=event.summary,
+            start=event.start.isoformat(),
+            end=event.end.isoformat(),
+            created_by=created_by,
+            all_day=event.all_day,
+            description=event.description,
+            rrule=event.rrule,
+            location=event.location,
+            # ``None`` for timed events → the usual creator / household
+            # chain. All-day imports pin ``"UTC"`` (``_vevent_to_create``).
+            tz=event.tz,
+            client_event_uuid=event.client_event_uuid,
+            keep_app_fields=True,
+        )
+
+    async def _create_or_update_event(
+        self,
+        *,
+        calendar_id: str,
+        summary: str,
+        start: str,
+        end: str,
+        created_by: str,
+        all_day: bool = False,
+        description: str | None = None,
+        attendees: list[str] | None = None,
+        rrule: str | None = None,
+        rsvp_enabled: bool = False,
+        cover_url: str | None = None,
+        location: str | None = None,
+        tz: str | None = None,
+        client_event_uuid: str | None = None,
+        keep_app_fields: bool = False,
+    ) -> tuple[CalendarEvent, bool]:
+        """Body of :meth:`create_event`; also reports ``created``
+        (``False`` when an existing ``(calendar_id, client_event_uuid)``
+        row was updated in place). ``keep_app_fields`` — see
+        :meth:`_apply_create_as_update`."""
         await self._require_calendar_enabled()
         summary = summary.strip()
         if not summary:
@@ -548,12 +626,14 @@ class CalendarService(BusPublisherMixin):
                 group_uuid,
             )
             if prior is not None:
-                return await self._apply_create_as_update(
+                updated = await self._apply_create_as_update(
                     prior=prior,
                     calendar=cal,
                     instance_for_user=instance_for_user,
                     fields=fields,
+                    keep_app_fields=keep_app_fields,
                 )
+                return updated, False
 
         event = CalendarEvent(
             id=uuid.uuid4().hex,
@@ -577,12 +657,14 @@ class CalendarService(BusPublisherMixin):
             )
             if prior is None:
                 raise
-            return await self._apply_create_as_update(
+            updated = await self._apply_create_as_update(
                 prior=prior,
                 calendar=cal,
                 instance_for_user=instance_for_user,
                 fields=fields,
+                keep_app_fields=keep_app_fields,
             )
+            return updated, False
         await self._emit(CalendarEventCreated(event=saved))
         await self._publish_federation_event(
             event=saved,
@@ -590,7 +672,7 @@ class CalendarService(BusPublisherMixin):
             instance_for_user=instance_for_user,
             event_type=FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
         )
-        return saved
+        return saved, True
 
     async def _apply_create_as_update(
         self,
@@ -599,6 +681,7 @@ class CalendarService(BusPublisherMixin):
         calendar: Calendar,
         instance_for_user: dict[str, str],
         fields: dict,
+        keep_app_fields: bool = False,
     ) -> CalendarEvent:
         """Apply a create payload onto an existing fan-out sibling.
 
@@ -613,7 +696,25 @@ class CalendarService(BusPublisherMixin):
         none") would silently inherit the stored value instead of
         clearing it. Create semantics are full-replacement — hence the
         inline ``replace(...)`` tail.
+
+        ``keep_app_fields`` (the import path) exempts the fields an
+        imported file never carries — ``attendees``, ``rsvp_enabled``,
+        ``cover_url`` — so a re-import does not silently un-invite a
+        remote attendee or drop a cover the household set in the app.
+        The stored attendees were validated when they were set, so they
+        resolve best-effort like an :meth:`update_event` that leaves
+        them alone.
         """
+        if keep_app_fields:
+            fields = {
+                **fields,
+                "attendees": prior.attendees,
+                "rsvp_enabled": prior.rsvp_enabled,
+                "cover_url": prior.cover_url,
+            }
+            instance_for_user = await self._resolve_attendee_instances(
+                prior.attendees,
+            )
         updated = replace(prior, **fields)
         await self._repo.save_event(updated)
         await self._emit(CalendarEventUpdated(event=updated))

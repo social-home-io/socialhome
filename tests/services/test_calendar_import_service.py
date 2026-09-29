@@ -9,7 +9,9 @@ from socialhome.services.calendar_import_service import (
     AICalendarImportParseError,
     AICalendarImportUnavailable,
     CalendarImportService,
+    ics_import_key,
 )
+from socialhome.services.calendar_service import _clean_client_event_uuid
 
 
 # ─── Fakes ────────────────────────────────────────────────────────────────
@@ -247,3 +249,111 @@ async def test_import_from_prompt_empty_reply_parse_error():
     svc = CalendarImportService(_ScriptedAdapter(""))
     with pytest.raises(AICalendarImportParseError):
         await svc.import_from_prompt(prompt="x")
+
+
+# ─── Stable per-VEVENT import key (re-import updates, not duplicates) ────
+
+_ICS_SERIES_WITH_OVERRIDE = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:series@test
+SUMMARY:Weekly standup
+DTSTART:20260601T090000Z
+DTEND:20260601T091500Z
+RRULE:FREQ=WEEKLY;COUNT=4
+END:VEVENT
+BEGIN:VEVENT
+UID:series@test
+RECURRENCE-ID:20260608T090000Z
+SUMMARY:Weekly standup (moved)
+DTSTART:20260608T100000Z
+DTEND:20260608T101500Z
+END:VEVENT
+END:VCALENDAR
+"""
+
+_ICS_NO_UID = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+SUMMARY:No uid here
+DTSTART:20260601T090000Z
+DTEND:20260601T100000Z
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+async def test_import_key_is_stable_for_same_uid():
+    svc = CalendarImportService(_AdapterWithoutAi())
+    first = await svc.import_ics(ics_bytes=_ICS_SINGLE)
+    second = await svc.import_ics(ics_bytes=_ICS_SINGLE)
+    assert first[0].client_event_uuid is not None
+    assert first[0].client_event_uuid == second[0].client_event_uuid
+    assert first[0].client_event_uuid == ics_import_key("evt-1@test", None)
+
+
+async def test_import_key_differs_between_uids():
+    svc = CalendarImportService(_AdapterWithoutAi())
+    events = await svc.import_ics(ics_bytes=_ICS_MULTI)
+    assert events[0].client_event_uuid != events[1].client_event_uuid
+
+
+async def test_import_key_differs_by_recurrence_id():
+    svc = CalendarImportService(_AdapterWithoutAi())
+    series, override = await svc.import_ics(ics_bytes=_ICS_SERIES_WITH_OVERRIDE)
+    assert series.client_event_uuid == ics_import_key("series@test", None)
+    assert override.client_event_uuid == ics_import_key(
+        "series@test", "2026-06-08T09:00:00+00:00"
+    )
+    assert series.client_event_uuid != override.client_event_uuid
+
+
+async def test_import_key_absent_without_uid():
+    svc = CalendarImportService(_AdapterWithoutAi())
+    events = await svc.import_ics(ics_bytes=_ICS_NO_UID)
+    assert events[0].client_event_uuid is None
+
+
+def test_import_key_is_32_lowercase_hex_and_passes_uuid_cleaner():
+    key = ics_import_key("Mixed-Case-UID@Example.COM", "2026-06-08")
+    assert len(key) == 32
+    assert key == key.lower()
+    int(key, 16)
+    assert _clean_client_event_uuid(key) == key
+
+
+def test_import_key_recurrence_id_none_equals_empty():
+    assert ics_import_key("u@t", None) == ics_import_key("u@t", "")
+    assert ics_import_key("u@t", None) != ics_import_key("u@t", "2026-06-08")
+
+
+async def test_import_key_normalises_recurrence_id_shapes():
+    """A date RECURRENCE-ID keys on the date; a zoned one keys on UTC, so
+    the same occurrence exported with a TZID or as ``Z`` maps to one key."""
+    ics = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:d@test
+RECURRENCE-ID;VALUE=DATE:20260702
+SUMMARY:Holiday moved
+DTSTART;VALUE=DATE:20260703
+DTEND;VALUE=DATE:20260704
+END:VEVENT
+BEGIN:VEVENT
+UID:z@test
+RECURRENCE-ID;TZID=Europe/Berlin:20260608T110000
+SUMMARY:Zoned override
+DTSTART:20260608T100000Z
+DTEND:20260608T110000Z
+END:VEVENT
+END:VCALENDAR
+"""
+    svc = CalendarImportService(_AdapterWithoutAi())
+    day, zoned = await svc.import_ics(ics_bytes=ics)
+    assert day.client_event_uuid == ics_import_key("d@test", "2026-07-02")
+    assert zoned.client_event_uuid == ics_import_key(
+        "z@test", "2026-06-08T09:00:00+00:00"
+    )

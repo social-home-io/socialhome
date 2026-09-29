@@ -97,6 +97,105 @@ async def test_import_ics_malformed_422(client):
     assert r.status == 422
 
 
+# ─── /import_ics — re-import updates by UID instead of duplicating ──────
+
+
+def _vcal(*vevents: str) -> bytes:
+    body = "".join(f"BEGIN:VEVENT\r\n{v}END:VEVENT\r\n" for v in vevents)
+    return (
+        f"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//T//EN\r\n{body}END:VCALENDAR\r\n"
+    ).encode()
+
+
+_TWO_EVENTS = (
+    "UID:a@t\r\nSUMMARY:Dentist\r\n"
+    "DTSTART:20260601T100000Z\r\nDTEND:20260601T110000Z\r\n",
+    "UID:b@t\r\nSUMMARY:Piano\r\n"
+    "DTSTART:20260602T150000Z\r\nDTEND:20260602T160000Z\r\n",
+)
+
+
+async def _import(client, cid, ics: bytes):
+    r = await client.post(
+        f"/api/calendars/{cid}/import_ics",
+        data=ics,
+        headers={**_auth(client._tok), "Content-Type": "text/calendar"},
+    )
+    assert r.status == 201, await r.text()
+    return await r.json()
+
+
+async def _list(client, cid):
+    r = await client.get(
+        f"/api/calendars/{cid}/events",
+        params={"start": "2026-05-01T00:00:00Z", "end": "2026-08-01T00:00:00Z"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200, await r.text()
+    return await r.json()
+
+
+async def test_import_ics_twice_updates_instead_of_duplicating(client):
+    cid = await _create_calendar(client)
+    first = await _import(client, cid, _vcal(*_TWO_EVENTS))
+    assert first["created"] == 2
+    assert first["updated"] == 0
+
+    changed = (_TWO_EVENTS[0].replace("Dentist", "Dentist (moved)"), _TWO_EVENTS[1])
+    second = await _import(client, cid, _vcal(*changed))
+    assert second["created"] == 0
+    assert second["updated"] == 2
+    assert {e["id"] for e in second["events"]} == {e["id"] for e in first["events"]}
+
+    rows = await _list(client, cid)
+    assert sorted(e["summary"] for e in rows) == ["Dentist (moved)", "Piano"]
+
+
+async def test_import_ics_series_and_override_stay_separate_rows(client):
+    cid = await _create_calendar(client)
+    series = (
+        "UID:s@t\r\nSUMMARY:Standup\r\n"
+        "DTSTART:20260601T090000Z\r\nDTEND:20260601T091500Z\r\n"
+        "RRULE:FREQ=WEEKLY;COUNT=4\r\n"
+    )
+    override = (
+        "UID:s@t\r\nRECURRENCE-ID:20260608T090000Z\r\nSUMMARY:Standup moved\r\n"
+        "DTSTART:20260608T100000Z\r\nDTEND:20260608T101500Z\r\n"
+    )
+    first = await _import(client, cid, _vcal(series, override))
+    assert first["created"] == 2
+    again = await _import(client, cid, _vcal(series, override))
+    assert (again["created"], again["updated"]) == (0, 2)
+    ids = {e["id"] for e in again["events"]}
+    assert len(ids) == 2
+
+
+async def test_import_ics_without_uid_keeps_creating_new_rows(client):
+    cid = await _create_calendar(client)
+    no_uid = (
+        "SUMMARY:Anonymous\r\nDTSTART:20260601T100000Z\r\nDTEND:20260601T110000Z\r\n"
+    )
+    await _import(client, cid, _vcal(no_uid))
+    second = await _import(client, cid, _vcal(no_uid))
+    assert (second["created"], second["updated"]) == (1, 0)
+    rows = await _list(client, cid)
+    assert [e["summary"] for e in rows] == ["Anonymous", "Anonymous"]
+
+
+async def test_import_ics_into_two_calendars_one_row_each_same_key(client):
+    cid_a = await _create_calendar(client)
+    cid_b = await _create_calendar(client)
+    a = await _import(client, cid_a, _vcal(_TWO_EVENTS[0]))
+    b = await _import(client, cid_b, _vcal(_TWO_EVENTS[0]))
+    assert (a["created"], b["created"]) == (1, 1)
+    ev_a, ev_b = a["events"][0], b["events"][0]
+    assert ev_a["id"] != ev_b["id"]
+    assert ev_a["client_event_uuid"] == ev_b["client_event_uuid"]
+    assert ev_a["client_event_uuid"] is not None
+    assert len(await _list(client, cid_a)) == 1
+    assert len(await _list(client, cid_b)) == 1
+
+
 # ─── /import_image — requires AI ────────────────────────────────────────
 
 

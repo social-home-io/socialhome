@@ -145,6 +145,12 @@ class CalendarEventCreate:
     #: import sets ``"UTC"`` because a bare ``DATE`` is floating and
     #: the parsed bounds are UTC-anchored by construction.
     tz: str | None = None
+    #: Stable grouping / idempotency key. An ICS import derives it from
+    #: the VEVENT's ``UID`` + ``RECURRENCE-ID`` (see
+    #: ``calendar_import_service.ics_import_key``) so re-importing the
+    #: same file updates its rows instead of duplicating them. ``None``
+    #: (no ``UID``) keeps the legacy always-insert behaviour.
+    client_event_uuid: str | None = None
 
 
 # Sentinel for ``CalendarEventUpdate.cover_url`` to distinguish
