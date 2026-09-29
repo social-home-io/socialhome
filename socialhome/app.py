@@ -3260,7 +3260,9 @@ def create_app(config: Config | None = None) -> web.Application:
         page_lock_scheduler = PageLockExpiryScheduler(page_repo)
         await page_lock_scheduler.start()
 
-        space_retention_scheduler = SpaceRetentionScheduler(db)
+        space_retention_scheduler = SpaceRetentionScheduler(
+            db, own_instance_id=real_instance_id
+        )
         await space_retention_scheduler.start()
 
         post_draft_scheduler = PostDraftCleanupScheduler(db)

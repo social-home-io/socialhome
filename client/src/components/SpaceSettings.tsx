@@ -270,16 +270,6 @@ export function SpaceSettings({
     const previousMode = space.features?.location_mode ?? 'gps'
     const modeChanged = locationEnabled.value
       && locationMode.value !== previousMode
-    // Empty / zero / negative → 0 sentinel which the backend normalises
-    // back to ``retention_days = null`` ("no limit"). A positive integer
-    // is sent verbatim.
-    const parsedRetention = parseInt(retentionDays, 10)
-    const retentionPayload: number | undefined =
-      retentionDays.trim() === ''
-        ? 0
-        : Number.isFinite(parsedRetention)
-          ? parsedRetention
-          : undefined
     // Rebuild allowed_post_types from the checkboxes, but PRESERVE any
     // type the UI doesn't manage (transcript / event / highlight_share)
     // exactly as the space already had it — otherwise saving settings
@@ -296,41 +286,96 @@ export function SpaceSettings({
       return
     }
     const allowedPostTypesPayload = [...preserved, ...chosen].sort()
+
+    // Send ONLY what the admin changed. Re-sending a field the form merely
+    // displayed is not harmless: on a space hosted by another household our
+    // copy can lag the host (and before retention federated it never had
+    // the value at all), so saving a rename used to push
+    // ``retention_days: 0`` and switch the host's cleanup off. Absent means
+    // "leave it alone" on every path (this PATCH route and the host's
+    // forwarded-edit handler).
+    const body: Record<string, unknown> = {}
+    if (name.value !== space.name) body.name = name.value
+    // '' clears the description / icon (the backend stores it as null).
+    if (description.value !== (space.description || '')) {
+      body.description = description.value
+    }
+    if (emoji.value !== (space.emoji || '')) body.emoji = emoji.value
+    if (joinMode.value !== space.join_mode) body.join_mode = joinMode.value
+    if (allowHere.value !== Boolean(space.allow_here_mention)) {
+      body.allow_here_mention = allowHere.value
+    }
+    // Retention: empty / zero / negative means "keep forever", sent as the
+    // 0 sentinel the backend normalises to ``retention_days = null``. Input
+    // that isn't a number at all is left out.
+    const parsedRetention = parseInt(retentionDays, 10)
+    const retentionValue: number | null | undefined =
+      retentionDays.trim() === ''
+        ? null
+        : Number.isFinite(parsedRetention)
+          ? (parsedRetention > 0 ? parsedRetention : null)
+          : undefined
+    if (
+      retentionValue !== undefined
+      && retentionValue !== (space.retention_days ?? null)
+    ) {
+      body.retention_days = retentionValue ?? 0
+    }
     // Only send the exempt list while retention is on — with it off the
     // checkboxes are hidden, so the stored choice is left as it was.
-    const exemptPayload = retentionOn
-      ? [...new Set(exemptTypes)].sort()
-      : undefined
+    if (retentionOn) {
+      const exempt = [...new Set(exemptTypes)].sort()
+      const stored = [...new Set(space.retention_exempt_types ?? [])].sort()
+      if (exempt.join(',') !== stored.join(',')) {
+        body.retention_exempt_types = exempt
+      }
+    }
+    // Features go as a partial block — the backend merges it onto the
+    // space's current features. Baselines mirror the toggle defaults above.
+    const f = space.features
+    const featureValues: Array<[string, unknown, unknown]> = [
+      ['pages', featurePages.value, f?.pages ?? true],
+      ['calendar', featureCalendar.value, f?.calendar ?? true],
+      ['todo', featureTodo.value, f?.todo ?? true],
+      ['stickies', featureStickies.value, f?.stickies ?? true],
+      ['gallery', featureGallery.value, f?.gallery ?? true],
+      ['bazaar', featureBazaar.value, f?.bazaar ?? true],
+      ['location', locationEnabled.value, Boolean(f?.location)],
+      ['location_mode', locationMode.value, previousMode],
+      ['allow_subscribers', allowSubscribers.value, Boolean(f?.allow_subscribers)],
+      [
+        'allow_subscriber_comment',
+        allowSubscriberComment.value,
+        Boolean(f?.allow_subscriber_comment),
+      ],
+      [
+        'allow_subscriber_react',
+        allowSubscriberReact.value,
+        Boolean(f?.allow_subscriber_react),
+      ],
+      [
+        'delegated_admin_authority',
+        delegatedAdminAuthority.value,
+        Boolean(f?.delegated_admin_authority),
+      ],
+    ]
+    const features: Record<string, unknown> = {}
+    for (const [key, value, baseline] of featureValues) {
+      if (value !== baseline) features[key] = value
+    }
+    if (
+      allowedPostTypesPayload.join(',') !== [...existingAllowed].sort().join(',')
+    ) {
+      features.allowed_post_types = allowedPostTypesPayload
+    }
+    if (Object.keys(features).length > 0) body.features = features
+
+    if (Object.keys(body).length === 0) {
+      showToast('No changes to save', 'info')
+      return
+    }
     try {
-      await api.patch(`/api/spaces/${space.id}`, {
-        name: name.value,
-        description: description.value || undefined,
-        emoji: emoji.value || undefined,
-        join_mode: joinMode.value,
-        allow_here_mention: allowHere.value,
-        ...(retentionPayload !== undefined
-          ? { retention_days: retentionPayload }
-          : {}),
-        ...(exemptPayload !== undefined
-          ? { retention_exempt_types: exemptPayload }
-          : {}),
-        features: {
-          ...(space.features as object),
-          pages: featurePages.value,
-          calendar: featureCalendar.value,
-          todo: featureTodo.value,
-          stickies: featureStickies.value,
-          gallery: featureGallery.value,
-          bazaar: featureBazaar.value,
-          location: locationEnabled.value,
-          location_mode: locationMode.value,
-          allow_subscribers: allowSubscribers.value,
-          allow_subscriber_comment: allowSubscriberComment.value,
-          allow_subscriber_react: allowSubscriberReact.value,
-          delegated_admin_authority: delegatedAdminAuthority.value,
-          allowed_post_types: allowedPostTypesPayload,
-        },
-      })
+      await api.patch(`/api/spaces/${space.id}`, body)
       if (modeChanged) {
         showToast(
           locationMode.value === 'zone_only'

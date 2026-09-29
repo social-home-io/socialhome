@@ -46,7 +46,7 @@ async def test_prune_deletes_old_posts(env):
     db = env
     await _seed_post(db, "old", days_old=10)
     await _seed_post(db, "fresh", days_old=1)
-    sched = SpaceRetentionScheduler(db)
+    sched = SpaceRetentionScheduler(db, own_instance_id="iid")
     n = await sched._prune_once()
     assert n == 1
     rows = {
@@ -66,7 +66,7 @@ async def test_exempt_types_are_kept(env):
     )
     await _seed_post(db, "old-poll", days_old=10, type_="poll")
     await _seed_post(db, "old-text", days_old=10, type_="text")
-    sched = SpaceRetentionScheduler(db)
+    sched = SpaceRetentionScheduler(db, own_instance_id="iid")
     n = await sched._prune_once()
     assert n == 1
     rows = {
@@ -83,14 +83,14 @@ async def test_no_retention_means_no_prune(env):
     db = env
     await db.enqueue("UPDATE spaces SET retention_days=NULL WHERE id='sp-1'")
     await _seed_post(db, "old", days_old=10)
-    sched = SpaceRetentionScheduler(db)
+    sched = SpaceRetentionScheduler(db, own_instance_id="iid")
     n = await sched._prune_once()
     assert n == 0
 
 
 async def test_scheduler_lifecycle_safe(env):
     db = env
-    s = SpaceRetentionScheduler(db, interval_seconds=10.0)
+    s = SpaceRetentionScheduler(db, own_instance_id="iid", interval_seconds=10.0)
     await s.start()
     await s.start()  # idempotent
     await s.stop()
@@ -98,7 +98,7 @@ async def test_scheduler_lifecycle_safe(env):
 
 async def test_scheduler_loop_ticks(env):
     db = env
-    s = SpaceRetentionScheduler(db, interval_seconds=0.05)
+    s = SpaceRetentionScheduler(db, own_instance_id="iid", interval_seconds=0.05)
     await s.start()
     await asyncio.sleep(0.12)
     await s.stop()
@@ -127,7 +127,7 @@ async def test_prune_handles_tz_aware_created_at_on_the_boundary_day(env):
     cutoff_day = (now - timedelta(days=7)).date().isoformat()
     await _seed_iso_post(db, "old", created_at=f"{cutoff_day}T00:00:00.000001+00:00")
     await _seed_iso_post(db, "fresh", created_at=now.isoformat())
-    n = await SpaceRetentionScheduler(db)._prune_once()
+    n = await SpaceRetentionScheduler(db, own_instance_id="iid")._prune_once()
     assert n == 1
     rows = {
         r["id"]: r["deleted"]
@@ -151,10 +151,39 @@ async def test_prune_boundary_day_respects_exempt_types(env):
         "VALUES('old-poll', 'sp-1', 'u-author', 'poll', 'hi', ?)",
         (stamp,),
     )
-    n = await SpaceRetentionScheduler(db)._prune_once()
+    n = await SpaceRetentionScheduler(db, own_instance_id="iid")._prune_once()
     assert n == 1
     rows = {
         r["id"]: r["deleted"]
         for r in await db.fetchall("SELECT id, deleted FROM space_posts")
     }
     assert rows == {"old-text": 1, "old-poll": 0}
+
+
+async def test_mirrored_space_is_never_pruned_here(env):
+    """Retention settings federate so a member household's copy shows the
+    host's real values, but the host alone enforces them. A space hosted on
+    another household is skipped, so a mirror never deletes posts on its own."""
+    db = env
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
+        "identity_public_key, retention_days, retention_exempt_json) "
+        "VALUES('sp-mirror', 't', 'other-iid', 'u', ?, 7, '[]')",
+        ("bb" * 32,),
+    )
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, created_at) "
+        "VALUES('mirror-old', 'sp-mirror', 'u-author', 'text', 'hi', ?)",
+        (old,),
+    )
+    await _seed_post(db, "hosted-old", days_old=10)
+    n = await SpaceRetentionScheduler(db, own_instance_id="iid")._prune_once()
+    assert n == 1
+    rows = {
+        r["id"]: r["deleted"]
+        for r in await db.fetchall("SELECT id, deleted FROM space_posts")
+    }
+    assert rows == {"mirror-old": 0, "hosted-old": 1}

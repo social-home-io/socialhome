@@ -1,9 +1,14 @@
 """Hourly retention prune for space content (§27181, §47092).
 
-For every space that has a non-NULL ``retention_days`` setting,
-content older than that horizon is soft-deleted unless the post's
+For every space THIS household hosts that has a non-NULL
+``retention_days`` setting, content older than that horizon is soft-deleted unless the post's
 ``type`` appears in ``spaces.retention_exempt_json`` (e.g. an admin
 might exempt ``"poll"`` so historic decisions stay readable).
+
+Retention settings also federate to member households (so a co-admin on
+another household sees and re-saves the real values), but only the host
+enforces them: a mirrored space — ``owner_instance_id`` is another
+household — is skipped, so a member's copy never deletes posts on its own.
 
 Soft-delete sets ``space_posts.deleted = 1`` so the existing
 moderation/feed-rendering paths keep working unchanged. Comments on a
@@ -29,15 +34,17 @@ log = logging.getLogger(__name__)
 class SpaceRetentionScheduler:
     """Background loop that prunes expired space content per space."""
 
-    __slots__ = ("_db", "_interval", "_task", "_stop")
+    __slots__ = ("_db", "_own_instance_id", "_interval", "_task", "_stop")
 
     def __init__(
         self,
         db: AsyncDatabase,
         *,
+        own_instance_id: str,
         interval_seconds: float = 3600.0,
     ) -> None:
         self._db = db
+        self._own_instance_id = own_instance_id
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -77,13 +84,14 @@ class SpaceRetentionScheduler:
                 continue
 
     async def _prune_once(self) -> int:
-        """Run one prune pass over every space with retention configured.
+        """Run one prune pass over every hosted space with retention configured.
 
         Returns the total number of soft-deleted posts. Exposed for tests.
         """
         spaces = await self._db.fetchall(
             "SELECT id, retention_days, retention_exempt_json "
-            "FROM spaces WHERE retention_days IS NOT NULL",
+            "FROM spaces WHERE retention_days IS NOT NULL AND owner_instance_id=?",
+            (self._own_instance_id,),
         )
         total = 0
         for s in spaces:

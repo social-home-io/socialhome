@@ -1102,6 +1102,53 @@ async def test_delegated_admin_without_seed_forwards(stack):
     assert reloaded.config_sequence == 3
 
 
+async def test_delegated_admin_retention_edit_also_forwards_to_host(stack):
+    """The host alone enforces retention and pins it against inbound config
+    snapshots (a delegated admin's mirror may be stale). So a seed-holding
+    delegated admin's retention change is applied to its mirror AND forwarded
+    to the host as a remote-admin ``update_config`` carrying ONLY the
+    retention fields; a delegated edit that doesn't touch retention forwards
+    nothing."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from socialhome.crypto import generate_space_keypair
+    from socialhome.domain.federation import FederationEventType
+
+    kp = generate_space_keypair()
+    sid = await _seat_remote_delegated_space(stack, actor="anna", seed=kp.private_key)
+    await stack.space_repo.set_space_pubkey(sid, kp.public_key.hex())
+    fed = MagicMock()
+    fed._own_instance_id = stack.iid
+    fed.broadcast_to_space_members = AsyncMock()
+    fed.peer_supports = AsyncMock(return_value=True)
+    fed.send_with_mesh_fallback = AsyncMock()
+    stack.space_svc._federation = fed
+
+    await stack.space_svc.update_config(
+        sid, actor_username="anna", name="Only a rename"
+    )
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+    await stack.space_svc.update_config(
+        sid,
+        actor_username="anna",
+        retention_days=14,
+        retention_exempt_types=["poll"],
+    )
+    fed.send_with_mesh_fallback.assert_awaited_once()
+    call = fed.send_with_mesh_fallback.await_args
+    assert call.kwargs["event_type"] is FederationEventType.SPACE_REMOTE_ADMIN_ACTION
+    assert call.kwargs["to_instance_id"] == "inst-remote-owner"
+    assert call.kwargs["payload"]["action"] == "update_config"
+    assert call.kwargs["payload"]["params"] == {
+        "retention_days": 14,
+        "retention_exempt_types": ["poll"],
+    }
+    reloaded = await stack.space_repo.get(sid)
+    assert reloaded.retention_days == 14
+    assert reloaded.retention_exempt_types == ("poll",)
+
+
 @pytest.mark.security
 @pytest.mark.parametrize("tier", ["public", "global"])
 async def test_delegated_admin_local_execute_rejects_space_type(stack, tier):

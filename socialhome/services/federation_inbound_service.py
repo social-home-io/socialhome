@@ -65,7 +65,7 @@ from ..domain.post import (
 )
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..domain.presence import truncate_coord
-from ..domain.space import SpaceConfigEventType, SpaceRole
+from ..domain.space import Space, SpaceConfigEventType, SpaceRole
 from ..domain.highlight import (
     Highlight,
     HighlightAudience,
@@ -196,6 +196,53 @@ def _coerce_sequence(meta: dict, payload: dict) -> int | None:
         return int(raw)
     except TypeError, ValueError:
         return None
+
+
+def _keep_local_space_state(
+    refreshed: Space,
+    *,
+    existing: Space,
+    meta: dict,
+    we_host: bool,
+) -> Space:
+    """Carry the row's local state across a SPACE_CONFIG_CHANGED snapshot.
+
+    ``stub_space_from_metadata`` rebuilds a whole :class:`Space` from the
+    wire, so every field that never federates comes back at its dataclass
+    default, and ``save`` writes it over the stored row. On the HOST — which
+    receives a seed-holding delegated admin's authority-signed snapshot —
+    that used to wipe its join code, geo-gate, bot toggle and retention
+    policy. Keep them from ``existing``:
+
+    * Host-local state (join code, geo-gate, bot toggle, dissolve bookkeeping)
+      never federates; the stored value always wins.
+    * Retention is mirrored (it rides ``space_meta``) but enforced by the host
+      alone, so the host pins its own values — a co-admin's mirror may be
+      stale, and a co-admin's retention edit reaches the host as a forwarded
+      ``update_config`` instead. A member household takes the host's values
+      when the snapshot carries them, and keeps what it has when an older
+      sender omits them ("absent" is "unknown", not "Forever").
+    """
+    keep_retention = we_host or "retention_days" not in meta
+    keep_exempt = we_host or "retention_exempt_types" not in meta
+    return replace(
+        refreshed,
+        join_code=existing.join_code,
+        lat=existing.lat,
+        lon=existing.lon,
+        radius_km=existing.radius_km,
+        bot_enabled=existing.bot_enabled,
+        dissolved=existing.dissolved,
+        archived_reason=existing.archived_reason,
+        retention_days=(
+            existing.retention_days if keep_retention else refreshed.retention_days
+        ),
+        retention_exempt_types=(
+            existing.retention_exempt_types
+            if keep_exempt
+            else refreshed.retention_exempt_types
+        ),
+    )
 
 
 #: Mapping from canonical media MIME types (produced by
@@ -2445,6 +2492,13 @@ class FederationInboundService:
                     event.from_instance,
                 )
             refreshed = replace(refreshed, features=pinned)
+        refreshed = _keep_local_space_state(
+            refreshed,
+            existing=existing,
+            meta=meta,
+            we_host=bool(own_instance_id)
+            and existing.owner_instance_id == own_instance_id,
+        )
         await self._space_repo.save(refreshed)
         # A cover / icon change ships the new image in ``space_meta``; land
         # it (validated) now that the change itself passed every gate above,

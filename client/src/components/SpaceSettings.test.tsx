@@ -141,9 +141,9 @@ describe('SpaceSettings', () => {
     fireEvent.click(getByText('Save changes'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
     const [, body] = apiMock.patch.mock.calls[0]
-    expect(body.features.allow_subscribers).toBe(true)
-    // …and the join mode is untouched: the two dials are independent.
-    expect(body.join_mode).toBe('invite_only')
+    // …and the join mode is untouched (not even re-sent): the two dials are
+    // independent.
+    expect(body).toEqual({ features: { allow_subscribers: true } })
   })
 
   it('reflects an already-on allow_subscribers from the space payload', () => {
@@ -230,7 +230,7 @@ describe('SpaceSettings', () => {
     ])
   })
 
-  it('sends all five feature toggles in the PATCH body on save', async () => {
+  it('sends only the feature toggles that changed, as a partial block', async () => {
     apiMock.patch.mockResolvedValueOnce({})
     const space = makeSpace()
     const { getByTestId, getByText } = render(
@@ -247,11 +247,9 @@ describe('SpaceSettings', () => {
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).toHaveBeenCalledOnce()
     const [, body] = apiMock.patch.mock.calls[0]
-    expect(body.features.pages).toBe(false)
-    expect(body.features.calendar).toBe(true)
-    expect(body.features.todo).toBe(true)
-    expect(body.features.stickies).toBe(false)
-    expect(body.features.gallery).toBe(false)
+    // The backend merges a partial block onto the current features, so the
+    // untouched toggles stay out.
+    expect(body).toEqual({ features: { pages: false, gallery: false } })
   })
 
   it('defaults gallery=true for a pre-migration space whose features lack the key', async () => {
@@ -278,10 +276,13 @@ describe('SpaceSettings', () => {
     ) as HTMLInputElement[]
     // Gallery is the 5th checkbox — should default to checked.
     expect(checkboxes[4].checked).toBe(true)
+    // Flip calendar (was off) so there is something to save: the defaulted
+    // gallery=true counts as unchanged, so it isn't re-sent.
+    fireEvent.change(checkboxes[1], { target: { checked: true } })
     fireEvent.click(getByText('Save changes'))
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
-    expect(body.features.gallery).toBe(true)
+    expect(body).toEqual({ features: { calendar: true } })
   })
 
   it('renders the Post types fieldset reflecting allowed_post_types', () => {
@@ -720,8 +721,8 @@ describe('SpaceSettings — retention exempt types', () => {
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     const [url, body] = apiMock.patch.mock.calls[0]
     expect(url).toBe('/api/spaces/s-1')
-    expect(body.retention_days).toBe(30)
-    expect(body.retention_exempt_types).toEqual(['event', 'poll'])
+    // The unchanged day count isn't re-sent — only the edited list.
+    expect(body).toEqual({ retention_exempt_types: ['event', 'poll'] })
     expect(showToast).toHaveBeenCalledWith('Space updated', 'success')
   })
 
@@ -738,26 +739,115 @@ describe('SpaceSettings — retention exempt types', () => {
     expect(apiMock.patch.mock.calls[0][1].retention_exempt_types).toEqual(['text'])
   })
 
-  it('leaves the stored list alone when retention is off', async () => {
+  it('leaves the stored list alone when retention is turned off', async () => {
     apiMock.patch.mockResolvedValueOnce({})
-    const { getByText } = render(
-      <SpaceSettings space={withExempt(null, ['poll'])} onUpdate={() => {}} />,
+    const { container, getByText } = render(
+      <SpaceSettings space={withExempt(30, ['poll'])} onUpdate={() => {}} />,
     )
+    const days = container.querySelector('input[type="number"]') as HTMLInputElement
+    fireEvent.input(days, { target: { value: '' } })
     fireEvent.click(getByText('Save changes'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
-    const body = apiMock.patch.mock.calls[0][1]
-    expect(body.retention_days).toBe(0)
-    expect('retention_exempt_types' in body).toBe(false)
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({ retention_days: 0 })
   })
 
   it('shows the server error when the save is rejected', async () => {
     apiMock.patch.mockRejectedValueOnce(new Error('unknown retention exempt type'))
-    const { getByText } = render(
+    const { getByTestId, getByText } = render(
       <SpaceSettings space={withExempt(30, [])} onUpdate={() => {}} />,
+    )
+    fireEvent.click(
+      getByTestId('retention-exempt-types').querySelector('input[value="poll"]')!,
     )
     fireEvent.click(getByText('Save changes'))
     await vi.waitFor(() =>
       expect(showToast).toHaveBeenCalledWith('unknown retention exempt type', 'error'),
     )
+  })
+})
+
+describe('SpaceSettings — sends only what the admin changed', () => {
+  beforeEach(() => {
+    apiMock.get.mockResolvedValue([])
+    apiMock.patch.mockReset()
+    vi.mocked(showToast).mockReset()
+  })
+
+  const nameInput = (container: Element) =>
+    container.querySelector('.sh-form input') as HTMLInputElement
+
+  it('a co-admin on another household renaming the space sends just the name', async () => {
+    // Regression: the remote admin's copy never had the host's retention, so
+    // the form showed "Forever" and a rename PATCHed ``retention_days: 0``
+    // (plus every other displayed default) — the host then switched its
+    // cleanup off. The body must carry only the edited field.
+    apiMock.patch.mockResolvedValueOnce({})
+    const space = {
+      ...(makeSpace({ retention_days: null }) as object),
+      retention_exempt_types: [],
+    } as never
+    const { container, getByText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} isRemoteSpace />,
+    )
+    fireEvent.input(nameInput(container), { target: { value: 'Summer trip' } })
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0]).toEqual([
+      '/api/spaces/s-1',
+      { name: 'Summer trip' },
+    ])
+  })
+
+  it('keeps loaded retention settings out of an unrelated save', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const space = {
+      ...(makeSpace({ retention_days: 30 }) as object),
+      retention_exempt_types: ['poll'],
+    } as never
+    const { container, getByText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    fireEvent.input(nameInput(container), { target: { value: 'Renamed' } })
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({ name: 'Renamed' })
+  })
+
+  it('sends an emptied description so it can actually be cleared', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const space = {
+      ...(makeSpace() as object),
+      description: 'Old blurb',
+    } as never
+    const { container, getByText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    const textarea = container.querySelector('.sh-form textarea') as HTMLTextAreaElement
+    fireEvent.input(textarea, { target: { value: '' } })
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({ description: '' })
+  })
+
+  it('does not PATCH when nothing changed and says so', async () => {
+    const { getByText } = render(
+      <SpaceSettings space={makeSpace({ retention_days: 30 })} onUpdate={() => {}} />,
+    )
+    fireEvent.click(getByText('Save changes'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiMock.patch).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith('No changes to save', 'info')
+  })
+
+  it('an edit reverted before saving counts as no change', async () => {
+    const { container, getByText } = render(
+      <SpaceSettings space={makeSpace({ retention_days: 30 })} onUpdate={() => {}} />,
+    )
+    const days = container.querySelector('input[type="number"]') as HTMLInputElement
+    fireEvent.input(days, { target: { value: '7' } })
+    fireEvent.input(days, { target: { value: '30' } })
+    fireEvent.click(getByText('Save changes'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiMock.patch).not.toHaveBeenCalled()
   })
 })
