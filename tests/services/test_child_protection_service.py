@@ -9,8 +9,14 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.child_protection import (
+    PROTECTED_ACCOUNT_RESTRICTIONS,
+    AccountProtectedError,
+    ProtectedCapability,
+)
 from socialhome.domain.space import SpacePermissionError
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.security import SENSITIVE_FIELDS
 from datetime import datetime, timezone
 
 from socialhome.domain.conversation import Conversation, ConversationType
@@ -875,3 +881,68 @@ async def test_add_guardian_both_present_still_works(env):
         "AND guardian_user_id='mom-id'",
     )
     assert row is not None
+
+
+# ─── Protected-account restrictions (§CP.R) ──────────────────────────────
+
+
+async def test_unprotected_user_has_no_restrictions(env):
+    svc, _ = env
+    assert await svc.is_protected("lila-id") is False
+    assert await svc.restrictions_for("lila-id") == ()
+    # No-op for an unprotected user.
+    await svc.require_unrestricted("lila-id", ProtectedCapability.BAZAAR)
+
+
+async def test_protected_user_is_restricted(env):
+    svc, _ = env
+    await svc.enable_protection(
+        minor_username="lila", declared_age=12, actor_user_id="admin-id"
+    )
+    assert await svc.is_protected("lila-id") is True
+    assert await svc.restrictions_for("lila-id") == PROTECTED_ACCOUNT_RESTRICTIONS
+    with pytest.raises(AccountProtectedError) as exc_info:
+        await svc.require_unrestricted("lila-id", ProtectedCapability.API_TOKENS)
+    assert exc_info.value.capability is ProtectedCapability.API_TOKENS
+
+
+async def test_disabling_protection_lifts_restrictions(env):
+    svc, _ = env
+    await svc.enable_protection(
+        minor_username="lila", declared_age=12, actor_user_id="admin-id"
+    )
+    await svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
+    assert await svc.is_protected("lila-id") is False
+    await svc.require_unrestricted("lila-id", ProtectedCapability.BAZAAR)
+
+
+async def test_unknown_user_is_not_protected(env):
+    svc, _ = env
+    assert await svc.is_protected("nobody-id") is False
+
+
+async def test_protection_summary_for_self_lists_guardians(env):
+    svc, _ = env
+    await svc.enable_protection(
+        minor_username="lila", declared_age=12, actor_user_id="admin-id"
+    )
+    await svc.add_guardian(
+        minor_user_id="lila-id", guardian_user_id="mom-id", actor_user_id="admin-id"
+    )
+    summary = await svc.protection_summary_for_self("lila-id")
+    assert summary == {
+        "protected": True,
+        "restrictions": [c.value for c in PROTECTED_ACCOUNT_RESTRICTIONS],
+        "guardians": [{"user_id": "mom-id", "username": "mom", "display_name": "Mom"}],
+    }
+    # Never leaks the sensitive CP fields.
+    assert not (set(summary) & SENSITIVE_FIELDS)
+
+
+async def test_protection_summary_for_unprotected_user(env):
+    svc, _ = env
+    assert await svc.protection_summary_for_self("mom-id") == {
+        "protected": False,
+        "restrictions": [],
+        "guardians": [],
+    }

@@ -12,6 +12,7 @@ Raises the usual domain exceptions:
 from __future__ import annotations
 
 import logging
+import secrets
 import sqlite3
 import uuid
 from collections.abc import Sequence
@@ -28,6 +29,7 @@ from ..domain.calendar import (
     EventReminder,
     RSVPStatus,
 )
+from ..domain.child_protection import ProtectedCapability
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -44,6 +46,7 @@ from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCale
 from ..utils.rrule import expand_rrule
 from ..utils.timezones import is_valid_tz
 from .bus_publisher import BusPublisherMixin
+from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -1140,10 +1143,17 @@ def _personal_event_payload(event: CalendarEvent, calendar: Calendar) -> dict:
     }
 
 
-class SpaceCalendarService(BusPublisherMixin):
+class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
     """Space calendar event operations."""
 
-    __slots__ = ("_repo", "_bus", "_federation", "_space_repo", "_household")
+    __slots__ = (
+        "_repo",
+        "_bus",
+        "_federation",
+        "_space_repo",
+        "_household",
+        "_child_protection",
+    )
 
     def __init__(
         self,
@@ -1157,6 +1167,38 @@ class SpaceCalendarService(BusPublisherMixin):
         # event create time. Tests that don't touch tz can skip both.
         self._space_repo = None
         self._household = None
+        self._child_protection = None
+
+    # ── Subscription feed tokens (Phase F) ───────────────────────────────
+
+    async def issue_feed_token(self, *, user_id: str, space_id: str) -> str:
+        """Mint (or replace) *user_id*'s subscription token for *space_id*.
+
+        Returns the raw token; storage keeps only its hash. The caller has
+        already checked space membership. §CP.R: a protected account gets
+        no subscription link — the URL is its own credential and exposes
+        the account's schedule to whoever holds it.
+        """
+        await self._require_unrestricted(user_id, ProtectedCapability.CALENDAR_FEEDS)
+        token = secrets.token_urlsafe(32)
+        await self._repo.upsert_feed_token(
+            user_id=user_id, space_id=space_id, token=token
+        )
+        return token
+
+    async def resolve_feed_token(self, token: str) -> tuple[str, str] | None:
+        """``(user_id, space_id)`` for a live feed token, else ``None``.
+
+        A token minted before its account was protected stops serving
+        (§CP.R at use time) without being deleted, so lifting protection
+        restores the subscription.
+        """
+        owner = await self._repo.get_user_for_feed_token(token)
+        if owner is None:
+            return None
+        if await self._is_restricted(owner[0], ProtectedCapability.CALENDAR_FEEDS):
+            return None
+        return owner
 
     def attach_federation(self, federation_service) -> None:
         """Wire outbound federation for RSVPs.

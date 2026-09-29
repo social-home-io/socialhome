@@ -26,8 +26,10 @@ from datetime import datetime, timezone
 import aiohttp
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.child_protection import ProtectedCapability
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
+from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +54,7 @@ class HighlightNotFoundError(KeyError):
     __slots__ = ()
 
 
-class HighlightPublicationService:
+class HighlightPublicationService(ProtectionGateMixin):
     """SH-side orchestrator for the publish / revoke / unpublish flow."""
 
     __slots__ = (
@@ -61,6 +63,7 @@ class HighlightPublicationService:
         "_http_client",
         "_signing_key",
         "_own_instance_id",
+        "_child_protection",
     )
 
     def __init__(
@@ -75,6 +78,7 @@ class HighlightPublicationService:
         self._http_client = http_client
         self._signing_key: bytes | None = None
         self._own_instance_id: str = ""
+        self._child_protection = None
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
         if self._http_client is None:
@@ -109,6 +113,10 @@ class HighlightPublicationService:
         but the parent ``gfs_highlight_publications`` row is upserted, so
         the second call doesn't double-up that row.
         """
+        # §CP.R: a protected account can't put a highlight on the open web.
+        await self._require_unrestricted(
+            author_user_id, ProtectedCapability.PUBLIC_LINKS
+        )
         highlight = await self._require_owned(highlight_id, author_user_id)
         if not highlight.expires_at:
             # Should never happen — every highlight carries an expires_at —

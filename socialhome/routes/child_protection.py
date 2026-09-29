@@ -14,6 +14,7 @@ Guardian operations are scoped to the caller's assigned minors.
 * ``GET    /api/cp/spaces/{space_id}/age-gate``                  — read gate
 * ``PATCH  /api/cp/spaces/{space_id}/age-gate``                  — admin: set gate
 * ``GET    /api/cp/minors/{minor_id}/audit-log``                 — guardian/admin: log
+* ``GET    /api/me/protection``                                  — self: what's limited, who to ask
 """
 
 from __future__ import annotations
@@ -50,6 +51,21 @@ class CPProtectionView(BaseView):
                 actor_user_id=ctx.user_id,
             )
         return web.Response(status=204)
+
+
+class MeProtectionView(BaseView):
+    """``GET /api/me/protection`` — the caller's own protection (§CP.R).
+
+    ``{protected, restrictions, guardians: [{user_id, username,
+    display_name}]}`` for the SPA's "Your account is protected" section.
+    Runs through ``self._json`` (the sanitiser) like any other route — the
+    service never returns ``is_minor`` / ``declared_age`` in the first
+    place.
+    """
+
+    async def get(self) -> web.Response:
+        svc = self.svc(K.child_protection_service_key)
+        return self._json(await svc.protection_summary_for_self(self.user.user_id))
 
 
 class CPProtectionStatusView(BaseView):

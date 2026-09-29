@@ -24,6 +24,7 @@ from aiohttp import web
 
 from ..app_keys import preferences_service_key, space_repo_key
 from ..auth import current_user
+from ..domain.child_protection import AccountProtectedError
 from ..domain.preferences import FeatureDisabledError
 from ..services.preferences_service import ScopeMismatchError
 from ..domain.space import (
@@ -275,6 +276,17 @@ class BaseView(web.View):
                 exc,
             )
             return error_response(400, "UNPROCESSABLE", str(exc))
+        except AccountProtectedError as exc:
+            # §CP.R — a PermissionError subclass, so it must precede the
+            # generic clause below. Fixed copy + the capability id; never
+            # the age or minor flag that caused it.
+            return error_response(
+                403,
+                "ACCOUNT_PROTECTED",
+                "Your account is protected by your household. "
+                "Ask a guardian if you need this.",
+                extra={"capability": exc.capability.value},
+            )
         except FeatureDisabledError as exc:
             return error_response(
                 403,

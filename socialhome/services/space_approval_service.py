@@ -30,10 +30,16 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from ..domain.child_protection import ProtectedCapability
 from ..domain.events import SpaceProposalUpdated
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.space import SpacePermissionError, SpaceRole
+from ..domain.space import (
+    PUBLIC_SPACE_TIERS,
+    SpacePermissionError,
+    SpaceRole,
+    SpaceType,
+)
 from ..domain.space_proposal import (
     ProposalAction,
     ProposalStatus,
@@ -46,6 +52,7 @@ from ..repositories.space_proposal_repo import AbstractSpaceProposalRepo
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +64,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class SpaceApprovalService:
+def _publishes(action: ProposalAction, params: dict) -> bool:
+    """Whether a proposal would make the space public / global (§CP.R)."""
+    if action is not ProposalAction.SET_PUBLIC_TIER:
+        return False
+    try:
+        return SpaceType(str(params.get("space_type") or "")) in PUBLIC_SPACE_TIERS
+    except ValueError:
+        return False
+
+
+class SpaceApprovalService(ProtectionGateMixin):
     """Quorum approval for ``dissolve`` and ``set_public_tier``."""
 
     __slots__ = (
@@ -69,6 +86,7 @@ class SpaceApprovalService:
         "_own_instance_id",
         "_federation",
         "_space_service",
+        "_child_protection",
     )
 
     def __init__(
@@ -89,6 +107,7 @@ class SpaceApprovalService:
         self._own_instance_id = own_instance_id
         self._federation = None
         self._space_service = None
+        self._child_protection = None
 
     def attach(self, *, federation_service=None, space_service=None) -> None:
         """Wire the federation transport (for cross-household forward +
@@ -117,6 +136,11 @@ class SpaceApprovalService:
         space = await self._require_space(space_id)
         actor = await self._require_local_admin(space_id, actor_username)
         params = params or {}
+        if _publishes(action, params):
+            # §CP.R: a protected account can't publish a space.
+            await self._require_unrestricted(
+                actor.user_id, ProtectedCapability.PUBLIC_SPACES
+            )
         if space.owner_instance_id and space.owner_instance_id != self._own_instance_id:
             await self._forward(
                 space, "propose", {"action": action.value, "params": params}, actor
@@ -144,6 +168,15 @@ class SpaceApprovalService:
     ) -> dict | None:
         space = await self._require_space(space_id)
         actor = await self._require_local_admin(space_id, actor_username)
+        if approve:
+            # §CP.R: nor approve someone else's proposal to publish it. The
+            # host mirrors every open proposal here, so a forwarded vote is
+            # checked against the same local row.
+            proposal = await self._proposals.get(proposal_id)
+            if proposal is not None and _publishes(proposal.action, proposal.params):
+                await self._require_unrestricted(
+                    actor.user_id, ProtectedCapability.PUBLIC_SPACES
+                )
         if space.owner_instance_id and space.owner_instance_id != self._own_instance_id:
             await self._forward(
                 space,

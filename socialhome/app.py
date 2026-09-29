@@ -2127,6 +2127,20 @@ def create_app(config: Config | None = None) -> web.Application:
         moment_repo=moment_repo,
         follow_repo=moment_public_follow_repo,
     )
+    # §CP.R: every service that owns a surface a protected account may not
+    # use (bazaar, public spaces, public moments / links, API tokens,
+    # calendar feeds) checks it through ChildProtectionService.
+    for gated in (
+        user_service,
+        space_service,
+        space_approval_service,
+        space_cal_service,
+        bazaar_service,
+        highlight_publication_service,
+        moment_public_service,
+        moment_public_outbound,
+    ):
+        gated.attach_child_protection(child_protection_service)
     # Public space-content relay (Phase 5a2) is constructed in
     # ``_on_startup`` — its producer/consumer both depend on
     # ``space_crypto`` (SpaceContentEncryption), which is only built once
@@ -2545,6 +2559,7 @@ def create_app(config: Config | None = None) -> web.Application:
             profile_picture_repo=profile_picture_repo,
             key_manager=key_manager,
         )
+        real_user_service.attach_child_protection(child_protection_service)
         app[K.user_service_key] = real_user_service
 
         # 4. Replace SpaceService with one carrying the real instance_id.
@@ -2557,7 +2572,7 @@ def create_app(config: Config | None = None) -> web.Application:
             media_dir=pathlib.Path(config.media_path),
             media_refs=repos.media_reference,
         )
-        # §CP.F1: hook child-protection age gate into add_member.
+        # §CP.F1 age gate on add_member + §CP.R public-tier gate.
         real_space_service.attach_child_protection(child_protection_service)
         real_space_service.attach_profile_picture_repo(profile_picture_repo)
         real_space_service.attach_cover_repo(space_cover_repo)
@@ -2768,6 +2783,7 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_service=federation_service,
             space_service=real_space_service,
         )
+        real_space_approval_service.attach_child_protection(child_protection_service)
         app[K.space_approval_service_key] = real_space_approval_service
         # The private-invite handler dispatches the propose / vote verbs and
         # the SPACE_ADMIN_PROPOSAL_UPDATED mirror into the approval service.

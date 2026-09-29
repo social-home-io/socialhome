@@ -28,6 +28,7 @@ from aiohttp.multipart import BodyPartReader
 
 from ..app_keys import (
     auth_audit_log_repo_key,
+    child_protection_service_key,
     data_export_service_key,
     media_signer_key,
     password_reset_repo_key,
@@ -125,7 +126,18 @@ class MeView(BaseView):
         user = await svc.get(ctx.username)
         if user is None:
             return error_response(404, "NOT_FOUND", "User not found.")
-        return web.json_response(_user_to_dict_signed(self.request, user))
+        payload = _user_to_dict_signed(self.request, user)
+        # §CP.R — the caller's OWN protection state: that it is protected
+        # and which surfaces the server refuses, so the SPA can explain
+        # instead of failing on click. Never ``is_minor`` / ``declared_age``
+        # (SENSITIVE_FIELDS), and only here — ``/api/users`` and every
+        # other user payload stay silent about who is protected.
+        restrictions = await self.svc(child_protection_service_key).restrictions_for(
+            user.user_id
+        )
+        payload["protected"] = bool(restrictions)
+        payload["restrictions"] = [c.value for c in restrictions]
+        return web.json_response(payload)
 
     async def patch(self) -> web.Response:
         ctx = self.user

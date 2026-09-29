@@ -19,7 +19,6 @@ Two surfaces:
 
 from __future__ import annotations
 
-import secrets
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
@@ -96,7 +95,7 @@ class SpaceCalendarFeedView(BaseView):
             return error_response(401, "UNAUTHORIZED", "feed token required")
         space_cal_svc = self.svc(K.space_cal_service_key)
         repo = space_cal_svc._repo
-        owner = await repo.get_user_for_feed_token(token)
+        owner = await space_cal_svc.resolve_feed_token(token)
         if owner is None:
             return error_response(401, "UNAUTHORIZED", "feed token invalid or revoked")
         token_user, token_space = owner
@@ -143,13 +142,9 @@ class SpaceCalendarFeedTokenView(BaseView):
         space_repo = self.svc(K.space_repo_key)
         if await space_repo.get_member(space_id, ctx.user_id) is None:
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        space_cal_svc = self.svc(K.space_cal_service_key)
-        repo = space_cal_svc._repo
-        token = secrets.token_urlsafe(32)
-        await repo.upsert_feed_token(
+        token = await self.svc(K.space_cal_service_key).issue_feed_token(
             user_id=ctx.user_id,
             space_id=space_id,
-            token=token,
         )
         url = f"/api/spaces/{space_id}/calendar/export.ics?token={token}"
         # Calendar apps poll this from outside the SPA, so a relative
