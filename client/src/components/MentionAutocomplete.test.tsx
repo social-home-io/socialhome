@@ -13,14 +13,22 @@ const MEMBERS = [
 
 let apiGet: ReturnType<typeof vi.fn>
 
+const OWNER_VIEWER = { user_id: 'u-me', username: 'pascal', display_name: 'Pascal' }
+/** The signed-in viewer the ``@/store/auth`` mock serves. A test that needs
+ *  another viewer reassigns this instead of calling ``vi.doMock`` a second
+ *  time: vitest resolves the queued ``doMock``s for one import batch in
+ *  parallel, so two mocks of the same path race and either may win. */
+let viewer: typeof OWNER_VIEWER = OWNER_VIEWER
+
 beforeEach(() => {
+  viewer = OWNER_VIEWER
   vi.resetModules()
   document.body.innerHTML = ''
   apiGet = vi.fn(async () => MEMBERS)
   vi.doMock('@/api', () => ({ api: { get: apiGet, post: vi.fn() } }))
   vi.doMock('@/ws', () => ({ ws: { on: vi.fn(), off: vi.fn(), send: vi.fn() } }))
   vi.doMock('@/store/auth', () => ({
-    currentUser: { value: { user_id: 'u-me', username: 'pascal', display_name: 'Pascal' } },
+    currentUser: { get value() { return viewer } },
   }))
   vi.doMock('./Toast', () => ({ showToast: vi.fn() }))
 })
@@ -186,9 +194,7 @@ describe('MentionAutocomplete — @here', () => {
   })
 
   it('does not offer @here to a plain member', async () => {
-    vi.doMock('@/store/auth', () => ({
-      currentUser: { value: { user_id: 'u-bob', username: 'bob', display_name: 'Bob' } },
-    }))
+    viewer = { user_id: 'u-bob', username: 'bob', display_name: 'Bob' }
     const { setSpaceHereAllowed } = await import('@/store/spaceMembers')
     setSpaceHereAllowed('sp-1', true)
     const { ta } = await composer()

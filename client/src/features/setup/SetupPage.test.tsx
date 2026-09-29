@@ -22,12 +22,15 @@ function buildCfg(mode: 'standalone' | 'ha' | 'haos') {
   }
 }
 
-function commonMocks(cfg: ReturnType<typeof buildCfg>) {
+/** ``auth`` extends the ``@/store/auth`` mock. Never ``vi.doMock`` that path
+ *  again next to this call: vitest resolves the queued mocks of one import
+ *  batch in parallel, so two mocks of the same path race and either wins. */
+function commonMocks(cfg: ReturnType<typeof buildCfg>, auth: Record<string, unknown> = {}) {
   vi.doMock('@/store/instance', () => ({
     instanceConfig: cfg,
     loadInstanceConfig: vi.fn(async () => cfg.value),
   }))
-  vi.doMock('@/store/auth', () => ({ setToken: vi.fn() }))
+  vi.doMock('@/store/auth', () => ({ setToken: vi.fn(), ...auth }))
   vi.doMock('@/components/Toast', () => ({ showToast: vi.fn() }))
 }
 
@@ -115,11 +118,9 @@ describe('SetupPage standalone welcome', () => {
     vi.doMock('@/api', () => ({
       api: { get: vi.fn(), post, delete: vi.fn() },
     }))
-    vi.doMock('@/store/auth', () => ({
-      setToken: vi.fn(),
+    commonMocks(buildCfg('standalone'), {
       loadCurrentUser: vi.fn(async () => null),
-    }))
-    commonMocks(buildCfg('standalone'))
+    })
     const { SetupPage } = await import('./SetupPage')
     const { findByText, container } = render(<SetupPage />)
 
