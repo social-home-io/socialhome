@@ -1804,6 +1804,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo=space_repo,
         conversation_repo=conversation_repo,
         media_transcode_repo=repos.media_transcode,
+        cp_repo=repos.cp,
     )
     realtime_service.wire()
 

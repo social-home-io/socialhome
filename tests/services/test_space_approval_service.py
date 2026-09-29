@@ -784,3 +784,37 @@ async def test_protected_admin_cannot_approve_public_tier(stack):
     )
     assert out["status"] == ProposalStatus.REJECTED.value
     stack.exec.update_config.assert_not_awaited()
+
+
+async def test_protected_admin_cannot_join_an_open_publication(stack):
+    """Proposing ``set_public_tier`` without a tier (or a private one) while
+    a public proposal is open would reuse that row and auto-approve it."""
+    space = await _space(stack)
+    kid = await _add_admin(stack, space.id, "kid")
+    stack.approvals.attach_child_protection(_Cp({kid.user_id}))
+    open_view = await stack.approvals.propose(
+        space.id,
+        actor_username="alice",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "public"},
+    )
+    assert open_view["status"] == ProposalStatus.PENDING.value
+    for params in ({}, {"space_type": "private"}):
+        with pytest.raises(AccountProtectedError):
+            await stack.approvals.propose(
+                space.id,
+                actor_username="kid",
+                action=ProposalAction.SET_PUBLIC_TIER,
+                params=params,
+            )
+    stack.exec.update_config.assert_not_awaited()
+
+
+async def test_protected_approval_of_an_unknown_proposal_fails_closed(stack):
+    space = await _space(stack)
+    kid = await _add_admin(stack, space.id, "kid")
+    stack.approvals.attach_child_protection(_Cp({kid.user_id}))
+    with pytest.raises(AccountProtectedError):
+        await stack.approvals.vote(
+            space.id, "not-mirrored-yet", actor_username="kid", approve=True
+        )

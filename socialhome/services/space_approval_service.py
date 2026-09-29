@@ -136,11 +136,18 @@ class SpaceApprovalService(ProtectionGateMixin):
         space = await self._require_space(space_id)
         actor = await self._require_local_admin(space_id, actor_username)
         params = params or {}
-        if _publishes(action, params):
-            # §CP.R: a protected account can't publish a space.
-            await self._require_unrestricted(
-                actor.user_id, ProtectedCapability.PUBLIC_SPACES
-            )
+        if action is ProposalAction.SET_PUBLIC_TIER:
+            # §CP.R: a protected account can't publish a space — neither by
+            # asking for it nor by joining an open proposal that does
+            # (``_host_propose`` reuses the open row with ITS params and
+            # auto-approves for the proposer).
+            open_row = await self._proposals.find_open(space_id, action)
+            if _publishes(action, params) or (
+                open_row is not None and _publishes(action, open_row.params)
+            ):
+                await self._require_unrestricted(
+                    actor.user_id, ProtectedCapability.PUBLIC_SPACES
+                )
         if space.owner_instance_id and space.owner_instance_id != self._own_instance_id:
             await self._forward(
                 space, "propose", {"action": action.value, "params": params}, actor
@@ -171,9 +178,11 @@ class SpaceApprovalService(ProtectionGateMixin):
         if approve:
             # §CP.R: nor approve someone else's proposal to publish it. The
             # host mirrors every open proposal here, so a forwarded vote is
-            # checked against the same local row.
+            # checked against the same local row. A proposal not mirrored
+            # here yet fails closed for a protected account — the host
+            # can't tell the voter is protected.
             proposal = await self._proposals.get(proposal_id)
-            if proposal is not None and _publishes(proposal.action, proposal.params):
+            if proposal is None or _publishes(proposal.action, proposal.params):
                 await self._require_unrestricted(
                     actor.user_id, ProtectedCapability.PUBLIC_SPACES
                 )

@@ -611,7 +611,10 @@ answer), and lifted the moment protection is disabled:
 The account learns *that* it is protected and *what* is limited from
 `GET /api/me` (`protected`, `restrictions`) and `GET /api/me/protection`
 (plus its guardians) — never its recorded age. Nobody else learns who is
-protected. Inbound federation needs no extra gate: remote households never
+protected: the `cp.*` WebSocket frames (protection on/off, guardian and
+block changes) reach only household admins, the account itself and its
+guardians, and carry no age.
+Inbound federation needs no extra gate: remote households never
 learn protection state, `space_session` peers can't send DMs at all (§24.11
 peer class), relayed DMs from a protected sender are already refused
 (§CP.F3), and remote invites above a space's age gate are refused on accept.

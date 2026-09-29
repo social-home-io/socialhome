@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 
+from ..domain.child_protection import AccountProtectedError
 from ..domain.events import UserProfileUpdated
 from ..infrastructure.event_bus import EventBus
 from ..repositories.moment_public_repo import (
@@ -57,6 +58,15 @@ class ProfileSyncService:
                 await self._public.push_profile_to_gfs(
                     user_id=event.user_id, gfs_id=reg.gfs_id
                 )
+            except AccountProtectedError:
+                # §CP.R: a registration from before protection no longer
+                # refreshes the public directory entry.
+                log.info(
+                    "profile_sync: user %s is protected — not pushed to gfs %s",
+                    event.user_id,
+                    reg.gfs_id,
+                )
+                return
             except MomentPublicError as exc:
                 log.warning(
                     "profile_sync: push to gfs %s failed for user %s: %s",

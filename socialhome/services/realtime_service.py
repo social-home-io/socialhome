@@ -143,6 +143,7 @@ from .space_bot_service import (
 )
 
 if TYPE_CHECKING:
+    from ..repositories.cp_repo import AbstractCpRepo
     from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
 
 log = logging.getLogger(__name__)
@@ -174,6 +175,7 @@ class RealtimeService:
         "_conversation_repo",
         "_media_signer",
         "_media_transcode_repo",
+        "_cp_repo",
     )
 
     def __init__(
@@ -186,6 +188,7 @@ class RealtimeService:
         conversation_repo=None,
         media_signer: MediaUrlSigner | None = None,
         media_transcode_repo: "AbstractMediaTranscodeRepo | None" = None,
+        cp_repo: "AbstractCpRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._ws = ws
@@ -210,6 +213,10 @@ class RealtimeService:
         # Optional for back-compat callers / test stacks that don't exercise
         # the video path.
         self._media_transcode_repo = media_transcode_repo
+        # §CP: child-protection frames name a protected account, so they go
+        # to admins, the account itself and its guardians only — never the
+        # whole household. Optional for test stacks without CP.
+        self._cp_repo = cp_repo
 
     def attach_media_signer(self, signer: MediaUrlSigner) -> None:
         """Late binding — signer is built after RealtimeService.__init__."""
@@ -1347,57 +1354,87 @@ class RealtimeService:
     # ─── Child Protection (§23.107) ──────────────────────────────────────
 
     async def _on_cp_protection_enabled(self, event: CpProtectionEnabled) -> None:
-        await self._broadcast_household(
+        # No ``declared_age`` (SENSITIVE_FIELDS): listeners refetch.
+        minor = await self._user_repo.get(event.minor_username)
+        await self._broadcast_cp(
+            minor.user_id if minor is not None else None,
             {
                 "type": "cp.protection_enabled",
                 "minor_username": event.minor_username,
-                "declared_age": event.declared_age,
-            }
+            },
         )
 
     async def _on_cp_protection_disabled(self, event: CpProtectionDisabled) -> None:
-        await self._broadcast_household(
+        minor = await self._user_repo.get(event.minor_username)
+        await self._broadcast_cp(
+            minor.user_id if minor is not None else None,
             {
                 "type": "cp.protection_disabled",
                 "minor_username": event.minor_username,
-            }
+            },
         )
 
     async def _on_cp_guardian_added(self, event: CpGuardianAdded) -> None:
-        await self._broadcast_household(
+        await self._broadcast_cp(
+            event.minor_user_id,
             {
                 "type": "cp.guardian_added",
                 "minor_user_id": event.minor_user_id,
                 "guardian_user_id": event.guardian_user_id,
-            }
+            },
+            also=(event.guardian_user_id,),
         )
 
     async def _on_cp_guardian_removed(self, event: CpGuardianRemoved) -> None:
-        await self._broadcast_household(
+        await self._broadcast_cp(
+            event.minor_user_id,
             {
                 "type": "cp.guardian_removed",
                 "minor_user_id": event.minor_user_id,
                 "guardian_user_id": event.guardian_user_id,
-            }
+            },
+            # The removed guardian is no longer listed — tell them directly.
+            also=(event.guardian_user_id,),
         )
 
     async def _on_cp_block_added(self, event: CpBlockAdded) -> None:
-        await self._broadcast_household(
+        await self._broadcast_cp(
+            event.minor_user_id,
             {
                 "type": "cp.block_added",
                 "minor_user_id": event.minor_user_id,
                 "blocked_user_id": event.blocked_user_id,
-            }
+            },
         )
 
     async def _on_cp_block_removed(self, event: CpBlockRemoved) -> None:
-        await self._broadcast_household(
+        await self._broadcast_cp(
+            event.minor_user_id,
             {
                 "type": "cp.block_removed",
                 "minor_user_id": event.minor_user_id,
                 "blocked_user_id": event.blocked_user_id,
-            }
+            },
         )
+
+    async def _broadcast_cp(
+        self,
+        minor_user_id: str | None,
+        payload: dict,
+        *,
+        also: tuple[str, ...] = (),
+    ) -> int:
+        """§CP fan-out: household admins, the protected account itself and
+        its guardians (plus ``also``). A child-protection frame names a
+        protected account, so the rest of the household must not see it."""
+        users = await self._user_repo.list_active()
+        ids = {u.user_id for u in users if u.is_admin}
+        ids.update(also)
+        if minor_user_id:
+            ids.add(minor_user_id)
+            if self._cp_repo is not None:
+                ids.update(await self._cp_repo.list_guardians(minor_user_id))
+        return await self._ws.broadcast_to_users(sorted(ids), payload)
 
     async def _on_cp_age_gate_changed(self, event: CpSpaceAgeGateChanged) -> None:
         await self._broadcast_household(
