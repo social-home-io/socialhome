@@ -428,3 +428,41 @@ async def test_back_channel_reaction_suppressed_when_reactor_hidden_from_author_
         ),
     )
     federation.send_event.assert_not_called()
+
+
+# ─── §CP.F2: nothing of a protected account reaches a blocked household ──
+
+
+class _HouseholdBlockCp:
+    """``uid-kid`` is protected; a guardian blocked a user homed on
+    ``peer-blocked``."""
+
+    def register_gate(self, gate):
+        pass
+
+    async def guardian_blocks_household(self, user_id, instance_id):
+        return user_id == "uid-kid" and instance_id == "peer-blocked"
+
+
+async def test_protected_authors_content_skips_a_blocked_persons_household(stack):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_HouseholdBlockCp())
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-ok"), _peer("peer-blocked")],
+    )
+    await _FIRE(out, "uid-kid")
+    assert {c.kwargs["to_instance_id"] for c in fed.send_event.call_args_list} == {
+        "peer-ok"
+    }
+    fed.send_event.reset_mock()
+    # Anyone else's content still reaches both.
+    await _FIRE(out, "uid-author")
+    assert {c.kwargs["to_instance_id"] for c in fed.send_event.call_args_list} == {
+        "peer-ok",
+        "peer-blocked",
+    }
+
+
+async def _FIRE(out, author):
+    await out._on_frame_added(_frame_event(author=author, is_first=True))

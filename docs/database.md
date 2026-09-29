@@ -250,7 +250,7 @@ themselves moments and link to the conversation root via
 | Table | Purpose |
 |---|---|
 | `cp_guardians` | Guardian → minor links granting view/control rights (§CP). |
-| `cp_minor_blocks` | Per-minor block list applied by guardians (§CP.F2). Read in both directions and only while the minor's `users.child_protection_enabled` is on: DMs, groups, calls, notifications and the moment / highlight feeds keep the pair apart (`is_blocked_pair`, `list_block_counterparts`, and the shared `GUARDIAN_BLOCK_COUNTERPARTS_SQL` sub-select in `repositories/cp_repo.py`). `blocked_user_id` may name a remote user. |
+| `cp_minor_blocks` | Per-minor block list applied by guardians (§CP.F2). Read in both directions and only while the minor's `users.child_protection_enabled` is on: DMs, groups, calls, typing, unread counts, notifications and the moment / highlight feeds keep the pair apart (`is_blocked_pair`, `list_block_counterparts`, and the shared `guardian_block_counterparts_sql()` sub-select in `repositories/cp_repo.py`). `blocked_user_id` may name a remote user; joined to `remote_users` (`blocks_someone_homed_on`) it keeps the account's moments / highlights off that person's household and refuses DM media from it whose message isn't here. |
 | `minor_space_memberships_audit` | Append-only audit of minor join/leave/block events on spaces. |
 | `guardian_audit_log` | Append-only audit of guardian actions on minors. |
 

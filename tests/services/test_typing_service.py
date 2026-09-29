@@ -657,3 +657,96 @@ async def test_user_typing_no_repo_fans_to_every_peer():
     )
     targets = {t for t, _, _ in fed.sent}
     assert targets == {"peer-open", "peer-hider"}
+
+
+# ─── §CP.F2 guardian blocks ──────────────────────────────────────────────
+
+
+class _BlockCp:
+    """``kid`` is protected and a guardian blocked ``bob`` and ``remote-eve``."""
+
+    _PAIRS = {frozenset({"kid", "bob"}), frozenset({"kid", "remote-eve"})}
+
+    def register_gate(self, gate):
+        pass
+
+    async def is_protected(self, user_id):
+        return user_id == "kid"
+
+    async def is_guardian_blocked(self, a, b):
+        return frozenset({a, b}) in self._PAIRS
+
+    async def guardian_block_counterparts(self, user_id):
+        return frozenset(
+            other
+            for pair in self._PAIRS
+            if user_id in pair
+            for other in pair - {user_id}
+        )
+
+
+def _svc(repo, ws, fed=None):
+    svc = TypingService(
+        conversation_repo=repo,
+        user_repo=_FakeUserRepo(),
+        ws_manager=ws,
+        federation_service=fed,
+        own_instance_id="self",
+    )
+    svc.attach_child_protection(_BlockCp())
+    return svc
+
+
+async def test_blocked_typist_is_never_shown_to_the_protected_account():
+    repo = _FakeConvoRepo(
+        members=[_FakeMember("kid"), _FakeMember("bob"), _FakeMember("carol")]
+    )
+    ws = _FakeWS()
+    await _svc(repo, ws).user_started_typing(
+        conversation_id="g1", sender_user_id="bob", sender_username="bob"
+    )
+    targets, _ = ws.calls[0]
+    assert set(targets) == {"carol"}
+
+
+async def test_protected_typist_is_never_shown_to_the_blocked_person():
+    repo = _FakeConvoRepo(
+        members=[_FakeMember("kid"), _FakeMember("bob"), _FakeMember("carol")]
+    )
+    ws = _FakeWS()
+    await _svc(repo, ws).user_started_typing(
+        conversation_id="g1", sender_user_id="kid", sender_username="kid"
+    )
+    targets, _ = ws.calls[0]
+    assert set(targets) == {"carol"}
+
+
+async def test_protected_typing_never_goes_to_the_blocked_persons_household():
+    remote = _FakeRemoteMember("remote-1", "eve")
+    remote.user_id = "remote-eve"
+    repo = _FakeConvoRepo(members=[_FakeMember("kid")], remote=[remote])
+    fed = _FakeFed()
+    await _svc(repo, _FakeWS(), fed).user_started_typing(
+        conversation_id="c1", sender_user_id="kid", sender_username="kid"
+    )
+    assert fed.sent == []
+
+
+async def test_inbound_typing_from_a_blocked_person_skips_the_protected_account():
+    remote = _FakeRemoteMember("remote-1", "eve")
+    remote.user_id = "remote-eve"
+    repo = _FakeConvoRepo(
+        members=[_FakeMember("kid"), _FakeMember("carol")], remote=[remote]
+    )
+    ws = _FakeWS()
+    svc = _svc(repo, ws)
+    await svc.handle_remote_typing(
+        _Event(
+            FederationEventType.DM_USER_TYPING,
+            "remote-1",
+            {"conversation_id": "g1", "sender_user_id": "remote-eve"},
+        )
+    )
+    assert ws.calls, "carol still sees eve typing"
+    targets, _ = ws.calls[0]
+    assert set(targets) == {"carol"}

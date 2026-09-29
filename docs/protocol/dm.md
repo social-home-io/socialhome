@@ -126,11 +126,18 @@ top of the rules above (WARNING `guardian block`, ids only):
   or a group whose every local member blocked the sender). In a group with
   other local members it is stored for them and withheld from the protected
   account (no WS frame, no bell, hidden from its message list).
-- **`DM_MEDIA_BLOB`** for a message refused that way is refused too, and any
-  bytes that overtook the message are never linked to it (the media orphan
-  sweep reaps them).
+- **`DM_MEDIA_BLOB`** whose message isn't here is judged from what is
+  stored (so it holds across a restart): for a conversation here, refused
+  when any of its seats on the sending household would have its message
+  refused; for a conversation that isn't here yet, refused when a protected
+  account here has a guardian block on someone homed on the sending
+  household. Nothing is written in either case.
 - **`DM_HISTORY_CHUNK`** rows from a blocked sender follow the same rule.
 - **`CALL_OFFER`** from a blocked caller never rings (no call row).
+- **`DM_USER_TYPING`** from a blocked typist is not shown to the protected
+  account; the account's own typing is not sent to a household whose every
+  seat in the conversation is someone it has blocked.
+- **`DM_CONTACT_REQUEST`** from a blocked requester is not stored.
 - `DM_RELAY` delivers nothing at its destination today, so it needs no gate.
 
 Locally the pair can't open or continue a 1:1, share a group (creating or

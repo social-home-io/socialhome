@@ -77,6 +77,17 @@ class ProtectionGateMixin:
             return False
         return await self._child_protection.is_guardian_blocked(user_a, user_b)
 
+    async def _guardian_blocks_household(
+        self, user_id: str | None, instance_id: str
+    ) -> bool:
+        """Whether a guardian block of *user_id* (``None``: of any protected
+        account here) names someone homed on *instance_id*."""
+        if self._child_protection is None:
+            return False
+        return await self._child_protection.guardian_blocks_household(
+            user_id, instance_id
+        )
+
     async def _guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
         """Everyone a guardian block separates from *user_id*."""
         if self._child_protection is None:

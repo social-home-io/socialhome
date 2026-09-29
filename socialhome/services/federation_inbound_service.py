@@ -154,10 +154,6 @@ log = logging.getLogger(__name__)
 #: Hold-buffer scope for DMs waiting on their sender's user sync.
 _DM_HOLD_SCOPE = DM_HOLD_SCOPE
 
-#: How many DM ids refused for a guardian block (§CP.F2) are remembered, so
-#: the media bytes that follow such a message are refused too.
-_GUARDIAN_REFUSED_DM_CAP = 4096
-
 
 def _moment_expired(expires_at: object) -> bool:
     """True iff ``expires_at`` parses and is already in the past.
@@ -358,7 +354,6 @@ class FederationInboundService(ProtectionGateMixin):
 
     __slots__ = (
         "_child_protection",
-        "_guardian_refused_dms",
         "_bus",
         "_conversation_repo",
         "_space_post_repo",
@@ -480,8 +475,6 @@ class FederationInboundService(ProtectionGateMixin):
         #: cross-household group leaves it instead of taking it down.
         self._groups: "DmGroupService | None" = None
         self._child_protection = None
-        #: DM ids refused for a guardian block (insertion-ordered, capped).
-        self._guardian_refused_dms: dict[str, None] = {}
 
     def attach_groups(self, groups: "DmGroupService") -> None:
         """Wire the group-membership authority (built with the DM stack)."""
@@ -612,8 +605,9 @@ class FederationInboundService(ProtectionGateMixin):
             return
         withheld = await self._guardian_withheld(conv_id, sender_user_id, recipients)
         if withheld is None:
-            # §CP.F2 — fail closed: nothing is stored, no conversation is
-            # opened, and the media bytes that follow are refused too.
+            # §CP.F2 — fail closed: nothing is stored and no conversation is
+            # opened; the media bytes that follow are refused by the same
+            # rule (see :meth:`_media_blob_guardian_refused`).
             refuse(
                 event,
                 "guardian block",
@@ -621,7 +615,6 @@ class FederationInboundService(ProtectionGateMixin):
                 message=message_id,
                 sender=sender_user_id,
             )
-            self._remember_guardian_refused_dm(message_id)
             return
 
         # Cross-household DMs arrive without the conversation ever
@@ -1073,15 +1066,36 @@ class FederationInboundService(ProtectionGateMixin):
             return None
         return frozenset(withheld)
 
-    def _remember_guardian_refused_dm(self, message_id: str) -> None:
-        """Remember a refused DM id so the media bytes that follow it are
-        refused too. Bytes that *overtook* it are never linked to a message
-        row, so nobody is shown them and the orphan sweep reaps them — they
-        are not deleted here, since the id is the sender's to choose."""
-        refused = self._guardian_refused_dms
-        refused[message_id] = None
-        while len(refused) > _GUARDIAN_REFUSED_DM_CAP:
-            refused.pop(next(iter(refused)))
+    async def _media_blob_guardian_refused(
+        self, event: "FederationEvent", conv_id: str
+    ) -> bool:
+        """§CP.F2 for bytes whose message isn't here (never stored, or not
+        arrived yet) — decided from what is stored, so it holds across a
+        restart. The sender is one of ``from_instance``'s users:
+
+        * the conversation is here → refused when any of its seats on
+          ``from_instance`` would have its message refused (fail closed);
+        * it isn't → refused when a protected account here has a guardian
+          block on someone homed on ``from_instance``.
+        """
+        conv = await self._conversation_repo.get(conv_id) if conv_id else None
+        if conv is None:
+            return await self._guardian_blocks_household(None, event.from_instance)
+        for seat in await self._conversation_repo.list_remote_members(conv_id):
+            if seat.instance_id != event.from_instance:
+                continue
+            seat_uid = seat.user_id
+            if seat_uid is None:
+                remote = await self._user_repo.get_remote_by_member(
+                    seat.instance_id, seat.remote_username
+                )
+                seat_uid = remote.user_id if remote is not None else None
+            if (
+                seat_uid
+                and await self._guardian_withheld(conv_id, seat_uid, ()) is None
+            ):
+                return True
+        return False
 
     async def _has_local_recipient(self, recipients: tuple) -> bool:
         for rid in recipients:
@@ -1295,7 +1309,8 @@ class FederationInboundService(ProtectionGateMixin):
         """
         msg = await self._conversation_repo.get_message(message_id)
         if msg is None:
-            if message_id in self._guardian_refused_dms:
+            conv_id = str((event.payload or {}).get("conversation_id") or "")
+            if await self._media_blob_guardian_refused(event, conv_id):
                 refuse(event, "guardian block", message=message_id)
                 return False
             return True

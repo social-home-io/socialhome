@@ -1041,3 +1041,26 @@ async def test_block_runs_the_guardian_block_hook(env):
         minor_user_id="lila-id", blocked_user_id="u-x", guardian_user_id="mom-id"
     )
     assert gate.blocks == [("lila-id", "u-x")]
+
+
+async def test_guardian_blocks_household(env):
+    svc, db = env
+    await _protect_lila(svc)
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES('peer-x', 'X', ?, 'k1', 'k2',"
+        " 'https://x/wh', 'wh-x', 'confirmed', 'manual')",
+        ("00" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES('u-x', 'peer-x', 'x', 'X')"
+    )
+    await svc.block_user_for_minor(
+        minor_user_id="lila-id", blocked_user_id="u-x", guardian_user_id="mom-id"
+    )
+    assert await svc.guardian_blocks_household("lila-id", "peer-x")
+    assert await svc.guardian_blocks_household(None, "peer-x")
+    assert not await svc.guardian_blocks_household("mom-id", "peer-x")
+    assert not await svc.guardian_blocks_household("lila-id", "")

@@ -33,6 +33,7 @@ from ...crypto import derive_instance_id
 from ...domain.federation import FederationEventType, PairingStatus
 from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from ...infrastructure.event_bus import EventBus
+from ..protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent, PairingSession
@@ -45,13 +46,23 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class PairingInboundHandlers:
+class PairingInboundHandlers(ProtectionGateMixin):
     """Six pairing-lifecycle inbound handlers registered on one federation
     service. (Five pairing events + the ``DM_CONTACT_REQUEST`` pre-pairing
     handshake, which lives in the same family.)
+
+    A contact request from someone a guardian block (§CP.F2) separates from
+    its recipient is not stored.
     """
 
-    __slots__ = ("_bus", "_repo", "_dm_contact_repo", "_peer_unpair", "_user_repo")
+    __slots__ = (
+        "_bus",
+        "_repo",
+        "_dm_contact_repo",
+        "_peer_unpair",
+        "_user_repo",
+        "_child_protection",
+    )
 
     def __init__(
         self,
@@ -69,6 +80,7 @@ class PairingInboundHandlers:
         #: Binds a contact request's requester to the sending household.
         #: Without it no request is accepted (fail closed).
         self._user_repo = user_repo
+        self._child_protection = None
 
     def attach_to(self, federation_service: "FederationService") -> None:
         """Register every handler on the service's event registry."""
@@ -353,6 +365,14 @@ class PairingInboundHandlers:
                 "DM_CONTACT_REQUEST from %s refused: requester %s is not homed there",
                 event.from_instance,
                 requester_user_id,
+            )
+            return
+        if await self._guardian_blocked(recipient_user_id, requester_user_id):
+            log.warning(
+                "DM_CONTACT_REQUEST from %s refused: guardian block (%s → %s)",
+                event.from_instance,
+                requester_user_id,
+                recipient_user_id,
             )
             return
         try:

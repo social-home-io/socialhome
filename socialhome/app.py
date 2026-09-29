@@ -987,6 +987,10 @@ def _wire_federation_stack(
         relay_policy=relay_policy,
         visibility_repo=peer_user_visibility_repo,
     )
+    # §CP.F2: nothing of a protected account to a blocked person's household.
+    moment_federation_outbound.attach_child_protection(
+        app[K.child_protection_service_key]
+    )
     moment_federation_outbound.wire()
 
     # §24.11 authorship: the users a space-content payload names must be
@@ -1059,13 +1063,16 @@ def _wire_federation_stack(
         dm_media_outbox_repo=dm_media_outbox_repo,
         space_media_outbox_repo=space_media_outbox_repo,
     )
-    PairingInboundHandlers(
+    pairing_handlers = PairingInboundHandlers(
         bus=bus,
         federation_repo=federation_repo,
         peer_unpair=peer_unpair_service,
         dm_contact_repo=dm_contact_repo,
         user_repo=user_repo,
-    ).attach_to(federation_service)
+    )
+    # §CP.F2: no contact request across a guardian block.
+    pairing_handlers.attach_child_protection(app[K.child_protection_service_key])
+    pairing_handlers.attach_to(federation_service)
 
     # Transitive auto-pair coordinator (§11 "simple pairing") —
     # intermediaries auto-forward without admin approval; the target's
@@ -1326,6 +1333,10 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
         user_repo=user_repo,
         visibility_repo=peer_user_visibility_repo,
+    )
+    # §CP.F2: nothing of a protected account to a blocked person's household.
+    highlight_federation_outbound.attach_child_protection(
+        app[K.child_protection_service_key]
     )
     highlight_federation_outbound.wire()
 
@@ -2186,6 +2197,8 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo=space_repo,
         visibility_repo=repos.peer_user_visibility,
     )
+    # §CP.F2: no typing indicator across a guardian block.
+    typing_service.attach_child_protection(child_protection_service)
 
     # ── Platform adapter (HA vs standalone) ──────────────────────────────
     platform_adapter = build_platform_adapter(config.mode, db, config)
