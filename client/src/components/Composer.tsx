@@ -18,6 +18,13 @@ import {
   handleEmojiAutocompleteKey,
 } from './EmojiAutocomplete'
 import { EmojiPickButton } from './EmojiPickButton'
+import {
+  MentionAutocomplete,
+  checkForMentionTrigger,
+  closeMentionAutocomplete,
+  handleMentionAutocompleteKey,
+  mentionInputAria,
+} from './MentionAutocomplete'
 import { LocationPicker, type LocationDraft } from './LocationPicker'
 import { MarkdownToolbar } from './MarkdownToolbar'
 import { MediaDropzone } from './MediaDropzone'
@@ -527,13 +534,22 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
               const t = e.target as HTMLTextAreaElement
               content.value = t.value
               checkForEmojiTrigger(t.value, t.selectionStart ?? 0, t, spliceEmoji)
+              // Space composer only: ``@`` opens the member picker; the
+              // splice is the same text-range replace the emoji pick uses.
+              checkForMentionTrigger(
+                t.value, t.selectionStart ?? 0, t, spaceId, spliceEmoji,
+              )
             }}
             onKeyDown={(e) => {
-              if (handleEmojiAutocompleteKey(e)) {
+              if (handleMentionAutocompleteKey(e) || handleEmojiAutocompleteKey(e)) {
                 e.preventDefault()
               }
             }}
-            onBlur={() => closeEmojiAutocomplete()}
+            onBlur={() => {
+              closeEmojiAutocomplete()
+              closeMentionAutocomplete()
+            }}
+            {...(spaceId ? mentionInputAria(textareaRef.current) : {})}
             rows={3}
             maxLength={MAX_LENGTH}
           />
@@ -765,6 +781,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
         onClose={() => setLocationOpen(false)}
       />
       <EmojiAutocomplete />
+      {spaceId && <MentionAutocomplete />}
     </form>
   )
 }

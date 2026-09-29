@@ -8,7 +8,9 @@
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
+import { currentUser } from '@/store/auth'
 import type { SpaceMemberProfile } from '@/types'
+import { mentionTokenSet } from '@/utils/mentions'
 
 export const spaceMembers = signal<Record<string, Map<string, SpaceMemberProfile>>>({})
 
@@ -26,6 +28,32 @@ export async function loadSpaceMembers(spaceId: string): Promise<void> {
     spaceMembers.value = { ...spaceMembers.value, [spaceId]: m }
   } catch {
     loaded.delete(spaceId)
+  }
+}
+
+export interface SpaceMentionRender {
+  mentions: ReadonlySet<string>
+  selfMention: string | null
+}
+
+const _tokenCache = new WeakMap<Map<string, SpaceMemberProfile>, Set<string>>()
+
+/** What the renderers need to highlight @-mentions in ``spaceId``: the
+ *  lower-cased member tokens (empty until the roster loads — nothing is
+ *  highlighted rather than guessing) and the viewer's own token. Reads
+ *  the signal, so a component calling it re-renders when the roster lands. */
+export function spaceMentionRender(spaceId: string | null | undefined): SpaceMentionRender {
+  const roster = spaceId ? spaceMembers.value[spaceId] : undefined
+  if (!roster) return { mentions: new Set(), selfMention: null }
+  let tokens = _tokenCache.get(roster)
+  if (!tokens) {
+    tokens = mentionTokenSet(roster.values())
+    _tokenCache.set(roster, tokens)
+  }
+  const me = currentUser.value?.user_id
+  return {
+    mentions: tokens,
+    selfMention: (me && roster.get(me)?.mention) || null,
   }
 }
 
