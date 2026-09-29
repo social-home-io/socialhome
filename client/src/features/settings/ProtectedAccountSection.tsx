@@ -3,41 +3,27 @@
  * account: what the household limited and who the guardians are.
  *
  * Backed by ``GET /api/me/protection`` (``{protected, restrictions,
- * guardians}``). The server never sends the recorded age, so neither does
- * this section — it explains *what* is limited, not *why*.
+ * guardians}``) through ``store/protection``, which also reloads it when the
+ * server says this account's protection changed. The server never sends the
+ * recorded age, so neither does this section — it explains *what* is
+ * limited, not *why*.
  */
 import { useEffect } from 'preact/hooks'
-import { useSignal } from '@preact/signals'
-import { api } from '@/api'
 import { Spinner } from '@/components/Spinner'
 import { restrictionCopy } from '@/components/ProtectedNotice'
 import { currentUser } from '@/store/auth'
+import { loadMyProtection, myProtection, myProtectionFailed } from '@/store/protection'
 import { t } from '@/i18n/i18n'
 
-export interface ProtectionGuardian {
-  user_id: string
-  username: string
-  display_name: string
-}
-
-export interface MyProtection {
-  protected: boolean
-  restrictions: string[]
-  guardians: ProtectionGuardian[]
-}
+export type { MyProtection, ProtectionGuardian } from '@/store/protection'
 
 export function ProtectedAccountSection() {
   const isProtected = currentUser.value?.protected === true
-  const data = useSignal<MyProtection | null>(null)
-  const failed = useSignal(false)
+  const data = myProtection
+  const failed = myProtectionFailed
 
   useEffect(() => {
-    if (!isProtected) return
-    let cancelled = false
-    api.get<MyProtection>('/api/me/protection')
-      .then((r) => { if (!cancelled) data.value = r })
-      .catch(() => { if (!cancelled) failed.value = true })
-    return () => { cancelled = true }
+    if (isProtected) void loadMyProtection()
   }, [isProtected])
 
   if (!isProtected) return null
@@ -66,7 +52,7 @@ export function ProtectedAccountSection() {
       {data.value === null && !failed.value && (
         <Spinner label={t('common.loading')} />
       )}
-      {failed.value && (
+      {failed.value && data.value === null && (
         <p class="sh-muted">{t('protected.section.load_error')}</p>
       )}
       {data.value && data.value.guardians.length === 0 && (

@@ -5,6 +5,7 @@ const { apiMock } = vi.hoisted(() => ({ apiMock: { get: vi.fn() } }))
 vi.mock('@/api', () => ({ api: apiMock }))
 
 import { currentUser } from '@/store/auth'
+import { myProtection, myProtectionFailed } from '@/store/protection'
 import type { User } from '@/types'
 import { ProtectedAccountSection } from './ProtectedAccountSection'
 
@@ -21,7 +22,11 @@ function me(extra: Partial<User> = {}): User {
   }
 }
 
-beforeEach(() => { apiMock.get.mockReset() })
+beforeEach(() => {
+  apiMock.get.mockReset()
+  myProtection.value = null
+  myProtectionFailed.value = false
+})
 afterEach(() => { currentUser.value = null })
 
 describe('ProtectedAccountSection', () => {

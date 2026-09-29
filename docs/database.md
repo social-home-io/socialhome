@@ -250,11 +250,11 @@ themselves moments and link to the conversation root via
 | Table | Purpose |
 |---|---|
 | `cp_guardians` | Guardian → minor links granting view/control rights (§CP). |
-| `cp_minor_blocks` | Per-minor block list applied by guardians. |
+| `cp_minor_blocks` | Per-minor block list applied by guardians (§CP.F2). Read in both directions and only while the minor's `users.child_protection_enabled` is on: DMs, groups, calls, notifications and the moment / highlight feeds keep the pair apart (`is_blocked_pair`, `list_block_counterparts`, and the shared `GUARDIAN_BLOCK_COUNTERPARTS_SQL` sub-select in `repositories/cp_repo.py`). `blocked_user_id` may name a remote user. |
 | `minor_space_memberships_audit` | Append-only audit of minor join/leave/block events on spaces. |
 | `guardian_audit_log` | Append-only audit of guardian actions on minors. |
 
-No table backs the §CP.R protected-account restrictions (`docs/api.md` → *Protected accounts*): they derive from `users.child_protection_enabled` at request time, so enabling or lifting protection takes effect immediately (an earlier calendar feed token simply stops serving) with no migration.
+No table backs the §CP.R protected-account restrictions (`docs/api.md` → *Protected accounts*): they derive from `users.child_protection_enabled` at request time, so enabling or lifting protection takes effect immediately (an earlier calendar feed token simply stops serving) with no migration. Enabling protection also revokes what the account set up before — `api_tokens` rows that aren't a password sign-in (a sign-in's hash is also in `platform_tokens`) get `revoked_at`, `highlights.public_gfs_id` is cleared, `moment_public_registrations` / `moment_public_follows` rows are deleted and active `bazaar_listings` become `cancelled` — all on existing columns.
 
 ## Search
 

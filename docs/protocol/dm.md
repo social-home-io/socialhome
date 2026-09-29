@@ -113,9 +113,41 @@ household and the conversation's remote seats
   user's old household keep that seat, so messages from the new home are
   refused there until the conversation is re-seated.
 
+### Guardian blocks (§CP.F2)
+
+A guardian can block a person (local or on another household) for a
+protected account. The block never leaves the household — the sender's
+household learns nothing — and it is enforced where the message lands, on
+top of the rules above (WARNING `guardian block`, ids only):
+
+- **`DM_MESSAGE`** from a blocked sender: refused outright — nothing is
+  stored and no conversation is opened — when the protected account is the
+  message's only local audience (a 1:1, a conversation that isn't here yet,
+  or a group whose every local member blocked the sender). In a group with
+  other local members it is stored for them and withheld from the protected
+  account (no WS frame, no bell, hidden from its message list).
+- **`DM_MEDIA_BLOB`** for a message refused that way is refused too, and any
+  bytes that overtook the message are never linked to it (the media orphan
+  sweep reaps them).
+- **`DM_HISTORY_CHUNK`** rows from a blocked sender follow the same rule.
+- **`CALL_OFFER`** from a blocked caller never rings (no call row).
+- `DM_RELAY` delivers nothing at its destination today, so it needs no gate.
+
+Locally the pair can't open or continue a 1:1, share a group (creating or
+adding refuses, and the block steps the protected account out of every group
+the two share), react, or call — in either direction. The 403 the blocked
+person gets reads exactly like a personal block (`Recipient has you
+blocked.`). A roster from another household can still seat both; the
+protected account then can't post there and never sees the blocked person's
+messages, reactions or media.
+
 Implementation: `socialhome/federation/dm_scope.py` (`DmScope`),
-`socialhome/services/dm_group_service.py`;
-`tests/protocol/test_dm_scope.py`, `tests/protocol/test_dm_group_scope.py`.
+`socialhome/services/dm_group_service.py`; guardian blocks in
+`socialhome/services/protection_gate.py` (`ProtectionGateMixin`) as used by
+`DmService`, `FederationInboundService`, `DmHistoryReceiver`,
+`CallSignalingService` and `NotificationService`;
+`tests/protocol/test_dm_scope.py`, `tests/protocol/test_dm_group_scope.py`,
+`tests/protocol/test_guardian_blocks.py`.
 
 ## Flow — 1:1 DM
 

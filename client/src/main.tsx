@@ -24,6 +24,7 @@ import { wireConnectionsWs } from './store/connections'
 import { wireUserPreferencesWs } from './store/userPreferences'
 import { wireMediaReadyWs } from './store/mediaReady'
 import { wireSpacesWs } from './store/spaces'
+import { wireProtectionWs } from './store/protection'
 
 // Wire WebSocket event handlers to local stores BEFORE connecting so
 // no events get lost between connect() and the subscribe() calls.
@@ -44,6 +45,7 @@ wireConnectionsWs()
 wireUserPreferencesWs()
 wireMediaReadyWs()
 wireSpacesWs()
+wireProtectionWs()
 
 // Wire the api client's 401 handler to clear the session. Done here (not at
 // store/auth module load) so api.ts stays free of a static import back to
