@@ -335,6 +335,33 @@ hard reject make the `"ed25519+mldsa65"` sibling a drop-in. Direct
 deliveries need no origin signature: there the envelope signer *is* the
 origin.
 
+**Link-preview author signature (GFS public relay)**
+(`services/space_public_author.py`) — a public/global space post's
+author-built link card rides inside the encrypted relay inner, but outside
+the main per-author signature's fixed field set (that relay has no version
+negotiation; widening the set would make every pre-preview subscriber drop
+posts that carry a card). The author's identity seed signs it separately:
+
+```
+link_preview           : {url, title, description, site_name, thumbnail_url}
+link_preview_sig       : "<b64url>"   # Ed25519 over the bytes below
+link_preview_sig_suite : "ed25519"    # unknown value → card rejected
+```
+
+```
+b"space-post-link-preview:v1:" + canonical_json({
+    post_id, space_id, author_user_id, author_pk,
+    link_preview, link_preview_sig_suite,
+})   # sort_keys, separators=(",", ":"), UTF-8
+```
+
+Verified against the same `author_pk` the main author signature already
+proved (`verified_link_preview`); a missing / bad signature drops the card,
+never the post, so a relayer can strip a card but cannot forge, alter or
+move one to another post. `SUPPORTED_LINK_PREVIEW_SIG_SUITES` +
+`UnsupportedLinkPreviewSigSuite`, no default — the PQ sibling is a suite
+bump.
+
 The key-wrap pubkey is **self-signed by the identity** so the seal path
 never trusts the GFS-served value. At identity setup each household
 produces `keywrap_sig = b64url(sign_ed25519(identity_seed,

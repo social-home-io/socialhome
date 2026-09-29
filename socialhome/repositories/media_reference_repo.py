@@ -31,6 +31,9 @@ noted:
   * ``pages`` / ``space_pages`` / ``page_edit_history`` ``.cover_image_url``
   * ``task_attachments.url``
   * ``post_drafts.media_url``
+  * ``feed_posts`` / ``space_posts`` ``.link_preview_json`` → ``$.thumbnail_url``
+    (the re-encoded link-preview image; one file may back several posts
+    that linked the same page)
 
 A soft-deleted post keeps ``image_urls_json`` (only ``media_url`` is
 cleared), so a post's image list counts only while the post is live.
@@ -78,6 +81,14 @@ _LIST_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("feed_posts", "image_urls_json", "deleted=0"),
     ("space_posts", "image_urls_json", "deleted=0"),
     ("bazaar_listings", "image_urls_json", ""),
+)
+
+
+#: ``(table, JSON column, JSON path)`` for a reference inside a JSON object.
+#: Soft-deleting a post NULLs its ``link_preview_json``, so no live filter.
+_JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("feed_posts", "link_preview_json", "$.thumbnail_url"),
+    ("space_posts", "link_preview_json", "$.thumbnail_url"),
 )
 
 
@@ -136,6 +147,16 @@ class SqliteMediaReferenceRepo:
             )
             for r in rows_to_dicts(rows):
                 out.update(_names_in_list(r.get("v")))
+        for table, col, path in _JSON_FIELD_COLUMNS:
+            rows = await self._db.fetchall(
+                f"SELECT json_extract({col}, ?) AS v FROM {table} "
+                f"WHERE {col} IS NOT NULL AND json_valid({col})",
+                (path,),
+            )
+            for r in rows_to_dicts(rows):
+                name = media_basename(r.get("v"))
+                if name:
+                    out.add(name)
         return out
 
     async def is_referenced(self, basename: str) -> bool:
@@ -161,5 +182,13 @@ class SqliteMediaReferenceRepo:
                 f"SELECT {col} AS v FROM {table} WHERE {where}", (pattern,)
             )
             if any(basename in _names_in_list(r["v"]) for r in rows):
+                return True
+        for table, col, path in _JSON_FIELD_COLUMNS:
+            rows = await self._db.fetchall(
+                f"SELECT json_extract({col}, ?) AS v FROM {table} "
+                f"WHERE {col} LIKE ? ESCAPE '\\' AND json_valid({col})",
+                (path, pattern),
+            )
+            if any(media_basename(r["v"]) == basename for r in rows):
                 return True
         return False

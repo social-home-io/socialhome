@@ -344,5 +344,12 @@
   "common.retry": "Erneut versuchen",
   "common.not_now": "Nicht jetzt",
   "common.ok": "OK",
-  "common.try_again": "Erneut versuchen"
+  "common.try_again": "Erneut versuchen",
+  "link_preview.loading": "Linkvorschau wird geladen…",
+  "link_preview.remove": "Linkvorschau entfernen",
+  "link_preview.restore": "Linkvorschau anzeigen",
+  "link_preview.open": "{site} in neuem Tab öffnen",
+  "link_preview.admin_legend": "Links",
+  "link_preview.admin_title": "Linkvorschauen",
+  "link_preview.admin_subtitle": "Zeigt eine Karte für den ersten Link in einem neuen Beitrag. Dein Zuhause lädt die Seite einmal, wenn der Beitrag geschrieben wird."
 }

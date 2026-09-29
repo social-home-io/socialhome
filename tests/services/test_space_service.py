@@ -7437,3 +7437,88 @@ async def test_update_config_toggles_allow_here_mention(stack):
         )
     assert (await stack.space_repo.get(space.id)).allow_here_mention is True
     assert "allow_here_mention" in SpaceService._REMOTE_CONFIG_FIELDS
+
+
+class _StubPreviews:
+    """Stands in for LinkPreviewService: records what it was asked."""
+
+    def __init__(self) -> None:
+        self.asked: list[dict] = []
+
+    async def preview_for_post(self, **kw):
+        from socialhome.domain.link_preview import LinkPreview
+
+        self.asked.append(kw)
+        if kw["no_link_preview"]:
+            return None
+        return LinkPreview(url="https://example.com/", title="Card")
+
+
+async def test_space_post_link_preview_built_by_author_and_survives_moderation(stack):
+    """The author's service builds the card; a moderated post keeps it (and
+    the opt-out) through the queue round-trip."""
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    previews = _StubPreviews()
+    stack.space_svc.attach_link_previews(previews)
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
+    direct = await stack.space_svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.TEXT,
+        content="see https://example.com/",
+    )
+    assert direct is not None and direct.link_preview is not None
+    assert direct.link_preview.title == "Card"
+    assert previews.asked[0]["user_id"] == a.user_id
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+    assert (
+        await stack.space_svc.create_post(
+            space.id,
+            author_user_id=b.user_id,
+            type=PostType.TEXT,
+            content="queued https://example.com/",
+        )
+        is None
+    )
+    pending = await stack.space_svc.list_pending_moderation(
+        space.id, actor_username="anna"
+    )
+    approved = await stack.space_svc.approve_moderation_item(
+        space.id, pending[0].id, actor_username="anna"
+    )
+    assert approved.link_preview is not None and approved.link_preview.title == "Card"
+    opted_out = await stack.space_svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.TEXT,
+        content="no card https://example.com/",
+        no_link_preview=True,
+    )
+    assert opted_out is not None
+    assert opted_out.link_preview is None and opted_out.no_link_preview is True
+
+
+async def test_space_post_edit_drops_the_card_when_the_link_changes(stack):
+    a = await stack.provision_user("anna")
+    stack.space_svc.attach_link_previews(_StubPreviews())
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.TEXT,
+        content="see https://example.com/",
+    )
+    kept = await stack.space_svc.edit_post(
+        p.id, editor_user_id=a.user_id, new_content="yes, https://example.com/"
+    )
+    assert kept.link_preview is not None
+    gone = await stack.space_svc.edit_post(
+        p.id, editor_user_id=a.user_id, new_content="never mind"
+    )
+    assert gone.link_preview is None

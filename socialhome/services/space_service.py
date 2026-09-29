@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from ..federation.invite_bootstrap import InviteBootstrapHint
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
+    from .link_preview_service import LinkPreviewService
 from ..domain.events import (
     CommentAdded,
     PeerProtoVersionRaised,
@@ -91,6 +92,8 @@ from ..domain.federation_capabilities import (
 )
 from ..media.cleanup import unlink_unreferenced
 from .space_purge import purge_space_and_media
+from ..domain.link_preview import card_survives_edit, link_preview_to_dict
+from .link_preview_service import wire_link_preview
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
 from ..domain.post import (
@@ -271,6 +274,7 @@ class SpaceService(SpaceMemberGuardMixin):
         "_bazaar",
         "_invite_keywrap_pk",
         "_invite_keywrap_sig",
+        "_link_previews",
     )
 
     def __init__(
@@ -318,6 +322,7 @@ class SpaceService(SpaceMemberGuardMixin):
         # paths, exactly as an older code is).
         self._invite_keywrap_pk = ""
         self._invite_keywrap_sig = ""
+        self._link_previews: LinkPreviewService | None = None
 
     def attach_invite_identity(
         self,
@@ -337,6 +342,13 @@ class SpaceService(SpaceMemberGuardMixin):
         """
         self._invite_keywrap_pk = keywrap_public_key.hex()
         self._invite_keywrap_sig = keywrap_sig
+
+    def attach_link_previews(self, svc: "LinkPreviewService") -> None:
+        """Wire the author-side link preview builder. The preview is built
+        here, on the author's household, and federates inside the encrypted
+        ``SPACE_POST_CREATED`` payload — member households never fetch the
+        URL (``services.link_preview_service``)."""
+        self._link_previews = svc
 
     def attach_gallery_repo(self, gallery_repo) -> None:
         """Wire the gallery repo so a hard-deleted space's gallery media
@@ -4501,6 +4513,7 @@ class SpaceService(SpaceMemberGuardMixin):
         location: LocationData | None = None,
         linked_highlight_id: str | None = None,
         hidden_from_feed: bool = False,
+        no_link_preview: bool = False,
     ) -> Post | None:
         """Create a post in the space, subject to the feature's access level.
 
@@ -4558,6 +4571,19 @@ class SpaceService(SpaceMemberGuardMixin):
                 label=location.label,
             )
 
+        # Built here from the post's own text (the client can only opt
+        # out); rides inside the encrypted post payload to the members.
+        link_preview = (
+            await self._link_previews.preview_for_post(
+                post_type=post_type,
+                content=content,
+                user_id=author.user_id,
+                no_link_preview=bool(no_link_preview),
+            )
+            if self._link_previews is not None
+            else None
+        )
+
         post = Post(
             # Owner-bound (v_36): no other household can announce this
             # id first as its own user's post.
@@ -4574,6 +4600,8 @@ class SpaceService(SpaceMemberGuardMixin):
             location=location,
             linked_highlight_id=linked_highlight_id,
             hidden_from_feed=hidden_from_feed,
+            no_link_preview=bool(no_link_preview),
+            link_preview=link_preview,
         )
         if decision == "queue":
             now = datetime.now(timezone.utc)
@@ -4598,6 +4626,8 @@ class SpaceService(SpaceMemberGuardMixin):
                         if location is not None
                         else None
                     ),
+                    "no_link_preview": bool(no_link_preview),
+                    "link_preview": link_preview_to_dict(link_preview),
                 },
                 current_snapshot=None,
                 submitted_at=now,
@@ -4755,7 +4785,13 @@ class SpaceService(SpaceMemberGuardMixin):
             if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
                 raise PermissionError("only the author or a space admin can edit")
         _validate_text_length(new_content, limit=MAX_POST_LENGTH)
-        await self._posts.edit(post_id, new_content, space_id=space_id)
+        await self._posts.edit(
+            post_id,
+            new_content,
+            space_id=space_id,
+            clear_link_preview=post.link_preview is not None
+            and not card_survives_edit(post.content, new_content),
+        )
         refreshed = await self._posts.get(post_id)
         assert refreshed is not None  # just edited — must exist
         # Bus fan-out so subscribers (system-album bridge, search index,
@@ -4779,7 +4815,11 @@ class SpaceService(SpaceMemberGuardMixin):
             return
         # Capture media URLs before soft_delete nulls them; unlinked after
         # the PostDeleted publish unmirrors the shared gallery item.
-        media = [post.media_url, *post.image_urls]
+        media = [
+            post.media_url,
+            *post.image_urls,
+            post.link_preview.thumbnail_url if post.link_preview else None,
+        ]
         moderated_by: str | None = None
         if post.author != actor_user_id:
             # Moderation path — actor must be admin/owner
@@ -6233,4 +6273,6 @@ def _post_from_queue_payload(item: SpaceModerationItem) -> Post:
         content=payload.get("content"),
         media_url=payload.get("media_url"),
         file_meta=file_meta,
+        no_link_preview=bool(payload.get("no_link_preview", False)),
+        link_preview=wire_link_preview(payload.get("link_preview")),
     )

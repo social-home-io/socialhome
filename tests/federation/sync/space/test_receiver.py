@@ -784,3 +784,34 @@ async def test_bazaar_catchup_save_failure_is_a_warning_naming_the_listing(
     assert warnings, caplog.text
     assert "p-listing" in warnings[0]
     assert "FOREIGN KEY" in warnings[0]
+
+
+def test_synced_post_record_keeps_a_validated_link_preview():
+    """A sync record round-trips the author-built card (exporter → receiver);
+    the receiver re-validates it and keeps only a local image reference."""
+    from datetime import datetime, timezone
+
+    from socialhome.domain.link_preview import LinkPreview
+    from socialhome.domain.post import Post, PostType
+    from socialhome.federation.sync.space.exporters.posts import _post_to_dict
+    from socialhome.federation.sync.space.receiver import _post_from_record
+
+    card = LinkPreview(
+        url="https://example.com/", title="T", thumbnail_url="api/media/lp.webp"
+    )
+    post = Post(
+        id="p-sync",
+        author="u",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        content="https://example.com/",
+        link_preview=card,
+    )
+    record = _post_to_dict(post)
+    assert record["link_preview"]["thumbnail_url"] == "api/media/lp.webp"
+    back = _post_from_record(record)
+    assert back is not None and back.link_preview == card
+    record["link_preview"]["thumbnail_url"] = "https://tracker.example/x.png"
+    assert _post_from_record(record).link_preview.thumbnail_url is None
+    record["link_preview"] = {"url": "file:///etc/passwd", "title": "T"}
+    assert _post_from_record(record).link_preview is None

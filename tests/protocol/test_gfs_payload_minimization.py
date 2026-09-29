@@ -48,6 +48,7 @@ from socialhome.crypto import (
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpacePostCreated
 from socialhome.domain.federation import GfsConnection
+from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import LocationData, Post, PostType
 from socialhome.domain.space import (
     JoinMode,
@@ -94,6 +95,11 @@ SUBSCRIBER_INSTANCE_NAME = "subscriber-household-distinctive.example"
 AUTHOR_USERNAME = "aurelia-distinctive-author"
 POST_TEXT = "distinctive-post-text-tulip-42"
 LOCATION_LABEL = "distinctive-location-label-bakery"
+#: The author-built link card rides inside the encrypted inner too — its
+#: URL, title and image reference must be as invisible to the GFS as the text.
+PREVIEW_URL = "https://distinctive-preview-site.example/article"
+PREVIEW_TITLE = "distinctive-preview-title-heron"
+PREVIEW_IMAGE = "api/media/distinctivepreviewimage.webp"
 POST_ID = "post-minimization-1"
 
 
@@ -272,6 +278,9 @@ async def post_payload(household):
         created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
         content=POST_TEXT,
         location=LocationData(lat=52.1234, lon=13.4321, label=LOCATION_LABEL),
+        link_preview=LinkPreview(
+            url=PREVIEW_URL, title=PREVIEW_TITLE, thumbnail_url=PREVIEW_IMAGE
+        ),
     )
     await household["bus"].publish(SpacePostCreated(post=post, space_id=SPACE_ID))
     calls = household["gfs"].calls
@@ -377,6 +386,11 @@ _SECRETS: tuple[str, ...] = (
     POST_TEXT,
     LOCATION_LABEL,
     POST_ID,
+    PREVIEW_URL,
+    "distinctive-preview-site",
+    PREVIEW_TITLE,
+    PREVIEW_IMAGE,
+    "distinctivepreviewimage",
 )
 
 

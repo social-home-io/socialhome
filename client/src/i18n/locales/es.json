@@ -364,5 +364,12 @@
   "common.retry": "Reintentar",
   "common.not_now": "Ahora no",
   "common.ok": "OK",
-  "common.try_again": "Volver a intentar"
+  "common.try_again": "Volver a intentar",
+  "link_preview.loading": "Cargando vista previa del enlace…",
+  "link_preview.remove": "Quitar vista previa del enlace",
+  "link_preview.restore": "Mostrar vista previa del enlace",
+  "link_preview.open": "Abrir {site} en una pestaña nueva",
+  "link_preview.admin_legend": "Enlaces",
+  "link_preview.admin_title": "Vistas previas de enlaces",
+  "link_preview.admin_subtitle": "Muestra una tarjeta para el primer enlace de una publicación nueva. Tu hogar carga la página una vez, al escribir la publicación."
 }

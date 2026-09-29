@@ -529,3 +529,37 @@ async def test_edit_comment_is_space_scoped(two):
     assert await _comment_row(two, "cmt-b") == before
     assert await two.repo.edit_comment("cmt-b", "fine", space_id=two.space_b) is True
     assert (await two.repo.get_comment("cmt-b")).content == "fine"
+
+
+async def test_link_preview_round_trip_and_cleared_on_delete(env):
+    """The author-built preview persists with the post and goes with its
+    content on a soft delete."""
+    import dataclasses
+
+    from socialhome.domain.link_preview import LinkPreview
+
+    preview = LinkPreview(
+        url="https://example.com/a",
+        title="Title",
+        description="Desc",
+        site_name="Example",
+        thumbnail_url="api/media/abc.webp",
+    )
+    await env.repo.save(
+        env.space_id, dataclasses.replace(_post("lp-1"), link_preview=preview)
+    )
+    _, fetched = await env.repo.get("lp-1")
+    assert fetched.link_preview == preview
+    assert await env.repo.soft_delete("lp-1", space_id=env.space_id)
+    _, gone = await env.repo.get("lp-1")
+    assert gone.link_preview is None
+
+
+async def test_malformed_stored_link_preview_reads_as_none(env):
+    await env.repo.save(env.space_id, _post("lp-2"))
+    await env.db.enqueue(
+        "UPDATE space_posts SET link_preview_json=? WHERE id=?",
+        ('{"url": "javascript:alert(1)", "title": "x"}', "lp-2"),
+    )
+    _, fetched = await env.repo.get("lp-2")
+    assert fetched.link_preview is None

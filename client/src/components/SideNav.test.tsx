@@ -21,6 +21,7 @@ const ALL_FEATURES_ON = {
   allow_text: true, allow_image: true, allow_video: true,
   allow_file: true, allow_poll: true, allow_schedule: true,
   allow_highlight_share: true,
+  allow_link_preview: true,
   household_name: 'Hearth',
 }
 

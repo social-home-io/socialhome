@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ....domain.federation import FederationEventType
+from ....domain.link_preview import link_preview_to_dict
 
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
@@ -492,6 +493,8 @@ def _post_to_payload(post: "Post") -> dict:
         if post.location.label is not None:
             loc["label"] = post.location.label
         payload["location"] = loc
+    if post.link_preview is not None:
+        payload["link_preview"] = link_preview_to_dict(post.link_preview)
     return payload
 
 

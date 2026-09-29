@@ -657,5 +657,12 @@
   "event.dialog.limit_attendance": "Limit attendance (host approval required)",
   "event.dialog.capacity": "Capacity",
   "event.dialog.capacity_help": "Members' \"going\" RSVPs become pending requests. Overflow goes to a waitlist that auto-promotes when seats free up.",
-  "event.dialog.capacity_invalid": "Capacity must be a non-negative number."
+  "event.dialog.capacity_invalid": "Capacity must be a non-negative number.",
+  "link_preview.loading": "Loading link preview…",
+  "link_preview.remove": "Remove link preview",
+  "link_preview.restore": "Show link preview",
+  "link_preview.open": "Open {site} in a new tab",
+  "link_preview.admin_legend": "Links",
+  "link_preview.admin_title": "Link previews",
+  "link_preview.admin_subtitle": "Show a card for the first link in a new post. Your home loads the page once, when the post is written."
 }

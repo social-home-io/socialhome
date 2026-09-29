@@ -38,6 +38,7 @@ from ..domain.events import (
     SpacePostCreated,
 )
 from ..domain.federation import FederationEventType
+from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
 from .space_public_author import build_signed_author_inner
@@ -178,6 +179,11 @@ class SpacePostOutbound:
                 "lon": post.location.lon,
                 "label": post.location.label,
             }
+        # The author-built link card rides inside the encrypted payload like
+        # the text; receivers validate it and never fetch the URL. Older
+        # receivers ignore the key and show the post without a card.
+        if post.link_preview is not None:
+            payload["link_preview"] = link_preview_to_dict(post.link_preview)
         if post.file_meta is not None:
             payload["file_meta"] = {
                 "url": post.file_meta.url,
@@ -245,6 +251,8 @@ class SpacePostOutbound:
             media_urls.extend(post.image_urls or ())
             if post.file_meta is not None and post.file_meta.url:
                 media_urls.append(post.file_meta.url)
+            if post.link_preview is not None and post.link_preview.thumbnail_url:
+                media_urls.append(post.link_preview.thumbnail_url)
             if media_urls:
                 try:
                     targets = await self._federation_repo.list_member_instance_ids(

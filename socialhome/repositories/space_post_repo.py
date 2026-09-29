@@ -34,6 +34,8 @@ from .post_repo import (  # reuse the household post helpers verbatim
     _encode_reactions,
     _encode_file_meta,
     _decode_file_meta,
+    _decode_link_preview,
+    _encode_link_preview,
     _encode_location,
     _decode_location,
     _encode_image_urls,
@@ -95,6 +97,7 @@ class AbstractSpacePostRepo(Protocol):
         new_content: str,
         *,
         space_id: str,
+        clear_link_preview: bool = False,
     ) -> bool: ...
 
     async def add_reaction(
@@ -176,8 +179,9 @@ class SqliteSpacePostRepo:
                 id, space_id, author, bot_id, linked_event_id, type, content,
                 media_url, reactions, comment_count, pinned, deleted, edited_at,
                 no_link_preview, moderated, file_meta_json, location_json,
-                image_urls_json, linked_highlight_id, hidden_from_feed, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+                image_urls_json, linked_highlight_id, hidden_from_feed,
+                link_preview_json, created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -193,7 +197,8 @@ class SqliteSpacePostRepo:
                 image_urls_json=excluded.image_urls_json,
                 linked_event_id=excluded.linked_event_id,
                 linked_highlight_id=excluded.linked_highlight_id,
-                hidden_from_feed=excluded.hidden_from_feed
+                hidden_from_feed=excluded.hidden_from_feed,
+                link_preview_json=excluded.link_preview_json
              WHERE space_posts.space_id = excluded.space_id
             """,
             (
@@ -217,6 +222,7 @@ class SqliteSpacePostRepo:
                 _encode_image_urls(post.image_urls),
                 post.linked_highlight_id,
                 int(post.hidden_from_feed),
+                _encode_link_preview(post.link_preview),
                 _iso_or_none(post.created_at),
             ),
         )
@@ -339,6 +345,7 @@ class SqliteSpacePostRepo:
                 """
                 UPDATE space_posts
                    SET deleted=1, content=NULL, media_url=NULL,
+                       link_preview_json=NULL,
                        moderated=CASE WHEN ? IS NOT NULL THEN 1 ELSE moderated END
                  WHERE id=? AND space_id=?
                 """,
@@ -353,13 +360,17 @@ class SqliteSpacePostRepo:
         new_content: str,
         *,
         space_id: str,
+        clear_link_preview: bool = False,
     ) -> bool:
-        """Replace a post's body. ``False`` = not in ``space_id``."""
+        """Replace a post's body. ``False`` = not in ``space_id``.
+        ``clear_link_preview`` drops the link card (the edit changed or
+        removed the link it was built for)."""
         return (
             await self._db.enqueue_rowcount(
-                "UPDATE space_posts SET content=?, edited_at=datetime('now') "
+                "UPDATE space_posts SET content=?, edited_at=datetime('now'), "
+                "link_preview_json=CASE WHEN ? THEN NULL ELSE link_preview_json END "
                 "WHERE id=? AND space_id=?",
-                (new_content, post_id, space_id),
+                (new_content, int(clear_link_preview), post_id, space_id),
             )
             > 0
         )
@@ -681,6 +692,7 @@ def _row_to_space_post(row: dict) -> Post:
         linked_event_id=row.get("linked_event_id"),
         linked_highlight_id=row.get("linked_highlight_id"),
         hidden_from_feed=bool_col(row.get("hidden_from_feed", 0)),
+        link_preview=_decode_link_preview(row.get("link_preview_json")),
     )
 
 

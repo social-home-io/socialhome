@@ -150,6 +150,7 @@ from .apps import (
 from .app_bundle import AppBundleView, AppRuntimeView
 from .me_preferences import MePreferencesView
 from .me_space_location import MeSpaceLocationSharingView
+from .link_preview import LinkPreviewView
 from .map_tiles import MapConfigView, MapTileView
 from .media import MediaServeView, MediaUploadView
 from .notifications import (
@@ -960,6 +961,9 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
     app.router.add_view("/api/bazaar/{id}/save", BazaarSaveView)
     app.router.add_view("/api/me/bazaar/saved", MySavedBazaarView)
+
+    # ── Link previews (composer live card) ──────────────────────────────
+    app.router.add_view("/api/link-preview", LinkPreviewView)
 
     # ── Map tiles ───────────────────────────────────────────────────────
     app.router.add_view("/api/map/config", MapConfigView)

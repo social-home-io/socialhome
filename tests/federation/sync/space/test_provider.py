@@ -884,3 +884,31 @@ async def test_the_two_waitable_reasons_keep_separate_budgets(provider):
 
     federation.close_sync_session.assert_not_called()
     assert federation.send_with_mesh_fallback.await_count == expected + 2
+
+
+def test_catchup_media_includes_the_link_preview_image():
+    """A joiner catching up receives the card image a synced post carries."""
+    from datetime import datetime, timezone
+
+    from socialhome.domain.link_preview import LinkPreview
+    from socialhome.domain.post import Post, PostType
+    from socialhome.federation.sync.space.provider import SpaceSyncService
+
+    post = Post(
+        id="p",
+        author="u",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        link_preview=LinkPreview(
+            url="https://example.com/", title="T", thumbnail_url="api/media/lp.webp"
+        ),
+    )
+    assert SpaceSyncService._post_media_urls(post) == ["api/media/lp.webp"]
+    no_image = Post(
+        id="q",
+        author="u",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        link_preview=LinkPreview(url="https://example.com/", title="T"),
+    )
+    assert SpaceSyncService._post_media_urls(no_image) == []

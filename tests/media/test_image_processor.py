@@ -266,3 +266,69 @@ async def test_fit_within_falls_back_to_the_minimum_when_the_search_runs_out(
     assert max(_Image.open(_io.BytesIO(fitted)).size) == 32
     # And when even that does not fit, the answer is still ``None``.
     assert await ImageProcessor().fit_within(data, 40, min_dimension=32) is None
+
+
+# ─── link_preview (web-page images) ──────────────────────────────────────
+
+
+def _encoded(fmt: str, size=(1600, 900), mode="RGB", **save) -> bytes:
+    img = _Image.new(mode, size, color="blue" if mode == "RGB" else None)
+    buf = _io.BytesIO()
+    img.save(buf, format=fmt, **save)
+    return buf.getvalue()
+
+
+async def test_link_preview_shrinks_and_strips_metadata():
+    exif = _Image.Exif()
+    exif[0x010F] = "CameraMaker"  # Make
+    exif[0x0131] = "Software-XYZ"
+    src = _encoded("JPEG", exif=exif.tobytes())
+    assert _Image.open(_io.BytesIO(src)).getexif()
+    out = await ImageProcessor().link_preview(src)
+    img = _Image.open(_io.BytesIO(out))
+    assert img.format == "WEBP"
+    assert max(img.size) == image_processor.LINK_PREVIEW_MAX_DIMENSION
+    assert not img.getexif()
+    assert "exif" not in img.info
+    assert "icc_profile" not in img.info
+    assert "xmp" not in img.info
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "GIF", "WEBP"])
+async def test_link_preview_accepts_web_formats(fmt):
+    out = await ImageProcessor().link_preview(_encoded(fmt, size=(200, 100)))
+    img = _Image.open(_io.BytesIO(out))
+    assert img.format == "WEBP"
+    assert img.size == (200, 100)  # never upscaled
+
+
+async def test_link_preview_keeps_alpha():
+    out = await ImageProcessor().link_preview(
+        _encoded("PNG", size=(50, 50), mode="RGBA")
+    )
+    assert _Image.open(_io.BytesIO(out)).mode == "RGBA"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+        b"GIF8 but truncated",
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 20,
+        b"",
+    ],
+)
+async def test_link_preview_refuses_non_images(data):
+    with pytest.raises(ValueError):
+        await ImageProcessor().link_preview(data)
+
+
+async def test_link_preview_refuses_heic():
+    with pytest.raises(ValueError):
+        await ImageProcessor().link_preview(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64)
+
+
+async def test_link_preview_refuses_decompression_bomb(monkeypatch):
+    monkeypatch.setattr(image_processor, "LINK_PREVIEW_MAX_SOURCE_PIXELS", 100)
+    with pytest.raises(ValueError, match="too large"):
+        await ImageProcessor().link_preview(_encoded("PNG", size=(20, 20)))

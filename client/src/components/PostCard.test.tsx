@@ -270,3 +270,30 @@ describe('PostCard', () => {
     expect(fn).toHaveBeenCalledOnce()
   })
 })
+
+describe('PostCard link preview', () => {
+  it('renders the author-built card under the text', () => {
+    const post: FeedPost = {
+      ...mockPost,
+      content: 'read https://example.com/story',
+      link_preview: {
+        url: 'https://example.com/story',
+        title: 'Story title',
+        description: 'About it',
+        site_name: 'Example',
+        thumbnail_url: 'api/media/lp.webp?sig=x',
+      },
+    }
+    const { getByText, container } = render(<PostCard post={post} />)
+    expect(getByText('Story title')).toBeTruthy()
+    const card = container.querySelector('.sh-link-preview a') as HTMLAnchorElement
+    expect(card.href).toBe('https://example.com/story')
+    // A feed card is read-only.
+    expect(container.querySelector('.sh-link-preview-remove')).toBeNull()
+  })
+
+  it('renders no card without a preview', () => {
+    const { container } = render(<PostCard post={mockPost} />)
+    expect(container.querySelector('.sh-link-preview')).toBeNull()
+  })
+})

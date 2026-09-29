@@ -128,7 +128,8 @@ Household-broadcast posts that fan to a 3-hop peer mesh. Replies are themselves 
 |---|---|---|
 | GET | `/api/feed` | Newest-first list of household posts. Each entry carries the post fields (`id`, `author`, `type`, `content`, …) plus a `latest_comment` field — the most recent non-deleted comment on the post (or `null` when there are none). Used by the SPA to render an inline preview line under each card without an N+1 fetch. |
 | GET | `/api/feed/posts` | Paginated post list. |
-| POST | `/api/feed/posts` | Create a household post. Body: `{type, content?, media_url?, location?, pinned?, no_link_preview?}`. `type` ∈ `text\|image\|video\|file\|poll\|schedule\|location`. When `type='location'` the body **must** include `location: {lat, lon, label?}` — server truncates `lat`/`lon` to 4 decimal places (~11 m) at the boundary, `label` is optional and capped at 80 characters. `bazaar` posts are space-scoped; `event` posts are auto-created by the calendar bridge. |
+| POST | `/api/feed/posts` | Create a household post. Body: `{type, content?, media_url?, location?, pinned?, no_link_preview?}`. `type` ∈ `text\|image\|video\|file\|poll\|schedule\|location`. When `type='location'` the body **must** include `location: {lat, lon, label?}` — server truncates `lat`/`lon` to 4 decimal places (~11 m) at the boundary, `label` is optional and capped at 80 characters. `bazaar` posts are space-scoped; `event` posts are auto-created by the calendar bridge. A `text` post whose content contains a web link gets a server-built `link_preview` (see *Link previews* below) unless `no_link_preview: true`; the client can only opt out — any preview fields in the body are ignored. |
+| POST | `/api/link-preview` | The composer's live link card. Body `{url}` → `{"preview": {url, title, description, site_name, thumbnail_url} \| null}`. Built by the **author's** household through the SSRF-guarded fetcher (see *Link previews*), cached ~15 min per URL — creating the post reuses the result. `thumbnail_url` is a signed local `api/media/…` URL of the page image re-encoded to WebP without metadata. Any member; 403 `FEATURE_DISABLED` when the household admin turned previews off (`allow_link_preview`); 422 on a missing `url`; `{"preview": null}` for a link that yields no card, cannot be fetched, or when the member's fetch budget is spent. |
 | GET / PATCH / DELETE | `/api/feed/posts/{id}` | Read / edit / delete one post. |
 | GET / POST / DELETE | `/api/feed/posts/{id}/reactions[/{emoji}]` | List reactions; add / remove own. |
 | GET / POST | `/api/feed/posts/{id}/comments` | List / add comments. |
@@ -246,6 +247,25 @@ endpoint, including `{type: "location", location: {lat, lon, label?}}`.
 Space-scoped location posts ride on the existing
 `SPACE_POST_CREATED` federation event — peers receive the location
 inside the encrypted payload and render the same map card.
+
+#### Link previews
+
+Every post (`GET /api/feed`, `GET /api/spaces/{id}/feed`, the
+`post.created` WebSocket frame) carries `link_preview`:
+`{url, title, description, site_name, thumbnail_url}` or `null`. It is
+built **once, by the author's household**, when a `text` post with a web
+link is created (household feed or space; comments and DMs never get
+one) and `no_link_preview` is not set. For a space post it travels inside
+the encrypted `SPACE_POST_CREATED` payload (its image as an ordinary
+`SPACE_MEDIA_BLOB`), so member households render the card without ever
+contacting the linked site. Text fields are plain text (the SPA escapes
+them); `url` is `http(s)` only; `thumbnail_url` is always local media.
+An edit keeps the card while the post's first link stays the same and drops it when the link changes or goes (never re-fetched on edit); every household applies that rule to its own copy.
+
+The household admin switch is `allow_link_preview` on
+`/api/household/preferences` (default on). Off, this household fetches
+nothing — the composer shows no card and new posts carry none; cards on
+posts other households send still render (they cost no fetch here).
 
 ### Pages
 
@@ -727,7 +747,7 @@ selected transparently by the server.  See [protocol/apps.md](./protocol/apps.md
 | POST | `/api/recovery-kit` | Admin-only. Body `{"passphrase": str}` (≥8 chars, in body so it never hits access logs); returns the passphrase-sealed `.shrk` Recovery Kit (trust layer for same-identity disaster recovery — see `docs/crypto.md` "Recovery Kit"). 422 on a short/missing passphrase. |
 | POST | `/api/setup/recovery/restore` | **Setup-gated, no bearer** (fresh-box only; 409 once setup is complete). Body `{"kit_b64": str, "passphrase": str}`. Validates the Kit, wipes the auto-minted throwaway identity, restores the Kit's trust layer (same `instance_id`), marks setup complete, and schedules a process restart. Returns `{instance_id, restart_required: true}`. 422 `BAD_KIT` (wrong passphrase / corrupt — generic, no oracle) or `RESTORE_FAILED`. |
 | GET / PATCH | `/api/theme` | Household theme. |
-| GET / PUT | `/api/household/preferences` | Household-wide feature toggles plus `household_name` and `tz` (IANA timezone). `PUT` accepts a partial body: `{"household_name"?: str, "toggles"?: {"feat_feed": bool, "feat_pages": bool, "feat_tasks": bool, "feat_stickies": bool, "feat_calendar": bool, "feat_bazaar": bool, "feat_presence": bool, "feat_gallery": bool}, "tz"?: "<iana>"}`. `tz` is validated via Python's `zoneinfo` — an unknown name returns 422. In ha / haos modes the value is mirrored from HA Core's `time_zone` on adapter startup; explicit operator edits via PUT are still honoured but get overwritten on the next restart. |
+| GET / PUT | `/api/household/preferences` | Household-wide feature toggles plus `household_name` and `tz` (IANA timezone). `PUT` accepts a partial body: `{"household_name"?: str, "toggles"?: {"feat_feed": bool, "feat_pages": bool, "feat_tasks": bool, "feat_stickies": bool, "feat_calendar": bool, "feat_bazaar": bool, "feat_presence": bool, "feat_gallery": bool, "allow_link_preview": bool, …}, "tz"?: "<iana>"}` (every `allow_*` post-type toggle is accepted too). `tz` is validated via Python's `zoneinfo` — an unknown name returns 422. In ha / haos modes the value is mirrored from HA Core's `time_zone` on adapter startup; explicit operator edits via PUT are still honoured but get overwritten on the next restart. |
 | GET / PATCH | `/api/me/preferences` | Per-user sidebar preferences. `GET` returns `{user_id, hide_highlights, hide_momentum, hide_bazaar}`. `PATCH` accepts a partial body; body keys MUST be a subset of `{hide_highlights, hide_momentum, hide_bazaar}` — unknown keys return 400. Changes apply only to the authenticated user; other household members are unaffected. |
 | POST | `/api/media/upload` | Upload a blob. Images/audio return `{url, filename, signed_url}` once processed. **Video transcoding is async** — the upload returns immediately with `{url, thumbnail_url, filename, media_status:"processing", signed_url, signed_thumbnail_url}` before the `.webm`/`.webp` files exist; a background `MediaTranscodeService` worker produces them and pushes a `media.ready` WS frame to the uploader when done. The `.webm` output and its `.webp` poster share one UUID stem (`<stem>.webm` + `<stem>.webp`) so the poster path is derivable server-side from the media URL. List endpoints that surface the video (feed, space feed, momentum, DM messages) carry a `media_status` field (`'processing'` / `'failed'` / `'ready'`; absent ⇒ ready) **and** a signed `media_thumbnail_url` (the poster — the signed `.webp` sibling of `media_url`) on **video** items; the `media.created`/`space.post.created` WS frames carry the same poster. (Gallery items keep their own stored `thumbnail_url`.) |
 | GET | `/api/media/{filename}` | Download a blob. |
@@ -904,6 +924,7 @@ These pages are server-rendered HTML and require no auth.
 | `POST /api/calls/{id}/join` | 30 / min / user |
 | `POST /api/calls/{id}/quality` | 30 / min / user — the call page samples every 10 s; on the broad `/api/calls` bucket it starved `join` |
 | `GET /api/calls/ice-servers` | 30 / min / user |
+| `POST /api/link-preview` | 30 / min / user — on top, the service caps **fresh page fetches** (cache misses, including the ones a post create causes) at 20 / 5 min per member and 60 / 5 min per household; over budget the answer is simply "no card". |
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
 | `POST /cluster/signaling-session{,/release}` | 60 / min / paired instance |
 | `GET /` + `GET /spaces/{id}` + `GET /join/{token}` (GFS public pages) | 30 / min / IP — `/join/` rides the same window: it is the page an attacker would hammer to walk the token space, and since it writes nothing there is no household identity to key a limiter on. |

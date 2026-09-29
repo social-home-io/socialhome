@@ -385,3 +385,71 @@ async def test_out_of_range_chunk_metadata_is_refused(env, index, count):
         )
     )
     assert not (media / "a1.webp").exists()
+
+
+async def test_link_preview_image_of_the_post_is_written(env, db):
+    """The card image the author's household re-encoded rides as a normal
+    SPACE_MEDIA_BLOB and lands only because the post references it."""
+    svc, media = env
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content,"
+        " link_preview_json) VALUES(?,?,?,?,?,?)",
+        (
+            "post-lp",
+            "sp-a",
+            "u-a",
+            "text",
+            "https://example.com/",
+            '{"url": "https://example.com/", "title": "T",'
+            ' "thumbnail_url": "api/media/lp1.webp"}',
+        ),
+    )
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-lp", "correlation_id": "post-lp", "filename": "lp1.webp"}
+        )
+    )
+    assert (media / "lp1.webp").read_bytes() == b"NEW-BYTES"
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-lp", "correlation_id": "post-lp", "filename": "zz.webp"}
+        )
+    )
+    assert not (media / "zz.webp").exists()
+
+
+async def test_inbound_post_payload_validates_link_preview(env):
+    """A received card is re-validated: a remote image URL never survives,
+    a non-web URL drops the card, and nothing is fetched."""
+    svc, _media = env
+    base = {"id": "p1", "author": "u-a", "type": "text", "content": "x"}
+    good = svc._post_from_payload(
+        {
+            **base,
+            "link_preview": {
+                "url": "https://Example.com/a#frag",
+                "title": "T " * 400,
+                "thumbnail_url": "https://tracker.example/pixel.png",
+            },
+        }
+    )
+    assert good is not None and good.link_preview is not None
+    assert good.link_preview.url == "https://example.com/a"
+    assert len(good.link_preview.title or "") <= 300
+    assert good.link_preview.thumbnail_url is None
+    bad = svc._post_from_payload(
+        {**base, "link_preview": {"url": "javascript:alert(1)", "title": "T"}}
+    )
+    assert bad is not None and bad.link_preview is None
+    local = svc._post_from_payload(
+        {
+            **base,
+            "link_preview": {
+                "url": "https://example.com/",
+                "title": "T",
+                "thumbnail_url": "api/media/ok.webp",
+            },
+        }
+    )
+    assert local is not None and local.link_preview is not None
+    assert local.link_preview.thumbnail_url == "api/media/ok.webp"

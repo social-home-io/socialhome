@@ -182,3 +182,43 @@ async def test_a_deleted_post_no_longer_references_its_images(db):
     assert not await repo.is_referenced("gone.webp")
     assert not await repo.is_referenced("fgone.webp")
     assert await repo.referenced_basenames() == set()
+
+
+async def test_link_preview_images_are_referenced(db):
+    """The re-encoded link-preview image a post carries is live media — the
+    orphan sweep must not delete it, nor may deleting one of two posts that
+    share it."""
+    await _seed_parents(db)
+    rows = [
+        (
+            "feed_posts",
+            "f1",
+            '{"url": "https://e.example/", "thumbnail_url": "api/media/lp_1.webp"}',
+        ),
+        (
+            "space_posts",
+            "p1",
+            '{"url": "https://e.example/", "thumbnail_url": "api/media/lp_2.webp"}',
+        ),
+        # A preview without an image, and a corrupt value, reference nothing.
+        ("space_posts", "p2", '{"url": "https://e.example/"}'),
+        ("space_posts", "p3", "not json lp_2.webp"),
+    ]
+    for table, pid, value in rows:
+        if table == "feed_posts":
+            await db.enqueue(
+                "INSERT INTO feed_posts(id, author, type, link_preview_json) "
+                "VALUES(?, 'u1', 'text', ?)",
+                (pid, value),
+            )
+        else:
+            await db.enqueue(
+                "INSERT INTO space_posts(id, space_id, author, type, "
+                "link_preview_json) VALUES(?, 'sp1', 'u1', 'text', ?)",
+                (pid, value),
+            )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.referenced_basenames() == {"lp_1.webp", "lp_2.webp"}
+    assert await repo.is_referenced("lp_1.webp")
+    assert await repo.is_referenced("lp_2.webp")
+    assert not await repo.is_referenced("lp_.webp")

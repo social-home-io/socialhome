@@ -41,6 +41,7 @@ from ..domain.post import (
     Post,
     PostType,
 )
+from ..domain.link_preview import card_survives_edit
 from ..domain.presence import truncate_coord
 from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import unlink_unreferenced
@@ -50,6 +51,8 @@ from ..repositories.user_repo import AbstractUserRepo
 
 if TYPE_CHECKING:
     import pathlib
+
+    from .link_preview_service import LinkPreviewService
 
 
 #: Max content length for a text / transcript post. Longer content is
@@ -78,6 +81,7 @@ class FeedService:
         "_quota",
         "_media_dir",
         "_media_refs",
+        "_link_previews",
     )
 
     def __init__(
@@ -94,6 +98,7 @@ class FeedService:
         self._bus = bus
         self._household = None  # set via attach_household_features
         self._quota = None  # set via attach_storage_quota
+        self._link_previews: LinkPreviewService | None = None
         # When both are set, a deleted post's media file(s) are removed
         # from disk once the post row + its gallery system-album mirror
         # are gone and no other row still references them.
@@ -111,6 +116,12 @@ class FeedService:
         """Wire :class:`StorageQuotaService` so ``create_post`` with
         ``file_meta`` pre-checks the household's remaining budget."""
         self._quota = svc
+
+    def attach_link_previews(self, svc: "LinkPreviewService") -> None:
+        """Wire the author-side link preview builder: a new ``text`` post
+        with a web link (and ``no_link_preview`` unset) carries a preview
+        card built by this household (``services.link_preview_service``)."""
+        self._link_previews = svc
 
     # ── Posts ──────────────────────────────────────────────────────────
 
@@ -172,6 +183,19 @@ class FeedService:
             if size > 0:
                 await self._quota.check_can_store(size)
 
+        # The preview is built server-side from the post's own text — the
+        # client can only opt out, never supply the card's fields.
+        link_preview = (
+            await self._link_previews.preview_for_post(
+                post_type=post_type,
+                content=content,
+                user_id=author.user_id,
+                no_link_preview=bool(no_link_preview),
+            )
+            if self._link_previews is not None
+            else None
+        )
+
         post = Post(
             id=uuid.uuid4().hex,
             author=author.user_id,
@@ -187,6 +211,7 @@ class FeedService:
             pinned=bool(pinned),
             no_link_preview=bool(no_link_preview),
             linked_highlight_id=linked_highlight_id,
+            link_preview=link_preview,
         )
         await self._posts.save(post)
         await self._bus.publish(PostCreated(post=post))
@@ -204,7 +229,12 @@ class FeedService:
         await self._require_author_or_admin(post.author, editor_user_id)
         _validate_text_length(new_content, limit=MAX_POST_LENGTH)
 
-        await self._posts.edit(post_id, new_content)
+        await self._posts.edit(
+            post_id,
+            new_content,
+            clear_link_preview=post.link_preview is not None
+            and not card_survives_edit(post.content, new_content),
+        )
         updated = await self._posts.get(post_id)
         assert updated is not None  # we just edited it
         await self._bus.publish(PostEdited(post=updated))
@@ -220,7 +250,11 @@ class FeedService:
         post = await self._require_post(post_id)
         await self._require_author_or_admin(post.author, actor_user_id)
         # Capture media URLs before soft_delete nulls them.
-        media = [post.media_url, *post.image_urls]
+        media = [
+            post.media_url,
+            *post.image_urls,
+            post.link_preview.thumbnail_url if post.link_preview else None,
+        ]
         await self._posts.soft_delete(post_id)
         # PostDeleted runs synchronously through the bus; SystemAlbumBridge
         # unmirrors (drops the gallery item that shared this file) within

@@ -59,7 +59,12 @@ from ..domain.presence import truncate_coord
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
 from .inbound_media_store import local_media_ref, local_media_refs
-from .space_public_author import verify_signed_author_inner
+from .link_preview_service import wire_link_preview
+from .space_public_author import (
+    UnsupportedLinkPreviewSigSuite,
+    verified_link_preview,
+    verify_signed_author_inner,
+)
 
 if TYPE_CHECKING:
     from ..repositories.space_post_repo import AbstractSpacePostRepo
@@ -275,11 +280,19 @@ class SpacePublicInbound:
                 )
             except KeyError, TypeError, ValueError:
                 location = None
+        # The card counts only under the author's own signature over it; a
+        # relayer can strip it but not forge or alter it.
+        try:
+            link_preview = wire_link_preview(verified_link_preview(inner))
+        except UnsupportedLinkPreviewSigSuite as exc:
+            log.warning("relayed post %s: link preview dropped (%s)", post_id, exc)
+            link_preview = None
         return Post(
             id=post_id,
             author=author,
             type=post_type,
             content=inner.get("content"),
+            link_preview=link_preview,
             media_url=local_media_ref(inner.get("media_url")),
             image_urls=local_media_refs(
                 inner.get("image_urls"), limit=FEED_POST_MAX_IMAGES

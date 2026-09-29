@@ -17,6 +17,7 @@ vi.mock('@/api', () => ({
       allow_text: true, allow_image: true, allow_video: true,
       allow_file: true, allow_poll: true, allow_schedule: true,
       allow_highlight_share: true,
+      allow_link_preview: true,
       household_name: 'Test Household',
     }),
     put: vi.fn().mockResolvedValue({}),
@@ -82,9 +83,22 @@ describe('HouseholdToggles', () => {
     expect(getByText('Text')).toBeTruthy()
     expect(getByText('Allow text posts in the feed')).toBeTruthy()
     expect(getByText('Highlight share')).toBeTruthy()
-    // 7 features + 7 post types = 14 checkbox cards
+    // 7 features + 7 post types + 1 link-preview switch = 15 cards
     const cards = container.querySelectorAll('.sh-radio-card')
-    expect(cards).toHaveLength(14)
+    expect(cards).toHaveLength(15)
+  })
+
+  it('the admin can switch link previews off', async () => {
+    const { api } = await import('@/api')
+    const { HouseholdToggles, loadToggles } = await import('./HouseholdToggles')
+    await loadToggles()
+    const { getByText } = render(<HouseholdToggles />)
+    const card = getByText('Link previews').closest('.sh-radio-card')!
+    expect(card.classList.contains('sh-radio-card--selected')).toBe(true)
+    fireEvent.click(card.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    expect(api.put).toHaveBeenCalledWith('/api/household/preferences', {
+      toggles: { allow_link_preview: false },
+    })
   })
 
   it('renders an enabled feature card as selected', async () => {

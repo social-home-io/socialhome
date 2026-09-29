@@ -259,3 +259,27 @@ async def test_latest_comment_per_post_picks_newest_skips_deleted(env):
     await env.feed_svc.delete_comment(first_id, actor_user_id=u.user_id)
     out = await env.post_repo.latest_comment_per_post([p_loud.id])
     assert out == {}
+
+
+async def test_link_preview_round_trip_and_cleared_on_delete(env):
+    from socialhome.domain.link_preview import LinkPreview
+
+    u = await env.user_svc.provision(username="lp", display_name="LP")
+    preview = LinkPreview(
+        url="https://example.com/", title="T", thumbnail_url="api/media/x.webp"
+    )
+    await env.post_repo.save(
+        Post(
+            id="post-lp-1",
+            author=u.user_id,
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="see https://example.com/",
+            link_preview=preview,
+        )
+    )
+    fetched = await env.post_repo.get("post-lp-1")
+    assert fetched is not None and fetched.link_preview == preview
+    await env.post_repo.soft_delete("post-lp-1")
+    gone = await env.post_repo.get("post-lp-1")
+    assert gone is not None and gone.link_preview is None

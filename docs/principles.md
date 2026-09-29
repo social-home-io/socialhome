@@ -240,6 +240,39 @@ sandbox policy, or the postMessage bridge MUST treat any weakening of
 these three mitigations as a §2-principle change requiring explicit
 sign-off.
 
+### Sign-off: the author's household fetches the links its members post
+
+Link previews add an outbound request that is **not** a federation
+envelope to a chosen peer: when a member writes a `text` post that contains
+a web link, their own household fetches that page (and its `og:image`)
+once, to build the preview card. This narrows "nothing leaves except
+encrypted envelopes" to "…plus one fetch of a page a member chose to link,
+made by that member's own household". What bounds it:
+
+1. **Author-side only.** Only the household of the person who wrote the
+   post fetches. The card travels inside the post (encrypted for a space
+   post, like its text; inside the encrypted inner on the GFS relay) and
+   receivers are forbidden from fetching — no reader's address ever
+   reaches the linked site, and a post shown in many households causes one
+   fetch, not one per reader (`tests/protocol/test_link_preview_receiver_no_fetch.py`,
+   and the GFS payload-minimization test covers the card's fields).
+2. **The site learns what any visitor tells it, no more.** One anonymous
+   GET: no cookies, no `Authorization`, no `Referer`, a generic
+   `User-Agent`; the household's public IP is the only thing disclosed, at
+   the moment the member publishes the link.
+3. **It cannot reach the household's LAN.** `socialhome/outbound_fetch.py`
+   refuses every non-global address (with DNS pinned against rebinding,
+   every redirect hop re-checked, ports 80 / 443 only), so the feature is
+   not an SSRF path into Home Assistant, the router or cloud metadata.
+4. **Opt-out at both levels.** The author can remove the card before
+   posting (`no_link_preview`); the household admin can switch previews
+   off entirely (`allow_link_preview`, default on), after which this
+   household fetches nothing.
+
+Any change that lets a *receiving* household fetch a preview, forwards a
+member's cookies / identity with the request, or weakens the address guard
+is a §2-principle change requiring a new sign-off.
+
 ## Plaintext locally, encrypted on the wire
 
 Local SQLite stores plaintext rows — that is your data, on your disk,

@@ -12,6 +12,7 @@ import { BotAvatar } from './BotAvatar'
 import { EventPostCard } from './EventPostCard'
 import { HighlightShareCard } from './HighlightShareCard'
 import { FileRenderer, VideoRenderer, ImageRenderer } from './FileRenderer'
+import { LinkPreviewCard } from './LinkPreviewCard'
 import { LocationPostCard } from './LocationPostCard'
 import { renderMarkdown } from './markdown'
 import { openReport } from './ReportDialog'
@@ -212,6 +213,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
               <PostBody content={post.content} spaceId={scopedSpaceId}
                 authorId={post.author} />
             )}
+            {post.link_preview && <LinkPreviewCard preview={post.link_preview} />}
             {post.type === 'file' && post.file_meta && <FileRenderer file={post.file_meta} />}
             {post.type === 'video' && post.media_url && (
               <VideoRenderer src={post.media_url} poster={post.media_thumbnail_url} mediaStatus={post.media_status} />

@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from enum import StrEnum
 
+from .link_preview import LinkPreview
+
 
 # ─── Core enums ───────────────────────────────────────────────────────────
 
@@ -509,6 +511,12 @@ class Post:
     #: posts always show. Federates on SPACE_POST_CREATED so member
     #: households mirror the same feed visibility.
     hidden_from_feed: bool = False
+    #: The card for the first web link in a ``text`` post — built once by
+    #: the AUTHOR's household and carried inside the post, so a receiving
+    #: household never fetches the URL (see ``domain.link_preview``).
+    #: ``None`` when the post has no link, the author opted out
+    #: (:attr:`no_link_preview`), or the page had nothing to show.
+    link_preview: LinkPreview | None = None
 
     def with_reaction(self, emoji: str, user_id: str) -> "Post":
         current = self.reactions.get(emoji, frozenset())
@@ -542,6 +550,7 @@ class Post:
             content=None,
             media_url=None,
             image_urls=(),
+            link_preview=None,
             deleted=True,
         )
 

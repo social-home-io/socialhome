@@ -43,6 +43,7 @@ export default function FeedPage() {
     extras?: {
       location?: { lat: number; lon: number; label: string | null }
       imageUrls?: string[]
+      noLinkPreview?: boolean
     },
   ) => {
     const body: Record<string, unknown> = {
@@ -51,6 +52,7 @@ export default function FeedPage() {
       image_urls: extras?.imageUrls ?? [],
     }
     if (extras?.location) body.location = extras.location
+    if (extras?.noLinkPreview) body.no_link_preview = true
     const post = await api.post('/api/feed/posts', body) as FeedPost
     showToast('Post shared', 'success')
     // No local prepend here — wireFeedWs() handles `post.created` and

@@ -25,6 +25,7 @@ import {
   handleMentionAutocompleteKey,
   mentionInputAria,
 } from './MentionAutocomplete'
+import { LinkPreviewCard } from './LinkPreviewCard'
 import { LocationPicker, type LocationDraft } from './LocationPicker'
 import { MarkdownToolbar } from './MarkdownToolbar'
 import { MediaDropzone } from './MediaDropzone'
@@ -38,6 +39,8 @@ import { showToast } from './Toast'
 import { UploadProgressBar, uploadProgress, uploadWithProgress } from './UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
+import { useLinkPreview } from '@/hooks/useLinkPreview'
+import { t } from '@/i18n/i18n'
 
 const MAX_LENGTH = 5000
 const MAX_IMAGES = 5
@@ -59,6 +62,8 @@ export interface ComposerExtras {
   location?: LocationDraft
   /** 1..``MAX_IMAGES`` canonical (unsigned) URLs for an image post. */
   imageUrls?: string[]
+  /** The author removed the link card — sent as ``no_link_preview``. */
+  noLinkPreview?: boolean
 }
 
 interface ComposerProps {
@@ -192,6 +197,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
     }
   }, [allowedKey])
   const charCount = content.value.length
+  const linkPreview = useLinkPreview(postType.value === 'text' ? content.value : '')
   const showCount = charCount > MAX_LENGTH * 0.8
   const overLimit = charCount > MAX_LENGTH
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -392,6 +398,11 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
       if (isImage && images.length > 0) {
         extras.imageUrls = images.map((e) => e.url)
       }
+      // The server builds the card itself from the text; the composer only
+      // says whether the author removed it.
+      if (postType.value === 'text' && linkPreview.dismissed) {
+        extras.noLinkPreview = true
+      }
       const newPostId = await onSubmit(
         postType.value,
         content.value,
@@ -561,6 +572,23 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
             >
               {charCount}/{MAX_LENGTH}
               {overLimit && <span class="sh-char-count-over-label"> (over limit)</span>}
+            </div>
+          )}
+          {postType.value === 'text' && linkPreview.url && (
+            <div class="sh-composer-link-preview" aria-live="polite">
+              {linkPreview.dismissed ? (
+                <button type="button" class="sh-link sh-composer-link-preview-restore"
+                        onClick={linkPreview.restore}>
+                  {t('link_preview.restore')}
+                </button>
+              ) : linkPreview.preview ? (
+                <LinkPreviewCard preview={linkPreview.preview}
+                                 onRemove={linkPreview.dismiss} />
+              ) : linkPreview.loading ? (
+                <span class="sh-muted sh-composer-link-preview-loading">
+                  {t('link_preview.loading')}
+                </span>
+              ) : null}
             </div>
           )}
         </>

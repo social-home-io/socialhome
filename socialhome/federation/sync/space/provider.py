@@ -440,6 +440,9 @@ class SpaceSyncService:
         fm = getattr(post, "file_meta", None)
         if fm is not None and getattr(fm, "url", None):
             urls.append(fm.url)
+        lp = getattr(post, "link_preview", None)
+        if lp is not None and lp.thumbnail_url:
+            urls.append(lp.thumbnail_url)
         return urls
 
     async def stream_request_more(
