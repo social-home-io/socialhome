@@ -1627,6 +1627,7 @@ class SpaceService(SpaceMemberGuardMixin):
         about_markdown: str | None | object = _UNSET_MEMBER_PROFILE,
         bot_enabled: bool | None = None,
         category: str | None = None,
+        allow_here_mention: bool | None = None,
     ) -> Space:
         """Owner or admin may update space metadata. Atomically bumps
         ``config_sequence`` and publishes :class:`SpaceConfigChanged`.
@@ -1714,6 +1715,8 @@ class SpaceService(SpaceMemberGuardMixin):
                 fwd["bot_enabled"] = bool(bot_enabled)
             if category is not None:
                 fwd["category"] = category
+            if allow_here_mention is not None:
+                fwd["allow_here_mention"] = bool(allow_here_mention)
             if await self._forward_admin_action_if_remote(
                 space, actor_username, "update_config", fwd
             ):
@@ -1831,6 +1834,12 @@ class SpaceService(SpaceMemberGuardMixin):
         if category is not None:
             new_fields["category"] = category
             payload["category"] = category
+        if allow_here_mention is not None:
+            # §23.42 — whether owners/admins may page everyone with @here.
+            # Federates in ``space_meta`` so every member household enforces
+            # it on the posts it receives.
+            new_fields["allow_here_mention"] = bool(allow_here_mention)
+            payload["allow_here_mention"] = bool(allow_here_mention)
 
         if not new_fields:
             return space
@@ -2430,6 +2439,7 @@ class SpaceService(SpaceMemberGuardMixin):
             "about_markdown",
             "bot_enabled",
             "category",
+            "allow_here_mention",
         }
     )
 
@@ -4570,7 +4580,9 @@ class SpaceService(SpaceMemberGuardMixin):
             SpacePostCreated(
                 post=post,
                 space_id=space_id,
-                mentions=await self._mentions().resolve(space_id, post.content),
+                mentions=await self._mentions().resolve(
+                    space_id, post.content, author_id=post.author
+                ),
             )
         )
         return post
@@ -4850,7 +4862,9 @@ class SpaceService(SpaceMemberGuardMixin):
                 post_id=post_id,
                 comment=comment,
                 space_id=space_id,
-                mentions=await self._mentions().resolve(space_id, content),
+                mentions=await self._mentions().resolve(
+                    space_id, content, author_id=author_user_id
+                ),
             ),
         )
         return comment
@@ -5638,6 +5652,11 @@ def _space_metadata_for_federation(space: Space) -> dict:
         # Read-only archive state — federates so member households go
         # read-only too. Reversible (an unarchive ships archived=False).
         "archived": space.archived,
+        # §23.42 @here policy — each member household drops @here from posts
+        # it receives unless this is on (and the author is owner/admin by its
+        # own roster). Missing on an older sender → OFF (fail closed); an
+        # older receiver ignores the key (it doesn't notify @here at all).
+        "allow_here_mention": space.allow_here_mention,
     }
 
 
@@ -5955,6 +5974,7 @@ def stub_space_from_metadata(
         # → min_age 0 (no restriction).
         min_age=_coerce_min_age(meta.get("min_age")),
         category=normalize_category(meta.get("category")),
+        allow_here_mention=meta.get("allow_here_mention") is True,
     )
 
 

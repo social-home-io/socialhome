@@ -160,3 +160,40 @@ describe('MentionAutocomplete in the space comment input', () => {
     await waitFor(() => expect(input.value).toBe('@bob '))
   })
 })
+
+describe('MentionAutocomplete — @here', () => {
+  it('offers @here to an owner in a space that allows it, and inserts it', async () => {
+    const { setSpaceHereAllowed } = await import('@/store/spaceMembers')
+    setSpaceHereAllowed('sp-1', true)
+    const { ta } = await composer()
+    type(ta, 'hey @he')
+    await waitFor(() => expect(listbox()).toBeTruthy())
+    const first = listbox()!.querySelector('[role="option"]')!
+    expect(first.textContent).toContain('Everyone in this space')
+    expect(first.textContent).toContain('@here')
+    fireEvent.keyDown(ta, { key: 'Enter' })
+    await waitFor(() => expect(ta.value).toBe('hey @here '))
+  })
+
+  it('does not offer @here when the space has it off', async () => {
+    const { setSpaceHereAllowed } = await import('@/store/spaceMembers')
+    setSpaceHereAllowed('sp-1', false)
+    const { ta } = await composer()
+    type(ta, '@he')
+    await waitFor(() =>
+      expect(document.body.textContent).toContain('No member of this space matches'))
+    expect(listbox()).toBeNull()
+  })
+
+  it('does not offer @here to a plain member', async () => {
+    vi.doMock('@/store/auth', () => ({
+      currentUser: { value: { user_id: 'u-bob', username: 'bob', display_name: 'Bob' } },
+    }))
+    const { setSpaceHereAllowed } = await import('@/store/spaceMembers')
+    setSpaceHereAllowed('sp-1', true)
+    const { ta } = await composer()
+    type(ta, '@')
+    await waitFor(() => expect(listbox()).toBeTruthy())
+    expect(listbox()!.textContent).not.toContain('@here')
+  })
+})

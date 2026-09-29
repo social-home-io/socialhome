@@ -21,14 +21,19 @@ from ..domain.mention import (
     Mention,
     MentionCandidate,
     MentionParser,
+    MentionType,
     candidate_lookup,
     mention_tokens,
 )
+from ..domain.space import SpaceRole
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 
 log = logging.getLogger(__name__)
+
+#: Local roles that may use ``@here`` (when the space allows it at all).
+_HERE_ROLES = frozenset({SpaceRole.OWNER.value, SpaceRole.ADMIN.value})
 
 
 def _names(*names: str | None) -> tuple[str, ...]:
@@ -104,8 +109,59 @@ class SpaceMentionResolver:
         """user_id → token (without ``@``) a composer should insert."""
         return mention_tokens(await self.candidates(space_id))
 
-    async def resolve(self, space_id: str, content: str | None) -> tuple[Mention, ...]:
+    async def may_use_here(self, space_id: str, author_id: str | None) -> bool:
+        """May *author_id* page everyone with ``@here`` in *space_id*?
+
+        Only when the space's ``allow_here_mention`` toggle is on AND the
+        author is an owner or admin **by this household's own roster** —
+        never by anything the post's payload claims:
+
+        * a local author → their ``space_members`` role (owner / admin);
+        * a remote author → a live ``admin`` seat in ``space_remote_members``,
+          or the host's owner: seated on the space's ``owner_instance_id``
+          under the space's ``owner_username`` (a remote seat can't hold
+          ``owner`` — the host's owner mirrors as a plain seat).
+
+        Members, subscribers, bots and unknown authors → ``False``.
+        """
+        if not author_id:
+            return False
+        space = await self._spaces.get(space_id)
+        if space is None or not space.allow_here_mention:
+            return False
+        if await self._users.get_by_user_id(author_id) is not None:
+            member = await self._spaces.get_member(space_id, author_id)
+            return member is not None and member.role in _HERE_ROLES
+        if self._remote_members is None:
+            return False
+        seats = [
+            rm
+            for rm in await self._remote_members.list_for_space(space_id)
+            if rm.user_id == author_id
+        ]
+        if any(rm.role == SpaceRole.ADMIN.value for rm in seats):
+            return True
+        if not any(rm.instance_id == space.owner_instance_id for rm in seats):
+            return False
+        remote = await self._users.get_remote(author_id)
+        return (
+            remote is not None
+            and remote.instance_id == space.owner_instance_id
+            and bool(space.owner_username)
+            and remote.remote_username == space.owner_username
+        )
+
+    async def resolve(
+        self,
+        space_id: str,
+        content: str | None,
+        *,
+        author_id: str | None,
+    ) -> tuple[Mention, ...]:
         """Parse *content* against the space's members.
+
+        A ``@here`` survives only when :meth:`may_use_here` allows it for
+        *author_id* (``None`` → dropped); user mentions are unaffected.
 
         Fail-soft: a lookup failure logs and yields no mentions — a broken
         roster read must never block the post it was parsing.
@@ -114,7 +170,12 @@ class SpaceMentionResolver:
             return ()
         try:
             lookup = candidate_lookup(await self.candidates(space_id))
+            mentions = MentionParser(lookup_member=lookup).parse(content, space_id)
+            if any(m.type is MentionType.HERE for m in mentions) and not (
+                await self.may_use_here(space_id, author_id)
+            ):
+                mentions = tuple(m for m in mentions if m.type is not MentionType.HERE)
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("mention resolution failed for space %s: %s", space_id, exc)
             return ()
-        return MentionParser(lookup_member=lookup).parse(content, space_id)
+        return mentions

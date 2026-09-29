@@ -10,7 +10,7 @@ import { api } from '@/api'
 import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import type { SpaceMemberProfile } from '@/types'
-import { mentionTokenSet } from '@/utils/mentions'
+import { HERE_TOKEN, mentionTokenSet } from '@/utils/mentions'
 
 export const spaceMembers = signal<Record<string, Map<string, SpaceMemberProfile>>>({})
 
@@ -38,11 +38,37 @@ export interface SpaceMentionRender {
 
 const _tokenCache = new WeakMap<Map<string, SpaceMemberProfile>, Set<string>>()
 
+/** Per-space ``allow_here_mention`` as last read from
+ *  ``GET /api/spaces/{id}`` (set by the space feed / settings pages). Absent
+ *  → treated as off: the picker never offers ``@here`` on a guess. */
+export const spaceHereAllowed = signal<Record<string, boolean>>({})
+
+export function setSpaceHereAllowed(spaceId: string, allowed: boolean): void {
+  if (spaceHereAllowed.value[spaceId] === allowed) return
+  spaceHereAllowed.value = { ...spaceHereAllowed.value, [spaceId]: allowed }
+}
+
+/** May the viewer use ``@here`` in ``spaceId``? The space allows it AND
+ *  their roster role is owner/admin. UI hint only — every receiving
+ *  household re-checks the author's role from its own roster. */
+export function viewerMayUseHere(spaceId: string | null | undefined): boolean {
+  if (!spaceId || !spaceHereAllowed.value[spaceId]) return false
+  const me = currentUser.value?.user_id
+  const role = me ? spaceMembers.value[spaceId]?.get(me)?.role : undefined
+  return role === 'owner' || role === 'admin'
+}
+
 /** What the renderers need to highlight @-mentions in ``spaceId``: the
  *  lower-cased member tokens (empty until the roster loads — nothing is
  *  highlighted rather than guessing) and the viewer's own token. Reads
- *  the signal, so a component calling it re-renders when the roster lands. */
-export function spaceMentionRender(spaceId: string | null | undefined): SpaceMentionRender {
+ *  the signal, so a component calling it re-renders when the roster lands.
+ *
+ *  ``@here`` is highlighted only when the space allows it AND ``authorId``
+ *  is an owner/admin in the roster — i.e. when it actually paged people. */
+export function spaceMentionRender(
+  spaceId: string | null | undefined,
+  authorId?: string | null,
+): SpaceMentionRender {
   const roster = spaceId ? spaceMembers.value[spaceId] : undefined
   if (!roster) return { mentions: new Set(), selfMention: null }
   let tokens = _tokenCache.get(roster)
@@ -50,9 +76,12 @@ export function spaceMentionRender(spaceId: string | null | undefined): SpaceMen
     tokens = mentionTokenSet(roster.values())
     _tokenCache.set(roster, tokens)
   }
+  const authorRole = authorId ? roster.get(authorId)?.role : undefined
+  const allowHere = Boolean(spaceId && spaceHereAllowed.value[spaceId])
+    && (authorRole === 'owner' || authorRole === 'admin')
   const me = currentUser.value?.user_id
   return {
-    mentions: tokens,
+    mentions: allowHere ? new Set([...tokens, HERE_TOKEN]) : tokens,
     selfMention: (me && roster.get(me)?.mention) || null,
   }
 }

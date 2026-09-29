@@ -247,6 +247,9 @@ class SpaceDetailView(BaseView):
                 "icon_hash": space.icon_hash,
                 "icon_url": icon_url,
                 "bot_enabled": space.bot_enabled,
+                # §23.42 — may owners/admins page everyone with @here? The
+                # SPA offers ``@here`` in the mention picker only when on.
+                "allow_here_mention": space.allow_here_mention,
                 # Read-only archive state — the SPA disables write
                 # affordances and shows a read-only banner when true.
                 "archived": space.archived,
@@ -308,6 +311,11 @@ class SpaceDetailView(BaseView):
             ),
             bot_enabled=body.get("bot_enabled"),
             category=body.get("category"),
+            allow_here_mention=(
+                body["allow_here_mention"]
+                if isinstance(body.get("allow_here_mention"), bool)
+                else None
+            ),
         )
         return web.json_response(
             {

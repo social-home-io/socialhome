@@ -314,6 +314,8 @@ export interface Space {
   /** When true, HA automations may post into this space via the
    *  bot-bridge. Required before any SpaceBot is registered. */
   bot_enabled?: boolean
+  /** §23.42 — owners/admins may page every member with ``@here``. */
+  allow_here_mention?: boolean
   /** Soft, reversible archive. When true the space is read-only (the
    *  server rejects writes) and the SPA groups it out of the active
    *  list + shows a read-only banner. Distinct from a dissolve (hard

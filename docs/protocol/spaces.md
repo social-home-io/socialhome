@@ -764,12 +764,33 @@ text and are not parsed).
   instead — `user_id` is global, so every member household resolves the
   qualified token identically. `GET /api/spaces/{id}/members` hands the SPA
   the exact token per row (`mention`).
-- **`@here`** is recognised but **not notified** yet (owner decision
-  pending); it doesn't suppress the user mentions next to it.
-- **No wire / protocol change, no capability bump.** Content was already
-  end-to-end encrypted to members; mentions are derived from it on receipt.
+- **`@here`** pages every member, so it is a privilege decided **on each
+  receiving household** from what that household already holds — never
+  from the post payload:
+  - the space's **`allow_here_mention`** toggle (owner/admin config edit,
+    default off) as this household mirrors it; and
+  - the author's role **in this household's roster**: a local
+    `owner`/`admin` `space_members` row, a remote **`admin`** seat in
+    `space_remote_members`, or the host's owner (seated on
+    `owner_instance_id` under the space's `owner_username` — a remote seat
+    can't hold `owner`). Members, subscribers, bots and unknown authors are
+    dropped.
+  A disallowed `@here` is removed before the event is published; the user
+  mentions next to it still count. Allowed, it notifies every member at
+  `all` / `mentions` (not `muted`, not the author) once per post, at most
+  one `@here` per author per space per 10 min (per household, in memory).
+- **`allow_here_mention` travels like the rest of the config:** it is in
+  `space_meta` (so it rides the authority-signed `SPACE_CONFIG_CHANGED`
+  broadcast and the §D1b snapshot) and in the forwardable
+  `update_config` fields for a cross-household admin. **No capability
+  bump:** a receiver that predates it ignores the key and never notifies
+  `@here` at all; a sender that predates it omits the key and the receiver
+  reads it as **off** (fail closed). An admin on a household forwarding to
+  an older host sees the toggle not stick (the old host drops the field).
+- **No other wire / protocol change.** Content was already end-to-end
+  encrypted to members; mentions are derived from it on receipt.
 - **Notifications:** see `docs/api.md` → `/api/spaces/{id}/notif-prefs`
-  (`space_mention` bell, title only per §25.3).
+  (`space_mention` / `space_here` bells, title only per §25.3).
 
 ## Bazaar tab + opt-in feed announcement
 

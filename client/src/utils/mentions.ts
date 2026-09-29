@@ -43,6 +43,20 @@ export interface MentionCandidate {
   pictureUrl: string | null
   /** Household label for a member from another household, else null. */
   household: string | null
+  /** The ``@here`` pseudo-candidate (pages everyone in the space). */
+  here?: boolean
+}
+
+/** Token for "everyone in this space" — see ``MentionType.HERE``. */
+export const HERE_TOKEN = 'here'
+
+const HERE_CANDIDATE: MentionCandidate = {
+  userId: '@here',
+  token: HERE_TOKEN,
+  name: 'Everyone in this space',
+  pictureUrl: null,
+  household: null,
+  here: true,
 }
 
 /** Is the cursor at the end of a ``@partial`` token? */
@@ -65,11 +79,18 @@ export function mentionCandidates(
   members: Iterable<SpaceMemberProfile>,
   query: string,
   excludeUserId: string | null | undefined,
+  opts: { includeHere?: boolean } = {},
 ): MentionCandidate[] {
   const q = query.toLocaleLowerCase()
   const ranked: { rank: number, c: MentionCandidate }[] = []
+  // ``@here`` first — only for a viewer allowed to use it in a space that
+  // allows it (the caller decides; the server re-checks on every household).
+  if (opts.includeHere && HERE_TOKEN.startsWith(q)) {
+    ranked.push({ rank: -1, c: HERE_CANDIDATE })
+  }
   for (const m of members) {
     if (!m.mention || m.user_id === excludeUserId) continue
+    if (m.mention.toLocaleLowerCase() === HERE_TOKEN) continue
     const name = displayName(m)
     const lname = name.toLocaleLowerCase()
     const token = m.mention.toLocaleLowerCase()

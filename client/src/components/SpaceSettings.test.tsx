@@ -628,3 +628,38 @@ describe('SpaceSettings', () => {
     })
   })
 })
+
+describe('SpaceSettings — @here toggle', () => {
+  beforeEach(() => {
+    apiMock.get.mockResolvedValue([])
+    apiMock.patch.mockReset()
+  })
+
+  it('is OFF by default and sends allow_here_mention when turned on', async () => {
+    apiMock.patch.mockResolvedValue({})
+    const { getByLabelText, getByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    )
+    const box = getByLabelText(/notify everyone with @here/) as HTMLInputElement
+    expect(box.checked).toBe(false)
+    fireEvent.click(box)
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
+    const [, body] = apiMock.patch.mock.calls[0]
+    expect(body.allow_here_mention).toBe(true)
+  })
+
+  it('reflects an already-on toggle and can turn it off', async () => {
+    apiMock.patch.mockResolvedValue({})
+    const space = { ...(makeSpace() as object), allow_here_mention: true } as never
+    const { getByLabelText, getByText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    const box = getByLabelText(/notify everyone with @here/) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    fireEvent.click(box)
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
+    expect(apiMock.patch.mock.calls[0][1].allow_here_mention).toBe(false)
+  })
+})

@@ -337,7 +337,8 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
         <div class="sh-comment-bubble">
           <span class="sh-comment-author">{authorName}</span>
           <span class="sh-comment-text">
-            <MentionText text={comment.content ?? ''} spaceId={spaceId} />
+            <MentionText text={comment.content ?? ''} spaceId={spaceId}
+              authorId={comment.author} />
           </span>
         </div>
         <div class="sh-comment-actions">
@@ -414,8 +415,12 @@ function formatRelative(iso: string): string {
 
 /** Plain comment text with the space's known @-mentions highlighted.
  *  JSX all the way down — user text is never parsed as HTML. */
-function MentionText({ text, spaceId }: { text: string, spaceId?: string | null }) {
-  const { mentions, selfMention } = spaceMentionRender(spaceId)
+function MentionText({ text, spaceId, authorId }: {
+  text: string
+  spaceId?: string | null
+  authorId?: string | null
+}) {
+  const { mentions, selfMention } = spaceMentionRender(spaceId, authorId)
   const self = selfMention?.toLocaleLowerCase() ?? null
   return (
     <>
@@ -424,7 +429,9 @@ function MentionText({ text, spaceId }: { text: string, spaceId?: string | null 
           ? p
           : (
             <span key={i}
-              class={p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'}>
+              class={p.token === 'here'
+                ? 'sh-mention sh-mention--here'
+                : p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'}>
               {p.raw}
             </span>
           )

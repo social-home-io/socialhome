@@ -13,6 +13,7 @@
  * detail endpoint and we render an access message.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { setSpaceHereAllowed } from '@/store/spaceMembers'
 import { signal } from '@preact/signals'
 import { useRoute, useLocation } from 'preact-iso'
 import { api } from '@/api'
@@ -88,6 +89,7 @@ export default function SpaceSettingsPage() {
         >,
       ])
       setSpace(detail)
+      setSpaceHereAllowed(spaceId, detail.allow_here_mention === true)
       const mine = members.find(
         m => m.user_id === currentUser.value?.user_id,
       )

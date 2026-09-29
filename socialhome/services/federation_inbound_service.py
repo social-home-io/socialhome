@@ -1515,7 +1515,9 @@ class FederationInboundService:
             SpacePostCreated(
                 post=post,
                 space_id=space_id,
-                mentions=await self._mentions.resolve(space_id, post.content),
+                mentions=await self._mentions.resolve(
+                    space_id, post.content, author_id=post.author
+                ),
                 origin_instance_id=event.from_instance,
                 public_relay=public_relay,
             )
@@ -1910,7 +1912,9 @@ class FederationInboundService:
                 comment=comment,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
-                mentions=await self._mentions.resolve(space_id, comment.content),
+                mentions=await self._mentions.resolve(
+                    space_id, comment.content, author_id=comment.author
+                ),
             ),
         )
 

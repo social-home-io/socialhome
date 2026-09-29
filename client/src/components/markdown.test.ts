@@ -81,6 +81,12 @@ describe('renderMarkdown — @mentions', () => {
     expect(renderMarkdown('hi @anna')).toBe('hi @anna')
   })
 
+  test('@here gets its own class when the token set carries it', () => {
+    const out = renderMarkdown('@here dinner', { mentions: new Set(['here']) })
+    expect(out).toBe('<span class="sh-mention sh-mention--here">@here</span> dinner')
+    expect(renderMarkdown('@here dinner', { mentions: tokens })).toBe('@here dinner')
+  })
+
   test('never inside code, link targets or e-mail addresses', () => {
     const out = renderMarkdown(
       '`@anna` [x](https://example.com/@anna) mail me@anna.org',

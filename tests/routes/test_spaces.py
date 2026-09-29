@@ -2871,7 +2871,74 @@ async def test_members_mention_tokens_disambiguate_remote_and_label_household(
 
     space_svc = client.app[space_service_key]
     for uid, tok in ((client._bob_uid, local_tok), ("rbob9876543", remote_tok)):
-        got = await space_svc._mentions().resolve(sid, f"@{tok} hi")
+        got = await space_svc._mentions().resolve(sid, f"@{tok} hi", author_id=None)
         assert [m.user_id for m in got] == [uid]
     # The bare, ambiguous token reaches nobody.
-    assert await space_svc._mentions().resolve(sid, "@bob hi") == ()
+    assert await space_svc._mentions().resolve(sid, "@bob hi", author_id=None) == ()
+
+
+async def test_allow_here_mention_toggle_and_here_end_to_end(client):
+    """Owner/admin flips ``allow_here_mention`` via PATCH (a member gets
+    403); with it on, the owner's @here pages a mentions-level member with
+    one ``space_here`` bell, and a member's @here pages nobody."""
+    admin = _auth(client._admin_token)
+    bob = _auth(client._bob_token)
+    r = await client.post("/api/spaces", json={"name": "Fam"}, headers=admin)
+    sid = (await r.json())["id"]
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    r = await client.get(f"/api/spaces/{sid}", headers=bob)
+    assert (await r.json())["allow_here_mention"] is False
+
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"allow_here_mention": True}, headers=bob
+    )
+    assert r.status == 403
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"allow_here_mention": True}, headers=admin
+    )
+    assert r.status == 200
+    r = await client.get(f"/api/spaces/{sid}", headers=bob)
+    assert (await r.json())["allow_here_mention"] is True
+    # A non-bool value is ignored, not coerced.
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"allow_here_mention": "no"}, headers=admin
+    )
+    assert r.status == 200
+    r = await client.get(f"/api/spaces/{sid}", headers=admin)
+    assert (await r.json())["allow_here_mention"] is True
+
+    r = await client.put(
+        f"/api/spaces/{sid}/notif-prefs", json={"level": "mentions"}, headers=bob
+    )
+    assert r.status == 200
+    r = await client.post(
+        f"/api/spaces/{sid}/posts",
+        json={"type": "text", "content": "@here dinner!"},
+        headers=admin,
+    )
+    assert r.status == 201
+    notes = await (await client.get("/api/notifications", headers=bob)).json()
+    bells = [
+        (n["type"], n["title"])
+        for n in notes
+        if n["type"] in {"space_here", "space_post_created", "space_mention"}
+    ]
+    assert bells == [("space_here", "Pascal notified everyone in Fam")]
+
+    # Bob (plain member) cannot page the admin.
+    r = await client.put(
+        f"/api/spaces/{sid}/notif-prefs", json={"level": "mentions"}, headers=admin
+    )
+    assert r.status == 200
+    r = await client.post(
+        f"/api/spaces/{sid}/posts",
+        json={"type": "text", "content": "@here me too"},
+        headers=bob,
+    )
+    assert r.status == 201
+    notes = await (await client.get("/api/notifications", headers=admin)).json()
+    assert [
+        n["type"]
+        for n in notes
+        if n["type"] in {"space_here", "space_post_created", "space_mention"}
+    ] == []

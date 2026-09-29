@@ -13564,6 +13564,21 @@ a.sh-welcome-card:hover {
   background: var(--sh-primary);
   color: var(--sh-bg);
 }
+.sh-mention--here {
+  background: var(--sh-warning);
+  color: var(--sh-bg);
+}
+.sh-mention-autocomplete-here {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-primary-soft);
+  font-size: 1rem;
+}
 
 /* Shared 😀 emoji-picker trigger button for any text input
  * (composer, comments, DM, bazaar). Replaces the per-component inline

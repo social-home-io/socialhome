@@ -47,7 +47,9 @@ function _wrapMentions(
     if (codeDepth > 0 || !part) return part
     return splitMentions(part, tokens).map((p) => {
       if (typeof p === 'string') return p
-      const cls = p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'
+      const cls = p.token === 'here'
+        ? 'sh-mention sh-mention--here'
+        : p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'
       return `<span class="${cls}">${p.raw}</span>`
     }).join('')
   }).join('')

@@ -312,7 +312,8 @@ async def test_space_post_mention_muted_self_and_non_member(stack):
 
 
 async def test_space_post_at_here_does_not_notify_mentions_level(stack):
-    """@here is parsed but not notified yet (owner decision pending)."""
+    """@here does nothing while the space's ``allow_here_mention`` is off
+    (the default), even from the owner."""
     space_svc, space, u = await _mention_space(stack, "bob", levels={"bob": "mentions"})
     await space_svc.create_post(
         space.id,
@@ -1636,3 +1637,117 @@ async def test_space_mention_from_remote_author_names_them(stack):
         if n.type == "space_mention"
     ]
     assert [n.title for n in notes] == ["Zoe Remote mentioned you in M"]
+
+
+# ─── @here ───────────────────────────────────────────────────────────────
+
+_HERE_TYPES = _CONTENT_TYPES | {"space_here"}
+
+
+async def _here_types(stack, user):
+    notes = await stack.notif_repo.list(user.user_id, limit=50)
+    return [n.type for n in reversed(notes) if n.type in _HERE_TYPES]
+
+
+async def _here_space(stack, *, allow=True, levels=None):
+    space_svc, space, u = await _mention_space(
+        stack, "bob", "carl", "erin", "dan", levels=levels
+    )
+    await space_svc.update_config(
+        space.id, actor_username="anna", allow_here_mention=allow
+    )
+    return space_svc, space, u
+
+
+async def _post(space_svc, space, author, content):
+    return await space_svc.create_post(
+        space.id, author_user_id=author.user_id, type=PostType.TEXT, content=content
+    )
+
+
+async def test_here_notifies_all_and_mentions_levels_not_muted_or_author(stack):
+    space_svc, space, u = await _here_space(
+        stack, levels={"carl": "mentions", "erin": "muted"}
+    )
+    await _post(space_svc, space, u["anna"], "@here dinner is ready")
+    notes = [
+        n
+        for n in await stack.notif_repo.list(u["bob"].user_id, limit=50)
+        if n.type == "space_here"
+    ]
+    assert [n.title for n in notes] == ["anna notified everyone in M"]
+    assert await _here_types(stack, u["carl"]) == ["space_here"]  # mentions level
+    assert await _here_types(stack, u["erin"]) == []  # muted
+    assert await _here_types(stack, u["anna"]) == []  # author
+
+
+async def test_here_and_direct_mention_is_one_bell(stack):
+    """A member both @-mentioned and covered by @here gets the direct
+    mention only — never two bells for one post."""
+    space_svc, space, u = await _here_space(stack)
+    await _post(space_svc, space, u["anna"], "@here and especially @bob")
+    assert await _here_types(stack, u["bob"]) == ["space_mention"]
+    assert await _here_types(stack, u["carl"]) == ["space_here"]
+
+
+async def test_here_push_is_title_only(stack):
+    space_svc, space, u = await _here_space(stack)
+    sent = []
+
+    class _Push:
+        async def push_to_user(self, user_id, payload):
+            sent.append((user_id, payload))
+
+    stack.notif_svc.attach_push_service(_Push())
+    await _post(space_svc, space, u["anna"], "@here secret plans")
+    assert sent and all(p.title == "anna notified everyone in M" for _, p in sent)
+    assert all("secret" not in p.to_json() for _, p in sent)
+
+
+async def test_here_from_plain_member_is_ignored(stack):
+    """Owner/admin only: a member's @here is dropped at resolve time and the
+    post notifies exactly as if it had no @here."""
+    space_svc, space, u = await _here_space(stack, levels={"carl": "mentions"})
+    await _post(space_svc, space, u["bob"], "@here look at this")
+    assert await _here_types(stack, u["carl"]) == []
+    assert await _here_types(stack, u["dan"]) == ["space_post_created"]
+
+
+async def test_here_ignored_when_space_toggle_off(stack):
+    space_svc, space, u = await _here_space(
+        stack, allow=False, levels={"carl": "mentions"}
+    )
+    await _post(space_svc, space, u["anna"], "@here anyone?")
+    assert await _here_types(stack, u["carl"]) == []
+    assert await _here_types(stack, u["bob"]) == ["space_post_created"]
+
+
+async def test_here_is_rate_limited_per_author_per_space(stack):
+    """One @here per author per space per 10 min: a second one inside the
+    window notifies like a plain post; after the window it pages again."""
+    now = [1000.0]
+    stack.notif_svc._clock = lambda: now[0]
+    space_svc, space, u = await _here_space(stack, levels={"carl": "mentions"})
+    await _post(space_svc, space, u["anna"], "@here one")
+    await _post(space_svc, space, u["anna"], "@here two")
+    assert await _here_types(stack, u["bob"]) == ["space_here", "space_post_created"]
+    assert await _here_types(stack, u["carl"]) == ["space_here"]
+    now[0] += 601
+    await _post(space_svc, space, u["anna"], "@here three")
+    assert await _here_types(stack, u["carl"]) == ["space_here", "space_here"]
+
+
+async def test_here_in_comment_notifies_members(stack):
+    space_svc, space, u = await _here_space(stack, levels={"carl": "mentions"})
+    post = await _post(space_svc, space, u["bob"], "plain")
+    await space_svc.add_comment(
+        post.id, author_user_id=u["anna"].user_id, content="@here see above"
+    )
+    notes = [
+        n
+        for n in await stack.notif_repo.list(u["carl"].user_id, limit=50)
+        if n.type in _HERE_TYPES
+    ]
+    assert [(n.type, n.title) for n in notes] == [
+        ("space_here", "anna notified everyone in M")
+    ]

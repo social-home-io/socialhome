@@ -225,7 +225,9 @@ class SpacePublicInbound:
                 post=post,
                 space_id=space_id,
                 mentions=(
-                    await self._mentions.resolve(space_id, post.content)
+                    await self._mentions.resolve(
+                        space_id, post.content, author_id=post.author
+                    )
                     if self._mentions is not None
                     else ()
                 ),
