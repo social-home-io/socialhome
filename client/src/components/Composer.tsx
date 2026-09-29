@@ -536,6 +536,8 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
           <textarea
             ref={textareaRef}
             class="sh-composer-input"
+            data-shortcut="composer"
+            aria-keyshortcuts="n"
             placeholder={
               placeholder
                 ?? placeholderFor(postType.value, user?.display_name)

@@ -39,6 +39,7 @@ export function SearchBar({ onSelect }: SearchBarProps) {
   return (
     <div class="sh-search">
       <input class="sh-search-input" type="search" placeholder="🔍 Search..."
+        data-shortcut="search" aria-keyshortcuts="/"
         value={query.value} onInput={handleInput}
         onFocus={() => open.value = true}
         onBlur={() => setTimeout(() => open.value = false, 200)} />

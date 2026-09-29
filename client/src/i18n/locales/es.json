@@ -371,5 +371,18 @@
   "link_preview.open": "Abrir {site} en una pestaña nueva",
   "link_preview.admin_legend": "Enlaces",
   "link_preview.admin_title": "Vistas previas de enlaces",
-  "link_preview.admin_subtitle": "Muestra una tarjeta para el primer enlace de una publicación nueva. Tu hogar carga la página una vez, al escribir la publicación."
+  "link_preview.admin_subtitle": "Muestra una tarjeta para el primer enlace de una publicación nueva. Tu hogar carga la página una vez, al escribir la publicación.",
+
+  "connection.offline": "Estás sin conexión — los cambios se sincronizarán cuando vuelvas a conectarte.",
+  "connection.unreachable": "No se puede conectar con Social Home — reconectando…",
+  "connection.retry": "Reintentar ahora",
+  "connection.reconnected": "Conectado de nuevo",
+  "shortcuts.title": "Atajos de teclado",
+  "shortcuts.menu_entry": "Atajos de teclado",
+  "shortcuts.quick_switcher": "Ir a una página",
+  "shortcuts.search": "Buscar",
+  "shortcuts.composer": "Escribir una publicación o un mensaje",
+  "shortcuts.help": "Mostrar esta ayuda",
+  "shortcuts.close": "Cerrar un diálogo",
+  "shortcuts.typing_note": "Los atajos de una sola tecla se pausan mientras escribes en un campo."
 }

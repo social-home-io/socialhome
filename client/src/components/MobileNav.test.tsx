@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { render } from '@testing-library/preact'
+import { render, act } from '@testing-library/preact'
 import { LocationProvider } from 'preact-iso'
-import { MobileNav } from './MobileNav'
+import { MobileNav, mobileSidebarOpen } from './MobileNav'
+import { shortcutsHelpOpen } from '@/lib/shortcuts'
 import { dmUnreadTotal } from '@/store/dms'
 
 function dmTab(container: Element): HTMLAnchorElement {
@@ -28,6 +29,15 @@ describe('MobileNav', () => {
     // 4 are anchor links, 1 is a button (the "More" toggle).
     expect(bar.querySelectorAll('a.sh-mobile-tab').length).toBe(4)
     expect(bar.querySelectorAll('button.sh-mobile-tab').length).toBe(1)
+  })
+
+  it('closes the drawer when the keyboard-shortcuts dialog opens', () => {
+    render(wrap(<MobileNav />))
+    act(() => { mobileSidebarOpen.value = true })
+    expect(mobileSidebarOpen.value).toBe(true)
+    act(() => { shortcutsHelpOpen.value = true })
+    expect(mobileSidebarOpen.value).toBe(false)
+    shortcutsHelpOpen.value = false
   })
 
   it('has navigation role', () => {

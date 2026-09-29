@@ -346,5 +346,18 @@
   "link_preview.open": "{site} openen in een nieuw tabblad",
   "link_preview.admin_legend": "Links",
   "link_preview.admin_title": "Linkvoorbeelden",
-  "link_preview.admin_subtitle": "Toont een kaart voor de eerste link in een nieuw bericht. Je huis laadt de pagina één keer, wanneer het bericht wordt geschreven."
+  "link_preview.admin_subtitle": "Toont een kaart voor de eerste link in een nieuw bericht. Je huis laadt de pagina één keer, wanneer het bericht wordt geschreven.",
+
+  "connection.offline": "Je bent offline — wijzigingen worden gesynchroniseerd zodra je weer verbonden bent.",
+  "connection.unreachable": "Social Home is niet bereikbaar — opnieuw verbinden…",
+  "connection.retry": "Nu opnieuw proberen",
+  "connection.reconnected": "Weer verbonden",
+  "shortcuts.title": "Sneltoetsen",
+  "shortcuts.menu_entry": "Sneltoetsen",
+  "shortcuts.quick_switcher": "Naar een pagina springen",
+  "shortcuts.search": "Zoeken",
+  "shortcuts.composer": "Een bericht schrijven",
+  "shortcuts.help": "Deze hulp tonen",
+  "shortcuts.close": "Een venster sluiten",
+  "shortcuts.typing_note": "Sneltoetsen met één toets zijn gepauzeerd terwijl je in een veld typt."
 }

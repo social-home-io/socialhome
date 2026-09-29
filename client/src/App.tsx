@@ -22,6 +22,8 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { NotificationBell, startNotificationPolling, stopNotificationPolling } from '@/components/NotificationBell'
 import { SearchBar } from '@/components/SearchBar'
 import { QuickSwitcher } from '@/components/QuickSwitcher'
+import { KeyboardShortcutsDialog } from '@/components/KeyboardShortcutsDialog'
+import { installKeyboardShortcuts } from '@/lib/shortcuts'
 import { ToastContainer, showToast } from '@/components/Toast'
 import { OnboardingFlow } from '@/components/OnboardingFlow'
 import { SpaceCreateDialog } from '@/components/SpaceCreateDialog'
@@ -307,6 +309,15 @@ export function App() {
     return stopNotificationPolling
   }, [authed.value, showOnboarding.value])
 
+  // Global single-key shortcuts (``/`` search, ``n`` composer, ``?``
+  // help). Installed explicitly here — not as an import side effect —
+  // and only while the signed-in shell is up, so the login / setup /
+  // onboarding screens never react to them.
+  useEffect(() => {
+    if (!authed.value || showOnboarding.value) return
+    return installKeyboardShortcuts()
+  }, [authed.value, showOnboarding.value])
+
   // While the config is loading, render nothing (avoids a flash of
   // login form before we know whether to redirect to /setup).
   if (cfg.value === null) return null
@@ -376,6 +387,7 @@ export function App() {
             </main>
           </div>
           <QuickSwitcher />
+          <KeyboardShortcutsDialog />
           <BackToTop />
           <ToastContainer />
           <SpaceCreateDialog />

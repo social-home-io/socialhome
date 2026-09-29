@@ -351,5 +351,18 @@
   "link_preview.open": "{site} in neuem Tab öffnen",
   "link_preview.admin_legend": "Links",
   "link_preview.admin_title": "Linkvorschauen",
-  "link_preview.admin_subtitle": "Zeigt eine Karte für den ersten Link in einem neuen Beitrag. Dein Zuhause lädt die Seite einmal, wenn der Beitrag geschrieben wird."
+  "link_preview.admin_subtitle": "Zeigt eine Karte für den ersten Link in einem neuen Beitrag. Dein Zuhause lädt die Seite einmal, wenn der Beitrag geschrieben wird.",
+
+  "connection.offline": "Du bist offline — Änderungen werden synchronisiert, sobald du wieder verbunden bist.",
+  "connection.unreachable": "Social Home ist nicht erreichbar — Verbindung wird wiederhergestellt…",
+  "connection.retry": "Jetzt erneut versuchen",
+  "connection.reconnected": "Wieder verbunden",
+  "shortcuts.title": "Tastenkürzel",
+  "shortcuts.menu_entry": "Tastenkürzel",
+  "shortcuts.quick_switcher": "Zu einer Seite springen",
+  "shortcuts.search": "Suchen",
+  "shortcuts.composer": "Beitrag oder Nachricht schreiben",
+  "shortcuts.help": "Diese Hilfe anzeigen",
+  "shortcuts.close": "Dialog schließen",
+  "shortcuts.typing_note": "Einzeltasten-Kürzel sind pausiert, während du in ein Feld tippst."
 }

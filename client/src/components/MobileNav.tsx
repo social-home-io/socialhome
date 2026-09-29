@@ -24,6 +24,7 @@ import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { SideNav } from '@/components/SideNav'
 import { dmUnreadTotal } from '@/store/dms'
+import { shortcutsHelpOpen } from '@/lib/shortcuts'
 
 interface Tab {
   href:   string
@@ -69,6 +70,15 @@ export function MobileNav() {
     // touching the signal inside is intentional.
     if (mobileSidebarOpen.value) mobileSidebarOpen.value = false
   }, [path])
+
+  // The drawer's SideNav hosts the "Keyboard shortcuts" entry: close
+  // the drawer when the help dialog opens so the dialog isn't stacked
+  // on a second modal surface (one Esc would otherwise close both).
+  useEffect(() => {
+    if (shortcutsHelpOpen.value && mobileSidebarOpen.value) {
+      mobileSidebarOpen.value = false
+    }
+  }, [shortcutsHelpOpen.value])
 
   // Esc closes the drawer.
   useEffect(() => {
