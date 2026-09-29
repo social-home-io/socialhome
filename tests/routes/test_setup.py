@@ -56,6 +56,76 @@ async def test_standalone_setup_seeds_admin_and_returns_token(
     assert await tc._app[setup_service_key].is_required() is False
 
 
+async def test_headless_admin_password_boot_skips_the_wizard(
+    aiohttp_client,
+    tmp_dir,
+):
+    """A first boot with ``[standalone].admin_password`` / ``SH_ADMIN_PASSWORD``
+    provisions the admin AND marks setup complete, so the SPA lands on the
+    login screen instead of the wizard, and the wizard endpoint is closed."""
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "t.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
+        admin_username="owner",
+        admin_password="headless-pw",
+    )
+    tc = await aiohttp_client(create_app(cfg))
+    r = await tc.get("/api/instance/config")
+    assert r.status == 200
+    assert (await r.json())["setup_required"] is False
+    # The wizard can no longer re-provision the household.
+    r = await tc.post(
+        "/api/setup/standalone",
+        json={"username": "intruder", "password": "x"},
+    )
+    assert r.status == 409
+    # The headless credentials log in.
+    r = await tc.post(
+        "/api/auth/token",
+        json={"username": "owner", "password": "headless-pw"},
+    )
+    assert r.status in (200, 201), await r.text()
+
+
+async def test_headless_boot_repairs_setup_flag_for_existing_admin(
+    aiohttp_client,
+    tmp_dir,
+):
+    """A household that already booted headless on an affected build (admin
+    seeded, ``setup_complete`` never written) is repaired on the next boot."""
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "t.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
+        admin_password="headless-pw",
+    )
+    app = create_app(cfg)
+    tc = await aiohttp_client(app)
+    db = app[_db_key]
+    await db.enqueue("DELETE FROM instance_config WHERE key='setup_complete'")
+    assert await app[setup_service_key].is_required() is True
+    await app[platform_adapter_key].on_startup(app)
+    assert await app[setup_service_key].is_required() is False
+    r = await tc.get("/api/instance/config")
+    assert (await r.json())["setup_required"] is False
+
+
+async def test_no_admin_password_still_requires_the_wizard(
+    aiohttp_client,
+    tmp_dir,
+):
+    tc = await _build_standalone_app(aiohttp_client, tmp_dir)
+    r = await tc.get("/api/instance/config")
+    assert (await r.json())["setup_required"] is True
+
+
 async def test_standalone_setup_requires_username_and_password(
     aiohttp_client,
     tmp_dir,

@@ -142,8 +142,8 @@ class Config:
     mode: str = "standalone"  # "standalone" | "ha" | "haos"
 
     # Standalone first-boot admin seed (mirrors [standalone] TOML section).
-    # ``admin_password`` empty → a random urlsafe password is generated and
-    # logged once on first boot.
+    # ``admin_password`` set → the admin is seeded headless on boot and the
+    # setup wizard is skipped; empty → the ``/setup`` wizard collects it.
     admin_username: str = "admin"
     admin_password: str = ""
 
