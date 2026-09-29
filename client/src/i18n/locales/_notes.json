@@ -70,5 +70,11 @@
   "location.precision_note": "Privacy reassurance: coordinates are rounded to 4 decimals (~11 m).",
   "location.accuracy": "Shown under a shared pin; {m} is a coarse accuracy radius in metres.",
   "dms.attach.menu": "Paperclip button in the chat composer that opens the attach menu.",
-  "dms.location.send_failed": "Toast; {error} is a technical error message."
+  "dms.location.send_failed": "Toast; {error} is a technical error message.",
+
+  "connection.unreachable": "Banner shown when the browser is online but the Social Home server can't be reached; the app keeps retrying in the background.",
+  "connection.retry": "Button in the unreachable banner — reconnects immediately instead of waiting.",
+  "connection.reconnected": "Short toast after the connection comes back.",
+  "shortcuts.menu_entry": "Sidebar entry that opens the keyboard-shortcuts help dialog.",
+  "shortcuts.typing_note": "Footnote in the shortcuts dialog: '/', 'n' and '?' do nothing while the cursor is in a text field."
 }

@@ -278,7 +278,8 @@ a:focus:not(:focus-visible) { outline: none; }
   transform: rotate(-4deg);
 }
 
-.sh-sidenav a {
+.sh-sidenav a,
+.sh-sidenav .sh-sidenav-action {
   display: flex;
   align-items: center;
   gap: var(--sh-space-sm);
@@ -293,22 +294,36 @@ a:focus:not(:focus-visible) { outline: none; }
     box-shadow var(--sh-transition-fast),
     transform var(--sh-transition-fast);
 }
-.sh-sidenav a .sh-sidenav-icon {
+.sh-sidenav a .sh-sidenav-icon,
+.sh-sidenav .sh-sidenav-action .sh-sidenav-icon {
   transition: transform var(--sh-transition-fast), color var(--sh-transition-fast);
   color: var(--sh-text-muted);
 }
-.sh-sidenav a:hover {
+.sh-sidenav a:hover,
+.sh-sidenav .sh-sidenav-action:hover {
   background: var(--sh-bg-secondary);
   text-decoration: none;
   color: var(--sh-primary);
 }
-.sh-sidenav a:hover .sh-sidenav-icon {
+.sh-sidenav a:hover .sh-sidenav-icon,
+.sh-sidenav .sh-sidenav-action:hover .sh-sidenav-icon {
   color: var(--sh-primary);
   transform: scale(1.08);
 }
-.sh-sidenav a:focus-visible {
+.sh-sidenav a:focus-visible,
+.sh-sidenav .sh-sidenav-action:focus-visible {
   outline: 2px solid var(--sh-primary);
   outline-offset: 2px;
+}
+/* Button rows in the sidebar (e.g. "Keyboard shortcuts") — same row
+ * geometry as the links above, minus the native button chrome. */
+.sh-sidenav .sh-sidenav-action {
+  width: 100%;
+  background: none;
+  border: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 .sh-sidenav a[aria-current="page"],
 .sh-sidenav a.sh-active {
@@ -14214,6 +14229,69 @@ a.sh-link-preview-link:focus-visible {
   font-weight: 600;
   font-size: var(--sh-font-size-sm);
   z-index: 9500;
+}
+/* Server-unreachable variant: message + "Retry now" on one line,
+ * wrapping under each other on a narrow phone. */
+.sh-offline-banner--server {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sh-space-xs) var(--sh-space-md);
+}
+.sh-offline-banner__retry {
+  min-height: 36px;
+  padding: 0 var(--sh-space-md);
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: var(--sh-radius-full);
+  background: rgba(255, 255, 255, 0.35);
+  color: #000;
+  font: inherit;
+  cursor: pointer;
+}
+.sh-offline-banner__retry:hover { background: rgba(255, 255, 255, 0.6); }
+.sh-offline-banner__retry:focus-visible {
+  outline: 2px solid #000;
+  outline-offset: 2px;
+}
+
+/* Keyboard-shortcuts help dialog */
+.sh-shortcuts {
+  display: grid;
+  gap: var(--sh-space-sm);
+  margin: 0;
+}
+.sh-shortcuts__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-md);
+}
+.sh-shortcuts__keys {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 7.5em;
+  margin: 0;
+}
+.sh-shortcuts__label { margin: 0; }
+.sh-shortcuts__plus { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
+.sh-shortcuts__note {
+  margin: var(--sh-space-md) 0 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-kbd {
+  display: inline-block;
+  min-width: 1.9em;
+  padding: 2px 6px;
+  border: 1px solid var(--sh-border);
+  border-bottom-width: 2px;
+  border-radius: var(--sh-radius-sm);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.4;
+  text-align: center;
 }
 .sh-install-dismissed { display: none; }
 

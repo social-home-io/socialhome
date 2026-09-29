@@ -13,6 +13,7 @@
  * render path filters items through the live state snapshot pulled
  * from auth / household-features / guardian signals.
  */
+import type { ComponentChildren } from 'preact'
 import { useEffect } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { useComputed } from '@preact/signals'
@@ -27,6 +28,8 @@ import { userPreferences } from '@/store/userPreferences'
 import { Avatar } from '@/components/Avatar'
 import { Wordmark } from '@/components/Wordmark'
 import { SideNavIcon, type SideNavIconName } from '@/components/SideNavIcon'
+import { openShortcutsHelp } from '@/lib/shortcuts'
+import { t } from '@/i18n/i18n'
 
 interface SideNavItem {
   key: string
@@ -252,7 +255,11 @@ export function SideNav() {
 
   const state = view.value.state
   const activeSpace = activeSpaceFromUrl.value
-  const renderGroup = (group: SideNavGroup, items: SideNavItem[]) => {
+  const renderGroup = (
+    group: SideNavGroup,
+    items: SideNavItem[],
+    extra?: ComponentChildren,
+  ) => {
     const isActive = items.some(i => i.href === currentPath)
       || (group.key === 'browse' && activeSpace !== null)
     const headerId = `sidenav-group-${group.key}`
@@ -311,6 +318,7 @@ export function SideNav() {
             </>
           )
         })}
+        {extra}
       </nav>
     )
   }
@@ -322,7 +330,21 @@ export function SideNav() {
       {local.items.length > 0 && (
         <>
           <hr class="sh-sidenav-divider" />
-          {renderGroup(local.group, local.items)}
+          {renderGroup(
+            local.group,
+            local.items,
+            // Discoverability for the ``?`` help sheet — a button, not
+            // a link: it opens a dialog, it doesn't navigate.
+            <button
+              type="button"
+              class="sh-sidenav-action"
+              aria-haspopup="dialog"
+              onClick={openShortcutsHelp}
+            >
+              <SideNavIcon name="keyboard" />
+              <span class="sh-sidenav-link-label">{t('shortcuts.menu_entry')}</span>
+            </button>,
+          )}
         </>
       )}
       {user && !isHaos && (

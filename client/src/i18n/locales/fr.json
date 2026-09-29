@@ -346,5 +346,18 @@
   "link_preview.open": "Ouvrir {site} dans un nouvel onglet",
   "link_preview.admin_legend": "Liens",
   "link_preview.admin_title": "Aperçus de liens",
-  "link_preview.admin_subtitle": "Affiche une carte pour le premier lien d’une nouvelle publication. Votre foyer charge la page une fois, à l’écriture de la publication."
+  "link_preview.admin_subtitle": "Affiche une carte pour le premier lien d’une nouvelle publication. Votre foyer charge la page une fois, à l’écriture de la publication.",
+
+  "connection.offline": "Vous êtes hors ligne — les modifications seront synchronisées à la reconnexion.",
+  "connection.unreachable": "Impossible de joindre Social Home — reconnexion…",
+  "connection.retry": "Réessayer maintenant",
+  "connection.reconnected": "Reconnecté",
+  "shortcuts.title": "Raccourcis clavier",
+  "shortcuts.menu_entry": "Raccourcis clavier",
+  "shortcuts.quick_switcher": "Aller à une page",
+  "shortcuts.search": "Rechercher",
+  "shortcuts.composer": "Écrire une publication ou un message",
+  "shortcuts.help": "Afficher cette aide",
+  "shortcuts.close": "Fermer une fenêtre",
+  "shortcuts.typing_note": "Les raccourcis à une touche sont suspendus pendant la saisie dans un champ."
 }

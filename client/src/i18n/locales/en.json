@@ -664,5 +664,18 @@
   "link_preview.open": "Open {site} in a new tab",
   "link_preview.admin_legend": "Links",
   "link_preview.admin_title": "Link previews",
-  "link_preview.admin_subtitle": "Show a card for the first link in a new post. Your home loads the page once, when the post is written."
+  "link_preview.admin_subtitle": "Show a card for the first link in a new post. Your home loads the page once, when the post is written.",
+
+  "connection.offline": "You're offline — changes will sync when you reconnect.",
+  "connection.unreachable": "Can't reach Social Home — reconnecting…",
+  "connection.retry": "Retry now",
+  "connection.reconnected": "Reconnected",
+  "shortcuts.title": "Keyboard shortcuts",
+  "shortcuts.menu_entry": "Keyboard shortcuts",
+  "shortcuts.quick_switcher": "Jump to a page",
+  "shortcuts.search": "Search",
+  "shortcuts.composer": "Write a post or message",
+  "shortcuts.help": "Show this help",
+  "shortcuts.close": "Close a dialog",
+  "shortcuts.typing_note": "Single-key shortcuts are paused while you type in a field."
 }

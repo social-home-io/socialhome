@@ -13,7 +13,7 @@ export type SideNavIconName =
   | 'gallery' | 'pages' | 'stickies'
   | 'messages' | 'calls' | 'highlights' | 'momentum'
   | 'spaces' | 'bazaar' | 'corner' | 'apps'
-  | 'parent-control' | 'connections' | 'admin' | 'person'
+  | 'parent-control' | 'connections' | 'admin' | 'person' | 'keyboard'
 
 interface Props {
   name: SideNavIconName
@@ -159,6 +159,18 @@ const GLYPHS: Record<SideNavIconName, JSX.Element> = {
   admin: (
     <svg {...COMMON}>
       <path d="M14.7 3.3 16 4.6l3.4-3.4 3 3-3.4 3.4 1.3 1.3-2 2-1.3-1.3-7 7L8 18l-2 1-1 2-2-3 2-1 1-2 2-2 7-7-1.3-1.3z" />
+    </svg>
+  ),
+  keyboard: (
+    /* Keyboard outline with a key row + space bar — the
+     * "Keyboard shortcuts" help entry. */
+    <svg {...COMMON}>
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <line x1="6" y1="10" x2="6.01" y2="10" />
+      <line x1="10" y1="10" x2="10.01" y2="10" />
+      <line x1="14" y1="10" x2="14.01" y2="10" />
+      <line x1="18" y1="10" x2="18.01" y2="10" />
+      <line x1="8" y1="14" x2="16" y2="14" />
     </svg>
   ),
   person: (

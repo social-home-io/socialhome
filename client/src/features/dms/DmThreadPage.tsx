@@ -2453,6 +2453,8 @@ export default function DmThreadPage() {
           <textarea
             ref={composerInputRef}
             name="content"
+            data-shortcut="composer"
+            aria-keyshortcuts="n"
             placeholder="Type a message..."
             autocomplete="off"
             rows={1}

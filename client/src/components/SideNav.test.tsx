@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render } from '@testing-library/preact'
+import { render, fireEvent } from '@testing-library/preact'
 import { LocationProvider } from 'preact-iso'
 
 vi.mock('@/api', () => ({ api: { get: vi.fn(), post: vi.fn() } }))
@@ -12,6 +12,7 @@ import { active as activeCalls } from '@/store/calls'
 import { dmUnreadTotal } from '@/store/dms'
 import { toggles } from '@/components/HouseholdToggles'
 import { userPreferences } from '@/store/userPreferences'
+import { shortcutsHelpOpen } from '@/lib/shortcuts'
 import { SideNav } from './SideNav'
 
 const ALL_FEATURES_ON = {
@@ -156,6 +157,19 @@ describe('SideNav', () => {
     const link = getByText('Personal').closest('a')
     expect(link).toBeTruthy()
     expect(link?.getAttribute('href')).toBe('/settings')
+  })
+
+  it('offers a "Keyboard shortcuts" button in the Settings group that opens the help dialog', () => {
+    setUser({ is_admin: false })
+    shortcutsHelpOpen.value = false
+    const { getByRole } = renderAt('/')
+    const settings = getByRole('navigation', { name: 'Settings' })
+    const btn = getByRole('button', { name: 'Keyboard shortcuts' })
+    expect(settings.contains(btn)).toBe(true)
+    expect(btn.getAttribute('aria-haspopup')).toBe('dialog')
+    fireEvent.click(btn)
+    expect(shortcutsHelpOpen.value).toBe(true)
+    shortcutsHelpOpen.value = false
   })
 
   it('also renders Personal for admins (alongside Federation / Admin)', () => {
