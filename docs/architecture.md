@@ -723,6 +723,66 @@ How it works:
 Do not "simplify" this back into a direct tile URL in the SPA — that is the
 bug this replaced.
 
+## Link previews and the outbound fetch guard
+
+A `text` post whose content contains a web link shows a preview card
+(title, description, site name, image). The card is built **once, on the
+author's household**, and then travels inside the post:
+
+```mermaid
+sequenceDiagram
+    participant C as Composer (author)
+    participant A as Author household
+    participant W as Linked site
+    participant M as Member household
+    C->>A: POST /api/link-preview {url}
+    A->>W: guarded GET (HTML ≤ 512 KiB, og:image ≤ 2 MiB)
+    W-->>A: page + image
+    A-->>C: {preview} (cached ~15 min)
+    C->>A: POST /api/spaces/{id}/posts {content, no_link_preview?}
+    A->>A: preview from cache (server is the source of truth)
+    A->>M: SPACE_POST_CREATED (encrypted, carries link_preview)
+    A->>M: SPACE_MEDIA_BLOB (the re-encoded image)
+    Note over M: renders the card — never contacts W
+```
+
+- `LinkPreviewService` (`socialhome/services/link_preview_service.py`)
+  owns the cache (per normalised URL, negative results too), in-flight
+  dedupe, a per-member and per-household fetch budget, and the admin switch
+  (`preferences.allow_link_preview`). The client never supplies card
+  fields; it can only opt a post out (`no_link_preview`).
+- The page's `og:image` is decoded under a pixel cap and re-encoded to a
+  fresh WebP with no metadata (`ImageProcessor.link_preview`, in
+  `asyncio.to_thread`), stored as ordinary local media and referenced as
+  `api/media/<name>` — the card never hot-links the site.
+- Receivers (`FederationInboundService._post_from_payload`, the space-sync
+  receiver, `SpacePublicInbound`) re-validate every field
+  (`wire_link_preview`: lengths, `http(s)`-only URL, image kept only as a
+  local media ref) and never fetch. On the GFS public relay the card rides
+  inside the encrypted inner under its own suite-tagged author signature
+  (`space_public_author.verified_link_preview`), so subscribers that predate
+  it still verify the post.
+
+**`socialhome/outbound_fetch.py`** is the SSRF guard every user-supplied URL
+goes through (today only link previews; use it for any future "fetch what a
+user typed"):
+
+- `http` / `https` only, ports 80 / 443 only, no user-info;
+- the host is resolved by the guard and **every** answer must be globally
+  routable (`is_public_address`: `is_global`, plus explicit refusal of
+  loopback, RFC 1918, link-local incl. cloud metadata, CGNAT, multicast,
+  unspecified, reserved, IPv6 ULA / site-local, and IPv4 embedded in IPv6 —
+  mapped, 6to4, Teredo); legacy numeric IPv4 spellings (`2130706433`,
+  `0x7f.1`, `0177.0.0.1`) are parsed as the address they name;
+- the connection is **pinned** to the vetted addresses by a resolver that
+  answers only that host, so DNS rebinding between check and connect is
+  impossible; TLS still verifies against the host name;
+- redirects are followed by hand (≤ 3), each hop re-vetted from scratch;
+- one 5 s deadline for the whole fetch (DNS included), 3 s connect and
+  per-read timeouts, bodies read in chunks and never past the cap;
+- no cookies, no `Authorization`, no proxy from the environment, a generic
+  `User-Agent`.
+
 ## Where things live
 
 | Concern | Path |

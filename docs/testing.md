@@ -92,6 +92,7 @@ necessary:
 | Concern | What it asserts |
 |---|---|
 | GFS payload | `test_gfs_payload_minimization.py` drives the real producers, the real household sender and the real GFS with real crypto: the `/gfs/publish` body is exactly `{space_id, event_type, payload}` and the fan-out frame exactly `{type, space_id, event_type, payload}`, neither carrying the relaying household's id, the author, the post text or a location label; each relay payload's cleartext key set is asserted by *equality*, so a new visible field must consciously extend it. |
+| Link preview (receiver) | `test_link_preview_receiver_no_fetch.py` turns a received card — member payload, sync record, GFS relay inner — into a stored preview with the outbound fetcher and the preview builder patched to fail, and asserts a remote / traversal / `file:` image reference never survives. The GFS payload test above also carries a card and asserts none of its fields reach the connection server. `tests/test_outbound_fetch.py` (marked `security`) covers every SSRF refusal class of the guard. |
 | Federation payload | Outbound envelopes encrypt every field except the §24.11 routing keys (`event_type`, `from_instance`, `to_instance`, `space_id`, `epoch`). |
 | API response | `SENSITIVE_FIELDS` (in `socialhome/security.py`) never appear in API responses. |
 | WebSocket broadcast | Per-event WS payloads exclude fields that should be local-only. |

@@ -821,6 +821,45 @@ is opt-in:
   an older sender → the receiver defaults to **visible**. Additive +
   fail-soft — **no new event type or capability bump**.
 
+## Link previews (author-built, receiver never fetches)
+
+A `text` post with a web link carries an optional `link_preview` object
+inside the encrypted `SPACE_POST_CREATED` payload:
+
+```json
+"link_preview": {
+  "url": "https://example.com/story",
+  "title": "…", "description": "…", "site_name": "…",
+  "thumbnail_url": "api/media/<uuid>.webp"
+}
+```
+
+- **Built once, by the author's household** (the composer's
+  `POST /api/link-preview` and the create path share one server-side,
+  SSRF-guarded builder — see `docs/architecture.md`). The image is the
+  page's `og:image` re-encoded to a metadata-free WebP and shipped as an
+  ordinary `SPACE_MEDIA_BLOB` correlated to the post; the blob is
+  accepted only because the post row names it.
+- **Receivers never fetch the URL.** `wire_link_preview` re-validates
+  every field: `url` must be `http(s)` without credentials (else the whole
+  card is dropped), text is clipped (title 300, description 500, site
+  name 100), and `thumbnail_url` survives only as a local `api/media/…`
+  reference — a remote image URL is discarded.
+- The same object rides the §25.6 sync record and the resume replay of
+  `SPACE_POST_CREATED`.
+- **GFS public relay:** the card is part of the encrypted inner, signed by
+  the author under a **separate** signature (`link_preview_sig`, suite
+  `link_preview_sig_suite = "ed25519"`, domain
+  `space-post-link-preview:v1:`, bound to post id / space / author).
+  The main author signature's field set is unchanged, so a subscriber
+  that predates previews still verifies the post and simply ignores the
+  card; a current one keeps the card only when its signature verifies and
+  rejects an unknown suite (card dropped, post kept).
+- **No capability bump.** An older receiver ignores the unknown key and
+  shows the post without a card — the default-if-missing ("no card") is
+  correct, not silently wrong. Edits (`SPACE_POST_UPDATED`) carry content
+  only; the card stays as created.
+
 ## Flow — rekey
 
 Triggered on every member-removal path (#121, PR #432): local kick,

@@ -37,15 +37,22 @@ sequenceDiagram
     participant B as HFS B
     participant C as HFS C
     U->>A: POST /api/spaces/{id}/posts
+    opt text post with a web link (no_link_preview unset)
+        A->>A: build link_preview<br/>(cached; guarded fetch<br/>of the linked page)
+    end
     A->>A: persist locally,<br/>publish SpacePostCreated
     par broadcast to every member HFS
-        A->>B: SPACE_POST_CREATED
+        A->>B: SPACE_POST_CREATED<br/>(link_preview inside the<br/>encrypted payload)
         A->>C: SPACE_POST_CREATED
     end
     B->>B: persist + publish<br/>RemoteSpacePostCreated
     C->>C: persist + publish<br/>RemoteSpacePostCreated
-    Note over B,C: each HFS pushes the post<br/>to its connected clients<br/>via WebSocket
+    Note over B,C: each HFS pushes the post<br/>to its connected clients<br/>via WebSocket.<br/>Neither fetches the linked URL.
 ```
+
+A `text` post's optional `link_preview` card is built only by the
+author's household and never re-fetched by a receiver — see
+[spaces.md § Link previews](./spaces.md#link-previews-author-built-receiver-never-fetches).
 
 ## Flow — reaction
 
