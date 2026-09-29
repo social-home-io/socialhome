@@ -331,6 +331,7 @@ export default function SpaceFeedPage() {
     extras?: {
       location?: { lat: number; lon: number; label: string | null }
       imageUrls?: string[]
+      noLinkPreview?: boolean
     },
   ) => {
     const body: Record<string, unknown> = {
@@ -338,6 +339,7 @@ export default function SpaceFeedPage() {
       image_urls: extras?.imageUrls ?? [],
     }
     if (extras?.location) body.location = extras.location
+    if (extras?.noLinkPreview) body.no_link_preview = true
     const post = await api.post(
       `/api/spaces/${spaceId}/posts`,
       body,

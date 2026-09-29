@@ -339,5 +339,12 @@
   "common.retry": "Opnieuw proberen",
   "common.not_now": "Niet nu",
   "common.ok": "OK",
-  "common.try_again": "Opnieuw proberen"
+  "common.try_again": "Opnieuw proberen",
+  "link_preview.loading": "Linkvoorbeeld laden…",
+  "link_preview.remove": "Linkvoorbeeld verwijderen",
+  "link_preview.restore": "Linkvoorbeeld tonen",
+  "link_preview.open": "{site} openen in een nieuw tabblad",
+  "link_preview.admin_legend": "Links",
+  "link_preview.admin_title": "Linkvoorbeelden",
+  "link_preview.admin_subtitle": "Toont een kaart voor de eerste link in een nieuw bericht. Je huis laadt de pagina één keer, wanneer het bericht wordt geschreven."
 }

@@ -160,3 +160,60 @@ describe('Composer', () => {
     expect(postButton()?.disabled).toBe(false)
   })
 })
+
+describe('Composer link preview', () => {
+  const CARD = {
+    url: 'https://example.com/story',
+    title: 'Story title',
+    description: 'About it',
+    site_name: 'Example',
+    thumbnail_url: null,
+  }
+
+  async function typeLink(post: ReturnType<typeof vi.fn>) {
+    vi.doMock('@/api', () => ({ api: { get: vi.fn(), post } }))
+    vi.doMock('@/store/auth', () => ({
+      currentUser: { value: { username: 'pascal', display_name: 'Pascal' } },
+    }))
+    vi.doMock('./Toast', () => ({ showToast: vi.fn() }))
+    const { Composer } = await import('./Composer')
+    const onSubmit = vi.fn(async () => 'new-id')
+    const view = render(<Composer onSubmit={onSubmit} />)
+    const ta = view.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.input(ta, { target: { value: 'read https://example.com/story' } })
+    await new Promise((r) => setTimeout(r, 750))
+    return { ...view, onSubmit }
+  }
+
+  it('shows the server-built card and posts without an opt-out', async () => {
+    const post = vi.fn(async () => ({ preview: CARD }))
+    const { findByText, container, onSubmit } = await typeLink(post)
+    expect(await findByText('Story title')).toBeTruthy()
+    expect(post).toHaveBeenCalledWith('/api/link-preview', {
+      url: 'https://example.com/story',
+    })
+    fireEvent.submit(container.querySelector('form')!)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(onSubmit).toHaveBeenCalledOnce()
+    const extras = (onSubmit.mock.calls[0] as unknown[])[3] as
+      | { noLinkPreview?: boolean }
+      | undefined
+    expect(extras?.noLinkPreview).toBeUndefined()
+  })
+
+  it('remove (×) opts the post out, and can be undone', async () => {
+    const post = vi.fn(async () => ({ preview: CARD }))
+    const { findByLabelText, findByText, getByText, queryByText, container, onSubmit } =
+      await typeLink(post)
+    fireEvent.click(await findByLabelText('Remove link preview'))
+    expect(queryByText('Story title')).toBeNull()
+    // One click back.
+    fireEvent.click(getByText('Show link preview'))
+    expect(await findByText('Story title')).toBeTruthy()
+    fireEvent.click(await findByLabelText('Remove link preview'))
+    fireEvent.submit(container.querySelector('form')!)
+    await new Promise((r) => setTimeout(r, 20))
+    const extras = (onSubmit.mock.calls[0] as unknown[])[3] as { noLinkPreview?: boolean }
+    expect(extras.noLinkPreview).toBe(true)
+  })
+})

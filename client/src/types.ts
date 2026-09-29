@@ -73,6 +73,17 @@ export interface LocationData {
   label?: string | null
 }
 
+/** Card for the first web link in a text post. Built once by the AUTHOR's
+ *  household and carried inside the post — the SPA never fetches the page.
+ *  ``thumbnail_url`` is a signed local ``api/media/…`` URL (or null). */
+export interface LinkPreview {
+  url: string
+  title: string | null
+  description: string | null
+  site_name: string | null
+  thumbnail_url: string | null
+}
+
 export interface FeedPost {
   id: string
   author: string
@@ -98,6 +109,9 @@ export interface FeedPost {
    *  map in the feed card. The composer's LocationPicker captures
    *  coordinates via navigator.geolocation. */
   location?: LocationData | null
+  /** Author-built link card (see :type:`LinkPreview`). Absent on older
+   *  payloads; null when the post has no link or the author removed it. */
+  link_preview?: LinkPreview | null
   reactions: Record<string, string[]>
   comment_count: number
   pinned: boolean

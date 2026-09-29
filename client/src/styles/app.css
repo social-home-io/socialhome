@@ -13571,6 +13571,124 @@ a.sh-welcome-card:hover {
   gap: var(--sh-space-xs);
 }
 
+/* Link preview card (LinkPreviewCard) — feed posts + composer ─────── */
+.sh-link-preview {
+  position: relative;
+  margin-top: var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+  overflow: hidden;
+  max-width: 100%;
+}
+.sh-link-preview-link {
+  display: flex;
+  align-items: stretch;
+  min-height: 88px;
+  color: inherit;
+  text-decoration: none;
+}
+a.sh-link-preview-link:hover .sh-link-preview-title {
+  text-decoration: underline;
+}
+a.sh-link-preview-link:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+  border-radius: var(--sh-radius-md);
+}
+.sh-link-preview-image {
+  flex: 0 0 auto;
+  width: 120px;
+  min-height: 88px;
+  max-height: 140px;
+  object-fit: cover;
+  background: var(--sh-bg-secondary);
+  display: block;
+}
+.sh-link-preview-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+}
+.sh-link-preview-site,
+.sh-link-preview-domain {
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-link-preview-title {
+  font-weight: 600;
+  line-height: var(--sh-line-height-snug);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sh-link-preview-description {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Room for the composer's remove button so it never covers the text. */
+.sh-link-preview:has(.sh-link-preview-remove) .sh-link-preview-text {
+  padding-right: calc(var(--sh-space-md) + 36px);
+}
+.sh-link-preview-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--sh-shadow-xs);
+}
+.sh-link-preview-remove:hover {
+  background: var(--sh-bg-secondary);
+}
+.sh-link-preview-remove:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+}
+.sh-composer-link-preview {
+  margin-top: var(--sh-space-xs);
+}
+.sh-composer-link-preview-loading {
+  display: inline-block;
+  font-size: var(--sh-font-size-sm);
+  padding: var(--sh-space-xs) 0;
+}
+.sh-composer-link-preview-restore {
+  min-height: 36px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: var(--sh-font-size-sm);
+  cursor: pointer;
+}
+@media (max-width: 480px) {
+  .sh-link-preview-image {
+    width: 88px;
+  }
+  .sh-link-preview-text {
+    padding: var(--sh-space-xs) var(--sh-space-sm);
+  }
+}
+
 /* Feed-card location post (LocationPostCard) ─────────────────────── */
 .sh-location-post {
   display: flex;

@@ -339,5 +339,12 @@
   "common.retry": "Réessayer",
   "common.not_now": "Pas maintenant",
   "common.ok": "OK",
-  "common.try_again": "Réessayer"
+  "common.try_again": "Réessayer",
+  "link_preview.loading": "Chargement de l’aperçu du lien…",
+  "link_preview.remove": "Retirer l’aperçu du lien",
+  "link_preview.restore": "Afficher l’aperçu du lien",
+  "link_preview.open": "Ouvrir {site} dans un nouvel onglet",
+  "link_preview.admin_legend": "Liens",
+  "link_preview.admin_title": "Aperçus de liens",
+  "link_preview.admin_subtitle": "Affiche une carte pour le premier lien d’une nouvelle publication. Votre foyer charge la page une fois, à l’écriture de la publication."
 }

@@ -10,6 +10,7 @@ import { api } from '@/api'
 import { ws } from '@/ws'
 import { showToast } from './Toast'
 import { CheckboxCardGroup, type CheckboxCardOption } from './CheckboxCardGroup'
+import { t } from '@/i18n/i18n'
 
 interface Toggles {
   feat_feed: boolean; feat_pages: boolean; feat_tasks: boolean
@@ -18,6 +19,8 @@ interface Toggles {
   allow_text: boolean; allow_image: boolean; allow_video: boolean
   allow_file: boolean; allow_poll: boolean; allow_schedule: boolean
   allow_highlight_share: boolean
+  /** Author-side link preview cards (default on). */
+  allow_link_preview: boolean
   household_name: string
 }
 
@@ -76,6 +79,15 @@ export function HouseholdToggles() {
     { value: 'allow_highlight_share', icon: '⭕', title: 'Highlight share', subtitle: 'Allow sharing highlights to the feed' },
   ]
 
+  const linkCards: { value: keyof Toggles; icon: string; title: string; subtitle: string }[] = [
+    {
+      value: 'allow_link_preview',
+      icon: '🔗',
+      title: t('link_preview.admin_title'),
+      subtitle: t('link_preview.admin_subtitle'),
+    },
+  ]
+
   const toOption = (c: { value: keyof Toggles; icon: string; title: string; subtitle: string }): CheckboxCardOption => ({
     value: c.value,
     icon: c.icon,
@@ -94,6 +106,11 @@ export function HouseholdToggles() {
       <CheckboxCardGroup
         legend="Feed post types"
         options={postTypeCards.map(toOption)}
+        onToggle={(k) => void toggle(k as keyof Toggles)}
+      />
+      <CheckboxCardGroup
+        legend={t('link_preview.admin_legend')}
+        options={linkCards.map(toOption)}
         onToggle={(k) => void toggle(k as keyof Toggles)}
       />
     </div>
