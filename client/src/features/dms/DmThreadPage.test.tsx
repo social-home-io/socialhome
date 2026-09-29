@@ -1014,3 +1014,31 @@ describe('DmThreadPage — older-history staleness', () => {
     }
   })
 })
+
+
+describe('DmThreadPage — mute in the header', () => {
+  const row = (muted_until: string | null) => ({
+    id: 'conv-test', type: 'dm', name: null, last_message_at: null,
+    members: [{ user_id: 'u-bob', username: 'bob', display_name: 'Bob', picture_url: null }],
+    member_count: 2, unread: 0, last_read_at: null, muted_until,
+  })
+
+  it('an unmuted thread shows the bell that opens the mute menu', async () => {
+    wireApiMock({ conversations: [row(null)], messages: [] })
+    const { render } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { findByLabelText } = render(<DmThreadPage />)
+    const bell = await findByLabelText('Mute notifications', {}, { timeout: RENDER_WAIT })
+    expect(bell.textContent).toBe('🔔')
+  })
+
+  it('a muted thread shows the bell-slash with when it ends', async () => {
+    const soon = new Date(Date.now() + 3600_000).toISOString()
+    wireApiMock({ conversations: [row(soon)], messages: [] })
+    const { render } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { findByLabelText } = render(<DmThreadPage />)
+    const btn = await findByLabelText(/^Muted until .* — select to unmute$/, {}, { timeout: RENDER_WAIT })
+    expect(btn.textContent).toBe('🔕')
+  })
+})

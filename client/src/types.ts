@@ -426,6 +426,10 @@ export interface Conversation {
    *  ``GET /api/conversations`` so the inbox can render per-row
    *  chips and the sidebar can sum across rows for the Chats badge. */
   unread?: number
+  /** The caller's own mute (UTC ISO 8601; ``9999-…`` = until they turn
+   *  it back on), ``null`` when not muted. Muted rows still count
+   *  ``unread`` but raise no bell / push and stay out of the Chats badge. */
+  muted_until?: string | null
 }
 
 export interface Message {

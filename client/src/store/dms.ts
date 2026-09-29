@@ -10,6 +10,7 @@
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
+import { isMuteActive, type MuteDuration } from '@/utils/mute'
 
 export interface DmReaction {
   user_id: string
@@ -108,12 +109,47 @@ function addTyping(convo: string, userId: string, ttlSeconds = 6): void {
   }
 }
 
+/** The Chats badge total: unread across every conversation the viewer
+ *  hasn't muted. A muted conversation keeps its own per-row count in the
+ *  inbox but doesn't pull the viewer back with a badge. */
+export function alertingUnread(
+  rows: ReadonlyArray<{ unread?: number; muted_until?: string | null }> | null | undefined,
+  now: number = Date.now(),
+): number {
+  let sum = 0
+  for (const r of rows ?? []) {
+    if (isMuteActive(r.muted_until, now)) continue
+    sum += Math.max(0, r.unread ?? 0)
+  }
+  return sum
+}
+
+/** Mute (``duration``) or with ``null`` unmute a conversation for the
+ *  viewer. Resolves the new ``muted_until`` (``null`` = unmuted). */
+export async function setConversationMute(
+  convId: string,
+  duration: MuteDuration | null,
+): Promise<string | null> {
+  let until: string | null = null
+  if (duration === null) {
+    await api.delete(`/api/conversations/${convId}/mute`)
+  } else {
+    const body = await api.put(
+      `/api/conversations/${convId}/mute`, { duration },
+    ) as { muted_until: string | null }
+    until = body.muted_until ?? null
+  }
+  // The badge excludes muted rows — re-sum so it moves right away.
+  void loadDmUnread()
+  return until
+}
+
 export async function loadDmUnread(): Promise<void> {
   try {
-    const rows = (await api.get('/api/conversations')) as Array<{ unread?: number }>
-    let sum = 0
-    for (const r of rows ?? []) sum += Math.max(0, r.unread ?? 0)
-    dmUnreadTotal.value = sum
+    const rows = (await api.get('/api/conversations')) as Array<{
+      unread?: number; muted_until?: string | null
+    }>
+    dmUnreadTotal.value = alertingUnread(rows)
   } catch {
     /* auth not ready or transient — leave the prior count visible */
   }

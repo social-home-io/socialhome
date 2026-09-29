@@ -49,5 +49,20 @@
   "space.federation": "Settings-tab label inside a space — controls GFS publication + cross-household sharing.",
   "space.retention_keep_legend": "Space settings → Retention. Heading over checkboxes of post kinds that are never auto-deleted.",
   "space.retention_keep_schedule": "A 'schedule' post = a poll to find a date/time that suits everyone (Doodle-style).",
-  "space.retention_keep_event": "The feed card auto-created for a calendar event (with RSVP buttons) — not the calendar entry itself."
+  "space.retention_keep_event": "The feed card auto-created for a calendar event (with RSVP buttons) — not the calendar entry itself.",
+
+  "dms.mute.menu_title": "Heading of the menu that silences one chat (DM or group) for a while.",
+  "dms.mute.1h": "Mute length option in the chat's mute menu.",
+  "dms.mute.8h": "Mute length option in the chat's mute menu.",
+  "dms.mute.1w": "Mute length option in the chat's mute menu.",
+  "dms.mute.forever": "Mute length option: stays muted until the user unmutes it.",
+  "dms.mute.unmute": "Button that turns a muted chat's notifications back on.",
+  "dms.mute.muted_until": "Status of a muted chat. {time} is a clock time or a short date + time.",
+  "dms.mute.muted_forever": "Status of a chat muted with no end time.",
+  "dms.mute.unmute_hint": "Tooltip / screen-reader label of the bell-slash button. {state} is the muted status line.",
+  "dms.mute.section": "Section heading in the group info dialog.",
+  "dms.mute.on": "Shown in the group info dialog when the chat isn't muted.",
+  "dms.mute.toast_muted": "Toast after muting a chat.",
+  "dms.mute.toast_unmuted": "Toast after unmuting a chat.",
+  "dms.mute.error": "Toast when the mute change failed (network / server)."
 }

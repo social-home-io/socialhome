@@ -5,6 +5,7 @@ const get = vi.fn()
 const post = vi.fn()
 const patch = vi.fn()
 const del = vi.fn()
+const put = vi.fn()
 
 vi.mock('@/api', () => ({
   api: {
@@ -12,6 +13,7 @@ vi.mock('@/api', () => ({
     post: (...a: unknown[]) => post(...a),
     patch: (...a: unknown[]) => patch(...a),
     delete: (...a: unknown[]) => del(...a),
+    put: (...a: unknown[]) => put(...a),
   },
 }))
 vi.mock('@/store/auth', () => ({ currentUser: { value: { user_id: 'u-me' } } }))
@@ -54,23 +56,28 @@ const FRIENDS = {
   ],
 }
 
-async function mount(props: { managedHere: boolean; name?: string | null }) {
+async function mount(props: {
+  managedHere: boolean; name?: string | null; mutedUntil?: string | null
+}) {
   const { GroupInfoDialog } = await import('./GroupInfoDialog')
   const onChanged = vi.fn()
   const onLeft = vi.fn()
+  const onMuteChange = vi.fn()
   const view = render(
     <GroupInfoDialog
       open
       convId="g1"
       name={props.name ?? 'Crew'}
       managedHere={props.managedHere}
+      mutedUntil={props.mutedUntil ?? null}
+      onMuteChange={onMuteChange}
       members={MEMBERS}
       onClose={() => {}}
       onChanged={onChanged}
       onLeft={onLeft}
     />,
   )
-  return { ...view, onChanged, onLeft }
+  return { ...view, onChanged, onLeft, onMuteChange }
 }
 
 beforeEach(() => {
@@ -78,6 +85,7 @@ beforeEach(() => {
   post.mockResolvedValue({ ok: true })
   patch.mockResolvedValue({ ok: true })
   del.mockResolvedValue({ ok: true })
+  put.mockReset()
   get.mockResolvedValue(FRIENDS)
 })
 
@@ -155,5 +163,26 @@ describe('GroupInfoDialog', () => {
     fireEvent.click(getByText('Leave'))
     await waitFor(() => expect(post).toHaveBeenCalledWith('/api/conversations/g1/leave'))
     await waitFor(() => expect(onLeft).toHaveBeenCalled())
+  })
+
+  it('mutes the group for a chosen length from the Notifications section', async () => {
+    put.mockResolvedValue({ muted_until: '2026-09-29T18:00:00+00:00' })
+    const { getByText, onMuteChange } = await mount({ managedHere: false })
+    expect(getByText('Notifications')).toBeTruthy()
+    expect(getByText(/^On — /)).toBeTruthy()
+    fireEvent.click(getByText('For 8 hours'))
+    await waitFor(() => expect(onMuteChange).toHaveBeenCalledWith('2026-09-29T18:00:00+00:00'))
+    expect(put).toHaveBeenCalledWith('/api/conversations/g1/mute', { duration: '8h' })
+  })
+
+  it('a muted group says until when, and unmutes in one click', async () => {
+    const { getByText, queryByText, onMuteChange } = await mount({
+      managedHere: true, mutedUntil: '9999-12-31T23:59:59+00:00',
+    })
+    expect(getByText('Muted until you turn it back on')).toBeTruthy()
+    expect(queryByText('For 1 hour')).toBeNull()
+    fireEvent.click(getByText('Unmute'))
+    await waitFor(() => expect(onMuteChange).toHaveBeenCalledWith(null))
+    expect(del).toHaveBeenCalledWith('/api/conversations/g1/mute')
   })
 })

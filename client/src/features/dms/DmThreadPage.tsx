@@ -24,6 +24,7 @@ import { MediaAttachmentChip } from '@/components/MediaAttachmentChip'
 import { MessageContextSheet } from '@/components/MessageContextSheet'
 import { ReactionPicker } from '@/components/ReactionPicker'
 import { GroupInfoDialog } from './GroupInfoDialog'
+import { MuteButton } from './ConversationMute'
 import {
   EmojiAutocomplete,
   checkForEmojiTrigger,
@@ -317,6 +318,8 @@ interface ThreadInfo {
   type: string
   name: string | null
   managed_here: boolean
+  /** The viewer's own mute of this thread (``null`` = not muted). */
+  muted_until: string | null
 }
 const threadInfo = signal<ThreadInfo | null>(null)
 const groupInfoOpen = signal(false)
@@ -335,14 +338,25 @@ async function fetchRoster(convId: string): Promise<boolean> {
   }
 }
 
+/** The viewer muted / unmuted this thread (header bell or Group info). */
+function setThreadMute(mutedUntil: string | null): void {
+  if (threadInfo.value) threadInfo.value = { ...threadInfo.value, muted_until: mutedUntil }
+}
+
 async function fetchThreadInfo(convId: string): Promise<void> {
   try {
     const rows = await api.get('/api/conversations') as Array<{
       id: string; type: string; name?: string | null; managed_here?: boolean
+      muted_until?: string | null
     }>
     const row = rows.find(r => r.id === convId)
     threadInfo.value = row
-      ? { type: row.type, name: row.name ?? null, managed_here: row.managed_here === true }
+      ? {
+        type: row.type,
+        name: row.name ?? null,
+        managed_here: row.managed_here === true,
+        muted_until: row.muted_until ?? null,
+      }
       : null
   } catch {
     /* keep what we have */
@@ -693,6 +707,7 @@ export default function DmThreadPage() {
       (rows: Array<{
         id: string; unread?: number; last_read_at?: string | null
         type?: string; name?: string | null; managed_here?: boolean
+        muted_until?: string | null
       }>) => {
         const row = rows.find(r => r.id === convId)
         if (row) {
@@ -703,6 +718,7 @@ export default function DmThreadPage() {
               type: row.type ?? 'dm',
               name: row.name ?? null,
               managed_here: row.managed_here === true,
+              muted_until: row.muted_until ?? null,
             }
           }
         }
@@ -1885,6 +1901,13 @@ export default function DmThreadPage() {
             <span aria-hidden="true">👥</span>
           </button>
         )}
+        {threadInfo.value && (
+          <MuteButton
+            convId={convId}
+            mutedUntil={threadInfo.value.muted_until}
+            onChange={setThreadMute}
+          />
+        )}
         <CallButton convId={convId} />
         <a
           class="sh-thread-history"
@@ -2421,6 +2444,8 @@ export default function DmThreadPage() {
           convId={convId}
           name={threadInfo.value.name}
           managedHere={threadInfo.value.managed_here}
+          mutedUntil={threadInfo.value.muted_until}
+          onMuteChange={setThreadMute}
           members={threadMembers.value}
           onClose={() => { groupInfoOpen.value = false }}
           onChanged={() => {

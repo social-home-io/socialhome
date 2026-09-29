@@ -13,7 +13,7 @@ import { signal, computed } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { ws } from '@/ws'
-import { dmUnreadTotal } from '@/store/dms'
+import { alertingUnread, dmUnreadTotal } from '@/store/dms'
 import type { Conversation } from '@/types'
 import { DmInboxSkeleton } from '@/components/Skeleton'
 import { Button } from '@/components/Button'
@@ -23,6 +23,7 @@ import { Avatar } from '@/components/Avatar'
 import { PullToRefresh } from '@/components/PullToRefresh'
 import { useTitle } from '@/store/pageTitle'
 import { relativeChatTime } from '@/utils/relativeTime'
+import { isMuteActive, mutedLabel } from '@/utils/mute'
 import CallsTab from './CallsTab'
 
 type ChatsTab = 'dms' | 'groups' | 'calls'
@@ -153,6 +154,7 @@ export default function DmInboxPage() {
           // members are missing (legacy rows from before this field).
           const visiblePeers = peers.slice(0, 3)
           const overflow = peers.length - visiblePeers.length
+          const muted = isMuteActive(c.muted_until)
           return (
             <a key={c.id} href={`/dms/${c.id}`} class="sh-dm-row">
               <div class="sh-dm-avatars">
@@ -175,7 +177,17 @@ export default function DmInboxPage() {
                 )}
               </div>
               <div class="sh-dm-info">
-                <strong>{displayName}</strong>
+                <strong>
+                  {displayName}
+                  {muted && (
+                    <span
+                      class="sh-dm-muted"
+                      role="img"
+                      aria-label={mutedLabel(c.muted_until as string)}
+                      title={mutedLabel(c.muted_until as string)}
+                    >🔕</span>
+                  )}
+                </strong>
                 <span class="sh-badge">
                   {c.type === 'group_dm'
                     ? `Group · ${c.member_count ?? peers.length + 1}`
@@ -192,7 +204,10 @@ export default function DmInboxPage() {
                 </time>
               )}
               {c.unread && c.unread > 0 ? (
-                <span class="sh-dm-unread" aria-label={`${c.unread} unread`}>
+                <span
+                  class={muted ? 'sh-dm-unread sh-dm-unread--muted' : 'sh-dm-unread'}
+                  aria-label={`${c.unread} unread`}
+                >
                   {c.unread > 99 ? '99+' : c.unread}
                 </span>
               ) : null}
@@ -212,9 +227,8 @@ const reload = () =>
       conversations.value = data
       // Re-sum the sidebar badge from the just-fetched payload so the
       // inbox and the badge can never drift while this page is open.
-      let sum = 0
-      for (const c of data ?? []) sum += Math.max(0, c.unread ?? 0)
-      dmUnreadTotal.value = sum
+      // Muted conversations keep their row count but stay out of it.
+      dmUnreadTotal.value = alertingUnread(data)
     })
     .catch(() => {
       /* noop — keep current list on transient failures */
