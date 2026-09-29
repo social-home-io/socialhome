@@ -33,6 +33,7 @@ from ..domain.conversation import (
     MESSAGE_TYPES,
     RemoteConversationMember,
 )
+from ..domain.dm_location import normalise_location_content
 from ..domain.events import (
     CommentAdded,
     CommentDeleted,
@@ -574,6 +575,20 @@ class FederationInboundService:
             return
         if msg_type not in MESSAGE_TYPES:
             msg_type = "text"
+        if msg_type == "location":
+            # Never trust the sender's rounding: re-validate and re-round
+            # (4-dp coords, coarse accuracy) before anything is stored,
+            # and refuse a malformed pin outright.
+            try:
+                content = normalise_location_content(content)
+            except ValueError as exc:
+                log.warning(
+                    "DM_MESSAGE %s from %s: malformed location refused: %s",
+                    message_id,
+                    event.from_instance,
+                    exc,
+                )
+                return
         recipients = tuple(p.get("recipient_user_ids") or ())
         if not await self._dm_message_in_scope(
             event, conv_id, message_id, sender_user_id, recipients

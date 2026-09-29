@@ -23,6 +23,11 @@ import { uploadWithProgress } from '@/components/UploadProgress'
 import { MediaAttachmentChip } from '@/components/MediaAttachmentChip'
 import { MessageContextSheet } from '@/components/MessageContextSheet'
 import { ReactionPicker } from '@/components/ReactionPicker'
+import { LocationPicker, type LocationDraft } from '@/components/LocationPicker'
+import { t } from '@/i18n/i18n'
+import { formatCoords, parseDmLocation, toDmLocationContent } from '@/utils/dmLocation'
+import { ComposerAttachMenu } from './ComposerAttachMenu'
+import { DmLocationMessage } from './DmLocationMessage'
 import { GroupInfoDialog } from './GroupInfoDialog'
 import { MuteButton } from './ConversationMute'
 import {
@@ -130,6 +135,9 @@ export function isAtLiveEdge(el: Pick<
  *  it into the round Send button — same slot, mutually exclusive
  *  actions, the chat-bar idiom every mainstream messenger uses. */
 const composerHasContent = signal(false)
+/** The "Share a location" picker (attach menu → Location). Its map is
+ *  the preview: nothing is sent until the user confirms there. */
+const locationPickerOpen = signal(false)
 
 /** Human-readable byte-size pill. Mirrors what the feed composer's
  *  upload UI shows so the DM composer reads in the same language. */
@@ -1212,11 +1220,7 @@ export default function DmThreadPage() {
     const fileName = `voice-note-${Date.now()}.${ext}`
     const file = new File([blob], fileName, { type: bareMime })
 
-    const tempId = `tmp-${
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-    }`
+    const tempId = newTempId()
     const myUid = currentUser.value?.user_id ?? ''
     const previewUrl = URL.createObjectURL(blob)
     const optimistic: Message = {
@@ -1438,11 +1442,7 @@ export default function DmThreadPage() {
     // they can re-type without losing whatever they were drafting
     // *next* (the old flow restored the failed draft into the
     // textarea, which clobbered an in-progress follow-up message).
-    const tempId = `tmp-${
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-    }`
+    const tempId = newTempId()
     const myUid = currentUser.value?.user_id ?? ''
     const optimistic: Message = {
       id: tempId,
@@ -1468,11 +1468,7 @@ export default function DmThreadPage() {
     // ``stickToBottom`` to true and clear the unread-since-scroll-up
     // counter so the jump-down CTA disappears for sends that
     // happened to fire while the user was reading history.
-    const scrollEl = messagesScrollRef.current
-    if (scrollEl) scrollEl.scrollTop = 0
-    stickToBottom.current = true
-    newSinceScrollUp.value = 0
-    if (unreadAnchor.value) unreadAnchor.value = null
+    pinToLatest()
 
     const draftAttachment = attachment
     form.reset()
@@ -1496,66 +1492,129 @@ export default function DmThreadPage() {
       requestAnimationFrame(() => autoResize(ta0))
     }
     replyTo.value = null
-    // Fire-and-forget the POST. Reconcile happens in the closure
-    // below — failures mark the optimistic bubble as
+    // Fire-and-forget the POST. Reconcile happens in
+    // ``dispatchSend`` — failures mark the optimistic bubble as
     // ``send_failed`` rather than restoring the draft into the
     // textarea, because the user may already be typing the next
     // message by the time the failure lands.
-    void (async () => {
-      try {
-        const res = await api.post(`/api/conversations/${convId}/messages`, {
-          content,
-          ...(reply_to_id ? { reply_to_id } : {}),
-          // Attachment metadata. Backend ignores these fields on a
-          // ``text`` send (``type`` defaults to "text"), so we only
-          // include them when an attachment is actually staged.
-          ...(draftAttachment ? {
-            type: draftAttachment.type,
-            media_url: draftAttachment.media_url,
-            file_name: draftAttachment.file_name,
-            mime_type: draftAttachment.mime_type,
-            file_size_bytes: draftAttachment.file_size_bytes,
-          } : {}),
-        }) as { id: string }
-        // Reconcile the optimistic row with the server-assigned id.
-        //  • If the WS broadcast already landed (real ``id`` in the
-        //    list) we just drop the temp.
-        //  • Otherwise we swap the temp's id for the real one so a
-        //    subsequent WS frame de-dupes naturally.
-        const list = messages.value
-        const realExists = list.some(m => m.id === res.id)
-        messages.value = realExists
-          ? list.filter(m => m.id !== tempId)
-          : list.map(m => m.id === tempId ? { ...m, id: res.id } : m)
-      } catch (err: unknown) {
-        // Mark the optimistic bubble as failed in-place — the
-        // composer is already free for the next message, so we
-        // can't shove the draft back into the textarea without
-        // clobbering whatever the user is typing now. The ⚠ on
-        // the bubble + the toast cover the failure mode.
-        const errMsg = (err as Error)?.message ?? String(err)
-        const isPairingError = errMsg.includes('MEDIA_REQUIRES_DIRECT_PAIRING')
-          || errMsg.toLowerCase().includes('directly-paired')
-        messages.value = messages.value.map(m =>
-          m.id === tempId
-            ? {
-                ...m,
-                send_failed: true,
-                send_failed_reason: isPairingError
-                  ? 'Pictures, videos and files can only be sent to '
-                    + "households you've paired with directly."
-                  : 'Send failed — tap to retry from a re-typed message.',
-              }
-            : m,
-        )
-        showToast(
-          isPairingError
-            ? 'Media only sends to directly-paired households.'
+    void dispatchSend(tempId, {
+      content,
+      ...(reply_to_id ? { reply_to_id } : {}),
+      // Attachment metadata. Backend ignores these fields on a
+      // ``text`` send (``type`` defaults to "text"), so we only
+      // include them when an attachment is actually staged.
+      ...(draftAttachment ? {
+        type: draftAttachment.type,
+        media_url: draftAttachment.media_url,
+        file_name: draftAttachment.file_name,
+        mime_type: draftAttachment.mime_type,
+        file_size_bytes: draftAttachment.file_size_bytes,
+      } : {}),
+    })
+  }
+
+  /** Mint the ``tmp-…`` id of an optimistic bubble. */
+  const newTempId = (): string => `tmp-${
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  }`
+
+  /** Pin the viewport to the latest message on a self-send (see the
+   *  long note in ``handleSend``). */
+  const pinToLatest = () => {
+    const scrollEl = messagesScrollRef.current
+    if (scrollEl) scrollEl.scrollTop = 0
+    stickToBottom.current = true
+    newSinceScrollUp.value = 0
+    if (unreadAnchor.value) unreadAnchor.value = null
+  }
+
+  /** POST a message whose optimistic bubble ``tempId`` is already on
+   *  screen, then reconcile it with the server row — or flip it to
+   *  ``send_failed`` and toast. */
+  const dispatchSend = async (
+    tempId: string,
+    body: Record<string, unknown>,
+  ): Promise<void> => {
+    try {
+      const res = await api.post(
+        `/api/conversations/${convId}/messages`, body,
+      ) as { id: string }
+      // Reconcile the optimistic row with the server-assigned id.
+      //  • If the WS broadcast already landed (real ``id`` in the
+      //    list) we just drop the temp.
+      //  • Otherwise we swap the temp's id for the real one so a
+      //    subsequent WS frame de-dupes naturally.
+      const list = messages.value
+      const realExists = list.some(m => m.id === res.id)
+      messages.value = realExists
+        ? list.filter(m => m.id !== tempId)
+        : list.map(m => m.id === tempId ? { ...m, id: res.id } : m)
+    } catch (err: unknown) {
+      // Mark the optimistic bubble as failed in-place — the
+      // composer is already free for the next message, so we
+      // can't shove the draft back into the textarea without
+      // clobbering whatever the user is typing now. The ⚠ on
+      // the bubble + the toast cover the failure mode.
+      const errMsg = (err as Error)?.message ?? String(err)
+      const isPairingError = errMsg.includes('MEDIA_REQUIRES_DIRECT_PAIRING')
+        || errMsg.toLowerCase().includes('directly-paired')
+      messages.value = messages.value.map(m =>
+        m.id === tempId
+          ? {
+              ...m,
+              send_failed: true,
+              send_failed_reason: isPairingError
+                ? 'Pictures, videos and files can only be sent to '
+                  + "households you've paired with directly."
+                : 'Send failed — tap to retry from a re-typed message.',
+            }
+          : m,
+      )
+      showToast(
+        isPairingError
+          ? 'Media only sends to directly-paired households.'
+          : body.type === 'location'
+            ? t('dms.location.send_failed', { error: errMsg })
             : `Send failed: ${errMsg}`,
-          'error',
-        )
-      }
-    })()
+        'error',
+      )
+    }
+  }
+
+  /** Attach menu → Location → picker confirmed. The picker's map was
+   *  the preview; this appends the optimistic location bubble and
+   *  sends it. Coordinates leave here rounded to 4 dp; the server
+   *  re-rounds and buckets the accuracy before storing / federating. */
+  const sendLocation = (draft: LocationDraft) => {
+    locationPickerOpen.value = false
+    const content = toDmLocationContent(draft)
+    const reply_to_id = replyTo.value?.id ?? null
+    const tempId = newTempId()
+    const optimistic: Message = {
+      id: tempId,
+      sender_user_id: currentUser.value?.user_id ?? '',
+      content,
+      type: 'location',
+      media_url: null,
+      file_name: null,
+      mime_type: null,
+      file_size_bytes: null,
+      media_sync_status: null,
+      reply_to_id,
+      deleted: false,
+      created_at: new Date().toISOString(),
+      edited_at: null,
+    }
+    messages.value = [...messages.value, optimistic]
+    pinToLatest()
+    replyTo.value = null
+    void dispatchSend(tempId, {
+      type: 'location',
+      content,
+      ...(reply_to_id ? { reply_to_id } : {}),
+    })
   }
 
   /** Resolve sender display name from the roster — falls back to the raw
@@ -1571,6 +1630,12 @@ export default function DmThreadPage() {
    *  Strips newlines and truncates to keep the bubble compact. */
   const quotePreview = (m: Message): string => {
     if (m.deleted) return '(message deleted)'
+    if (m.type === 'location') {
+      const loc = parseDmLocation(m.content)
+      return loc?.label
+        ? `${t('dms.location.quote')} · ${loc.label}`
+        : t('dms.location.quote')
+    }
     if (!m.content) return m.media_url ? '📎 Attachment' : ''
     const flat = m.content.replace(/\s+/g, ' ').trim()
     return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat
@@ -1623,8 +1688,15 @@ export default function DmThreadPage() {
    *  context sheet's "Copy" action. */
   const copyMessageText = async (m: Message) => {
     if (!m.content) return
+    // A location copies as readable text ("Dam · 52.3702, 4.8952"),
+    // never the raw JSON the message carries.
+    const loc = m.type === 'location' ? parseDmLocation(m.content) : null
+    if (m.type === 'location' && !loc) return
+    const text = loc
+      ? (loc.label ? `${loc.label} · ${formatCoords(loc)}` : formatCoords(loc))
+      : m.content
     try {
-      await navigator.clipboard.writeText(m.content)
+      await navigator.clipboard.writeText(text)
       showToast('Copied', 'success')
     } catch {
       showToast("Couldn't copy — clipboard access denied", 'error')
@@ -2124,6 +2196,9 @@ export default function DmThreadPage() {
                   </span>
                 </a>
               )}
+              {!m.deleted && m.type === 'location' && (
+                <DmLocationMessage content={m.content} />
+              )}
               {!m.deleted && m.type === 'audio' && m.media_url && (
                 <AudioBubble
                   src={m.media_url}
@@ -2157,7 +2232,8 @@ export default function DmThreadPage() {
                *  bubble). ``audio`` messages render their transcript
                *  inside :class:`AudioBubble` above, so we skip the
                *  caption render here to avoid doubling the text. */}
-              {(m.deleted || (m.content && m.type !== 'audio')) && (
+              {(m.deleted
+                || (m.content && m.type !== 'audio' && m.type !== 'location')) && (
                 <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
                   {m.deleted ? '(message deleted)' : m.content}
                 </p>
@@ -2356,21 +2432,17 @@ export default function DmThreadPage() {
           tabIndex={-1}
           onChange={handleAttachPicked}
         />
-        {/* Attach button — paperclip. Outside the input pill so it
+        {/* Attach menu — paperclip. Outside the input pill so it
          *  has its own thumb target separate from the textarea and
-         *  the inline emoji picker. ``aria-label`` carries the verb
-         *  rather than the icon name so screen readers say "Attach
-         *  a file". */}
-        <button
-          type="button"
-          class="sh-dm-attach-btn"
-          title="Attach a picture, video or file"
-          aria-label="Attach a picture, video or file"
-          disabled={pendingAttachment.value !== null || uploadingAttachment.value !== null}
-          onClick={() => attachInputRef.current?.click()}
-        >
-          <span aria-hidden="true">📎</span>
-        </button>
+         *  the inline emoji picker. Opens "Photo, video or file"
+         *  (the hidden input above) or "Location" (the picker). */}
+        <ComposerAttachMenu
+          fileDisabled={
+            pendingAttachment.value !== null || uploadingAttachment.value !== null
+          }
+          onPickFile={() => attachInputRef.current?.click()}
+          onPickLocation={() => { locationPickerOpen.value = true }}
+        />
         {/* Textarea + inline emoji picker. The emoji button sits
          *  inside the input pill on the right edge (WhatsApp / iMessage
          *  idiom): a small ghost-icon that doesn't claim a separate
@@ -2438,6 +2510,12 @@ export default function DmThreadPage() {
        *  popover positions itself absolutely against the input's
        *  bounding rect, not the parent. */}
       <EmojiAutocomplete />
+      <LocationPicker
+        open={locationPickerOpen.value}
+        submitLabel={t('location.send')}
+        onSubmit={sendLocation}
+        onClose={() => { locationPickerOpen.value = false }}
+      />
       {isGroupThread && threadInfo.value && (
         <GroupInfoDialog
           open={groupInfoOpen.value}

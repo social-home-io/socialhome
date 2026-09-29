@@ -32,6 +32,9 @@ export interface LocationMarker {
   sub_label?: string | null
   /** Presence colour dot class — e.g. "home" | "away" | "not_home". */
   state?: string
+  /** A place pin (a shared location, not a person): draw this glyph
+   *  in the pin instead of the label's initials. */
+  glyph?: string
 }
 
 /** Per-space display zone (§23.8.7). Drawn as a labelled circle on
@@ -57,6 +60,25 @@ export interface LocationMapProps {
   /** When true + no markers, shows a muted fallback pane instead of
    *  an empty map — keeps the layout stable on dashboards. */
   emptyLabel?: string
+  /** Pick mode: every click / tap on the map reports its coordinates,
+   *  and the empty-state pane is suppressed (an empty map *is* the
+   *  prompt). Used by :class:`LocationPicker`'s "pick on the map". */
+  onPick?: (lat: number, lon: number) => void
+  /** Accessible name for the map region. */
+  ariaLabel?: string
+}
+
+/** Escape text for the HTML strings Leaflet popups / icons take.
+ *  Labels and names can come from another household (a DM location
+ *  label, a remote member's display name) — never interpolate them
+ *  raw. */
+export function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 /** Deterministic palette colour from a string id, used when a zone
@@ -95,25 +117,30 @@ function _avatarHtml(m: LocationMarker): string {
   if (m.avatar_url) {
     return (
       `<div class="sh-map-pin" style="border-color: ${colour}">`
-      + `<img src="${m.avatar_url}" alt="" />`
+      + `<img src="${escapeHtml(m.avatar_url)}" alt="" />`
       + `</div>`
     )
   }
   return (
     `<div class="sh-map-pin" style="background: ${colour}">`
-    + `<span class="sh-map-pin__initials">${_initials(m.label)}</span>`
+    + `<span class="sh-map-pin__initials">${escapeHtml(m.glyph ?? _initials(m.label))}</span>`
     + `</div>`
   )
 }
 
 export function LocationMap({
   markers, zones, height = 320, emptyLabel = 'No locations to show.',
+  onPick, ariaLabel,
 }: LocationMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
   const zoneLayerRef = useRef<L.LayerGroup | null>(null)
   const [tileError, setTileError] = useState(false)
+  // Latest ``onPick`` in a ref so the one-time click binding below
+  // always calls the current callback without re-creating the map.
+  const onPickRef = useRef(onPick)
+  onPickRef.current = onPick
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -149,6 +176,9 @@ export function LocationMap({
     zoneLayerRef.current = L.layerGroup().addTo(map)
     layerRef.current = L.layerGroup().addTo(map)
     mapRef.current = map
+    map.on('click', (e: L.LeafletMouseEvent) => {
+      onPickRef.current?.(e.latlng.lat, e.latlng.lng)
+    })
 
     // Leaflet measures its container lazily — if the parent was
     // ``display:none`` on mount (e.g. a hidden tab) we need to
@@ -202,7 +232,7 @@ export function LocationMap({
         .bindPopup(
           // Tap-on-touch surface. Plain text keeps the popup small;
           // the legend below the map has the full detail row.
-          `<strong>${z.name}</strong>`,
+          `<strong>${escapeHtml(z.name)}</strong>`,
           { closeButton: false, autoPan: false },
         )
       circles.push(c)
@@ -240,8 +270,8 @@ export function LocationMap({
       })
       const pin = L.marker([m.lat, m.lon], { icon }).addTo(layer)
       pin.bindPopup(
-        `<strong>${m.label}</strong>`
-        + (m.sub_label ? `<br /><span>${m.sub_label}</span>` : ''),
+        `<strong>${escapeHtml(m.label)}</strong>`
+        + (m.sub_label ? `<br /><span>${escapeHtml(m.sub_label)}</span>` : ''),
       )
       if (m.accuracy_m && m.accuracy_m > 0) {
         L.circle([m.lat, m.lon], {
@@ -255,7 +285,10 @@ export function LocationMap({
     }
 
     if (usable.length === 1) {
-      map.setView([usable[0].lat, usable[0].lon], 14)
+      // In pick mode keep the user's zoom when they move the pin — a
+      // re-centre on every tap must not yank the map out from under them.
+      const zoom = onPickRef.current ? Math.max(map.getZoom(), 14) : 14
+      map.setView([usable[0].lat, usable[0].lon], zoom)
     } else if (usable.length > 1) {
       const bounds = L.latLngBounds(usable.map((m) => [m.lat, m.lon]))
       map.fitBounds(bounds.pad(0.3), { maxZoom: 15 })
@@ -267,13 +300,18 @@ export function LocationMap({
   )
 
   return (
-    <div class="sh-location-map" style={`height: ${height}px`}>
+    <div
+      class={'sh-location-map' + (onPick ? ' sh-location-map--pick' : '')}
+      style={`height: ${height}px`}
+      role={ariaLabel ? 'region' : undefined}
+      aria-label={ariaLabel}
+    >
       <div ref={containerRef} class="sh-location-map__canvas" />
       {tileError ? (
         <div class="sh-map-error">
           {TILE_ERROR_MESSAGE}
         </div>
-      ) : !hasMarkers && (
+      ) : !hasMarkers && !onPick && (
         <div class="sh-location-map__empty sh-muted">
           {emptyLabel}
         </div>

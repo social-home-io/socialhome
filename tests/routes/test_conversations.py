@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -509,6 +511,46 @@ async def test_send_empty_message_422(client):
         headers=_auth(client._admin_token),
     )
     assert resp.status == 422
+
+
+async def test_send_location_message_is_rounded_and_malformed_422(client):
+    """A location DM is stored + listed with 4-dp coords; junk is a 422."""
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    resp = await client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={
+            "type": "location",
+            "content": json.dumps(
+                {"lat": 52.370216789, "lon": 4.895167912, "accuracy_m": 8}
+            ),
+        },
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 201
+    bad = await client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"type": "location", "content": "somewhere nice"},
+        headers=_auth(client._admin_token),
+    )
+    assert bad.status == 422
+    listed = await client.get(
+        f"/api/conversations/{conv_id}/messages",
+        headers=_auth(client._admin_token),
+    )
+    rows = await listed.json()
+    assert len(rows) == 1
+    assert rows[0]["type"] == "location"
+    assert json.loads(rows[0]["content"]) == {
+        "lat": 52.3702,
+        "lon": 4.8952,
+        "label": None,
+        "accuracy_m": 25,
+    }
 
 
 # ── DM reliability (§12.5) ─────────────────────────────────────────────────

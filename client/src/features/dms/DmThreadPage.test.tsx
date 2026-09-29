@@ -146,6 +146,23 @@ vi.mock('@/api', async () => ({
   },
 }))
 
+// Leaflet can't run under jsdom; the location surfaces only need a
+// stand-in that reports what it was given and lets a test "tap" it.
+vi.mock('@/components/LocationMap', () => ({
+  LocationMap: ({ markers, onPick }: {
+    markers: Array<{ lat: number, lon: number }>
+    onPick?: (lat: number, lon: number) => void
+  }) => (
+    <div data-testid="map" data-marker-count={markers.length}>
+      {onPick && (
+        <button type="button" onClick={() => onPick(48.858370123, 2.294481987)}>
+          tap-map
+        </button>
+      )}
+    </div>
+  ),
+}))
+
 vi.mock('@/ws', () => ({
   ws: { on: vi.fn(() => () => {}), send: vi.fn() },
 }))
@@ -1040,5 +1057,59 @@ describe('DmThreadPage — mute in the header', () => {
     const { findByLabelText } = render(<DmThreadPage />)
     const btn = await findByLabelText(/^Muted until .* — select to unmute$/, {}, { timeout: RENDER_WAIT })
     expect(btn.textContent).toBe('🔕')
+  })
+})
+
+
+describe('DmThreadPage — location messages', () => {
+  const conv = {
+    id: 'conv-test', type: 'group_dm', name: 'Trip', last_message_at: null,
+    members: [{ user_id: 'u-bob', username: 'bob', display_name: 'Bob', picture_url: null }],
+    member_count: 3, unread: 0, last_read_at: null,
+  }
+  const locRow = (content: string) => ({
+    id: 'msg-loc', sender_user_id: 'u-bob', content, type: 'location',
+    media_url: null, file_name: null, mime_type: null, file_size_bytes: null,
+    reply_to_id: null, reactions: [], deleted: false,
+    created_at: '2026-05-17T13:00:42+00:00', edited_at: null,
+  })
+
+  it('renders a shared location as a card, never as raw JSON', async () => {
+    wireApiMock({
+      conversations: [conv],
+      messages: [locRow('{"lat":52.3702,"lon":4.8952,"label":"Dam square","accuracy_m":50}')],
+    })
+    const { render } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { container, findByText } = render(<DmThreadPage />)
+    await findByText('📍 Dam square', {}, { timeout: RENDER_WAIT })
+    expect(container.textContent).not.toContain('"lat"')
+    const link = container.querySelector('a.sh-location-post-open') as HTMLAnchorElement
+    expect(link.href).toContain('mlat=52.3702')
+  })
+
+  it('shares a location picked on the map from the attach menu', async () => {
+    wireApiMock({ conversations: [conv], messages: [] })
+    apiPost.mockResolvedValue({ id: 'srv-loc' })
+    const { render, fireEvent, waitFor } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { container, getByRole, getByText, findByRole } = render(<DmThreadPage />)
+    fireEvent.click(await findByRole('button', { name: 'Attach' }, { timeout: RENDER_WAIT }))
+    fireEvent.click(getByRole('menuitem', { name: /Location/ }))
+    fireEvent.click(getByText(/Pick a spot on the map/))
+    fireEvent.click(getByText('tap-map'))
+    fireEvent.click(getByRole('button', { name: 'Send location' }))
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/conversations/conv-test/messages',
+        {
+          type: 'location',
+          content: '{"lat":48.8584,"lon":2.2945,"label":null,"accuracy_m":null}',
+        },
+      )
+    })
+    // The optimistic bubble is the card, not the JSON.
+    expect(container.textContent).toContain('48.8584, 2.2945')
+    expect(container.textContent).not.toContain('"lat"')
   })
 })

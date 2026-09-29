@@ -427,6 +427,58 @@ Implementation pointers:
 - `client/src/components/AudioBubble.tsx` — inline `<audio>` +
   transcript line
 
+## Location messages
+
+A `type: "location"` message shares a one-shot pin (attach menu →
+Location in the SPA, in 1:1 and group conversations alike). It rides
+the ordinary `DM_MESSAGE` — no new event type — with the pin as a JSON
+object in `content`, the same `{lat, lon, label}` shape as a location
+post plus an optional accuracy:
+
+```json
+{"lat": 52.3702, "lon": 4.8952, "label": "Marina", "accuracy_m": 50}
+```
+
+- `lat` ∈ [-90, 90], `lon` ∈ [-180, 180], finite numbers — **rounded to
+  4 decimal places** (~11 m).
+- `accuracy_m` — optional; rounded *up* to a coarse bucket (25, 50, 100,
+  250, 500, 1000, 2500, 5000, 10000 m; larger clamps to 10000) so it
+  never claims more precision than the fix had.
+- `label` — optional, trimmed, control characters stripped, max 80
+  characters; blank becomes `null`. Other keys are dropped.
+
+`socialhome/domain/dm_location.py` (`normalise_location_content`) is the
+single authority, and it runs on **every** path before a row is stored
+or anything leaves the household: the local send and edit
+(`DmService`), an inbound `DM_MESSAGE` (first delivery and edit re-fan)
+and each `DM_HISTORY_CHUNK` row. A receiver never trusts the sender's
+rounding: it re-rounds, and refuses a malformed pin outright (WARNING;
+nothing stored, no conversation created; a malformed history row is
+skipped). The pin travels only inside the encrypted payload, like all
+DM content. The bell row / push reads "*X* shared a location" — title
+only, no coordinates or label — and search indexes the label only.
+
+Older peers already accept `location` as a message type; one that
+predates the card renders the JSON as text, so no capability bump is
+needed.
+
+```mermaid
+sequenceDiagram
+    participant SPA as Sender SPA
+    participant A as Sender household
+    participant B as Receiver household
+    SPA->>A: POST /api/conversations/{id}/messages<br/>{type: location, content: {lat, lon, …}}
+    A->>A: normalise (4 dp, accuracy bucket, label cap) → store
+    A->>B: DM_MESSAGE (content inside encrypted_payload)
+    B->>B: re-normalise (reject malformed) → store
+    B-->>B: bell / push "X shared a location" (title only)
+```
+
+Tests: `tests/domain/test_dm_location.py`,
+`tests/protocol/test_dm_location_precision.py` (decrypts the outbound
+envelope and asserts no raw precision in it or the DB; inbound re-round
+and refusal).
+
 ## Contact requests
 
 `DM_CONTACT_REQUEST` lets a user on HFS A ask a user on HFS B for

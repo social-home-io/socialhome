@@ -34,6 +34,7 @@ from ..domain.conversation import (
     RemoteConversationMember,
     mute_until_for,
 )
+from ..domain.dm_location import normalise_location_content
 from ..domain.events import (
     DmConversationCreated,
     DmMessageCreated,
@@ -617,6 +618,12 @@ class DmService(VisibilityMixin):
             raise ValueError(f"message content exceeds {MAX_DM_LENGTH} chars")
         if is_media and not media_url:
             raise ValueError(f"{type!r} messages require ``media_url``")
+        if type == "location":
+            # Structured pin — validated and rounded (4-dp coords, coarse
+            # accuracy bucket) here, before it is stored, published on the
+            # bus or federated, so raw device precision never leaves this
+            # call (CLAUDE.md GPS rule).
+            content = normalise_location_content(content)
         # Federated-only rule (operator decision, issue #319 paragraph 5):
         # media may only be shared with peers we have a direct confirmed
         # pairing with — never via the multi-hop DM_RELAY path used for
@@ -923,6 +930,8 @@ class DmService(VisibilityMixin):
             raise ValueError("content must not be empty")
         if len(new_content) > MAX_DM_LENGTH:
             raise ValueError(f"message content exceeds {MAX_DM_LENGTH} chars")
+        if msg.type == "location":
+            new_content = normalise_location_content(new_content)
         await self._convos.edit_message(message_id, new_content)
         # Receiver upserts on message_id (save_message ON CONFLICT UPDATE),
         # so a re-send of DM_MESSAGE with updated content + edited_at is

@@ -13,6 +13,10 @@ beforeAll(() => {
 // Leaflet manipulates the DOM directly which is heavy under jsdom.
 // The smoke test only validates the module contract: exports a
 // component, renders a container, and handles the empty state.
+/** Handlers the component registered via ``map.on(...)``. */
+const mapHandlers: Record<string, (e: unknown) => void> = {}
+/** Every popup HTML string handed to a marker. */
+const popups: string[] = []
 vi.mock('leaflet', () => ({
   default: {
     map: vi.fn(() => ({
@@ -20,10 +24,23 @@ vi.mock('leaflet', () => ({
       invalidateSize: vi.fn(),
       setView: vi.fn(),
       fitBounds: vi.fn(),
+      getZoom: vi.fn(() => 4),
+      on: vi.fn((name: string, fn: (e: unknown) => void) => {
+        mapHandlers[name] = fn
+      }),
     })),
     tileLayer: vi.fn(() => ({ addTo: vi.fn() })),
-    layerGroup: vi.fn(() => ({ addTo: vi.fn(), clearLayers: vi.fn() })),
-    marker: vi.fn(() => ({ addTo: vi.fn(), bindPopup: vi.fn() })),
+    layerGroup: vi.fn(() => {
+      const g = { addTo: vi.fn(() => g), clearLayers: vi.fn() }
+      return g
+    }),
+    marker: vi.fn(() => {
+      const m = {
+        addTo: vi.fn(() => m),
+        bindPopup: vi.fn((html: string) => { popups.push(html) }),
+      }
+      return m
+    }),
     circle: vi.fn(() => ({ addTo: vi.fn() })),
     divIcon: vi.fn(),
     latLngBounds: vi.fn(() => ({ pad: vi.fn(() => ({})) })),
@@ -45,6 +62,8 @@ vi.mock('@/utils/mapTiles', async (importOriginal) => ({
 }))
 
 beforeEach(() => {
+  popups.length = 0
+  for (const k of Object.keys(mapHandlers)) delete mapHandlers[k]
   addTileLayer.mockReset()
   addTileLayer.mockResolvedValue(undefined)
 })
@@ -126,5 +145,44 @@ describe('LocationMap', () => {
     resolveTiles()
     await Promise.resolve()
     expect(container.textContent).toBe('')
+  })
+
+  it('escapes a marker label before it reaches the popup HTML', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        markers={[{
+          id: 'x', lat: 1, lon: 2,
+          label: '<img src=x onerror=alert(1)>',
+          sub_label: '"quoted" & <b>',
+        }]}
+      />,
+    )
+    expect(popups).toHaveLength(1)
+    expect(popups[0]).not.toContain('<img')
+    expect(popups[0]).toContain('&lt;img src=x onerror=alert(1)&gt;')
+    expect(popups[0]).toContain('&quot;quoted&quot; &amp; &lt;b&gt;')
+  })
+
+  it('reports map clicks in pick mode and hides the empty pane', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const onPick = vi.fn()
+    const { queryByText } = render(
+      <LocationMap markers={[]} emptyLabel="Nothing here yet." onPick={onPick} />,
+    )
+    expect(queryByText('Nothing here yet.')).toBeNull()
+    mapHandlers.click({ latlng: { lat: 52.1, lng: 4.2 } })
+    expect(onPick).toHaveBeenCalledWith(52.1, 4.2)
+  })
+})
+
+describe('escapeHtml', () => {
+  it('escapes the five HTML-significant characters', async () => {
+    const { escapeHtml } = await import('./LocationMap')
+    expect(escapeHtml(`<a href="x">'&'</a>`)).toBe(
+      '&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;',
+    )
   })
 })
