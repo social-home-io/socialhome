@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import MUTED_FOREVER, ConversationType
+from socialhome.domain.events import DmMessageCreated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -859,3 +861,93 @@ async def test_send_skips_space_session_peer(stack):
     from socialhome.domain.federation import FederationEventType
 
     assert [s for s in fed.sent if s["type"] == FederationEventType.DM_MESSAGE] == []
+
+
+# ── Location messages ─────────────────────────────────────────────────────
+
+
+async def test_send_location_rounds_before_storing(stack):
+    """A location message is stored with 4-dp coords + a coarse accuracy."""
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    msg = await stack.dm_svc.send_message(
+        dm.id,
+        sender_username="anna",
+        type="location",
+        content=json.dumps(
+            {
+                "lat": 52.370216789,
+                "lon": 4.895167912,
+                "accuracy_m": 7.3,
+                "label": " Dam ",
+            },
+        ),
+    )
+    assert json.loads(msg.content) == {
+        "lat": 52.3702,
+        "lon": 4.8952,
+        "label": "Dam",
+        "accuracy_m": 25,
+    }
+    rows = await stack.dm_svc.list_messages(dm.id, reader_username="bob")
+    assert rows[0].content == msg.content
+    assert "52.370216789" not in rows[0].content
+
+
+async def test_send_location_rejects_malformed(stack):
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    for bad in ("", "somewhere", '{"lat": 91, "lon": 0}'):
+        with pytest.raises(ValueError):
+            await stack.dm_svc.send_message(
+                dm.id, sender_username="anna", type="location", content=bad
+            )
+    assert await stack.dm_svc.list_messages(dm.id, reader_username="anna") == []
+
+
+async def test_location_notification_event_carries_rounded_content(stack):
+    """The bus event every consumer (WS, notifications) reads is rounded."""
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    seen: list[DmMessageCreated] = []
+
+    async def _grab(ev: DmMessageCreated) -> None:
+        seen.append(ev)
+
+    stack.dm_svc._bus.subscribe(DmMessageCreated, _grab)
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    await stack.dm_svc.send_message(
+        dm.id,
+        sender_username="anna",
+        type="location",
+        content='{"lat": 1.123456789, "lon": 2.987654321}',
+    )
+    assert seen and seen[0].message_type == "location"
+    assert json.loads(seen[0].content)["lat"] == 1.1235
+    assert "1.123456789" not in seen[0].content
+
+
+async def test_edit_location_rounds_and_rejects_malformed(stack):
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    m = await stack.dm_svc.send_message(
+        dm.id,
+        sender_username="anna",
+        type="location",
+        content='{"lat": 1, "lon": 2}',
+    )
+    await stack.dm_svc.edit_message(
+        m.id,
+        editor_username="anna",
+        new_content='{"lat": 10.123456, "lon": 20.987654}',
+    )
+    rows = await stack.dm_svc.list_messages(dm.id, reader_username="anna")
+    assert json.loads(rows[0].content)["lat"] == 10.1235
+    assert "10.123456" not in rows[0].content
+    with pytest.raises(ValueError):
+        await stack.dm_svc.edit_message(
+            m.id, editor_username="anna", new_content="plain text"
+        )

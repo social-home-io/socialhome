@@ -64,5 +64,11 @@
   "dms.mute.on": "Shown in the group info dialog when the chat isn't muted.",
   "dms.mute.toast_muted": "Toast after muting a chat.",
   "dms.mute.toast_unmuted": "Toast after unmuting a chat.",
-  "dms.mute.error": "Toast when the mute change failed (network / server)."
+  "dms.mute.error": "Toast when the mute change failed (network / server).",
+  "location.share_title": "Title of the location picker dialog (chat and feed composer).",
+  "location.pick_on_map": "Button: choose a place by tapping a map instead of using GPS.",
+  "location.precision_note": "Privacy reassurance: coordinates are rounded to 4 decimals (~11 m).",
+  "location.accuracy": "Shown under a shared pin; {m} is a coarse accuracy radius in metres.",
+  "dms.attach.menu": "Paperclip button in the chat composer that opens the attach menu.",
+  "dms.location.send_failed": "Toast; {error} is a technical error message."
 }

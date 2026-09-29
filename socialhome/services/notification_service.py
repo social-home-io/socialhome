@@ -484,7 +484,12 @@ class NotificationService:
         """
         if not event.recipient_user_ids:
             return
-        title = f"{event.sender_display_name} messaged you"
+        # A shared location says so in the title — never where (§25.3:
+        # no coordinates, no label, no body).
+        if event.message_type == "location":
+            title = f"{event.sender_display_name} shared a location"
+        else:
+            title = f"{event.sender_display_name} messaged you"
         link = f"/dms/{event.conversation_id}"
         muted = await self._muted_usernames(event.conversation_id)
         for recipient_id in event.recipient_user_ids:

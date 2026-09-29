@@ -658,6 +658,38 @@ async def test_dm_message_creates_in_app_row_and_push(stack):
     assert not hasattr(payload, "body")
 
 
+async def test_dm_location_message_title_only_no_coordinates(stack):
+    """A shared location notifies as "X shared a location" — title only,
+    and no coordinate or label ever reaches the bell row or the push."""
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    fake = _CapturingPush()
+    stack.notif_svc.attach_push_service(fake)
+
+    await stack.bus.publish(
+        DmMessageCreated(
+            conversation_id="c-loc",
+            message_id="m-loc",
+            sender_user_id=a.user_id,
+            sender_display_name="Anna",
+            recipient_user_ids=(b.user_id,),
+            content='{"lat":52.3702,"lon":4.8952,"label":"Secret spot","accuracy_m":25}',
+            message_type="location",
+        )
+    )
+
+    rows = await stack.notif_repo.list(b.user_id)
+    assert len(rows) == 1
+    assert rows[0].title == "Anna shared a location"
+    assert fake.calls
+    _, payload = fake.calls[0]
+    assert payload.title == "Anna shared a location"
+    assert not hasattr(payload, "body")
+    flat = repr(rows[0]) + repr(payload)
+    for leak in ("52.3702", "4.8952", "Secret spot"):
+        assert leak not in flat
+
+
 async def test_dm_message_creates_one_row_per_recipient(stack):
     """Group DMs fan one notification row to each recipient (and push
     too) so every member gets their own bell badge — bell counts

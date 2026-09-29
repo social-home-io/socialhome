@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ....domain.conversation import MESSAGE_TYPES, ConversationMessage
+from ....domain.dm_location import normalise_location_content
 from ....domain.events import DmHistorySyncComplete
 from ....domain.federation import FederationEventType
 from ...dm_scope import DmScope, refuse
@@ -175,16 +176,28 @@ def _dict_to_message(raw: dict, conversation_id: str) -> ConversationMessage | N
     msg_type = str(raw.get("type") or "text")
     if msg_type not in MESSAGE_TYPES:
         msg_type = "text"
+    content = str(raw.get("content") or "")
+    deleted = bool(raw.get("deleted") or False)
+    if msg_type == "location" and not deleted:
+        # Same rule as a live ``DM_MESSAGE``: re-round the pin, and skip a
+        # malformed one rather than store raw or unparseable coordinates.
+        try:
+            content = normalise_location_content(content)
+        except ValueError as exc:
+            log.warning(
+                "DM_HISTORY_CHUNK: malformed location %s skipped: %s", msg_id, exc
+            )
+            return None
     return ConversationMessage(
         id=msg_id,
         conversation_id=conversation_id,
         sender_user_id=sender_user_id,
-        content=str(raw.get("content") or ""),
+        content=content,
         created_at=_parse_iso(raw.get("created_at")),
         type=msg_type,
         media_url=raw.get("media_url"),
         reply_to_id=raw.get("reply_to_id"),
-        deleted=bool(raw.get("deleted") or False),
+        deleted=deleted,
         edited_at=_parse_iso(raw.get("edited_at")) if raw.get("edited_at") else None,
     )
 

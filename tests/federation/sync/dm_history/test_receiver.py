@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 
@@ -92,6 +93,45 @@ async def test_chunk_persists_each_message():
     )
     assert saved == 2
     assert {m.id for m in repo.saved} == {"m-0", "m-1"}
+
+
+async def test_chunk_rounds_location_and_skips_malformed():
+    """History catch-up applies the same GPS rule as a live DM_MESSAGE."""
+    repo = _FakeConvRepo()
+    r = DmHistoryReceiver(
+        conversation_repo=repo, user_repo=_FakeUserRepo(), bus=EventBus()
+    )
+    base = {"sender_user_id": "u-x", "type": "location"}
+    saved = await r.handle_chunk(
+        _event(
+            FederationEventType.DM_HISTORY_CHUNK,
+            "peer-a",
+            {
+                "conversation_id": "c-1",
+                "messages": [
+                    {
+                        **base,
+                        "id": "m-raw",
+                        "content": '{"lat": 48.858370123, "lon": 2.294481987,'
+                        ' "accuracy_m": 3}',
+                    },
+                    {**base, "id": "m-bad", "content": "the eiffel tower"},
+                    {**base, "id": "m-gone", "content": "", "deleted": True},
+                ],
+                "is_last": True,
+            },
+        )
+    )
+    assert saved == 2
+    by_id = {m.id: m for m in repo.saved}
+    assert set(by_id) == {"m-raw", "m-gone"}
+    assert json.loads(by_id["m-raw"].content) == {
+        "lat": 48.8584,
+        "lon": 2.2945,
+        "label": None,
+        "accuracy_m": 25,
+    }
+    assert by_id["m-gone"].deleted is True
 
 
 async def test_duplicate_chunk_is_idempotent():

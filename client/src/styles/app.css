@@ -3947,7 +3947,7 @@ body.sh-dm-thread-open .sh-messages {
  * the user a thumb target that doesn't share with the textarea
  * pill. Same 44 px round shape as the mic⇄send slot so the row
  * reads as a balanced pair of round buttons flanking the pill. */
-.sh-thread > .sh-composer > .sh-dm-attach-btn {
+.sh-thread > .sh-composer .sh-dm-attach-btn {
   width: 44px;
   height: 44px;
   flex: 0 0 auto;
@@ -3963,15 +3963,92 @@ body.sh-dm-thread-open .sh-messages {
   justify-content: center;
   transition: background var(--sh-transition-fast), color var(--sh-transition-fast);
 }
-.sh-thread > .sh-composer > .sh-dm-attach-btn:hover:not(:disabled),
-.sh-thread > .sh-composer > .sh-dm-attach-btn:focus-visible {
+.sh-thread > .sh-composer .sh-dm-attach-btn:hover:not(:disabled),
+.sh-thread > .sh-composer .sh-dm-attach-btn:focus-visible {
   background: color-mix(in srgb, var(--sh-primary) 10%, transparent);
   color: var(--sh-primary);
   outline: none;
 }
-.sh-thread > .sh-composer > .sh-dm-attach-btn:disabled {
+.sh-thread > .sh-composer .sh-dm-attach-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+/* Attach menu (paperclip → "Photo, video or file" / "Location").
+ * Opens upward: the composer sits at the bottom of the thread. */
+.sh-dm-attach {
+  position: relative;
+  flex: 0 0 auto;
+}
+.sh-dm-attach-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sh-space-xs);
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-md);
+}
+.sh-dm-attach-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 44px;
+  padding: 0 var(--sh-space-md);
+  border: none;
+  border-radius: var(--sh-radius-md);
+  background: transparent;
+  color: var(--sh-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sh-dm-attach-menu__item:hover:not(:disabled),
+.sh-dm-attach-menu__item:focus-visible {
+  background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+}
+.sh-dm-attach-menu__item:hover:not(:disabled) { outline: none; }
+.sh-dm-attach-menu__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sh-thread > .sh-composer .sh-dm-attach-btn[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--sh-primary) 10%, transparent);
+  color: var(--sh-primary);
+}
+/* Location message bubble. The bubble is content-sized, so the map
+ * needs an explicit width or it collapses to the meta line's width. */
+.sh-dm-location {
+  width: min(300px, 62vw);
+  max-width: 100%;
+  margin-bottom: 6px;
+}
+.sh-dm-location .sh-location-post-meta {
+  row-gap: 2px;
+}
+/* ``.sh-message strong`` styles the sender-name eyebrow (mono, caps,
+ * primary); the pin's label is content, not chrome. */
+.sh-message .sh-dm-location .sh-location-post-label {
+  display: inline;
+  font: 600 var(--sh-font-size-sm) / 1.3 var(--sh-font-family, inherit);
+  letter-spacing: normal;
+  text-transform: none;
+  color: inherit;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.sh-message--mine .sh-dm-location .sh-muted,
+.sh-message--mine .sh-dm-location-unreadable {
+  color: rgba(255, 255, 255, 0.85);
+}
+.sh-message--mine .sh-dm-location .sh-location-map {
+  border-color: rgba(255, 255, 255, 0.35);
 }
 /* Pre-send attachment preview. Sits above the composer between the
  * reply-quote chip (if any) and the input row so the user can
@@ -13531,6 +13608,33 @@ a.sh-welcome-card:hover {
   gap: var(--sh-space-sm);
   padding: var(--sh-space-md) 0;
   text-align: center;
+}
+.sh-location-picker-note {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-location-picker-coords {
+  margin: 0;
+  font-size: var(--sh-font-size-xs);
+}
+.sh-location-picker-coords__value {
+  font-family: var(--sh-font-family-mono, monospace);
+}
+.sh-location-picker-repin {
+  align-self: flex-start;
+  min-height: 36px;
+  padding: 0;
+}
+.sh-location-picker-error {
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  border: 1px solid color-mix(in srgb, var(--sh-danger, #dc2626) 45%, transparent);
+  background: color-mix(in srgb, var(--sh-danger, #dc2626) 10%, transparent);
+  font-size: var(--sh-font-size-sm);
+}
+/* Pick mode: the map is the control — a crosshair says "tap here". */
+.sh-location-map--pick .leaflet-container {
+  cursor: crosshair;
 }
 
 /* Slack-style ``:shortcode`` autocomplete shown as the user types. */

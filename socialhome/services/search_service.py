@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 
+from ..domain.dm_location import parse_location_content
 from ..domain.events import (
     CommentAdded,
     DmMessageCreated,
@@ -144,6 +145,13 @@ class SearchService:
         Skips empty bodies so file-only DMs don't create empty hits.
         """
         body = (event.content or "").strip()
+        if event.message_type == "location":
+            # Index the pin's label only — the JSON (and its coordinates)
+            # is not searchable text.
+            try:
+                body = parse_location_content(body).label or ""
+            except ValueError:
+                body = ""
         if not body:
             return
         await self._repo.upsert(

@@ -198,6 +198,35 @@ async def test_dm_message_is_indexed_with_scope_message(env):
     assert hits[0].ref_id == "m-1"
 
 
+async def test_location_dm_indexes_label_not_coordinates(env):
+    from socialhome.domain.events import DmMessageCreated
+
+    svc, bus, _ = env
+    for mid, content in (
+        (
+            "m-loc",
+            '{"lat":52.3702,"lon":4.8952,"label":"Harbour cafe","accuracy_m":null}',
+        ),
+        ("m-nolabel", '{"lat":1.5,"lon":2.5,"label":null,"accuracy_m":null}'),
+        ("m-bad", "not json"),
+    ):
+        await bus.publish(
+            DmMessageCreated(
+                conversation_id="c-1",
+                message_id=mid,
+                sender_user_id="u1",
+                sender_display_name="Anna",
+                recipient_user_ids=("u2",),
+                content=content,
+                message_type="location",
+            )
+        )
+    hits = await svc.search("harbour")
+    assert [h.ref_id for h in hits] == ["m-loc"]
+    assert await svc.search("52.3702") == []
+    assert await svc.search("lat") == []
+
+
 async def test_empty_dm_message_not_indexed(env):
     from socialhome.domain.events import DmMessageCreated
 
