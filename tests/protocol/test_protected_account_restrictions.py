@@ -103,7 +103,17 @@ async def hh(aiohttp_client, tmp_dir):
         await db.enqueue(
             "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
             "VALUES(?,?,?,?)",
-            (f"t-{name}", uid, "t", sha256_token_hash(f"{name}-tok")),
+            (f"t-{name}", uid, "web", sha256_token_hash(f"{name}-tok")),
+        )
+        # A password sign-in session (what the platform login mints): it
+        # survives protection, unlike a personal API token.
+        await db.enqueue(
+            "INSERT INTO platform_users(username, display_name) VALUES(?, ?)",
+            (name, name.title()),
+        )
+        await db.enqueue(
+            "INSERT INTO platform_tokens(token_id, username, token_hash) VALUES(?,?,?)",
+            (f"t-{name}", name, sha256_token_hash(f"{name}-tok")),
         )
     r = await tc.post("/api/spaces", json={"name": "Home"}, headers=_h("admin-tok"))
     assert r.status == 201, await r.text()

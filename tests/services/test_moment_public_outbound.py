@@ -248,6 +248,9 @@ class _ProtectedCp:
     def __init__(self, protected: set[str]) -> None:
         self._protected = protected
 
+    def register_gate(self, gate):
+        pass
+
     async def is_restricted(self, user_id, capability):
         return user_id in self._protected
 

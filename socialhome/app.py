@@ -2131,6 +2131,8 @@ def create_app(config: Config | None = None) -> web.Application:
     # §CP.R: every service that owns a surface a protected account may not
     # use (bazaar, public spaces, public moments / links, API tokens,
     # calendar feeds) checks it through ChildProtectionService.
+    # DMs and notifications enforce guardian blocks (§CP.F2) through the
+    # same wiring (the inbound + history-sync halves attach at startup).
     for gated in (
         user_service,
         space_service,
@@ -2140,6 +2142,9 @@ def create_app(config: Config | None = None) -> web.Application:
         highlight_publication_service,
         moment_public_service,
         moment_public_outbound,
+        moment_public_signaling_handler,
+        dm_service,
+        notification_service,
     ):
         gated.attach_child_protection(child_protection_service)
     # Public space-content relay (Phase 5a2) is constructed in
@@ -2909,6 +2914,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # frames to local participants when the full bytes for a
         # cross-household media DM land.
         fed.inbound_service.attach_realtime(realtime_service)
+        # §CP.F2: guardian blocks on inbound DMs and DM history sync.
+        fed.inbound_service.attach_child_protection(child_protection_service)
+        app[K.dm_history_receiver_key].attach_child_protection(child_protection_service)
         # Personal calendar federation (§23.60). Cross-household invites
         # ride on regular send_event envelopes; attendee → instance
         # routing happens inside the service via the user/federation
@@ -3013,6 +3021,8 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         federation_service.attach_call_signaling(call_signaling)
         call_signaling.attach_push_service(push_service)
+        # §CP.F2: guardian blocks hold for calls as for DMs.
+        call_signaling.attach_child_protection(child_protection_service)
         app[K.call_signaling_service_key] = call_signaling
         app[K.call_repo_key] = repos.call
 

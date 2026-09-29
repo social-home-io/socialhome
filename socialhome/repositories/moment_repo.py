@@ -30,6 +30,7 @@ from typing import Protocol, runtime_checkable
 from ..db import AsyncDatabase
 from ..domain.moment import Moment, MomentReaction, extract_hashtags
 from .base import row_to_dict, rows_to_dicts
+from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 
 
 @runtime_checkable
@@ -262,7 +263,8 @@ class SqliteMomentRepo:
         the cursor.
 
         Visibility:
-        * Author is not on the viewer's :table:`user_blocks`.
+        * Author is not on the viewer's :table:`user_blocks`, and no
+          guardian block (§CP.F2) separates the two.
         * EITHER the moment is < 24 h old, OR the viewer follows the
           author (then up to 7 d, the absolute ``expires_at``).
         * The row's ``hop_count`` is ≤ the viewer's ``max_hops``
@@ -279,12 +281,13 @@ class SqliteMomentRepo:
         # own moments.
         capped_hops = max(1, min(int(max_hops), 3))
         rows = await self._db.fetchall(
-            """
+            f"""
             SELECT m.* FROM moments AS m
              WHERE m.author_user_id NOT IN (
                  SELECT blocked_user_id FROM user_blocks
                   WHERE blocker_user_id = ?
              )
+               AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
                AND (
                  (julianday('now') - julianday(m.created_at)) * 24 < 24
                  OR EXISTS (
@@ -307,6 +310,8 @@ class SqliteMomentRepo:
              LIMIT ?
             """,
             (
+                viewer_user_id,
+                viewer_user_id,
                 viewer_user_id,
                 viewer_user_id,
                 capped_hops,
@@ -529,7 +534,7 @@ class SqliteMomentRepo:
         """
         limit = max(1, min(int(limit), 50))
         rows = await self._db.fetchall(
-            """
+            f"""
             SELECT mh.tag AS tag, COUNT(*) AS n
               FROM moment_hashtags AS mh
               JOIN moments AS m ON m.id = mh.moment_id
@@ -537,6 +542,7 @@ class SqliteMomentRepo:
                  SELECT blocked_user_id FROM user_blocks
                   WHERE blocker_user_id = ?
              )
+               AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
                AND (
                  (julianday('now') - julianday(m.created_at)) * 24 < 24
                  OR EXISTS (
@@ -551,7 +557,7 @@ class SqliteMomentRepo:
              ORDER BY n DESC, mh.tag ASC
              LIMIT ?
             """,
-            (viewer_user_id, viewer_user_id, limit),
+            (viewer_user_id, viewer_user_id, viewer_user_id, viewer_user_id, limit),
         )
         return [(r["tag"], int(r["n"])) for r in rows]
 

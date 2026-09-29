@@ -119,6 +119,7 @@ from .inbound_media_store import (
     publish_once,
     remove_quietly,
 )
+from .protection_gate import ProtectionGateMixin
 from .space_mentions import SpaceMentionResolver
 from .space_crypto_service import (
     UnsupportedAuthoritySuite,
@@ -152,6 +153,10 @@ log = logging.getLogger(__name__)
 
 #: Hold-buffer scope for DMs waiting on their sender's user sync.
 _DM_HOLD_SCOPE = DM_HOLD_SCOPE
+
+#: How many DM ids refused for a guardian block (§CP.F2) are remembered, so
+#: the media bytes that follow such a message are refused too.
+_GUARDIAN_REFUSED_DM_CAP = 4096
 
 
 def _moment_expired(expires_at: object) -> bool:
@@ -338,16 +343,22 @@ def _bytes_match_mime(data: bytes, mime_type: str) -> bool | None:
     return data[offset : offset + len(pattern)] == pattern
 
 
-class FederationInboundService:
+class FederationInboundService(ProtectionGateMixin):
     """Apply decrypted inbound federation events to local state.
 
     Registers handlers for the event families backed by a concrete repo:
     DM messages, space posts/comments, space membership, user status.
     Handlers call the injected repos to persist the row and publish a
     local :class:`DomainEvent` so the realtime layer picks it up.
+
+    Guardian blocks (§CP.F2) are enforced on the way in: a DM from someone
+    blocked for a local protected account never reaches it — not stored at
+    all when it is the only local audience, withheld from it otherwise.
     """
 
     __slots__ = (
+        "_child_protection",
+        "_guardian_refused_dms",
         "_bus",
         "_conversation_repo",
         "_space_post_repo",
@@ -468,6 +479,9 @@ class FederationInboundService:
         #: Group-conversation authority (v_37) — a deprovisioned member of a
         #: cross-household group leaves it instead of taking it down.
         self._groups: "DmGroupService | None" = None
+        self._child_protection = None
+        #: DM ids refused for a guardian block (insertion-ordered, capped).
+        self._guardian_refused_dms: dict[str, None] = {}
 
     def attach_groups(self, groups: "DmGroupService") -> None:
         """Wire the group-membership authority (built with the DM stack)."""
@@ -595,6 +609,19 @@ class FederationInboundService:
         if not await self._dm_message_in_scope(
             event, conv_id, message_id, sender_user_id, recipients
         ):
+            return
+        withheld = await self._guardian_withheld(conv_id, sender_user_id, recipients)
+        if withheld is None:
+            # §CP.F2 — fail closed: nothing is stored, no conversation is
+            # opened, and the media bytes that follow are refused too.
+            refuse(
+                event,
+                "guardian block",
+                conversation=conv_id,
+                message=message_id,
+                sender=sender_user_id,
+            )
+            self._remember_guardian_refused_dm(message_id)
             return
 
         # Cross-household DMs arrive without the conversation ever
@@ -733,7 +760,9 @@ class FederationInboundService:
         # never whoever the sender listed in ``recipient_user_ids`` (a
         # sender could name any local user). A 1:1 the local member hid
         # still reaches them (as before); a group member who left doesn't.
-        local_recipients = await self._local_member_ids(conv_id)
+        local_recipients = tuple(
+            uid for uid in await self._local_member_ids(conv_id) if uid not in withheld
+        )
 
         if not created:
             # Two cases land here:
@@ -1010,6 +1039,50 @@ class FederationInboundService:
                 ids.append(user.user_id)
         return tuple(ids)
 
+    async def _guardian_withheld(
+        self,
+        conv_id: str,
+        sender_user_id: str,
+        recipients: tuple,
+    ) -> frozenset[str] | None:
+        """§CP.F2: the local members an inbound DM must not reach.
+
+        ``None`` refuses the message outright — a 1:1 (or a conversation
+        not here yet) whose local party a guardian block separates from the
+        sender, or a group where every local member is. Otherwise the ids to
+        leave out of the local fan-out (empty when nobody is blocked).
+        """
+        blocked = await self._guardian_block_counterparts(sender_user_id)
+        if not blocked:
+            return frozenset()
+        conv = await self._conversation_repo.get(conv_id)
+        if conv is not None:
+            audience = set(await self._local_member_ids(conv_id))
+        else:
+            audience = set()
+            for rid in recipients:
+                local = await self._user_repo.get_by_user_id(str(rid))
+                if local is not None:
+                    audience.add(local.user_id)
+        withheld = audience & blocked
+        if not withheld:
+            return frozenset()
+        if conv is None or conv.type is not ConversationType.GROUP_DM:
+            return None
+        if withheld == audience:
+            return None
+        return frozenset(withheld)
+
+    def _remember_guardian_refused_dm(self, message_id: str) -> None:
+        """Remember a refused DM id so the media bytes that follow it are
+        refused too. Bytes that *overtook* it are never linked to a message
+        row, so nobody is shown them and the orphan sweep reaps them — they
+        are not deleted here, since the id is the sender's to choose."""
+        refused = self._guardian_refused_dms
+        refused[message_id] = None
+        while len(refused) > _GUARDIAN_REFUSED_DM_CAP:
+            refused.pop(next(iter(refused)))
+
     async def _has_local_recipient(self, recipients: tuple) -> bool:
         for rid in recipients:
             if await self._user_repo.get_by_user_id(str(rid)) is not None:
@@ -1222,6 +1295,9 @@ class FederationInboundService:
         """
         msg = await self._conversation_repo.get_message(message_id)
         if msg is None:
+            if message_id in self._guardian_refused_dms:
+                refuse(event, "guardian block", message=message_id)
+                return False
             return True
         reason: str | None = None
         if msg.media_blob_id != blob_id:
@@ -1397,11 +1473,20 @@ class FederationInboundService:
         if self._realtime is not None:
             broadcaster = getattr(self._realtime, "broadcast_dm_media_ready", None)
             if broadcaster is not None:
+                # §CP.F2: never to a protected member who blocked the sender.
+                stored = await self._conversation_repo.get_message(message_id)
+                withheld = (
+                    await self._guardian_block_counterparts(stored.sender_user_id)
+                    if stored is not None
+                    else frozenset()
+                )
+                extra = {"exclude_user_ids": withheld} if withheld else {}
                 try:
                     await broadcaster(
                         message_id=message_id,
                         conversation_id=conversation_id,
                         media_url=new_url,
+                        **extra,
                     )
                 except Exception as exc:  # pragma: no cover
                     log.debug(
@@ -1452,6 +1537,11 @@ class FederationInboundService:
         if reason is not None:
             refuse(event, reason, message=message_id, user=user_id)
             return
+        withheld = await self._guardian_withheld(msg.conversation_id, user_id, ())
+        if withheld is None:
+            # §CP.F2 — same rule as the message itself.
+            refuse(event, "guardian block", message=message_id, user=user_id)
+            return
         if action == "remove":
             await self._conversation_repo.remove_reaction(message_id, user_id, emoji)
         else:
@@ -1462,7 +1552,7 @@ class FederationInboundService:
         recipient_ids: list[str] = []
         for m in members:
             u = await self._user_repo.get(m.username)
-            if u is not None:
+            if u is not None and u.user_id not in withheld:
                 recipient_ids.append(u.user_id)
         await self._bus.publish(
             DmMessageReactionChanged(

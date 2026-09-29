@@ -44,9 +44,11 @@ import aiofiles.os
 import aiohttp
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.child_protection import ProtectedCapability
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.moment_repo import AbstractMomentRepo
 from . import highlight_public_framing as framing
+from .protection_gate import ProtectionGateMixin
 from .highlight_signaling_handler import (
     PeerFactory,
     _AnswererPeer,
@@ -81,10 +83,15 @@ class _Session:
 # ─── Handler ───────────────────────────────────────────────────────────
 
 
-class MomentPublicSignalingHandler:
-    """Drives the author-side half of §Momentum-public WebRTC."""
+class MomentPublicSignalingHandler(ProtectionGateMixin):
+    """Drives the author-side half of §Momentum-public WebRTC.
+
+    A protected account's public moments are never served (§CP.R) — the
+    stream is an empty index, whatever the connection server still lists.
+    """
 
     __slots__ = (
+        "_child_protection",
         "_moments",
         "_gfs_repo",
         "_http_client",
@@ -120,6 +127,7 @@ class MomentPublicSignalingHandler:
         #: framed bytes go out over a signed streaming POST instead).
         self._relay_tasks: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
+        self._child_protection = None
 
     # ── Late-bound wiring ────────────────────────────────────────────────
 
@@ -248,6 +256,9 @@ class MomentPublicSignalingHandler:
         + ``stream_end`` so the guest sees an empty index, not an error.
         """
         moments = await self._moments.list_public_for(user_id)
+        if await self._is_restricted(user_id, ProtectedCapability.PUBLIC_MOMENTS):
+            # §CP.R: shared before protection, never streamed after it.
+            moments = []
         meta: list[dict] = []
         for m in moments:
             has_media = bool(m.media_url)

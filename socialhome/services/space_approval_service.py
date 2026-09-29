@@ -30,7 +30,10 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from ..domain.child_protection import ProtectedCapability
+from ..domain.child_protection import (
+    PROTECTED_OWNER_PUBLISH_DETAIL,
+    ProtectedCapability,
+)
 from ..domain.events import SpaceProposalUpdated
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
@@ -347,6 +350,17 @@ class SpaceApprovalService(ProtectionGateMixin):
         proposer_user: str,
     ) -> dict:
         existing = await self._proposals.find_open(space_id, action)
+        # §CP.R: a space a protected account owns never goes public — not by
+        # its adult admins, not by a remote admin, not by a quorum.
+        if (
+            _publishes(action, params)
+            or (
+                existing is not None
+                and existing.expires_at > _now()
+                and _publishes(action, existing.params)
+            )
+        ) and await self._owner_is_protected(space_id):
+            raise SpacePermissionError(PROTECTED_OWNER_PUBLISH_DETAIL)
         if existing is not None and existing.expires_at > _now():
             proposal = existing
         else:
@@ -429,6 +443,12 @@ class SpaceApprovalService(ProtectionGateMixin):
         met, execute. Returns the SPA view with the resolved status."""
         if proposal.action == ProposalAction.REMOTE_ADMIN_ACTION:
             return await self._evaluate_owner_only(proposal)
+        if _publishes(proposal.action, proposal.params) and (
+            await self._owner_is_protected(proposal.space_id)
+        ):
+            # Opened before the owner was protected: it can't pass now.
+            await self._proposals.set_status(proposal.id, ProposalStatus.REJECTED)
+            return await self._emit(proposal, ProposalStatus.REJECTED)
         admins = await self._admin_keys(proposal.space_id)
         votes = await self._proposals.list_votes(proposal.id)
         relevant = [v for v in votes if (v.voter_instance, v.voter_user) in admins]
@@ -558,6 +578,14 @@ class SpaceApprovalService(ProtectionGateMixin):
         if owner is None:
             return None
         return (self._own_instance_id or "", owner.user_id)
+
+    async def _owner_is_protected(self, space_id: str) -> bool:
+        """Whether the space's (local) owner is a protected account."""
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return False
+        owner = await self._users.get(space.owner_username)
+        return owner is not None and await self._is_protected(owner.user_id)
 
     async def _require_space(self, space_id: str):
         space = await self._spaces.get(space_id)

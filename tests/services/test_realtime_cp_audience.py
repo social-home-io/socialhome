@@ -3,10 +3,13 @@ guardians only, never the rest of the household."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from socialhome.domain.events import (
     CpBlockAdded,
+    CpBlockRemoved,
     CpGuardianAdded,
     CpGuardianRemoved,
     CpProtectionDisabled,
@@ -115,3 +118,25 @@ async def test_without_cp_repo_admins_and_account_still_hear(env):
         await ws.register(uid, sock)
     await bus.publish(CpProtectionEnabled(minor_username="kid", declared_age=12))
     assert _got(socks, "cp.protection_enabled") == {"adm", "kid"}
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        CpProtectionEnabled(minor_username="kid", declared_age=12),
+        CpProtectionDisabled(minor_username="kid"),
+        CpGuardianAdded(minor_user_id="kid", guardian_user_id="mom"),
+        CpGuardianRemoved(minor_user_id="kid", guardian_user_id="mom"),
+        CpBlockAdded(minor_user_id="kid", blocked_user_id="bob"),
+        CpBlockRemoved(minor_user_id="kid", blocked_user_id="bob"),
+    ],
+)
+async def test_the_account_alone_is_told_to_reload_its_protection(env, event):
+    """``me.protection_changed`` reaches only the account itself, with no
+    data — its SPA refetches ``/api/me`` + ``/api/me/protection``."""
+    bus, socks = env
+    await bus.publish(event)
+    assert _got(socks, "me.protection_changed") == {"kid"}
+    frames = [m for m in socks["kid"].sent if "me.protection_changed" in m]
+    assert frames
+    assert all(json.loads(m) == {"type": "me.protection_changed"} for m in frames)

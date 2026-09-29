@@ -101,9 +101,11 @@ export default function BazaarPage() {
   return (
     <div class="sh-bazaar">
       <div class="sh-page-header">
-        {isRestricted('bazaar')
-          ? <ProtectedNotice capability="bazaar" />
-          : <Button onClick={() => openBazaarCreate()}>+ New listing</Button>}
+        {/* A protected account sees the notice once: here on the list, or
+         *  in the open listing where "Buy" would be — never both. */}
+        {!isRestricted('bazaar')
+          ? <Button onClick={() => openBazaarCreate()}>+ New listing</Button>
+          : !selected.value && <ProtectedNotice capability="bazaar" />}
       </div>
 
       <div class="sh-bazaar-filters">

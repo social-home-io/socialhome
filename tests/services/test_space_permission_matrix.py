@@ -184,6 +184,13 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # owner-only approve path (``approve_join_request`` → ``set_role`` /
         # ``set_remote_member_role``), not this filing. No route reaches it.
         "file_admin_elevation_request",
+        # §CP hooks (ProtectionGateMixin) — called only by
+        # ChildProtectionService after an admin-gated protection change or a
+        # guardian-gated block. ``on_account_protected`` takes the account's
+        # own public spaces private (acting as their owner); no route reaches
+        # either, no actor to authorize.
+        "on_account_protected",
+        "on_guardian_block",
     }
 )
 

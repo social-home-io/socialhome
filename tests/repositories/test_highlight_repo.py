@@ -430,3 +430,31 @@ async def test_highlight_expired_today_is_pruned(db, repo):
     assert await repo.prune_expired() == 1
     assert await repo.get_highlight(gone.id) is None
     assert await repo.get_highlight(live.id) is not None
+
+
+async def test_visibility_hides_guardian_blocked_authors_both_ways(db, repo):
+    """§CP.F2: a guardian block hides each side's highlights from the other."""
+    await _seed_user(db, "u-bad", "bad")
+    await _seed_user(db, "u-kid", "kid")
+    await db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='u-kid'"
+    )
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES('u-kid', 'u-bad', 'u-guardian')"
+    )
+    for author in ("u-bad", "u-kid"):
+        await repo.find_or_create_today(
+            author_user_id=author,
+            audience_kind=HighlightAudience.ALL_PAIRED,
+            audience=(),
+            highlight_date="2026-05-03",
+            expires_at=_expires(),
+        )
+    assert {h.author_user_id for h in await repo.list_visible_to("u-kid")} == {"u-kid"}
+    assert {h.author_user_id for h in await repo.list_visible_to("u-bad")} == {"u-bad"}
+    # Lifting protection lifts the block's effect.
+    await db.enqueue(
+        "UPDATE users SET child_protection_enabled=0 WHERE user_id='u-kid'"
+    )
+    assert len(await repo.list_visible_to("u-kid")) == 2

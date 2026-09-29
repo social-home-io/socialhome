@@ -54,7 +54,11 @@ if TYPE_CHECKING:
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
     from .link_preview_service import LinkPreviewService
-from ..domain.child_protection import ProtectedCapability
+from ..domain.child_protection import (
+    PROTECTED_OWNER_PUBLISH_DETAIL,
+    PROTECTED_OWNER_TRANSFER_DETAIL,
+    ProtectedCapability,
+)
 from ..domain.events import (
     CommentAdded,
     PeerProtoVersionRaised,
@@ -1856,6 +1860,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             payload["join_mode"] = jmode.value
         if space_type is not None:
             stype = _coerce_space_type(space_type)
+            if (
+                stype in PUBLIC_SPACE_TIERS
+                and stype is not space.space_type
+                and await self._owner_is_protected(space)
+            ):
+                # §CP.R — whoever enacts it (owner, quorum, admin).
+                raise SpacePermissionError(PROTECTED_OWNER_PUBLISH_DETAIL)
             if stype is SpaceType.PUBLIC and space.space_type is not SpaceType.PUBLIC:
                 count = len(await self._spaces.list_by_type(SpaceType.PUBLIC))
                 if count >= MAX_PUBLIC_SPACES:
@@ -2986,6 +2997,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         new_owner_member = await self._spaces.get_member(space_id, to_user_id)
         if new_owner_member is None:
             raise KeyError(f"user {to_user_id!r} is not a member")
+        if space.space_type in PUBLIC_SPACE_TIERS and await self._is_protected(
+            to_user_id
+        ):
+            # §CP.R: a protected account never owns a public / global space.
+            raise SpacePermissionError(PROTECTED_OWNER_TRANSFER_DETAIL)
         # The outgoing owner becomes admin; the new owner becomes owner.
         outgoing = await self._users.get(actor_username)
         assert outgoing is not None
@@ -5433,6 +5449,30 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             (SpaceRole.OWNER, SpaceRole.ADMIN),
             message="admin or owner required",
         )
+
+    async def on_account_protected(self, user_id: str) -> None:
+        """§CP.R retroactive: a public / global space the account owns goes
+        private, through the normal (federated, GFS-unpublishing) config
+        path — a protected account never owns an advertised space."""
+        owner = await self._users.get_by_user_id(user_id)
+        if owner is None:
+            return
+        for tier in PUBLIC_SPACE_TIERS:
+            for space in await self._spaces.list_by_type(tier):
+                if (
+                    space.owner_username == owner.username
+                    and space.owner_instance_id == self._own_instance_id
+                ):
+                    await self.update_config(
+                        space.id,
+                        actor_username=owner.username,
+                        space_type=SpaceType.PRIVATE,
+                    )
+
+    async def _owner_is_protected(self, space: Space) -> bool:
+        """Whether the space's local owner is a protected account (§CP.R)."""
+        owner = await self._users.get(space.owner_username)
+        return owner is not None and await self._is_protected(owner.user_id)
 
     async def _require_owner(
         self,

@@ -866,3 +866,38 @@ async def test_ice_with_failing_peer_is_swallowed(repos, public_moments):
     )
     open_event.set()
     await _drain(handler)
+
+
+class _ProtectedCp:
+    """§CP.R stub: ``u1`` is a protected account."""
+
+    def register_gate(self, gate):
+        pass
+
+    async def is_restricted(self, user_id, capability):
+        return user_id == "u1"
+
+
+async def test_protected_accounts_public_moments_are_never_streamed(
+    repos, public_moments
+):
+    """Shared publicly before protection — never served after it, whatever
+    the connection server still lists."""
+    handler, peers = _make_handler(repos)
+    handler.attach_child_protection(_ProtectedCp())
+    await handler.handle_signal(
+        {
+            "kind": "offer",
+            "session_id": "s-1",
+            "user_id": "u1",
+            "gfs_id": "gfs-abc",
+            "sdp": "v=0",
+        }
+    )
+    await _drain(handler)
+    decoded = [framing.decode(b) for b in peers[0].frames]
+    assert [f.header["kind"] for f in decoded] == [
+        framing.KIND_MOMENT_INDEX_META,
+        framing.KIND_STREAM_END,
+    ]
+    assert decoded[0].header["moments"] == []

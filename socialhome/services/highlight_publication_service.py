@@ -236,6 +236,23 @@ class HighlightPublicationService(ProtectionGateMixin):
         finally:
             await self._highlights.mark_unpublished(highlight.id)
 
+    async def on_account_protected(self, user_id: str) -> None:
+        """§CP.R retroactive: pull every public link the account published.
+
+        The local flag is what the streaming handler checks before serving,
+        so it is cleared even when the connection server can't be reached.
+        """
+        for highlight in await self._highlights.list_published_for(user_id):
+            try:
+                await self.unpublish(highlight.id, user_id)
+            except HighlightPublicationError as exc:
+                log.warning(
+                    "highlight %s: unpublish on protection failed: %s",
+                    highlight.id,
+                    exc,
+                )
+                await self._highlights.mark_unpublished(highlight.id)
+
     # ── Internal helpers ─────────────────────────────────────────────────
 
     async def _require_owned(

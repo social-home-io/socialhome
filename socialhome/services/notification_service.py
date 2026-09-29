@@ -78,6 +78,7 @@ from ..repositories.notification_repo import (
 )
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .protection_gate import ProtectionGateMixin
 from .push_service import PushPayload
 
 
@@ -89,7 +90,7 @@ HERE_COOLDOWN_SECONDS = 600
 _HERE_TRACK_MAX = 10_000
 
 
-class NotificationService:
+class NotificationService(ProtectionGateMixin):
     """Creates notification-centre entries in response to domain events.
 
     Call :meth:`wire` once during app startup to bind the handlers to the
@@ -103,6 +104,7 @@ class NotificationService:
     """
 
     __slots__ = (
+        "_child_protection",
         "_notifs",
         "_users",
         "_spaces",
@@ -133,6 +135,9 @@ class NotificationService:
         #: Without it no conversation reads as muted.
         self._convos = conversation_repo
         self._users = user_repo
+        #: §CP.F2 — nobody hears from someone a guardian block separates
+        #: them from (mentions, @here, DMs, reactions).
+        self._child_protection = None
         self._spaces = space_repo
         self._bus = bus
         self._i18n = i18n
@@ -357,8 +362,9 @@ class NotificationService:
         users = await self._users.list_active()
         author = await self._users.get_by_user_id(author_id)
         name = author.display_name if author else "Someone"
+        blocked = await self._guardian_block_counterparts(author_id)
         for user in users:
-            if user.user_id == author_id:
+            if user.user_id == author_id or user.user_id in blocked:
                 continue
             await self._save_notif(
                 new_notification(
@@ -398,8 +404,9 @@ class NotificationService:
         commenter = await self._users.get_by_user_id(commenter_id)
         name = commenter.display_name if commenter else "Someone"
         users = await self._users.list_active()
+        blocked = await self._guardian_block_counterparts(commenter_id)
         for user in users:
-            if user.user_id == commenter_id:
+            if user.user_id == commenter_id or user.user_id in blocked:
                 continue
             await self._save_notif(
                 new_notification(
@@ -492,7 +499,10 @@ class NotificationService:
             title = f"{event.sender_display_name} messaged you"
         link = f"/dms/{event.conversation_id}"
         muted = await self._muted_usernames(event.conversation_id)
+        blocked = await self._guardian_block_counterparts(event.sender_user_id)
         for recipient_id in event.recipient_user_ids:
+            if recipient_id in blocked:
+                continue
             # Notifications.user_id FK's into ``users`` (local accounts
             # only). Remote recipients' rows live in ``remote_users``;
             # they get notified on their *own* household via the
@@ -556,6 +566,10 @@ class NotificationService:
 
     async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
         """A user wants to start a DM — notify the recipient + push."""
+        if await self._guardian_blocked(
+            event.recipient_user_id, event.requester_user_id
+        ):
+            return
         recipient = await self._users.get_by_user_id(event.recipient_user_id)
         title = self._t(
             "notification.dm.contact_requested",
@@ -794,8 +808,9 @@ class NotificationService:
             self._take_here_slot(space_id, author_id)
         )
         members = await self._spaces.list_members(space_id)
+        blocked = await self._guardian_block_counterparts(author_id)
         for member in members:
-            if member.user_id == author_id:
+            if member.user_id == author_id or member.user_id in blocked:
                 continue
             level = await self._notifs.get_space_notif_level(
                 user_id=member.user_id,
@@ -1335,6 +1350,8 @@ class NotificationService:
             return
         if event.reactor_user_id == event.author_user_id:
             return
+        if await self._guardian_blocked(event.author_user_id, event.reactor_user_id):
+            return
         author = await self._users.get_by_user_id(event.author_user_id)
         if author is None:
             return  # remote author — their instance fires the local notif
@@ -1362,6 +1379,10 @@ class NotificationService:
             return
         if event.parent_author_user_id == event.author_user_id:
             return  # author replied to their own thread
+        if await self._guardian_blocked(
+            event.parent_author_user_id, event.author_user_id
+        ):
+            return
         recipient = await self._users.get_by_user_id(event.parent_author_user_id)
         if recipient is None:
             return  # parent author lives on a peer instance
@@ -1379,6 +1400,8 @@ class NotificationService:
     async def on_user_followed(self, event: UserFollowed) -> None:
         """Notify the followed user when someone starts following them."""
         if event.follower_user_id == event.followed_user_id:
+            return
+        if await self._guardian_blocked(event.followed_user_id, event.follower_user_id):
             return
         recipient = await self._users.get_by_user_id(event.followed_user_id)
         if recipient is None:

@@ -31,6 +31,7 @@ from ..domain.highlight import (
     HighlightFrameView,
 )
 from .base import dump_json, load_json, row_to_dict, rows_to_dicts
+from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
 
 
 @runtime_checkable
@@ -190,15 +191,17 @@ class SqliteHighlightRepo:
         # Personal blocks are applied here (§Privacy): authors the viewer
         # has blocked never surface in their inbox, even if the audience
         # would otherwise admit them. Block list stays local — see
-        # ``user_blocks`` table.
+        # ``user_blocks`` table. Guardian blocks (§CP.F2) hide authors the
+        # same way, in both directions.
         rows = await self._db.fetchall(
-            """
+            f"""
             SELECT * FROM highlights
             WHERE datetime(expires_at) > datetime('now')
               AND author_user_id NOT IN (
                   SELECT blocked_user_id FROM user_blocks
                   WHERE blocker_user_id = ?
               )
+              AND author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
               AND (
                   audience_kind IN ('all_paired','households')
                   OR (audience_kind = 'users' AND EXISTS (
@@ -209,7 +212,7 @@ class SqliteHighlightRepo:
               )
             ORDER BY highlight_date DESC, created_at DESC
             """,
-            (viewer_user_id, viewer_user_id, viewer_user_id),
+            (viewer_user_id,) * 5,
         )
         return [s for s in (_row_to_highlight(d) for d in rows_to_dicts(rows)) if s]
 

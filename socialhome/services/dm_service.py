@@ -49,6 +49,7 @@ from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .dm_group_service import DmGroupService, clean_group_name
+from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
@@ -64,6 +65,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+#: What a personal block answers the blocked sender with. A guardian block
+#: (§CP.F2) answers the person it blocks with these very words, so nothing
+#: tells them a guardian — or a protected account — is involved.
+RECIPIENT_BLOCKED_DETAIL = "Recipient has you blocked."
+#: What the protected account itself hears.
+GUARDIAN_BLOCK_DETAIL = "You can't message this person."
+#: A group a guardian block rules out (whoever creates or changes it).
+GUARDIAN_BLOCK_GROUP_DETAIL = "One of these people can't be added to this group."
 
 #: Per-message length cap (§23.47). Households don't need novella-length
 #: chat messages; the cap also bounds the search-index row size and the
@@ -97,10 +107,18 @@ class MediaRequiresDirectPairingError(ValueError):
     """
 
 
-class DmService(VisibilityMixin):
-    """Conversation + message CRUD for household DMs."""
+class DmService(VisibilityMixin, ProtectionGateMixin):
+    """Conversation + message CRUD for household DMs.
+
+    Guardian blocks (§CP.F2, via :class:`ProtectionGateMixin`) apply like a
+    personal block, in both directions: the pair can't open or continue a
+    1:1, share a group, or see each other's messages. In a group the
+    protected account can't post while a blocked person is seated; a blocked
+    person's posts still reach the others but never the protected account.
+    """
 
     __slots__ = (
+        "_child_protection",
         "_convos",
         "_users",
         "_bus",
@@ -160,6 +178,7 @@ class DmService(VisibilityMixin):
         self._pending_transcribe_tasks: set[asyncio.Task[None]] = set()
         self._own_instance_id = own_instance_id
         self._visibility_repo = visibility_repo
+        self._child_protection = None
         #: Group-conversation membership authority (v_37). Always present —
         #: a local-only group needs it too; federation is attached later.
         self._groups = DmGroupService(
@@ -357,6 +376,7 @@ class DmService(VisibilityMixin):
         local_names = list(dict.fromkeys([creator.username, *local_names]))
         if len(local_names) + len(remote_seats) < 3:
             raise ValueError("group DM requires at least 3 participants")
+        await self._guard_group_roster(local_names, remote_seats)
         conv = Conversation(
             id=conv_id,
             type=ConversationType.GROUP_DM,
@@ -457,9 +477,11 @@ class DmService(VisibilityMixin):
         for s in new_remote:
             seats[(s.instance_id, s.remote_username)] = s
         local = await self._active_local_usernames(conversation_id)
+        roster = list(dict.fromkeys([*local, *new_local]))
+        await self._guard_group_roster(roster, list(seats.values()))
         await self._commit_group(
             conv,
-            local_usernames=list(dict.fromkeys([*local, *new_local])),
+            local_usernames=roster,
             remote_members=list(seats.values()),
             name=conv.name,
         )
@@ -564,7 +586,25 @@ class DmService(VisibilityMixin):
         )
 
     async def list_conversations(self, username: str) -> list[Conversation]:
-        return await self._convos.list_for_user(username)
+        convs = await self._convos.list_for_user(username)
+        user = await self._users.get(username)
+        blocked = (
+            await self._guardian_block_counterparts(user.user_id)
+            if user is not None
+            else frozenset()
+        )
+        if not blocked:
+            return convs
+        # §CP.F2: a 1:1 with someone a guardian block separates from the
+        # viewer is gone from their list (either side), like a personal block.
+        kept: list[Conversation] = []
+        for conv in convs:
+            if conv.type is ConversationType.DM and blocked & set(
+                await self._seat_user_ids(conv.id)
+            ):
+                continue
+            kept.append(conv)
+        return kept
 
     async def get_conversation(self, conversation_id: str) -> Conversation:
         return await self._require_conversation(conversation_id)
@@ -594,6 +634,9 @@ class DmService(VisibilityMixin):
         conv = await self._require_conversation(conversation_id)
         await self._require_membership(conversation_id, sender_username)
         sender = await self._require_user(sender_username)
+        # §CP.F2 guardian blocks — every seat, local or remote, 1:1 or group.
+        # ``withheld`` are the local members this message must not reach.
+        withheld = await self._guard_guardian_blocks(conv, sender.user_id)
         # 1:1 DM block gate (§Privacy). Group DMs ignore personal blocks
         # in v1 — see ``conversation_repo.list_for_user`` for the
         # matching read-side note.
@@ -663,7 +706,7 @@ class DmService(VisibilityMixin):
             if m.username == sender_username:
                 continue
             u = await self._users.get(m.username)
-            if u is not None:
+            if u is not None and u.user_id not in withheld:
                 recipients.append(u.user_id)
         # Resolve each remote member's ``user_id`` via the
         # ``remote_users`` mirror so the federation envelope carries
@@ -989,11 +1032,22 @@ class DmService(VisibilityMixin):
     ) -> list[ConversationMessage]:
         await self._require_membership(conversation_id, reader_username)
         limit = max(1, min(int(limit), 100))
-        return await self._convos.list_messages(
+        messages = await self._convos.list_messages(
             conversation_id,
             before=before,
             limit=limit,
         )
+        reader = await self._users.get(reader_username)
+        blocked = (
+            await self._guardian_block_counterparts(reader.user_id)
+            if reader is not None
+            else frozenset()
+        )
+        if not blocked:
+            return messages
+        # §CP.F2: a group can still carry a blocked person's messages for the
+        # others — never for the reader a guardian block separates them from.
+        return [m for m in messages if m.sender_user_id not in blocked]
 
     # ── Read tracking ──────────────────────────────────────────────────
 
@@ -1124,6 +1178,15 @@ class DmService(VisibilityMixin):
         msg = await self._require_message(message_id)
         await self._require_membership(msg.conversation_id, username)
         actor = await self._require_user(username)
+        # §CP.F2: a reaction is a message too — same rule as a send, and
+        # never onto a message the reader isn't shown.
+        await self._guard_guardian_blocks(
+            await self._require_conversation(msg.conversation_id), actor.user_id
+        )
+        if msg.sender_user_id in await self._guardian_block_counterparts(actor.user_id):
+            raise RecipientBlockedError(
+                await self._guardian_block_detail(actor.user_id)
+            )
         clean = emoji.strip()
         if not clean:
             raise ValueError("emoji must not be empty")
@@ -1195,10 +1258,12 @@ class DmService(VisibilityMixin):
         update the reaction strip in lockstep.
         """
         members = await self._convos.list_members(msg.conversation_id)
+        # §CP.F2: never to someone a guardian block separates from the actor.
+        withheld = await self._guardian_block_counterparts(actor_user_id)
         recipient_ids: list[str] = []
         for m in members:
             u = await self._users.get(m.username)
-            if u is not None:
+            if u is not None and u.user_id not in withheld:
                 recipient_ids.append(u.user_id)
         await self._bus.publish(
             DmMessageReactionChanged(
@@ -1271,13 +1336,103 @@ class DmService(VisibilityMixin):
         :class:`RecipientBlockedError` so :class:`BaseView._iter` maps
         it to 403.
         """
+        if await self._guardian_blocked(sender_id, recipient_id):
+            raise RecipientBlockedError(await self._guardian_block_detail(sender_id))
         if await self._users.is_blocked(recipient_id, sender_id):
-            raise RecipientBlockedError("Recipient has you blocked.")
+            raise RecipientBlockedError(RECIPIENT_BLOCKED_DETAIL)
         if await self._users.is_blocked(sender_id, recipient_id):
             raise RecipientBlockedError(
                 "You have blocked this user — unblock them in Settings to "
                 "continue this conversation."
             )
+
+    async def _seat_user_ids(self, conversation_id: str) -> list[str]:
+        """``user_id`` of every active seat — local members and remote seats."""
+        ids: list[str] = []
+        for m in await self._convos.list_members(conversation_id):
+            if m.deleted_at is not None:
+                continue
+            u = await self._users.get(m.username)
+            if u is not None:
+                ids.append(u.user_id)
+        for seat in await self._convos.list_remote_members(conversation_id):
+            if seat.user_id is not None:
+                ids.append(seat.user_id)
+                continue
+            ru = await self._users.get_remote_by_member(
+                seat.instance_id, seat.remote_username
+            )
+            if ru is not None:
+                ids.append(ru.user_id)
+        return ids
+
+    async def _guard_guardian_blocks(
+        self, conv: Conversation, sender_id: str
+    ) -> frozenset[str]:
+        """§CP.F2 on a send: raise when the sender may not post here, else
+        return the seats this message is withheld from.
+
+        A 1:1 with a counterpart is refused both ways. In a group the
+        protected account is refused while a counterpart is seated; anyone
+        else posts, and the protected accounts that blocked them don't get it.
+        """
+        blocked = await self._guardian_block_counterparts(sender_id)
+        if not blocked:
+            return frozenset()
+        seated = blocked & set(await self._seat_user_ids(conv.id))
+        if not seated:
+            return frozenset()
+        if conv.type is ConversationType.DM:
+            raise RecipientBlockedError(await self._guardian_block_detail(sender_id))
+        if await self._is_protected(sender_id):
+            raise RecipientBlockedError(GUARDIAN_BLOCK_DETAIL)
+        return frozenset(seated)
+
+    async def _guardian_block_detail(self, sender_id: str) -> str:
+        """The refusal *sender_id* sees: the protected account learns it
+        can't message the person; the blocked person sees a personal block."""
+        if await self._is_protected(sender_id):
+            return GUARDIAN_BLOCK_DETAIL
+        return RECIPIENT_BLOCKED_DETAIL
+
+    async def _guard_group_roster(
+        self,
+        local_usernames: list[str],
+        remote_seats: list[RemoteConversationMember],
+    ) -> None:
+        """§CP.F2: nobody a guardian block separates may share a group."""
+        ids: list[str] = []
+        for uname in local_usernames:
+            u = await self._users.get(uname)
+            if u is not None:
+                ids.append(u.user_id)
+        ids.extend(s.user_id for s in remote_seats if s.user_id)
+        roster = set(ids)
+        for uid in ids:
+            if await self._guardian_block_counterparts(uid) & roster:
+                raise RecipientBlockedError(GUARDIAN_BLOCK_GROUP_DETAIL)
+
+    async def on_guardian_block(self, minor_user_id: str, blocked_user_id: str) -> None:
+        """§CP.F2: the protected account steps out of every group it shares
+        with the person just blocked (the 1:1 closes through the block)."""
+        minor = await self._users.get_by_user_id(minor_user_id)
+        if minor is None or not await self._is_protected(minor_user_id):
+            return
+        failed: list[str] = []
+        for conv in await self._convos.list_for_user(minor.username):
+            if conv.type is not ConversationType.GROUP_DM:
+                continue
+            if blocked_user_id not in await self._seat_user_ids(conv.id):
+                continue
+            try:
+                await self.leave(conv.id, username=minor.username)
+            except Exception as exc:
+                # Keep going; the account still can't post there and never
+                # sees the blocked person's messages (read-side filter).
+                log.warning("§CP.F2 leave of group %s failed: %s", conv.id, exc)
+                failed.append(conv.id)
+        if failed:
+            raise RuntimeError(f"could not leave {len(failed)} group(s)")
 
     async def _require_conversation(
         self,

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.domain.child_protection import AccountProtectedError
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     BazaarBidPlaced,
@@ -17,10 +18,11 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
+from socialhome.repositories.bazaar_repo import SqliteBazaarRepo, new_bid
 from socialhome.services.bazaar_service import (
     BazaarExpiryScheduler,
     BazaarService,
+    BazaarServiceError,
     BidNotFoundError,
     ListingNotFoundError,
 )
@@ -237,3 +239,91 @@ async def test_scheduler_loop_calls_expire(env):
     await s.start()
     await asyncio.sleep(0.12)
     await s.stop()
+
+
+# ─── §CP.R: a protected seller neither sells nor keeps listings open ─────
+
+
+class _ProtectedCp:
+    def __init__(self, protected: set[str]):
+        self._protected = protected
+
+    def register_gate(self, gate):
+        pass
+
+    async def is_restricted(self, user_id, capability):
+        return user_id in self._protected
+
+    async def require_unrestricted(self, user_id, capability):
+        if user_id in self._protected:
+            raise AccountProtectedError(capability)
+
+
+async def test_protected_seller_cannot_accept_a_bid_offer(env):
+    pid = await _seed_listing(env, mode=BazaarMode.OFFER, end_in=timedelta(days=1))
+    bid = await env.svc.place_bid(
+        listing_post_id=pid, bidder_user_id="u-bidder", amount=120
+    )
+    env.svc.attach_child_protection(_ProtectedCp({"u-seller"}))
+    with pytest.raises(AccountProtectedError):
+        await env.svc.accept_offer(bid_id=bid.id, actor_user_id="u-seller")
+    assert (await env.repo.get_listing(pid)).status == BazaarStatus.ACTIVE
+
+
+async def test_protected_seller_cannot_accept_a_fixed_offer(env):
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    offer = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=90
+    )
+    env.svc.attach_child_protection(_ProtectedCp({"u-seller"}))
+    with pytest.raises(AccountProtectedError):
+        await env.svc.accept_fixed_offer(offer_id=offer.id, actor_user_id="u-seller")
+    assert (await env.repo.get_listing(pid)).status == BazaarStatus.ACTIVE
+
+
+async def test_becoming_protected_closes_active_listings(env):
+    active = await _seed_listing(env, mode=BazaarMode.FIXED, end_in=timedelta(days=1))
+    sold = await _seed_listing(env, mode=BazaarMode.OFFER, end_in=timedelta(days=1))
+    bid = await env.svc.place_bid(
+        listing_post_id=sold, bidder_user_id="u-bidder", amount=120
+    )
+    await env.svc.accept_offer(bid_id=bid.id, actor_user_id="u-seller")
+    await env.svc.on_account_protected("u-seller")
+    assert (await env.repo.get_listing(active)).status == BazaarStatus.CANCELLED
+    # Finished listings stay as they are.
+    assert (await env.repo.get_listing(sold)).status == BazaarStatus.SOLD
+    # Idempotent.
+    await env.svc.on_account_protected("u-seller")
+
+
+async def test_nothing_is_sold_to_a_protected_buyer(env):
+    """An offer / bid made before protection can't be accepted after it."""
+    pid = await _seed_listing(env, mode=BazaarMode.OFFER, end_in=timedelta(days=1))
+    bid = await env.svc.place_bid(
+        listing_post_id=pid, bidder_user_id="u-kid", amount=120
+    )
+    neg = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    offer = await env.svc.make_offer(
+        listing_post_id=neg, offerer_user_id="u-kid", amount=90
+    )
+    env.svc.attach_child_protection(_ProtectedCp({"u-kid"}))
+    with pytest.raises(BazaarServiceError, match="can no longer be accepted"):
+        await env.svc.accept_offer(bid_id=bid.id, actor_user_id="u-seller")
+    with pytest.raises(BazaarServiceError, match="can no longer be accepted"):
+        await env.svc.accept_fixed_offer(offer_id=offer.id, actor_user_id="u-seller")
+    assert (await env.repo.get_listing(pid)).status == BazaarStatus.ACTIVE
+    assert (await env.repo.get_listing(neg)).status == BazaarStatus.ACTIVE
+
+
+async def test_a_protected_high_bidder_never_wins_the_auction(env):
+    pid = await _seed_listing(
+        env, mode=BazaarMode.AUCTION, end_in=timedelta(seconds=-1)
+    )
+    await env.repo.place_bid(
+        new_bid(listing_post_id=pid, bidder_user_id="u-kid", amount=500),
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    env.svc.attach_child_protection(_ProtectedCp({"u-kid"}))
+    await env.svc.expire_due()
+    listing = await env.repo.get_listing(pid)
+    assert listing.status == BazaarStatus.EXPIRED

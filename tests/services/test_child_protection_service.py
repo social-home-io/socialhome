@@ -26,6 +26,7 @@ from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.child_protection_service import (
     ChildProtectionService,
     GuardianRequiredError,
+    ProtectionIncompleteError,
     UserNotFoundError,
 )
 
@@ -946,3 +947,97 @@ async def test_protection_summary_for_unprotected_user(env):
         "restrictions": [],
         "guardians": [],
     }
+
+
+# ─── Guardian blocks + retroactive hooks (§CP.F2 / §CP.R) ────────────────
+
+
+class _Gate:
+    """A gated service recording the hooks it hears."""
+
+    def __init__(self, *, fail: bool = False):
+        self.protected: list[str] = []
+        self.blocks: list[tuple[str, str]] = []
+        self._fail = fail
+
+    async def on_account_protected(self, user_id):
+        if self._fail:
+            raise RuntimeError("boom")
+        self.protected.append(user_id)
+
+    async def on_guardian_block(self, minor_user_id, blocked_user_id):
+        self.blocks.append((minor_user_id, blocked_user_id))
+
+
+class _OtherGate(_Gate):
+    pass
+
+
+async def _protect_lila(svc):
+    await svc.enable_protection(
+        minor_username="lila", declared_age=12, actor_user_id="admin-id"
+    )
+    await svc.add_guardian(
+        minor_user_id="lila-id", guardian_user_id="mom-id", actor_user_id="admin-id"
+    )
+
+
+async def test_guardian_block_is_symmetric_while_protected(env):
+    svc, _ = env
+    await _protect_lila(svc)
+    await svc.block_user_for_minor(
+        minor_user_id="lila-id", blocked_user_id="u-x", guardian_user_id="mom-id"
+    )
+    assert await svc.is_guardian_blocked("lila-id", "u-x")
+    assert await svc.is_guardian_blocked("u-x", "lila-id")
+    assert not await svc.is_guardian_blocked("lila-id", "mom-id")
+    assert not await svc.is_guardian_blocked("", "u-x")
+    assert not await svc.is_guardian_blocked("u-x", "u-x")
+    assert await svc.guardian_block_counterparts("lila-id") == frozenset({"u-x"})
+    assert await svc.guardian_block_counterparts("u-x") == frozenset({"lila-id"})
+    assert await svc.guardian_block_counterparts("") == frozenset()
+    await svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
+    assert not await svc.is_guardian_blocked("u-x", "lila-id")
+
+
+async def test_enable_protection_runs_every_gate_hook(env):
+    svc, _ = env
+    gate = _Gate()
+    svc.register_gate(gate)
+    await _protect_lila(svc)
+    assert gate.protected == ["lila-id"]
+
+
+async def test_a_rebuilt_service_replaces_its_twin(env):
+    svc, _ = env
+    old, new = _Gate(), _Gate()
+    svc.register_gate(old)
+    svc.register_gate(new)
+    await _protect_lila(svc)
+    assert old.protected == []
+    assert new.protected == ["lila-id"]
+
+
+async def test_a_failing_hook_does_not_stop_the_others_and_is_reported(env):
+    svc, _ = env
+    bad, good = _Gate(fail=True), _OtherGate()
+    svc.register_gate(bad)
+    svc.register_gate(good)
+    with pytest.raises(ProtectionIncompleteError, match="Try again"):
+        await svc.enable_protection(
+            minor_username="lila", declared_age=12, actor_user_id="admin-id"
+        )
+    assert good.protected == ["lila-id"]
+    # Protection itself is on regardless.
+    assert await svc.is_protected("lila-id")
+
+
+async def test_block_runs_the_guardian_block_hook(env):
+    svc, _ = env
+    gate = _Gate()
+    svc.register_gate(gate)
+    await _protect_lila(svc)
+    await svc.block_user_for_minor(
+        minor_user_id="lila-id", blocked_user_id="u-x", guardian_user_id="mom-id"
+    )
+    assert gate.blocks == [("lila-id", "u-x")]
