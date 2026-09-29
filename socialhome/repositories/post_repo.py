@@ -29,6 +29,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..utils.datetime import parse_iso8601_optional
+from ..domain.link_preview import (
+    LinkPreview,
+    link_preview_from_dict,
+    link_preview_to_dict,
+)
 from ..domain.post import (
     Comment,
     CommentType,
@@ -150,8 +155,8 @@ class SqlitePostRepo:
                 id, author, type, content, media_url, reactions,
                 comment_count, pinned, deleted, edited_at, no_link_preview,
                 moderated, file_meta_json, location_json, image_urls_json,
-                linked_highlight_id, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+                linked_highlight_id, link_preview_json, created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
                 content=excluded.content,
                 media_url=excluded.media_url,
@@ -165,7 +170,8 @@ class SqlitePostRepo:
                 file_meta_json=excluded.file_meta_json,
                 location_json=excluded.location_json,
                 image_urls_json=excluded.image_urls_json,
-                linked_highlight_id=excluded.linked_highlight_id
+                linked_highlight_id=excluded.linked_highlight_id,
+                link_preview_json=excluded.link_preview_json
             """,
             (
                 post.id,
@@ -184,6 +190,7 @@ class SqlitePostRepo:
                 _encode_location(post.location),
                 _encode_image_urls(post.image_urls),
                 post.linked_highlight_id,
+                _encode_link_preview(post.link_preview),
                 _iso_or_none(post.created_at),
             ),
         )
@@ -243,7 +250,7 @@ class SqlitePostRepo:
         await self._db.enqueue(
             """
             UPDATE feed_posts
-               SET deleted=1, content=NULL, media_url=NULL
+               SET deleted=1, content=NULL, media_url=NULL, link_preview_json=NULL
              WHERE id=?
             """,
             (post_id,),
@@ -591,6 +598,24 @@ def _decode_location(raw: str | None) -> LocationData | None:
     )
 
 
+def _encode_link_preview(preview: LinkPreview | None) -> str | None:
+    data = link_preview_to_dict(preview)
+    return dump_json(data) if data is not None else None
+
+
+def _decode_link_preview(raw: str | None) -> LinkPreview | None:
+    """Stored preview → domain. Every write path already validated it (the
+    author's service, or ``wire_link_preview`` for peer data); the shape is
+    re-checked anyway so a hand-edited row reads as "no preview"."""
+    if not raw:
+        return None
+    return link_preview_from_dict(load_json(raw, None), image_ref=_str_or_none)
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _encode_image_urls(urls: tuple[str, ...]) -> str | None:
     """Serialise a multi-image post's URL list. ``None`` for an empty
     list so the column reads as NULL on non-image posts (slightly
@@ -631,6 +656,7 @@ def _row_to_post(row: dict | None) -> Post | None:
         file_meta=_decode_file_meta(row.get("file_meta_json")),
         location=_decode_location(row.get("location_json")),
         linked_highlight_id=row.get("linked_highlight_id"),
+        link_preview=_decode_link_preview(row.get("link_preview_json")),
     )
 
 

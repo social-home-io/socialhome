@@ -42,6 +42,18 @@ log = logging.getLogger(__name__)
 #: a ~2000 px range land within a few pixels of the largest fitting size.
 _FIT_MAX_ENCODES: int = 10
 
+#: Longest side of a link-preview card image (:meth:`ImageProcessor.link_preview`).
+LINK_PREVIEW_MAX_DIMENSION: int = 800
+
+#: Largest source image (pixels) a link preview decodes. The header is read
+#: first, so a decompression bomb from a web page costs a header parse.
+LINK_PREVIEW_MAX_SOURCE_PIXELS: int = 40_000_000
+
+#: Formats a web page's preview image may be in. No HEIC / SVG / TIFF.
+LINK_PREVIEW_SOURCE_MIMES: frozenset[str] = frozenset(
+    {"image/jpeg", "image/png", "image/gif", "image/webp"}
+)
+
 # MIME type → tuple of (offset, magic_bytes)
 MAGIC_BYTES: dict[str, tuple[int, bytes]] = {
     "image/jpeg": (0, b"\xff\xd8\xff"),
@@ -281,6 +293,50 @@ class ImageProcessor:
             if len(out) <= max_bytes:
                 best = out
         return best
+
+    async def link_preview(self, data: bytes) -> bytes:
+        """Re-encode an image fetched from a web page into a local WebP.
+
+        For the image a link preview shows (``og:image``): the bytes came
+        from an arbitrary site, so they are never stored as-is. Accepted
+        only when the magic bytes say JPEG / PNG / GIF / WebP; the size is
+        read from the header before any pixel is decoded; the first frame
+        is shrunk to :data:`LINK_PREVIEW_MAX_DIMENSION` and written as a
+        fresh WebP that carries **no metadata** (no EXIF, XMP or ICC — a
+        photo's GPS tag never survives).
+
+        Raises
+        ------
+        ValueError
+            On an unsupported format, an oversized or undecodable image.
+        """
+        return await asyncio.to_thread(self._link_preview_sync, data)
+
+    def _link_preview_sync(self, data: bytes) -> bytes:
+        mime = self._detect_mime(data)
+        if mime not in LINK_PREVIEW_SOURCE_MIMES:
+            raise ValueError("unsupported preview image format")
+        try:
+            img = Image.open(io.BytesIO(data))
+            w, h = img.size
+            if w * h > LINK_PREVIEW_MAX_SOURCE_PIXELS:
+                raise ValueError("preview image too large")
+            img.seek(0)
+            img.load()
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"cannot open preview image: {exc}") from exc
+        has_alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
+        mode = "RGBA" if has_alpha else "RGB"
+        frame = self._resize(img.convert(mode), LINK_PREVIEW_MAX_DIMENSION)
+        # Copy the pixels into a brand-new image so no ``info`` (exif, xmp,
+        # icc_profile, comments) can ride along into the encoder.
+        clean = Image.new(mode, frame.size)
+        clean.paste(frame)
+        out = io.BytesIO()
+        clean.save(out, format="WEBP", quality=THUMBNAIL_WEBP_QUALITY)
+        return out.getvalue()
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

@@ -79,6 +79,7 @@ class SqlitePreferencesRepo:
             allow_schedule=bool(row["allow_schedule"]),
             allow_location=bool(row["allow_location"]),
             allow_highlight_share=bool(row["allow_highlight_share"]),
+            allow_link_preview=bool(row["allow_link_preview"]),
         )
 
     async def get_user(self, user_id: str) -> UserPreferences:

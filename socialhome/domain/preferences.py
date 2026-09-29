@@ -42,6 +42,7 @@ PREFERENCE_SCOPE: dict[str, str] = {
     "allow_schedule": "household",
     "allow_location": "household",
     "allow_highlight_share": "household",
+    "allow_link_preview": "household",
     # Per-user (row id = <user_id>)
     "hide_highlights": "user",
     "hide_momentum": "user",
@@ -129,6 +130,11 @@ class HouseholdPreferences:
     allow_schedule: bool = True
     allow_location: bool = True
     allow_highlight_share: bool = True
+    #: Build a preview card for the first link in a new text post (the
+    #: author's household fetches the page once; see
+    #: ``services.link_preview_service``). Not a post type — a household
+    #: that turns it off still accepts previews other households send.
+    allow_link_preview: bool = True
 
     def is_enabled(self, section: str) -> bool:
         """``True`` if the ``feat_{section}`` toggle is on."""
