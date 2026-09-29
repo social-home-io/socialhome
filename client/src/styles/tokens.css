@@ -20,6 +20,9 @@
  * like one.
  */
 :root {
+  /* Native controls (select, file picker, date input, scrollbars) follow
+     the active theme instead of always rendering light. */
+  color-scheme: light;
   /* ── Brand colors ─────────────────────────────────────────────── */
   --sh-primary:         #D2542A;     /* hearth — terracotta */
   --sh-primary-hover:   #A33F1A;     /* hearth-deep */
@@ -28,6 +31,9 @@
   --sh-danger-hover:    #DC2626;     /* red-600 */
   --sh-success:         #1F4438;     /* moss — hearth-green secondary */
   --sh-warning:         #C8902F;     /* honey — replaces amber-500 */
+  /* Hearth used as TEXT on a hearth-tinted chip (--sh-primary-soft or a
+     primary colour-mix): the plain primary only reaches ~3:1 there. */
+  --sh-primary-on-soft: var(--sh-primary-hover);
 
   /* ── Surface ladder — cream parchment, never pure white ───────── */
   --sh-bg:              #F4ECE0;     /* paper — primary surface */
@@ -174,6 +180,7 @@
  * so a brand tweak here propagates to the federation entry-pages
  * with a small ``s/old/new/`` over there too. */
 .sh-theme-dark {
+  color-scheme: dark;
   --sh-primary:        #E96A3F;  /* hearth lifted for dark surfaces */
   --sh-primary-hover:  #C04E22;  /* hearth-deep dark variant */
   --sh-primary-soft:   #4A2419;  /* hearth-on-dark — for tinted accents */
@@ -181,6 +188,9 @@
   --sh-warning:        #E8B865;  /* honey-light */
   --sh-danger:         #F87171;  /* red-400 */
   --sh-danger-hover:   #EF4444;
+  /* Hearth lifted toward the cream ink: ≥ 6:1 on --sh-primary-soft and
+     on the dark surfaces (the plain dark hearth is ~4.2:1 on its tint). */
+  --sh-primary-on-soft: color-mix(in srgb, var(--sh-primary) 55%, var(--sh-text));
 
   --sh-bg:             #1A1612;  /* deep ember — warm coffee */
   --sh-bg-secondary:   #251E18;  /* one notch up for chrome */

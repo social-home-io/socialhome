@@ -251,3 +251,42 @@ describe('MentionAutocomplete in a group chat (conversation scope)', () => {
     expect(apiGet).not.toHaveBeenCalled()
   })
 })
+
+describe('MentionAutocomplete — right-to-left', () => {
+  it('anchors the list to the input’s inline-start (right) edge in RTL', async () => {
+    const { ta } = await composer()
+    ta.setAttribute('dir', 'rtl')
+    ta.getBoundingClientRect = () => ({
+      left: 100, right: 700, top: 100, bottom: 160, width: 600, height: 60,
+      x: 100, y: 100, toJSON: () => ({}),
+    }) as DOMRect
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1000 })
+    // jsdom has no layout: report the popover where its inline style puts
+    // it, so the "cancel the containing-block offset" pass is a no-op.
+    const orig = HTMLDivElement.prototype.getBoundingClientRect
+    HTMLDivElement.prototype.getBoundingClientRect = function (this: HTMLDivElement) {
+      const l = parseFloat(this.style.left) || 0
+      const t = parseFloat(this.style.top) || 0
+      return {
+        left: l, top: t, right: l + 320, bottom: t + 100, width: 320, height: 100,
+        x: l, y: t, toJSON: () => ({}),
+      } as DOMRect
+    }
+    try {
+      type(ta, '@an')
+      await waitFor(() => expect(listbox()).toBeTruthy())
+      // 320 px wide, its right edge on the input's right edge.
+      expect(listbox()!.style.left).toBe('380px')
+    } finally {
+      HTMLDivElement.prototype.getBoundingClientRect = orig
+    }
+  })
+
+  it('keeps a token readable ("@anna", not "anna@") in an RTL page', async () => {
+    const { ta } = await composer()
+    type(ta, '@an')
+    await waitFor(() => expect(listbox()).toBeTruthy())
+    const bdi = listbox()!.querySelector('.sh-mention-autocomplete-meta bdi')
+    expect(bdi?.textContent).toBe('@anna')
+  })
+})

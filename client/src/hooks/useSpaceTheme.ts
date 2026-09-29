@@ -22,6 +22,19 @@ interface SpaceTheme {
   post_layout?: 'compact' | 'spacious' | null
 }
 
+/** The ``space_themes`` column defaults (migration 0001) — the brand
+ *  hearth + honey every space row carries until an admin picks a colour.
+ *  They mean "no override": pinning them inline on ``<html>`` would force
+ *  the LIGHT palette's hearth over the dark theme's lifted one. */
+const DEFAULT_COLORS: Record<string, string> = {
+  '--sh-primary': '#d2542a',
+  '--sh-accent': '#c8902f',
+}
+
+function isDefault(prop: string, value: string): boolean {
+  return DEFAULT_COLORS[prop] === value.trim().toLowerCase()
+}
+
 const POST_LAYOUT_GAP: Record<string, string> = {
   compact:  'var(--sh-space-xs)',
   spacious: 'var(--sh-space-lg)',
@@ -35,6 +48,7 @@ export function useSpaceTheme(spaceId: string | undefined | null): void {
     let stopped = false
 
     const apply = (prop: string, value: string) => {
+      if (isDefault(prop, value)) return
       root.style.setProperty(prop, value)
       applied.add(prop)
     }
