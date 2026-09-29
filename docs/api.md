@@ -260,7 +260,7 @@ the encrypted `SPACE_POST_CREATED` payload (its image as an ordinary
 `SPACE_MEDIA_BLOB`), so member households render the card without ever
 contacting the linked site. Text fields are plain text (the SPA escapes
 them); `url` is `http(s)` only; `thumbnail_url` is always local media.
-Edits keep the card the post was created with.
+An edit keeps the card while the post's first link stays the same and drops it when the link changes or goes (never re-fetched on edit); every household applies that rule to its own copy.
 
 The household admin switch is `allow_link_preview` on
 `/api/household/preferences` (default on). Off, this household fetches

@@ -81,6 +81,12 @@ IMAGE_TYPES: frozenset[str] = frozenset(
     {"image/jpeg", "image/png", "image/gif", "image/webp"}
 )
 
+#: Wall-clock budget for building one preview — the page AND its image
+#: share it, so a post create never waits longer than this on the network.
+BUILD_BUDGET_S: float = 5.0
+#: Below this much budget left, the image is skipped (text card only).
+IMAGE_MIN_BUDGET_S: float = 0.5
+
 #: How long a built preview is reused.
 CACHE_TTL_S: float = 15 * 60
 #: How long "this URL has no preview" is remembered.
@@ -230,15 +236,17 @@ class LinkPreviewService:
             self._cache.popitem(last=False)
 
     def _allow_fetch(self, user_id: str) -> bool:
+        # The member's own budget first: a member who is over it must not
+        # keep spending the household's (and switch previews off for all).
         if not self._limiter.is_allowed(
-            "link_preview:household",
-            limit=HOUSEHOLD_FETCH_LIMIT,
+            f"link_preview:user:{user_id}",
+            limit=USER_FETCH_LIMIT,
             window_s=FETCH_WINDOW_S,
         ):
             return False
         return self._limiter.is_allowed(
-            f"link_preview:user:{user_id}",
-            limit=USER_FETCH_LIMIT,
+            "link_preview:household",
+            limit=HOUSEHOLD_FETCH_LIMIT,
             window_s=FETCH_WINDOW_S,
         )
 
@@ -257,9 +265,14 @@ class LinkPreviewService:
     # ── Fetch + extract ───────────────────────────────────────────────
 
     async def _build(self, url: str) -> LinkPreview | None:
+        deadline = self._clock() + BUILD_BUDGET_S
         try:
             page = await self._fetcher.fetch(
-                url, accept=HTML_TYPES, max_bytes=HTML_MAX_BYTES, truncate=True
+                url,
+                accept=HTML_TYPES,
+                max_bytes=HTML_MAX_BYTES,
+                truncate=True,
+                timeout_s=BUILD_BUDGET_S,
             )
         except OutboundFetchRefused as exc:
             log.info(
@@ -276,7 +289,9 @@ class LinkPreviewService:
         if title is None and description is None:
             return None
         link = _card_url(url, page.url, meta.canonical_url)
-        thumbnail = await self._store_image(meta.image_url)
+        thumbnail = await self._store_image(
+            meta.image_url, budget_s=deadline - self._clock()
+        )
         return wire_link_preview(
             {
                 "url": link,
@@ -289,14 +304,19 @@ class LinkPreviewService:
             }
         )
 
-    async def _store_image(self, image_url: str | None) -> str | None:
+    async def _store_image(
+        self, image_url: str | None, *, budget_s: float
+    ) -> str | None:
         """Download, re-encode and store the page's image; its local ref."""
         src = normalise_url(image_url)
         if src is None:
             return None
+        if budget_s < IMAGE_MIN_BUDGET_S:
+            log.info("link preview image: skipped, page used the time budget")
+            return None
         try:
             res = await self._fetcher.fetch(
-                src, accept=IMAGE_TYPES, max_bytes=IMAGE_MAX_BYTES
+                src, accept=IMAGE_TYPES, max_bytes=IMAGE_MAX_BYTES, timeout_s=budget_s
             )
             webp = await self._images.link_preview(res.body)
         except OutboundFetchRefused as exc:

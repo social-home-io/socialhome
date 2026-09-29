@@ -80,7 +80,9 @@ class AbstractPostRepo(Protocol):
     ) -> list[Post]: ...
     async def find(self, spec: Spec) -> list[Post]: ...
     async def soft_delete(self, post_id: str) -> None: ...
-    async def edit(self, post_id: str, new_content: str) -> None: ...
+    async def edit(
+        self, post_id: str, new_content: str, *, clear_link_preview: bool = False
+    ) -> None: ...
 
     # Reactions -----------------------------------------------------------
     async def add_reaction(
@@ -256,10 +258,16 @@ class SqlitePostRepo:
             (post_id,),
         )
 
-    async def edit(self, post_id: str, new_content: str) -> None:
+    async def edit(
+        self, post_id: str, new_content: str, *, clear_link_preview: bool = False
+    ) -> None:
+        """Replace a post's body; ``clear_link_preview`` drops its link card
+        (the edit changed or removed the link it was built for)."""
         await self._db.enqueue(
-            "UPDATE feed_posts SET content=?, edited_at=datetime('now') WHERE id=?",
-            (new_content, post_id),
+            "UPDATE feed_posts SET content=?, edited_at=datetime('now'),"
+            " link_preview_json=CASE WHEN ? THEN NULL ELSE link_preview_json END"
+            " WHERE id=?",
+            (new_content, int(clear_link_preview), post_id),
         )
 
     # ── Reactions (inline JSON, atomic) ────────────────────────────────

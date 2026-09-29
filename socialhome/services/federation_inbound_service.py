@@ -106,6 +106,7 @@ from ..infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
+from ..domain.link_preview import card_survives_edit
 from .link_preview_service import wire_link_preview
 from .inbound_media_store import (
     is_safe_media_name,
@@ -1856,10 +1857,20 @@ class FederationInboundService:
             return
         if not await self._owned_post_mutation_allowed(event, gated_space_id, post_id):
             return
+        # Same card rule as the author's household applied to its own copy
+        # (``card_survives_edit``) — derived from content both sides hold.
+        current = await self._space_post_repo.get(post_id)
+        current_post = current[1] if current is not None else None
+        clear_card = (
+            current_post is not None
+            and current_post.link_preview is not None
+            and not card_survives_edit(current_post.content, new_content)
+        )
         if not await self._space_post_repo.edit(
             post_id,
             new_content,
             space_id=gated_space_id,
+            clear_link_preview=clear_card,
         ):
             log_cross_space_refusal(
                 event,

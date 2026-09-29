@@ -7502,3 +7502,23 @@ async def test_space_post_link_preview_built_by_author_and_survives_moderation(s
     )
     assert opted_out is not None
     assert opted_out.link_preview is None and opted_out.no_link_preview is True
+
+
+async def test_space_post_edit_drops_the_card_when_the_link_changes(stack):
+    a = await stack.provision_user("anna")
+    stack.space_svc.attach_link_previews(_StubPreviews())
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.TEXT,
+        content="see https://example.com/",
+    )
+    kept = await stack.space_svc.edit_post(
+        p.id, editor_user_id=a.user_id, new_content="yes, https://example.com/"
+    )
+    assert kept.link_preview is not None
+    gone = await stack.space_svc.edit_post(
+        p.id, editor_user_id=a.user_id, new_content="never mind"
+    )
+    assert gone.link_preview is None

@@ -97,6 +97,7 @@ class AbstractSpacePostRepo(Protocol):
         new_content: str,
         *,
         space_id: str,
+        clear_link_preview: bool = False,
     ) -> bool: ...
 
     async def add_reaction(
@@ -359,13 +360,17 @@ class SqliteSpacePostRepo:
         new_content: str,
         *,
         space_id: str,
+        clear_link_preview: bool = False,
     ) -> bool:
-        """Replace a post's body. ``False`` = not in ``space_id``."""
+        """Replace a post's body. ``False`` = not in ``space_id``.
+        ``clear_link_preview`` drops the link card (the edit changed or
+        removed the link it was built for)."""
         return (
             await self._db.enqueue_rowcount(
-                "UPDATE space_posts SET content=?, edited_at=datetime('now') "
+                "UPDATE space_posts SET content=?, edited_at=datetime('now'), "
+                "link_preview_json=CASE WHEN ? THEN NULL ELSE link_preview_json END "
                 "WHERE id=? AND space_id=?",
-                (new_content, post_id, space_id),
+                (new_content, int(clear_link_preview), post_id, space_id),
             )
             > 0
         )

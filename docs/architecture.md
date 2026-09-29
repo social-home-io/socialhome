@@ -779,7 +779,16 @@ user typed"):
   impossible; TLS still verifies against the host name;
 - redirects are followed by hand (≤ 3), each hop re-vetted from scratch;
 - one 5 s deadline for the whole fetch (DNS included), 3 s connect and
-  per-read timeouts, bodies read in chunks and never past the cap;
+  per-read timeouts, bodies read in chunks and never past the cap
+  (`LinkPreviewService` shares one 5 s budget between the page and its
+  image, so a post create waits at most that long on the network);
+- the host that is vetted is the one aiohttp connects to (`yarl`'s
+  IDNA/UTS46 `raw_host`), and a host aiohttp would treat as an IP literal
+  must parse as one — Unicode digit look-alikes cannot turn a "name" into
+  an unvetted literal;
+- NAT64 / DNS64 answers (`64:ff9b::/96`) count as non-global and are
+  refused, so a v6-only network behind NAT64 gets no previews (fails
+  safe);
 - no cookies, no `Authorization`, no proxy from the environment, a generic
   `User-Agent`.
 

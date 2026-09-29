@@ -858,7 +858,10 @@ inside the encrypted `SPACE_POST_CREATED` payload:
 - **No capability bump.** An older receiver ignores the unknown key and
   shows the post without a card — the default-if-missing ("no card") is
   correct, not silently wrong. Edits (`SPACE_POST_UPDATED`) carry content
-  only; the card stays as created.
+  only: every household (author and receivers) keeps the card while the
+  post's first link is unchanged and drops it when the edit changes or
+  removes that link (`domain.link_preview.card_survives_edit`, derived
+  from content both sides hold — no new field, no re-fetch).
 
 ## Flow — rekey
 

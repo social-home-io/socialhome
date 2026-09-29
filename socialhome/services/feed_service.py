@@ -41,6 +41,7 @@ from ..domain.post import (
     Post,
     PostType,
 )
+from ..domain.link_preview import card_survives_edit
 from ..domain.presence import truncate_coord
 from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import unlink_unreferenced
@@ -228,7 +229,12 @@ class FeedService:
         await self._require_author_or_admin(post.author, editor_user_id)
         _validate_text_length(new_content, limit=MAX_POST_LENGTH)
 
-        await self._posts.edit(post_id, new_content)
+        await self._posts.edit(
+            post_id,
+            new_content,
+            clear_link_preview=post.link_preview is not None
+            and not card_survives_edit(post.content, new_content),
+        )
         updated = await self._posts.get(post_id)
         assert updated is not None  # we just edited it
         await self._bus.publish(PostEdited(post=updated))
@@ -244,7 +250,11 @@ class FeedService:
         post = await self._require_post(post_id)
         await self._require_author_or_admin(post.author, actor_user_id)
         # Capture media URLs before soft_delete nulls them.
-        media = [post.media_url, *post.image_urls]
+        media = [
+            post.media_url,
+            *post.image_urls,
+            post.link_preview.thumbnail_url if post.link_preview else None,
+        ]
         await self._posts.soft_delete(post_id)
         # PostDeleted runs synchronously through the bus; SystemAlbumBridge
         # unmirrors (drops the gallery item that shared this file) within

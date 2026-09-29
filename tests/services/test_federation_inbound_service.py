@@ -22,6 +22,7 @@ from socialhome.domain.events import (
     UserStatusChanged,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import (
     FEED_POST_MAX_IMAGES,
     Comment,
@@ -4323,3 +4324,50 @@ def test_moment_expired(value, expired):
     if isinstance(value, timedelta):
         value = (datetime.now(timezone.utc) + value).isoformat()
     assert _moment_expired(value) is expired
+
+
+@pytest.mark.parametrize(
+    ("new_content", "keeps"),
+    [("still https://example.com/a here", True), ("link gone", False)],
+)
+async def test_space_post_updated_applies_the_card_rule(
+    db, bus, inbound, new_content, keeps
+):
+    """A receiver clears the card exactly when the author's household does —
+    from the content it already holds; it never re-fetches."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        (
+            "sp-1",
+            "Space 1",
+            "peer-a",
+            "owner",
+            "aa" * 32,
+            SpaceType.HOUSEHOLD.value,
+            JoinMode.INVITE_ONLY.value,
+        ),
+    )
+    repo = SqliteSpacePostRepo(db)
+    await repo.save(
+        "sp-1",
+        Post(
+            id="p-1",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="see https://example.com/a",
+            link_preview=LinkPreview(url="https://example.com/a", title="Card"),
+        ),
+    )
+    await inbound._on_space_post_updated(
+        _event(
+            FederationEventType.SPACE_POST_UPDATED,
+            {"id": "p-1", "content": new_content},
+            space_id="sp-1",
+        )
+    )
+    _, post = await repo.get("p-1")
+    assert post.content == new_content
+    assert (post.link_preview is not None) is keeps

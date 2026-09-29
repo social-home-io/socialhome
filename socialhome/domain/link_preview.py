@@ -149,3 +149,15 @@ def link_preview_from_dict(
         site_name=clean_text(raw.get("site_name"), limit=LINK_PREVIEW_SITE_NAME_MAX),
         thumbnail_url=image_ref(raw.get("thumbnail_url")),
     )
+
+
+def card_survives_edit(old_content: str | None, new_content: str | None) -> bool:
+    """Whether a post keeps its link card across an edit.
+
+    The card belongs to the first link it was built for: an edit that keeps
+    that link keeps the card; one that removes or changes it drops the card
+    (no re-fetch on edit). Every household applies the same rule to the
+    content it already holds, so a ``SPACE_POST_UPDATED`` needs no new field.
+    """
+    before = normalise_url(first_url(old_content))
+    return before is not None and before == normalise_url(first_url(new_content))

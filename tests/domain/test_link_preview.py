@@ -8,6 +8,7 @@ from socialhome.domain.link_preview import (
     LINK_PREVIEW_DESCRIPTION_MAX,
     LINK_PREVIEW_TITLE_MAX,
     LinkPreview,
+    card_survives_edit,
     clean_text,
     first_url,
     link_preview_from_dict,
@@ -124,3 +125,17 @@ def test_from_dict_clips_and_filters_image() -> None:
     assert len(p.description) == LINK_PREVIEW_DESCRIPTION_MAX
     assert p.site_name is None
     assert p.thumbnail_url is None
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "keeps"),
+    [
+        ("see https://example.com/a", "see https://EXAMPLE.com/a#x ok", True),
+        ("see https://example.com/a", "see https://example.com/b", False),
+        ("see https://example.com/a", "no link now", False),
+        (None, "https://example.com/a", False),
+        ("https://a.example then https://b.example", "https://a.example only", True),
+    ],
+)
+def test_card_survives_edit(old, new, keeps) -> None:
+    assert card_survives_edit(old, new) is keeps

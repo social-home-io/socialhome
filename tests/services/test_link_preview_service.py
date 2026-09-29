@@ -39,10 +39,15 @@ class FakeFetcher:
     def __init__(self, pages: dict[str, object]) -> None:
         self.pages = pages
         self.calls: list[str] = []
+        self.budgets: list[float | None] = []
+        self.on_fetch = None
         self.gate: asyncio.Event | None = None
 
-    async def fetch(self, url, *, accept, max_bytes, truncate=False):
+    async def fetch(self, url, *, accept, max_bytes, truncate=False, timeout_s=None):
         self.calls.append(url)
+        self.budgets.append(timeout_s)
+        if self.on_fetch is not None:
+            self.on_fetch()
         if self.gate is not None:
             await self.gate.wait()
         item = self.pages.get(url)
@@ -336,3 +341,37 @@ def test_wire_link_preview_filters_image_ref() -> None:
         ).thumbnail_url
         is None
     )  # type: ignore[union-attr]
+
+
+async def test_member_over_budget_does_not_spend_the_household_budget(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(lps, "USER_FETCH_LIMIT", 1)
+    monkeypatch.setattr(lps, "HOUSEHOLD_FETCH_LIMIT", 3)
+    svc, fetcher = _svc(tmp_path, {})
+    for i in range(10):
+        await svc.preview_for_url(f"https://g{i}.example/", user_id="greedy")
+    assert len(fetcher.calls) == 1
+    # The household still has room for two other members.
+    await svc.preview_for_url("https://o1.example/", user_id="o1")
+    await svc.preview_for_url("https://o2.example/", user_id="o2")
+    assert len(fetcher.calls) == 3
+
+
+async def test_page_and_image_share_one_time_budget(tmp_path):
+    clock = Clock()
+    svc, fetcher = _svc(tmp_path, _default_pages(), clock=clock)
+    fetcher.on_fetch = lambda: setattr(clock, "t", clock.t + 1.5)
+    p = await svc.preview_for_url("https://example.com/story", user_id="u")
+    assert p is not None and p.thumbnail_url
+    assert fetcher.budgets[0] == lps.BUILD_BUDGET_S
+    assert fetcher.budgets[1] == pytest.approx(lps.BUILD_BUDGET_S - 1.5)
+
+
+async def test_image_skipped_when_page_spent_the_budget(tmp_path):
+    clock = Clock()
+    svc, fetcher = _svc(tmp_path, _default_pages(), clock=clock)
+    fetcher.on_fetch = lambda: setattr(clock, "t", clock.t + lps.BUILD_BUDGET_S)
+    p = await svc.preview_for_url("https://example.com/story", user_id="u")
+    assert p is not None and p.title and p.thumbnail_url is None
+    assert fetcher.calls == ["https://example.com/story"]

@@ -47,7 +47,9 @@ LINK_PREVIEW_MAX_DIMENSION: int = 800
 
 #: Largest source image (pixels) a link preview decodes. The header is read
 #: first, so a decompression bomb from a web page costs a header parse.
-LINK_PREVIEW_MAX_SOURCE_PIXELS: int = 40_000_000
+#: 16 MP ≈ 64 MB as RGBA — bounded even with a few previews in parallel on
+#: a small Home Assistant box.
+LINK_PREVIEW_MAX_SOURCE_PIXELS: int = 16_000_000
 
 #: Formats a web page's preview image may be in. No HEIC / SVG / TIFF.
 LINK_PREVIEW_SOURCE_MIMES: frozenset[str] = frozenset(
@@ -322,14 +324,18 @@ class ImageProcessor:
             if w * h > LINK_PREVIEW_MAX_SOURCE_PIXELS:
                 raise ValueError("preview image too large")
             img.seek(0)
-            img.load()
+            has_alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
+            mode = "RGBA" if has_alpha else "RGB"
+            # ``thumbnail`` shrinks in place with ``draft`` (JPEG decodes at a
+            # reduced scale straight away) and a reducing gap, so the full
+            # source is never held in several converted copies.
+            box = (LINK_PREVIEW_MAX_DIMENSION, LINK_PREVIEW_MAX_DIMENSION)
+            img.thumbnail(box, Resampling.LANCZOS, reducing_gap=2.0)
+            frame = img.convert(mode)
         except ValueError:
             raise
         except Exception as exc:
             raise ValueError(f"cannot open preview image: {exc}") from exc
-        has_alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
-        mode = "RGBA" if has_alpha else "RGB"
-        frame = self._resize(img.convert(mode), LINK_PREVIEW_MAX_DIMENSION)
         # Copy the pixels into a brand-new image so no ``info`` (exif, xmp,
         # icc_profile, comments) can ride along into the encoder.
         clean = Image.new(mode, frame.size)

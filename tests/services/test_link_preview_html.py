@@ -81,3 +81,12 @@ def test_script_is_not_parsed_as_meta() -> None:
     <title>Real</title></head>"""
     meta = extract_page_meta(html, None, BASE)
     assert meta.title == "Real"
+
+
+def test_non_text_codecs_are_never_used() -> None:
+    """A page may not pick a bytes-to-bytes codec (``zlib_codec`` / ``rot13``
+    make ``bytes.decode`` raise) — they fall through to UTF-8."""
+    for charset in ("zlib_codec", "rot13", "base64", "hex"):
+        assert decode_html(b"<title>ok</title>", charset) == "<title>ok</title>"
+    sniffed = b'<meta charset="zlib_codec"><title>ok</title>'
+    assert extract_page_meta(sniffed, None, BASE).title == "ok"

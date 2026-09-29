@@ -59,6 +59,7 @@ from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
+import yarl
 from aiohttp.abc import AbstractResolver, ResolveResult
 
 log = logging.getLogger(__name__)
@@ -229,7 +230,10 @@ class _PinnedResolver(AbstractResolver):
 
 @dataclass(slots=True, frozen=True)
 class _Target:
-    url: str
+    #: The URL exactly as aiohttp will request it (already IDNA-encoded).
+    url: yarl.URL
+    #: ``url.raw_host`` — the host aiohttp connects to and asks the
+    #: resolver for, never the Unicode spelling ``urlsplit`` returns.
     host: str
     port: int
     addresses: list[str]
@@ -280,15 +284,32 @@ class OutboundFetcher:
         self._ssl = ssl
 
     async def _vet(self, url: str) -> _Target:
-        _scheme, host, port = check_url_shape(url)
+        _scheme, _host, port = check_url_shape(url)
+        # Vet the host aiohttp will actually use. ``urlsplit`` keeps a
+        # Unicode host while yarl applies UTS46 mapping, and the two can
+        # disagree: exotic digits such as U+1FBF1 map to ASCII ``1`` under
+        # UTS46 only, so ``🯱🯲🯷.0.0.1`` would be vetted as a DNS name and
+        # then *connected to* as the IP literal 127.0.0.1, skipping the
+        # pinned resolver. Everything below works on ``raw_host``.
+        try:
+            yurl = yarl.URL(url)
+            host = yurl.raw_host or ""
+        except (ValueError, UnicodeError) as exc:
+            raise OutboundFetchRefused("malformed") from exc
+        if not host:
+            raise OutboundFetchRefused("malformed", "no host")
         literal = parse_ip_literal(host)
+        if literal is None and (":" in host or host.replace(".", "").isdigit()):
+            # aiohttp's own "is this an IP" heuristic would bypass the
+            # resolver for this host, so it MUST be a parseable address.
+            raise OutboundFetchRefused("malformed", "ambiguous address")
         if literal is not None:
             if not is_public_address(literal):
                 raise OutboundFetchRefused("private_address", host)
-            return _Target(url=url, host=host, port=port, addresses=[str(literal)])
+            return _Target(url=yurl, host=host, port=port, addresses=[str(literal)])
         try:
             raw = await self._resolve(host, port)
-        except OSError as exc:
+        except (OSError, UnicodeError, ValueError) as exc:
             raise OutboundFetchRefused("dns", host) from exc
         if not raw:
             raise OutboundFetchRefused("dns", host)
@@ -303,7 +324,7 @@ class OutboundFetcher:
             if not is_public_address(ip):
                 raise OutboundFetchRefused("private_address", host)
             addresses.append(str(ip))
-        return _Target(url=url, host=host, port=port, addresses=addresses)
+        return _Target(url=yurl, host=host, port=port, addresses=addresses)
 
     async def fetch(
         self,
@@ -312,16 +333,23 @@ class OutboundFetcher:
         accept: frozenset[str],
         max_bytes: int,
         truncate: bool = False,
+        timeout_s: float | None = None,
     ) -> FetchResult:
         """GET *url* under every rule in the module docstring.
 
         ``accept`` lists the media types the answer may carry (anything
         else is refused). A body longer than ``max_bytes`` is refused, or —
         with ``truncate=True`` (HTML, whose ``<head>`` comes first) — cut
-        at ``max_bytes`` and returned.
+        at ``max_bytes`` and returned. ``timeout_s`` can only shorten the
+        fetcher's total deadline (a caller sharing one budget across fetches).
         """
+        budget = self._total_timeout
+        if timeout_s is not None:
+            budget = min(budget, timeout_s)
+        if budget <= 0:
+            raise OutboundFetchRefused("timeout")
         try:
-            async with asyncio.timeout(self._total_timeout):
+            async with asyncio.timeout(budget):
                 return await self._fetch_hops(
                     url, accept=accept, max_bytes=max_bytes, truncate=truncate
                 )
@@ -347,7 +375,10 @@ class OutboundFetcher:
                 return outcome
             # A redirect: resolve against the current URL; re-vetted on the
             # next pass exactly like the first URL.
-            current = urljoin(current, outcome)
+            try:
+                current = urljoin(current, outcome)
+            except ValueError as exc:
+                raise OutboundFetchRefused("bad_redirect") from exc
         raise OutboundFetchRefused("too_many_redirects")
 
     async def _get_once(

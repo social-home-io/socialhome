@@ -92,7 +92,7 @@ from ..domain.federation_capabilities import (
 )
 from ..media.cleanup import unlink_unreferenced
 from .space_purge import purge_space_and_media
-from ..domain.link_preview import link_preview_to_dict
+from ..domain.link_preview import card_survives_edit, link_preview_to_dict
 from .link_preview_service import wire_link_preview
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
@@ -4785,7 +4785,13 @@ class SpaceService(SpaceMemberGuardMixin):
             if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
                 raise PermissionError("only the author or a space admin can edit")
         _validate_text_length(new_content, limit=MAX_POST_LENGTH)
-        await self._posts.edit(post_id, new_content, space_id=space_id)
+        await self._posts.edit(
+            post_id,
+            new_content,
+            space_id=space_id,
+            clear_link_preview=post.link_preview is not None
+            and not card_survives_edit(post.content, new_content),
+        )
         refreshed = await self._posts.get(post_id)
         assert refreshed is not None  # just edited — must exist
         # Bus fan-out so subscribers (system-album bridge, search index,
@@ -4809,7 +4815,11 @@ class SpaceService(SpaceMemberGuardMixin):
             return
         # Capture media URLs before soft_delete nulls them; unlinked after
         # the PostDeleted publish unmirrors the shared gallery item.
-        media = [post.media_url, *post.image_urls]
+        media = [
+            post.media_url,
+            *post.image_urls,
+            post.link_preview.thumbnail_url if post.link_preview else None,
+        ]
         moderated_by: str | None = None
         if post.author != actor_user_id:
             # Moderation path — actor must be admin/owner

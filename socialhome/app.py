@@ -1510,6 +1510,22 @@ def _wire_federation_stack(
     )
 
 
+def _build_link_previews(
+    config: Config, preferences_service: PreferencesService
+) -> LinkPreviewService:
+    """The author-side link preview builder behind the SSRF guard.
+
+    The household fetches a linked page once when a member posts it; the
+    preview then travels inside the post so receivers never fetch it.
+    """
+    return LinkPreviewService(
+        fetcher=OutboundFetcher(),
+        image_processor=ImageProcessor(),
+        media_dir=pathlib.Path(config.media_path),
+        preferences=preferences_service,
+    )
+
+
 def _build_middleware(config: Config, limiter: RateLimiter):
     """Compose the HTTP middleware stack.
 
@@ -1917,14 +1933,7 @@ def create_app(config: Config | None = None) -> web.Application:
     )
 
     # ── Link previews (author-side, SSRF-guarded) ────────────────────────
-    # The household fetches a linked page once when a member posts it; the
-    # preview then travels inside the post so receivers never fetch it.
-    link_preview_service = LinkPreviewService(
-        fetcher=OutboundFetcher(),
-        image_processor=ImageProcessor(),
-        media_dir=pathlib.Path(config.media_path),
-        preferences=preferences_service,
-    )
+    link_preview_service = _build_link_previews(config, preferences_service)
     feed_service.attach_link_previews(link_preview_service)
     space_service.attach_link_previews(link_preview_service)
 

@@ -13,6 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from socialhome._version import __version__
 from socialhome.app import (
     MAP_TILE_USER_AGENT,
+    _build_link_previews,
     create_app,
     dispatch_gfs_relay_frame,
 )
@@ -21,6 +22,7 @@ from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
 )
 from socialhome.config import Config
+from socialhome.outbound_fetch import OutboundFetcher
 from socialhome.services.app_federation_service import AppFederationService
 
 
@@ -407,3 +409,14 @@ async def test_gfs_relay_is_a_noop_without_consumers():
         space_public_inbound=None,
         space_subscriber_key_inbound=None,
     )
+
+
+def test_build_link_previews_wires_the_guarded_fetcher(tmp_path):
+    """The link preview builder uses the SSRF-guarded fetcher, the household
+    preferences (admin switch) and the configured media dir."""
+    cfg = Config(data_dir=str(tmp_path), media_path=str(tmp_path / "media"))
+    prefs = object()
+    svc = _build_link_previews(cfg, prefs)  # type: ignore[arg-type]
+    assert isinstance(svc._fetcher, OutboundFetcher)
+    assert svc._preferences is prefs
+    assert svc._media_dir == tmp_path / "media"

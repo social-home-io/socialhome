@@ -85,10 +85,18 @@ def decode_html(body: bytes, charset: str | None) -> str:
         if not candidate:
             continue
         try:
-            codecs.lookup(candidate)
+            info = codecs.lookup(candidate)
         except LookupError:
             continue
-        return body.decode(candidate, errors="replace")
+        # ``codecs.lookup`` also knows bytes-to-bytes codecs (``zlib_codec``,
+        # ``rot13``…) that ``bytes.decode`` refuses — a page must not be able
+        # to pick one.
+        if not getattr(info, "_is_text_encoding", True):
+            continue
+        try:
+            return body.decode(info.name, errors="replace")
+        except LookupError:  # pragma: no cover — defensive
+            continue
     return body.decode("utf-8", errors="replace")
 
 

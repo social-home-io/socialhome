@@ -577,3 +577,87 @@ async def test_connection_refused_is_network(loopback_is_public) -> None:
     with pytest.raises(OutboundFetchRefused) as info:
         await fetcher.fetch(f"http://site.test:{port}/", accept=HTML, max_bytes=4096)
     assert info.value.reason == "network"
+
+
+# ─── the host aiohttp connects to is the host that was vetted ────────────
+
+
+async def test_uts46_digit_host_is_vetted_as_the_literal_it_becomes() -> None:
+    """``🯱🯲🯷.0.0.1`` is a DNS name to ``urlsplit`` but the IP literal
+    127.0.0.1 to yarl (UTS46 maps U+1FBF1.. to ASCII digits) — and aiohttp
+    connects to literals without asking the pinned resolver. It must be
+    refused as the loopback address it is, without any DNS lookup."""
+    resolve = _resolver({"xn--ub0icp.0.0.1": ["93.184.216.34"]})
+    fetcher = OutboundFetcher(resolver=resolve)
+    with pytest.raises(OutboundFetchRefused) as info:
+        await fetcher.fetch(
+            "http://\U0001fbf1\U0001fbf2\U0001fbf7.0.0.1/", accept=HTML, max_bytes=1024
+        )
+    assert info.value.reason == "private_address"
+    assert resolve.calls == []
+
+
+async def test_idn_host_is_resolved_and_pinned_by_its_punycode_name(
+    loopback_is_public,
+) -> None:
+    async def page(request: web.Request) -> web.Response:
+        return web.Response(text="ok", content_type="text/html")
+
+    server = await _serve([web.get("/", page)])
+    try:
+        fetcher, resolve = _fetcher_for(
+            server, loopback_is_public, mapping={"xn--bcher-kva.test": ["127.0.0.1"]}
+        )
+        res = await fetcher.fetch(
+            f"http://bücher.test:{server.port}/", accept=HTML, max_bytes=4096
+        )
+    finally:
+        await server.close()
+    assert res.body == b"ok"
+    assert resolve.calls == ["xn--bcher-kva.test"]
+
+
+async def test_overlong_label_is_a_refusal_not_a_crash() -> None:
+    fetcher = OutboundFetcher()
+    with pytest.raises(OutboundFetchRefused) as info:
+        await fetcher.fetch(
+            "https://" + "a" * 70 + ".example/", accept=HTML, max_bytes=1024
+        )
+    assert info.value.reason in {"dns", "malformed"}
+
+
+async def test_malformed_redirect_location_is_refused(loopback_is_public) -> None:
+    async def hop(request: web.Request) -> web.Response:
+        return web.Response(status=302, headers={"Location": "http://[::1"})
+
+    server = await _serve([web.get("/", hop)])
+    try:
+        fetcher, _ = _fetcher_for(server, loopback_is_public)
+        with pytest.raises(OutboundFetchRefused) as info:
+            await fetcher.fetch(
+                f"http://site.test:{server.port}/", accept=HTML, max_bytes=4096
+            )
+    finally:
+        await server.close()
+    assert info.value.reason == "bad_redirect"
+
+
+async def test_caller_budget_only_shortens_the_deadline() -> None:
+    async def slow(host: str, port: int) -> list[str]:
+        await asyncio.sleep(5)
+        return ["8.8.8.8"]
+
+    fetcher = OutboundFetcher(resolver=slow, total_timeout_s=30)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(OutboundFetchRefused) as info:
+        await fetcher.fetch(
+            "https://slow.example/", accept=HTML, max_bytes=1024, timeout_s=0.2
+        )
+    assert info.value.reason == "timeout"
+    assert loop.time() - started < 2
+    with pytest.raises(OutboundFetchRefused) as spent:
+        await fetcher.fetch(
+            "https://slow.example/", accept=HTML, max_bytes=1, timeout_s=0
+        )
+    assert spent.value.reason == "timeout"

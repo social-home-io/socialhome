@@ -4,10 +4,13 @@ from __future__ import annotations
 
 
 import pytest
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.post import FileMeta, PostType
+from socialhome.domain.link_preview import LinkPreview
+from socialhome.domain.post import FileMeta, Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.post_repo import SqlitePostRepo
@@ -602,3 +605,61 @@ async def test_create_post_carries_author_built_link_preview(stack):
     )
     assert q.link_preview is None
     assert asked[0]["post_type"] is PostType.TEXT
+
+
+async def test_edit_keeps_the_card_only_while_its_link_stays(stack, tmp_dir):
+    """An edit that keeps the link keeps the card; one that changes or drops
+    it clears the card (no re-fetch). Deleting the post also removes the
+    card image once nothing else references it."""
+
+    class Previews:
+        async def preview_for_post(self, **kw):
+            return LinkPreview(
+                url="https://example.com/a",
+                title="Card",
+                thumbnail_url="api/media/lp.webp",
+            )
+
+    stack.feed_svc.attach_link_previews(Previews())
+    u = await stack.provision_user("pascal")
+    p = await stack.feed_svc.create_post(
+        author_user_id=u.user_id,
+        type=PostType.TEXT,
+        content="see https://example.com/a",
+    )
+    kept = await stack.feed_svc.edit_post(
+        p.id, editor_user_id=u.user_id, new_content="really, see https://example.com/a!"
+    )
+    assert kept.link_preview is not None
+    gone = await stack.feed_svc.edit_post(
+        p.id, editor_user_id=u.user_id, new_content="now https://other.example/"
+    )
+    assert gone.link_preview is None
+
+
+async def test_delete_removes_the_card_image(tmp_dir):
+    """The card's re-encoded image goes with the post's other media."""
+    media = tmp_dir / "media"
+    media.mkdir()
+    (media / "lp.webp").write_bytes(b"x")
+    post = Post(
+        id="p1",
+        author="u",
+        type=PostType.TEXT,
+        created_at=datetime.now(timezone.utc),
+        content="https://example.com/",
+        link_preview=LinkPreview(
+            url="https://example.com/", title="T", thumbnail_url="api/media/lp.webp"
+        ),
+    )
+    posts = AsyncMock()
+    posts.get = AsyncMock(return_value=post)
+    users = AsyncMock()
+    user = AsyncMock()
+    user.is_admin = False
+    users.get_by_user_id = AsyncMock(return_value=user)
+    refs = AsyncMock()
+    refs.is_referenced = AsyncMock(return_value=False)
+    svc = FeedService(posts, users, EventBus(), media_dir=media, media_refs=refs)
+    await svc.delete_post("p1", actor_user_id="u")
+    assert not (media / "lp.webp").exists()

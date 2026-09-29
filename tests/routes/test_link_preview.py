@@ -39,7 +39,9 @@ def _auth(token: str) -> dict:
 def fetched():
     calls: list[str] = []
 
-    async def fake_fetch(self, url, *, accept, max_bytes, truncate=False):
+    async def fake_fetch(
+        self, url, *, accept, max_bytes, truncate=False, timeout_s=None
+    ):
         calls.append(url)
         if url == "https://example.com/story":
             return FetchResult(url, "text/html", "utf-8", PAGE, False)
