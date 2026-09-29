@@ -1710,7 +1710,16 @@ class SpaceService(SpaceMemberGuardMixin):
             if emoji is not None:
                 fwd["emoji"] = emoji
             if features is not None:
-                fwd["features"] = features.to_wire_dict()
+                # Only the keys that differ from our copy. The host merges a
+                # partial block onto its CURRENT features, so re-sending the
+                # untouched keys would revert any host-side change our copy
+                # hasn't caught up with yet.
+                ours = space.features.to_wire_dict()
+                changed = {
+                    k: v for k, v in features.to_wire_dict().items() if ours.get(k) != v
+                }
+                if changed:
+                    fwd["features"] = changed
             if join_mode is not None:
                 fwd["join_mode"] = _coerce_join_mode(join_mode).value
             if space_type is not None:
@@ -1727,10 +1736,31 @@ class SpaceService(SpaceMemberGuardMixin):
                 fwd["category"] = category
             if allow_here_mention is not None:
                 fwd["allow_here_mention"] = bool(allow_here_mention)
+            if not fwd:
+                return space  # nothing changed — don't ship an empty edit
             if await self._forward_admin_action_if_remote(
                 space, actor_username, "update_config", fwd
             ):
                 return space
+
+        # Retention is enforced by the host alone, and the host pins its own
+        # values against an inbound config snapshot (our mirror may be stale —
+        # see ``_keep_local_space_state``). So a seed-holding delegated admin's
+        # retention change, applied to our mirror below, ALSO travels to the
+        # host as a forwarded edit carrying just those fields.
+        if (
+            is_remote_host
+            and executes_locally
+            and (retention_days is not None or exempt_types is not None)
+        ):
+            retention_fwd: dict = {}
+            if retention_days is not None:
+                retention_fwd["retention_days"] = retention_days
+            if exempt_types is not None:
+                retention_fwd["retention_exempt_types"] = list(exempt_types)
+            await self._forward_admin_action_if_remote(
+                space, actor_username, "update_config", retention_fwd
+            )
 
         # SECURITY (v_24): the publication tier (``space_type``) is owner/quorum
         # gated (v_16 ``SpaceApprovalService``) and the v_15 forward path
@@ -5673,6 +5703,15 @@ def _space_metadata_for_federation(space: Space) -> dict:
         # own roster). Missing on an older sender → OFF (fail closed); an
         # older receiver ignores the key (it doesn't notify @here at all).
         "allow_here_mention": space.allow_here_mention,
+        # Retention policy ("delete posts older than N days" + the kept post
+        # types). Config, not content: member households mirror it so a
+        # co-admin seated on another household sees — and doesn't blindly
+        # re-save — the host's real values. Only the host enforces it (the
+        # sweep skips mirrored spaces) and the host pins its own values
+        # against an inbound snapshot. An older receiver ignores the keys; an
+        # older sender omits them and the receiver keeps what it has.
+        "retention_days": space.retention_days,
+        "retention_exempt_types": list(space.retention_exempt_types),
     }
 
 
@@ -5991,7 +6030,24 @@ def stub_space_from_metadata(
         min_age=_coerce_min_age(meta.get("min_age")),
         category=normalize_category(meta.get("category")),
         allow_here_mention=meta.get("allow_here_mention") is True,
+        retention_days=_coerce_retention_days(meta.get("retention_days")),
+        # Lenient: drop post types this household doesn't know (a newer
+        # peer's) rather than reject the whole snapshot.
+        retention_exempt_types=normalize_retention_exempt_types(
+            meta.get("retention_exempt_types")
+        ),
     )
+
+
+def _coerce_retention_days(value: object) -> int | None:
+    """A federated ``retention_days``: a positive int, else ``None`` (forever).
+
+    ``bool`` is an ``int`` subclass, so it is rejected explicitly — a
+    malformed ``true`` must not read as "delete after 1 day".
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def _coerce_roster_sequence(meta: dict) -> int:

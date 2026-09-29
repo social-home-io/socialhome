@@ -77,6 +77,12 @@ FEDERATED_ROUNDTRIP: frozenset[str] = frozenset(
         "tz",
         "min_age",
         "category",
+        # Retention is config, not content: member households mirror it so a
+        # remote admin's settings show (and re-save) the host's real values.
+        # The host alone enforces it (the sweep skips mirrored spaces) and
+        # pins it against an inbound snapshot.
+        "retention_days",
+        "retention_exempt_types",
     }
 )
 
@@ -97,10 +103,6 @@ FEDERATED_TRANSFORMED: dict[str, str] = {
 #: Fields that MUST NOT federate (absent from ``space_meta`` entirely), each
 #: with a one-line reason. The stub rebuilds them at their dataclass default.
 INTENTIONALLY_LOCAL: dict[str, str] = {
-    # Host-only retention policy; member households don't enforce the host's
-    # retention sweep — content arrives over its own events.
-    "retention_days": "host-only retention policy; not enforced on members",
-    "retention_exempt_types": "host-only retention policy companion",
     # Secret-ish join secret minted + checked host-side; never leaves the host.
     "join_code": "host-local join secret; must not leak to members",
     # Geo-gate coordinates are host-local matching state (raw GPS never
@@ -350,6 +352,8 @@ def test_older_sender_meta_fails_soft() -> None:
     assert stub.tz == "UTC"
     assert stub.archived is False
     assert stub.features == SpaceFeatures()
+    assert stub.retention_days is None
+    assert stub.retention_exempt_types == ()
     # Transform still holds for the older shape.
     assert stub.owner_instance_id == "host.example"
     assert stub.id == "legacy-space"

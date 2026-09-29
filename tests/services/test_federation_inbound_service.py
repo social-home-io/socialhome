@@ -2747,6 +2747,7 @@ def _signed_cfg_event(
     tamper=False,
     bad_sig=False,
     features=None,
+    extra_meta=None,
 ):
     """Build a SPACE_CONFIG_CHANGED whose ``space_meta`` is authority-signed
     with the space seed. ``author`` records the config_author_instance carried
@@ -2781,6 +2782,8 @@ def _signed_cfg_event(
     }
     if config_hlc is not None:
         meta["config_hlc"] = config_hlc
+    if extra_meta:
+        meta.update(extra_meta)
     signed = sign_authority_event(
         event_type="space_config_changed",
         space_id=space_id,
@@ -2937,6 +2940,127 @@ async def test_config_changed_applies_owner_only_flags_on_a_member_household(
     assert space.features.allow_subscribers is True
     assert space.features.delegated_admin_authority is True
     assert space.name == "OwnerOpenedIt"
+
+
+async def _set_host_local_state(db, space_id):
+    """Give a space row the host-only / runtime state a config change must
+    never reset (retention, join code, geo-gate, bot toggle). The terminal
+    ``archived_reason`` already short-circuits the handler, so it's not here."""
+    await db.enqueue(
+        "UPDATE spaces SET retention_days=30, retention_exempt_json=?,"
+        " join_code='JOIN42', lat=52.37, lon=4.89, radius_km=5.0,"
+        " bot_enabled=1 WHERE id=?",
+        ('["poll"]', space_id),
+    )
+
+
+async def test_config_changed_mirror_receives_retention_from_meta(db, bus, inbound):
+    """A member household mirrors the host's retention settings from the
+    authority-signed ``space_meta`` so a remote admin's General tab shows the
+    real values instead of "Forever"."""
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-ret",
+        owner_instance="owner-i",
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    _own_instance(inbound, "own-i")  # a member household, not the host
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-ret",
+            from_instance="owner-i",
+            owner_instance="owner-i",
+            sequence=6,
+            name="Kept",
+            seed=kp.private_key,
+            extra_meta={
+                "retention_days": 14,
+                "retention_exempt_types": ["poll", "event", "not_a_type"],
+            },
+        )
+    )
+    space = await SqliteSpaceRepo(db).get("sp-ret")
+    assert space.retention_days == 14
+    assert space.retention_exempt_types == ("event", "poll")
+
+
+async def test_config_changed_from_older_sender_keeps_mirrored_retention(
+    db, bus, inbound
+):
+    """An older host's meta carries no retention keys — "absent" means
+    "unknown", so the mirror keeps what it already has instead of resetting
+    to "Forever"."""
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-old",
+        owner_instance="owner-i",
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    await _set_host_local_state(db, "sp-old")
+    _own_instance(inbound, "own-i")
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-old",
+            from_instance="owner-i",
+            owner_instance="owner-i",
+            sequence=6,
+            name="Renamed",
+            seed=kp.private_key,
+        )
+    )
+    space = await SqliteSpaceRepo(db).get("sp-old")
+    assert space.name == "Renamed"
+    assert space.retention_days == 30
+    assert space.retention_exempt_types == ("poll",)
+
+
+@pytest.mark.security
+async def test_config_changed_never_resets_host_local_state_on_the_host(
+    db, bus, inbound
+):
+    """A delegated admin's authority-signed config snapshot lands on the host
+    as a whole ``Space`` rebuilt from meta. The host's own state that never
+    federates (join code, geo-gate, bot toggle) and its
+    retention policy (which the host alone enforces) must survive it — even
+    when the admin's possibly-stale mirror ships different retention values."""
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-h",
+        owner_instance="own-i",
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    await _set_host_local_state(db, "sp-h")
+    _own_instance(inbound, "own-i")  # we HOST this space
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-h",
+            from_instance="admin-i",
+            owner_instance="own-i",
+            sequence=6,
+            name="RenamedByAdmin",
+            seed=kp.private_key,
+            extra_meta={"retention_days": None, "retention_exempt_types": []},
+        )
+    )
+    space = await SqliteSpaceRepo(db).get("sp-h")
+    assert space.name == "RenamedByAdmin"
+    assert space.retention_days == 30
+    assert space.retention_exempt_types == ("poll",)
+    assert space.join_code == "JOIN42"
+    assert (space.lat, space.lon, space.radius_km) == (52.37, 4.89, 5.0)
+    assert space.bot_enabled is True
 
 
 @pytest.mark.security

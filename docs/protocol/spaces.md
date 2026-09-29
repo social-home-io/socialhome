@@ -1254,9 +1254,27 @@ or revoke delegation. Unknown / non-forwardable actions are dropped at
 the door (no phantom approval is recorded). A forwarded
 `retention_exempt_types` is sanitised on the host: values that are not a
 `PostType` (a newer peer's type, garbage) are dropped rather than failing
-the rest of the edit. Retention itself is host-only — `retention_days` /
-`retention_exempt_types` never ride `space_meta`; only the host runs the
-sweep.
+the rest of the edit.
+
+A forwarded `update_config` is an **edit**: an absent field means "leave it
+alone", never "reset to the default". The SPA sends only the fields the admin
+actually changed, and the forwarding household ships only the `features` keys
+that differ from its copy (the host merges them onto its current features),
+so a co-admin's rename can't carry stale or never-loaded values over the
+host's. An edit with nothing left to forward sends nothing.
+
+**Retention** (`retention_days`, `retention_exempt_types`) is config, not
+content. It rides `space_meta` so every member household mirrors the host's
+values (a co-admin's settings page shows them instead of "Forever"). An older
+sender omits the keys, and the receiver then keeps what it already had. Only
+the host **enforces** retention: the sweep skips spaces hosted elsewhere, so a
+mirror never deletes posts on its own. On the host, an inbound
+`SPACE_CONFIG_CHANGED` snapshot never overwrites the host's retention (a
+delegated admin's mirror may be stale). It also never overwrites the host's
+other local state: join code, geo-gate, bot toggle and dissolve bookkeeping.
+A seed-holding delegated admin's retention change is applied to its mirror
+and also forwarded to the host as an `update_config` carrying just those
+fields.
 
 ```mermaid
 sequenceDiagram

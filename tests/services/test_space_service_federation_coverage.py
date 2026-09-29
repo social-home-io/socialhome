@@ -24,6 +24,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.space import (
     JoinMode,
+    RemoteAdminOutcome,
     SpaceFeatures,
     SpaceMember,
     SpacePermissionError,
@@ -1094,13 +1095,38 @@ async def test_update_config_remote_forwards_to_host(stack):
     assert refreshed.name == "S"
 
 
-async def test_update_config_remote_serialises_features(stack):
-    """The forwarded params carry the wire-dict form of SpaceFeatures."""
+async def test_update_config_remote_forwards_only_changed_features(stack):
+    """The forwarded params carry only the feature keys that differ from the
+    stub's copy — a full snapshot would re-send every key the admin didn't
+    touch and revert any host change the stub hasn't caught up with yet."""
     stub = await _remote_stub_space(stack)
     feats = SpaceFeatures(calendar=False, bazaar=False)
     await stack.svc.update_config(stub.id, actor_username="localadmin", features=feats)
     payload = stack.fed_svc.send_with_mesh_fallback.call_args.kwargs["payload"]
-    assert payload["params"]["features"] == feats.to_wire_dict()
+    assert payload["params"]["features"] == {"calendar": False, "bazaar": False}
+
+
+async def test_update_config_remote_drops_unchanged_features(stack):
+    """A features block identical to the stub's is not forwarded at all."""
+    stub = await _remote_stub_space(stack)
+    await stack.svc.update_config(
+        stub.id,
+        actor_username="localadmin",
+        name="Renamed",
+        features=SpaceFeatures(),
+    )
+    params = stack.fed_svc.send_with_mesh_fallback.call_args.kwargs["payload"]["params"]
+    assert params == {"name": "Renamed"}
+
+
+async def test_update_config_remote_nothing_to_forward_sends_nothing(stack):
+    """An edit that changes nothing (e.g. the route's always-present features
+    block equal to the stub's) doesn't ship an empty action to the host."""
+    stub = await _remote_stub_space(stack)
+    await stack.svc.update_config(
+        stub.id, actor_username="localadmin", features=SpaceFeatures()
+    )
+    stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
 
 
 async def test_ban_remote_forwards_to_host(stack):
@@ -1195,6 +1221,55 @@ async def test_apply_remote_admin_action_sanitises_exempt_types(stack):
     refreshed = await stack.space_repo.get(space.id)
     assert refreshed.name == "Renamed"
     assert refreshed.retention_exempt_types == ("poll",)
+
+
+async def test_forwarded_rename_leaves_host_retention_intact(stack):
+    """A remote admin's forwarded save that doesn't name the retention fields
+    (the SPA now sends only what the admin changed) must not touch the host's
+    retention — absent means "no change", never "reset to Forever"."""
+    space = await _host_space_with_remote_admin(stack)
+    await stack.svc.update_config(
+        space.id,
+        actor_username="alicehost",
+        retention_days=30,
+        retention_exempt_types=["poll"],
+    )
+    outcome = await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="update_config",
+        params={"name": "Renamed by co-admin"},
+    )
+    assert outcome is RemoteAdminOutcome.EXECUTED
+    refreshed = await stack.space_repo.get(space.id)
+    assert refreshed.name == "Renamed by co-admin"
+    assert refreshed.retention_days == 30
+    assert refreshed.retention_exempt_types == ("poll",)
+
+
+async def test_forwarded_config_ignores_fields_a_remote_admin_may_not_set(stack):
+    """``space_type`` (quorum-gated), unknown keys like ``join_code`` and the
+    owner-only feature flags are dropped / pinned on the host even when a
+    forwarded edit carries them."""
+    space = await _host_space_with_remote_admin(stack)
+    await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="update_config",
+        params={
+            "space_type": "public",
+            "join_code": "HIJACK",
+            "features": {"allow_subscribers": True, "calendar": False},
+        },
+    )
+    refreshed = await stack.space_repo.get(space.id)
+    assert refreshed.space_type is SpaceType.PRIVATE
+    assert refreshed.join_code != "HIJACK"
+    assert refreshed.features.allow_subscribers is False
+    assert refreshed.features.delegated_admin_authority is True
+    assert refreshed.features.calendar is False
 
 
 async def test_apply_remote_admin_action_update_config_rebuilds_features(stack):
@@ -1325,7 +1400,8 @@ async def test_update_config_remote_forwards_all_fields(stack):
     assert params["name"] == "N"
     assert params["description"] == "D"
     assert params["emoji"] == "🌟"
-    assert params["features"] == SpaceFeatures().to_wire_dict()
+    # Identical to the stub's features → nothing to forward for them.
+    assert "features" not in params
     assert params["join_mode"] == JoinMode.OPEN.value
     assert params["space_type"] == SpaceType.PRIVATE.value
     assert params["retention_days"] == 30
