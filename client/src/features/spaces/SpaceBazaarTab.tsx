@@ -14,6 +14,7 @@ import { useEffect } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from '@/components/Button'
+import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { BazaarSkeleton } from '@/components/Skeleton'
 import { BazaarPostBody } from '@/components/BazaarPostBody'
 import { BazaarCard } from '@/features/bazaar/BazaarPage'
@@ -78,8 +79,11 @@ export function SpaceBazaarTab({ spaceId }: { spaceId: string }) {
         <p class="sh-muted" style={{ margin: 0 }}>
           Items members are sharing or selling in this space.
         </p>
-        <Button onClick={() => openBazaarCreate(spaceId)}>+ New listing</Button>
+        {!isRestricted('bazaar') && (
+          <Button onClick={() => openBazaarCreate(spaceId)}>+ New listing</Button>
+        )}
       </div>
+      {isRestricted('bazaar') && <ProtectedNotice capability="bazaar" />}
       {loading.value ? (
         <BazaarSkeleton />
       ) : listings.value.length === 0 ? (
@@ -90,7 +94,9 @@ export function SpaceBazaarTab({ spaceId }: { spaceId: string }) {
             Be the first to list something. New listings stay in this tab —
             tick “Also announce in the space feed” if you want a feed post too.
           </p>
-          <Button onClick={() => openBazaarCreate(spaceId)}>+ New listing</Button>
+          {!isRestricted('bazaar') && (
+            <Button onClick={() => openBazaarCreate(spaceId)}>+ New listing</Button>
+          )}
         </div>
       ) : (
         <div class="sh-bazaar-grid">

@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from ..domain.child_protection import ProtectedCapability
 from ..domain.events import (
     BazaarBidPlaced,
     BazaarBidWithdrawn,
@@ -46,6 +47,7 @@ from ..repositories.bazaar_repo import (
     new_bid,
     new_offer,
 )
+from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
     from .space_service import SpaceService
@@ -81,7 +83,7 @@ class _Unset:
 _UNSET = _Unset()
 
 
-class BazaarService:
+class BazaarService(ProtectionGateMixin):
     """Service-level wrapper around :class:`AbstractBazaarRepo`.
 
     Listings are scoped to a single :class:`Space` — :meth:`create_listing`
@@ -90,12 +92,13 @@ class BazaarService:
     the space's membership / federation rules.
     """
 
-    __slots__ = ("_repo", "_bus", "_spaces")
+    __slots__ = ("_repo", "_bus", "_spaces", "_child_protection")
 
     def __init__(self, repo: AbstractBazaarRepo, bus: EventBus) -> None:
         self._repo = repo
         self._bus = bus
         self._spaces: SpaceService | None = None
+        self._child_protection = None
 
     def attach_spaces(self, space_service: "SpaceService") -> None:
         """Wire :class:`SpaceService` so ``create_listing`` can mint the
@@ -151,6 +154,8 @@ class BazaarService:
         Raises :class:`ValueError` on shape-of-input validation failure
         (mapped to HTTP 422).
         """
+        # §CP.R: a protected account doesn't trade with other households.
+        await self._require_unrestricted(seller_user_id, ProtectedCapability.BAZAAR)
         if self._spaces is None:
             raise RuntimeError("space service not attached")
         space = await self._spaces.get_space(space_id)
@@ -328,7 +333,9 @@ class BazaarService:
           * amount must be positive
           * AUCTION / BID_FROM must beat the current high bid + step
           * listing must be ACTIVE
+          * the bidder isn't a protected account (§CP.R)
         """
+        await self._require_unrestricted(bidder_user_id, ProtectedCapability.BAZAAR)
         listing = await self.get_listing(listing_post_id)
         if listing.status is not BazaarStatus.ACTIVE:
             raise ValueError("listing is not active")
@@ -469,8 +476,10 @@ class BazaarService:
 
         Auction listings reject offer creation — auction uses
         :meth:`place_bid` instead. A seller can't offer on their own
-        listing; already-sold / expired / cancelled listings reject.
+        listing; already-sold / expired / cancelled listings reject. A
+        protected account can't make offers (§CP.R).
         """
+        await self._require_unrestricted(offerer_user_id, ProtectedCapability.BAZAAR)
         listing = await self.get_listing(listing_post_id)
         if listing.status != BazaarStatus.ACTIVE:
             raise BazaarServiceError(

@@ -13,6 +13,7 @@ import { useRoute, useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
+import { isRestricted } from '@/components/ProtectedNotice'
 import { Avatar } from '@/components/Avatar'
 import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
@@ -433,12 +434,16 @@ export default function HighlightViewerPage() {
             >
               👁 {myViews.length} · {myReactions.length} reactions
             </button>
-            <Button
-              variant="ghost"
-              onClick={() => openPublishMenu(highlight.id, !!highlight.public_gfs_id)}
-            >
-              🔗 Publish public link
-            </Button>
+            {/* §CP.R: a protected account can't mint a public link; it
+             *  keeps the button only to unpublish one made before. */}
+            {(!isRestricted('public_links') || !!highlight.public_gfs_id) && (
+              <Button
+                variant="ghost"
+                onClick={() => openPublishMenu(highlight.id, !!highlight.public_gfs_id)}
+              >
+                🔗 Publish public link
+              </Button>
+            )}
             <Button variant="danger" onClick={deleteFrame}>Delete frame</Button>
           </>
         )}

@@ -78,6 +78,7 @@ from .child_protection import (
     CPKickView,
     CPMembershipAuditView,
     CPMinorsForGuardianView,
+    MeProtectionView,
     CPSpaceCollectionView,
     CPGuardiansView,
     CPProtectionStatusView,
@@ -430,6 +431,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         "/api/me/onboarding-complete",
         MeOnboardingCompleteView,
     )
+    app.router.add_view("/api/me/protection", MeProtectionView)
     app.router.add_view("/api/me/tokens", TokenCollectionView)
     app.router.add_view("/api/me/tokens/{id}", TokenDetailView)
     app.router.add_view("/api/admin/tokens", AdminTokenCollectionView)

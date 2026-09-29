@@ -19,6 +19,7 @@
 import { useSignal } from '@preact/signals'
 import { api, ApiError } from '@/api'
 import { Button } from '@/components/Button'
+import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { FormError } from '@/components/FormError'
 import { SecretReveal } from '@/components/SecretReveal'
 import { showToast } from '@/components/Toast'
@@ -101,6 +102,23 @@ export function SubscribeFeed({ spaceId }: SubscribeFeedProps) {
   const current = feed.value
   const external = current?.external_url ?? null
   const webcal = external ? webcalUrl(external) : null
+
+  if (isRestricted('calendar_feeds')) {
+    // §CP.R: no new link — an earlier one already stopped serving, but can
+    // still be turned off for good.
+    return (
+      <section class="sh-subscribe-feed" aria-label={t('event.subscribe.aria')}>
+        <ProtectedNotice capability="calendar_feeds" />
+        <p class="sh-muted sh-subscribe-feed-note">
+          <button type="button" class="sh-link-button" onClick={() => void revoke()}
+                  disabled={busy.value}>
+            {t('event.subscribe.revoke_existing')}
+          </button>
+        </p>
+        <FormError id={`sh-subscribe-error-${spaceId}`} message={error.value} />
+      </section>
+    )
+  }
 
   return (
     <section class="sh-subscribe-feed" aria-label={t('event.subscribe.aria')}>

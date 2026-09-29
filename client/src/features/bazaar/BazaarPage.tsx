@@ -16,6 +16,7 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from '@/components/Button'
+import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { BazaarSkeleton } from '@/components/Skeleton'
 import { BazaarPostBody, formatBazaarAmount } from '@/components/BazaarPostBody'
 import { BazaarSellerDashboard } from '@/components/BazaarSellerDashboard'
@@ -100,7 +101,9 @@ export default function BazaarPage() {
   return (
     <div class="sh-bazaar">
       <div class="sh-page-header">
-        <Button onClick={() => openBazaarCreate()}>+ New listing</Button>
+        {isRestricted('bazaar')
+          ? <ProtectedNotice capability="bazaar" />
+          : <Button onClick={() => openBazaarCreate()}>+ New listing</Button>}
       </div>
 
       <div class="sh-bazaar-filters">
@@ -234,7 +237,9 @@ function EmptyState({ tab }: { tab: BazaarTab }) {
       <div aria-hidden="true">{icon}</div>
       <h3>{heading}</h3>
       <p>{body}</p>
-      <Button onClick={() => openBazaarCreate()}>+ Create a listing</Button>
+      {!isRestricted('bazaar') && (
+        <Button onClick={() => openBazaarCreate()}>+ Create a listing</Button>
+      )}
     </div>
   )
 }

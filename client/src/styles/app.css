@@ -15967,6 +15967,64 @@ a.sh-link-preview-link:focus-visible {
   border-color: color-mix(in srgb, var(--sh-primary) 30%, transparent);
 }
 
+/* Protected account (§CP.R) — stands in for an entry point the server
+   refuses for this account. Informational, not an error: calm primary tint. */
+.sh-protected-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-primary) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sh-primary) 28%, transparent);
+  max-width: 100%;
+  box-sizing: border-box;
+  text-align: start;
+}
+.sh-protected-notice__icon {
+  font-size: 1.25em;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+.sh-protected-notice__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sh-protected-notice__text > strong {
+  display: block;
+  margin-bottom: 2px;
+}
+.sh-protected-notice__text p {
+  margin: 0 0 var(--sh-space-xs);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-protected-notice__text .sh-link {
+  font-size: var(--sh-font-size-sm);
+  display: inline-block;
+  padding: var(--sh-space-xs) 0;
+}
+.sh-protected-account {
+  border: 1px solid color-mix(in srgb, var(--sh-primary) 28%, transparent);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
+  padding: var(--sh-space-md);
+  margin-bottom: var(--sh-space-lg);
+}
+.sh-protected-account h2 { margin-top: 0; }
+.sh-protected-account__list,
+.sh-protected-account__guardians {
+  margin: 0 0 var(--sh-space-sm);
+  padding-inline-start: 1.25rem;
+}
+.sh-protected-account__list li,
+.sh-protected-account__guardians li {
+  margin-bottom: var(--sh-space-xs);
+}
+.sh-protected-account__guardians-heading {
+  margin: var(--sh-space-md) 0 var(--sh-space-xs);
+  font-size: var(--sh-font-size-sm);
+}
+
 /* Scope chips — which kind of space is this? */
 .sh-scope-chip, .sh-join-mode-chip, .sh-age-chip {
   display: inline-flex; align-items: center; gap: 4px;

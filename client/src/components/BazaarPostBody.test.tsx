@@ -14,6 +14,7 @@ vi.mock('./SaveListingButton', () => ({ SaveListingButton: () => null }))
 vi.mock('./FileRenderer', () => ({ ImageRenderer: () => null }))
 
 import { BazaarPostBody } from './BazaarPostBody'
+import { currentUser } from '@/store/auth'
 
 const future = () => new Date(Date.now() + 86_400_000).toISOString()
 
@@ -70,5 +71,41 @@ describe('BazaarPostBody activity count', () => {
     )
     const { container } = render(<BazaarPostBody postId="p1" />)
     await waitFor(() => expect(container.textContent).toContain('1 bid'))
+  })
+})
+
+describe('BazaarPostBody — protected buyer', () => {
+  beforeEach(() => apiGet.mockReset())
+
+  it('shows the protected notice instead of Buy / bid / offer', async () => {
+    const saved = currentUser.value
+    ;(currentUser as { value: unknown }).value = {
+      user_id: 'kid1', restrictions: ['bazaar'], protected: true,
+    }
+    try {
+      mockApi(listing({ mode: 'fixed', price: 1000 }), [], [])
+      const { container, findByRole } = render(<BazaarPostBody postId="p1" />)
+      const note = await findByRole('note')
+      expect(note.getAttribute('data-capability')).toBe('bazaar')
+      expect(container.textContent).not.toContain('Buy for')
+      expect(container.querySelector('form.sh-bazaar-bid-form')).toBeNull()
+    } finally {
+      ;(currentUser as { value: unknown }).value = saved
+    }
+  })
+
+  it('an unrestricted buyer still gets the bid form', async () => {
+    const saved = currentUser.value
+    ;(currentUser as { value: unknown }).value = { user_id: 'adult1', restrictions: [] }
+    try {
+      mockApi(listing({ mode: 'auction', start_price: 1000 }), [], [])
+      const { container } = render(<BazaarPostBody postId="p1" />)
+      await waitFor(() =>
+        expect(container.querySelector('form.sh-bazaar-bid-form')).not.toBeNull(),
+      )
+      expect(container.querySelector('[role="note"]')).toBeNull()
+    } finally {
+      ;(currentUser as { value: unknown }).value = saved
+    }
   })
 })

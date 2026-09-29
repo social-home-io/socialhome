@@ -17,6 +17,8 @@ vi.mock('@/platform', () => ({ isSupervisorAddon: () => platformMock.addon }))
 
 import { ApiError } from '@/api'
 import { SubscribeFeed, webcalUrl } from './SubscribeFeed'
+import { currentUser } from '@/store/auth'
+import type { User } from '@/types'
 
 const FEED_URL = '/api/spaces/sp1/calendar/export.ics?token=tok123'
 
@@ -125,5 +127,29 @@ describe('webcalUrl', () => {
   it('maps https to webcal and refuses plain http', () => {
     expect(webcalUrl('https://h.example/x.ics?token=a')).toBe('webcal://h.example/x.ics?token=a')
     expect(webcalUrl('http://h.example/x.ics')).toBeNull()
+  })
+})
+
+describe('SubscribeFeed — protected account', () => {
+  it('offers no new link, explains why, and can still turn an old one off', async () => {
+    currentUser.value = {
+      user_id: 'u-kid', username: 'kid', display_name: 'Kid', is_admin: false,
+      picture_url: null, picture_hash: null, bio: null, is_new_member: false,
+      protected: true, restrictions: ['calendar_feeds'],
+    } as User
+    try {
+      confirmMock.mockResolvedValueOnce(true)
+      apiMock.delete.mockResolvedValueOnce(undefined)
+      const { queryByRole, getByRole } = render(<SubscribeFeed spaceId="sp1" />)
+      expect(queryByRole('button', { name: 'Create my link' })).toBeNull()
+      expect(getByRole('note').textContent).toContain('Calendar subscription links')
+      fireEvent.click(getByRole('button', { name: 'Turn off my existing link' }))
+      await waitFor(() =>
+        expect(apiMock.delete).toHaveBeenCalledWith('/api/spaces/sp1/calendar/feed-token'),
+      )
+      expect(apiMock.post).not.toHaveBeenCalled()
+    } finally {
+      currentUser.value = null
+    }
   })
 })

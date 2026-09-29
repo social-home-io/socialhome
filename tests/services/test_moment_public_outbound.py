@@ -240,3 +240,47 @@ async def test_outbound_used_before_attach_skips_silently(db):
             expires_at="2026-05-07T12:00:00Z",
         )
     )
+
+
+class _ProtectedCp:
+    """Stub ChildProtectionService: every listed user is protected."""
+
+    def __init__(self, protected: set[str]) -> None:
+        self._protected = protected
+
+    async def is_restricted(self, user_id, capability):
+        return user_id in self._protected
+
+
+async def test_protected_author_moment_is_not_published(outbound_setup):
+    """§CP.R at use time: a registration made before the account was
+    protected no longer publishes its moments to the connection server."""
+    s = outbound_setup
+    s["sub"].attach_child_protection(_ProtectedCp({"u1"}))
+    await s["moments"].save(_moment())
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    assert s["session"].posts == []
+
+
+async def test_protected_author_can_still_retract_a_moment(outbound_setup):
+    """Deletes keep flowing so earlier public moments can be withdrawn."""
+    s = outbound_setup
+    s["sub"].attach_child_protection(_ProtectedCp({"u1"}))
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(
+        MomentDeleted(
+            moment_id="m-1", author_user_id="u1", origin_instance_id="inst-self"
+        )
+    )
+    assert len(s["session"].posts) == 1
+    assert s["session"].posts[0][0].endswith("/gfs/moments/delete")
+
+
+async def test_unprotected_author_still_publishes_with_cp_wired(outbound_setup):
+    s = outbound_setup
+    s["sub"].attach_child_protection(_ProtectedCp(set()))
+    await s["moments"].save(_moment())
+    await s["regs"].upsert(user_id="u1", gfs_id="g1")
+    await s["bus"].publish(_created_event())
+    assert len(s["session"].posts) == 1

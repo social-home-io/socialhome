@@ -10,6 +10,7 @@ import { computed, signal } from '@preact/signals'
 import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
+import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { useTitle } from '@/store/pageTitle'
@@ -110,6 +111,15 @@ export default function PublicDiscoveryPage() {
         'error',
       )
     }
+  }
+
+  if (isRestricted('public_moments')) {
+    return (
+      <div class="sh-momentum-discover">
+        <header class="sh-page-header"><h2>Discover Momentum</h2></header>
+        <ProtectedNotice capability="public_moments" />
+      </div>
+    )
   }
 
   if (gfses.value.length === 0) {

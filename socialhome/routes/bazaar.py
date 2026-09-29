@@ -10,6 +10,7 @@ from ..app_keys import (
     media_signer_key,
     space_repo_key,
 )
+from ..domain.child_protection import AccountProtectedError
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..repositories.bazaar_repo import BidStateError, OfferStateError
 from ..security import error_response
@@ -404,6 +405,8 @@ class BazaarOfferCollectionView(BaseView):
             )
         except ListingNotFoundError:
             return error_response(404, "NOT_FOUND", "Listing not found.")
+        except AccountProtectedError:
+            raise  # BaseView maps it to 403 ACCOUNT_PROTECTED (+ capability)
         except PermissionError as exc:
             return error_response(403, "FORBIDDEN", str(exc))
         except ValueError as exc:

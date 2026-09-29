@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import orjson
 
 from ..crypto import derive_user_id, generate_identity_keypair
+from ..domain.child_protection import ProtectedCapability
 from ..domain.events import (
     UserBlocked,
     UserDeprovisioned,
@@ -48,6 +49,7 @@ from ..repositories.profile_picture_repo import (
     compute_picture_hash,
 )
 from ..repositories.user_repo import AbstractUserRepo
+from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
 
@@ -124,10 +126,17 @@ def _resolve_clear_after(value: object, *, now: datetime, tz: str) -> str | None
     return deadline.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
-class UserService:
+class UserService(ProtectionGateMixin):
     """Provision, update, and query local users."""
 
-    __slots__ = ("_repo", "_bus", "_own_instance_pk", "_pictures", "_key_manager")
+    __slots__ = (
+        "_repo",
+        "_bus",
+        "_own_instance_pk",
+        "_pictures",
+        "_key_manager",
+        "_child_protection",
+    )
 
     def __init__(
         self,
@@ -143,6 +152,7 @@ class UserService:
         self._own_instance_pk = own_instance_public_key
         self._pictures = profile_picture_repo
         self._key_manager = key_manager
+        self._child_protection = None
 
     def attach_profile_picture_repo(
         self,
@@ -695,6 +705,10 @@ class UserService:
         user = await self._repo.get(username)
         if user is None:
             raise KeyError(f"user {username!r} not found")
+        # §CP.R: a protected account doesn't hand a bearer credential to an
+        # external tool. Browser sign-ins mint through the platform adapter,
+        # not here, so logging in is unaffected.
+        await self._require_unrestricted(user.user_id, ProtectedCapability.API_TOKENS)
         if not label.strip():
             raise ValueError("token label must not be empty")
         raw_token = secrets.token_urlsafe(48)

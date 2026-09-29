@@ -11,6 +11,12 @@ Coordinates all minor-account features. Security invariants from the spec:
   spaces shared with the blocked user.
 * **§CP.F3** — Protected minors may only DM users on directly-paired
   instances (no DM_RELAY hops).
+* **§CP.R** — Protected accounts may not use the surfaces in
+  :data:`~socialhome.domain.child_protection.PROTECTED_ACCOUNT_RESTRICTIONS`
+  (bazaar, public spaces, public moments / links, API tokens, calendar
+  feeds). Services enforce it through :meth:`require_unrestricted` (via
+  :class:`~socialhome.services.protection_gate.ProtectionGateMixin`); the
+  account reads its own state from :meth:`protection_summary_for_self`.
 
 V1 implements the public-facing surface — age gate updates, the
 :meth:`check_space_age_gate` enforcement hook called by SpaceService.join,
@@ -25,6 +31,11 @@ import logging
 from datetime import date as _date
 from typing import Protocol, runtime_checkable
 
+from ..domain.child_protection import (
+    PROTECTED_ACCOUNT_RESTRICTIONS,
+    AccountProtectedError,
+    ProtectedCapability,
+)
 from ..domain.events import (
     CpBlockAdded,
     CpBlockRemoved,
@@ -642,6 +653,66 @@ class ChildProtectionService:
             raise SpacePermissionError(
                 f"This space is restricted to users aged {min_age}+."
             )
+
+    # ─── Protected-account restrictions (§CP.R) ──────────────────────────
+
+    async def is_protected(self, user_id: str) -> bool:
+        """``True`` iff *user_id* is a local user under child protection."""
+        protection = await self._repo.get_user_protection(user_id)
+        return bool(protection and protection["child_protection_enabled"])
+
+    async def restrictions_for(self, user_id: str) -> tuple[ProtectedCapability, ...]:
+        """The surfaces *user_id* may not use — empty when unprotected."""
+        if await self.is_protected(user_id):
+            return PROTECTED_ACCOUNT_RESTRICTIONS
+        return ()
+
+    async def is_restricted(
+        self,
+        user_id: str,
+        capability: ProtectedCapability,
+    ) -> bool:
+        """Whether *capability* is off-limits for *user_id* (§CP.R)."""
+        return capability in await self.restrictions_for(user_id)
+
+    async def require_unrestricted(
+        self,
+        user_id: str,
+        capability: ProtectedCapability,
+    ) -> None:
+        """§CP.R enforcement hook — raise :class:`AccountProtectedError`
+        when *user_id* is protected and *capability* is restricted."""
+        if await self.is_restricted(user_id, capability):
+            raise AccountProtectedError(capability)
+
+    async def protection_summary_for_self(self, user_id: str) -> dict:
+        """What a user may learn about their *own* protection.
+
+        ``{protected, restrictions, guardians}`` — the restricted surfaces
+        and who to ask. Deliberately omits ``is_minor`` / ``declared_age`` /
+        ``date_of_birth`` (``SENSITIVE_FIELDS``): the account learns *what*
+        is limited, never the age the household recorded.
+        """
+        restrictions = await self.restrictions_for(user_id)
+        if not restrictions:
+            return {"protected": False, "restrictions": [], "guardians": []}
+        guardians: list[dict] = []
+        for guardian_id in await self._repo.list_guardians(user_id):
+            guardian = await self._users.get_by_user_id(guardian_id)
+            if guardian is None:
+                continue
+            guardians.append(
+                {
+                    "user_id": guardian.user_id,
+                    "username": guardian.username,
+                    "display_name": guardian.display_name,
+                }
+            )
+        return {
+            "protected": True,
+            "restrictions": [c.value for c in restrictions],
+            "guardians": guardians,
+        }
 
     # ─── DM enforcement (§CP.F3) ─────────────────────────────────────────
 

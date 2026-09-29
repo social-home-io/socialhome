@@ -8,6 +8,7 @@ import { currentUser } from '@/store/auth'
 import { loadSpaces } from '@/store/spaces'
 import { Modal } from './Modal'
 import { Button } from './Button'
+import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { EmojiField } from './EmojiField'
 import { RadioCardGroup } from './RadioCardGroup'
 import {
@@ -136,6 +137,18 @@ export function SpaceCreateDialog() {
         : o,
     )
 
+  // §CP.R: a protected account can create private / household spaces
+  // only — the server refuses the discoverable tiers (403
+  // ACCOUNT_PROTECTED), so offer them disabled with the reason.
+  const tierLocked = isRestricted('public_spaces')
+  const offeredOptions = tierLocked
+    ? visibilityOptions.map((o) =>
+      o.value === 'public' || o.value === 'global'
+        ? { ...o, disabled: true, subtitle: t('protected.tier_unavailable') }
+        : o,
+    )
+    : visibilityOptions
+
   const noLocation = isPublic() && !lat.value.trim() && !lon.value.trim()
 
   return (
@@ -157,7 +170,7 @@ export function SpaceCreateDialog() {
           legend="Visibility"
           name="space-create-visibility"
           value={spaceType.value}
-          options={visibilityOptions}
+          options={offeredOptions}
           onChange={(v) => {
             spaceType.value = v
             // A private space is invite-only by definition — there's no
@@ -165,7 +178,8 @@ export function SpaceCreateDialog() {
             if (v === 'private') joinMode.value = 'invite_only'
           }}
         />
-        {!hasActiveGfs.value && (
+        {tierLocked && <ProtectedNotice capability="public_spaces" />}
+        {!tierLocked && !hasActiveGfs.value && (
           <p class="sh-muted" style={{ marginTop: 'calc(-1 * var(--sh-space-sm))' }}>
             {isAdmin ? (
               <>Want a Global space? <a href={addBase('/connections')}>Connect a global server</a> first.</>

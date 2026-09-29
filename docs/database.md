@@ -254,6 +254,8 @@ themselves moments and link to the conversation root via
 | `minor_space_memberships_audit` | Append-only audit of minor join/leave/block events on spaces. |
 | `guardian_audit_log` | Append-only audit of guardian actions on minors. |
 
+No table backs the §CP.R protected-account restrictions (`docs/api.md` → *Protected accounts*): they derive from `users.child_protection_enabled` at request time, so enabling or lifting protection takes effect immediately (an earlier calendar feed token simply stops serving) with no migration.
+
 ## Search
 
 | Table | Purpose |

@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.child_protection import ProtectedCapability
 from ..domain.moment_public import MomentPublicFollow, MomentPublicRegistration
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.moment_public_repo import (
@@ -30,6 +31,7 @@ from ..repositories.moment_public_repo import (
 )
 from ..repositories.profile_picture_repo import AbstractProfilePictureRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +42,7 @@ class MomentPublicError(Exception):
     __slots__ = ()
 
 
-class MomentPublicService:
+class MomentPublicService(ProtectionGateMixin):
     """Author/follower bookkeeping + GFS round-trips."""
 
     __slots__ = (
@@ -52,6 +54,7 @@ class MomentPublicService:
         "_http_client",
         "_signing_key",
         "_own_instance_id",
+        "_child_protection",
     )
 
     def __init__(
@@ -72,6 +75,7 @@ class MomentPublicService:
         self._http_client = http_client
         self._signing_key: bytes | None = None
         self._own_instance_id: str = ""
+        self._child_protection = None
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
         if self._http_client is None:
@@ -90,6 +94,9 @@ class MomentPublicService:
         gfs_id: str,
         default_share: bool = True,
     ) -> MomentPublicRegistration:
+        # §CP.R: a protected account never lists itself in a connection
+        # server's public directory.
+        await self._require_unrestricted(user_id, ProtectedCapability.PUBLIC_MOMENTS)
         user = await self._users.get_by_user_id(user_id)
         if user is None:
             raise LookupError(f"user {user_id!r} not found")
@@ -186,6 +193,10 @@ class MomentPublicService:
         gfs_id: str,
         followed_user_id: str,
     ) -> MomentPublicFollow:
+        # §CP.R: nor announces itself to a stranger as a follower.
+        await self._require_unrestricted(
+            follower_user_id, ProtectedCapability.PUBLIC_MOMENTS
+        )
         conn = await self._require_active_gfs(gfs_id)
         body = {
             "follower_user_id": follower_user_id,

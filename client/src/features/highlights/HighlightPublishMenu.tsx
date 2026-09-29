@@ -18,6 +18,7 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
+import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { showToast } from '@/components/Toast'
 
 interface GfsConnection {
@@ -117,14 +118,18 @@ export function HighlightPublishMenu() {
         if you tap unpublish.
       </p>
 
-      {connections.value.length === 0 && (
+      {isRestricted('public_links') && (
+        <ProtectedNotice capability="public_links" />
+      )}
+
+      {!isRestricted('public_links') && connections.value.length === 0 && (
         <p class="sh-muted">
           You're not connected to any Global Federation Server yet.
           Connect one in <a href="/settings/connections">Settings → Connections</a>.
         </p>
       )}
 
-      {connections.value.length > 0 && !lastIssued.value && (
+      {!isRestricted('public_links') && connections.value.length > 0 && !lastIssued.value && (
         <form
           class="sh-highlight-publish-form"
           onSubmit={(e) => { e.preventDefault(); void submit() }}

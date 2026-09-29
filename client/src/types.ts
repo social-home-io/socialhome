@@ -26,6 +26,12 @@ export interface User {
    *  user's actual wall clock. Editable from the settings page. */
   tz?: string
   is_new_member: boolean
+  /** ``/api/me`` only: the caller's account is under child protection.
+   *  Never on other users' payloads, and never an age or minor flag. */
+  protected?: boolean
+  /** ``/api/me`` only: capability ids the server refuses for this account
+   *  (``403 ACCOUNT_PROTECTED``) — see ``components/ProtectedNotice``. */
+  restrictions?: string[]
   /** Emoji + one-line status (``PATCH /api/me``). Every field is null
    *  when no status is set; an expired one already reads as unset. */
   status?: UserStatus | null

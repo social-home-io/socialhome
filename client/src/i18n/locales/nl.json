@@ -359,5 +359,22 @@
   "shortcuts.composer": "Een bericht schrijven",
   "shortcuts.help": "Deze hulp tonen",
   "shortcuts.close": "Een venster sluiten",
-  "shortcuts.typing_note": "Sneltoetsen met één toets zijn gepauzeerd terwijl je in een veld typt."
+  "shortcuts.typing_note": "Sneltoetsen met één toets zijn gepauzeerd terwijl je in een veld typt.",
+  "protected.notice_title": "Je account wordt beschermd door je huishouden",
+  "protected.ask_guardian": "Vraag het een voogd als je dit nodig hebt.",
+  "protected.see_what": "Bekijk wat beperkt is",
+  "protected.cap.bazaar": "Verkopen, bieden en aanbiedingen doen in de Bazaar staan uit.",
+  "protected.cap.public_spaces": "Openbare of globale ruimtes maken, of een ruimte openbaar maken, staat uit.",
+  "protected.cap.public_moments": "Momenten openbaar delen en openbare profielen volgen op verbindingsservers staat uit.",
+  "protected.cap.public_links": "Highlights als openbare links publiceren staat uit.",
+  "protected.cap.api_tokens": "API-tokens maken voor andere apps staat uit.",
+  "protected.cap.calendar_feeds": "Agenda-abonnementslinks staan uit.",
+  "protected.tier_unavailable": "Niet beschikbaar: je account is beschermd.",
+  "protected.approve_blocked": "Je account is beschermd, dus je kunt niet goedkeuren dat deze ruimte openbaar wordt.",
+  "protected.section.title": "Je account is beschermd",
+  "protected.section.intro": "Je huishouden heeft bescherming aangezet voor je account. Al het andere werkt zoals gewoonlijk. Dit staat uit:",
+  "protected.section.guardians": "Je voogden",
+  "protected.section.guardians_help": "Vraag het een van hen als je iets van deze lijst nodig hebt.",
+  "protected.section.no_guardians": "Er is nog geen voogd toegewezen. Vraag het een beheerder van het huishouden.",
+  "protected.section.load_error": "Je voogden konden niet worden geladen. Laad de pagina opnieuw om het nog eens te proberen."
 }

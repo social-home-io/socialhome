@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
     from .link_preview_service import LinkPreviewService
+from ..domain.child_protection import ProtectedCapability
 from ..domain.events import (
     CommentAdded,
     PeerProtoVersionRaised,
@@ -92,6 +93,7 @@ from ..domain.federation_capabilities import (
 )
 from ..media.cleanup import unlink_unreferenced
 from .space_purge import purge_space_and_media
+from .protection_gate import ProtectionGateMixin
 from ..domain.link_preview import card_survives_edit, link_preview_to_dict
 from .link_preview_service import wire_link_preview
 from ..media.image_processor import ImageProcessor
@@ -247,7 +249,7 @@ def _invite_expiry_epoch(expires_at: str | None) -> int:
     return min(when, cap)
 
 
-class SpaceService(SpaceMemberGuardMixin):
+class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
     """Orchestrates space lifecycle + member + post flows."""
 
     __slots__ = (
@@ -360,10 +362,6 @@ class SpaceService(SpaceMemberGuardMixin):
         (which live only on the listing, not the wrapper post) are
         unlinked too."""
         self._bazaar = bazaar_repo
-
-    def attach_child_protection(self, child_protection_service) -> None:
-        """Wire §CP.F1 enforcement into add_member."""
-        self._child_protection = child_protection_service
 
     def attach_profile_picture_repo(self, repo) -> None:
         """Wire the blob store so per-space picture uploads can land."""
@@ -686,6 +684,13 @@ class SpaceService(SpaceMemberGuardMixin):
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
+
+        if stype in PUBLIC_SPACE_TIERS:
+            # §CP.R: a protected account may create private / household
+            # spaces, never one advertised to peers or connection servers.
+            await self._require_unrestricted(
+                owner.user_id, ProtectedCapability.PUBLIC_SPACES
+            )
 
         if stype is SpaceType.PUBLIC:
             count = len(await self._spaces.list_by_type(SpaceType.PUBLIC))

@@ -21,6 +21,7 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
+from socialhome.domain.child_protection import AccountProtectedError
 from socialhome.domain.events import SpaceProposalUpdated
 from socialhome.domain.space_proposal import ProposalAction, ProposalStatus
 from socialhome.infrastructure.event_bus import EventBus
@@ -730,3 +731,90 @@ async def test_owner_only_view_label_none_for_targetless_action(stack):
     )
     v = (await stack.approvals.list_for_space(space.id))[0]
     assert v["fwd_target_label"] is None
+
+
+# ── §CP.R: a protected admin can't publish a space ───────────────────
+
+
+class _Cp:
+    def __init__(self, protected: set[str]):
+        self._protected = protected
+
+    async def require_unrestricted(self, user_id, capability):
+        if user_id in self._protected:
+            raise AccountProtectedError(capability)
+
+
+async def test_protected_admin_cannot_propose_public_tier(stack):
+    space = await _space(stack)
+    kid = await _add_admin(stack, space.id, "kid")
+    stack.approvals.attach_child_protection(_Cp({kid.user_id}))
+    with pytest.raises(AccountProtectedError):
+        await stack.approvals.propose(
+            space.id,
+            actor_username="kid",
+            action=ProposalAction.SET_PUBLIC_TIER,
+            params={"space_type": "global"},
+        )
+    # Dissolving isn't a publication — the gate stays out of it.
+    view = await stack.approvals.propose(
+        space.id, actor_username="kid", action=ProposalAction.DISSOLVE
+    )
+    assert view["status"] == ProposalStatus.PENDING.value
+
+
+async def test_protected_admin_cannot_approve_public_tier(stack):
+    space = await _space(stack)
+    kid = await _add_admin(stack, space.id, "kid")
+    stack.approvals.attach_child_protection(_Cp({kid.user_id}))
+    view = await stack.approvals.propose(
+        space.id,
+        actor_username="alice",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "public"},
+    )
+    assert view["status"] == ProposalStatus.PENDING.value
+    with pytest.raises(AccountProtectedError):
+        await stack.approvals.vote(
+            space.id, view["id"], actor_username="kid", approve=True
+        )
+    # Rejecting is always allowed — it can only keep the space private.
+    out = await stack.approvals.vote(
+        space.id, view["id"], actor_username="kid", approve=False
+    )
+    assert out["status"] == ProposalStatus.REJECTED.value
+    stack.exec.update_config.assert_not_awaited()
+
+
+async def test_protected_admin_cannot_join_an_open_publication(stack):
+    """Proposing ``set_public_tier`` without a tier (or a private one) while
+    a public proposal is open would reuse that row and auto-approve it."""
+    space = await _space(stack)
+    kid = await _add_admin(stack, space.id, "kid")
+    stack.approvals.attach_child_protection(_Cp({kid.user_id}))
+    open_view = await stack.approvals.propose(
+        space.id,
+        actor_username="alice",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "public"},
+    )
+    assert open_view["status"] == ProposalStatus.PENDING.value
+    for params in ({}, {"space_type": "private"}):
+        with pytest.raises(AccountProtectedError):
+            await stack.approvals.propose(
+                space.id,
+                actor_username="kid",
+                action=ProposalAction.SET_PUBLIC_TIER,
+                params=params,
+            )
+    stack.exec.update_config.assert_not_awaited()
+
+
+async def test_protected_approval_of_an_unknown_proposal_fails_closed(stack):
+    space = await _space(stack)
+    kid = await _add_admin(stack, space.id, "kid")
+    stack.approvals.attach_child_protection(_Cp({kid.user_id}))
+    with pytest.raises(AccountProtectedError):
+        await stack.approvals.vote(
+            space.id, "not-mirrored-yet", actor_username="kid", approve=True
+        )

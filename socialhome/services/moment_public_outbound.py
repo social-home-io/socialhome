@@ -21,8 +21,10 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.child_protection import ProtectedCapability
 from ..domain.events import MomentCreated, MomentDeleted
 from ..infrastructure.event_bus import EventBus
+from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
@@ -35,7 +37,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class MomentPublicOutbound:
+class MomentPublicOutbound(ProtectionGateMixin):
     __slots__ = (
         "_bus",
         "_moments",
@@ -46,6 +48,7 @@ class MomentPublicOutbound:
         "_signing_key",
         "_own_instance_id",
         "_own_users",
+        "_child_protection",
     )
 
     def __init__(
@@ -70,6 +73,7 @@ class MomentPublicOutbound:
         # subscribe + after each successful event so we don't fan out
         # for events whose author lives on another instance.
         self._own_users: set[str] | None = None
+        self._child_protection = None
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
         if self._http_client is None:
@@ -96,6 +100,17 @@ class MomentPublicOutbound:
             return
         regs = await self._regs.list_for_user(event.author_user_id)
         if not regs:
+            return
+        # §CP.R at use time: a registration made before the account was
+        # protected must not keep publishing its moments to strangers.
+        # Deletes (below) still flow so earlier moments can be retracted.
+        if await self._is_restricted(
+            event.author_user_id, ProtectedCapability.PUBLIC_MOMENTS
+        ):
+            log.info(
+                "public moment %s not published: author account is protected",
+                event.moment_id,
+            )
             return
         author = await self._users.get_by_user_id(event.author_user_id)
         if author is None:

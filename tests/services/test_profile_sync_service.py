@@ -14,6 +14,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
+from socialhome.domain.child_protection import (
+    AccountProtectedError,
+    ProtectedCapability,
+)
 from socialhome.domain.events import UserProfileUpdated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.moment_public_repo import (
@@ -126,3 +130,23 @@ async def test_only_pushes_for_event_user(db):
     await bus.publish(_event(user_id="u1"))
 
     public.push_profile_to_gfs.assert_not_called()
+
+
+async def test_protected_account_is_not_pushed_and_stops_quietly(db):
+    """§CP.R: an earlier registration no longer refreshes the public
+    directory — the gate's refusal is expected, not a per-GFS failure."""
+    await _seed_two_gfses(db)
+    repo = SqliteMomentPublicRegistrationRepo(db)
+    await repo.upsert(user_id="u1", gfs_id="g1")
+    await repo.upsert(user_id="u1", gfs_id="g2")
+    bus = EventBus()
+    public = AsyncMock()
+    public.push_profile_to_gfs.side_effect = AccountProtectedError(
+        ProtectedCapability.PUBLIC_MOMENTS
+    )
+    sync = ProfileSyncService(bus=bus, registration_repo=repo, public_service=public)
+    sync.wire()
+
+    await bus.publish(_event())
+    # Stops after the first refusal instead of retrying every GFS.
+    assert public.push_profile_to_gfs.await_count == 1
