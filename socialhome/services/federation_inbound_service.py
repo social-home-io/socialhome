@@ -87,7 +87,7 @@ from ..domain.user import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..federation.dm_scope import DM_HOLD_SCOPE, DmScope, refuse
-from ..federation.moment_origin import check_relayed_moment_origin
+from ..federation.moment_origin import carries_no_relay, check_relayed_moment_origin
 from ..federation.owner_bound_id import (
     MOMENT_KIND,
     SPACE_COMMENT_KIND,
@@ -3612,6 +3612,17 @@ class FederationInboundService(ProtectionGateMixin):
         """
         if event.from_instance == origin_instance_id:
             return True
+        if carries_no_relay(event.payload):
+            # v_38: a ``no_relay`` moment only ever comes from its origin.
+            log.warning(
+                "%s relayed by %s for origin %s: marked no_relay — refusing "
+                "(moment=%s)",
+                event.event_type,
+                event.from_instance,
+                origin_instance_id,
+                event.payload.get("moment_id"),
+            )
+            return False
         fed = self._federation_service
         if fed is None:  # no key directory: nothing can be verified
             return False

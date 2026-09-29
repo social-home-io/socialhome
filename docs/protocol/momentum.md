@@ -181,6 +181,13 @@ verbatim.
   that disagrees with the pinned one or does not derive to the origin, and
   any unknown `origin_sig_suite`. Refused events are logged at WARNING and
   never relayed (`tests/protocol/test_moment_origin_signature.py`).
+* **`no_relay`** (v_38) — a protected account's moments go to its
+  household's directly paired households only. The origin marks them
+  `no_relay: true` inside the origin signature (`moment-origin:v2:`
+  domain), sends them only to households at v_38 or above (an older one
+  might relay them), no household relays a marked moment, and a receiver
+  refuses one that arrives from anyone but its origin
+  (`tests/protocol/test_moment_no_relay.py`).
 * **Legacy window** — an unsigned relay whose origin this household holds a
   row for at `proto_version` < 35 is accepted and logged at INFO; it closes
   as origins upgrade. See [`capabilities.md`](./capabilities.md) (v_35).

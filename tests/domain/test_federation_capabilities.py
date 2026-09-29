@@ -6,7 +6,18 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 37
+    assert fc.OURS == 38
+
+
+def test_moment_no_relay_capability_threshold():
+    """v_38 — a protected account's moments stay one hop. Not space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_MOMENT_NO_RELAY == 38
+    assert fc.FederationCapability.MIN_FOR_MOMENT_NO_RELAY <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_MOMENT_NO_RELAY not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Direct-only moments" in fc.features_missing_below(37)
+    assert "Direct-only moments" not in fc.features_missing_below(38)
 
 
 def test_cross_household_group_dm_capability_threshold():

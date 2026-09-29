@@ -29,6 +29,16 @@ delete the id, author, origin and ``occurred_at``. The event type is
 inside the signed object, so a signed create can never be replayed as a
 delete of the same moment, and the domain prefix keeps the bytes disjoint
 from every other identity-key signature in the protocol.
+
+**v_38 — ``no_relay``.** A moment its origin marks ``no_relay: true`` (a
+protected account's, §CP.R) is for the origin's directly paired households
+only: no household relays it, and a receiver refuses one that arrives from
+anyone but the origin. The mark is signed — its bytes use the
+``b"moment-origin:v2:"`` domain and carry ``"no_relay": true`` — so a relay
+can neither strip it (the remaining v1 bytes don't verify) nor forge it. A
+moment without the mark signs exactly the v1 bytes, so older receivers
+verify it unchanged; the origin never sends a marked moment to a household
+below v_38 at all (it might relay it).
 """
 
 from __future__ import annotations
@@ -61,6 +71,20 @@ ORIGIN_SIG_SUITE_FIELD = "origin_sig_suite"
 ORIGIN_IDENTITY_PK_FIELD = "origin_identity_pk"
 
 _DOMAIN = b"moment-origin:v1:"
+#: Signing domain of a ``no_relay`` moment (v_38) — disjoint from v1, so the
+#: mark can't be removed or added without breaking the signature.
+_DOMAIN_NO_RELAY = b"moment-origin:v2:"
+
+#: Payload key marking a moment for direct delivery only (v_38).
+NO_RELAY_FIELD = "no_relay"
+
+
+def carries_no_relay(payload: dict[str, Any]) -> bool:
+    """Whether *payload* claims the ``no_relay`` mark at all — any value.
+    Relays and receivers treat a present key as the mark (fail closed); the
+    signature decides whether it is genuine."""
+    return NO_RELAY_FIELD in payload
+
 
 #: The payload fields the origin signs, per event type. Everything the
 #: receiver stores; never ``hop_count`` (each relay bumps it).
@@ -112,7 +136,11 @@ def moment_origin_signing_bytes(
     signed: dict[str, Any] = {k: payload.get(k) for k in fields}
     signed["event_type"] = event_type.value
     signed["sig_suite"] = sig_suite
-    return _DOMAIN + json.dumps(
+    domain = _DOMAIN
+    if carries_no_relay(payload):
+        signed[NO_RELAY_FIELD] = payload[NO_RELAY_FIELD]
+        domain = _DOMAIN_NO_RELAY
+    return domain + json.dumps(
         signed,
         sort_keys=True,
         separators=(",", ":"),
@@ -264,6 +292,8 @@ __all__ = [
     "OriginCheck",
     "check_relayed_moment_origin",
     "MOMENT_ORIGIN_SIG_SUITE_ED25519",
+    "NO_RELAY_FIELD",
+    "carries_no_relay",
     "ORIGIN_IDENTITY_PK_FIELD",
     "ORIGIN_SIG_FIELD",
     "ORIGIN_SIG_SUITE_FIELD",

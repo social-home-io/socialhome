@@ -36,8 +36,13 @@ from ..domain.events import (
     MomentReactionChanged,
 )
 from ..domain.federation import FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.moment import MOMENT_MAX_HOPS
-from ..federation.moment_origin import sign_moment_origin
+from ..federation.moment_origin import (
+    NO_RELAY_FIELD,
+    carries_no_relay,
+    sign_moment_origin,
+)
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
 from .protection_gate import ProtectionGateMixin
@@ -112,27 +117,34 @@ class MomentFederationOutbound(
             target_id=event.moment_id,
         ):
             return
+        payload = {
+            "moment_id": event.moment_id,
+            "author_user_id": event.author_user_id,
+            "content": event.content,
+            "media_url": event.media_url,
+            "media_type": event.media_type,
+            "duration_ms": event.duration_ms,
+            "parent_moment_id": event.parent_moment_id,
+            "origin_instance_id": event.origin_instance_id,
+            "expires_at": event.expires_at,
+            "occurred_at": event.occurred_at.isoformat(),
+            "hop_count": 1,
+        }
+        # §CP.R (v_38): a protected account's moments reach our directly
+        # paired households only — signed ``no_relay``, and never sent to a
+        # household too old to honour it (it would relay them onward).
+        no_relay = await self._is_protected(event.author_user_id)
+        if no_relay:
+            payload[NO_RELAY_FIELD] = True
         await self._fan_to_peers(
             event_type=FederationEventType.MOMENT_CREATED,
-            payload=self._origin_signed(
-                FederationEventType.MOMENT_CREATED,
-                {
-                    "moment_id": event.moment_id,
-                    "author_user_id": event.author_user_id,
-                    "content": event.content,
-                    "media_url": event.media_url,
-                    "media_type": event.media_type,
-                    "duration_ms": event.duration_ms,
-                    "parent_moment_id": event.parent_moment_id,
-                    "origin_instance_id": event.origin_instance_id,
-                    "expires_at": event.expires_at,
-                    "occurred_at": event.occurred_at.isoformat(),
-                    "hop_count": 1,
-                },
-            ),
+            payload=self._origin_signed(FederationEventType.MOMENT_CREATED, payload),
             origin_instance_id=event.origin_instance_id,
             exclude_instances=set(),
             author_user_id=event.author_user_id,
+            min_version=(
+                FederationCapability.MIN_FOR_MOMENT_NO_RELAY if no_relay else None
+            ),
         )
 
     async def _on_deleted(self, event: MomentDeleted) -> None:
@@ -213,6 +225,9 @@ class MomentFederationOutbound(
         # local DB state on the inbound hot path.
         if str(payload.get("received_via") or "") == "gfs":
             return
+        # v_38: a ``no_relay`` moment (a protected account's) goes no further.
+        if carries_no_relay(payload):
+            return
         try:
             hop = int(payload.get("hop_count") or 0)
         except TypeError, ValueError:
@@ -272,6 +287,7 @@ class MomentFederationOutbound(
         origin_instance_id: str,
         exclude_instances: set[str],
         author_user_id: str | None = None,
+        min_version: int | None = None,
     ) -> None:
         # ``confirmed_peers`` already drops our own instance + null ids;
         # the relay/origin skip set adds the origin + the immediate sender.
@@ -280,6 +296,10 @@ class MomentFederationOutbound(
         for peer in await self.confirmed_peers():
             instance_id = peer.id
             if instance_id in skip:
+                continue
+            if min_version is not None and not await self._federation.peer_supports(
+                instance_id, min_version=min_version
+            ):
                 continue
             if author_user_id is not None and await self._guardian_blocks_household(
                 author_user_id, instance_id
