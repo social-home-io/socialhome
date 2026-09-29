@@ -245,6 +245,13 @@ class LinkPreviewService:
     async def _build_and_cache(self, key: str) -> LinkPreview | None:
         preview = await self._build(key)
         self._store(key, preview)
+        if preview is not None:
+            # Host only — the path / query of a member's link stay out of logs.
+            log.info(
+                "link preview: built (host=%s, image=%s)",
+                urlsplit(key).hostname,
+                "yes" if preview.thumbnail_url else "no",
+            )
         return preview
 
     # ── Fetch + extract ───────────────────────────────────────────────
