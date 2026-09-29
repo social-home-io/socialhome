@@ -67,6 +67,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Message types whose ``content`` the sender may edit: text, media
+#: captions and a location pin. A voice note's ``content`` is its machine
+#: transcript and a call entry is system text — neither is the sender's.
+EDITABLE_TYPES: frozenset[str] = MENTIONABLE_TYPES | {"location"}
+
 
 #: What a personal block answers the blocked sender with. A guardian block
 #: (§CP.F2) answers the person it blocks with these very words, so nothing
@@ -971,11 +976,23 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         *,
         editor_username: str,
         new_content: str,
-    ) -> None:
-        msg = await self._require_message(message_id)
+        conversation_id: str | None = None,
+    ) -> datetime:
+        """Edit the sender's own message; returns the new ``edited_at``.
+
+        ``conversation_id`` (the route's path) must match the message's
+        conversation — ``KeyError`` (404) otherwise. A deleted message, a
+        voice note / transcript / call entry, or empty content is a
+        ``ValueError`` (422); anyone but the sender is refused (403).
+        """
+        msg = await self._require_message(message_id, conversation_id)
         editor = await self._require_user(editor_username)
         if msg.sender_user_id != editor.user_id:
             raise PermissionError("only the sender can edit a message")
+        if msg.deleted:
+            raise ValueError("a deleted message can't be edited")
+        if msg.type not in EDITABLE_TYPES:
+            raise ValueError(f"{msg.type!r} messages can't be edited")
         if not new_content:
             raise ValueError("content must not be empty")
         if len(new_content) > MAX_DM_LENGTH:
@@ -1032,14 +1049,16 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             },
             sender_user_id=msg.sender_user_id,
         )
+        return edited_at
 
     async def delete_message(
         self,
         message_id: str,
         *,
         actor_username: str,
+        conversation_id: str | None = None,
     ) -> None:
-        msg = await self._require_message(message_id)
+        msg = await self._require_message(message_id, conversation_id)
         actor = await self._require_user(actor_username)
         if msg.sender_user_id != actor.user_id:
             raise PermissionError("only the sender can delete a message")
@@ -1528,9 +1547,12 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
     async def _require_message(
         self,
         message_id: str,
+        conversation_id: str | None = None,
     ) -> ConversationMessage:
         msg = await self._convos.get_message(message_id)
-        if msg is None:
+        if msg is None or (
+            conversation_id is not None and msg.conversation_id != conversation_id
+        ):
             raise KeyError(f"message {message_id!r} not found")
         return msg
 

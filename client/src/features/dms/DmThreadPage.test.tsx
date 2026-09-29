@@ -1170,3 +1170,81 @@ describe('DmThreadPage — @-mentions in a group chat', () => {
     expect(rosterCalls).toHaveLength(1)
   })
 })
+
+
+describe('DmThreadPage — editing your own message', () => {
+  const dm = {
+    id: 'conv-test', type: 'dm', name: null, last_message_at: null,
+    members: [{ user_id: 'u-bob', username: 'bob', display_name: 'Bob', picture_url: null }],
+    member_count: 2, unread: 0, last_read_at: null, muted_until: null,
+  }
+  const row = (id: string, sender: string, content: string, extra = {}) => ({
+    id, sender_user_id: sender, content, type: 'text',
+    media_url: null, file_name: null, mime_type: null, file_size_bytes: null,
+    reply_to_id: null, reactions: [], deleted: false,
+    created_at: '2026-05-17T13:00:42+00:00', edited_at: null, ...extra,
+  })
+
+  it('offers ✎ on own text messages only, and Enter saves the edit', async () => {
+    wireApiMock({
+      conversations: [dm],
+      messages: [row('m-mine', 'u-me', 'helo'), row('m-bob', 'u-bob', 'hi there')],
+    })
+    const { api } = await import('@/api')
+    const patch = api.patch as unknown as ReturnType<typeof vi.fn>
+    patch.mockResolvedValueOnce({
+      id: 'm-mine', content: 'hello', edited_at: '2026-05-17T13:05:00+00:00',
+    })
+    const { render, fireEvent, waitFor } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { findAllByLabelText, findByLabelText, container } = render(<DmThreadPage />)
+    const edits = await findAllByLabelText('Edit your message', {}, { timeout: RENDER_WAIT })
+    expect(edits).toHaveLength(1) // Bob's message carries no edit chip
+    fireEvent.click(edits[0])
+    const box = await findByLabelText('Edit message') as HTMLTextAreaElement
+    expect(box.value).toBe('helo')
+    fireEvent.input(box, { target: { value: 'hello' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    await waitFor(() => expect(patch).toHaveBeenCalledWith(
+      '/api/conversations/conv-test/messages/m-mine', { content: 'hello' },
+    ))
+    await waitFor(() => expect(container.querySelector('.sh-message-edit')).toBeNull())
+    expect(container.textContent).toContain('hello')
+    expect(container.querySelector('.sh-message-edited')?.textContent).toBe('edited')
+  })
+
+  it('Escape cancels without saving; a failed save keeps the draft open', async () => {
+    wireApiMock({ conversations: [dm], messages: [row('m-mine', 'u-me', 'draft')] })
+    const { api } = await import('@/api')
+    const patch = api.patch as unknown as ReturnType<typeof vi.fn>
+    patch.mockClear()
+    const { render, fireEvent, waitFor } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { findByLabelText, container } = render(<DmThreadPage />)
+    fireEvent.click(await findByLabelText('Edit your message', {}, { timeout: RENDER_WAIT }))
+    const box = await findByLabelText('Edit message') as HTMLTextAreaElement
+    fireEvent.keyDown(box, { key: 'Escape' })
+    await waitFor(() => expect(container.querySelector('.sh-message-edit')).toBeNull())
+    expect(patch).not.toHaveBeenCalled()
+
+    patch.mockRejectedValueOnce(new Error('offline'))
+    fireEvent.click(await findByLabelText('Edit your message'))
+    const again = await findByLabelText('Edit message') as HTMLTextAreaElement
+    fireEvent.input(again, { target: { value: 'draft 2' } })
+    fireEvent.keyDown(again, { key: 'Enter' })
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1))
+    expect(container.querySelector('.sh-message-edit')).not.toBeNull()
+  })
+
+  it('canEditMessage: never someone else’s, a deleted, pending or voice message', async () => {
+    const { canEditMessage } = await import('./DmThreadPage')
+    const base = row('m-1', 'u-me', 'x') as unknown as Parameters<typeof canEditMessage>[0]
+    expect(canEditMessage(base, 'u-me')).toBe(true)
+    expect(canEditMessage(base, 'u-bob')).toBe(false)
+    expect(canEditMessage({ ...base, deleted: true }, 'u-me')).toBe(false)
+    expect(canEditMessage({ ...base, id: 'tmp-1' }, 'u-me')).toBe(false)
+    expect(canEditMessage({ ...base, type: 'audio' }, 'u-me')).toBe(false)
+    expect(canEditMessage({ ...base, type: 'image', content: '' }, 'u-me')).toBe(false)
+    expect(canEditMessage({ ...base, type: 'image', content: 'cap' }, 'u-me')).toBe(true)
+  })
+})

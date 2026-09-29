@@ -408,6 +408,43 @@ class ConversationMessageView(BaseView):
         return web.json_response({"id": msg.id}, status=201)
 
 
+class ConversationMessageItemView(BaseView):
+    """PATCH / DELETE /api/conversations/{id}/messages/{mid} — the sender
+    edits or deletes their own message.
+
+    ``PATCH`` body ``{"content": str}`` → ``{id, content, edited_at}``.
+    Sender only (403); a message not in this conversation is 404; empty
+    content or a deleted / non-editable message is 422. Both federate to
+    the other households (``DM_MESSAGE`` with ``edited_at`` /
+    ``DM_MESSAGE_DELETED``); an edit notifies only the people it newly
+    @-mentions.
+    """
+
+    async def patch(self) -> web.Response:
+        body = await self.body()
+        content = body.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return error_response(422, "UNPROCESSABLE", "content is required")
+        mid = self.match("mid")
+        edited_at = await self.svc(dm_service_key).edit_message(
+            mid,
+            editor_username=self.user.username,
+            new_content=content,
+            conversation_id=self.match("id"),
+        )
+        return web.json_response(
+            {"id": mid, "content": content, "edited_at": edited_at.isoformat()}
+        )
+
+    async def delete(self) -> web.Response:
+        await self.svc(dm_service_key).delete_message(
+            self.match("mid"),
+            actor_username=self.user.username,
+            conversation_id=self.match("id"),
+        )
+        return web.json_response({"ok": True})
+
+
 class ConversationMembersView(BaseView):
     """``GET /api/conversations/{id}/members`` — roster for one DM.
 
