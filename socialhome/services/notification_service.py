@@ -723,7 +723,17 @@ class NotificationService:
         if space is None:
             return
         author = await self._users.get_by_user_id(author_id)
-        name = author.display_name if author else "Someone"
+        # A post federated from another household names a remote author.
+        remote_author = (
+            await self._users.get_remote(author_id) if author is None else None
+        )
+        name = (
+            author.display_name
+            if author
+            else remote_author.display_name
+            if remote_author and remote_author.display_name
+            else "Someone"
+        )
         mentioned = {m.user_id for m in mentions if m.user_id}
         members = await self._spaces.list_members(space_id)
         for member in members:

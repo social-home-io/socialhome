@@ -8,10 +8,12 @@ import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import CommentAdded
-from socialhome.domain.post import Comment, CommentType, PostType
+from socialhome.domain.events import CommentAdded, SpacePostCreated
+from socialhome.domain.mention import Mention, MentionType
+from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
 from socialhome.domain.task import Task, TaskStatus
+from socialhome.domain.user import RemoteUser
 from socialhome.domain.events import TaskAssigned
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import SqliteCalendarRepo
@@ -1591,3 +1593,46 @@ async def test_space_join_approved_for_a_non_local_user_saves_nothing(stack):
     )
     rows = await stack.notif_repo.list("remote-user-not-local", limit=50)
     assert rows == []
+
+
+async def test_space_mention_from_remote_author_names_them(stack):
+    """A federated post by a remote member names that member, not
+    "Someone" (the author lives in ``remote_users``)."""
+    space_svc, space, u = await _mention_space(stack, "bob")
+    await stack.db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES('peer-r', 'peer-r', ?, 'k1',"
+        " 'k2', 'https://peer-r/wh', 'wh-peer-r', 'confirmed', 'manual')",
+        ("00" * 32,),
+    )
+    await SqliteUserRepo(stack.db).upsert_remote(
+        RemoteUser(
+            user_id="r-zoe",
+            instance_id="peer-r",
+            remote_username="zoe",
+            display_name="Zoe Remote",
+        )
+    )
+    await stack.bus.publish(
+        SpacePostCreated(
+            post=Post(
+                id="p-remote",
+                author="r-zoe",
+                type=PostType.TEXT,
+                content="@bob hi",
+                created_at=datetime.now(timezone.utc),
+            ),
+            space_id=space.id,
+            mentions=(
+                Mention(type=MentionType.USER, raw="@bob", user_id=u["bob"].user_id),
+            ),
+            origin_instance_id="peer-r",
+        )
+    )
+    notes = [
+        n
+        for n in await stack.notif_repo.list(u["bob"].user_id, limit=50)
+        if n.type == "space_mention"
+    ]
+    assert [n.title for n in notes] == ["Zoe Remote mentioned you in M"]
