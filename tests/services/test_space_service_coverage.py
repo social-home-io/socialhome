@@ -356,12 +356,13 @@ async def test_update_space_description_emoji_features(stack):
         features=SpaceFeatures(),
         join_mode="open",
         retention_days=30,
-        retention_exempt_types=["pin", "announcement"],
+        retention_exempt_types=["poll", "event"],
         about_markdown="# Home",
     )
     assert updated.description == "Cozy"
     assert updated.emoji == "🏡"
     assert updated.retention_days == 30
+    assert updated.retention_exempt_types == ("event", "poll")
 
 
 async def test_update_space_retention_zero_means_none(stack):

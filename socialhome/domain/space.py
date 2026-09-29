@@ -180,6 +180,49 @@ _ALL_POST_TYPES: tuple[str, ...] = (
 )
 
 
+#: Values ``spaces.retention_exempt_json`` may hold — every post type. The
+#: retention sweep filters ``space_posts.type NOT IN (...)``, so anything
+#: else (the pre-#733 UI's ``pages`` / ``gallery`` / ``tasks``) could never
+#: match a row and would be a silently-ignored exemption.
+RETENTION_EXEMPTABLE_TYPES: frozenset[str] = frozenset(_ALL_POST_TYPES)
+
+
+def normalize_retention_exempt_types(
+    value: object,
+    *,
+    strict: bool = False,
+) -> tuple[str, ...]:
+    """Normalise a ``retention_exempt_types`` list to sorted, de-duplicated
+    post-type values.
+
+    ``strict=True`` (a local admin's edit) raises :class:`ValueError` for a
+    non-list or a value outside :data:`RETENTION_EXEMPTABLE_TYPES`, so the
+    API answers 422. ``strict=False`` (a stored row, a remote admin's
+    forwarded edit) drops anything unknown instead — a newer peer's post
+    type must not fail the rest of the config edit. Blank entries are
+    ignored either way; ``None`` means "no exemptions".
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        if strict:
+            raise ValueError("retention_exempt_types must be a list of post types")
+        return ()
+    kept: set[str] = set()
+    for raw in value:
+        item = raw.strip() if isinstance(raw, str) else None
+        if not item:
+            if strict and not isinstance(raw, str):
+                raise ValueError(f"invalid retention exempt type {raw!r}")
+            continue
+        if item not in RETENTION_EXEMPTABLE_TYPES:
+            if strict:
+                raise ValueError(f"unknown retention exempt type {item!r}")
+            continue
+        kept.add(item)
+    return tuple(sorted(kept))
+
+
 @dataclass(slots=True, frozen=True)
 class SpaceFeatures:
     """Per-space feature toggles and access levels."""

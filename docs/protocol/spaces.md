@@ -1251,7 +1251,12 @@ Hardening: a forwarded `update_config` can never change
 it to the space's current value before running the edit, so neither a
 delegation-ON self-authorized edit nor an owner-approved one can grant
 or revoke delegation. Unknown / non-forwardable actions are dropped at
-the door (no phantom approval is recorded).
+the door (no phantom approval is recorded). A forwarded
+`retention_exempt_types` is sanitised on the host: values that are not a
+`PostType` (a newer peer's type, garbage) are dropped rather than failing
+the rest of the edit. Retention itself is host-only — `retention_days` /
+`retention_exempt_types` never ride `space_meta`; only the host runs the
+sweep.
 
 ```mermaid
 sequenceDiagram

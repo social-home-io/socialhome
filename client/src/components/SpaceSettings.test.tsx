@@ -14,6 +14,7 @@ vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 
 import { SpaceSettings } from './SpaceSettings'
 import { api } from '@/api'
+import { showToast } from './Toast'
 
 const apiMock = api as unknown as {
   get: ReturnType<typeof vi.fn>
@@ -661,5 +662,102 @@ describe('SpaceSettings — @here toggle', () => {
     fireEvent.click(getByText('Save changes'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
     expect(apiMock.patch.mock.calls[0][1].allow_here_mention).toBe(false)
+  })
+})
+
+describe('SpaceSettings — retention exempt types', () => {
+  beforeEach(() => {
+    apiMock.get.mockResolvedValue([])
+    apiMock.patch.mockReset()
+    vi.mocked(showToast).mockReset()
+  })
+
+  const withExempt = (days: number | null, exempt: string[]) =>
+    ({
+      ...(makeSpace({ retention_days: days }) as object),
+      retention_exempt_types: exempt,
+    }) as never
+
+  it('hides the keep-list while retention is off (forever)', () => {
+    const { queryByTestId } = render(
+      <SpaceSettings space={withExempt(null, [])} onUpdate={() => {}} />,
+    )
+    expect(queryByTestId('retention-exempt-types')).toBeNull()
+  })
+
+  it('shows the keep-list once a day count is typed', () => {
+    const { container, queryByTestId } = render(
+      <SpaceSettings space={withExempt(null, [])} onUpdate={() => {}} />,
+    )
+    const days = container.querySelector('input[type="number"]') as HTMLInputElement
+    fireEvent.input(days, { target: { value: '30' } })
+    const box = queryByTestId('retention-exempt-types')
+    expect(box).not.toBeNull()
+    const values = Array.from(
+      box!.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    ).map((i) => i.value)
+    // Real PostType values only; text / transcript / highlight_share are
+    // deliberately not offered.
+    expect(values).toEqual([
+      'image', 'video', 'file', 'poll', 'schedule', 'event', 'bazaar', 'location',
+    ])
+    expect(box!.textContent).toContain('space.retention_keep_legend')
+    expect(box!.textContent).toContain('space.retention_keep_poll')
+  })
+
+  it('prefills from the space and sends the exact sorted list on save', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const { getByTestId, getByText } = render(
+      <SpaceSettings space={withExempt(30, ['poll'])} onUpdate={() => {}} />,
+    )
+    const box = getByTestId('retention-exempt-types')
+    const poll = box.querySelector('input[value="poll"]') as HTMLInputElement
+    const event = box.querySelector('input[value="event"]') as HTMLInputElement
+    expect(poll.checked).toBe(true)
+    expect(event.checked).toBe(false)
+    fireEvent.click(event)
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    const [url, body] = apiMock.patch.mock.calls[0]
+    expect(url).toBe('/api/spaces/s-1')
+    expect(body.retention_days).toBe(30)
+    expect(body.retention_exempt_types).toEqual(['event', 'poll'])
+    expect(showToast).toHaveBeenCalledWith('Space updated', 'success')
+  })
+
+  it('unchecking removes the type and keeps values the UI does not offer', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const { getByTestId, getByText } = render(
+      <SpaceSettings space={withExempt(7, ['poll', 'text'])} onUpdate={() => {}} />,
+    )
+    fireEvent.click(
+      getByTestId('retention-exempt-types').querySelector('input[value="poll"]')!,
+    )
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0][1].retention_exempt_types).toEqual(['text'])
+  })
+
+  it('leaves the stored list alone when retention is off', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const { getByText } = render(
+      <SpaceSettings space={withExempt(null, ['poll'])} onUpdate={() => {}} />,
+    )
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    const body = apiMock.patch.mock.calls[0][1]
+    expect(body.retention_days).toBe(0)
+    expect('retention_exempt_types' in body).toBe(false)
+  })
+
+  it('shows the server error when the save is rejected', async () => {
+    apiMock.patch.mockRejectedValueOnce(new Error('unknown retention exempt type'))
+    const { getByText } = render(
+      <SpaceSettings space={withExempt(30, [])} onUpdate={() => {}} />,
+    )
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith('unknown retention exempt type', 'error'),
+    )
   })
 })

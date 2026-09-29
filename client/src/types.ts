@@ -311,6 +311,9 @@ export interface Space {
    *  `hydrateLocalReadability` in `SpaceBrowserPage`. */
   features?: SpaceFeatures
   retention_days: number | null
+  /** Post types (``PostType`` values) the retention sweep never deletes.
+   *  Only meaningful while ``retention_days`` is set. */
+  retention_exempt_types?: string[]
   /** When true, HA automations may post into this space via the
    *  bot-bridge. Required before any SpaceBot is registered. */
   bot_enabled?: boolean

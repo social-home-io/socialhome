@@ -17,7 +17,9 @@ from socialhome.domain.space import (
     mirrorable_remote_role,
     normalize_join_mode,
     normalize_min_age,
+    normalize_retention_exempt_types,
 )
+from socialhome.domain.post import PostType
 
 
 def test_remote_admin_outcome_values():
@@ -283,3 +285,42 @@ def test_a_missing_role_reads_as_member():
     member/admin — the same answer."""
     assert mirrorable_remote_role(None) == SpaceRole.MEMBER.value
     assert mirrorable_remote_role("") == SpaceRole.MEMBER.value
+
+
+# ─── normalize_retention_exempt_types ─────────────────────────────────────
+
+
+def test_retention_exempt_types_cover_every_post_type():
+    """The valid set is exactly the ``PostType`` enum — a new post type
+    becomes exemptable without a second list to keep in sync."""
+    every = [p.value for p in PostType]
+    assert normalize_retention_exempt_types(every, strict=True) == tuple(sorted(every))
+
+
+def test_retention_exempt_types_strict_rejects_unknown():
+    with pytest.raises(ValueError, match="pages"):
+        normalize_retention_exempt_types(["poll", "pages"], strict=True)
+
+
+def test_retention_exempt_types_strict_rejects_non_list():
+    # A bare string would otherwise iterate into single characters.
+    with pytest.raises(ValueError):
+        normalize_retention_exempt_types("poll", strict=True)
+
+
+def test_retention_exempt_types_lenient_drops_unknown():
+    assert normalize_retention_exempt_types(["pages", "poll", "gallery", 7, None]) == (
+        "poll",
+    )
+    assert normalize_retention_exempt_types("poll") == ()
+    assert normalize_retention_exempt_types({"poll": 1}) == ()
+
+
+def test_retention_exempt_types_dedupes_strips_and_sorts():
+    assert normalize_retention_exempt_types(
+        [" schedule", "poll", "poll", "", "  "], strict=True
+    ) == ("poll", "schedule")
+
+
+def test_retention_exempt_types_none_is_empty():
+    assert normalize_retention_exempt_types(None, strict=True) == ()

@@ -46,5 +46,8 @@
   "gfs.publish": "'Publish' a space to the Global Federation Server directory so strangers on the public internet can discover it.",
   "gfs.unpublish": "Opposite of publish — take the space back off the public directory.",
 
-  "space.federation": "Settings-tab label inside a space — controls GFS publication + cross-household sharing."
+  "space.federation": "Settings-tab label inside a space — controls GFS publication + cross-household sharing.",
+  "space.retention_keep_legend": "Space settings → Retention. Heading over checkboxes of post kinds that are never auto-deleted.",
+  "space.retention_keep_schedule": "A 'schedule' post = a poll to find a date/time that suits everyone (Doodle-style).",
+  "space.retention_keep_event": "The feed card auto-created for a calendar event (with RSVP buttons) — not the calendar entry itself."
 }

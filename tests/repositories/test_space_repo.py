@@ -103,6 +103,20 @@ async def test_save_and_get_space(env):
     assert fetched.name == "TestSpace"
 
 
+async def test_get_drops_legacy_non_post_type_exemptions(env):
+    """Rows written by the pre-#733 UI carry values like ``pages`` that are
+    not post types (they never matched ``space_posts.type``). Reads keep
+    only real post types so a re-save can't fail on stale values."""
+    await env.repo.save(_space("sp-1"))
+    await env.db.enqueue(
+        "UPDATE spaces SET retention_exempt_json=? WHERE id=?",
+        ('["pages", "poll", "gallery"]', "sp-1"),
+    )
+    fetched = await env.repo.get("sp-1")
+    assert fetched is not None
+    assert fetched.retention_exempt_types == ("poll",)
+
+
 async def test_save_round_trips_allow_subscribers(env):
     """Migration 0051's ``spaces.allow_subscribers`` persists through
     ``save`` (both INSERT and the ON CONFLICT update) and comes back on
