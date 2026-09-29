@@ -34,6 +34,25 @@ const SPACE_POST_TYPES: [string, string][] = [
 ]
 const SPACE_POST_TYPE_KEYS = SPACE_POST_TYPES.map(([k]) => k)
 
+// Post types an admin may keep past the retention horizon. The sweep
+// (``space_retention_scheduler``) soft-deletes old ``space_posts`` whose
+// ``type`` is NOT in ``retention_exempt_types``, so each key is a real
+// ``PostType`` value. Deliberately absent: ``text`` / ``transcript`` (that
+// is what retention is for — exempting them would switch it off) and
+// ``highlight_share`` (the highlight expires on its own schedule, so a kept
+// card would only show "Highlight has ended"). Any of those an API client
+// set is preserved untouched on save.
+const RETENTION_EXEMPT_TYPES: [string, string][] = [
+  ['image', 'space.retention_keep_image'],
+  ['video', 'space.retention_keep_video'],
+  ['file', 'space.retention_keep_file'],
+  ['poll', 'space.retention_keep_poll'],
+  ['schedule', 'space.retention_keep_schedule'],
+  ['event', 'space.retention_keep_event'],
+  ['bazaar', 'space.retention_keep_bazaar'],
+  ['location', 'space.retention_keep_location'],
+]
+
 const showDissolve = signal(false)
 const gfsServers = signal<GfsConnection[]>([])
 const publications = signal<GfsSpacePublication[]>([])
@@ -236,6 +255,11 @@ export function SpaceSettings({
   const [retentionDays, setRetentionDays] = useState<string>(
     space.retention_days != null ? String(space.retention_days) : '',
   )
+  const [exemptTypes, setExemptTypes] = useState<string[]>(
+    space.retention_exempt_types ?? [],
+  )
+  // Mirrors the save logic below: a positive whole number turns the sweep on.
+  const retentionOn = (parseInt(retentionDays, 10) || 0) > 0
 
   useEffect(() => {
     // GFS publication is host-local; on a remote stub there's nothing to load.
@@ -272,6 +296,11 @@ export function SpaceSettings({
       return
     }
     const allowedPostTypesPayload = [...preserved, ...chosen].sort()
+    // Only send the exempt list while retention is on — with it off the
+    // checkboxes are hidden, so the stored choice is left as it was.
+    const exemptPayload = retentionOn
+      ? [...new Set(exemptTypes)].sort()
+      : undefined
     try {
       await api.patch(`/api/spaces/${space.id}`, {
         name: name.value,
@@ -281,6 +310,9 @@ export function SpaceSettings({
         allow_here_mention: allowHere.value,
         ...(retentionPayload !== undefined
           ? { retention_days: retentionPayload }
+          : {}),
+        ...(exemptPayload !== undefined
+          ? { retention_exempt_types: exemptPayload }
           : {}),
         features: {
           ...(space.features as object),
@@ -420,8 +452,35 @@ export function SpaceSettings({
           </label>
           <p class="sh-muted">
             Applies to feed posts and comments in this space. Calendar
-            events and pages are exempt by default.
+            entries and pages themselves are never deleted.
           </p>
+          {retentionOn && (
+            <fieldset
+              class="sh-form-fieldset sh-retention-keep"
+              data-testid="retention-exempt-types"
+            >
+              <legend>{t('space.retention_keep_legend')}</legend>
+              <p class="sh-muted" style={{ marginTop: 0 }}>
+                {t('space.retention_keep_hint')}
+              </p>
+              {RETENTION_EXEMPT_TYPES.map(([key, labelKey]) => (
+                <label class="sh-toggle-row" key={key}>
+                  <input
+                    type="checkbox"
+                    value={key}
+                    checked={exemptTypes.includes(key)}
+                    onChange={(e) => {
+                      const on = (e.target as HTMLInputElement).checked
+                      setExemptTypes((prev) => on
+                        ? [...prev.filter((x) => x !== key), key]
+                        : prev.filter((x) => x !== key))
+                    }}
+                  />
+                  {t(labelKey)}
+                </label>
+              ))}
+            </fieldset>
+          )}
         </fieldset>
         <fieldset class="sh-form-fieldset" data-testid="space-features">
           <legend>🧩 Features</legend>

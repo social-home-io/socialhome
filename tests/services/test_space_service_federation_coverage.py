@@ -1178,6 +1178,25 @@ async def test_apply_remote_admin_action_update_config(stack):
     assert refreshed.name == "From Remote Admin"
 
 
+async def test_apply_remote_admin_action_sanitises_exempt_types(stack):
+    """A forwarded config edit drops exempt values we don't know (a newer
+    peer's post type, or garbage) instead of failing the whole edit."""
+    space = await _host_space_with_remote_admin(stack)
+    await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="update_config",
+        params={
+            "name": "Renamed",
+            "retention_exempt_types": ["poll", "pages", "future_type", 3],
+        },
+    )
+    refreshed = await stack.space_repo.get(space.id)
+    assert refreshed.name == "Renamed"
+    assert refreshed.retention_exempt_types == ("poll",)
+
+
 async def test_apply_remote_admin_action_update_config_rebuilds_features(stack):
     space = await _host_space_with_remote_admin(stack)
     feats = SpaceFeatures(bazaar=False, calendar=False)

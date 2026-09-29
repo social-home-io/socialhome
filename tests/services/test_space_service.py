@@ -1334,10 +1334,39 @@ async def test_delegated_admin_local_edit_converges_with_member(stack, tmp_dir):
     updated = await stack.space_svc.update_config(
         space.id,
         actor_username="anna",
-        retention_exempt_types=["list", "poll", "", "  ", "schedule"],
+        retention_exempt_types=["schedule", "poll", "", "  ", "poll"],
     )
-    # Empty / whitespace entries stripped; rest preserved as a tuple.
-    assert updated.retention_exempt_types == ("list", "poll", "schedule")
+    # Empty / whitespace / duplicate entries dropped; sorted tuple.
+    assert updated.retention_exempt_types == ("poll", "schedule")
+
+
+async def test_update_config_rejects_unknown_exempt_type(stack):
+    """A value that isn't a post type (e.g. the old UI's ``pages``) can
+    never match ``space_posts.type`` — reject it rather than store a
+    silently-ignored exemption."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="Exempt",
+    )
+    with pytest.raises(ValueError, match="pages"):
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="anna",
+            retention_exempt_types=["poll", "pages"],
+        )
+    refreshed = await stack.space_svc._require_space(space.id)
+    assert refreshed.retention_exempt_types == ()
+
+
+async def test_create_space_rejects_unknown_exempt_type(stack):
+    await stack.provision_user("anna")
+    with pytest.raises(ValueError):
+        await stack.space_svc.create_space(
+            owner_username="anna",
+            name="Exempt",
+            retention_exempt_types=["gallery"],
+        )
 
 
 # ─── Delegated-admin ban/remove offline-of-owner (Phase 4b) ──────────────

@@ -40,6 +40,7 @@ from ..domain.space import (
     SpaceModerationItem,
     SpaceRole,
     SpaceType,
+    normalize_retention_exempt_types,
 )
 from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
 
@@ -1873,7 +1874,10 @@ def _row_to_space(row: dict | None) -> Space | None:
     if row is None:
         return None
     features = SpaceFeatures.from_row(row)
-    exempt = tuple(load_json(row.get("retention_exempt_json"), []))
+    # Lenient: legacy rows may hold non-post-type values (pre-#733 UI).
+    exempt = normalize_retention_exempt_types(
+        load_json(row.get("retention_exempt_json"), [])
+    )
     return Space(
         id=row["id"],
         name=row["name"],

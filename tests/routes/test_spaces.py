@@ -262,7 +262,7 @@ async def test_patch_sets_retention_exempt_types(client):
     sid = (await r.json())["id"]
     resp = await client.patch(
         f"/api/spaces/{sid}",
-        json={"retention_exempt_types": ["list", "poll"]},
+        json={"retention_exempt_types": ["poll", "event"]},
         headers=_auth(client._admin_token),
     )
     assert resp.status == 200
@@ -271,7 +271,28 @@ async def test_patch_sets_retention_exempt_types(client):
         headers=_auth(client._admin_token),
     )
     body = await got.json()
-    assert set(body["retention_exempt_types"]) == {"list", "poll"}
+    assert body["retention_exempt_types"] == ["event", "poll"]
+
+
+async def test_patch_rejects_unknown_retention_exempt_type(client):
+    """A value that isn't a post type is a 422, and nothing is stored."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "ExemptSpace"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    resp = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"retention_exempt_types": ["poll", "pages"]},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 422
+    got = await client.get(
+        f"/api/spaces/{sid}",
+        headers=_auth(client._admin_token),
+    )
+    assert (await got.json())["retention_exempt_types"] == []
 
 
 async def test_get_includes_retention_fields(client):

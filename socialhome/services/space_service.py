@@ -122,6 +122,7 @@ from ..domain.space import (
     mirrorable_remote_role,
     normalize_category,
     normalize_min_age,
+    normalize_retention_exempt_types,
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.base import row_to_dict
@@ -686,7 +687,9 @@ class SpaceService(SpaceMemberGuardMixin):
             lat = lon = radius_km = None
 
         kp = generate_identity_keypair()
-        exempt_types = _normalise_exempt_types(retention_exempt_types)
+        exempt_types = normalize_retention_exempt_types(
+            retention_exempt_types, strict=True
+        )
         space = Space(
             id=uuid.uuid4().hex,
             name=name.strip(),
@@ -1641,6 +1644,13 @@ class SpaceService(SpaceMemberGuardMixin):
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
+        # Validate before any forward/local path so a bad value is a 422 here
+        # and the host only ever receives normalised post types.
+        exempt_types: tuple[str, ...] | None = (
+            None
+            if retention_exempt_types is None
+            else normalize_retention_exempt_types(retention_exempt_types, strict=True)
+        )
 
         # SECURITY: toggling delegated_admin_authority is OWNER-only — it is
         # the owner's policy switch that authorises (and triggers distribution
@@ -1707,8 +1717,8 @@ class SpaceService(SpaceMemberGuardMixin):
                 fwd["space_type"] = _coerce_space_type(space_type).value
             if retention_days is not None:
                 fwd["retention_days"] = retention_days
-            if retention_exempt_types is not None:
-                fwd["retention_exempt_types"] = list(retention_exempt_types)
+            if exempt_types is not None:
+                fwd["retention_exempt_types"] = list(exempt_types)
             if about_markdown is not _UNSET_MEMBER_PROFILE:
                 fwd["about_markdown"] = about_markdown
             if bot_enabled is not None:
@@ -1815,10 +1825,9 @@ class SpaceService(SpaceMemberGuardMixin):
                 retention_days if retention_days > 0 else None
             )
             payload["retention_days"] = new_fields["retention_days"]
-        if retention_exempt_types is not None:
-            exempt = _normalise_exempt_types(retention_exempt_types)
-            new_fields["retention_exempt_types"] = exempt
-            payload["retention_exempt_types"] = list(exempt)
+        if exempt_types is not None:
+            new_fields["retention_exempt_types"] = exempt_types
+            payload["retention_exempt_types"] = list(exempt_types)
         if about_markdown is not _UNSET_MEMBER_PROFILE:
             # Narrow the ``str | None | object`` sentinel to a ``str | None``
             # for mypy — once past the sentinel check, only real values remain.
@@ -2578,6 +2587,13 @@ class SpaceService(SpaceMemberGuardMixin):
         match action:
             case "update_config":
                 kwargs = {k: v for k, v in p.items() if k in self._REMOTE_CONFIG_FIELDS}
+                if kwargs.get("retention_exempt_types") is not None:
+                    # Lenient on the wire: drop a value we don't know (a newer
+                    # peer's post type, garbage) rather than fail the edit. A
+                    # null stays null ("leave the stored list alone").
+                    kwargs["retention_exempt_types"] = normalize_retention_exempt_types(
+                        kwargs["retention_exempt_types"]
+                    )
                 feats = kwargs.get("features")
                 if feats is not None:
                     # A forwarded edit is an EDIT of an existing space, so an
@@ -6162,11 +6178,3 @@ def _post_from_queue_payload(item: SpaceModerationItem) -> Post:
         media_url=payload.get("media_url"),
         file_meta=file_meta,
     )
-
-
-def _normalise_exempt_types(
-    value: tuple[str, ...] | list[str] | None,
-) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    return tuple(str(t).strip() for t in value if str(t).strip())
