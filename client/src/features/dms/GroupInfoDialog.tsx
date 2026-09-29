@@ -29,6 +29,7 @@ import {
   type Pickable,
 } from '@/components/NewDmDialog'
 import { MuteSection } from './ConversationMute'
+import type { ConversationNotifLevel } from '@/store/dms'
 
 /** The slice of a ``GET /api/conversations/{id}/members`` row this uses. */
 export interface GroupMember {
@@ -49,6 +50,9 @@ interface Props {
   /** The viewer's own mute (``null`` = not muted) and its setter. */
   mutedUntil: string | null
   onMuteChange: (mutedUntil: string | null) => void
+  /** The viewer's own group level (§23.42) and its setter. */
+  notifLevel?: ConversationNotifLevel
+  onNotifLevelChange?: (level: ConversationNotifLevel) => void
   members: GroupMember[]
   onClose: () => void
   /** The roster / name changed — the thread refetches it. */
@@ -93,7 +97,8 @@ async function loadCandidates() {
 }
 
 export function GroupInfoDialog({
-  open, convId, name, managedHere, mutedUntil, onMuteChange, members, onClose,
+  open, convId, name, managedHere, mutedUntil, onMuteChange, notifLevel,
+  onNotifLevelChange, members, onClose,
   onChanged, onLeft,
 }: Props) {
   // Every opening starts clean — no half-picked list or pending confirm
@@ -314,7 +319,13 @@ export function GroupInfoDialog({
           )}
 
           {!adding.value && (
-            <MuteSection convId={convId} mutedUntil={mutedUntil} onChange={onMuteChange} />
+            <MuteSection
+              convId={convId}
+              mutedUntil={mutedUntil}
+              onChange={onMuteChange}
+              level={notifLevel}
+              onLevelChange={onNotifLevelChange}
+            />
           )}
 
           {!adding.value && (

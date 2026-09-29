@@ -54,8 +54,10 @@ class ConversationCollectionView(BaseView):
             preview: list[dict] = []
             own_last_read_at: str | None = None
             own_muted_until: str | None = None
+            own_notif_level = "all"
             for m in members:
                 if m.username == ctx.username:
+                    own_notif_level = m.notif_level
                     # The caller's own mute, when still on (a past
                     # ``muted_until`` reads as unmuted).
                     if mute_active(m.muted_until, now=now):
@@ -141,6 +143,10 @@ class ConversationCollectionView(BaseView):
                     # ISO 8601; ``9999-…`` = until they unmute). ``null``
                     # when not muted. Unread still counts; no bell / push.
                     "muted_until": own_muted_until,
+                    # Groups: the caller's own level — ``all`` or
+                    # ``mentions`` (only @-mentions ring). Always ``all``
+                    # for a 1:1.
+                    "notif_level": own_notif_level,
                 }
             )
         return web.json_response(rows)
@@ -262,6 +268,35 @@ class ConversationMuteView(BaseView):
             username=self.user.username,
         )
         return web.json_response({"muted_until": None})
+
+
+class ConversationNotifPrefsView(BaseView):
+    """GET / PUT /api/conversations/{id}/notif-prefs — the caller's own level.
+
+    Group conversations only. ``PUT`` body ``{"level": "all" | "mentions"}``
+    (422 for another value or a 1:1); both return ``{"level"}``. Members
+    only (403). An active mute (``/mute``) still wins. Local only.
+    """
+
+    async def get(self) -> web.Response:
+        conv_id = self.match("id")
+        members = await self.svc(conversation_repo_key).list_members(conv_id)
+        for m in members:
+            if m.username == self.user.username and m.deleted_at is None:
+                return web.json_response({"level": m.notif_level})
+        raise PermissionError("not a member of this conversation")
+
+    async def put(self) -> web.Response:
+        body = await self.body()
+        level = body.get("level")
+        if not isinstance(level, str):
+            return error_response(422, "UNPROCESSABLE", "level is required")
+        saved = await self.svc(dm_service_key).set_notif_level(
+            self.match("id"),
+            username=self.user.username,
+            level=level,
+        )
+        return web.json_response({"level": saved})
 
 
 class ConversationMemberView(BaseView):
@@ -441,6 +476,9 @@ class ConversationMembersView(BaseView):
         # for offline users).
         user_repo = self.svc(user_repo_key)
         online_svc = self.request.app.get(online_status_service_key)
+        # The exact @-token per member (``None`` → can't be mentioned), so
+        # the composer inserts what this household resolves back to them.
+        tokens = await self.svc(dm_service_key).mention_tokens(conv_id)
         rows: list[dict] = []
         for m in members:
             u = await user_repo.get(m.username)
@@ -469,6 +507,7 @@ class ConversationMembersView(BaseView):
                     "last_seen_at": last_seen,
                     "instance_id": None,
                     "household_name": None,
+                    "mention": tokens.get(u.user_id),
                 }
             )
         for rm in remote_members:
@@ -493,6 +532,7 @@ class ConversationMembersView(BaseView):
                         "last_seen_at": None,
                         "instance_id": rm.instance_id,
                         "household_name": await _household(rm.instance_id),
+                        "mention": tokens.get(rm.user_id),
                     }
                 )
                 continue
@@ -520,6 +560,7 @@ class ConversationMembersView(BaseView):
                     "last_seen_at": last_seen,
                     "instance_id": rm.instance_id,
                     "household_name": await _household(rm.instance_id),
+                    "mention": tokens.get(ru.user_id),
                 }
             )
         return self._json(rows)

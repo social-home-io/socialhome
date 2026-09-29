@@ -28,5 +28,7 @@
   "notification.space.remote_invite.declined": "Your invite was declined.",
   "notification.task.assigned": "You were assigned: {title}",
   "notification.task.completed": "{name} completed: {title}",
-  "notification.task.deadline_due": "Task due today: {title}"
+  "notification.task.deadline_due": "Task due today: {title}",
+  "notification.dm.mention": "{author} mentioned you in {chat_name}",
+  "notification.dm.mention_unnamed": "{author} mentioned you in a group chat"
 }

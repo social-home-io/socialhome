@@ -24,6 +24,7 @@ import { PullToRefresh } from '@/components/PullToRefresh'
 import { useTitle } from '@/store/pageTitle'
 import { relativeChatTime } from '@/utils/relativeTime'
 import { isMuteActive, mutedLabel } from '@/utils/mute'
+import { t } from '@/i18n/i18n'
 import CallsTab from './CallsTab'
 
 type ChatsTab = 'dms' | 'groups' | 'calls'
@@ -186,6 +187,14 @@ export default function DmInboxPage() {
                       aria-label={mutedLabel(c.muted_until as string)}
                       title={mutedLabel(c.muted_until as string)}
                     >🔕</span>
+                  )}
+                  {!muted && c.notif_level === 'mentions' && (
+                    <span
+                      class="sh-dm-level"
+                      role="img"
+                      aria-label={t('dms.notif.mentions')}
+                      title={t('dms.notif.mentions')}
+                    >@</span>
                   )}
                 </strong>
                 <span class="sh-badge">

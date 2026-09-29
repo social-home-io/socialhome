@@ -203,3 +203,51 @@ describe('MentionAutocomplete — @here', () => {
     expect(listbox()!.textContent).not.toContain('@here')
   })
 })
+
+
+describe('MentionAutocomplete in a group chat (conversation scope)', () => {
+  async function chat() {
+    const mod = await import('./MentionAutocomplete')
+    const ta = document.createElement('textarea')
+    document.body.appendChild(ta)
+    const utils = render(<mod.MentionAutocomplete />)
+    const splice = vi.fn((text: string, range: [number, number]) => {
+      ta.value = ta.value.slice(0, range[0]) + text + ta.value.slice(range[1])
+    })
+    const typeIn = (value: string) => {
+      ta.value = value
+      mod.checkForMentionTrigger(value, value.length, ta, { conversationId: 'c-9' }, splice)
+    }
+    return { mod, ta, typeIn, splice, ...utils }
+  }
+
+  it('loads the conversation roster once and never offers @here', async () => {
+    const { setSpaceHereAllowed } = await import('@/store/spaceMembers')
+    setSpaceHereAllowed('c-9', true)
+    const { typeIn } = await chat()
+    typeIn('@')
+    typeIn('@h')
+    typeIn('@')
+    await waitFor(() => expect(listbox()).toBeTruthy())
+    expect(listbox()!.textContent).not.toContain('@here')
+    expect(listbox()!.textContent).toContain('@anna')
+    const calls = apiGet.mock.calls.filter(c => c[0] === '/api/conversations/c-9/members')
+    expect(calls).toHaveLength(1)
+    expect(apiGet.mock.calls.some(c => String(c[0]).startsWith('/api/spaces/'))).toBe(false)
+  })
+
+  it('says "Nobody in this chat matches" for an unknown name', async () => {
+    const { typeIn } = await chat()
+    typeIn('@zz')
+    await waitFor(() =>
+      expect(document.body.textContent).toContain('Nobody in this chat matches “@zz”'))
+  })
+
+  it('a null scope (1:1 chat) never opens the picker', async () => {
+    const { mod, ta } = await chat()
+    ta.value = '@an'
+    mod.checkForMentionTrigger('@an', 3, ta, null, vi.fn())
+    expect(mod.isMentionAutocompleteOpen()).toBe(false)
+    expect(apiGet).not.toHaveBeenCalled()
+  })
+})

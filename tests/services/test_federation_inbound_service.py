@@ -15,8 +15,11 @@ from PIL import Image as PILImage
 from socialhome.crypto import derive_user_id
 from socialhome.domain.events import (
     CommentAdded,
+    CommentUpdated,
     DmMessageCreated,
+    DmMessageUpdated,
     PostDeleted,
+    PostEdited,
     SpaceConfigChanged,
     SpacePostCreated,
     UserStatusChanged,
@@ -4371,3 +4374,137 @@ async def test_space_post_updated_applies_the_card_rule(
     _, post = await repo.get("p-1")
     assert post.content == new_content
     assert (post.link_preview is not None) is keeps
+
+
+# ─── Inbound edits that add a mention ────────────────────────────────────
+
+
+async def _seed_mention_post(db, space_id, post_id, content):
+    await _seed_mention_space(db, space_id)
+    await SqliteSpacePostRepo(db).save(
+        space_id,
+        Post(
+            id=post_id,
+            author="user-remote",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content=content,
+        ),
+    )
+
+
+async def test_inbound_space_post_update_carries_only_new_mentions(db, bus, inbound):
+    """SPACE_POST_UPDATED: the receiving household diffs the stored body
+    against the edited one on its own member view — @bob newly added
+    counts; an edit that keeps him adds nobody; @dave never resolves."""
+    await _seed_mention_post(db, "sp-eu", "p-eu", "hello")
+    captured: list[PostEdited] = []
+    bus.subscribe(PostEdited, captured.append)
+    for content in ("hello @bob @dave", "hello again @bob"):
+        await inbound._on_space_post_updated(
+            _event(
+                FederationEventType.SPACE_POST_UPDATED,
+                {"id": "p-eu", "content": content},
+                space_id="sp-eu",
+            )
+        )
+    assert [[m.user_id for m in e.new_mentions] for e in captured] == [["u-bob"], []]
+
+
+async def test_inbound_space_post_resend_upsert_carries_new_mentions(db, bus, inbound):
+    """A SPACE_POST_CREATED re-send of an existing id is an edit — it is
+    diffed against the stored body too."""
+    await _seed_mention_post(db, "sp-rs", "p-rs", "plain")
+    captured: list[PostEdited] = []
+    bus.subscribe(PostEdited, captured.append)
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "p-rs",
+                "author": "user-remote",
+                "type": "text",
+                "content": "plain, cc @bob",
+            },
+            space_id="sp-rs",
+        )
+    )
+    assert [m.user_id for m in captured[0].new_mentions] == ["u-bob"]
+
+
+async def test_inbound_space_comment_update_carries_only_new_mentions(db, bus, inbound):
+    await _seed_mention_post(db, "sp-cu", "p-cu", "post")
+    await SqliteSpacePostRepo(db).add_comment(
+        Comment(
+            id="c-cu",
+            post_id="p-cu",
+            author="user-remote",
+            type=CommentType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="first",
+        ),
+        space_id="sp-cu",
+    )
+    captured: list[CommentUpdated] = []
+    bus.subscribe(CommentUpdated, captured.append)
+    await inbound._on_space_comment_updated(
+        _event(
+            FederationEventType.SPACE_COMMENT_UPDATED,
+            {"id": "c-cu", "content": "@bob first"},
+            space_id="sp-cu",
+        )
+    )
+    await inbound._on_space_comment_updated(
+        _event(
+            FederationEventType.SPACE_COMMENT_UPDATED,
+            {"id": "c-cu", "content": "@bob first (edited)"},
+            space_id="sp-cu",
+        )
+    )
+    assert [[m.user_id for m in e.new_mentions] for e in captured] == [["u-bob"], []]
+
+
+async def test_inbound_dm_resolves_mentions_and_edit_diffs(db, bus, inbound):
+    """DM_MESSAGE: mentions resolve against this household's seats; an
+    ``edited_at`` re-fan carries only the mentions it newly adds."""
+    await _seed_dm(db, "conv-men")
+    created: list[DmMessageCreated] = []
+    updated: list[DmMessageUpdated] = []
+    bus.subscribe(DmMessageCreated, created.append)
+    bus.subscribe(DmMessageUpdated, updated.append)
+    base = {
+        "conversation_id": "conv-men",
+        "message_id": "m-men",
+        "sender_user_id": "user-remote",
+        "sender_display_name": "Alice",
+        "recipient_user_ids": ["user-local"],
+    }
+    await inbound._on_dm_message(
+        _event(FederationEventType.DM_MESSAGE, {**base, "content": "hi"})
+    )
+    await inbound._on_dm_message(
+        _event(
+            FederationEventType.DM_MESSAGE,
+            {**base, "content": "hi @local", "edited_at": "2026-09-29T12:00:00+00:00"},
+        )
+    )
+    await inbound._on_dm_message(
+        _event(
+            FederationEventType.DM_MESSAGE,
+            {**base, "content": "hi @Local!", "edited_at": "2026-09-29T12:01:00+00:00"},
+        )
+    )
+    assert created[0].mentions == ()
+    assert [[m.user_id for m in u.new_mentions] for u in updated] == [
+        ["user-local"],
+        [],
+    ]
+    assert updated[0].sender_display_name == "Alice"
+
+    await inbound._on_dm_message(
+        _event(
+            FederationEventType.DM_MESSAGE,
+            {**base, "message_id": "m-men-2", "content": "@local look"},
+        )
+    )
+    assert [m.user_id for m in created[-1].mentions] == ["user-local"]

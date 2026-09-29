@@ -24,6 +24,7 @@ from ..domain.mention import (
     MentionType,
     candidate_lookup,
     mention_tokens,
+    mentions_added,
 )
 from ..domain.space import SpaceRole
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
@@ -179,3 +180,35 @@ class SpaceMentionResolver:
             log.warning("mention resolution failed for space %s: %s", space_id, exc)
             return ()
         return mentions
+
+    async def added(
+        self,
+        space_id: str,
+        before: str | None,
+        after: str | None,
+        *,
+        author_id: str | None,
+    ) -> tuple[Mention, ...]:
+        """Mentions an edit from *before* to *after* newly adds — the only
+        people an edit may notify
+        (:func:`~socialhome.domain.mention.mentions_added`).
+
+        *after* is resolved like a new post (so a ``@here`` survives only
+        when :meth:`may_use_here` allows it); *before* is parsed without
+        that filter, so a ``@here`` already written — allowed or not — is
+        never "new". Fail-soft like :meth:`resolve`.
+        """
+        if not after or "@" not in after:
+            return ()
+        new = await self.resolve(space_id, after, author_id=author_id)
+        if not new:
+            return ()
+        if not before or "@" not in before:
+            return new
+        try:
+            lookup = candidate_lookup(await self.candidates(space_id))
+            old = MentionParser(lookup_member=lookup).parse(before, space_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("mention diff failed for space %s: %s", space_id, exc)
+            return ()
+        return mentions_added(old, new)

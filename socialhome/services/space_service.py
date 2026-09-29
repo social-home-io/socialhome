@@ -111,6 +111,7 @@ from ..domain.post import (
     Post,
     PostType,
 )
+from ..domain.mention import Mention
 from ..domain.presence import truncate_coord
 from ..domain.space import (
     PUBLIC_SPACE_TIERS,
@@ -4690,6 +4691,24 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         brings the remote-member roster) is always honoured."""
         return SpaceMentionResolver(self._spaces, self._users, self._remote_members)
 
+    async def _edit_mentions(
+        self,
+        space_id: str,
+        before: str | None,
+        after: str,
+        *,
+        author_id: str,
+        editor_user_id: str,
+    ) -> tuple[Mention, ...]:
+        """The mentions an edit newly adds, when the author made it. A
+        space admin's moderation edit of someone else's words is not the
+        author speaking, so it mentions nobody."""
+        if editor_user_id != author_id:
+            return ()
+        return await self._mentions().added(
+            space_id, before, after, author_id=author_id
+        )
+
     async def mention_tokens(self, space_id: str) -> dict[str, str | None]:
         """user_id → the @-token (without ``@``) a composer inserts to
         mention that member so it resolves uniquely (``GET .../members``)."""
@@ -4819,7 +4838,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         # SPACE_POST_UPDATED federation outbound) can react. ``space_id``
         # gates the federation broadcast so we don't accidentally fan
         # a household-feed edit out to space members.
-        await self._bus.publish(PostEdited(post=refreshed[1], space_id=space_id))
+        await self._bus.publish(
+            PostEdited(
+                post=refreshed[1],
+                space_id=space_id,
+                new_mentions=await self._edit_mentions(
+                    space_id,
+                    post.content,
+                    new_content,
+                    author_id=post.author,
+                    editor_user_id=editor_user_id,
+                ),
+            )
+        )
         return refreshed[1]
 
     async def delete_post(
@@ -5022,6 +5053,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
                 post_id=updated.post_id,
                 comment=updated,
                 space_id=space_id,
+                new_mentions=await self._edit_mentions(
+                    space_id,
+                    comment.content,
+                    new_content,
+                    author_id=comment.author,
+                    editor_user_id=editor_user_id,
+                ),
             ),
         )
         return updated

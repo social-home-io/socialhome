@@ -120,6 +120,7 @@ from .inbound_media_store import (
     remove_quietly,
 )
 from .protection_gate import ProtectionGateMixin
+from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .space_mentions import SpaceMentionResolver
 from .space_crypto_service import (
     UnsupportedAuthoritySuite,
@@ -384,6 +385,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_space_icon_repo",
         "_groups",
         "_mentions",
+        "_dm_mentions",
     )
 
     def __init__(
@@ -460,6 +462,9 @@ class FederationInboundService(ProtectionGateMixin):
         self._mentions = SpaceMentionResolver(
             space_repo, user_repo, space_remote_member_repo
         )
+        #: DM / group-DM mentions resolve against THIS household's seats of
+        #: the conversation, on the decrypted message.
+        self._dm_mentions = DmMentionResolver(conversation_repo, user_repo)
         #: §24.11 DM binding — ties the conversation, message and person a
         #: DM payload names to the household that signed it.
         self._dm_scope = DmScope(
@@ -755,6 +760,13 @@ class FederationInboundService(ProtectionGateMixin):
         # — both transports could see ``existing=None`` before either
         # wrote — and the user got two bell rows + two pushes for one
         # message.
+        # An edit re-fan: keep the content it replaces, so only the people
+        # the edit newly @-mentions are notified (never the ones before).
+        prior = (
+            await self._conversation_repo.get_message(message_id)
+            if p.get("edited_at") is not None and msg_type in MENTIONABLE_TYPES
+            else None
+        )
         _, created = await self._conversation_repo.save_message_returning_created(msg)
         # Who hears about it here: the conversation's own local members —
         # never whoever the sender listed in ``recipient_user_ids`` (a
@@ -788,6 +800,12 @@ class FederationInboundService(ProtectionGateMixin):
                     recipient_user_ids=local_recipients,
                     content=content,
                     edited_at=parse_iso8601_lenient(edited_at_iso),
+                    new_mentions=(
+                        await self._dm_mentions.added(conv_id, prior.content, content)
+                        if prior is not None
+                        else ()
+                    ),
+                    sender_display_name=str(p.get("sender_display_name") or "") or None,
                 )
             )
             return
@@ -804,6 +822,11 @@ class FederationInboundService(ProtectionGateMixin):
                 media_url=media_url,
                 reply_to_id=p.get("reply_to_id"),
                 occurred_at=msg.created_at,
+                mentions=(
+                    await self._dm_mentions.resolve(conv_id, content)
+                    if msg_type in MENTIONABLE_TYPES
+                    else ()
+                ),
             )
         )
 
@@ -1662,6 +1685,12 @@ class FederationInboundService(ProtectionGateMixin):
                     post=post,
                     space_id=space_id,
                     origin_instance_id=event.from_instance,
+                    new_mentions=await self._mentions.added(
+                        space_id,
+                        existing[1].content,
+                        post.content,
+                        author_id=post.author,
+                    ),
                 )
             )
             return
@@ -1978,6 +2007,16 @@ class FederationInboundService(ProtectionGateMixin):
                 post=post,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
+                new_mentions=(
+                    await self._mentions.added(
+                        space_id,
+                        current_post.content,
+                        post.content,
+                        author_id=post.author,
+                    )
+                    if current_post is not None
+                    else ()
+                ),
             )
         )
 
@@ -2096,6 +2135,8 @@ class FederationInboundService(ProtectionGateMixin):
             return
         if not await self._owned_comment_mutation_allowed(event, space_id, comment_id):
             return
+        # The body this edit replaces — only mentions it newly adds notify.
+        prior = await self._space_post_repo.get_comment(comment_id)
         # No post id on the wire for this event — the repo's EXISTS
         # sub-select resolves the comment's parent post and checks it
         # lives in the gated space in the same statement.
@@ -2120,6 +2161,12 @@ class FederationInboundService(ProtectionGateMixin):
                 comment=refreshed,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
+                new_mentions=await self._mentions.added(
+                    space_id,
+                    prior.content if prior is not None else None,
+                    refreshed.content,
+                    author_id=refreshed.author,
+                ),
             ),
         )
 

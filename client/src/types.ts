@@ -450,6 +450,8 @@ export interface Conversation {
    *  it back on), ``null`` when not muted. Muted rows still count
    *  ``unread`` but raise no bell / push and stay out of the Chats badge. */
   muted_until?: string | null
+  /** Groups: the caller's own level — every message, or only @-mentions. */
+  notif_level?: 'all' | 'mentions'
 }
 
 export interface Message {

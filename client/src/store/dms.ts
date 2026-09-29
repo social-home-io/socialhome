@@ -144,6 +144,20 @@ export async function setConversationMute(
   return until
 }
 
+/** A group member's own notification level (§23.42). */
+export type ConversationNotifLevel = 'all' | 'mentions'
+
+/** Set the viewer's own level for a group; resolves the saved level. */
+export async function setConversationNotifLevel(
+  convId: string,
+  level: ConversationNotifLevel,
+): Promise<ConversationNotifLevel> {
+  const body = await api.put(
+    `/api/conversations/${convId}/notif-prefs`, { level },
+  ) as { level?: string }
+  return body.level === 'mentions' ? 'mentions' : 'all'
+}
+
 export async function loadDmUnread(): Promise<void> {
   try {
     const rows = (await api.get('/api/conversations')) as Array<{

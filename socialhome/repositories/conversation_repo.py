@@ -74,6 +74,12 @@ class AbstractConversationRepo(Protocol):
         username: str,
         muted_until: str | None,
     ) -> None: ...
+    async def set_notif_level(
+        self,
+        conversation_id: str,
+        username: str,
+        level: str,
+    ) -> None: ...
     async def soft_leave(
         self,
         conversation_id: str,
@@ -337,6 +343,7 @@ class SqliteConversationRepo:
                 joined_version=r["joined_version"],
                 left_version=r["left_version"],
                 muted_until=r["muted_until"],
+                notif_level=r["notif_level"],
             )
             for r in rows
         ]
@@ -531,6 +538,23 @@ class SqliteConversationRepo:
              WHERE conversation_id=? AND username=?
             """,
             (muted_until, conversation_id, username),
+        )
+
+    async def set_notif_level(
+        self,
+        conversation_id: str,
+        username: str,
+        level: str,
+    ) -> None:
+        """Set the member's own notification level (``all`` / ``mentions``;
+        the column CHECK refuses anything else)."""
+        await self._db.enqueue(
+            """
+            UPDATE conversation_members
+               SET notif_level=?
+             WHERE conversation_id=? AND username=?
+            """,
+            (level, conversation_id, username),
         )
 
     async def soft_leave(

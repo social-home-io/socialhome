@@ -197,3 +197,27 @@ def _qualified(base: str, user_id: str, rivals: list[str]) -> str | None:
         if not any(r.startswith(p) for r in rivals):
             return f"{base}@{prefix}"
     return None
+
+
+def mentions_added(
+    before: Iterable[Mention], after: Iterable[Mention]
+) -> tuple[Mention, ...]:
+    """The mentions in *after* that *before* did not already carry — what an
+    edit newly adds, so only those people hear about it.
+
+    A user mention counts as new when its ``user_id`` wasn't mentioned
+    before (re-spelling ``@Anna`` as ``@anna@k3f9x2`` is the same person).
+    ``@here`` counts as new only when *before* had none at all. Order
+    follows *after*.
+    """
+    prior = tuple(before)
+    had_here = any(m.type is MentionType.HERE for m in prior)
+    prior_ids = {m.user_id for m in prior if m.user_id}
+    out: list[Mention] = []
+    for m in after:
+        if m.type is MentionType.HERE:
+            if not had_here:
+                out.append(m)
+        elif m.user_id and m.user_id not in prior_ids:
+            out.append(m)
+    return tuple(out)

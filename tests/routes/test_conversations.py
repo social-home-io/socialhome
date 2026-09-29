@@ -1122,3 +1122,120 @@ async def test_a_group_kept_elsewhere_is_read_only_here(client, households):
     r = await client.post(f"/api/conversations/{conv_id}/leave", headers=h)
     assert r.status == 200
     assert [(i, e) for i, e, _ in households] == [("inst-rita", "dm_group_leave")]
+
+
+# ── Group notification level + mentions ────────────────────────────────────
+
+
+async def _team_with_carol(client) -> str:
+    """Group "Team": pascal (admin), bob, carol."""
+    db = client.server.app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
+    uid = derive_user_id(bytes.fromhex(row["identity_public_key"]), "carol")
+    await db.enqueue(
+        "INSERT OR IGNORE INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("carol", uid, "Carol"),
+    )
+    await db.enqueue(
+        "INSERT OR IGNORE INTO api_tokens(token_id, user_id, label, token_hash)"
+        " VALUES(?,?,?,?)",
+        ("tid-carol", uid, "carol", sha256_token_hash("carol-tok")),
+    )
+    r = await client.post(
+        "/api/conversations/group",
+        json={"members": ["bob", "carol"], "name": "Team"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 201
+    return (await r.json())["id"]
+
+
+async def _bell(client, token: str) -> list[dict]:
+    r = await client.get("/api/notifications", headers=_auth(token))
+    body = await r.json()
+    return body["notifications"] if isinstance(body, dict) else body
+
+
+async def test_notif_prefs_round_trip_and_list_field(client):
+    conv_id = await _team_with_carol(client)
+    url = f"/api/conversations/{conv_id}/notif-prefs"
+    r = await client.get(url, headers=_auth(client._bob_token))
+    assert (await r.json()) == {"level": "all"}
+    r = await client.put(
+        url, json={"level": "mentions"}, headers=_auth(client._bob_token)
+    )
+    assert r.status == 200 and (await r.json()) == {"level": "mentions"}
+    assert (await _row(client, client._bob_token, conv_id))["notif_level"] == (
+        "mentions"
+    )
+    # Personal: the others still ring for everything.
+    assert (await _row(client, client._admin_token, conv_id))["notif_level"] == "all"
+
+
+async def test_notif_prefs_rejects_bad_levels_one_to_one_and_outsiders(client):
+    conv_id = await _team_with_carol(client)
+    url = f"/api/conversations/{conv_id}/notif-prefs"
+    for body in ({"level": "muted"}, {}, {"level": 1}):
+        r = await client.put(url, json=body, headers=_auth(client._bob_token))
+        assert r.status == 422, body
+    dm_id = await _dm_with_bob(client)
+    r = await client.put(
+        f"/api/conversations/{dm_id}/notif-prefs",
+        json={"level": "mentions"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 422
+    db = client.server.app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
+    uid = derive_user_id(bytes.fromhex(row["identity_public_key"]), "dora")
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("dora", uid, "Dora"),
+    )
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("tid-dora", uid, "dora", sha256_token_hash("dora-tok")),
+    )
+    dora = {"Authorization": "Bearer dora-tok"}
+    assert (await client.get(url, headers=dora)).status == 403
+    r = await client.put(url, json={"level": "mentions"}, headers=dora)
+    assert r.status == 403
+
+
+async def test_members_carry_the_mention_token(client):
+    conv_id = await _team_with_carol(client)
+    r = await client.get(
+        f"/api/conversations/{conv_id}/members", headers=_auth(client._bob_token)
+    )
+    tokens = {m["username"]: m["mention"] for m in await r.json()}
+    assert tokens == {"pascal": "pascal", "bob": "bob", "carol": "carol"}
+
+
+async def test_group_mention_rings_a_mentions_level_member_end_to_end(client):
+    """Bob at level 'mentions': a plain message rings nothing; a message
+    that @-mentions him gives one 'dm_mention' bell; Carol ('all') gets the
+    ordinary bells and no mention bell."""
+    conv_id = await _team_with_carol(client)
+    await client.put(
+        f"/api/conversations/{conv_id}/notif-prefs",
+        json={"level": "mentions"},
+        headers=_auth(client._bob_token),
+    )
+    send = f"/api/conversations/{conv_id}/messages"
+    await client.post(
+        send, json={"content": "lunch?"}, headers=_auth(client._admin_token)
+    )
+    assert await _bell(client, client._bob_token) == []
+    await client.post(
+        send, json={"content": "@bob lunch?"}, headers=_auth(client._admin_token)
+    )
+    notes = await _bell(client, client._bob_token)
+    assert [(n["type"], n["title"]) for n in notes] == [
+        ("dm_mention", "Pascal mentioned you in Team")
+    ]
+    carol = [n["type"] for n in await _bell(client, "carol-tok")]
+    assert "dm_mention" not in carol and "dm_message" in carol

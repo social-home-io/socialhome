@@ -18,5 +18,7 @@
   "notification.space.mention": "{author} te mencionó en {space_name}",
   "notification.space.comment.mention": "{author} te mencionó en un comentario en {space_name}",
   "notification.space.comment.added": "{author} comentó en {space_name}",
-  "notification.space.here": "{author} avisó a todos en {space_name}"
+  "notification.space.here": "{author} avisó a todos en {space_name}",
+  "notification.dm.mention": "{author} te mencionó en {chat_name}",
+  "notification.dm.mention_unnamed": "{author} te mencionó en un chat de grupo"
 }

@@ -14,7 +14,14 @@ from socialhome.domain.conversation import (
     ConversationMember,
     ConversationType,
 )
-from socialhome.domain.events import CommentAdded, DmMessageCreated, SpacePostCreated
+from socialhome.domain.events import (
+    CommentAdded,
+    CommentUpdated,
+    DmMessageCreated,
+    DmMessageUpdated,
+    PostEdited,
+    SpacePostCreated,
+)
 from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
@@ -620,6 +627,171 @@ async def test_dm_without_a_conversation_repo_never_reads_as_muted(stack):
         )
     )
     assert len(await stack.notif_repo.list(bob.user_id)) == 1
+
+
+def _m(user) -> Mention:
+    return Mention(type=MentionType.USER, raw=f"@{user.username}", user_id=user.user_id)
+
+
+async def _named_group(stack, conv_id: str, name: str | None, *users) -> None:
+    await stack.conv_repo.create(
+        Conversation(
+            id=conv_id,
+            type=ConversationType.GROUP_DM,
+            created_at=datetime.now(timezone.utc),
+            name=name,
+        )
+    )
+    for u in users:
+        await stack.conv_repo.add_member(
+            ConversationMember(
+                conversation_id=conv_id,
+                username=u.username,
+                joined_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+
+def _dm_event(conv_id, sender, recipients, *, mentions=(), mid="m-1"):
+    return DmMessageCreated(
+        conversation_id=conv_id,
+        message_id=mid,
+        sender_user_id=sender.user_id,
+        sender_display_name=sender.display_name,
+        recipient_user_ids=tuple(r.user_id for r in recipients),
+        content="x",
+        mentions=tuple(mentions),
+    )
+
+
+async def test_group_mentions_level_only_rings_for_a_mention(stack):
+    """level='mentions': a plain message rings nothing; a message that
+    @-mentions the member gives one distinct ``dm_mention`` bell."""
+    anna = await stack.provision_user("anna-l")
+    bob = await stack.provision_user("bob-l")
+    await _named_group(stack, "g-lvl", "Team", anna, bob)
+    await stack.conv_repo.set_notif_level("g-lvl", bob.username, "mentions")
+    await stack.bus.publish(_dm_event("g-lvl", anna, [bob]))
+    assert await stack.notif_repo.list(bob.user_id) == []
+    await stack.bus.publish(
+        _dm_event("g-lvl", anna, [bob], mentions=[_m(bob)], mid="m-2")
+    )
+    notes = await stack.notif_repo.list(bob.user_id)
+    assert [(n.type, n.title, n.link_url) for n in notes] == [
+        ("dm_mention", "anna-l mentioned you in Team", "/dms/g-lvl")
+    ]
+
+
+async def test_group_mention_at_level_all_replaces_the_message_bell(stack):
+    """Level 'all' + mentioned → the mention bell only, never both; an
+    unmentioned member gets the ordinary message bell."""
+    anna = await stack.provision_user("anna-a")
+    bob = await stack.provision_user("bob-a")
+    carl = await stack.provision_user("carl-a")
+    await _named_group(stack, "g-all", None, anna, bob, carl)
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    await stack.bus.publish(_dm_event("g-all", anna, [bob, carl], mentions=[_m(bob)]))
+    assert [n.type for n in await stack.notif_repo.list(bob.user_id)] == ["dm_mention"]
+    assert (await stack.notif_repo.list(bob.user_id))[0].title == (
+        "anna-a mentioned you in a group chat"
+    )
+    assert [n.type for n in await stack.notif_repo.list(carl.user_id)] == ["dm_message"]
+    # §25.3: the push carries the title only.
+    for _ids, payload in push.calls:
+        assert not getattr(payload, "body", None)
+        assert "x" != payload.title
+
+
+async def test_group_mention_of_a_muted_member_or_self_is_silent(stack):
+    anna = await stack.provision_user("anna-q")
+    bob = await stack.provision_user("bob-q")
+    await _named_group(stack, "g-mute", "G", anna, bob)
+    await stack.conv_repo.set_muted_until("g-mute", bob.username, MUTED_FOREVER)
+    await stack.bus.publish(
+        _dm_event("g-mute", anna, [bob], mentions=[_m(bob), _m(anna)])
+    )
+    assert await stack.notif_repo.list(bob.user_id) == []
+    assert await stack.notif_repo.list(anna.user_id) == []
+
+
+async def test_one_to_one_mention_is_an_ordinary_message_bell(stack):
+    """In a 1:1 every message is for the other person — no mention bell."""
+    anna = await stack.provision_user("anna-o")
+    bob = await stack.provision_user("bob-o")
+    await stack.conv_repo.create(
+        Conversation(
+            id="d-1", type=ConversationType.DM, created_at=datetime.now(timezone.utc)
+        )
+    )
+    for u in (anna, bob):
+        await stack.conv_repo.add_member(
+            ConversationMember(
+                conversation_id="d-1",
+                username=u.username,
+                joined_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+    await stack.bus.publish(_dm_event("d-1", anna, [bob], mentions=[_m(bob)]))
+    assert [n.type for n in await stack.notif_repo.list(bob.user_id)] == ["dm_message"]
+
+
+async def test_dm_edit_notifies_only_the_newly_mentioned(stack):
+    """An edit rings only the members it newly mentions (dm_mention), even at
+    level 'mentions'; muted members and the sender stay silent."""
+    anna = await stack.provision_user("anna-e")
+    bob = await stack.provision_user("bob-e")
+    carl = await stack.provision_user("carl-e")
+    dora = await stack.provision_user("dora-e")
+    await _named_group(stack, "g-edit", "Team", anna, bob, carl, dora)
+    await stack.conv_repo.set_notif_level("g-edit", carl.username, "mentions")
+    await stack.conv_repo.set_muted_until("g-edit", dora.username, MUTED_FOREVER)
+    await stack.bus.publish(
+        DmMessageUpdated(
+            conversation_id="g-edit",
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            recipient_user_ids=(bob.user_id, carl.user_id, dora.user_id),
+            content="now @carl-e and @dora-e",
+            edited_at=datetime.now(timezone.utc),
+            new_mentions=(_m(carl), _m(dora), _m(anna)),
+            sender_display_name="Anna",
+        )
+    )
+    assert await stack.notif_repo.list(bob.user_id) == []
+    notes = await stack.notif_repo.list(carl.user_id)
+    assert [(n.type, n.title) for n in notes] == [
+        ("dm_mention", "Anna mentioned you in Team")
+    ]
+    assert await stack.notif_repo.list(dora.user_id) == []
+    assert await stack.notif_repo.list(anna.user_id) == []
+
+
+async def test_dm_edit_without_new_mentions_is_silent(stack):
+    anna = await stack.provision_user("anna-s")
+    bob = await stack.provision_user("bob-s")
+    await _named_group(stack, "g-s", "S", anna, bob)
+    await stack.bus.publish(
+        DmMessageUpdated(
+            conversation_id="g-s",
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            recipient_user_ids=(bob.user_id,),
+            content="typo fixed",
+            edited_at=datetime.now(timezone.utc),
+        )
+    )
+    assert await stack.notif_repo.list(bob.user_id) == []
+
+
+async def test_mark_read_for_dm_also_clears_mention_rows(stack):
+    anna = await stack.provision_user("anna-r")
+    bob = await stack.provision_user("bob-r")
+    await _named_group(stack, "g-r", "R", anna, bob)
+    await stack.bus.publish(_dm_event("g-r", anna, [bob], mentions=[_m(bob)]))
+    assert await stack.notif_repo.count_unread(bob.user_id) == 1
+    await stack.notif_svc.mark_read_for_dm(bob.user_id, "g-r")
+    assert await stack.notif_repo.count_unread(bob.user_id) == 0
 
 
 async def test_dm_message_creates_in_app_row_and_push(stack):
@@ -1883,3 +2055,141 @@ async def test_here_in_comment_notifies_members(stack):
     assert [(n.type, n.title) for n in notes] == [
         ("space_here", "anna notified everyone in M")
     ]
+
+
+# ─── Edits that add a mention ────────────────────────────────────────────
+
+
+async def test_space_post_edit_notifies_only_newly_mentioned(stack):
+    """Editing a post to add @carl rings carl (mention bell); bob, already
+    mentioned, is not re-notified; nobody gets a generic bell for an edit."""
+    space_svc, space, u = await _mention_space(
+        stack, "bob", "carl", "dan", levels={"carl": "mentions"}
+    )
+    post = await _post(space_svc, space, u["anna"], "hi @bob")
+    before = {k: await _types(stack, v) for k, v in u.items()}
+    await space_svc.edit_post(
+        post.id, editor_user_id=u["anna"].user_id, new_content="hi @bob and @carl"
+    )
+    assert await _types(stack, u["bob"]) == before["bob"] == ["space_mention"]
+    assert await _types(stack, u["carl"]) == ["space_mention"]
+    assert await _types(stack, u["dan"]) == before["dan"] == ["space_post_created"]
+    # A second edit keeping both mentions notifies nobody again.
+    await space_svc.edit_post(
+        post.id, editor_user_id=u["anna"].user_id, new_content="hi @carl, @bob!"
+    )
+    assert await _types(stack, u["carl"]) == ["space_mention"]
+
+
+async def test_space_post_edit_by_an_admin_never_notifies(stack):
+    """A moderation edit of someone else's post isn't the author speaking —
+    it adds nobody's mention."""
+    space_svc, space, u = await _mention_space(stack, "bob", "carl")
+    post = await _post(space_svc, space, u["bob"], "hello")
+    await space_svc.edit_post(
+        post.id, editor_user_id=u["anna"].user_id, new_content="hello @carl"
+    )
+    assert await _types(stack, u["carl"]) == ["space_post_created"]
+
+
+async def test_space_comment_edit_notifies_only_newly_mentioned(stack):
+    space_svc, space, u = await _mention_space(
+        stack, "bob", "carl", levels={"carl": "muted"}
+    )
+    post = await _post(space_svc, space, u["anna"], "plain")
+    c = await space_svc.add_comment(
+        post.id, author_user_id=u["bob"].user_id, content="nice"
+    )
+    await space_svc.edit_comment(
+        c.id, editor_user_id=u["bob"].user_id, new_content="nice @anna @carl"
+    )
+    notes = [
+        n
+        for n in await stack.notif_repo.list(u["anna"].user_id, limit=50)
+        if n.type == "space_mention"
+    ]
+    assert [n.title for n in notes] == ["bob mentioned you in a comment in M"]
+    assert "space_mention" not in await _types(stack, u["carl"])  # muted
+
+
+async def test_here_added_on_edit_pages_once_and_stays_rate_limited(stack):
+    """@here newly added on edit pages everyone (owner, toggle on); an edit
+    that keeps it doesn't re-page; inside the 10-min window a fresh @here
+    edit on another post pages nobody."""
+    now = [1000.0]
+    stack.notif_svc._clock = lambda: now[0]
+    space_svc, space, u = await _here_space(stack, levels={"carl": "mentions"})
+    p1 = await _post(space_svc, space, u["anna"], "dinner")
+    await space_svc.edit_post(
+        p1.id, editor_user_id=u["anna"].user_id, new_content="@here dinner"
+    )
+    assert await _here_types(stack, u["carl"]) == ["space_here"]
+    await space_svc.edit_post(
+        p1.id, editor_user_id=u["anna"].user_id, new_content="@here dinner now"
+    )
+    assert await _here_types(stack, u["carl"]) == ["space_here"]
+    p2 = await _post(space_svc, space, u["anna"], "later")
+    await space_svc.edit_post(
+        p2.id, editor_user_id=u["anna"].user_id, new_content="@here later"
+    )
+    assert await _here_types(stack, u["carl"]) == ["space_here"]
+
+
+async def test_edit_events_without_new_mentions_are_silent(stack):
+    """Bare ``PostEdited`` / ``CommentUpdated`` (household feed, or no new
+    mention) never notify."""
+    space_svc, space, u = await _mention_space(stack, "bob")
+    post = await _post(space_svc, space, u["anna"], "x")
+    before = await _types(stack, u["bob"])
+    await stack.bus.publish(PostEdited(post=post, space_id=space.id))
+    await stack.bus.publish(PostEdited(post=post, new_mentions=(_m(u["bob"]),)))
+    c = Comment(
+        id="c-x",
+        post_id=post.id,
+        author=u["anna"].user_id,
+        type=CommentType.TEXT,
+        created_at=datetime.now(timezone.utc),
+        content="y",
+    )
+    await stack.bus.publish(CommentUpdated(post_id=post.id, comment=c))
+    assert await _types(stack, u["bob"]) == before
+
+
+class _BlockingCP:
+    """Child-protection stand-in: a guardian block between two users."""
+
+    def __init__(self, a: str, b: str) -> None:
+        self._pairs = {a: frozenset({b}), b: frozenset({a})}
+
+    async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        return self._pairs.get(user_id, frozenset())
+
+    async def is_restricted(self, user_id, capability) -> bool:
+        return False
+
+    def register_gate(self, gate) -> None:
+        pass
+
+
+async def test_dm_edit_mention_across_a_guardian_block_is_silent(stack):
+    """A guardian block between sender and a member also stops the mention
+    bell an edit would add; other newly mentioned members still get it."""
+    anna = await stack.provision_user("anna-gb")
+    kid = await stack.provision_user("kid-gb")
+    carl = await stack.provision_user("carl-gb")
+    await _named_group(stack, "g-gb", "G", anna, kid, carl)
+    stack.notif_svc.attach_child_protection(_BlockingCP(anna.user_id, kid.user_id))
+    await stack.bus.publish(
+        DmMessageUpdated(
+            conversation_id="g-gb",
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            recipient_user_ids=(kid.user_id, carl.user_id),
+            content="@kid-gb @carl-gb",
+            edited_at=datetime.now(timezone.utc),
+            new_mentions=(_m(kid), _m(carl)),
+            sender_display_name="Anna",
+        )
+    )
+    assert await stack.notif_repo.list(kid.user_id) == []
+    assert [n.type for n in await stack.notif_repo.list(carl.user_id)] == ["dm_mention"]

@@ -312,3 +312,27 @@ async def test_remote_host_owner_may_use_here(env):
 
 async def test_here_unknown_space_is_dropped(env):
     assert await env.resolver.resolve("nope", "@here", author_id="x") == ()
+
+
+async def test_added_diffs_old_and_new_content(env):
+    """Only mentions the edit adds; a @here already written is never new,
+    even when it was dropped at create time; a new @here stays gated."""
+    space, ada, bob = await _here_space(env)
+    anna = await env.users.get("anna")
+
+    async def added(before, after, author):
+        out = await env.resolver.added(space.id, before, after, author_id=author)
+        return [(m.type, m.user_id) for m in out]
+
+    assert await added("hi @bob", "hi @bob @ada", anna.user_id) == [
+        (MentionType.USER, ada.user_id)
+    ]
+    assert await added(None, "@bob", anna.user_id) == [(MentionType.USER, bob.user_id)]
+    assert await added("hello", "@here hello", anna.user_id) == [
+        (MentionType.HERE, None)
+    ]
+    assert await added("@here hello", "@here hello!", anna.user_id) == []
+    # A member's @here isn't allowed — adding it on edit pages nobody.
+    assert await added("x", "@here x", bob.user_id) == []
+    assert await added("@bob", "no mentions", anna.user_id) == []
+    assert await added("@bob", "@bob", anna.user_id) == []

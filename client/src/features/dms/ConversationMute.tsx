@@ -13,12 +13,21 @@
  * unread, they just raise no bell row or push. The parent owns
  * ``mutedUntil`` (from ``GET /api/conversations``) and gets the new value
  * through ``onChange``.
+ *
+ * Group chats also pass ``level`` / ``onLevelChange`` (§23.42): "All
+ * messages" or "Only @mentions" (``PUT .../notif-prefs``). Both surfaces
+ * then offer the two levels above the mute lengths; a mute still wins
+ * while it lasts.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
-import { setConversationMute } from '@/store/dms'
+import {
+  setConversationMute,
+  setConversationNotifLevel,
+  type ConversationNotifLevel,
+} from '@/store/dms'
 import {
   MUTE_DURATIONS,
   isMuteActive,
@@ -31,6 +40,33 @@ interface Props {
   convId: string
   mutedUntil: string | null
   onChange: (mutedUntil: string | null) => void
+  /** Groups only: the viewer's level, and its setter. */
+  level?: ConversationNotifLevel
+  onLevelChange?: (level: ConversationNotifLevel) => void
+}
+
+const LEVELS: readonly ConversationNotifLevel[] = ['all', 'mentions']
+
+function levelLabel(level: ConversationNotifLevel): string {
+  return t(level === 'all' ? 'dms.notif.all' : 'dms.notif.mentions')
+}
+
+async function applyLevel(
+  convId: string,
+  level: ConversationNotifLevel,
+  onLevelChange: (level: ConversationNotifLevel) => void,
+): Promise<boolean> {
+  try {
+    onLevelChange(await setConversationNotifLevel(convId, level))
+    showToast(
+      t(level === 'all' ? 'dms.notif.toast_all' : 'dms.notif.toast_mentions'),
+      'success',
+    )
+    return true
+  } catch {
+    showToast(t('dms.mute.error'), 'error')
+    return false
+  }
 }
 
 async function apply(
@@ -49,7 +85,7 @@ async function apply(
   }
 }
 
-export function MuteButton({ convId, mutedUntil, onChange }: Props) {
+export function MuteButton({ convId, mutedUntil, onChange, level, onLevelChange }: Props) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const wrapRef = useRef<HTMLDivElement | null>(null)
@@ -79,6 +115,18 @@ export function MuteButton({ convId, mutedUntil, onChange }: Props) {
     if (await apply(convId, duration, onChange)) setOpen(false)
     setSaving(false)
   }
+  const pickLevel = async (next: ConversationNotifLevel) => {
+    if (saving || !onLevelChange) return
+    if (next === level) { setOpen(false); return }
+    setSaving(true)
+    if (await applyLevel(convId, next, onLevelChange)) setOpen(false)
+    setSaving(false)
+  }
+  const hasLevels = level !== undefined && onLevelChange !== undefined
+  const mentionsOnly = hasLevels && level === 'mentions'
+  const triggerLabel = mentionsOnly
+    ? t('dms.notif.mentions_hint')
+    : t('dms.mute.menu_title')
 
   if (muted) {
     const hint = t('dms.mute.unmute_hint', { state: mutedLabel(mutedUntil as string) })
@@ -100,22 +148,48 @@ export function MuteButton({ convId, mutedUntil, onChange }: Props) {
     <div class="sh-thread-mute" ref={wrapRef}>
       <button
         type="button"
-        class="sh-icon-btn sh-thread-mute-btn"
-        title={t('dms.mute.menu_title')}
-        aria-label={t('dms.mute.menu_title')}
+        class={mentionsOnly
+          ? 'sh-icon-btn sh-thread-mute-btn sh-thread-mute-btn--mentions'
+          : 'sh-icon-btn sh-thread-mute-btn'}
+        title={triggerLabel}
+        aria-label={triggerLabel}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
         <span aria-hidden="true">🔔</span>
+        {mentionsOnly && <span class="sh-thread-mute-btn__at" aria-hidden="true">@</span>}
       </button>
       {open && (
         <div class="sh-thread-mute__panel" role="menu" aria-label={t('dms.mute.menu_title')}>
+          {hasLevels && (
+            <>
+              <div class="sh-thread-mute__title" aria-hidden="true">{t('dms.notif.heading')}</div>
+              {LEVELS.map((l, i) => (
+                <button
+                  key={l}
+                  ref={i === 0 ? firstItemRef : undefined}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={l === level}
+                  class="sh-thread-mute__item sh-thread-mute__item--radio"
+                  disabled={saving}
+                  onClick={() => { void pickLevel(l) }}
+                >
+                  <span class="sh-thread-mute__check" aria-hidden="true">
+                    {l === level ? '✓' : ''}
+                  </span>
+                  {levelLabel(l)}
+                </button>
+              ))}
+              <div class="sh-thread-mute__sep" role="separator" />
+            </>
+          )}
           <div class="sh-thread-mute__title" aria-hidden="true">{t('dms.mute.menu_title')}</div>
           {MUTE_DURATIONS.map((d, i) => (
             <button
               key={d}
-              ref={i === 0 ? firstItemRef : undefined}
+              ref={i === 0 && !hasLevels ? firstItemRef : undefined}
               type="button"
               role="menuitem"
               class="sh-thread-mute__item"
@@ -131,7 +205,7 @@ export function MuteButton({ convId, mutedUntil, onChange }: Props) {
   )
 }
 
-export function MuteSection({ convId, mutedUntil, onChange }: Props) {
+export function MuteSection({ convId, mutedUntil, onChange, level, onLevelChange }: Props) {
   const [saving, setSaving] = useState(false)
   const muted = isMuteActive(mutedUntil)
   const run = async (duration: MuteDuration | null) => {
@@ -140,11 +214,35 @@ export function MuteSection({ convId, mutedUntil, onChange }: Props) {
     await apply(convId, duration, onChange)
     setSaving(false)
   }
+  const pickLevel = async (next: ConversationNotifLevel) => {
+    if (saving || !onLevelChange || next === level) return
+    setSaving(true)
+    await applyLevel(convId, next, onLevelChange)
+    setSaving(false)
+  }
+  const hasLevels = level !== undefined && onLevelChange !== undefined
   return (
     <section class="sh-groupinfo-mute" aria-labelledby={`sh-mute-${convId}`}>
       <h3 class="sh-groupinfo-heading" id={`sh-mute-${convId}`}>
         {t('dms.mute.section')}
       </h3>
+      {hasLevels && (
+        <fieldset class="sh-groupinfo-level" disabled={saving}>
+          <legend class="sh-groupinfo-level__legend">{t('dms.notif.heading')}</legend>
+          {LEVELS.map(l => (
+            <label key={l} class="sh-groupinfo-level__option">
+              <input
+                type="radio"
+                name={`sh-level-${convId}`}
+                value={l}
+                checked={l === level}
+                onChange={() => { void pickLevel(l) }}
+              />
+              <span>{levelLabel(l)}</span>
+            </label>
+          ))}
+        </fieldset>
+      )}
       {muted ? (
         <div class="sh-groupinfo-mute__row">
           <span class="sh-groupinfo-mute__state">
@@ -160,7 +258,9 @@ export function MuteSection({ convId, mutedUntil, onChange }: Props) {
         </div>
       ) : (
         <>
-          <p class="sh-muted sh-groupinfo-mute__state">{t('dms.mute.on')}</p>
+          <p class="sh-muted sh-groupinfo-mute__state">
+            {t(hasLevels && level === 'mentions' ? 'dms.mute.on_mentions' : 'dms.mute.on')}
+          </p>
           <div class="sh-groupinfo-mute__options" role="group" aria-label={t('dms.mute.menu_title')}>
             {MUTE_DURATIONS.map(d => (
               <button

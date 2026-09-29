@@ -20,6 +20,9 @@ itself is the persistence layer; push is fire-and-forget on top.
 | TaskDeadlineDue      | All assignees                         | "Task due today: {task title}"                 |
 | SpacePostCreated     | Space members with notifications on   | "{author} posted in {space}"                   |
 | … mentioning a member | That member (level all / mentions)   | "{author} mentioned you in {space}"            |
+| PostEdited / CommentUpdated (space) | Only members the edit newly mentions | "{author} mentioned you in {space}" |
+| DmMessageCreated     | Other members (group level all / mentions, not muted) | "{sender} messaged you" / "{sender} mentioned you in {chat}" |
+| DmMessageUpdated     | Only members the edit newly mentions (groups) | "{sender} mentioned you in {chat}"   |
 | SpaceModerationQueued| Space admins                          | "New content pending review in {space}"        |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
@@ -31,9 +34,10 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ..domain.conversation import mute_active
+from ..domain.conversation import ConversationType, mute_active
 from ..domain.events import (
     AppChallengeReceived,
     BazaarBidPlaced,
@@ -44,13 +48,16 @@ from ..domain.events import (
     CalendarEventDeleted,
     CalendarEventUpdated,
     CommentAdded,
+    CommentUpdated,
     EventReminderDue,
     DmContactRequested,
     DmMessageCreated,
+    DmMessageUpdated,
     MomentCreated,
     MomentReactionChanged,
     NotificationCreated,
     PostCreated,
+    PostEdited,
     RemoteSpaceDissolved,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
@@ -67,7 +74,7 @@ from ..domain.events import (
     TaskDeadlineDue,
     UserFollowed,
 )
-from ..domain.mention import MentionType
+from ..domain.mention import Mention, MentionType
 from ..domain.space import SpaceRole
 from ..i18n import Catalog
 from ..infrastructure.event_bus import EventBus
@@ -88,6 +95,16 @@ log = logging.getLogger(__name__)
 HERE_COOLDOWN_SECONDS = 600
 #: Cap on remembered (space, author) @here timestamps before pruning.
 _HERE_TRACK_MAX = 10_000
+
+
+@dataclass(slots=True, frozen=True)
+class _SeatPrefs:
+    """Service-local: one conversation's per-member bell settings."""
+
+    muted: frozenset[str] = frozenset()
+    mentions_only: frozenset[str] = frozenset()
+    group: bool = False
+    name: str | None = None
 
 
 class NotificationService(ProtectionGateMixin):
@@ -315,6 +332,9 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(SpacePostCreated, self.on_space_post_created)
         self._bus.subscribe(SpaceModerationQueued, self.on_moderation_queued)
         self._bus.subscribe(DmMessageCreated, self.on_dm_message_created)
+        self._bus.subscribe(DmMessageUpdated, self.on_dm_message_updated)
+        self._bus.subscribe(PostEdited, self.on_post_edited)
+        self._bus.subscribe(CommentUpdated, self.on_comment_updated)
         self._bus.subscribe(BazaarBidPlaced, self.on_bazaar_bid_placed)
         self._bus.subscribe(BazaarOfferAccepted, self.on_bazaar_offer_accepted)
         self._bus.subscribe(BazaarOfferRejected, self.on_bazaar_offer_rejected)
@@ -417,6 +437,39 @@ class NotificationService(ProtectionGateMixin):
                 )
             )
 
+    async def on_post_edited(self, event: PostEdited) -> None:
+        """A space post edit rings only the members it newly @-mentions
+        (``event.new_mentions`` — never those already mentioned, never a
+        generic "posted" bell). A newly added ``@here`` pages like on
+        create, still under the per-author cooldown."""
+        if event.space_id is None or not event.new_mentions:
+            return
+        await self._notify_space_members(
+            space_id=event.space_id,
+            author_id=event.post.author,
+            mentions=event.new_mentions,
+            generic_type=None,
+            generic_key="notification.space.post.created",
+            generic_fallback="{author} posted in {space_name}",
+            mention_key="notification.space.mention",
+            mention_fallback="{author} mentioned you in {space_name}",
+        )
+
+    async def on_comment_updated(self, event: CommentUpdated) -> None:
+        """Space comment edit — same rule as :meth:`on_post_edited`."""
+        if event.space_id is None or not event.new_mentions:
+            return
+        await self._notify_space_members(
+            space_id=event.space_id,
+            author_id=event.comment.author,
+            mentions=event.new_mentions,
+            generic_type=None,
+            generic_key="notification.space.comment.added",
+            generic_fallback="{author} commented in {space_name}",
+            mention_key="notification.space.comment.mention",
+            mention_fallback="{author} mentioned you in a comment in {space_name}",
+        )
+
     async def on_task_assigned(self, event: TaskAssigned) -> None:
         """Notify the assignee (unless they assigned themselves)."""
         if event.task.created_by == event.assigned_to:
@@ -488,6 +541,13 @@ class NotificationService(ProtectionGateMixin):
         (``conversation_members.muted_until`` still in the future) gets
         neither the bell row nor the push. The message and its unread
         count are untouched; the mute is theirs alone and never federated.
+
+        Group mentions (``event.mentions``, resolved against the
+        conversation's seats): a mentioned member gets one distinct
+        ``dm_mention`` bell ("{sender} mentioned you in {chat}") instead of
+        the ``dm_message`` one; a member at level ``mentions``
+        (``conversation_members.notif_level``) is rung only when mentioned.
+        A mute wins over both. In a 1:1 a mention is just a message.
         """
         if not event.recipient_user_ids:
             return
@@ -498,7 +558,11 @@ class NotificationService(ProtectionGateMixin):
         else:
             title = f"{event.sender_display_name} messaged you"
         link = f"/dms/{event.conversation_id}"
-        muted = await self._muted_usernames(event.conversation_id)
+        prefs = await self._seat_prefs(event.conversation_id)
+        muted = prefs.muted
+        mentioned = (
+            {m.user_id for m in event.mentions if m.user_id} if prefs.group else set()
+        )
         blocked = await self._guardian_block_counterparts(event.sender_user_id)
         for recipient_id in event.recipient_user_ids:
             if recipient_id in blocked:
@@ -517,12 +581,23 @@ class NotificationService(ProtectionGateMixin):
                 # The recipient muted this conversation: the message still
                 # lands and counts unread, but no bell row and no push.
                 continue
+            is_mentioned = recipient_id in mentioned
+            if local.username in prefs.mentions_only and not is_mentioned:
+                continue
             if self._ws_manager is not None and (
                 self._ws_manager.is_user_active_in_conversation(
                     recipient_id,
                     event.conversation_id,
                 )
             ):
+                continue
+            if is_mentioned:
+                await self._save_dm_mention(
+                    local,
+                    sender_name=event.sender_display_name,
+                    chat_name=prefs.name,
+                    link=link,
+                )
                 continue
             await self._save_notif(
                 new_notification(
@@ -534,15 +609,97 @@ class NotificationService(ProtectionGateMixin):
                 dedupe_by_link=True,
             )
 
-    async def _muted_usernames(self, conversation_id: str) -> frozenset[str]:
-        """Local usernames whose own mute on ``conversation_id`` is on now."""
+    async def on_dm_message_updated(self, event: DmMessageUpdated) -> None:
+        """A sender's edit rings only the group members it newly @-mentions
+        (``event.new_mentions``) with a ``dm_mention`` bell — whatever
+        their level, never while muted, never the sender, never someone
+        already mentioned, never across a guardian block. Transcript patches
+        carry no new mentions."""
+        if not event.new_mentions:
+            return
+        prefs = await self._seat_prefs(event.conversation_id)
+        if not prefs.group:
+            return
+        link = f"/dms/{event.conversation_id}"
+        allowed = set(event.recipient_user_ids)
+        blocked = await self._guardian_block_counterparts(event.sender_user_id)
+        name = event.sender_display_name or await self._display_name(
+            event.sender_user_id
+        )
+        for user_id in {m.user_id for m in event.new_mentions if m.user_id}:
+            if (
+                user_id == event.sender_user_id
+                or user_id not in allowed
+                or user_id in blocked
+            ):
+                continue
+            local = await self._users.get_by_user_id(user_id)
+            if local is None or local.username in prefs.muted:
+                continue
+            if self._ws_manager is not None and (
+                self._ws_manager.is_user_active_in_conversation(
+                    user_id, event.conversation_id
+                )
+            ):
+                continue
+            await self._save_dm_mention(
+                local, sender_name=name, chat_name=prefs.name, link=link
+            )
+
+    async def _save_dm_mention(
+        self, recipient, *, sender_name: str, chat_name: str | None, link: str
+    ) -> None:
+        if chat_name:
+            title = self._t(
+                "notification.dm.mention",
+                locale=self._locale(recipient),
+                fallback="{author} mentioned you in {chat_name}",
+                author=sender_name,
+                chat_name=chat_name,
+            )
+        else:
+            title = self._t(
+                "notification.dm.mention_unnamed",
+                locale=self._locale(recipient),
+                fallback="{author} mentioned you in a group chat",
+                author=sender_name,
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=recipient.user_id,
+                type="dm_mention",
+                title=title,
+                link_url=link,
+            ),
+            dedupe_by_link=True,
+        )
+
+    async def _display_name(self, user_id: str) -> str:
+        local = await self._users.get_by_user_id(user_id)
+        if local is not None:
+            return local.display_name
+        remote = await self._users.get_remote(user_id)
+        return remote.display_name if remote and remote.display_name else "Someone"
+
+    async def _seat_prefs(self, conversation_id: str) -> "_SeatPrefs":
+        """This conversation's per-member bell settings, read once per
+        message: who muted it right now, who is at level ``mentions``, and
+        whether it is a group (only groups have mentions / levels)."""
         if self._convos is None:
-            return frozenset()
+            return _SeatPrefs()
         now = datetime.now(timezone.utc)
-        return frozenset(
-            m.username
-            for m in await self._convos.list_members(conversation_id)
-            if mute_active(m.muted_until, now=now)
+        members = await self._convos.list_members(conversation_id)
+        conv = await self._convos.get(conversation_id)
+        group = conv is not None and conv.type is ConversationType.GROUP_DM
+        return _SeatPrefs(
+            muted=frozenset(
+                m.username for m in members if mute_active(m.muted_until, now=now)
+            ),
+            mentions_only=frozenset(
+                m.username for m in members if group and m.notif_level == "mentions"
+            ),
+            group=group,
+            name=conv.name if conv is not None and group else None,
         )
 
     async def mark_read_for_dm(
@@ -550,19 +707,21 @@ class NotificationService(ProtectionGateMixin):
         user_id: str,
         conversation_id: str,
     ) -> int:
-        """Mark every unread ``dm_message`` notification pointing at a
-        conversation as read for one user. Returns the number flipped.
+        """Mark every unread ``dm_message`` / ``dm_mention`` notification
+        pointing at a conversation as read for one user. Returns the number flipped.
 
         Called from ``POST /api/conversations/{id}/read`` so the bell
         clears in step with the thread's read-receipt state — opening
         the thread is the natural "I've seen these" signal, no
         separate UI gesture needed.
         """
-        return await self._notifs.mark_read_by_link(
-            user_id=user_id,
-            link_url=f"/dms/{conversation_id}",
-            type="dm_message",
-        )
+        link = f"/dms/{conversation_id}"
+        flipped = 0
+        for ntype in ("dm_message", "dm_mention"):
+            flipped += await self._notifs.mark_read_by_link(
+                user_id=user_id, link_url=link, type=ntype
+            )
+        return flipped
 
     async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
         """A user wants to start a DM — notify the recipient + push."""
@@ -758,8 +917,8 @@ class NotificationService(ProtectionGateMixin):
         *,
         space_id: str,
         author_id: str,
-        mentions: tuple,
-        generic_type: str,
+        mentions: tuple[Mention, ...],
+        generic_type: str | None,
         generic_key: str,
         generic_fallback: str,
         mention_key: str,
@@ -784,6 +943,10 @@ class NotificationService(ProtectionGateMixin):
         only. At most one @here per ``(space, author)`` per
         :data:`HERE_COOLDOWN_SECONDS` pages anyone — a later one inside the
         window notifies like a plain post (per-process, spam brake).
+
+        ``generic_type=None`` (an edit, whose *mentions* are only the newly
+        added ones) → no generic bell for anyone: only the mentioned (and a
+        newly added, still-allowed, not-rate-limited ``@here``) are rung.
 
         The member list is the local ``space_members`` roster, so a mention can
         only ever reach a member — the resolver never resolves outsiders.
@@ -829,6 +992,8 @@ class NotificationService(ProtectionGateMixin):
                     "notification.space.here",
                     "{author} notified everyone in {space_name}",
                 )
+            elif generic_type is None:
+                continue
             else:
                 ntype, key, fallback = generic_type, generic_key, generic_fallback
             recipient = await self._users.get_by_user_id(member.user_id)

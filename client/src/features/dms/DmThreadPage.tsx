@@ -36,6 +36,18 @@ import {
   closeEmojiAutocomplete,
   handleEmojiAutocompleteKey,
 } from '@/components/EmojiAutocomplete'
+import {
+  MentionAutocomplete,
+  checkForMentionTrigger,
+  closeMentionAutocomplete,
+  handleMentionAutocompleteKey,
+  mentionInputAria,
+} from '@/components/MentionAutocomplete'
+import { MentionText } from '@/components/MentionText'
+import {
+  conversationMentionRender,
+  setConversationMembers,
+} from '@/store/conversationMembers'
 import { emojiByShortcode } from '@/data/emojis'
 import { currentUser } from '@/store/auth'
 import { useTitle, useTitleAvatar } from '@/store/pageTitle'
@@ -317,6 +329,9 @@ interface ThreadMember {
    *  member otherwise (``household_name`` is null when not paired). */
   instance_id?: string | null
   household_name?: string | null
+  /** §23.42 — the exact @-token (no ``@``) that mentions this member in
+   *  the chat; ``null`` when they can't be mentioned by token. */
+  mention?: string | null
 }
 
 const threadMembers = signal<ThreadMember[]>([])
@@ -328,6 +343,8 @@ interface ThreadInfo {
   managed_here: boolean
   /** The viewer's own mute of this thread (``null`` = not muted). */
   muted_until: string | null
+  /** Groups: the viewer's own level — every message, or only @-mentions. */
+  notif_level: 'all' | 'mentions'
 }
 const threadInfo = signal<ThreadInfo | null>(null)
 const groupInfoOpen = signal(false)
@@ -339,6 +356,7 @@ async function fetchRoster(convId: string): Promise<boolean> {
     const rows = await api.get(`/api/conversations/${convId}/members`) as ThreadMember[]
     threadMembers.value = rows
     memberCount.value = rows.length || 2
+    setConversationMembers(convId, rows)
     return true
   } catch (e: any) {
     if (e?.status === 403) return false
@@ -351,11 +369,16 @@ function setThreadMute(mutedUntil: string | null): void {
   if (threadInfo.value) threadInfo.value = { ...threadInfo.value, muted_until: mutedUntil }
 }
 
+/** The viewer changed their group level (header bell or Group info). */
+function setThreadLevel(level: 'all' | 'mentions'): void {
+  if (threadInfo.value) threadInfo.value = { ...threadInfo.value, notif_level: level }
+}
+
 async function fetchThreadInfo(convId: string): Promise<void> {
   try {
     const rows = await api.get('/api/conversations') as Array<{
       id: string; type: string; name?: string | null; managed_here?: boolean
-      muted_until?: string | null
+      muted_until?: string | null; notif_level?: string
     }>
     const row = rows.find(r => r.id === convId)
     threadInfo.value = row
@@ -364,6 +387,7 @@ async function fetchThreadInfo(convId: string): Promise<void> {
         name: row.name ?? null,
         managed_here: row.managed_here === true,
         muted_until: row.muted_until ?? null,
+        notif_level: row.notif_level === 'mentions' ? 'mentions' : 'all',
       }
       : null
   } catch {
@@ -715,7 +739,7 @@ export default function DmThreadPage() {
       (rows: Array<{
         id: string; unread?: number; last_read_at?: string | null
         type?: string; name?: string | null; managed_here?: boolean
-        muted_until?: string | null
+        muted_until?: string | null; notif_level?: string
       }>) => {
         const row = rows.find(r => r.id === convId)
         if (row) {
@@ -727,6 +751,7 @@ export default function DmThreadPage() {
               name: row.name ?? null,
               managed_here: row.managed_here === true,
               muted_until: row.muted_until ?? null,
+              notif_level: row.notif_level === 'mentions' ? 'mentions' : 'all',
             }
           }
         }
@@ -862,6 +887,8 @@ export default function DmThreadPage() {
       if (cancelled) return
       threadMembers.value = rows
       memberCount.value = rows.length || 2
+      // Seeds the @-mention picker + highlights: no second roster fetch.
+      setConversationMembers(convId, rows)
     }).catch(() => {
       if (cancelled) return
       threadMembers.value = []
@@ -1376,6 +1403,15 @@ export default function DmThreadPage() {
       ta,
       spliceEmojiIntoTextarea,
     )
+    // Group chats: ``@`` opens the member picker (a 1:1 has nobody else
+    // to single out). Same text-range splice the emoji pick uses.
+    checkForMentionTrigger(
+      ta.value,
+      ta.selectionStart ?? 0,
+      ta,
+      threadInfo.value?.type === 'group_dm' ? { conversationId: convId } : null,
+      spliceEmojiIntoTextarea,
+    )
     if (typingTimer) return
     sendTyping(convId)
     typingTimer = setTimeout(() => { typingTimer = null }, 2000)
@@ -1399,7 +1435,7 @@ export default function DmThreadPage() {
    *  than the form submit.
    */
   const handleComposerKeyDown = (e: KeyboardEvent) => {
-    if (handleEmojiAutocompleteKey(e)) {
+    if (handleMentionAutocompleteKey(e) || handleEmojiAutocompleteKey(e)) {
       e.preventDefault()
       return
     }
@@ -1812,6 +1848,9 @@ export default function DmThreadPage() {
   // first entry.
   const peers = threadMembers.value.filter(m => !m.is_self)
   const isGroupThread = threadInfo.value?.type === 'group_dm'
+  // Known @-tokens of this chat's members (+ the viewer's own) — the
+  // bubbles highlight only these, never a guess.
+  const mentionRender = conversationMentionRender(convId)
   const peerTitle =
     isGroupThread && threadInfo.value?.name ? threadInfo.value.name
     : peers.length === 0 ? 'Chats'
@@ -1978,6 +2017,9 @@ export default function DmThreadPage() {
             convId={convId}
             mutedUntil={threadInfo.value.muted_until}
             onChange={setThreadMute}
+            {...(isGroupThread
+              ? { level: threadInfo.value.notif_level, onLevelChange: setThreadLevel }
+              : {})}
           />
         )}
         <CallButton convId={convId} />
@@ -2235,7 +2277,9 @@ export default function DmThreadPage() {
               {(m.deleted
                 || (m.content && m.type !== 'audio' && m.type !== 'location')) && (
                 <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
-                  {m.deleted ? '(message deleted)' : m.content}
+                  {m.deleted
+                    ? '(message deleted)'
+                    : <MentionText text={m.content} {...mentionRender} />}
                 </p>
               )}
               {showFooter && (
@@ -2460,7 +2504,11 @@ export default function DmThreadPage() {
             rows={1}
             onInput={handleInput}
             onKeyDown={handleComposerKeyDown}
-            onBlur={() => closeEmojiAutocomplete()}
+            onBlur={() => {
+              closeEmojiAutocomplete()
+              closeMentionAutocomplete()
+            }}
+            {...(isGroupThread ? mentionInputAria(composerInputRef.current) : {})}
           />
           <EmojiPickButton
             openKey="dm-composer"
@@ -2512,6 +2560,7 @@ export default function DmThreadPage() {
        *  popover positions itself absolutely against the input's
        *  bounding rect, not the parent. */}
       <EmojiAutocomplete />
+      {isGroupThread && <MentionAutocomplete />}
       <LocationPicker
         open={locationPickerOpen.value}
         submitLabel={t('location.send')}
@@ -2526,6 +2575,8 @@ export default function DmThreadPage() {
           managedHere={threadInfo.value.managed_here}
           mutedUntil={threadInfo.value.muted_until}
           onMuteChange={setThreadMute}
+          notifLevel={threadInfo.value.notif_level}
+          onNotifLevelChange={setThreadLevel}
           members={threadMembers.value}
           onClose={() => { groupInfoOpen.value = false }}
           onChanged={() => {

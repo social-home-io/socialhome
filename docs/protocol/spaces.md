@@ -789,6 +789,16 @@ text and are not parsed).
   an older host sees the toggle not stick (the old host drops the field).
 - **No other wire / protocol change.** Content was already end-to-end
   encrypted to members; mentions are derived from it on receipt.
+- **Edits:** an edit notifies only the members it **newly** mentions —
+  mentions in the new body minus those already in the old one (by
+  `user_id`), resolved on this household's member view. Local post /
+  comment edits by the author (a moderator editing someone else's words
+  mentions nobody) and inbound `SPACE_POST_UPDATED`,
+  `SPACE_COMMENT_UPDATED` and a `SPACE_POST_CREATED` re-send of an existing
+  post all diff the stored body against the new one. Nobody gets a generic
+  "posted" bell for an edit; a mention bell follows the same level rules.
+  `@here` counts only when the old body had none at all and the author may
+  use it, and it is still under the per-author 10-min limit.
 - **Notifications:** see `docs/api.md` → `/api/spaces/{id}/notif-prefs`
   (`space_mention` / `space_here` bells, title only per §25.3).
 
