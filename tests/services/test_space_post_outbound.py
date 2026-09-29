@@ -20,6 +20,7 @@ from socialhome.domain.events import (
     SpacePostCreated,
 )
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import JoinMode, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
@@ -822,3 +823,64 @@ async def test_join_mode_never_gates_the_relay_hint(join_mode):
     payload = federation.broadcast_to_space_members.call_args.args[2]
     assert "public_relay" in payload
     assert payload["id"] == "post-req"
+
+
+async def test_link_preview_rides_inside_the_member_payload_and_its_image_syncs():
+    """The author-built card travels inside the (encrypted) member payload —
+    receivers never fetch the URL — and its local image is handed to the
+    media sync like any other post media."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    federation._own_instance_id = "self-id"
+    federation_repo = AsyncMock()
+    federation_repo.list_member_instance_ids = AsyncMock(return_value=["peer-a"])
+    media_sync = AsyncMock()
+    media_sync.enqueue_for_post = AsyncMock()
+    _make_outbound(
+        bus=bus,
+        federation=federation,
+        media_sync=media_sync,
+        federation_repo=federation_repo,
+    )
+    card = LinkPreview(
+        url="https://example.com/a",
+        title="Card",
+        thumbnail_url="api/media/lp.webp",
+    )
+    post = Post(
+        id="p-link",
+        author="u",
+        type=PostType.TEXT,
+        content="see https://example.com/a",
+        link_preview=card,
+        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert payload["link_preview"] == {
+        "url": "https://example.com/a",
+        "title": "Card",
+        "description": None,
+        "site_name": None,
+        "thumbnail_url": "api/media/lp.webp",
+    }
+    call = media_sync.enqueue_for_post.call_args
+    assert call.kwargs["media_urls"] == ["api/media/lp.webp"]
+
+
+async def test_post_without_link_preview_has_no_key():
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    post = Post(
+        id="p-plain",
+        author="u",
+        type=PostType.TEXT,
+        content="hi",
+        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert "link_preview" not in payload

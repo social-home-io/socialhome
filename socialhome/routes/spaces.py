@@ -38,6 +38,7 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.events import SpaceMemberLocationOptedIn
+from ..domain.link_preview import link_preview_to_dict
 from ..domain.post import LocationData, PostType
 from ..domain.space import (
     PUBLIC_SPACE_TIERS,
@@ -1935,6 +1936,8 @@ class SpaceFeedView(BaseView):
                 "edited_at": p.edited_at.isoformat() if p.edited_at else None,
                 "linked_event_id": p.linked_event_id,
                 "linked_highlight_id": p.linked_highlight_id,
+                # ``thumbnail_url`` inside is signed by the pass below.
+                "link_preview": link_preview_to_dict(p.link_preview),
                 "created_at": p.created_at.isoformat() if p.created_at else None,
                 "bot": _bot_view(p.bot_id, bots_by_id, creators_by_user_id)
                 if p.author == SYSTEM_AUTHOR
@@ -2290,6 +2293,7 @@ class SpacePostCollectionView(BaseView):
             media_url=strip_signature_query(body.get("media_url")),
             image_urls=tuple(strip_signature_query(str(u)) for u in raw_images),
             location=_extract_location(body),
+            no_link_preview=bool(body.get("no_link_preview", False)),
         )
         if post is None:
             return web.json_response({"queued": True}, status=202)

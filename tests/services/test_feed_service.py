@@ -570,3 +570,35 @@ async def test_mark_read_accepts_none(stack):
 async def test_get_read_watermark_absent(stack):
     u = await stack.provision_user("alice")
     assert await stack.feed_svc.get_read_watermark(u.user_id) is None
+
+
+async def test_create_post_carries_author_built_link_preview(stack):
+    from socialhome.domain.link_preview import LinkPreview
+
+    asked: list[dict] = []
+
+    class Previews:
+        async def preview_for_post(self, **kw):
+            asked.append(kw)
+            return (
+                None
+                if kw["no_link_preview"]
+                else LinkPreview(url="https://example.com/", title="Card")
+            )
+
+    stack.feed_svc.attach_link_previews(Previews())
+    u = await stack.provision_user("pascal")
+    p = await stack.feed_svc.create_post(
+        author_user_id=u.user_id, type=PostType.TEXT, content="https://example.com/"
+    )
+    assert p.link_preview == LinkPreview(url="https://example.com/", title="Card")
+    stored = await stack.feed_svc.get_post(p.id)
+    assert stored.link_preview == p.link_preview
+    q = await stack.feed_svc.create_post(
+        author_user_id=u.user_id,
+        type=PostType.TEXT,
+        content="https://example.com/",
+        no_link_preview=True,
+    )
+    assert q.link_preview is None
+    assert asked[0]["post_type"] is PostType.TEXT

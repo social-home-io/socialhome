@@ -792,3 +792,22 @@ async def test_resume_replays_every_album_state_the_peer_may_have_missed(
         (FederationEventType.SPACE_GALLERY_ALBUM_UPDATED, "alb-renamed"),
     ]
     assert sent == 6
+
+
+def test_post_to_payload_carries_link_preview_only_when_set():
+    """A resumed SPACE_POST_CREATED replays the author-built card so a
+    catching-up member still never fetches the URL."""
+    from socialhome.domain.link_preview import LinkPreview
+
+    base = dict(
+        id="p-lp",
+        author="alice",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        content="https://example.com/",
+    )
+    assert "link_preview" not in _post_to_payload(Post(**base))
+    card = LinkPreview(url="https://example.com/", title="T")
+    payload = _post_to_payload(Post(**base, link_preview=card))
+    assert payload["link_preview"]["title"] == "T"
+    assert payload["link_preview"]["url"] == "https://example.com/"

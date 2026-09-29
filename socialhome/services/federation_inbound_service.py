@@ -106,6 +106,7 @@ from ..infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
+from .link_preview_service import wire_link_preview
 from .inbound_media_store import (
     is_safe_media_name,
     local_media_ref,
@@ -1708,6 +1709,9 @@ class FederationInboundService:
                 media_basename(post.media_url),
                 *(media_basename(u) for u in post.image_urls or ()),
                 media_basename(post.file_meta.url if post.file_meta else None),
+                media_basename(
+                    post.link_preview.thumbnail_url if post.link_preview else None
+                ),
             }
             if filename in names:
                 return True
@@ -3906,4 +3910,8 @@ class FederationInboundService:
             image_urls=local_media_refs(
                 payload.get("image_urls"), limit=FEED_POST_MAX_IMAGES
             ),
+            # The author-built link card — every field re-validated, the
+            # image kept only as a local media ref (its bytes follow as
+            # SPACE_MEDIA_BLOB). This household never fetches the URL.
+            link_preview=wire_link_preview(payload.get("link_preview")),
         )

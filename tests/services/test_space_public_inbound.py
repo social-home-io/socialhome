@@ -29,7 +29,10 @@ from socialhome.crypto import (
     generate_space_keypair,
     sign_ed25519,
 )
-from socialhome.services.space_public_author import author_signing_bytes
+from socialhome.services.space_public_author import (
+    author_signing_bytes,
+    link_preview_signing_bytes,
+)
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpacePostCreated
@@ -126,6 +129,9 @@ async def _make_envelope(
     space_seed: bytes | None = None,
     identity_anchor: str | None = None,
     content: str = "secret space content",
+    link_preview: dict | None = None,
+    tamper_preview: dict | None = None,
+    preview_suite: str = "ed25519",
 ):
     """Build a relayed envelope.
 
@@ -159,6 +165,14 @@ async def _make_envelope(
         inner["author_sig"] = b64url_encode(
             sign_ed25519(sign_seed, author_signing_bytes(inner))
         )
+    if link_preview is not None:
+        inner["link_preview"] = link_preview
+        inner["link_preview_sig_suite"] = preview_suite
+        inner["link_preview_sig"] = b64url_encode(
+            sign_ed25519(sign_seed, link_preview_signing_bytes(inner))
+        )
+        if tamper_preview is not None:
+            inner["link_preview"] = tamper_preview
     epoch, ct = await env["crypto"].encrypt(space_id, json.dumps(inner).encode())
     envelope = {"space_id": space_id, "epoch": epoch, "encrypted_payload": ct}
     envelope.update(
@@ -601,3 +615,42 @@ async def test_self_echo_dropped_before_any_write(env, caplog):
         if r.name.startswith("socialhome") and r.levelno > logging.DEBUG
     ]
     assert noisy == []
+
+
+_CARD = {
+    "url": "https://example.com/a",
+    "title": "Card",
+    "description": "Desc",
+    "site_name": None,
+    "thumbnail_url": "api/media/lp.webp",
+}
+
+
+async def test_relayed_link_preview_kept_when_author_signed(env):
+    envelope = await _make_envelope(env, link_preview=_CARD)
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    _, post = await env["post_repo"].get("post-1")
+    assert post.link_preview is not None
+    assert post.link_preview.title == "Card"
+    assert post.link_preview.thumbnail_url == "api/media/lp.webp"
+
+
+async def test_relayed_link_preview_altered_by_relayer_dropped(env):
+    envelope = await _make_envelope(
+        env,
+        link_preview=_CARD,
+        tamper_preview={**_CARD, "url": "https://evil.example/"},
+    )
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    got = await env["post_repo"].get("post-1")
+    assert got is not None  # the post still lands
+    assert got[1].link_preview is None
+
+
+async def test_relayed_link_preview_unknown_suite_dropped(env, caplog):
+    envelope = await _make_envelope(env, link_preview=_CARD, preview_suite="future")
+    with caplog.at_level("WARNING"):
+        await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    got = await env["post_repo"].get("post-1")
+    assert got is not None and got[1].link_preview is None
+    assert "link preview dropped" in caplog.text

@@ -60,6 +60,7 @@ from ...owner_bound_id import (
     owner_bound_id_refused,
 )
 from ....services.inbound_media_store import local_media_ref, local_media_refs
+from ....services.link_preview_service import wire_link_preview
 from .exporter import ALLOWED_RESOURCES, SENTINEL_RESOURCE, parse_chunk
 
 if TYPE_CHECKING:
@@ -994,6 +995,8 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         # The post's image gallery — the media bytes that follow are
         # matched against these names. Local-upload references, feed-capped.
         image_urls=local_media_refs(r.get("image_urls"), limit=FEED_POST_MAX_IMAGES),
+        # The author-built link card (never re-fetched here), re-validated.
+        link_preview=wire_link_preview(r.get("link_preview")),
     )
 
 

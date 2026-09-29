@@ -60,6 +60,7 @@ from .i18n import Catalog
 from .identity_bootstrap import ensure_instance_identity
 from .infrastructure.user_identity import ensure_user_identities
 from .media_signer import MediaUrlSigner, derive_signing_key
+from .outbound_fetch import OutboundFetcher
 from .peer_http import post_to_peer
 from . import __version__
 from .infrastructure import (
@@ -288,6 +289,7 @@ from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .services.gallery_service import GalleryService
 from .services.gallery_tombstones import GalleryAlbumTombstones
 from .services.media_transcode_service import MediaTranscodeService
+from .media.image_processor import ImageProcessor
 from .media.video_processor import VideoProcessor
 from .services.system_album_bridge import SystemAlbumBridge
 from .services.pairing_relay_queue import PairingRelayQueue
@@ -304,6 +306,7 @@ from .services.presence_service import PresenceService
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
+from .services.link_preview_service import LinkPreviewService
 from .services.map_tile_service import MapTileService
 from .services.public_space_discovery_service import PublicSpaceDiscoveryService
 from .services.push_service import PushService, load_or_create_vapid
@@ -1558,6 +1561,10 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # Sensitive surfaces — tighter than the 60/min default.
             "/api/me/tokens": (10, 60),  # API token create
             "/api/feed/posts": (30, 60),  # household posting
+            # Composer live link card — each call may make the household
+            # fetch a page (the service adds its own per-member and
+            # household fetch budget on top).
+            "/api/link-preview": (30, 60),
             "/api/presence/location": (10, 60),  # GPS pings
             "/api/calls": (10, 60),  # initiate / signal
             "/api/pairing": (5, 60),  # pairing handshakes
@@ -1908,6 +1915,18 @@ def create_app(config: Config | None = None) -> web.Application:
         repo=repos.preferences,
         bus=bus,
     )
+
+    # ── Link previews (author-side, SSRF-guarded) ────────────────────────
+    # The household fetches a linked page once when a member posts it; the
+    # preview then travels inside the post so receivers never fetch it.
+    link_preview_service = LinkPreviewService(
+        fetcher=OutboundFetcher(),
+        image_processor=ImageProcessor(),
+        media_dir=pathlib.Path(config.media_path),
+        preferences=preferences_service,
+    )
+    feed_service.attach_link_previews(link_preview_service)
+    space_service.attach_link_previews(link_preview_service)
 
     # ── App service (Social Home Apps install / uninstall / enable) ──────
     app_service = AppService(
@@ -2285,6 +2304,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.child_protection_service_key] = child_protection_service
     app[K.typing_service_key] = typing_service
     app[K.preferences_service_key] = preferences_service
+    app[K.link_preview_service_key] = link_preview_service
     app[K.app_service_key] = app_service
     app[K.alias_service_key] = alias_service
     app[K.alias_resolver_key] = alias_resolver
@@ -2534,6 +2554,7 @@ def create_app(config: Config | None = None) -> web.Application:
         real_space_service.attach_cover_repo(space_cover_repo)
         real_space_service.attach_icon_repo(space_icon_repo)
         real_space_service.attach_gallery_repo(gallery_repo)
+        real_space_service.attach_link_previews(link_preview_service)
         real_space_service.attach_bazaar_repo(bazaar_repo)
         real_space_service.attach_gfs_connection_service(gfs_connection_service)
         real_space_service.attach_gfs_space_mirror(gfs_space_mirror)

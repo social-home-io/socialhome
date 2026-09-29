@@ -21,6 +21,19 @@ identity seed.
 This module owns the ONE canonical, domain-separated message both sides sign /
 verify over so the two never drift. The signed message covers every
 attributable field of the inner payload and EXCLUDES ``author_sig`` itself.
+
+**Link previews ride under a second author signature.** A post's
+``link_preview`` (built once by the author's household — see
+``services.link_preview_service``) is carried in the inner too, but NOT in
+:data:`_SIGNED_FIELDS`: this relay has no protocol-version negotiation, and a
+subscriber that predates the field would recompute the author bytes without
+it and drop the whole post. Instead the author signs the preview separately
+(``link_preview_sig``, domain :data:`_LINK_PREVIEW_SIG_DOMAIN`, bound to the
+post id / space / author so it can't be moved to another post, suite-tagged
+``link_preview_sig_suite``). An older subscriber ignores both keys and shows
+the post without a card; a current one keeps the card only when that
+signature verifies (:func:`verified_link_preview`) — a relayer can strip the
+card but never forge or alter it.
 """
 
 from __future__ import annotations
@@ -35,10 +48,26 @@ from ..crypto import (
     sign_ed25519,
     verify_ed25519,
 )
+from ..domain.link_preview import link_preview_to_dict
 from ..federation.owner_bound_id import SPACE_POST_KIND, owner_bound_id_refused
 
 if TYPE_CHECKING:
     from ..domain.post import Post
+
+#: Suite of the separate link-preview author signature (see the module
+#: docstring). Receivers reject any other value — the card is dropped.
+LINK_PREVIEW_SIG_SUITE_ED25519: str = "ed25519"
+SUPPORTED_LINK_PREVIEW_SIG_SUITES: frozenset[str] = frozenset(
+    {LINK_PREVIEW_SIG_SUITE_ED25519}
+)
+
+#: Domain-separation prefix for the link-preview author signature.
+_LINK_PREVIEW_SIG_DOMAIN: bytes = b"space-post-link-preview:v1:"
+
+
+class UnsupportedLinkPreviewSigSuite(ValueError):
+    """A relayed link preview names a signature suite we don't support."""
+
 
 #: Domain-separation prefix — distinguishes these signing bytes from every
 #: other Ed25519 signature in the system (envelope authority sig, user
@@ -197,7 +226,57 @@ def build_signed_author_inner(
     inner["author_sig"] = b64url_encode(
         sign_ed25519(author_identity_seed, author_signing_bytes(inner))
     )
+    preview = link_preview_to_dict(post.link_preview)
+    if preview is not None:
+        inner["link_preview"] = preview
+        inner["link_preview_sig_suite"] = LINK_PREVIEW_SIG_SUITE_ED25519
+        inner["link_preview_sig"] = b64url_encode(
+            sign_ed25519(author_identity_seed, link_preview_signing_bytes(inner))
+        )
     return inner
+
+
+def link_preview_signing_bytes(inner: dict) -> bytes:
+    """Canonical bytes of the separate link-preview author signature: the
+    preview plus the fields that pin it to this one post and author."""
+    body = {
+        "post_id": inner.get("post_id"),
+        "space_id": inner.get("space_id"),
+        "author_user_id": inner.get("author_user_id"),
+        "author_pk": inner.get("author_pk"),
+        "link_preview": inner.get("link_preview"),
+        "link_preview_sig_suite": inner.get("link_preview_sig_suite"),
+    }
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return _LINK_PREVIEW_SIG_DOMAIN + canonical
+
+
+def verified_link_preview(inner: dict) -> dict | None:
+    """The inner's ``link_preview`` iff the author signed it, else ``None``.
+
+    Call only on an inner that already passed
+    :func:`verify_signed_author_inner` (so ``author_pk`` is the author's).
+    Missing / malformed / invalid signature → no card (the post itself is
+    unaffected). An unknown ``link_preview_sig_suite`` raises
+    :class:`UnsupportedLinkPreviewSigSuite` — never a fallback.
+    """
+    preview = inner.get("link_preview")
+    if not isinstance(preview, dict):
+        return None
+    suite = inner.get("link_preview_sig_suite")
+    if suite not in SUPPORTED_LINK_PREVIEW_SIG_SUITES:
+        raise UnsupportedLinkPreviewSigSuite(str(suite))
+    sig_text = inner.get("link_preview_sig")
+    if not isinstance(sig_text, str) or not sig_text:
+        return None
+    try:
+        author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
+        sig = b64url_decode(sig_text)
+    except ValueError:
+        return None
+    if not verify_ed25519(author_pk, link_preview_signing_bytes(inner), sig):
+        return None
+    return preview
 
 
 def verify_signed_author_inner(inner: dict) -> bool:

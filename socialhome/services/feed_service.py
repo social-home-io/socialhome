@@ -51,6 +51,8 @@ from ..repositories.user_repo import AbstractUserRepo
 if TYPE_CHECKING:
     import pathlib
 
+    from .link_preview_service import LinkPreviewService
+
 
 #: Max content length for a text / transcript post. Longer content is
 #: rejected with ValueError; image posts can still carry a caption up to
@@ -78,6 +80,7 @@ class FeedService:
         "_quota",
         "_media_dir",
         "_media_refs",
+        "_link_previews",
     )
 
     def __init__(
@@ -94,6 +97,7 @@ class FeedService:
         self._bus = bus
         self._household = None  # set via attach_household_features
         self._quota = None  # set via attach_storage_quota
+        self._link_previews: LinkPreviewService | None = None
         # When both are set, a deleted post's media file(s) are removed
         # from disk once the post row + its gallery system-album mirror
         # are gone and no other row still references them.
@@ -111,6 +115,12 @@ class FeedService:
         """Wire :class:`StorageQuotaService` so ``create_post`` with
         ``file_meta`` pre-checks the household's remaining budget."""
         self._quota = svc
+
+    def attach_link_previews(self, svc: "LinkPreviewService") -> None:
+        """Wire the author-side link preview builder: a new ``text`` post
+        with a web link (and ``no_link_preview`` unset) carries a preview
+        card built by this household (``services.link_preview_service``)."""
+        self._link_previews = svc
 
     # ── Posts ──────────────────────────────────────────────────────────
 
@@ -172,6 +182,19 @@ class FeedService:
             if size > 0:
                 await self._quota.check_can_store(size)
 
+        # The preview is built server-side from the post's own text — the
+        # client can only opt out, never supply the card's fields.
+        link_preview = (
+            await self._link_previews.preview_for_post(
+                post_type=post_type,
+                content=content,
+                user_id=author.user_id,
+                no_link_preview=bool(no_link_preview),
+            )
+            if self._link_previews is not None
+            else None
+        )
+
         post = Post(
             id=uuid.uuid4().hex,
             author=author.user_id,
@@ -187,6 +210,7 @@ class FeedService:
             pinned=bool(pinned),
             no_link_preview=bool(no_link_preview),
             linked_highlight_id=linked_highlight_id,
+            link_preview=link_preview,
         )
         await self._posts.save(post)
         await self._bus.publish(PostCreated(post=post))

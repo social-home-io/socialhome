@@ -15,6 +15,7 @@ from .config import Config
 from .db import AsyncDatabase
 
 if TYPE_CHECKING:  # circular at runtime: services → … → auth → app_keys
+    from .services.link_preview_service import LinkPreviewService
     from .services.map_tile_service import MapTileService
 
 # ── Core ─────────────────────────────────────────────────────────────────
@@ -105,6 +106,9 @@ media_signer_key: AppKey = AppKey("media_signer")
 #: Map tile proxy (§map). Fetches OSM raster tiles with an identifying
 #: ``User-Agent`` the browser cannot send, so the SPA's maps render.
 map_tile_service_key: AppKey[MapTileService] = AppKey("map_tile_service")
+#: Author-side link preview builder behind the SSRF-guarded fetcher
+#: (``POST /api/link-preview`` + post create).
+link_preview_service_key: AppKey[LinkPreviewService] = AppKey("link_preview_service")
 ha_bridge_service_key: AppKey = AppKey("ha_bridge_service")
 url_update_outbound_key: AppKey = AppKey("url_update_outbound")
 capabilities_outbound_key: AppKey = AppKey("capabilities_outbound")

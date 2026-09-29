@@ -13,10 +13,15 @@ from socialhome.crypto import (
     sign_ed25519,
     verify_ed25519,
 )
+import pytest
+
+from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import LocationData, Post, PostType
 from socialhome.services.space_public_author import (
+    UnsupportedLinkPreviewSigSuite,
     author_signing_bytes,
     build_signed_author_inner,
+    verified_link_preview,
     verify_signed_author_inner,
 )
 
@@ -559,3 +564,80 @@ def test_hidden_from_feed_is_signed_and_roundtrips():
     # Flipping hidden_from_feed after signing breaks verification.
     inner["hidden_from_feed"] = not inner["hidden_from_feed"]
     assert verify_signed_author_inner(inner) is False
+
+
+# ─── link preview: separate author signature ─────────────────────────────
+
+
+def _preview_inner(**over):
+    kp = generate_identity_keypair()
+    username = "bob"
+    preview = LinkPreview(
+        url="https://example.com/a",
+        title="Card",
+        description="Desc",
+        thumbnail_url="api/media/lp.webp",
+    )
+    inner = build_signed_author_inner(
+        post=_post(
+            author=derive_user_id(kp.public_key, username), link_preview=preview
+        ),
+        space_id="sp",
+        author_username=username,
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+    )
+    inner.update(over)
+    return kp, inner
+
+
+def test_link_preview_rides_outside_the_v25_author_bytes():
+    """A post WITH a card still signs the exact pre-preview author bytes, so a
+    subscriber that predates the field verifies the post (and ignores the
+    card) instead of dropping it."""
+    _kp, inner = _preview_inner()
+    assert inner["link_preview"]["title"] == "Card"
+    assert inner["link_preview_sig_suite"] == "ed25519"
+    assert verify_signed_author_inner(inner) is True
+    stripped = {
+        k: v
+        for k, v in inner.items()
+        if k not in {"link_preview", "link_preview_sig", "link_preview_sig_suite"}
+    }
+    assert author_signing_bytes(stripped) == author_signing_bytes(inner)
+    assert verified_link_preview(inner) == inner["link_preview"]
+
+
+def test_no_preview_no_preview_keys():
+    _kp, inner = _signed_inner()
+    assert "link_preview" not in inner
+    assert "link_preview_sig" not in inner
+    assert verified_link_preview(inner) is None
+
+
+def test_tampered_or_moved_link_preview_is_dropped():
+    _kp, inner = _preview_inner()
+    tampered = dict(
+        inner, link_preview={**inner["link_preview"], "url": "https://evil.example/"}
+    )
+    assert verified_link_preview(tampered) is None
+    assert verified_link_preview(dict(inner, post_id="other-post")) is None
+    unsigned = {k: v for k, v in inner.items() if k != "link_preview_sig"}
+    assert verified_link_preview(unsigned) is None
+    assert verified_link_preview(dict(inner, link_preview_sig="%%%")) is None
+    assert verified_link_preview(dict(inner, author_pk="zz")) is None
+    assert verified_link_preview(dict(inner, link_preview="x")) is None
+    # The post itself still verifies — only the card is lost.
+    assert verify_signed_author_inner(tampered) is True
+
+
+def test_unknown_link_preview_suite_is_rejected():
+    _kp, inner = _preview_inner(link_preview_sig_suite="ed25519+mldsa65")
+    with pytest.raises(UnsupportedLinkPreviewSigSuite):
+        verified_link_preview(inner)
+    missing = {
+        k: v for k, v in _preview_inner()[1].items() if k != "link_preview_sig_suite"
+    }
+    with pytest.raises(UnsupportedLinkPreviewSigSuite):
+        verified_link_preview(missing)
