@@ -749,7 +749,8 @@ export function SpaceSettings({
         {/* @here (§23.42). Admin config like the rest; federates to every
          *  member household, each of which re-checks the author's role. */}
         <fieldset class="sh-form-fieldset">
-          <legend>📣 @here</legend>
+          {/* ``bdi``: "@here" stays "@here" on a right-to-left page. */}
+          <legend>📣 <bdi>@here</bdi></legend>
           <label>
             <input
               type="checkbox"

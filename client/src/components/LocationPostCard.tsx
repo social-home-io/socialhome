@@ -46,7 +46,8 @@ export function LocationPostCard({ location }: LocationPostCardProps) {
           📍 {label || t('location.shared')}
         </strong>
         <span class="sh-muted sh-location-post-coords">
-          {coords}
+          {/* Data, not prose: keep "lat, lon" in order on an RTL page. */}
+          <bdi dir="ltr">{coords}</bdi>
           {accuracy ? ` · ${t('location.accuracy', { m: String(accuracy) })}` : ''}
         </span>
         {href && (

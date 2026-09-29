@@ -322,7 +322,7 @@ a:focus:not(:focus-visible) { outline: none; }
   background: none;
   border: none;
   font-family: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .sh-sidenav a[aria-current="page"],
@@ -335,6 +335,12 @@ a:focus:not(:focus-visible) { outline: none; }
 .sh-sidenav a[aria-current="page"] .sh-sidenav-icon,
 .sh-sidenav a.sh-active .sh-sidenav-icon {
   color: var(--sh-primary);
+}
+/* RTL: the "you are here" bar sits on the inline-start (right) edge. */
+[dir="rtl"] .sh-sidenav a[aria-current="page"],
+[dir="rtl"] .sh-sidenav a.sh-active,
+[dir="rtl"] .sh-sidenav .sh-sidenav-subitem--active {
+  box-shadow: inset -3px 0 0 var(--sh-primary);
 }
 
 /* Active-space sub-row under the "Spaces" nav item — anchors "you
@@ -349,7 +355,7 @@ a:focus:not(:focus-visible) { outline: none; }
   /* Aligns the emoji column with the parent link's icon column —
    * the parent has 16px icon + 12px gap = 28px lead, so this row
    * indents the same amount and the labels stack flush. */
-  padding-left: calc(var(--sh-space-md) + 28px);
+  padding-inline-start: calc(var(--sh-space-md) + 28px);
   margin-top: 1px;
   font-size: var(--sh-font-size-sm);
   border-radius: var(--sh-radius-md);
@@ -935,6 +941,13 @@ input:focus, textarea:focus, select:focus,
   outline: none;
   border-color: var(--sh-primary);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 22%, transparent);
+}
+/* A checkbox / radio has no border to recolour, and the 22% glow alone is
+ * ~1.5:1 on the dark surfaces — keep a real ring for keyboard focus
+ * (settings toggles, retention "keep" boxes, Group info radios). */
+input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
 }
 textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 
@@ -3523,11 +3536,11 @@ button.sh-friends-member-chip:not(:disabled):hover {
   gap: var(--sh-space-xs);
   padding: 4px 10px;
   background: var(--sh-primary-soft);
-  color: var(--sh-primary);
+  color: var(--sh-primary-on-soft);
   border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
-  margin-right: auto;
+  margin-inline-end: auto;
 }
 .sh-char-count {
   font-size: var(--sh-font-size-xs);
@@ -4030,7 +4043,7 @@ body.sh-dm-thread-open .sh-messages {
 .sh-dm-attach-menu {
   position: absolute;
   bottom: calc(100% + 6px);
-  left: 0;
+  inset-inline-start: 0;
   z-index: 30;
   min-width: 220px;
   display: flex;
@@ -4052,7 +4065,7 @@ body.sh-dm-thread-open .sh-messages {
   background: transparent;
   color: var(--sh-text);
   font: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .sh-dm-attach-menu__item:hover:not(:disabled),
@@ -4718,7 +4731,7 @@ body.sh-dm-thread-open .sh-messages {
 .sh-thread-mute__panel {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  inset-inline-end: 0;
   min-width: 220px;
   max-width: calc(100vw - 2 * var(--sh-space-sm));
   padding: 6px;
@@ -8570,6 +8583,10 @@ a.sh-btn { text-decoration: none; }
   cursor: pointer;
 }
 .sh-toggle-row > input { flex-shrink: 0; }
+/* ``.sh-form label`` (block) out-ranks the class above; a toggle row inside
+ * a form (the retention "keep these" boxes) must stay a flex row, or the
+ * checkbox drops onto the text's baseline and floats above its label. */
+.sh-form label.sh-toggle-row { display: flex; }
 .sh-toggle-row:last-child, .sh-settings-row:last-child { border-bottom: none; }
 .sh-settings-avatar {
   display: flex;
@@ -11252,7 +11269,7 @@ a.sh-welcome-card:hover {
   padding: 2px 10px;
   border-radius: var(--sh-radius-full);
   background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
-  color: var(--sh-primary);
+  color: var(--sh-primary-on-soft);
   font: 600 calc(var(--sh-font-size-xs) - 1px) / 1 var(--sh-font-family-mono);
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -12322,6 +12339,8 @@ a.sh-welcome-card:hover {
   font-size: var(--sh-font-size-xs);
   line-height: 1.35;
 }
+/* Muted ink on the hearth tint is ~3–4:1; the chosen card reads in full ink. */
+.sh-radio-card--selected .sh-radio-card__subtitle { color: var(--sh-text); }
 
 /* ───── QR scanner (camera / upload / paste) ───────────────────── */
 .sh-pairing-scan {
@@ -13712,12 +13731,12 @@ a.sh-link-preview-link:focus-visible {
 }
 /* Room for the composer's remove button so it never covers the text. */
 .sh-link-preview:has(.sh-link-preview-remove) .sh-link-preview-text {
-  padding-right: calc(var(--sh-space-md) + 36px);
+  padding-inline-end: calc(var(--sh-space-md) + 36px);
 }
 .sh-link-preview-remove {
   position: absolute;
   top: 4px;
-  right: 4px;
+  inset-inline-end: 4px;
   width: 36px;
   height: 36px;
   border: none;
@@ -13782,7 +13801,7 @@ a.sh-link-preview-link:focus-visible {
   font-size: var(--sh-font-size-xs);
 }
 .sh-location-post-open {
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 /* LocationPicker modal body */
@@ -13809,6 +13828,9 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-location-picker-coords__value {
   font-family: var(--sh-font-family-mono, monospace);
+  /* "lat, lon" stays in order inside a right-to-left paragraph. */
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .sh-location-picker-repin {
   align-self: flex-start;
@@ -13907,6 +13929,9 @@ a.sh-link-preview-link:focus-visible {
 .sh-mention-autocomplete-row--active {
   box-shadow: inset 2px 0 0 var(--sh-primary);
 }
+[dir="rtl"] .sh-mention-autocomplete-row--active {
+  box-shadow: inset -2px 0 0 var(--sh-primary);
+}
 .sh-mention-autocomplete-text {
   display: flex;
   flex-direction: column;
@@ -13931,23 +13956,30 @@ a.sh-link-preview-link:focus-visible {
   white-space: normal;
 }
 
-/* A resolved @-mention in a rendered space post / comment. */
+/* A resolved @-mention in a rendered space post / comment. Text colours
+ * are the "on" variants so each chip clears 4.5:1 in both themes. */
 .sh-mention {
-  color: var(--sh-primary);
+  color: var(--sh-primary-on-soft);
   background: var(--sh-primary-soft);
   border-radius: var(--sh-radius-sm);
   padding: 0 2px;
   font-weight: 600;
   white-space: nowrap;
+  /* Direction from the token itself, so "@anna" doesn't render "anna@"
+   * inside a right-to-left paragraph. */
+  unicode-bidi: plaintext;
 }
 .sh-mention--self {
-  background: var(--sh-primary);
+  background: var(--sh-primary-hover);
   color: var(--sh-bg);
 }
 .sh-mention--here {
   background: var(--sh-warning);
-  color: var(--sh-bg);
+  color: var(--sh-text);
 }
+/* Dark: the lifted hearth / honey are light, so the ink goes dark. */
+.sh-theme-dark .sh-mention--self { background: var(--sh-primary); }
+.sh-theme-dark .sh-mention--here { color: var(--sh-bg); }
 .sh-mention-autocomplete-here {
   width: 28px;
   height: 28px;
@@ -14224,7 +14256,7 @@ a.sh-link-preview-link:focus-visible {
  * it's not hidden behind the tab bar. */
 .sh-back-to-top {
   position: fixed;
-  right: var(--sh-space-md);
+  inset-inline-end: var(--sh-space-md);
   bottom: calc(var(--sh-space-md) + env(safe-area-inset-bottom, 0px));
   width: 44px;
   height: 44px;
@@ -14329,7 +14361,11 @@ a.sh-link-preview-link:focus-visible {
   gap: 4px;
   flex: 0 0 7.5em;
   margin: 0;
+  /* A key combo reads "Ctrl + K" in any page direction. */
+  direction: ltr;
 }
+/* …and still hugs the row's inline-start (right) edge in RTL. */
+[dir="rtl"] .sh-shortcuts__keys { justify-content: flex-end; }
 .sh-shortcuts__label { margin: 0; }
 .sh-shortcuts__plus { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
 .sh-shortcuts__note {
@@ -14858,7 +14894,7 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-token-row__meta { font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
 .sh-token-row__badge {
-  margin-left: var(--sh-space-xs);
+  margin-inline-start: var(--sh-space-xs);
   padding: 0 6px;
   border-radius: 999px;
   font-size: var(--sh-font-size-xs);
@@ -16056,6 +16092,7 @@ a.sh-link-preview-link:focus-visible {
   font-size: var(--sh-font-size-sm);
 }
 .sh-protected-notice__text .sh-link {
+  color: var(--sh-primary-on-soft);
   font-size: var(--sh-font-size-sm);
   display: inline-block;
   padding: var(--sh-space-xs) 0;
@@ -16068,6 +16105,12 @@ a.sh-link-preview-link:focus-visible {
   margin-bottom: var(--sh-space-lg);
 }
 .sh-protected-account h2 { margin-top: 0; }
+/* Muted ink on this hearth-tinted panel (and on the chosen landing-page
+ * option below it) is ~4.2:1 in dark; pull it toward the full ink. */
+.sh-protected-account .sh-muted,
+.sh-landing-option--active .sh-muted {
+  color: color-mix(in srgb, var(--sh-text-muted) 60%, var(--sh-text));
+}
 .sh-protected-account__list,
 .sh-protected-account__guardians {
   margin: 0 0 var(--sh-space-sm);
@@ -17340,11 +17383,11 @@ a.sh-link-preview-link:focus-visible {
   min-height: 36px;
 }
 .sh-subscribe-app {
-  margin-left: var(--sh-space-md);
+  margin-inline-start: var(--sh-space-md);
 }
 .sh-subscribe-steps {
   margin: 0 0 var(--sh-space-xs);
-  padding-left: var(--sh-space-lg);
+  padding-inline-start: var(--sh-space-lg);
   font-size: var(--sh-font-size-sm);
   color: var(--sh-text);
 }
@@ -17454,7 +17497,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-cal-import-result__headline { font-weight: 700; margin: 0 0 var(--sh-space-sm); }
 .sh-cal-import-result__list {
   margin: 0 0 var(--sh-space-sm);
-  padding-left: var(--sh-space-lg);
+  padding-inline-start: var(--sh-space-lg);
 }
 .sh-cal-import-result__list li { margin-bottom: 0.25em; overflow-wrap: anywhere; }
 .sh-cal-import-result__note { font-size: var(--sh-font-size-sm); }

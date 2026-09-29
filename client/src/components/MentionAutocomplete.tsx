@@ -128,7 +128,10 @@ export function checkForMentionTrigger(
   const spaceAbove = rect.top - visibleTop
   const above = spaceBelow < ESTIMATED_POPOVER_HEIGHT + EDGE && spaceAbove > spaceBelow
   const width = Math.min(MAX_WIDTH, visibleWidth - 2 * EDGE)
-  const left = Math.max(EDGE, Math.min(rect.left, visibleWidth - width - EDGE))
+  // Anchor on the input's inline-start edge: its right edge in RTL.
+  const rtl = getComputedStyle(anchor).direction === 'rtl'
+  const start = rtl ? rect.right - width : rect.left
+  const left = Math.max(EDGE, Math.min(start, visibleWidth - width - EDGE))
   const prev = state.value
   const sameToken = prev !== null && prev.anchor === anchor
     && prev.range[0] === trigger.start
@@ -315,7 +318,8 @@ export function MentionAutocomplete() {
           <span class="sh-mention-autocomplete-text">
             <span class="sh-mention-autocomplete-name">{c.name}</span>
             <span class="sh-mention-autocomplete-meta">
-              @{c.token}
+              {/* Isolated so an RTL page shows "@anna", not "anna@". */}
+              <bdi>@{c.token}</bdi>
               {c.here && ' · notifies every member'}
               {c.household && (
                 <span class="sh-mention-autocomplete-household">

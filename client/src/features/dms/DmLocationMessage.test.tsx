@@ -17,13 +17,16 @@ vi.mock('@/components/LocationMap', () => ({
 describe('DmLocationMessage', () => {
   it('renders the card with label, coords, accuracy and a maps link', async () => {
     const { DmLocationMessage } = await import('./DmLocationMessage')
-    const { getByText, getByTestId, getByRole } = render(
+    const { getByText, getByTestId, getByRole, container } = render(
       <DmLocationMessage
         content='{"lat":52.3702,"lon":4.8952,"label":"Dam square","accuracy_m":50}'
       />,
     )
     expect(getByText('📍 Dam square')).toBeTruthy()
-    expect(getByText(/52\.3702, 4\.8952 · within ~50 m/)).toBeTruthy()
+    // The coords sit in an LTR-isolated ``<bdi>`` (RTL pages), so match the
+    // whole line's text rather than one text node.
+    expect(container.querySelector('.sh-location-post-coords')?.textContent)
+      .toBe('52.3702, 4.8952 · within ~50 m')
     const map = getByTestId('map')
     expect(map.getAttribute('data-marker-count')).toBe('1')
     expect(map.getAttribute('data-accuracy')).toBe('50')

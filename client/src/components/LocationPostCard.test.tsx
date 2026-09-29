@@ -27,6 +27,18 @@ describe('LocationPostCard', () => {
     expect(link.href).toContain('mlon=4.06')
   })
 
+  it('keeps "lat, lon" in reading order on a right-to-left page', async () => {
+    // Coordinates are data, not prose: an RTL paragraph would otherwise
+    // lay "52.5200, 4.0600" out as "4.0600 ,52.5200" — lat and lon swapped.
+    const { LocationPostCard } = await import('./LocationPostCard')
+    const { container } = render(
+      <LocationPostCard location={{ lat: 52.52, lon: 4.06, label: 'Marina' }} />,
+    )
+    const bdi = container.querySelector('.sh-location-post-coords bdi')
+    expect(bdi?.getAttribute('dir')).toBe('ltr')
+    expect(bdi?.textContent).toBe('52.5200, 4.0600')
+  })
+
   it('falls back to coord-only label when none was set', async () => {
     const { LocationPostCard } = await import('./LocationPostCard')
     const { getByText } = render(
