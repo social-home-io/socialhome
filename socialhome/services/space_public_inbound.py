@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_crypto_service import SpaceContentEncryption
+    from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +73,14 @@ log = logging.getLogger(__name__)
 class SpacePublicInbound:
     """GFS-relay → local-persist consumer for public/global space posts."""
 
-    __slots__ = ("_bus", "_spaces", "_crypto", "_posts", "_own_instance_id")
+    __slots__ = (
+        "_bus",
+        "_spaces",
+        "_crypto",
+        "_posts",
+        "_own_instance_id",
+        "_mentions",
+    )
 
     def __init__(
         self,
@@ -81,12 +89,16 @@ class SpacePublicInbound:
         space_repo: "AbstractSpaceRepo",
         space_crypto: "SpaceContentEncryption",
         space_post_repo: "AbstractSpacePostRepo",
+        mention_resolver: "SpaceMentionResolver | None" = None,
     ) -> None:
         self._bus = bus
         self._spaces = space_repo
         self._crypto = space_crypto
         self._posts = space_post_repo
         self._own_instance_id: str = ""
+        #: Resolves @-mentions in the decrypted relayed post against this
+        #: household's view of the space's members. ``None`` → no mentions.
+        self._mentions = mention_resolver
 
     def attach_identity(self, *, own_instance_id: str) -> None:
         """Wire our own instance id — the self-echo guard's only input."""
@@ -212,6 +224,11 @@ class SpacePublicInbound:
             SpacePostCreated(
                 post=post,
                 space_id=space_id,
+                mentions=(
+                    await self._mentions.resolve(space_id, post.content)
+                    if self._mentions is not None
+                    else ()
+                ),
                 origin_instance_id=origin_instance_id,
             )
         )

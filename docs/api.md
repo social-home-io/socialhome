@@ -167,7 +167,7 @@ events these routes fire.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST | `/api/spaces/{id}/members` | List / invite. |
+| GET / POST | `/api/spaces/{id}/members` | List / invite. Each listed row (local and remote seats) carries `mention` — the exact @-token (without `@`) a composer inserts to mention that member, unique in the space (`handle`, or `handle@<user_id prefix>` when two members share a handle; `null` when the member has no token-safe handle) — and remote rows add `household_name` (the paired peer's display name, `null` if unknown). |
 | GET / PATCH / DELETE | `/api/spaces/{id}/members/me` | Self member profile. |
 | POST / DELETE | `/api/spaces/{id}/members/me/picture` | Space-specific avatar. |
 | GET / PATCH / DELETE | `/api/spaces/{id}/members/{user_id}` | Admin-only ops. |
@@ -207,7 +207,7 @@ events these routes fire.
 |---|---|---|
 | GET / POST | `/api/spaces/{id}/links` | List / create admin-configured sidebar quick-links. Members see; admin/owner writes. Body: `{label, url, position?}`. |
 | PATCH / DELETE | `/api/spaces/{id}/links/{link_id}` | Update or remove a link. Admin/owner. |
-| GET / PUT | `/api/spaces/{id}/notif-prefs` | Caller's per-space notification level. Body: `{level}` where level ∈ `"all"` \| `"mentions"` \| `"muted"`. Muted suppresses `space_post_created` notifications; `mentions` only fires when the caller appears in the post's `mentions`. |
+| GET / PUT | `/api/spaces/{id}/notif-prefs` | Caller's per-space notification level. Body: `{level}` where level ∈ `"all"` \| `"mentions"` \| `"muted"`. Applies to space posts **and** space comments. `all` → a `space_post_created` / `space_comment_added` bell for every post / comment by someone else; `mentions` → only posts / comments that @-mention the caller; `muted` → nothing, mentioned or not. A mentioned member (level `all` or `mentions`) gets one `space_mention` bell ("{author} mentioned you in {space}" / "… in a comment in {space}") **instead of** the generic one. Mentions resolve against the space's members only (never a non-member), the author is never notified of a self-mention, and `@here` is not notified yet. Push carries the title only (§25.3). |
 
 **Bot personas (bot-bridge)**
 
@@ -480,7 +480,7 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | GET / POST | `/api/spaces/{id}/zones` | List or create a per-space display zone (§23.8.7). `GET` open to space members; `POST` admin/owner only. Body: `{name, latitude, longitude, radius_m, color?}`. |
 | PATCH / DELETE | `/api/spaces/{id}/zones/{zone_id}` | Update or delete a per-space zone. Admin/owner only. Partial update; `color: null` clears, omitting fields leaves them. |
 | PATCH | `/api/spaces/{id}/members/me/location-sharing` | Member-self-service opt in or out of GPS sharing for this space (§23.8.8). Body: `{enabled: bool}`. Returns `{location_share_enabled: bool}`. |
-| GET | `/api/notifications` | Paginated list. Each row carries an optional `link_url` deep-link target — the bell renders unread items as anchors. `dm_message` rows are **collapsed per conversation** — a burst of N inbound DMs from the same peer bumps one bell row rather than stacking N entries; dedupe is scoped to currently-unread rows, so once the recipient opens the thread (`POST /api/conversations/{id}/read` clears the row) the next DM starts a fresh one. `calendar_event_created` rows are **scoped to the event's audience**: personal-calendar events notify the calendar's owner only (and not when the owner created the event themselves); space-calendar events notify space members except the creator. The household-wide fanout from earlier builds is gone. |
+| GET | `/api/notifications` | Paginated list. Each row carries an optional `link_url` deep-link target — the bell renders unread items as anchors. `dm_message` rows are **collapsed per conversation** — a burst of N inbound DMs from the same peer bumps one bell row rather than stacking N entries; dedupe is scoped to currently-unread rows, so once the recipient opens the thread (`POST /api/conversations/{id}/read` clears the row) the next DM starts a fresh one. Space post / comment rows (`space_post_created`, `space_comment_added`, `space_mention`) go to the space's members only, per their `/api/spaces/{id}/notif-prefs` level; household-feed comments (`comment_added`) still notify the household. `calendar_event_created` rows are **scoped to the event's audience**: personal-calendar events notify the calendar's owner only (and not when the owner created the event themselves); space-calendar events notify space members except the creator. The household-wide fanout from earlier builds is gone. |
 | GET | `/api/notifications/unread-count` | Count. |
 | POST | `/api/notifications/{id}/read` | Mark read. |
 | POST | `/api/notifications/read-all` | Mark all read. |

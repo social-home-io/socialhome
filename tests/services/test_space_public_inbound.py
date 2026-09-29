@@ -33,12 +33,20 @@ from socialhome.services.space_public_author import author_signing_bytes
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpacePostCreated
-from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceFeatures,
+    SpaceMember,
+    SpaceType,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.space_mentions import SpaceMentionResolver
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_inbound import SpacePublicInbound
 
@@ -92,6 +100,8 @@ async def env(tmp_dir):
     inbound.attach_identity(own_instance_id="us.home")
     return {
         "db": db,
+        "space_repo": space_repo,
+        "crypto_obj": crypto,
         "own_iid": "us.home",
         "bus": bus,
         "crypto": crypto,
@@ -115,6 +125,7 @@ async def _make_envelope(
     omit_author_sig: bool = False,
     space_seed: bytes | None = None,
     identity_anchor: str | None = None,
+    content: str = "secret space content",
 ):
     """Build a relayed envelope.
 
@@ -138,7 +149,7 @@ async def _make_envelope(
         "author_pk": author_pk.hex(),
         "author_username": "bob",
         "type": "text",
-        "content": "secret space content",
+        "content": content,
         "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
         "origin_instance_id": "remote.home",
     }
@@ -182,6 +193,38 @@ async def test_valid_relay_decrypts_persists_and_publishes(env):
     assert post.author == env["author_user_id"]
     assert len(env["events"]) == 1
     assert env["events"][0].origin_instance_id == "remote.home"
+
+
+async def test_relayed_post_resolves_mentions_against_local_member_view(env):
+    """The subscriber household parses the decrypted relayed post against
+    its own member view — a member resolves, a non-member never does."""
+    for uname in ("anna", "dave"):
+        await env["db"].enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (uname, f"u-{uname}", uname.title()),
+        )
+    await env["space_repo"].save_member(
+        SpaceMember(space_id="sp-1", user_id="u-anna", role="member", joined_at="")
+    )
+    inbound = SpacePublicInbound(
+        bus=env["bus"],
+        space_repo=env["space_repo"],
+        space_crypto=env["crypto_obj"],
+        space_post_repo=env["post_repo"],
+        mention_resolver=SpaceMentionResolver(
+            env["space_repo"], SqliteUserRepo(env["db"])
+        ),
+    )
+    inbound.attach_identity(own_instance_id="us.home")
+    envelope = await _make_envelope(env, content="hi @anna and @dave")
+    await inbound.handle(_frame(envelope), gfs_id="g1")
+    assert [m.user_id for m in env["events"][0].mentions] == ["u-anna"]
+
+
+async def test_relay_without_resolver_carries_no_mentions(env):
+    envelope = await _make_envelope(env, content="hi @anna")
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert env["events"][0].mentions == ()
 
 
 async def test_dedupe_same_envelope_twice_persists_once(env):

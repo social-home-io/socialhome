@@ -14,5 +14,8 @@
   "notification.calendar.event_created": "{author} añadió un evento: {summary}",
   "notification.bazaar.bid_received": "Nueva oferta en tu anuncio",
   "notification.bazaar.bid_placed": "Nueva oferta en tu anuncio",
-  "notification.bazaar.offer_accepted": "Tu oferta fue aceptada"
+  "notification.bazaar.offer_accepted": "Tu oferta fue aceptada",
+  "notification.space.mention": "{author} te mencionó en {space_name}",
+  "notification.space.comment.mention": "{author} te mencionó en un comentario en {space_name}",
+  "notification.space.comment.added": "{author} comentó en {space_name}"
 }
