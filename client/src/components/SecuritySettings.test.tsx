@@ -17,6 +17,8 @@ vi.mock('@/platform', () => ({ isSupervisorAddon: () => platformMock.addon }))
 
 import { ApiError } from '@/api'
 import { SecuritySettings } from './SecuritySettings'
+import { currentUser } from '@/store/auth'
+import type { User } from '@/types'
 
 const WEB_ROW = {
   token_id: 'tid-web', label: 'web', created_at: '2026-09-01 10:00:00',
@@ -165,5 +167,25 @@ describe('SecuritySettings', () => {
     fireEvent.click(await findByRole('button', { name: 'Try again' }))
     await findByText(/No tokens yet/)
     expect(apiMock.get).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('SecuritySettings — protected account', () => {
+  it('swaps the create form for the protected notice but keeps list + revoke', async () => {
+    currentUser.value = {
+      user_id: 'u-kid', username: 'kid', display_name: 'Kid', is_admin: false,
+      picture_url: null, picture_hash: null, bio: null, is_new_member: false,
+      protected: true, restrictions: ['api_tokens'],
+    } as User
+    try {
+      apiMock.get.mockResolvedValueOnce({ base_url: null, tokens: [WEB_ROW] })
+      const { findByText, container, getByRole } = render(<SecuritySettings />)
+      await findByText('Browser sign-in')
+      expect(container.querySelector('form.sh-token-create')).toBeNull()
+      expect(getByRole('note').textContent).toContain('API tokens')
+      expect(getByRole('button', { name: 'Sign out Browser sign-in' })).toBeTruthy()
+    } finally {
+      currentUser.value = null
+    }
   })
 })

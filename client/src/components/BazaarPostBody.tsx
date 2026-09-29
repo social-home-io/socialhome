@@ -10,6 +10,7 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
+import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { BazaarOffersPanel } from './BazaarOffersPanel'
 import { ImageRenderer } from './FileRenderer'
 import { SaveListingButton } from './SaveListingButton'
@@ -368,7 +369,10 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
         )}
       </div>
 
-      {!closed && me && !isSeller && (
+      {!closed && me && !isSeller && isRestricted('bazaar') && (
+        <ProtectedNotice capability="bazaar" />
+      )}
+      {!closed && me && !isSeller && !isRestricted('bazaar') && (
         listing.mode === 'fixed' ? (
           <Button loading={busy}
                   onClick={() => void placeBid(listing.price ?? 0)}>

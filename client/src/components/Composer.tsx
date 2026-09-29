@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { Avatar } from './Avatar'
 import { Button } from './Button'
+import { isRestricted } from './ProtectedNotice'
 import { DraftBanner, saveDraft, clearDraft } from './DraftPersistence'
 import {
   EmojiAutocomplete,
@@ -512,7 +513,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
               ⭕
             </button>
           )}
-          {spaceId && bazaarEnabled && (
+          {spaceId && bazaarEnabled && !isRestricted('bazaar') && (
             <button
               type="button"
               class="sh-type-btn"

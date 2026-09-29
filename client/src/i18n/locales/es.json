@@ -384,5 +384,22 @@
   "shortcuts.composer": "Escribir una publicación o un mensaje",
   "shortcuts.help": "Mostrar esta ayuda",
   "shortcuts.close": "Cerrar un diálogo",
-  "shortcuts.typing_note": "Los atajos de una sola tecla se pausan mientras escribes en un campo."
+  "shortcuts.typing_note": "Los atajos de una sola tecla se pausan mientras escribes en un campo.",
+  "protected.notice_title": "Tu cuenta está protegida por tu hogar",
+  "protected.ask_guardian": "Pídeselo a un tutor si lo necesitas.",
+  "protected.see_what": "Ver qué está limitado",
+  "protected.cap.bazaar": "Vender, pujar y hacer ofertas en el Bazar están desactivados.",
+  "protected.cap.public_spaces": "Crear espacios públicos o globales, o hacer público un espacio, está desactivado.",
+  "protected.cap.public_moments": "Compartir momentos públicamente y seguir perfiles públicos en servidores de conexión está desactivado.",
+  "protected.cap.public_links": "Publicar destacados como enlaces públicos está desactivado.",
+  "protected.cap.api_tokens": "Crear tokens de API para otras aplicaciones está desactivado.",
+  "protected.cap.calendar_feeds": "Los enlaces de suscripción al calendario están desactivados.",
+  "protected.tier_unavailable": "No disponible: tu cuenta está protegida.",
+  "protected.approve_blocked": "Tu cuenta está protegida, así que no puedes aprobar que este espacio sea público.",
+  "protected.section.title": "Tu cuenta está protegida",
+  "protected.section.intro": "Tu hogar activó la protección de tu cuenta. Todo lo demás funciona como siempre. Esto está desactivado:",
+  "protected.section.guardians": "Tus tutores",
+  "protected.section.guardians_help": "Pídeselo a uno de ellos si necesitas algo de esta lista.",
+  "protected.section.no_guardians": "Todavía no hay ningún tutor asignado. Pregunta a un administrador del hogar.",
+  "protected.section.load_error": "No se pudieron cargar tus tutores. Recarga la página para intentarlo de nuevo."
 }

@@ -359,5 +359,22 @@
   "shortcuts.composer": "Écrire une publication ou un message",
   "shortcuts.help": "Afficher cette aide",
   "shortcuts.close": "Fermer une fenêtre",
-  "shortcuts.typing_note": "Les raccourcis à une touche sont suspendus pendant la saisie dans un champ."
+  "shortcuts.typing_note": "Les raccourcis à une touche sont suspendus pendant la saisie dans un champ.",
+  "protected.notice_title": "Ton compte est protégé par ton foyer",
+  "protected.ask_guardian": "Demande à un responsable si tu en as besoin.",
+  "protected.see_what": "Voir ce qui est limité",
+  "protected.cap.bazaar": "Vendre, enchérir et faire des offres dans le Bazar sont désactivés.",
+  "protected.cap.public_spaces": "Créer des espaces publics ou globaux, ou rendre un espace public, est désactivé.",
+  "protected.cap.public_moments": "Partager des moments publiquement et suivre des profils publics sur les serveurs de connexion est désactivé.",
+  "protected.cap.public_links": "Publier des temps forts sous forme de liens publics est désactivé.",
+  "protected.cap.api_tokens": "Créer des jetons d'API pour d'autres applications est désactivé.",
+  "protected.cap.calendar_feeds": "Les liens d'abonnement au calendrier sont désactivés.",
+  "protected.tier_unavailable": "Indisponible : ton compte est protégé.",
+  "protected.approve_blocked": "Ton compte est protégé, tu ne peux donc pas approuver le passage de cet espace en public.",
+  "protected.section.title": "Ton compte est protégé",
+  "protected.section.intro": "Ton foyer a activé la protection de ton compte. Tout le reste fonctionne normalement. Ceci est désactivé :",
+  "protected.section.guardians": "Tes responsables",
+  "protected.section.guardians_help": "Demande à l'un d'eux si tu as besoin de quelque chose dans cette liste.",
+  "protected.section.no_guardians": "Aucun responsable n'est encore désigné. Demande à un administrateur du foyer.",
+  "protected.section.load_error": "Impossible de charger tes responsables. Recharge la page pour réessayer."
 }

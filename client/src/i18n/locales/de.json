@@ -364,5 +364,22 @@
   "shortcuts.composer": "Beitrag oder Nachricht schreiben",
   "shortcuts.help": "Diese Hilfe anzeigen",
   "shortcuts.close": "Dialog schließen",
-  "shortcuts.typing_note": "Einzeltasten-Kürzel sind pausiert, während du in ein Feld tippst."
+  "shortcuts.typing_note": "Einzeltasten-Kürzel sind pausiert, während du in ein Feld tippst.",
+  "protected.notice_title": "Dein Konto wird von deinem Haushalt geschützt",
+  "protected.ask_guardian": "Frag eine Aufsichtsperson, wenn du das brauchst.",
+  "protected.see_what": "Was eingeschränkt ist",
+  "protected.cap.bazaar": "Verkaufen, Bieten und Angebote machen im Basar sind ausgeschaltet.",
+  "protected.cap.public_spaces": "Öffentliche oder globale Bereiche erstellen oder einen Bereich öffentlich machen ist ausgeschaltet.",
+  "protected.cap.public_moments": "Momente öffentlich teilen und öffentlichen Profilen auf Verbindungsservern folgen ist ausgeschaltet.",
+  "protected.cap.public_links": "Highlights als öffentliche Links veröffentlichen ist ausgeschaltet.",
+  "protected.cap.api_tokens": "API-Tokens für andere Apps erstellen ist ausgeschaltet.",
+  "protected.cap.calendar_feeds": "Kalender-Abo-Links sind ausgeschaltet.",
+  "protected.tier_unavailable": "Nicht verfügbar: Dein Konto ist geschützt.",
+  "protected.approve_blocked": "Dein Konto ist geschützt, deshalb kannst du nicht zustimmen, diesen Bereich öffentlich zu machen.",
+  "protected.section.title": "Dein Konto ist geschützt",
+  "protected.section.intro": "Dein Haushalt hat den Schutz für dein Konto eingeschaltet. Alles andere funktioniert wie gewohnt. Ausgeschaltet ist:",
+  "protected.section.guardians": "Deine Aufsichtspersonen",
+  "protected.section.guardians_help": "Frag eine von ihnen, wenn du etwas von dieser Liste brauchst.",
+  "protected.section.no_guardians": "Noch keine Aufsichtsperson zugewiesen. Frag eine Haushalts-Administration.",
+  "protected.section.load_error": "Deine Aufsichtspersonen konnten nicht geladen werden. Lade die Seite neu, um es erneut zu versuchen."
 }

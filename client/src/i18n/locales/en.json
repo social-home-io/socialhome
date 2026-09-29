@@ -677,5 +677,22 @@
   "shortcuts.composer": "Write a post or message",
   "shortcuts.help": "Show this help",
   "shortcuts.close": "Close a dialog",
-  "shortcuts.typing_note": "Single-key shortcuts are paused while you type in a field."
+  "shortcuts.typing_note": "Single-key shortcuts are paused while you type in a field.",
+  "protected.notice_title": "Your account is protected by your household",
+  "protected.ask_guardian": "Ask a guardian if you need this.",
+  "protected.see_what": "See what's limited",
+  "protected.cap.bazaar": "Selling, bidding and making offers in the Bazaar are turned off.",
+  "protected.cap.public_spaces": "Creating public or global spaces, or making a space public, is turned off.",
+  "protected.cap.public_moments": "Sharing moments publicly and following public profiles on connection servers is turned off.",
+  "protected.cap.public_links": "Publishing highlights as public links is turned off.",
+  "protected.cap.api_tokens": "Creating API tokens for other apps is turned off.",
+  "protected.cap.calendar_feeds": "Calendar subscription links are turned off.",
+  "protected.tier_unavailable": "Not available: your account is protected.",
+  "protected.approve_blocked": "Your account is protected, so you can't approve making this space public.",
+  "protected.section.title": "Your account is protected",
+  "protected.section.intro": "Your household turned on protection for your account. Everything else works as usual. These are turned off:",
+  "protected.section.guardians": "Your guardians",
+  "protected.section.guardians_help": "Ask one of them if you need something on this list.",
+  "protected.section.no_guardians": "No guardian is assigned yet. Ask a household admin.",
+  "protected.section.load_error": "Couldn't load your guardians. Reload the page to try again."
 }

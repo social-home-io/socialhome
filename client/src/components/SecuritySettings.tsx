@@ -17,6 +17,7 @@ import { useEffect } from 'preact/hooks'
 import { useSignal } from '@preact/signals'
 import { api, ApiError } from '@/api'
 import { Button } from './Button'
+import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { FormError } from './FormError'
 import { SecretReveal } from './SecretReveal'
 import { Spinner } from './Spinner'
@@ -179,6 +180,8 @@ export function SecuritySettings() {
           }</code></pre>
           {!baseUrl.value && <NoPublicAddressNote />}
         </SecretReveal>
+      ) : isRestricted('api_tokens') ? (
+        <ProtectedNotice capability="api_tokens" />
       ) : (
         <form class="sh-token-create" onSubmit={create} noValidate>
           <label class="sh-token-create__field">

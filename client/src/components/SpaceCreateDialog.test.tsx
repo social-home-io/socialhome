@@ -212,3 +212,29 @@ describe('SpaceCreateDialog — min-age + category', () => {
     expect('min_age' in body).toBe(false)
   })
 })
+
+describe('SpaceCreateDialog — protected account', () => {
+  beforeEach(() => { post.mockReset(); get.mockClear(); gfsConns = [{ status: 'active' }]; cleanup() })
+
+  it('offers public / global disabled with the reason, private stays selectable', async () => {
+    currentUser.value = {
+      user_id: 'u-kid', username: 'kid', display_name: 'Kid', is_admin: false,
+      protected: true, restrictions: ['public_spaces'],
+    } as typeof currentUser.value
+    const { container } = await open()
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/api/gfs/connections'))
+    expect(visibility(container, 'public').disabled).toBe(true)
+    expect(visibility(container, 'global').disabled).toBe(true)
+    expect(visibility(container, 'private').disabled).toBe(false)
+    expect(container.textContent).toContain('protected.tier_unavailable')
+    expect(container.querySelector('[role="note"][data-capability="public_spaces"]')).toBeTruthy()
+  })
+
+  it('leaves the tiers alone for an adult', async () => {
+    setViewer(false)
+    const { container } = await open()
+    await waitFor(() => expect(visibility(container, 'global').disabled).toBe(false))
+    expect(visibility(container, 'public').disabled).toBe(false)
+    expect(container.querySelector('[data-capability="public_spaces"]')).toBeNull()
+  })
+})

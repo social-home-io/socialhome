@@ -14,6 +14,7 @@ import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { Button } from '@/components/Button'
+import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { useTitle } from '@/store/pageTitle'
@@ -71,6 +72,15 @@ export default function PublicSharingSettings() {
   useEffect(() => {
     void reload()
   }, [])
+
+  if (isRestricted('public_moments')) {
+    return (
+      <section class="sh-settings-section">
+        <h2>Share Moments via a GFS</h2>
+        <ProtectedNotice capability="public_moments" />
+      </section>
+    )
+  }
 
   if (loading.value) return <Spinner />
 

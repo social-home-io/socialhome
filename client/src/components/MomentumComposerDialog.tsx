@@ -17,6 +17,7 @@ import { signal } from '@preact/signals'
 import { useEffect, useRef } from 'preact/hooks'
 import { api } from '@/api'
 import { Button } from './Button'
+import { isRestricted } from './ProtectedNotice'
 import { MediaDropzone } from './MediaDropzone'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
@@ -151,7 +152,9 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
         if (mediaType.value === 'video') body.duration_ms = durationMs.value
       }
       if (parentId.value) body.parent_moment_id = parentId.value
-      if (registrations.value.length > 0) body.is_public = isPublic.value
+      if (registrations.value.length > 0) {
+        body.is_public = isPublic.value && !isRestricted('public_moments')
+      }
       const m = await api.post('/api/moments', body) as Moment
       open.value = false
       onPosted?.(m)
@@ -245,7 +248,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
           <UploadProgressBar />
         </div>
 
-        {registrations.value.length > 0 && (
+        {registrations.value.length > 0 && !isRestricted('public_moments') && (
           <label class="sh-momentum-composer-public">
             <input
               type="checkbox"

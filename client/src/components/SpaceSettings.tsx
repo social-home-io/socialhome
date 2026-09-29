@@ -8,6 +8,7 @@ import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { clearLocalDissolve, markLocalDissolve } from '@/store/spaces'
 import { Button } from './Button'
+import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { ConfirmDialog } from './ConfirmDialog'
 import { EmojiField } from './EmojiField'
 import { RadioCardGroup } from './RadioCardGroup'
@@ -816,14 +817,17 @@ export function SpaceSettings({
           >
             <option value="private">Private — invite only, not listed</option>
             <option value="household">Household — everyone in your home</option>
-            <option value="public">
+            <option value="public" disabled={isRestricted('public_spaces')}>
               Public — listed in this instance's directory
             </option>
-            <option value="global">
+            <option value="global" disabled={isRestricted('public_spaces')}>
               Global — published to connected global servers
             </option>
           </select>
         </label>
+        {isRestricted('public_spaces') && (
+          <ProtectedNotice capability="public_spaces" />
+        )}
         <div class="sh-form-actions">
           <Button
             variant="secondary"

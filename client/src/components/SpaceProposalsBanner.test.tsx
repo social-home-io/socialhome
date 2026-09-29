@@ -20,6 +20,8 @@ vi.mock('@/ws', () => ({
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 
 import { SpaceProposalsBanner } from './SpaceProposalsBanner'
+import { currentUser } from '@/store/auth'
+import type { User } from '@/types'
 
 function proposal(over: Record<string, unknown> = {}) {
   return {
@@ -188,5 +190,42 @@ describe('SpaceProposalsBanner', () => {
         { approve: true },
       ),
     )
+  })
+})
+
+describe('SpaceProposalsBanner — protected admin', () => {
+  beforeEach(() => {
+    apiGet.mockReset()
+    apiPost.mockReset()
+    currentUser.value = {
+      user_id: 'u-kid', username: 'kid', display_name: 'Kid', is_admin: false,
+      picture_url: null, picture_hash: null, bio: null, is_new_member: false,
+      protected: true, restrictions: ['public_spaces'],
+    } as User
+  })
+
+  it('can reject but not approve making the space public', async () => {
+    apiGet.mockResolvedValue({
+      proposals: [proposal({ action: 'set_public_tier', params: { space_type: 'global' } })],
+    })
+    const { container, findByText } = render(
+      <SpaceProposalsBanner spaceId="s1" canVote={true} isOwner={true} />,
+    )
+    await findByText('Reject')
+    const labels = [...container.querySelectorAll('button')].map(b => b.textContent)
+    expect(labels).not.toContain('Approve')
+    expect(container.textContent).toContain("you can't approve making this space public")
+    currentUser.value = null
+  })
+
+  it('still approves proposals that are not a publication', async () => {
+    apiGet.mockResolvedValue({
+      proposals: [proposal({ action: 'set_public_tier', params: { space_type: 'private' } })],
+    })
+    const { findByText } = render(
+      <SpaceProposalsBanner spaceId="s1" canVote={true} isOwner={true} />,
+    )
+    await findByText('Approve')
+    currentUser.value = null
   })
 })

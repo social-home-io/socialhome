@@ -6,6 +6,7 @@ import { api, ApiError } from '@/api'
 import { Avatar } from '@/components/Avatar'
 import type { User } from '@/types'
 import { Button } from '@/components/Button'
+import { ProtectedAccountSection } from './ProtectedAccountSection'
 import { showToast } from '@/components/Toast'
 import { theme, type Theme } from '@/store/theme'
 import { HouseholdThemeStudio } from '@/components/HouseholdThemeStudio'
@@ -94,6 +95,11 @@ export default function SettingsPage() {
     landingPath.value = getLandingPath()
     haNotifyService.value = getPreferences().ha_notify_service ?? ''
     syncOnlineStatusFromUser()
+    // "See what's limited" on a protected-account notice links here; the
+    // section lives on the Profile tab.
+    if (typeof window !== 'undefined' && window.location.hash === '#protection') {
+      activeTab.value = 'profile'
+    }
   }, [])
 
   const panelId = (t: SettingsTab) => `sh-settings-panel-${t}`
@@ -258,6 +264,8 @@ function ProfileTab() {
   const bioRemaining = 300 - bio.value.length
 
   return (
+    <>
+    <ProtectedAccountSection />
     <section class="sh-settings-section">
       <h2>Profile</h2>
       <div class="sh-profile-card">
@@ -331,6 +339,7 @@ function ProfileTab() {
 
       <LandingPicker />
     </section>
+    </>
   )
 }
 

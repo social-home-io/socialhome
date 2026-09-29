@@ -13,6 +13,7 @@ import { useEffect, useRef } from 'preact/hooks'
 import { api } from '@/api'
 import { Modal } from './Modal'
 import { Button } from './Button'
+import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { t } from '@/i18n/i18n'
 import { showToast } from './Toast'
 import { uploadWithProgress, UploadProgressBar } from './UploadProgress'
@@ -192,7 +193,8 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
     <Modal open={open.value}
            onClose={() => { open.value = false }}
            title="New listing">
-      {step.value === 1 && (
+      {isRestricted('bazaar') && <ProtectedNotice capability="bazaar" />}
+      {!isRestricted('bazaar') && step.value === 1 && (
         <div class="sh-form sh-bazaar-create">
           {lockedSpaceId.value ? (
             <label>

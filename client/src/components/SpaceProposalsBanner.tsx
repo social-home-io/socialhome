@@ -18,6 +18,8 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
+import { isRestricted } from './ProtectedNotice'
+import { t } from '@/i18n/i18n'
 import { showToast } from './Toast'
 
 export interface SpaceProposal {
@@ -132,6 +134,12 @@ export function SpaceProposalsBanner({ spaceId, canVote, isOwner }: Props) {
         // Owner-only proposals (forwarded admin actions) are votable by the
         // owner alone; other proposals follow the admin-quorum rule.
         const canVoteThis = canVote && (!p.owner_only || isOwner)
+        // §CP.R: a protected admin may reject — never approve — making the
+        // space public / global (the server refuses the approval).
+        const approveLocked =
+          p.action === 'set_public_tier'
+          && (p.params?.space_type === 'public' || p.params?.space_type === 'global')
+          && isRestricted('public_spaces')
         return (
           <div key={p.id} class="sh-proposal-banner" role="status">
             <div class="sh-proposal-banner__body">
@@ -170,13 +178,19 @@ export function SpaceProposalsBanner({ spaceId, canVote, isOwner }: Props) {
                 >
                   Reject
                 </Button>
-                <Button
-                  variant={p.action === 'dissolve' ? 'danger' : 'primary'}
-                  disabled={busy === p.id}
-                  onClick={() => void vote(p, true)}
-                >
-                  Approve
-                </Button>
+                {approveLocked ? (
+                  <p class="sh-muted sh-proposal-banner__note">
+                    {t('protected.approve_blocked')}
+                  </p>
+                ) : (
+                  <Button
+                    variant={p.action === 'dissolve' ? 'danger' : 'primary'}
+                    disabled={busy === p.id}
+                    onClick={() => void vote(p, true)}
+                  >
+                    Approve
+                  </Button>
+                )}
               </div>
             ) : (
               <p class="sh-muted sh-proposal-banner__note">
