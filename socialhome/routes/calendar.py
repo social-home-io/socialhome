@@ -376,28 +376,33 @@ class CalendarEventDeleteView(BaseView):
 
 
 async def _persist_imported_events(view, calendar_id, created_by, events):
+    """Write parsed import events; report how many were added vs updated.
+
+    An event whose ``client_event_uuid`` (derived from the ICS ``UID``)
+    already sits on this calendar is updated in place, so re-importing
+    the same file converges instead of duplicating. Events that vanished
+    from the file are left alone — import is not a sync.
+    """
     svc = view.svc(calendar_service_key)
     persisted = []
+    created = 0
     for ev in events:
-        persisted.append(
-            await svc.create_event(
-                calendar_id=calendar_id,
-                summary=ev.summary,
-                start=ev.start.isoformat(),
-                end=ev.end.isoformat(),
-                created_by=created_by,
-                all_day=ev.all_day,
-                description=ev.description,
-                rrule=ev.rrule,
-                location=ev.location,
-                # ``None`` for timed events → the service resolves the
-                # creator / household chain. All-day imports pin
-                # ``"UTC"`` (see ``_vevent_to_create``).
-                tz=ev.tz,
-            )
+        event, was_created = await svc.import_event(
+            calendar_id=calendar_id,
+            created_by=created_by,
+            event=ev,
         )
+        persisted.append(event)
+        created += int(was_created)
     return web.json_response(
-        _sign_payload(view.request, {"events": [_event_dict(e) for e in persisted]}),
+        _sign_payload(
+            view.request,
+            {
+                "events": [_event_dict(e) for e in persisted],
+                "created": created,
+                "updated": len(persisted) - created,
+            },
+        ),
         status=201,
     )
 

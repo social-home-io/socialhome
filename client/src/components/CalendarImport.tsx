@@ -8,11 +8,14 @@
  *   3. From a description (AI)   → POST /api/calendars/{id}/import_prompt
  *      (JSON ``{prompt}``)
  *
- * All three answer ``201 {events: [...]}`` — the rows actually created.
- * ICS import is all-or-nothing: one VEVENT without SUMMARY / DTSTART
- * fails the whole file with ``422 ICS_PARSE_ERROR`` and nothing is
- * written, so the result is either "N added" or one error — never a
- * partial import. The server does not de-duplicate; the result says so.
+ * All three answer ``201 {events: [...], created, updated}`` — the rows
+ * written, and how many were new vs. updated in place. ICS import is
+ * all-or-nothing: one VEVENT without SUMMARY / DTSTART fails the whole
+ * file with ``422 ICS_PARSE_ERROR`` and nothing is written, so the
+ * result is either a count or one error — never a partial import. The
+ * server keys each VEVENT on its ``UID`` (+ ``RECURRENCE-ID``), so
+ * re-importing the same file updates its events instead of adding them
+ * again; events removed from the file are left on the calendar.
  *
  * Request bodies are capped at 1 MiB (aiohttp's ``client_max_size``), so
  * files are size-checked before upload and large photos are downscaled.
@@ -157,7 +160,28 @@ async function preparePhoto(file: File): Promise<Blob> {
 interface Result {
   calendarId: string
   events: ImportedEvent[]
+  /** Rows newly added / updated in place (a re-imported ``UID``). */
+  created: number
+  updated: number
   source: Source
+}
+
+interface ImportResponse {
+  events: ImportedEvent[]
+  created?: number
+  updated?: number
+}
+
+function eventsWord(n: number): string {
+  return n === 1 ? '1 event' : `${n} events`
+}
+
+/** The result headline. Plain "Added N" when nothing was updated; the
+ *  added / updated split once a re-import touched existing events. */
+export function importHeadline(r: Pick<Result, 'events' | 'created' | 'updated'>, targetPhrase: string): string {
+  if (r.updated === 0) return `Added ${eventsWord(r.events.length)} to ${targetPhrase}.`
+  return `Imported ${eventsWord(r.events.length)} into ${targetPhrase}: `
+    + `${r.created} added, ${r.updated} updated.`
 }
 
 function CalendarImportDialog({
@@ -210,7 +234,7 @@ function CalendarImportDialog({
     try {
       const calendarId = target.value ?? await ensureCalendar()
       const base = `/api/calendars/${encodeURIComponent(calendarId)}`
-      let res: { events: ImportedEvent[] }
+      let res: ImportResponse
       if (src === 'file') {
         if (!file.value) { error.value = 'Choose a calendar file first.'; return }
         res = await api.postRaw(`${base}/import_ics`, file.value, 'text/calendar')
@@ -230,7 +254,11 @@ function CalendarImportDialog({
         res = await api.post(`${base}/import_prompt`, { prompt: text })
       }
       const events = res?.events ?? []
-      result.value = { calendarId, events, source: src }
+      // The AI paths (and an older server) omit the split — every row
+      // is then a new one.
+      const updated = typeof res?.updated === 'number' ? res.updated : 0
+      const created = typeof res?.created === 'number' ? res.created : events.length - updated
+      result.value = { calendarId, events, created, updated, source: src }
       onImported(calendarId, events)
     } catch (err) {
       error.value = importErrorMessage(err, src)
@@ -255,9 +283,7 @@ function CalendarImportDialog({
       {done ? (
         <div class="sh-cal-import-result" role="status">
           <p class="sh-cal-import-result__headline">
-            {done.events.length === 1
-              ? `Added 1 event to ${targetPhrase}.`
-              : `Added ${done.events.length} events to ${targetPhrase}.`}
+            {importHeadline(done, targetPhrase)}
           </p>
           <ul class="sh-cal-import-result__list">
             {done.events.slice(0, SAMPLE_COUNT).map(ev => (
@@ -272,7 +298,7 @@ function CalendarImportDialog({
           )}
           {done.source === 'file' && (
             <p class="sh-muted sh-cal-import-result__note">
-              Duplicates aren't detected — importing the same file again adds its events again.
+              Re-importing the same file updates its events; events removed from the file stay on the calendar.
             </p>
           )}
           <div class="sh-form-actions">

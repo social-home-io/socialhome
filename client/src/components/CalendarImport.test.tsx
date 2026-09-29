@@ -95,7 +95,40 @@ describe('CalendarImport', () => {
     )
     expect(onImported).toHaveBeenCalledWith('cal-maria', expect.any(Array))
     expect(document.body.textContent).toContain('Dentist')
-    expect(document.body.textContent).toContain('Duplicates aren\'t detected')
+    expect(document.body.textContent).toContain(
+      'Re-importing the same file updates its events; events removed from the file stay on the calendar.',
+    )
+    expect(document.body.textContent).not.toContain('Duplicates aren\'t detected')
+  })
+
+  it('reports added and updated counts when a re-import updated existing events', async () => {
+    apiMock.postRaw.mockResolvedValueOnce({
+      events: [
+        { id: 'e1', summary: 'Dentist (moved)', start: '2026-10-01T11:00:00+00:00' },
+        { id: 'e2', summary: 'Piano', start: '2026-10-02T15:00:00+00:00' },
+        { id: 'e3', summary: 'Swimming', start: '2026-10-03T09:00:00+00:00' },
+      ],
+      created: 1,
+      updated: 2,
+    })
+    const { container, findByText } = setup()
+    await pick(container, icsFile())
+    await findByText(/family\.ics/)
+    fireEvent.submit(document.querySelector('form.sh-cal-import')!)
+    await findByText('Imported 3 events into your calendar: 1 added, 2 updated.')
+  })
+
+  it('says "0 added" when re-importing an unchanged file only updated events', async () => {
+    apiMock.postRaw.mockResolvedValueOnce({
+      events: [{ id: 'e1', summary: 'Dentist', start: '2026-10-01T10:00:00+00:00' }],
+      created: 0,
+      updated: 1,
+    })
+    const { container, findByText } = setup()
+    await pick(container, icsFile())
+    await findByText(/family\.ics/)
+    fireEvent.submit(document.querySelector('form.sh-cal-import')!)
+    await findByText('Imported 1 event into your calendar: 0 added, 1 updated.')
   })
 
   it('defaults to the caller\'s own calendar and says "your calendar"', async () => {

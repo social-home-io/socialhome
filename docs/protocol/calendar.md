@@ -151,6 +151,21 @@ header and skip refetches within the window.
 one event per `VEVENT`. Each resulting event federates individually
 — there is no iCal-level federation envelope.
 
+Re-importing is idempotent per `VEVENT`: the importer derives the
+event's `client_event_uuid` as `uuid5(namespace, UID + "\x1f" +
+RECURRENCE-ID)` (32 lowercase hex; `calendar_import_service.ics_import_key`),
+so the same `UID` lands on the existing row through the normal
+create-as-update path (`ux_calendar_events_fanout`) and federates as
+`PERSONAL_CALENDAR_EVENT_UPDATED` rather than a second
+`PERSONAL_CALENDAR_EVENT_CREATED` (attendees, RSVP toggle and cover
+set in the app are kept, so invitees keep receiving the update).
+`RECURRENCE-ID` is part of the key so
+a series and its per-occurrence overrides stay separate rows. A `VEVENT`
+without a `UID` keeps the always-insert behaviour, and events removed
+from the file are not deleted (import is not a sync). Events imported
+before this key existed have none, so their first re-import adds one
+more copy; after that it converges.
+
 Export works the same way:
 `GET /api/calendar/{calendar_id}/export.ics` emits the caller's view
 of the calendar, including federated events from remote HFS instances

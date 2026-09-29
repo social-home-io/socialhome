@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import uuid
 from datetime import date, datetime, time, timezone
 from typing import Any
 
@@ -35,6 +36,26 @@ _VCAL_BLOCK_RE = re.compile(
     r"BEGIN:VCALENDAR.*?END:VCALENDAR",
     re.DOTALL | re.IGNORECASE,
 )
+
+
+#: uuid5 namespace for :func:`ics_import_key`. Fixed forever: changing
+#: it would re-key every previously imported event, so the next
+#: re-import of any file would duplicate instead of update.
+ICS_IMPORT_NAMESPACE = uuid.UUID("5b0f7c2e-8d1a-4c3e-9a6f-2e4d1b7c9a30")
+
+
+def ics_import_key(uid: str, recurrence_id: str | None) -> str:
+    """Derive the stable ``client_event_uuid`` for one imported VEVENT.
+
+    ``uuid5(ICS_IMPORT_NAMESPACE, UID + "\\x1f" + RECURRENCE-ID)`` as 32
+    lowercase hex. ``RECURRENCE-ID`` is part of the key because a
+    recurring series and its per-occurrence overrides share one ``UID``
+    and must stay separate rows. The calendar id is deliberately NOT
+    in the key: ``ux_calendar_events_fanout`` already scopes the key
+    per calendar, and the same event imported into two household
+    calendars should group as one card on the shared agenda.
+    """
+    return uuid.uuid5(ICS_IMPORT_NAMESPACE, f"{uid}\x1f{recurrence_id or ''}").hex
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────
@@ -251,6 +272,13 @@ def _vevent_to_create(component: Any) -> CalendarEventCreate:
         # back to the RFC 5545 form we can round-trip.
         rrule_str = str(rrule_field).strip() or None
 
+    uid = str(component.get("uid") or "").strip()
+    client_event_uuid = (
+        ics_import_key(uid, _recurrence_id_text(component.get("recurrence-id")))
+        if uid
+        else None
+    )
+
     return CalendarEventCreate(
         summary=summary,
         start=start_dt,
@@ -267,7 +295,23 @@ def _vevent_to_create(component: Any) -> CalendarEventCreate:
         # shift the day for every household west of UTC. Timed VEVENTs
         # keep ``None`` and resolve the usual creator / household chain.
         tz="UTC" if all_day else None,
+        client_event_uuid=client_event_uuid,
     )
+
+
+def _recurrence_id_text(field: Any) -> str | None:
+    """Normalise a ``RECURRENCE-ID`` for :func:`ics_import_key`.
+
+    A date keys on its ISO date; a datetime keys on its UTC ISO form
+    (floating = UTC) so the same occurrence exported with a ``TZID`` or
+    as ``Z`` maps to one key.
+    """
+    if field is None:
+        return None
+    value = field.dt
+    if isinstance(value, datetime):
+        return _as_datetime(value).astimezone(timezone.utc).isoformat()
+    return value.isoformat()
 
 
 def _as_datetime(value: date | datetime) -> datetime:
