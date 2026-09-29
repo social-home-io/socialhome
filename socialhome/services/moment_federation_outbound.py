@@ -40,6 +40,7 @@ from ..domain.moment import MOMENT_MAX_HOPS
 from ..federation.moment_origin import sign_moment_origin
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
+from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
@@ -56,10 +57,12 @@ class MomentFederationOutbound(
     VisibilityMixin,
     ConfirmedPeerBroadcaster,
     SingleTargetSender,
+    ProtectionGateMixin,
 ):
     """Publish moment mutations to the 3-hop peer mesh."""
 
     __slots__ = (
+        "_child_protection",
         "_bus",
         "_federation",
         "_federation_repo",
@@ -87,6 +90,7 @@ class MomentFederationOutbound(
         self._user_repo = user_repo
         self._relay_policy = relay_policy
         self._visibility_repo = visibility_repo
+        self._child_protection = None
 
     def wire(self) -> None:
         self._bus.subscribe(MomentCreated, self._on_created)
@@ -276,6 +280,11 @@ class MomentFederationOutbound(
         for peer in await self.confirmed_peers():
             instance_id = peer.id
             if instance_id in skip:
+                continue
+            if author_user_id is not None and await self._guardian_blocks_household(
+                author_user_id, instance_id
+            ):
+                # §CP.F2: a guardian blocked someone homed there.
                 continue
             if author_user_id is not None:
                 if instance_id not in hidden_per_peer:

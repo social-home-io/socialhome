@@ -36,6 +36,7 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
+from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
@@ -51,10 +52,12 @@ class HighlightFederationOutbound(
     VisibilityMixin,
     ConfirmedPeerBroadcaster,
     SingleTargetSender,
+    ProtectionGateMixin,
 ):
     """Publish Highlight mutations to paired peer instances."""
 
     __slots__ = (
+        "_child_protection",
         "_bus",
         "_federation",
         "_federation_repo",
@@ -79,6 +82,7 @@ class HighlightFederationOutbound(
         self._federation_repo = federation_repo
         self._user_repo = user_repo
         self._visibility_repo = visibility_repo
+        self._child_protection = None
 
     def wire(self) -> None:
         """Subscribe handlers on the bus. Idempotent."""
@@ -275,5 +279,8 @@ class HighlightFederationOutbound(
         for instance_id in targets:
             hidden = await self.hidden_for_peer(instance_id)
             if author_user_id in hidden:
+                continue
+            if await self._guardian_blocks_household(author_user_id, instance_id):
+                # §CP.F2: a guardian blocked someone homed there.
                 continue
             await self.send_to_instance(instance_id, event_type, payload)

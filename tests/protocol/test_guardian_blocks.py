@@ -29,6 +29,7 @@ from socialhome.app import create_app
 from socialhome.app_keys import (
     child_protection_service_key,
     db_key,
+    federation_inbound_service_key,
     federation_service_key,
 )
 from socialhome.auth import sha256_token_hash
@@ -564,3 +565,82 @@ async def test_inbound_reaction_from_a_blocked_sender_is_not_stored(env):
         )
         is None
     )
+
+
+# ── Follow-ups: unread badges, contact requests, blobs after a restart ──
+
+
+async def test_withheld_group_message_is_not_counted_unread(env):
+    await _reseat(env._db, "g-krc", "kid")
+    await env._db.enqueue(
+        "UPDATE conversation_members SET last_read_at='2000-01-01T00:00:00'"
+        " WHERE conversation_id='g-krc'"
+    )
+    await _dispatch(env._app, FET.DM_MESSAGE, _dm("g-krc", "m-unread"))
+    for actor, expected in (("kid", 0), ("carol", 1)):
+        r = await env.get("/api/conversations/g-krc/unread", headers=_h(actor))
+        assert r.status == 200, await r.text()
+        assert (await r.json())["unread"] == expected, actor
+    r = await env.get("/api/conversations", headers=_h("kid"))
+    rows = {c["id"]: c for c in await r.json()}
+    assert rows["g-krc"]["unread"] == 0
+
+
+async def test_contact_request_from_a_blocked_user_is_not_stored(env):
+    await _dispatch(
+        env._app,
+        FET.DM_CONTACT_REQUEST,
+        {
+            "requester_user_id": REX,
+            "requester_display_name": "Rex",
+            "recipient_user_id": "u-kid",
+        },
+    )
+    assert await env._db.fetchone("SELECT 1 FROM dm_contact_requests") is None
+    assert (
+        await env._db.fetchone(
+            "SELECT 1 FROM notifications WHERE user_id='u-kid'"
+            " AND type LIKE 'dm_contact%'"
+        )
+        is None
+    )
+
+
+def _forget_in_memory_state(app) -> None:
+    """What a restart loses: anything the inbound service kept in memory."""
+    inbound = app[federation_inbound_service_key]
+    for attr in ("_guardian_refused_dms",):
+        state = getattr(inbound, attr, None)
+        if state is not None:
+            state.clear()
+
+
+def _blob(conv_id: str, message_id: str) -> dict:
+    return {
+        "media_blob_id": message_id,
+        "message_id": message_id,
+        "conversation_id": conv_id,
+        "mime_type": "image/png",
+        "bytes_b64": base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 32).decode(),
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "final": True,
+    }
+
+
+@pytest.mark.parametrize("conv_id", ["c-kr", "c-brand-new"])
+async def test_media_after_a_refused_dm_is_refused_across_a_restart(
+    env, tmp_dir, conv_id
+):
+    msg = _dm(
+        conv_id,
+        f"m-{conv_id}",
+        type="image",
+        media_blob_id=f"m-{conv_id}",
+        mime_type="image/png",
+    )
+    await _dispatch(env._app, FET.DM_MESSAGE, msg)
+    _forget_in_memory_state(env._app)
+    await _dispatch(env._app, FET.DM_MEDIA_BLOB, _blob(conv_id, f"m-{conv_id}"))
+    media = tmp_dir / "media"
+    assert not media.exists() or not list(media.glob(f"m-{conv_id}*"))

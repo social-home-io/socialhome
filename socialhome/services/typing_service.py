@@ -25,6 +25,7 @@ from ..federation.dm_scope import DmScope, refuse
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .peer_outbound import SingleTargetSender
+from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
@@ -47,10 +48,16 @@ class _TypingState:
     last_seen_at: float
 
 
-class TypingService(VisibilityMixin, SingleTargetSender):
-    """Relay + dedup typing indicators across conversation members."""
+class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
+    """Relay + dedup typing indicators across conversation members.
+
+    Never across a guardian block (§CP.F2): a blocked person's typing isn't
+    shown to the protected account, nor the other way round — locally, from
+    another household, or to the blocked person's household.
+    """
 
     __slots__ = (
+        "_child_protection",
         "_convo_repo",
         "_user_repo",
         "_dm_scope",
@@ -84,6 +91,7 @@ class TypingService(VisibilityMixin, SingleTargetSender):
         self._federation = federation_service
         self._own_instance_id = own_instance_id
         self._visibility_repo = visibility_repo
+        self._child_protection = None
         # (conversation_id, user_id) → _TypingState
         self._active: dict[tuple[str, str], _TypingState] = {}
         # (post_id, user_id) → _TypingState  for comment-thread typing
@@ -130,10 +138,11 @@ class TypingService(VisibilityMixin, SingleTargetSender):
         # for WS routing (some test fakes attach ``user_id`` directly,
         # which we honour as a fast path).
         members = await self._convo_repo.list_members(conversation_id)
+        blocked = await self._guardian_block_counterparts(sender_user_id)
         local_targets: list[str] = []
         for m in members:
             uid = await self._resolve_user_id(m)
-            if uid and uid != sender_user_id:
+            if uid and uid != sender_user_id and uid not in blocked:
                 local_targets.append(uid)
         delivered = await self._ws.broadcast_to_users(
             local_targets,
@@ -289,10 +298,11 @@ class TypingService(VisibilityMixin, SingleTargetSender):
             return 0
         sender_username = seat.remote_username
         members = await self._convo_repo.list_members(cid)
+        blocked = await self._guardian_block_counterparts(sender_uid)
         local_targets: list[str] = []
         for m in members:
             uid = await self._resolve_user_id(m)
-            if uid and uid != sender_uid:
+            if uid and uid != sender_uid and uid not in blocked:
                 local_targets.append(uid)
         return await self._ws.broadcast_to_users(
             local_targets,
@@ -358,12 +368,28 @@ class TypingService(VisibilityMixin, SingleTargetSender):
             )
         except Exception:
             return
+        blocked = await self._guardian_block_counterparts(sender_user_id)
+        # A household whose every seat here is someone a guardian block
+        # separates from the typist gets nothing (§CP.F2).
+        wanted: set[str | None] = set()
+        if blocked:
+            for rm in remote_members:
+                seat_uid = getattr(rm, "user_id", None)
+                if seat_uid is None:
+                    ru = await self._user_repo.get_remote_by_member(
+                        rm.instance_id, rm.remote_username
+                    )
+                    seat_uid = ru.user_id if ru is not None else None
+                if seat_uid not in blocked:
+                    wanted.add(rm.instance_id)
         seen_instances: set[str] = set()
         for rm in remote_members:
             inst = getattr(rm, "instance_id", None)
             if not inst or inst == self._own_instance_id or inst in seen_instances:
                 continue
             seen_instances.add(inst)
+            if blocked and inst not in wanted:
+                continue
             hidden = await self.hidden_for_peer(inst)
             if sender_user_id in hidden:
                 continue

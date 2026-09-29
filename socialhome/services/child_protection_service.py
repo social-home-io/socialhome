@@ -633,6 +633,18 @@ class ChildProtectionService:
             return False
         return await self._repo.is_blocked_pair(user_a, user_b)
 
+    async def guardian_blocks_household(
+        self, user_id: str | None, instance_id: str
+    ) -> bool:
+        """Whether a guardian block of *user_id* (protected) — or, with
+        ``user_id=None``, of any protected account here — names someone
+        homed on the household *instance_id*."""
+        if not instance_id:
+            return False
+        return await self._repo.blocks_someone_homed_on(
+            instance_id, minor_user_id=user_id
+        )
+
     async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
         """Everyone a guardian block separates from *user_id* (either way)."""
         if not user_id:

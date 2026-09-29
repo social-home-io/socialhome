@@ -647,12 +647,15 @@ never says why.
 protected: the two can't open or continue a 1:1 DM, share a group DM
 (creating or adding refuses; the block steps the account out of every group
 they share), react to each other, or call; an existing 1:1 drops out of both
-lists; their moments and highlights are hidden from each other (for a
-remote blocked person: on this household — the block never leaves it, so
-what the account federates to that person's household is not filtered); and
-a blocked person's space posts, household posts and comments, @mentions,
-@here, DMs, contact requests, follows, moment replies and reactions never
-notify the account. Refusals are 403: the blocked person sees exactly a
+lists (and a withheld group message never counts as unread for the
+account); typing indicators never cross; their moments and highlights are
+hidden from each other — and the account's own moments and highlights are
+not sent to a household where someone it has blocked lives (the moment
+3-hop relay mesh can still carry a moment there through a third household,
+which knows nothing of the block); and a blocked person's space posts,
+household posts and comments, @mentions, @here, DMs, contact requests (not
+stored either), follows, moment replies and reactions never notify the
+account. Refusals are 403: the blocked person sees exactly a
 personal block's `Recipient has you blocked.`, the protected account `You
 can't message this person.` / `You can't call this person.`, and a group
 that can't hold both `One of these people can't be added to this group.` —

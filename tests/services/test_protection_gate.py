@@ -127,3 +127,17 @@ async def test_guardian_block_reads_are_empty_when_not_wired():
     assert not await svc._guardian_blocked("bob", "kid")
     assert await svc._guardian_block_counterparts("kid") == frozenset()
     assert not await svc._is_protected("kid")
+
+
+class _HouseholdCp(_FakeCp):
+    async def guardian_blocks_household(self, user_id, instance_id):
+        return (user_id in (None, "kid")) and instance_id == "peer-x"
+
+
+async def test_household_block_read_delegates_and_is_empty_unwired():
+    svc = _Svc()
+    assert not await svc._guardian_blocks_household("kid", "peer-x")
+    svc.attach_child_protection(_HouseholdCp(set()))
+    assert await svc._guardian_blocks_household("kid", "peer-x")
+    assert await svc._guardian_blocks_household(None, "peer-x")
+    assert not await svc._guardian_blocks_household("bob", "peer-x")

@@ -31,14 +31,30 @@ from ..db import AsyncDatabase
 #: that have the viewer blocked. A block only counts while its account is
 #: protected. Bind the viewer's ``user_id`` twice. Shared by the repos whose
 #: read queries hide a blocked author (highlights, moments).
-GUARDIAN_BLOCK_COUNTERPARTS_SQL = """
+def guardian_block_counterparts_sql(viewer: str = "?") -> str:
+    """The counterparts sub-select for the SQL expression *viewer* — a bind
+    placeholder by default, or a column of the outer query (e.g. the unread
+    count's ``u.user_id``)."""
+    return f"""
     SELECT b.blocked_user_id FROM cp_minor_blocks b
       JOIN users m ON m.user_id = b.minor_user_id
-     WHERE b.minor_user_id = ? AND m.child_protection_enabled = 1
+     WHERE b.minor_user_id = {viewer} AND m.child_protection_enabled = 1
     UNION
     SELECT b.minor_user_id FROM cp_minor_blocks b
       JOIN users m ON m.user_id = b.minor_user_id
-     WHERE b.blocked_user_id = ? AND m.child_protection_enabled = 1
+     WHERE b.blocked_user_id = {viewer} AND m.child_protection_enabled = 1
+"""
+
+
+GUARDIAN_BLOCK_COUNTERPARTS_SQL = guardian_block_counterparts_sql()
+
+#: Guardian blocks (while protected) from a local account onto people homed
+#: on one household — ``remote_users`` places them.
+_BLOCKS_HOMED_ON_SQL = """
+    SELECT 1 FROM cp_minor_blocks b
+      JOIN users m ON m.user_id = b.minor_user_id
+      JOIN remote_users r ON r.user_id = b.blocked_user_id
+     WHERE m.child_protection_enabled = 1 AND r.instance_id = ?
 """
 
 
@@ -104,6 +120,9 @@ class AbstractCpRepo(Protocol):
     ) -> bool: ...
     async def is_blocked_pair(self, user_a: str, user_b: str) -> bool: ...
     async def list_block_counterparts(self, user_id: str) -> frozenset[str]: ...
+    async def blocks_someone_homed_on(
+        self, instance_id: str, *, minor_user_id: str | None = None
+    ) -> bool: ...
     async def list_blocks_for_minor(
         self,
         minor_user_id: str,
@@ -310,6 +329,22 @@ class SqliteCpRepo:
             " OR (b.minor_user_id = ? AND b.blocked_user_id = ?)) LIMIT 1",
             (user_a, user_b, user_b, user_a),
         )
+        return row is not None
+
+    async def blocks_someone_homed_on(
+        self, instance_id: str, *, minor_user_id: str | None = None
+    ) -> bool:
+        """Whether a guardian block (of *minor_user_id*, or of any protected
+        account here) names someone homed on *instance_id*."""
+        if minor_user_id is None:
+            row = await self._db.fetchone(
+                _BLOCKS_HOMED_ON_SQL + " LIMIT 1", (instance_id,)
+            )
+        else:
+            row = await self._db.fetchone(
+                _BLOCKS_HOMED_ON_SQL + " AND b.minor_user_id = ? LIMIT 1",
+                (instance_id, minor_user_id),
+            )
         return row is not None
 
     async def list_block_counterparts(self, user_id: str) -> frozenset[str]:

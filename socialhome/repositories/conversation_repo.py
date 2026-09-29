@@ -30,6 +30,7 @@ from ..domain.conversation import (
     RemoteConversationMember,
 )
 from .base import bool_col, row_to_dict, rows_to_dicts
+from .cp_repo import guardian_block_counterparts_sql
 
 
 @runtime_checkable
@@ -985,15 +986,19 @@ class SqliteConversationRepo:
         Messages the user sent themselves are excluded via the
         ``sender_user_id != username`` heuristic (the sender's own messages
         never count as "unread"; we resolve username → user_id via the
-        users table).
+        users table). Neither do messages a guardian block (§CP.F2) withholds
+        from the member — they are never shown to them.
         """
         return int(
             await self._db.fetchval(
-                """
+                f"""
             SELECT COUNT(*) FROM conversation_messages m
               LEFT JOIN users u ON u.username = ?
              WHERE m.conversation_id = ?
                AND (u.user_id IS NULL OR m.sender_user_id != u.user_id)
+               AND m.sender_user_id NOT IN (
+                   {guardian_block_counterparts_sql("u.user_id")}
+               )
                AND m.deleted = 0
                AND m.created_at > COALESCE(
                      (SELECT last_read_at FROM conversation_members
