@@ -295,3 +295,12 @@ async def test_update_user_two_users_are_independent(env):
 
     assert prefs_u2.hide_highlights is False  # u-2 didn't touch this
     assert prefs_u2.hide_momentum is True
+
+
+async def test_require_enabled_timetable_toggle(env):
+    svc, _ = env
+    await svc.require_enabled("timetable")  # on by default
+    await svc.update_household(actor_is_admin=True, toggles={"feat_timetable": False})
+    with pytest.raises(FeatureDisabledError) as exc:
+        await svc.require_enabled("timetable")
+    assert exc.value.section == "timetable"

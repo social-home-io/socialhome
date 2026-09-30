@@ -128,10 +128,13 @@ from ..domain.events import (
     TaskListDeleted,
     TaskListUpdated,
     TaskUpdated,
+    TimetableDeleted,
+    TimetableSaved,
     UserPreferencesChanged,
     UserStatusChanged,
 )
 from ..domain.space import SpaceRole
+from ..domain.timetable import to_wire_dict as timetable_to_wire_dict
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
 from ..media_signer import MediaUrlSigner, sign_media_urls_in
@@ -300,6 +303,8 @@ class RealtimeService:
         self._bus.subscribe(TaskListCreated, self._on_task_list_created)
         self._bus.subscribe(TaskListUpdated, self._on_task_list_updated)
         self._bus.subscribe(TaskListDeleted, self._on_task_list_deleted)
+        self._bus.subscribe(TimetableSaved, self._on_timetable_saved)
+        self._bus.subscribe(TimetableDeleted, self._on_timetable_deleted)
         self._bus.subscribe(
             SchedulePollResponded,
             self._on_schedule_responded,
@@ -1078,6 +1083,28 @@ class RealtimeService:
             "type": "task.deleted",
             "task_id": event.task_id,
             "list_id": event.list_id,
+            "space_id": event.space_id,
+        }
+        if event.space_id is None:
+            await self._broadcast_household(payload)
+        else:
+            await self._broadcast_space(event.space_id, payload)
+
+    async def _on_timetable_saved(self, event: TimetableSaved) -> None:
+        payload = {
+            "type": "timetable.changed",
+            "space_id": event.space_id,
+            "timetable": timetable_to_wire_dict(event.timetable),
+        }
+        if event.space_id is None:
+            await self._broadcast_household(payload)
+        else:
+            await self._broadcast_space(event.space_id, payload)
+
+    async def _on_timetable_deleted(self, event: TimetableDeleted) -> None:
+        payload = {
+            "type": "timetable.deleted",
+            "timetable_id": event.timetable_id,
             "space_id": event.space_id,
         }
         if event.space_id is None:

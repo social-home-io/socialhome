@@ -137,6 +137,8 @@ def test_exportable_queries_cover_user_facing_surfaces():
         "feed_comments",
         "conversation_messages",
         "tasks",
+        "timetables",
+        "space_timetables",
         "calendar_events",
         "gallery_albums",
         "gallery_items",
@@ -164,3 +166,14 @@ async def test_export_includes_shopping_items_created_by_user(env):
     assert "shopping_list_items" in out.tables
     items = out.tables["shopping_list_items"]
     assert [i["id"] for i in items] == ["i1"]
+
+
+async def test_export_includes_timetables_created_by_user(env):
+    db, svc = env
+    for tid, owner in (("tt1", "alice-id"), ("tt2", "bob-id")):
+        await db.enqueue(
+            "INSERT INTO timetables(id, name, created_by) VALUES(?, ?, ?)",
+            (tid, f"TT {tid}", owner),
+        )
+    out = await svc.export_for_user("alice-id")
+    assert [t["id"] for t in out.tables["timetables"]] == ["tt1"]

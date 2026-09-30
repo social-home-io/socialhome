@@ -50,3 +50,9 @@ def test_coerce_tz_treats_absent_as_default(missing, caplog):
     with caplog.at_level(logging.WARNING, logger="socialhome.utils.timezones"):
         assert coerce_tz(missing, context="test") == DEFAULT_TZ
     assert caplog.text == ""
+
+
+def test_is_valid_tz_rejects_overlong_name_instead_of_raising():
+    """A 5000-char key makes the tz database lookup raise ``OSError``
+    (ENAMETOOLONG) — that is "not a zone", not a crash."""
+    assert is_valid_tz("a" * 5000) is False

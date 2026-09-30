@@ -43,6 +43,10 @@ def is_valid_tz(value: str) -> bool:
     except ValueError:
         # Malformed key — absolute or ``..``-containing path.
         return False
+    except OSError:
+        # The key maps to a filesystem path; an overlong one raises
+        # ENAMETOOLONG from the tzdata lookup.
+        return False
     return True
 
 

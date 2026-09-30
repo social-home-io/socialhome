@@ -61,6 +61,8 @@ EXPORTABLE_TABLES: tuple[str, ...] = (
     "message_reactions",
     "task_lists",
     "tasks",
+    "timetables",
+    "space_timetables",
     "calendars",
     "calendar_events",
     "calendar_rsvps",

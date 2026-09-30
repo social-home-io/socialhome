@@ -32,7 +32,15 @@ async def test_get_household_returns_defaults_when_no_row(repo):
     assert prefs.feat_feed is True
     assert prefs.feat_presence is True
     assert prefs.feat_gallery is True
+    assert prefs.feat_timetable is True
     assert prefs.allow_text is True
+
+
+async def test_feat_timetable_round_trips(repo):
+    await repo.ensure_row(HOUSEHOLD_ROW_ID)
+    assert (await repo.get_household()).feat_timetable is True
+    await repo.set_household_value("feat_timetable", 0)
+    assert (await repo.get_household()).feat_timetable is False
 
 
 async def test_get_household_returns_row_values_after_ensure_and_set(repo):

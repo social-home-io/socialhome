@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from .post import Comment, Post
     from .space import SpaceModerationItem
     from .task import Task
+    from .timetable import Timetable
     from .user import UserStatus
 
 
@@ -400,6 +401,32 @@ class TaskDeleted(DomainEvent):
     task_id: str
     list_id: str
     space_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class TimetableSaved(DomainEvent):
+    """A timetable was created or edited (the full new state).
+
+    Broadcast as ``timetable.changed`` — household scope when
+    ``space_id`` is ``None``, else to the space's local members.
+    ``origin_instance_id`` is set by federation inbound so the outbound
+    bridge can skip echoing a peer's own edit back to it.
+    """
+
+    timetable: "Timetable"
+    space_id: str | None = None
+    origin_instance_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class TimetableDeleted(DomainEvent):
+    """A timetable was deleted. Broadcast as ``timetable.deleted``."""
+
+    timetable_id: str
+    space_id: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

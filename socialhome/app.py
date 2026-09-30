@@ -165,6 +165,7 @@ from .repositories.report_repo import SqliteReportRepo
 from .repositories.search_repo import SqliteSearchRepo
 from .repositories.space_key_repo import SqliteSpaceKeyRepo
 from .repositories.theme_repo import SqliteThemeRepo
+from .repositories.timetable_repo import SqliteTimetableRepo
 from .routes import setup_routes
 from .services.auto_pair_inbox import AutoPairInbox
 from .services import (
@@ -327,6 +328,7 @@ from .services.storage_quota_service import StorageQuotaService
 from .services.setup_service import SetupService
 from .services.stt_service import SttService
 from .services.task_service import SpaceTaskService, TaskService
+from .services.timetable_service import TimetableService
 from .services.theme_service import ThemeService
 from .services.typing_service import TypingService
 from .services.call_service import CallSignalingService, StaleCallCleanupScheduler
@@ -745,6 +747,7 @@ def _build_repos(db: AsyncDatabase):
         notification=SqliteNotificationRepo(db),
         conversation=SqliteConversationRepo(db),
         task=SqliteTaskRepo(db),
+        timetable=SqliteTimetableRepo(db),
         space_task=SqliteSpaceTaskRepo(db),
         calendar=SqliteCalendarRepo(db),
         space_cal=SqliteSpaceCalendarRepo(db),
@@ -1521,6 +1524,16 @@ def _wire_federation_stack(
     )
 
 
+def _build_timetables(repos: SimpleNamespace, bus: EventBus) -> TimetableService:
+    """The household timetable (Stundenplan) service.
+
+    Assignees are checked against the local user directory; the
+    ``feat_timetable`` gate and household tz are wired later via
+    ``attach_household_features``.
+    """
+    return TimetableService(repos.timetable, bus, user_repo=repos.user)
+
+
 def _build_link_previews(
     config: Config, preferences_service: PreferencesService
 ) -> LinkPreviewService:
@@ -1791,6 +1804,7 @@ def create_app(config: Config | None = None) -> web.Application:
     )
     task_service = TaskService(task_repo, bus, user_repo=user_repo)
     space_task_service = SpaceTaskService(space_task_repo, bus)
+    timetable_service = _build_timetables(repos, bus)
     calendar_service = CalendarService(calendar_repo, bus)
     # Subscribe to UserProvisioned so every freshly-created household
     # member gets a default calendar row — without this, the household
@@ -1967,6 +1981,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # ``feat_tasks`` immediately makes POST /api/tasks return 403.
     feed_service.attach_household_features(preferences_service)
     task_service.attach_household_features(preferences_service)
+    timetable_service.attach_household_features(preferences_service)
     calendar_service.attach_household_features(preferences_service)
     # Space-calendar event creation walks the same tz resolution chain
     # as personal events. Wire the helpers it needs: the household
@@ -2366,6 +2381,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.report_service_key] = report_service
     app[K.task_service_key] = task_service
     app[K.space_task_service_key] = space_task_service
+    app[K.timetable_service_key] = timetable_service
     app[K.calendar_service_key] = calendar_service
     app[K.space_cal_service_key] = space_cal_service
     app[K.shopping_service_key] = shopping_service

@@ -373,6 +373,22 @@ from .tasks import (
     TaskListTasksView,
 )
 from .themes import HouseholdThemeView, SpaceThemeView
+from .timetables import (
+    TimetableCollectionView,
+    TimetableDayCopyView,
+    TimetableDayGenerateView,
+    TimetableDayShiftView,
+    TimetableDayView,
+    TimetableDetailView,
+    TimetableDuplicateView,
+    TimetableEntryCollectionView,
+    TimetableEntryDetailView,
+    TimetableOverrideCollectionView,
+    TimetableOverrideDetailView,
+    TimetableValidityView,
+    TimetableWeekOverridesView,
+    TimetableWeekView,
+)
 from .corner import CornerView
 from .users import (
     AdminAuthAuditLogView,
@@ -727,6 +743,47 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/shopping/{id}", ShoppingItemDetailView)
     app.router.add_view("/api/shopping/{id}/complete", ShoppingItemCompleteView)
     app.router.add_view("/api/shopping/{id}/uncomplete", ShoppingItemUncompleteView)
+
+    # ── Timetables (household) ──────────────────────────────────────────
+    # ``/day`` before ``/{id}`` so "day" is never read as a timetable id.
+    app.router.add_view("/api/timetables", TimetableCollectionView)
+    app.router.add_view("/api/timetables/day", TimetableDayView)
+    app.router.add_view("/api/timetables/{id}", TimetableDetailView)
+    app.router.add_view("/api/timetables/{id}/duplicate", TimetableDuplicateView)
+    app.router.add_view(
+        "/api/timetables/{id}/days/{weekday:[0-6]}/generate",
+        TimetableDayGenerateView,
+    )
+    app.router.add_view(
+        "/api/timetables/{id}/days/{weekday:[0-6]}/copy",
+        TimetableDayCopyView,
+    )
+    app.router.add_view(
+        "/api/timetables/{id}/days/{weekday:[0-6]}/shift",
+        TimetableDayShiftView,
+    )
+    app.router.add_view(
+        "/api/timetables/{id}/entries",
+        TimetableEntryCollectionView,
+    )
+    app.router.add_view(
+        "/api/timetables/{id}/entries/{entry_id}",
+        TimetableEntryDetailView,
+    )
+    app.router.add_view("/api/timetables/{id}/validity", TimetableValidityView)
+    app.router.add_view("/api/timetables/{id}/weeks/{date}", TimetableWeekView)
+    app.router.add_view(
+        "/api/timetables/{id}/weeks/{date}/overrides",
+        TimetableWeekOverridesView,
+    )
+    app.router.add_view(
+        "/api/timetables/{id}/overrides",
+        TimetableOverrideCollectionView,
+    )
+    app.router.add_view(
+        "/api/timetables/{id}/overrides/{override_id}",
+        TimetableOverrideDetailView,
+    )
 
     # ── Tasks ───────────────────────────────────────────────────────────
     app.router.add_view("/api/tasks/lists", TaskListCollectionView)
