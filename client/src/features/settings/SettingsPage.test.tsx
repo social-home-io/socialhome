@@ -450,3 +450,85 @@ describe('SettingsPage — web push toggle', () => {
     expect(await findByRole('button', { name: 'Disable' })).toBeTruthy()
   })
 })
+
+describe('SettingsPage — first day of the week', () => {
+  async function renderAppearance() {
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const result = render(<SettingsPage />)
+    fireEvent.click(result.getByRole('tab', { name: 'Appearance' }))
+    return result
+  }
+
+  it('offers Automatic / Monday / Sunday with Automatic selected by default', async () => {
+    const { getByRole } = await renderAppearance()
+    const group = getByRole('radiogroup', { name: 'First day of the week' })
+    const radios = group.querySelectorAll('[role="radio"]')
+    expect(radios).toHaveLength(3)
+    expect(radios[0].getAttribute('aria-checked')).toBe('true')
+    expect(radios[0].textContent).toMatch(/Automatic \((Monday|Sunday)\)/)
+  })
+
+  it('choosing Sunday persists week_start=sun via PATCH /api/me', async () => {
+    const { getByRole } = await renderAppearance()
+    fireEvent.click(getByRole('radio', { name: 'Sunday' }))
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith(
+        '/api/me', { preferences: { week_start: 'sun' } },
+      )
+    })
+    expect(getByRole('radio', { name: 'Sunday' }).getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('choosing Automatic clears the stored preference', async () => {
+    const { getByRole } = await renderAppearance()
+    fireEvent.click(getByRole('radio', { name: 'Monday' }))
+    fireEvent.click(getByRole('radio', { name: /Automatic/ }))
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith(
+        '/api/me', { preferences: { week_start: null } },
+      )
+    })
+  })
+
+  it('reverts the selection when the save fails', async () => {
+    mockPatch.mockRejectedValueOnce(new Error('offline'))
+    const { getByRole } = await renderAppearance()
+    fireEvent.click(getByRole('radio', { name: 'Sunday' }))
+    await waitFor(() => {
+      expect(getByRole('radio', { name: /Automatic/ }).getAttribute('aria-checked')).toBe('true')
+    })
+  })
+
+  it('is a single Tab stop and arrow keys move + select (ARIA radiogroup)', async () => {
+    const { getByRole } = await renderAppearance()
+    const group = getByRole('radiogroup', { name: 'First day of the week' })
+    const radios = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]'))
+    expect(radios.map(r => r.tabIndex)).toEqual([0, -1, -1])
+    fireEvent.keyDown(radios[0], { key: 'ArrowRight' })
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith(
+        '/api/me', { preferences: { week_start: 'mon' } },
+      )
+    })
+    expect(document.activeElement).toBe(radios[1])
+    expect(radios.map(r => r.tabIndex)).toEqual([-1, 0, -1])
+    fireEvent.keyDown(radios[1], { key: 'ArrowLeft' })
+    fireEvent.keyDown(radios[0], { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(radios[2])
+  })
+
+  it('a stale failed save does not roll back a newer successful choice', async () => {
+    let rejectMon: (e: Error) => void = () => {}
+    mockPatch.mockClear()
+    mockPatch
+      .mockImplementationOnce(() => new Promise((_, rej) => { rejectMon = rej }))
+      .mockResolvedValueOnce({})
+    const { getByRole } = await renderAppearance()
+    fireEvent.click(getByRole('radio', { name: 'Monday' }))
+    fireEvent.click(getByRole('radio', { name: 'Sunday' }))
+    await waitFor(() => expect(mockPatch).toHaveBeenCalledTimes(2))
+    rejectMon(new Error('late failure'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(getByRole('radio', { name: 'Sunday' }).getAttribute('aria-checked')).toBe('true')
+  })
+})

@@ -8,6 +8,7 @@
 import { t } from '@/i18n/i18n'
 import type { CalendarEvent } from '@/types'
 import { utcIsoToLocalParts } from './timezone'
+import { currentWeekStart, startOfWeek, type WeekStart } from './week'
 
 /** Zones already checked by :func:`safeTimeZone` — ``Intl`` rejects an
  *  unknown zone by throwing, and the agenda asks the same question
@@ -652,20 +653,19 @@ export function monthRange(date: Date): { start: string; end: string } {
 }
 
 /** ISO bounds covering the active period for ``mode`` anchored at
- *  ``date``. Month → calendar month; week → Sun-Sat; day → 00:00 to
- *  23:59:59. Used by both the household calendar and the per-space
- *  calendar's view-mode switcher. */
+ *  ``date``. Month → calendar month; week → the 7 days opening on
+ *  ``weekStart`` (default: the user's ``week_start`` preference,
+ *  re-read on every call); day → 00:00 to 23:59:59. Used by both the
+ *  household calendar and the per-space calendar's view-mode switcher. */
 export function dateRangeForMode(
   date: Date,
   mode: CalendarViewMode,
+  weekStart: WeekStart = currentWeekStart(),
 ): { start: string; end: string } {
   if (mode === 'month') return monthRange(date)
   const d = new Date(date)
   if (mode === 'week') {
-    const dayOfWeek = d.getDay()
-    const start = new Date(d)
-    start.setDate(d.getDate() - dayOfWeek)
-    start.setHours(0, 0, 0, 0)
+    const start = startOfWeek(d, weekStart)
     const end = new Date(start)
     end.setDate(start.getDate() + 6)
     end.setHours(23, 59, 59, 0)
@@ -681,11 +681,11 @@ export function dateRangeForMode(
 export function formatRangeHeading(
   date: Date,
   mode: CalendarViewMode,
+  weekStart: WeekStart = currentWeekStart(),
 ): string {
   if (mode === 'month') return formatMonthHeading(date)
   if (mode === 'week') {
-    const start = new Date(date)
-    start.setDate(date.getDate() - date.getDay())
+    const start = startOfWeek(date, weekStart)
     const end = new Date(start)
     end.setDate(start.getDate() + 6)
     return `${start.toLocaleDateString(undefined, {

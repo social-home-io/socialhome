@@ -23,6 +23,7 @@ import { Button } from '@/components/Button'
 import { CalendarSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
 import { resolveDisplayName } from '@/utils/avatar'
+import { currentWeekStart, weekdayOrder, type WeekStart } from '@/utils/week'
 import { ws } from '@/ws'
 import type { HighlightInboxItem } from '@/types'
 
@@ -52,6 +53,40 @@ function ymd(d: Date): DayKey {
 
 function startOfMonth(year: number, month0: number): Date {
   return new Date(Date.UTC(year, month0, 1))
+}
+
+/** Localised short weekday label for ISO weekday ``iso`` (Mon = 0).
+ *  2024-01-01 was a Monday. */
+function dowLabel(iso: number): string {
+  return new Date(Date.UTC(2024, 0, 1 + iso)).toLocaleDateString(
+    undefined, { weekday: 'short', timeZone: 'UTC' },
+  )
+}
+
+type GridCell = { date: DayKey; inMonth: boolean } | null
+
+/** Header labels + day cells for the month grid, ordered to open on
+ *  ``ws``. Leading blanks align the 1st under its weekday column;
+ *  trailing blanks pad to whole weeks (at least 5 rows) so the layout
+ *  stays stable and a 6-row month is never clipped. */
+export function buildMonthGrid(
+  year: number, month0: number, weekStart: WeekStart,
+): { weekdayLabels: string[]; cells: GridCell[] } {
+  const order = weekdayOrder(weekStart)
+  // ``getUTCDay()`` is 0 (Sun) ‥ 6 (Sat); shift to ISO Mon = 0.
+  const firstIso = (startOfMonth(year, month0).getUTCDay() + 6) % 7
+  const lead = order.indexOf(firstIso)
+  const daysInMonth = new Date(Date.UTC(year, month0 + 1, 0)).getUTCDate()
+  const cells: GridCell[] = []
+  for (let i = 0; i < lead; i++) cells.push(null)
+  for (let d = 1; d <= daysInMonth; d++) {
+    cells.push({
+      date: ymd(new Date(Date.UTC(year, month0, d))),
+      inMonth: true,
+    })
+  }
+  while (cells.length < 35 || cells.length % 7 !== 0) cells.push(null)
+  return { weekdayLabels: order.map(dowLabel), cells }
 }
 
 
@@ -87,23 +122,10 @@ export default function HighlightArchiveTab() {
 
   if (loading.value) return <CalendarSkeleton />
 
-  // Build the 5×7 grid: pad with leading blanks until day-of-week
-  // aligns, fill the month, pad trailing blanks to keep the layout
-  // stable. Monday-first to match /calendar.
+  // Month grid opening on the user's first day of the week (the same
+  // ``week_start`` preference /calendar honours).
   const monthStart = startOfMonth(year, month)
-  // ``getUTCDay()`` returns 0 (Sunday) ‥ 6 (Saturday); shift to
-  // Mon-first.
-  const lead = (monthStart.getUTCDay() + 6) % 7
-  const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate()
-  const cells: Array<{ date: DayKey; inMonth: boolean } | null> = []
-  for (let i = 0; i < lead; i++) cells.push(null)
-  for (let d = 1; d <= daysInMonth; d++) {
-    cells.push({
-      date: ymd(new Date(Date.UTC(year, month, d))),
-      inMonth: true,
-    })
-  }
-  while (cells.length < 35) cells.push(null)
+  const { weekdayLabels, cells } = buildMonthGrid(year, month, currentWeekStart())
 
   const monthLabel = monthStart.toLocaleDateString(undefined, {
     year:  'numeric',
@@ -152,8 +174,8 @@ export default function HighlightArchiveTab() {
       )}
 
       <div class="sh-highlight-archive-grid" role="grid" aria-label={monthLabel}>
-        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
-          <div key={d} class="sh-highlight-archive-dow" aria-hidden="true">{d}</div>
+        {weekdayLabels.map((d, i) => (
+          <div key={i} class="sh-highlight-archive-dow" aria-hidden="true">{d}</div>
         ))}
         {cells.map((cell, i) => {
           if (cell === null) {
