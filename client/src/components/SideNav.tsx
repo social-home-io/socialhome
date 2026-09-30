@@ -63,6 +63,7 @@ interface SideNavState {
   dmUnread: number
   feat_feed: boolean
   feat_calendar: boolean
+  feat_timetable: boolean
   feat_tasks: boolean
   feat_pages: boolean
   feat_stickies: boolean
@@ -76,6 +77,7 @@ interface SideNavState {
 const ALL_ON: Omit<SideNavState, 'isAdmin' | 'isGuardian' | 'hasActiveCall' | 'dmUnread'> = {
   feat_feed: true,
   feat_calendar: true,
+  feat_timetable: true,
   feat_tasks: true,
   feat_pages: true,
   feat_stickies: true,
@@ -96,8 +98,10 @@ const HOME_GROUP: SideNavGroup = {
     // sits at ``/`` via LandingDispatch.
     { key: 'feed',     label: 'Feed',     href: '/feed',     icon: 'feed',
       gate: s => s.feat_feed },
+    // The Calendar page also hosts the Timetable tab, so it stays in
+    // the nav while either feature is on.
     { key: 'calendar', label: 'Calendar', href: '/calendar', icon: 'calendar',
-      gate: s => s.feat_calendar },
+      gate: s => s.feat_calendar || s.feat_timetable },
     // Tasks · Shopping · Stickies share a single hub at /organize —
     // individually low-traffic, collectively crowded the sidebar; the
     // hub renders them as tabs with live count chips ("Tasks · 3 ·
@@ -225,6 +229,7 @@ export function SideNav() {
         ? {
             feat_feed: t.feat_feed,
             feat_calendar: t.feat_calendar,
+            feat_timetable: t.feat_timetable,
             feat_tasks: t.feat_tasks,
             feat_pages: t.feat_pages,
             feat_stickies: t.feat_stickies,

@@ -96,6 +96,30 @@ describe('ApiError — friendly-detail unwrap', () => {
       expect(err.message).toBe('API 404: /api/foo')
     }
   })
+
+  it('exposes the extra structured fields of the error body (e.g. count, current_version)', async () => {
+    stubFetch(409, {
+      error: { code: 'DAYS_ORPHAN_ENTRIES', detail: '6 entries would be removed.', count: 6 },
+    })
+    try {
+      await api.patch('/api/timetables/t1', { version: 1 })
+      expect.fail('should have thrown')
+    } catch (e) {
+      const err = e as ApiError
+      expect(err.code).toBe('DAYS_ORPHAN_ENTRIES')
+      expect(err.extra).toEqual({ count: 6 })
+    }
+  })
+
+  it('has an empty extra when the body carries nothing beyond code / detail', async () => {
+    stubFetch(502, '<html>Bad Gateway</html>')
+    try {
+      await api.get('/api/whatever')
+      expect.fail('should have thrown')
+    } catch (e) {
+      expect((e as ApiError).extra).toEqual({})
+    }
+  })
 })
 
 describe('ApiClient — empty / 204 responses', () => {
@@ -195,5 +219,48 @@ describe('ApiClient.postRaw — raw bodies with an explicit content type', () =>
     ).rejects.toMatchObject({
       status: 422, code: 'ICS_PARSE_ERROR', message: 'VEVENT missing SUMMARY',
     })
+  })
+})
+
+describe('ApiClient.delete — response body', () => {
+  it('resolves to the JSON body when the server sends one', async () => {
+    const res = {
+      ok: true, status: 200,
+      headers: { get: (k: string) => (k === 'content-type' ? 'application/json; charset=utf-8' : null) },
+      json: vi.fn().mockResolvedValue({ timetable: { id: 't1' } }),
+    } as unknown as Response
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res))
+    await expect(api.delete('/api/timetables/t1/entries/e1?version=2'))
+      .resolves.toEqual({ timetable: { id: 't1' } })
+    vi.unstubAllGlobals()
+  })
+
+  it('lets a malformed JSON body reject instead of hiding it as null', async () => {
+    const res = {
+      ok: true, status: 200,
+      headers: { get: (k: string) => (k === 'content-type' ? 'application/json' : null) },
+      json: vi.fn().mockRejectedValue(new SyntaxError('bad json')),
+    } as unknown as Response
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res))
+    await expect(api.delete('/api/foo')).rejects.toThrow('bad json')
+    vi.unstubAllGlobals()
+  })
+
+  it('resolves to null for a non-JSON body', async () => {
+    const res = {
+      ok: true, status: 200, headers: { get: () => 'text/plain' }, json: vi.fn(),
+    } as unknown as Response
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res))
+    await expect(api.delete('/api/foo')).resolves.toBeNull()
+    vi.unstubAllGlobals()
+  })
+
+  it('resolves to null for a 204', async () => {
+    const res = {
+      ok: true, status: 204, headers: { get: () => null }, json: vi.fn(),
+    } as unknown as Response
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res))
+    await expect(api.delete('/api/foo')).resolves.toBeNull()
+    vi.unstubAllGlobals()
   })
 })

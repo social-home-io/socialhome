@@ -1,5 +1,6 @@
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
+import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { useTitle } from '@/store/pageTitle'
 import type { CalendarEvent } from '@/types'
@@ -29,6 +30,9 @@ import {
 } from '@/utils/calendar'
 import { t } from '@/i18n/i18n'
 import { confirmDialog } from '@/components/confirm'
+import { TabHeader } from '@/components/TabHeader'
+import { toggles } from '@/components/HouseholdToggles'
+import TimetablePage from '@/features/timetable/TimetablePage'
 
 interface CalendarSummary {
   id: string
@@ -159,7 +163,64 @@ function showOnlyMine() {
   void loadEvents()
 }
 
+type CalendarTab = 'calendar' | 'timetable'
+
+/** Tabs the household toggles allow, in display order. Toggles not
+ *  loaded yet → everything on (no "tab appears" flash, like SideNav).
+ *  With both features off the page still shows the calendar — it is
+ *  only reachable by URL then. */
+export function visibleCalendarTabs(
+  t: { feat_calendar: boolean; feat_timetable: boolean } | null,
+): CalendarTab[] {
+  const tabs: CalendarTab[] = []
+  if (!t || t.feat_calendar) tabs.push('calendar')
+  if (!t || t.feat_timetable) tabs.push('timetable')
+  return tabs.length > 0 ? tabs : ['calendar']
+}
+
+function tabFromUrl(url: string | undefined): CalendarTab {
+  const q = (url ?? '').split('?')[1] ?? ''
+  return new URLSearchParams(q).get('tab') === 'timetable' ? 'timetable' : 'calendar'
+}
+
+/**
+ * CalendarPage — hosts the household calendar and, when the
+ * ``feat_timetable`` toggle is on, the school Timetable as a second
+ * tab (``?tab=timetable``; the default Calendar tab carries no query).
+ * The tab strip only appears when the Timetable tab does, so a
+ * household without timetables sees the calendar exactly as before.
+ */
 export default function CalendarPage() {
+  const loc = useLocation()
+  const tabs = visibleCalendarTabs(toggles.value)
+  const wanted = tabFromUrl(loc.url)
+  const active = tabs.includes(wanted) ? wanted : tabs[0]
+  const onSelectTab = (tab: CalendarTab) => {
+    const next = tab === 'calendar' ? '/calendar' : '/calendar?tab=timetable'
+    if (loc.url !== next) loc.route?.(next, true)
+  }
+  const labels: Record<CalendarTab, string> = {
+    calendar: t('nav.calendar'),
+    timetable: t('nav.timetable'),
+  }
+  return (
+    <div class="sh-calendar-host">
+      {tabs.includes('timetable') && (
+        <TabHeader<CalendarTab>
+          activeTab={active}
+          visibleTabs={tabs}
+          labels={labels}
+          ariaLabel={t('timetable.tabs_aria')}
+          onSelectTab={onSelectTab}
+        />
+      )}
+      {active === 'calendar' ? <CalendarAgenda /> : <TimetablePage />}
+    </div>
+  )
+}
+
+/** The calendar tab — household agenda, filters, event dialog. */
+function CalendarAgenda() {
   useTitle('Calendar')
   useEffect(() => {
     // Drop any rows the WS handler accreted while we were on a
