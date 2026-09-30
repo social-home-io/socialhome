@@ -25,6 +25,9 @@ interface Preferences {
    *  Companion app (e.g. ``notify.mobile_app_pascals_iphone``). Empty /
    *  absent disables HA-app push for the user (§25.3). */
   ha_notify_service?: string
+  /** First day of the week for calendar-style views. Absent = follow
+   *  the browser locale (see ``utils/week.ts``). */
+  week_start?: 'mon' | 'sun' | null
   [key: string]: unknown
 }
 

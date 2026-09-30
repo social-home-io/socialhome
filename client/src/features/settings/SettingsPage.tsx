@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { useTitle } from '@/store/pageTitle'
 import { signal, useSignal } from '@preact/signals'
 import { currentUser } from '@/store/auth'
@@ -10,8 +10,11 @@ import { ProtectedAccountSection } from './ProtectedAccountSection'
 import { showToast } from '@/components/Toast'
 import { theme, type Theme } from '@/store/theme'
 import { HouseholdThemeStudio } from '@/components/HouseholdThemeStudio'
-import { locale, setLocale } from '@/i18n/i18n'
+import { locale, setLocale, t } from '@/i18n/i18n'
 import localeMeta from '@/i18n/locales/_meta.json'
+import {
+  detectLocaleWeekStart, getWeekStartPref, type WeekStartPref,
+} from '@/utils/week'
 import {
   getLandingPath,
   getPreferences,
@@ -1136,7 +1139,85 @@ function AppearanceTab() {
           Contribute translations on Weblate</a>.
         </p>
       </div>
+      <WeekStartPicker />
       {currentUser.value?.is_admin && <HouseholdThemeStudio />}
     </section>
+  )
+}
+
+function WeekStartPicker() {
+  const choice = useSignal<WeekStartPref>(getWeekStartPref())
+  const detected = detectLocaleWeekStart() === 6
+    ? t('settings.week_start.sunday')
+    : t('settings.week_start.monday')
+  const options: Array<{ value: WeekStartPref; label: string }> = [
+    { value: 'auto', label: t('settings.week_start.auto', { day: detected }) },
+    { value: 'mon', label: t('settings.week_start.monday') },
+    { value: 'sun', label: t('settings.week_start.sunday') },
+  ]
+  // Only the latest save may revert / toast — an older PATCH failing
+  // after a newer one succeeded must not roll the picker back.
+  const seq = useRef(0)
+  const group = useRef<HTMLDivElement>(null)
+  const select = async (next: WeekStartPref) => {
+    if (next === choice.value) return
+    const prev = choice.value
+    const mine = ++seq.current
+    choice.value = next
+    try {
+      await setPreference('week_start', next === 'auto' ? null : next)
+    } catch (err: unknown) {
+      if (mine !== seq.current) return
+      choice.value = prev
+      // Keep focus on the (re-)checked radio, the group's only Tab stop.
+      const idx = options.findIndex(o => o.value === prev)
+      group.current?.querySelectorAll<HTMLElement>('[role="radio"]')[idx]?.focus()
+      showToast(
+        t('settings.week_start.save_failed', {
+          error: (err as Error).message ?? String(err),
+        }),
+        'error',
+      )
+    }
+  }
+
+  // ARIA radiogroup: one Tab stop (the checked radio); arrows move
+  // focus and selection together, wrapping at either end.
+  const onKeyDown = (e: KeyboardEvent, idx: number) => {
+    const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1
+      : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
+    if (step === 0) return
+    e.preventDefault()
+    const next = (idx + step + options.length) % options.length
+    group.current?.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus()
+    void select(options[next].value)
+  }
+
+  return (
+    <div class="sh-locale-picker">
+      <h3 id="sh-week-start-heading">{t('settings.week_start.title')}</h3>
+      <div class="sh-locale-options" role="radiogroup" ref={group}
+           aria-labelledby="sh-week-start-heading">
+        {options.map((o, idx) => (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={choice.value === o.value}
+            tabIndex={choice.value === o.value ? 0 : -1}
+            onKeyDown={e => onKeyDown(e, idx)}
+            class={
+              choice.value === o.value
+                ? 'sh-locale-option sh-locale-option--active'
+                : 'sh-locale-option'
+            }
+            onClick={() => { void select(o.value) }}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <p class="sh-muted">{t('settings.week_start.hint')}</p>
+    </div>
   )
 }

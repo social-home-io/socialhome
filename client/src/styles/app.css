@@ -15522,21 +15522,24 @@ a.sh-link-preview-link:focus-visible {
   margin: var(--sh-space-xs) 0 var(--sh-space-sm);
 }
 .sh-locale-option {
+  display: inline-flex; align-items: center;
+  min-height: 36px;
   padding: var(--sh-space-xs) var(--sh-space-md);
   border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-pill);
+  border-radius: var(--sh-radius-full);
   background: var(--sh-bg);
   color: inherit; cursor: pointer;
   font: inherit;
   transition: background-color 120ms, border-color 120ms;
 }
 .sh-locale-option:hover {
-  background: color-mix(in srgb, var(--sh-accent) 8%, var(--sh-surface));
+  background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-surface));
 }
-.sh-locale-option--active {
-  background: var(--sh-accent);
-  color: var(--sh-on-accent, white);
-  border-color: var(--sh-accent);
+.sh-locale-option--active,
+.sh-locale-option--active:hover {
+  background: var(--sh-primary);
+  color: var(--sh-bg);
+  border-color: var(--sh-primary);
 }
 
 /* ─── Admin page extras (§A1-A9) ────────────────────────────────────── */

@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
+import { currentUser } from '@/store/auth'
 import {
+  dateRangeForMode,
+  formatRangeHeading,
   formatDayLabel,
   formatDayPortion,
   formatEventBounds,
@@ -845,5 +848,87 @@ describe('a malformed event.tz degrades one row, never the page', () => {
     const groups = groupEventsByDay([timed])
     expect(Object.keys(groups).sort()).toEqual(['2026-05-01', '2026-05-02'])
     expect(formatDayPortion(groups['2026-05-01'][0]).badge).toBe('Starts')
+  })
+})
+
+describe('dateRangeForMode / formatRangeHeading — week start', () => {
+  const setWeekPref = (week_start: string | null) => {
+    ;(currentUser as { value: unknown }).value = week_start === null
+      ? null
+      : { user_id: 'u', preferences_json: JSON.stringify({ week_start }) }
+  }
+  afterEach(() => setWeekPref(null))
+
+  // Sun 4 Oct 2026, mid-afternoon local time.
+  const sunday = new Date(2026, 9, 4, 15, 30)
+  // Sat 3 Oct 2026.
+  const saturday = new Date(2026, 9, 3, 9, 0)
+
+  it('Monday start: a Sunday falls in the Mon 28 Sep – Sun 4 Oct week', () => {
+    const r = dateRangeForMode(sunday, 'week', 0)
+    expect(r.start).toBe(new Date(2026, 8, 28, 0, 0, 0).toISOString())
+    expect(r.end).toBe(new Date(2026, 9, 4, 23, 59, 59).toISOString())
+  })
+
+  it('Sunday start: a Sunday opens the Sun 4 – Sat 10 Oct week', () => {
+    const r = dateRangeForMode(sunday, 'week', 6)
+    expect(r.start).toBe(new Date(2026, 9, 4, 0, 0, 0).toISOString())
+    expect(r.end).toBe(new Date(2026, 9, 10, 23, 59, 59).toISOString())
+  })
+
+  it('Sunday start: a Saturday closes the Sun 27 Sep – Sat 3 Oct week', () => {
+    const r = dateRangeForMode(saturday, 'week', 6)
+    expect(r.start).toBe(new Date(2026, 8, 27, 0, 0, 0).toISOString())
+    expect(r.end).toBe(new Date(2026, 9, 3, 23, 59, 59).toISOString())
+  })
+
+  it('week spanning a DST change still ends at local 23:59:59', () => {
+    // Pin a DST zone — the suite runs in UTC. US DST ends Sun 1 Nov 2026,
+    // inside the Mon 26 Oct – Sun 1 Nov week.
+    const prevTz = process.env.TZ
+    process.env.TZ = 'America/New_York'
+    try {
+      expect(new Date(2026, 9, 26).getTimezoneOffset())
+        .not.toBe(new Date(2026, 10, 1, 12).getTimezoneOffset())
+      const r = dateRangeForMode(new Date(2026, 9, 27, 12), 'week', 0)
+      expect(r.start).toBe(new Date(2026, 9, 26, 0, 0, 0).toISOString())
+      expect(r.end).toBe(new Date(2026, 10, 1, 23, 59, 59).toISOString())
+    } finally {
+      process.env.TZ = prevTz
+    }
+  })
+
+  it('month / day modes ignore the week start', () => {
+    expect(dateRangeForMode(sunday, 'month', 6)).toEqual(dateRangeForMode(sunday, 'month', 0))
+    expect(dateRangeForMode(sunday, 'day', 6)).toEqual(dateRangeForMode(sunday, 'day', 0))
+  })
+
+  it('default reads the preference on every call', () => {
+    setWeekPref('sun')
+    expect(dateRangeForMode(sunday, 'week').start)
+      .toBe(new Date(2026, 9, 4).toISOString())
+    setWeekPref('mon')
+    expect(dateRangeForMode(sunday, 'week').start)
+      .toBe(new Date(2026, 8, 28).toISOString())
+  })
+
+  it('formatRangeHeading follows the week start', () => {
+    const fmt = (d: Date, withYear = false) => d.toLocaleDateString(undefined, withYear
+      ? { month: 'short', day: 'numeric', year: 'numeric' }
+      : { month: 'short', day: 'numeric' })
+    expect(formatRangeHeading(sunday, 'week', 0))
+      .toBe(`${fmt(new Date(2026, 8, 28))} – ${fmt(new Date(2026, 9, 4), true)}`)
+    expect(formatRangeHeading(sunday, 'week', 6))
+      .toBe(`${fmt(new Date(2026, 9, 4))} – ${fmt(new Date(2026, 9, 10), true)}`)
+  })
+
+  it('formatRangeHeading default reads the preference per call', () => {
+    setWeekPref('sun')
+    const sun = formatRangeHeading(sunday, 'week')
+    setWeekPref('mon')
+    const mon = formatRangeHeading(sunday, 'week')
+    expect(sun).toBe(formatRangeHeading(sunday, 'week', 6))
+    expect(mon).toBe(formatRangeHeading(sunday, 'week', 0))
+    expect(sun).not.toBe(mon)
   })
 })
