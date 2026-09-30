@@ -32,6 +32,12 @@ from ..domain.space import (
     PublicSpaceLimitError,
     SpacePermissionError,
 )
+from ..domain.timetable import (
+    TimetableConflictError,
+    TimetableLimitError,
+    TimetableOrphanError,
+    TimetableValidationError,
+)
 from ..domain.space_bot import (
     SpaceBotDisabledError,
     SpaceBotError,
@@ -240,6 +246,25 @@ class BaseView(web.View):
             return error_response(409, "ZONE_LIMIT", str(exc))
         except SpaceZoneNameConflictError as exc:
             return error_response(409, "ZONE_NAME_TAKEN", str(exc))
+        except TimetableConflictError as exc:
+            # The SPA refetches and re-applies onto ``current_version``.
+            return error_response(
+                409,
+                "TIMETABLE_CONFLICT",
+                "The timetable was changed elsewhere.",
+                extra={"current_version": exc.current_version},
+            )
+        except TimetableOrphanError as exc:
+            # DAY_HAS_ENTRIES / DAYS_ORPHAN_ENTRIES — the SPA asks the user
+            # to confirm, then retries with replace / drop_orphans.
+            return error_response(
+                409,
+                exc.code,
+                f"{exc.count} entries would be removed.",
+                extra={"count": exc.count},
+            )
+        except TimetableLimitError as exc:
+            return error_response(409, "TIMETABLE_LIMIT", str(exc))
         except KeyError as exc:
             # §Audit #7 / #15: never echo the raw KeyError text — the
             # missing dict-key name leaks payload structure / internal
@@ -324,6 +349,11 @@ class BaseView(web.View):
             # The message says which person and why (not paired / their
             # household needs an update) — the picker shows it verbatim.
             return error_response(422, "GROUP_MEMBER_UNSUPPORTED", str(exc))
+        except TimetableValidationError as exc:
+            # Subclasses ValueError — must precede it. The domain composes
+            # these messages itself (field + rule, user input truncated),
+            # so the editor can show why a slot was refused.
+            return error_response(422, "UNPROCESSABLE", str(exc))
         except InvalidPeerUrlError as exc:
             # Subclasses ValueError — must precede it. The message names
             # the field + the failed rule (never the URL), so the admin who

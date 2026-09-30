@@ -89,6 +89,7 @@ def _rich(tid: str = "tt-1", **kw) -> Timetable:
             teacher="Fr. B",
             note="Heft",
             color="teal",
+            icon="🔢",
         ),
         TimetableEntry(
             id="mb",
@@ -108,6 +109,7 @@ def _rich(tid: str = "tt-1", **kw) -> Timetable:
             start=time(12, 0),
             end=time(12, 45),
             title="AG",
+            icon="⚽",
         ),
     )
     base = dict(
@@ -148,6 +150,24 @@ class TestHousehold:
 
     async def test_get_missing(self, env):
         assert await env.repo.get("nope") is None
+
+    async def test_icon_lives_in_entries_json_and_old_rows_read_none(self, env):
+        await env.repo.insert(_rich())
+        row = await env.db.fetchone(
+            "SELECT entries_json FROM timetables WHERE id=?", ("tt-1",)
+        )
+        assert '"icon":"🔢"' in row["entries_json"]
+        # A row written before icons existed has no "icon" key.
+        await env.db.enqueue(
+            "UPDATE timetables SET entries_json=? WHERE id=?",
+            (
+                '[{"id":"m1","weekday":0,"start":"08:00","end":"08:45",'
+                '"kind":"lesson"}]',
+                "tt-1",
+            ),
+        )
+        got = await env.repo.get("tt-1")
+        assert got is not None and got.entries[0].icon is None
 
     async def test_defaults_json_shape(self, env):
         await env.repo.insert(_rich())

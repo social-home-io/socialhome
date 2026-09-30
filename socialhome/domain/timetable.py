@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import unicodedata
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
@@ -89,6 +90,7 @@ MAX_ROOM = 30
 MAX_TEACHER = 60
 MAX_NOTE = 200
 MAX_LABEL = 8
+MAX_ICON = 16  # code points — room for ZWJ sequences and tag flags
 MAX_ID = 64  # timetable / entry / override ids and user ids
 MAX_TZ = 64
 #: Fits SQLite's INTEGER and orjson; stops a peer from pinning LWW forever
@@ -102,6 +104,14 @@ _LESSON_MINUTES_RANGE: Final = (5, 240)
 _GAP_MINUTES_RANGE: Final = (0, 120)
 _LAST_MINUTE: Final = 23 * 60 + 59  # 23:59 — there is no 24:00
 _HHMM_RE: Final = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+#: Every id (timetable / entry / override, and user ids — base32 derived
+#: or ``uuid4().hex`` in practice) is URL-path and log safe.
+_ID_RE: Final = re.compile(r"[A-Za-z0-9_-]{1,64}")
+#: Dates a timetable may mention. Far enough out for any school year, and
+#: keeps week arithmetic (anchor − 1 day, anchor + 7) clear of
+#: ``date.min`` / ``date.max`` so it can never raise ``OverflowError``.
+MIN_DATE: Final = date(1900, 1, 1)
+MAX_DATE: Final = date(2199, 12, 31)
 
 #: Optional string fields shared by entries and overrides, with their caps.
 _TEXT_LIMITS: Final[tuple[tuple[str, int], ...]] = (
@@ -111,10 +121,11 @@ _TEXT_LIMITS: Final[tuple[tuple[str, int], ...]] = (
     ("teacher", MAX_TEACHER),
     ("note", MAX_NOTE),
 )
-_TEXT_FIELDS: Final = tuple(name for name, _ in _TEXT_LIMITS) + ("color",)
+_TEXT_FIELDS: Final = tuple(name for name, _ in _TEXT_LIMITS) + ("color", "icon")
 #: Fields a ``replace`` override may change on its entry. ``label`` is
 #: replaceable too (e.g. a moved lesson renumbered "1." → "0.").
 _REPLACEABLE: Final = (
+    "icon",
     "label",
     "title",
     "room",
@@ -127,7 +138,15 @@ _REPLACEABLE: Final = (
 #: Fields a ``cancel`` override must leave unset — it carries no payload.
 _CANCEL_EMPTY: Final = (*_TEXT_FIELDS, "start", "end")
 #: Lesson fields cleared by ``copy_day(with_subjects=False)``.
-_SUBJECT_FIELDS: Final = ("title", "room", "teacher", "note", "color")
+_SUBJECT_FIELDS: Final = ("title", "room", "teacher", "note", "color", "icon")
+#: Non-symbol code points an emoji sequence may still contain: the
+#: zero-width joiner (👩‍🔬) and the tag characters of subdivision flags.
+_ZWJ: Final = 0x200D
+_ICON_JOINERS: Final = frozenset({_ZWJ, *range(0xE0020, 0xE0080)})
+_REGIONAL_INDICATORS: Final = range(0x1F1E6, 0x1F200)
+_SKIN_TONES: Final = range(0x1F3FB, 0x1F400)
+#: Keycaps (1️⃣ #️⃣ *⃣) are the one emoji built on an ASCII base.
+_KEYCAP_RE: Final = re.compile("[0-9#*]\ufe0f?\u20e3")
 
 
 # ─── Exceptions ──────────────────────────────────────────────────────────
@@ -193,6 +212,7 @@ class TimetableEntry:
     teacher: str | None = None
     note: str | None = None
     color: str | None = None
+    icon: str | None = None  # an emoji, for children who can't read yet
 
 
 @dataclass(slots=True, frozen=True)
@@ -212,6 +232,7 @@ class TimetableOverride:
     teacher: str | None = None
     note: str | None = None
     color: str | None = None
+    icon: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -268,6 +289,7 @@ class EffectiveLesson:
     status: LessonStatus
     override_id: str | None = None
     original: TimetableEntry | None = None  # set for CHANGED / CANCELLED
+    icon: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -289,6 +311,7 @@ class ResolvedWeek:
 
 def week_anchor(d: date, week_start: int) -> date:
     """First day of the week containing ``d`` (a Monday or a Sunday)."""
+    _check_date(d, "date")
     if week_start == WEEK_START_MONDAY:
         return d - timedelta(days=d.weekday())
     if week_start == WEEK_START_SUNDAY:
@@ -318,8 +341,17 @@ def _r(value: object) -> str:
 
 
 def _check_id(value: object, what: str) -> None:
-    if not isinstance(value, str) or not 1 <= len(value) <= MAX_ID:
-        raise TimetableValidationError(f"{what} must be 1..{MAX_ID} characters")
+    if not isinstance(value, str) or _ID_RE.fullmatch(value) is None:
+        raise TimetableValidationError(
+            f"{what} must be 1..{MAX_ID} characters of A-Z a-z 0-9 _ -"
+        )
+
+
+def _check_date(d: date, what: str) -> None:
+    if not MIN_DATE <= d <= MAX_DATE:
+        raise TimetableValidationError(
+            f"{what} must be between {MIN_DATE.year} and {MAX_DATE.year}"
+        )
 
 
 def _from_minutes(m: int) -> time:
@@ -339,14 +371,72 @@ def _clean_text(value: str | None) -> str | None:
 
 
 def _clean_fields[T: (TimetableEntry, TimetableOverride)](obj: T) -> T:
-    return copy.replace(
-        obj, **{name: _clean_text(getattr(obj, name)) for name in _TEXT_FIELDS}
-    )
+    changes = {
+        name: _clean_text(getattr(obj, name)) for name in _TEXT_FIELDS if name != "icon"
+    }
+    # An icon is not stripped (whitespace is invalid, not decoration);
+    # only "" means "no icon".
+    changes["icon"] = obj.icon or None
+    return copy.replace(obj, **changes)
 
 
 def _check_color(value: str | None, where: str) -> None:
     if value is not None and value not in TIMETABLE_COLORS:
         raise TimetableValidationError(f"{where}: unknown color {_r(value)}")
+
+
+def _pictographs(value: str) -> int:
+    """Count visible pictographs, grapheme-ish.
+
+    A symbol starts a new one unless it follows a ZWJ (👩‍🔬 is one);
+    two regional indicators make one flag (🇬🇧); skin tones, variation
+    selectors, keycap marks and tag characters never start one.
+    """
+    count = 0
+    prev = 0
+    open_flag = False
+    for c in value:
+        o = ord(c)
+        if o in _REGIONAL_INDICATORS:
+            if open_flag:
+                open_flag = False  # second half of the flag
+            else:
+                count += prev != _ZWJ
+                open_flag = True
+        else:
+            open_flag = False
+            if unicodedata.category(c)[0] == "S" and o not in _SKIN_TONES:
+                count += prev != _ZWJ
+        prev = o
+    return count
+
+
+def _check_icon(value: object, where: str) -> None:
+    """``None`` or exactly one emoji of at most :data:`MAX_ICON` code points.
+
+    A keycap (1️⃣ #️⃣ *⃣) is matched explicitly. Anything else must start
+    with a symbol (``S*``, regional indicators included), consist only of
+    non-ASCII symbols, combining marks (``M*`` — variation selectors,
+    keycap marks) and ZWJ / tag joiners, and draw a single pictograph.
+    That admits 🔢 ✏️ 👩‍🔬 👍🏽 🇬🇧 but refuses words in any script, markup,
+    whitespace, invisible controls, bare joiners and ★★.
+    """
+    if value is None:
+        return
+    if isinstance(value, str) and _KEYCAP_RE.fullmatch(value):
+        return
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= MAX_ICON
+        or unicodedata.category(value[0])[0] != "S"
+        or not all(
+            ord(c) > 0x7F
+            and (ord(c) in _ICON_JOINERS or unicodedata.category(c)[0] in ("S", "M"))
+            for c in value
+        )
+        or _pictographs(value) != 1
+    ):
+        raise TimetableValidationError(f"{where}: icon must be a single emoji")
 
 
 def _check_texts(obj: TimetableEntry | TimetableOverride, where: str) -> None:
@@ -357,6 +447,7 @@ def _check_texts(obj: TimetableEntry | TimetableOverride, where: str) -> None:
                 f"{where}: {name} exceeds {limit} characters"
             )
     _check_color(obj.color, where)
+    _check_icon(obj.icon, where)
 
 
 def _check_order(start: time, end: time, where: str) -> None:
@@ -395,7 +486,11 @@ def validate(tt: Timetable) -> None:
     entries_by_id = _validate_entries(tt)
     _validate_overrides(tt, entries_by_id)
     _validate_validity(tt)
-    if len(orjson.dumps(to_wire_dict(tt))) > MAX_WIRE_BYTES:
+    try:
+        wire = orjson.dumps(to_wire_dict(tt))
+    except TypeError as exc:  # orjson.JSONEncodeError: e.g. a lone surrogate
+        raise TimetableValidationError("text must be valid UTF-8") from exc
+    if len(wire) > MAX_WIRE_BYTES:
         raise TimetableValidationError(
             f"timetable exceeds {MAX_WIRE_BYTES} bytes on the wire"
         )
@@ -482,6 +577,7 @@ def _validate_overrides(
         if ov.id in seen_ids:
             raise TimetableValidationError(f"duplicate override id {ov.id!r}")
         seen_ids.add(ov.id)
+        _check_date(ov.date, f"{where}: date")
         if ov.date.weekday() not in tt.days:
             raise TimetableValidationError(f"{where}: date's weekday not in days")
         _check_texts(ov, where)
@@ -534,6 +630,9 @@ def _validate_overrides(
 
 def _validate_validity(tt: Timetable) -> None:
     v = tt.validity
+    for d in (v.valid_from, v.valid_until, *v.excluded_weeks):
+        if d is not None:
+            _check_date(d, "validity date")
     if (
         v.valid_from is not None
         and v.valid_until is not None
@@ -578,6 +677,7 @@ def _lesson_from_entry(
         status=status,
         override_id=override_id,
         original=original,
+        icon=e.icon,
     )
 
 
@@ -637,6 +737,7 @@ def _effective_lessons(tt: Timetable, d: date) -> tuple[EffectiveLesson, ...]:
                 color=ov.color,
                 status=LessonStatus.ADDED,
                 override_id=ov.id,
+                icon=ov.icon,
             )
         )
     out.sort(key=lambda ls: (ls.start, ls.end))
@@ -644,6 +745,7 @@ def _effective_lessons(tt: Timetable, d: date) -> tuple[EffectiveLesson, ...]:
 
 
 def resolve_day(tt: Timetable, d: date) -> ResolvedDay:
+    _check_date(d, "date")
     valid = tt.validity.is_valid_on(d, tt.week_start) and d.weekday() in tt.days
     if not valid:
         return ResolvedDay(date=d, valid=False, lessons=())
@@ -695,6 +797,8 @@ class _Unset:
 
 
 UNSET: Final = _Unset()
+#: Public name of the sentinel's type, for callers' type hints.
+Unset = _Unset
 
 
 def _commit(
@@ -1001,6 +1105,55 @@ def clear_week(
     )
 
 
+# ─── Templates ───────────────────────────────────────────────────────────
+
+#: School template: six lessons, a long break after the 2nd and a short
+#: one after the 4th (minutes). Breaks replace the gap after their lesson.
+_SCHOOL_LESSONS: Final = 6
+_SCHOOL_BREAKS: Final[Mapping[int, int]] = {2: 20, 4: 15}
+_SCHOOL_BREAK_TITLE: Final = "Pause"
+
+
+def school_template_day(
+    weekday: int,
+    defaults: TimetableDefaults,
+    id_factory: Callable[[], str],
+) -> tuple[TimetableEntry, ...]:
+    """A typical school day on ``weekday``, timed from ``defaults``.
+
+    Untitled lessons labelled "1."–"6." (empty slots for the UI brush),
+    ``gap_minutes`` apart, with a 20-minute break after lesson 2 and a
+    15-minute break after lesson 4. With the stock defaults that is
+    08:00–13:20.
+    """
+    out: list[TimetableEntry] = []
+    t = _minutes(defaults.day_start)
+
+    def slot(start: int, end: int, **kw: Any) -> TimetableEntry:
+        if end > _LAST_MINUTE:
+            raise TimetableValidationError("school template would cross midnight")
+        return TimetableEntry(
+            id=id_factory(),
+            weekday=weekday,
+            start=_from_minutes(start),
+            end=_from_minutes(end),
+            **kw,
+        )
+
+    for n in range(1, _SCHOOL_LESSONS + 1):
+        end = t + defaults.lesson_minutes
+        out.append(slot(t, end, label=f"{n}."))
+        pause = _SCHOOL_BREAKS.get(n)
+        if pause is None:
+            t = end + defaults.gap_minutes
+        else:
+            out.append(
+                slot(end, end + pause, kind=EntryKind.BREAK, title=_SCHOOL_BREAK_TITLE)
+            )
+            t = end + pause
+    return tuple(out)
+
+
 # ─── Wire format ─────────────────────────────────────────────────────────
 #
 # One JSON shape for the REST body, the repository's JSON columns and
@@ -1041,6 +1194,7 @@ def entry_to_dict(e: TimetableEntry) -> dict[str, Any]:
         "teacher": e.teacher,
         "note": e.note,
         "color": e.color,
+        "icon": e.icon,
     }
 
 
@@ -1059,7 +1213,17 @@ def override_to_dict(o: TimetableOverride) -> dict[str, Any]:
         "teacher": o.teacher,
         "note": o.note,
         "color": o.color,
+        "icon": o.icon,
     }
+
+
+#: Keys of an entry / override on the wire (and in REST bodies).
+ENTRY_FIELDS: Final = frozenset(
+    entry_to_dict(TimetableEntry(id="x", weekday=0, start=time(0), end=time(0, 5)))
+)
+OVERRIDE_FIELDS: Final = frozenset(
+    override_to_dict(TimetableOverride(id="x", date=MIN_DATE, kind=OverrideKind.CANCEL))
+)
 
 
 def validity_to_dict(v: TimetableValidity) -> dict[str, Any]:
@@ -1147,9 +1311,11 @@ def _parse_opt_hhmm(value: Any, what: str) -> time | None:
 
 def _parse_date(value: Any, what: str) -> date:
     try:
-        return date.fromisoformat(_as_str(value, what))
+        d = date.fromisoformat(_as_str(value, what))
     except ValueError as exc:
         raise TimetableValidationError(f"{what} must be an ISO date") from exc
+    _check_date(d, what)
+    return d
 
 
 def _parse_opt_date(value: Any, what: str) -> date | None:
@@ -1291,6 +1457,142 @@ def from_wire_dict(d: Mapping[str, Any]) -> Timetable:
             )
         ),
     )
+
+
+# Public wrappers for the route / service layer, so path and query
+# strings are parsed with the same rules (and errors) as wire fields.
+
+
+def parse_date(value: Any, what: str) -> date:
+    """An ISO ``YYYY-MM-DD`` string, else :class:`TimetableValidationError`."""
+    return _parse_date(value, what)
+
+
+def parse_hhmm(value: Any, what: str) -> time:
+    """A ``"HH:MM"`` string, else :class:`TimetableValidationError`."""
+    return _parse_hhmm(value, what)
+
+
+def parse_int(value: Any, what: str) -> int:
+    """A JSON integer (``bool`` refused), else :class:`TimetableValidationError`."""
+    return _as_int(value, what)
+
+
+def parse_weekdays(value: Any, what: str) -> tuple[int, ...]:
+    """A non-empty list of weekdays 0..6 → sorted, deduplicated tuple."""
+    items = _as_list(value, what, max_len=14)
+    days = {_as_int(x, f"{what}[]") for x in items}
+    if not days or any(d not in range(7) for d in days):
+        raise TimetableValidationError(f"{what} must be a non-empty subset of 0..6")
+    return tuple(sorted(days))
+
+
+def parse_user_ids(value: Any, what: str) -> tuple[str, ...]:
+    """A list of user ids (≤ :data:`MAX_ASSIGNEES`) → deduplicated tuple."""
+    items = _as_list(value, what, max_len=MAX_ASSIGNEES * 2)
+    ids: list[str] = []
+    for x in items:
+        _check_id(x, f"{what}[]")
+        ids.append(x)
+    out = tuple(dict.fromkeys(ids))
+    if len(out) > MAX_ASSIGNEES:
+        raise TimetableValidationError(f"{what}: at most {MAX_ASSIGNEES} items")
+    return out
+
+
+def reject_unknown(d: Any, allowed: Collection[str], what: str) -> None:
+    """REST strictness: refuse keys outside ``allowed``.
+
+    The wire parsers (:func:`entry_from_dict`, :func:`from_wire_dict`)
+    stay lenient so a newer federation peer's extra fields don't break
+    an older receiver; request bodies from our own SPA get no such slack.
+    """
+    unknown = sorted(k for k in _as_mapping(d, what) if k not in allowed)
+    if unknown:
+        raise TimetableValidationError(f"{what}: unknown field {_r(unknown[0])}")
+
+
+def entries_from_list(
+    value: Any,
+    *,
+    id_factory: Callable[[], str],
+    weekday: int | None = None,
+    allow_id: bool = True,
+    keep_ids: Collection[str] | None = None,
+    max_len: int = MAX_ENTRIES,
+) -> tuple[TimetableEntry, ...]:
+    """Parse a request's entry list (length-capped before parsing).
+
+    An element's ``id`` is kept when ``keep_ids`` is ``None`` or contains
+    it — so a replace-all keeps the ids, and the overrides, of existing
+    entries the client sent back — and minted otherwise. ``allow_id=False``
+    refuses an ``id`` key outright (every id is minted). ``weekday``
+    forces every element onto that day (generating a day from slots).
+    Unknown keys are refused.
+    """
+    allowed = ENTRY_FIELDS if allow_id else ENTRY_FIELDS - {"id"}
+    out: list[TimetableEntry] = []
+    for item in _as_list(value, "entries", max_len=max_len):
+        reject_unknown(item, allowed, "entry")
+        d = dict(item)
+        if weekday is not None:
+            d["weekday"] = weekday
+        given = d.get("id")
+        keep = given is not None and (keep_ids is None or given in keep_ids)
+        out.append(entry_from_dict(d, id=None if keep else id_factory()))
+    return tuple(out)
+
+
+# ─── Resolved views (read-only REST shapes) ──────────────────────────────
+
+
+def effective_lesson_to_dict(ls: EffectiveLesson) -> dict[str, Any]:
+    return {
+        "source_id": ls.source_id,
+        "date": ls.date.isoformat(),
+        "start": _hhmm(ls.start),
+        "end": _hhmm(ls.end),
+        "kind": ls.kind.value,
+        "label": ls.label,
+        "title": ls.title,
+        "room": ls.room,
+        "teacher": ls.teacher,
+        "note": ls.note,
+        "color": ls.color,
+        "icon": ls.icon,
+        "status": ls.status.value,
+        "override_id": ls.override_id,
+        "original": None if ls.original is None else entry_to_dict(ls.original),
+    }
+
+
+def resolved_day_to_dict(day: ResolvedDay) -> dict[str, Any]:
+    return {
+        "date": day.date.isoformat(),
+        "valid": day.valid,
+        "lessons": [effective_lesson_to_dict(ls) for ls in day.lessons],
+    }
+
+
+def resolved_week_to_dict(week: ResolvedWeek) -> dict[str, Any]:
+    return {
+        "anchor": week.anchor.isoformat(),
+        "valid": week.valid,
+        "days": [resolved_day_to_dict(d) for d in week.days],
+    }
+
+
+def timetable_view_dict(tt: Timetable, today: date) -> dict[str, Any]:
+    """The REST body: the wire dict plus flags computed for ``today``.
+
+    ``today`` is the date in the timetable's own tz (the caller resolves
+    it — this module does no clock reads).
+    """
+    return {
+        **to_wire_dict(tt),
+        "active_this_week": resolve_week(tt, today).valid,
+        "valid_today": resolve_day(tt, today).valid,
+    }
 
 
 # ─── Partial updates (PATCH) ─────────────────────────────────────────────

@@ -1647,3 +1647,542 @@ class TestIdInjectionAndPatch:
             override_patch(o, {"kind": "nope"})
         with pytest.raises(TimetableValidationError, match="unknown"):
             override_patch(o, {"bogus": 1})
+
+
+# ─── School template + resolved serializers + public parsers (PR2 part 2) ─
+
+
+def _counter_ids():
+    n = itertools.count(1)
+    return lambda: f"id{next(n)}"
+
+
+class TestSchoolTemplateDay:
+    def test_default_school_grid(self):
+        slots = tt_mod.school_template_day(2, TimetableDefaults(), _counter_ids())
+        got = [
+            (
+                s.kind,
+                s.label,
+                s.title,
+                s.start.strftime("%H:%M"),
+                s.end.strftime("%H:%M"),
+            )
+            for s in slots
+        ]
+        assert got == [
+            (EntryKind.LESSON, "1.", None, "08:00", "08:45"),
+            (EntryKind.LESSON, "2.", None, "08:50", "09:35"),
+            (EntryKind.BREAK, None, "Pause", "09:35", "09:55"),
+            (EntryKind.LESSON, "3.", None, "09:55", "10:40"),
+            (EntryKind.LESSON, "4.", None, "10:45", "11:30"),
+            (EntryKind.BREAK, None, "Pause", "11:30", "11:45"),
+            (EntryKind.LESSON, "5.", None, "11:45", "12:30"),
+            (EntryKind.LESSON, "6.", None, "12:35", "13:20"),
+        ]
+        assert all(s.weekday == 2 for s in slots)
+        assert [s.id for s in slots] == [f"id{i}" for i in range(1, 9)]
+
+    def test_follows_defaults(self):
+        dft = TimetableDefaults(lesson_minutes=50, gap_minutes=0, day_start=hm("07:30"))
+        slots = tt_mod.school_template_day(0, dft, _counter_ids())
+        assert slots[0].start == hm("07:30") and slots[0].end == hm("08:20")
+        assert slots[1].start == hm("08:20")  # zero gap
+        assert slots[2].kind is EntryKind.BREAK
+        assert slots[2].start == slots[1].end
+
+    def test_template_passes_validate(self):
+        slots = tt_mod.school_template_day(0, TimetableDefaults(), _counter_ids())
+        validate(tt_(entries=slots))
+
+    def test_crossing_midnight_is_rejected(self):
+        dft = TimetableDefaults(lesson_minutes=240, day_start=hm("20:00"))
+        with pytest.raises(TimetableValidationError, match="midnight"):
+            tt_mod.school_template_day(0, dft, _counter_ids())
+
+
+class TestResolvedSerializers:
+    def test_week_dict_shape(self):
+        base = std()
+        tt = copy.replace(
+            base,
+            overrides=(
+                TimetableOverride(
+                    id="o1", date=MON, kind=OverrideKind.CANCEL, entry_id="m1"
+                ),
+                TimetableOverride(
+                    id="o2",
+                    date=MON,
+                    kind=OverrideKind.REPLACE,
+                    entry_id="m2",
+                    room="B7",
+                ),
+            ),
+        )
+        d = tt_mod.resolved_week_to_dict(resolve_week(tt, WED))
+        assert d["anchor"] == MON.isoformat()
+        assert d["valid"] is True
+        assert [day["date"] for day in d["days"]] == [
+            (MON + timedelta(days=i)).isoformat() for i in range(5)
+        ]
+        mon = d["days"][0]
+        assert mon["valid"] is True
+        first = mon["lessons"][0]
+        assert first == {
+            "source_id": "m1",
+            "date": MON.isoformat(),
+            "start": "08:00",
+            "end": "08:45",
+            "kind": "lesson",
+            "label": "1.",
+            "title": "Mathe",
+            "room": None,
+            "teacher": None,
+            "note": None,
+            "color": None,
+            "icon": None,
+            "status": "cancelled",
+            "override_id": "o1",
+            "original": entry_to_dict(base.entries[0]),
+        }
+        changed = mon["lessons"][1]
+        assert changed["status"] == "changed" and changed["room"] == "B7"
+        assert mon["lessons"][2]["original"] is None
+        orjson.dumps(d)  # plain JSON types only
+
+    def test_day_dict_invalid(self):
+        d = tt_mod.resolved_day_to_dict(resolve_day(std(), SAT))
+        assert d == {"date": SAT.isoformat(), "valid": False, "lessons": []}
+
+    def test_lesson_dict_added(self):
+        tt = copy.replace(
+            std(),
+            overrides=(
+                TimetableOverride(
+                    id="a1",
+                    date=TUE,
+                    kind=OverrideKind.ADD,
+                    start=hm("10:00"),
+                    end=hm("10:45"),
+                    title="AG",
+                ),
+            ),
+        )
+        lessons = resolve_day(tt, TUE).lessons
+        d = tt_mod.effective_lesson_to_dict(lessons[-1])
+        assert (
+            d["status"] == "added" and d["source_id"] == "a1" and d["original"] is None
+        )
+
+
+class TestPublicParsers:
+    def test_parse_date(self):
+        assert tt_mod.parse_date("2026-09-28", "date") == MON
+        for bad in ("2026-13-01", 5, None, "x"):
+            with pytest.raises(TimetableValidationError):
+                tt_mod.parse_date(bad, "date")
+
+    def test_parse_hhmm(self):
+        assert tt_mod.parse_hhmm("07:15", "from") == hm("07:15")
+        for bad in ("7:15", "24:00", 715, None):
+            with pytest.raises(TimetableValidationError):
+                tt_mod.parse_hhmm(bad, "from")
+
+    def test_parse_int(self):
+        assert tt_mod.parse_int(3, "n") == 3
+        for bad in (True, "3", 3.0, None):
+            with pytest.raises(TimetableValidationError):
+                tt_mod.parse_int(bad, "n")
+
+    def test_parse_weekdays(self):
+        assert tt_mod.parse_weekdays([4, 0, 2, 0], "days") == (0, 2, 4)
+        for bad in ([], [7], [-1], ["1"], [True], "0,1", None, list(range(8)) * 2):
+            with pytest.raises(TimetableValidationError):
+                tt_mod.parse_weekdays(bad, "days")
+
+    def test_parse_user_ids(self):
+        assert tt_mod.parse_user_ids(["b", "a", "b"], "assignees") == ("b", "a")
+        assert tt_mod.parse_user_ids([], "assignees") == ()
+        for bad in ("a", [1], [""], ["x" * 65], [f"u{i}" for i in range(21)], None):
+            with pytest.raises(TimetableValidationError):
+                tt_mod.parse_user_ids(bad, "assignees")
+
+
+class TestEntriesFromList:
+    def test_mints_missing_ids_and_keeps_given(self):
+        got = tt_mod.entries_from_list(
+            [
+                {"id": "keep", "weekday": 0, "start": "08:00", "end": "08:45"},
+                {"weekday": 0, "start": "09:00", "end": "09:45"},
+                {"id": None, "weekday": 1, "start": "09:00", "end": "09:45"},
+            ],
+            id_factory=_counter_ids(),
+        )
+        assert [e.id for e in got] == ["keep", "id1", "id2"]
+
+    def test_fresh_ids_and_forced_weekday(self):
+        got = tt_mod.entries_from_list(
+            [{"start": "08:00", "end": "08:45", "weekday": 4}],
+            id_factory=_counter_ids(),
+            weekday=2,
+            allow_id=False,
+        )
+        assert got[0].id == "id1" and got[0].weekday == 2
+
+    def test_rejects_non_list_and_too_long(self):
+        for bad in (None, {"a": 1}, "x"):
+            with pytest.raises(TimetableValidationError):
+                tt_mod.entries_from_list(bad, id_factory=_counter_ids())
+        with pytest.raises(TimetableValidationError, match="at most"):
+            tt_mod.entries_from_list([{}] * 3, id_factory=_counter_ids(), max_len=2)
+
+    def test_bad_element(self):
+        with pytest.raises(TimetableValidationError):
+            tt_mod.entries_from_list(["nope"], id_factory=_counter_ids())
+
+
+def test_timetable_view_dict_adds_computed_flags():
+    tt = std()
+    view = tt_mod.timetable_view_dict(tt, WED)
+    assert view == {**to_wire_dict(tt), "active_this_week": True, "valid_today": True}
+    weekend = tt_mod.timetable_view_dict(tt, SAT)
+    assert weekend["valid_today"] is False and weekend["active_this_week"] is True
+    held = copy.replace(tt, validity=TimetableValidity(excluded_weeks=(MON,)))
+    off = tt_mod.timetable_view_dict(held, WED)
+    assert off["valid_today"] is False and off["active_this_week"] is False
+
+
+# ─── Lesson icons (emoji for kids who can't read yet) ─────────────────────
+
+
+class TestIcon:
+    @pytest.mark.parametrize(
+        "icon",
+        ["🔢", "✏️", "👩‍🔬", "👍🏽", "🇬🇧", "⚽", "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "1️⃣", "#️⃣", "*\u20e3", "★"],
+    )
+    def test_valid_emoji(self, icon):
+        validate(tt_(entries=(ent("e1", 0, "08:00", "08:45", icon=icon),)))
+        validate(
+            tt_(
+                overrides=(
+                    TimetableOverride(
+                        id="o1",
+                        date=MON,
+                        kind=OverrideKind.ADD,
+                        start=hm("10:00"),
+                        end=hm("10:45"),
+                        icon=icon,
+                    ),
+                )
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "icon",
+        [
+            "abc",
+            "<b>",
+            "🔢" * 17,
+            " 🔢",
+            "🔢 ",
+            "\u00a0🔢",  # non-ASCII whitespace
+            "",
+            "日本",  # a word in another script
+            "\u202e🔢",  # bidi override
+            "a\u20e3",  # a keycap on a letter is not a keycap
+            "\u200d",  # a bare ZWJ
+            "\u0301\ufe0f",  # marks only
+            "\U0001f3fd",  # a skin tone on its own
+            "★★",
+            "★" * 16,
+            "🔢🔢",
+            5,
+        ],
+    )
+    def test_rejected(self, icon):
+        with pytest.raises(TimetableValidationError, match="icon"):
+            validate(tt_(entries=(ent("e1", 0, "08:00", "08:45", icon=icon),)))
+
+    def test_sixteen_code_points_is_the_cap(self):
+        # One pictograph (a tag-sequence flag) padded with tag characters.
+        at_cap = "🏴" + "\U000e0067" * 15
+        validate(tt_(entries=(ent("e1", 0, "08:00", "08:45", icon=at_cap),)))
+        with pytest.raises(TimetableValidationError, match="icon"):
+            validate(
+                tt_(
+                    entries=(
+                        ent("e1", 0, "08:00", "08:45", icon=at_cap + "\U000e0067"),
+                    )
+                )
+            )
+
+    def test_mutator_turns_empty_into_none(self):
+        out = with_entry(tt_(), ent("e1", 0, "08:00", "08:45", icon=""), now=NOW)
+        assert out.entries[0].icon is None
+
+    def test_mutator_does_not_strip_icon(self):
+        with pytest.raises(TimetableValidationError, match="icon"):
+            with_entry(tt_(), ent("e1", 0, "08:00", "08:45", icon=" 🔢"), now=NOW)
+
+    def test_cancel_cannot_carry_icon(self):
+        with pytest.raises(TimetableValidationError, match="cancel"):
+            validate(
+                copy.replace(
+                    std(),
+                    overrides=(
+                        TimetableOverride(
+                            id="o1",
+                            date=MON,
+                            kind=OverrideKind.CANCEL,
+                            entry_id="m1",
+                            icon="🔢",
+                        ),
+                    ),
+                )
+            )
+
+    def test_replace_changes_icon_and_original_keeps_old(self):
+        base = copy.replace(
+            std(),
+            entries=tuple(
+                copy.replace(e, icon="🔢") if e.id == "m1" else e for e in std().entries
+            ),
+        )
+        tt = with_override(
+            base,
+            TimetableOverride(
+                id="o1", date=MON, kind=OverrideKind.REPLACE, entry_id="m1", icon="🎨"
+            ),
+            now=NOW,
+        )
+        lesson = resolve_day(tt, MON).lessons[0]
+        assert lesson.status is LessonStatus.CHANGED
+        assert lesson.icon == "🎨"
+        assert lesson.original is not None and lesson.original.icon == "🔢"
+        d = tt_mod.effective_lesson_to_dict(lesson)
+        assert d["icon"] == "🎨" and d["original"]["icon"] == "🔢"
+
+    def test_normal_and_added_lessons_carry_icon(self):
+        tt = copy.replace(
+            tt_(entries=(ent("e1", 0, "08:00", "08:45", icon="🔢"),)),
+            overrides=(
+                TimetableOverride(
+                    id="a1",
+                    date=MON,
+                    kind=OverrideKind.ADD,
+                    start=hm("09:00"),
+                    end=hm("09:45"),
+                    icon="⚽",
+                ),
+            ),
+        )
+        lessons = resolve_day(tt, MON).lessons
+        assert [ls.icon for ls in lessons] == ["🔢", "⚽"]
+
+    def test_wire_round_trip(self):
+        tt = copy.replace(
+            tt_(entries=(ent("e1", 0, "08:00", "08:45", icon="👩‍🔬"),)),
+            overrides=(
+                TimetableOverride(
+                    id="o1",
+                    date=MON,
+                    kind=OverrideKind.REPLACE,
+                    entry_id="e1",
+                    icon="🇬🇧",
+                ),
+            ),
+        )
+        wire = orjson.loads(orjson.dumps(to_wire_dict(tt)))
+        assert wire["entries"][0]["icon"] == "👩‍🔬"
+        assert wire["overrides"][0]["icon"] == "🇬🇧"
+        assert from_wire_dict(wire) == tt
+        # A pre-icon row / payload reads back as no icon.
+        del wire["entries"][0]["icon"]
+        assert from_wire_dict(wire).entries[0].icon is None
+
+    def test_patch_sets_and_clears_icon(self):
+        e = ent("e1", 0, "08:00", "08:45")
+        assert entry_patch(e, {"icon": "⚽"}).icon == "⚽"
+        assert entry_patch(copy.replace(e, icon="⚽"), {"icon": None}).icon is None
+        ov = TimetableOverride(
+            id="o1", date=MON, kind=OverrideKind.REPLACE, entry_id="e1"
+        )
+        assert override_patch(ov, {"icon": "🎨"}).icon == "🎨"
+        with pytest.raises(TimetableValidationError):
+            entry_patch(e, {"icon": 7})
+
+    def test_school_template_has_no_icons(self):
+        slots = tt_mod.school_template_day(0, TimetableDefaults(), _counter_ids())
+        assert all(s.icon is None for s in slots)
+
+    def test_copy_day_without_subjects_clears_lesson_icon(self):
+        tt = tt_(
+            entries=(
+                ent("e1", 0, "08:00", "08:45", icon="🔢", title="Mathe"),
+                ent("b1", 0, "08:45", "09:00", kind=EntryKind.BREAK, icon="🍎"),
+            )
+        )
+        out = copy_day(
+            tt, 0, [1], with_subjects=False, id_factory=_counter_ids(), now=NOW
+        )
+        tue = sorted((e for e in out.entries if e.weekday == 1), key=lambda e: e.start)
+        assert [e.icon for e in tue] == [None, "🍎"]
+
+
+# ─── Review hardening: date range, surrogates, unknown keys, ids ─────────
+
+
+class TestDateRange:
+    @pytest.mark.parametrize(
+        "bad", ["0001-01-01", "1899-12-31", "2200-01-01", "9999-12-31"]
+    )
+    def test_parse_date_bounded(self, bad):
+        with pytest.raises(TimetableValidationError, match="1900"):
+            tt_mod.parse_date(bad, "date")
+
+    def test_parse_date_edges_ok(self):
+        assert tt_mod.parse_date("1900-01-01", "d") == date(1900, 1, 1)
+        assert tt_mod.parse_date("2199-12-31", "d") == date(2199, 12, 31)
+
+    @pytest.mark.parametrize(
+        "d", [date(1, 1, 1), date(9999, 12, 31), date(1899, 12, 31)]
+    )
+    def test_week_anchor_and_resolve_refuse_out_of_range(self, d):
+        for ws in (0, 6):
+            with pytest.raises(TimetableValidationError):
+                week_anchor(d, ws)
+        with pytest.raises(TimetableValidationError):
+            resolve_week(std(), d)
+        with pytest.raises(TimetableValidationError):
+            resolve_day(std(), d)
+
+    def test_validate_checks_validity_and_override_dates(self):
+        with pytest.raises(TimetableValidationError, match="1900"):
+            validate(tt_(validity=TimetableValidity(valid_from=date(1, 1, 1))))
+        with pytest.raises(TimetableValidationError, match="1900"):
+            validate(tt_(validity=TimetableValidity(valid_until=date(9999, 12, 31))))
+        with pytest.raises(TimetableValidationError, match="1900"):
+            validate(tt_(validity=TimetableValidity(excluded_weeks=(date(1, 1, 1),))))
+        with pytest.raises(TimetableValidationError, match="1900"):
+            validate(
+                copy.replace(
+                    std(),
+                    overrides=(
+                        TimetableOverride(
+                            id="o1",
+                            date=date(9999, 12, 27),  # a Monday
+                            kind=OverrideKind.CANCEL,
+                            entry_id="m1",
+                        ),
+                    ),
+                )
+            )
+
+    def test_week_start_change_at_the_edge_is_a_validation_error(self):
+        # 1900-01-01 is a Monday; under Sunday-start its anchor is 1899-12-31.
+        tt = tt_(validity=TimetableValidity(excluded_weeks=(date(1900, 1, 1),)))
+        validate(tt)
+        with pytest.raises(TimetableValidationError):
+            with_header(tt, now=NOW, week_start=6)
+
+    def test_clear_week_out_of_range(self):
+        with pytest.raises(TimetableValidationError):
+            clear_week(std(), date(9999, 12, 31), now=NOW)
+
+
+class TestSurrogates:
+    def test_lone_surrogate_title(self):
+        with pytest.raises(TimetableValidationError, match="UTF-8"):
+            validate(tt_(entries=(ent("e1", 0, "08:00", "08:45", title="\ud800"),)))
+
+    def test_lone_surrogate_name(self):
+        with pytest.raises(TimetableValidationError, match="UTF-8"):
+            with_header(tt_(), now=NOW, name="Anna \udfff")
+
+
+class TestRejectUnknown:
+    def test_allows_known_rejects_unknown(self):
+        tt_mod.reject_unknown({"a": 1}, frozenset({"a", "b"}), "thing")
+        with pytest.raises(TimetableValidationError, match="unknown field"):
+            tt_mod.reject_unknown({"a": 1, "zz": 2}, frozenset({"a"}), "thing")
+        with pytest.raises(TimetableValidationError):
+            tt_mod.reject_unknown([1], frozenset({"a"}), "thing")
+
+    def test_field_sets(self):
+        assert tt_mod.ENTRY_FIELDS == frozenset(
+            entry_to_dict(ent("e", 0, "08:00", "08:45"))
+        )
+        o = TimetableOverride(id="o", date=MON, kind=OverrideKind.CANCEL, entry_id="e")
+        assert tt_mod.OVERRIDE_FIELDS == frozenset(override_to_dict(o))
+
+    def test_entries_from_list_rejects_unknown(self):
+        with pytest.raises(TimetableValidationError, match="unknown field"):
+            tt_mod.entries_from_list(
+                [{"weekday": 0, "start": "08:00", "end": "08:45", "bogus": 1}],
+                id_factory=_counter_ids(),
+            )
+
+    def test_entries_from_list_id_disallowed_when_minting(self):
+        with pytest.raises(TimetableValidationError, match="unknown field"):
+            tt_mod.entries_from_list(
+                [{"id": "x", "start": "08:00", "end": "08:45"}],
+                id_factory=_counter_ids(),
+                weekday=0,
+                allow_id=False,
+            )
+
+    def test_entries_from_list_keeps_only_known_ids(self):
+        got = tt_mod.entries_from_list(
+            [
+                {"id": "keep", "weekday": 0, "start": "08:00", "end": "08:45"},
+                {"id": "stranger", "weekday": 0, "start": "09:00", "end": "09:45"},
+            ],
+            id_factory=_counter_ids(),
+            keep_ids=frozenset({"keep"}),
+        )
+        assert [e.id for e in got] == ["keep", "id1"]
+
+    def test_from_wire_dict_stays_lenient(self):
+        wire = to_wire_dict(std())
+        wire["future_field"] = 1
+        wire["entries"][0]["future_field"] = 1
+        assert from_wire_dict(wire) == std()
+
+
+class TestIdCharset:
+    @pytest.mark.parametrize("bad", ["a b", "a/b", "ä", "a.b", "<x>", ""])
+    def test_entry_id(self, bad):
+        with pytest.raises(TimetableValidationError, match="id"):
+            validate(tt_(entries=(ent(bad, 0, "08:00", "08:45"),)))
+
+    @pytest.mark.parametrize("field", ["id", "created_by", "updated_by"])
+    def test_header_ids(self, field):
+        with pytest.raises(TimetableValidationError):
+            validate(tt_(**{field: "x y"}))
+
+    def test_assignees_and_override_ids(self):
+        with pytest.raises(TimetableValidationError):
+            validate(tt_(assignees=("ok", "not ok")))
+        with pytest.raises(TimetableValidationError):
+            validate(
+                copy.replace(
+                    std(),
+                    overrides=(
+                        TimetableOverride(
+                            id="o 1", date=MON, kind=OverrideKind.CANCEL, entry_id="m1"
+                        ),
+                    ),
+                )
+            )
+        with pytest.raises(TimetableValidationError):
+            tt_mod.parse_user_ids(["bad id"], "assignees")
+
+    def test_real_ids_pass(self):
+        # uuid4().hex, base32 derived user ids, fixtures with dashes.
+        validate(
+            tt_(
+                id="9f1c2e3d4b5a69788796a5b4c3d2e1f0",
+                created_by="ftsmmf26uygffxkyblbo3rgj336pst4y",
+                assignees=("uid-alice", "u_bob"),
+            )
+        )

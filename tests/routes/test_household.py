@@ -21,6 +21,19 @@ async def test_get_preferences_returns_defaults(client):
     assert body["feat_feed"] is True
     assert body["feat_presence"] is True
     assert body["feat_gallery"] is True
+    assert body["feat_timetable"] is True
+
+
+async def test_put_preferences_toggles_timetable(client):
+    r = await client.put(
+        "/api/household/preferences",
+        json={"toggles": {"feat_timetable": False}},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert (await r.json())["feat_timetable"] is False
+    r = await client.get("/api/household/preferences", headers=_auth(client._tok))
+    assert (await r.json())["feat_timetable"] is False
 
 
 async def test_put_preferences_admin_renames_household(client):

@@ -34,6 +34,7 @@ PREFERENCE_SCOPE: dict[str, str] = {
     "feat_calendar": "household",
     "feat_presence": "household",
     "feat_gallery": "household",
+    "feat_timetable": "household",
     "allow_text": "household",
     "allow_image": "household",
     "allow_video": "household",
@@ -70,6 +71,7 @@ SECTIONS: tuple[str, ...] = (
     "calendar",
     "presence",
     "gallery",
+    "timetable",
 )
 
 #: Post types mapped to their ``allow_*`` attribute names. Bazaar
@@ -121,6 +123,9 @@ class HouseholdPreferences:
     feat_calendar: bool = True
     feat_presence: bool = True
     feat_gallery: bool = True
+    #: School timetables (Stundenplan) — ``/api/timetables``. Column from
+    #: migration ``0063_timetables.sql``.
+    feat_timetable: bool = True
 
     allow_text: bool = True
     allow_image: bool = True

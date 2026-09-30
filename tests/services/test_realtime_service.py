@@ -33,11 +33,14 @@ from socialhome.domain.events import (
     TaskAssigned,
     TaskCompleted,
     TaskDeadlineDue,
+    TimetableDeleted,
+    TimetableSaved,
     UserStatusChanged,
 )
 from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.task import Task, TaskStatus
+from socialhome.domain.timetable import Timetable, to_wire_dict
 from socialhome.domain.user import User, UserStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.ws_manager import WebSocketManager
@@ -1041,3 +1044,50 @@ async def test_media_transcode_failed_no_owner_no_broadcast(env):
         MediaTranscodeFailed(output_filename="v.webm", owner_user_id=None)
     )
     assert sock.sent == []
+
+
+# ─── Timetables ──────────────────────────────────────────────────────────
+
+
+def _timetable():
+    at = datetime(2026, 9, 28, 8, tzinfo=timezone.utc)
+    return Timetable(
+        id="tt1", name="Anna", created_by="u1", created_at=at, updated_at=at
+    )
+
+
+async def test_timetable_saved_fans_changed_frame_to_household(env):
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u2", sock)
+    tt = _timetable()
+    await bus.publish(TimetableSaved(timetable=tt))
+    frames = [json.loads(m) for m in sock.sent]
+    assert frames == [
+        {"type": "timetable.changed", "space_id": None, "timetable": to_wire_dict(tt)}
+    ]
+
+
+async def test_timetable_deleted_fans_to_household(env):
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(TimetableDeleted(timetable_id="tt1"))
+    frames = [json.loads(m) for m in sock.sent]
+    assert frames == [
+        {"type": "timetable.deleted", "timetable_id": "tt1", "space_id": None}
+    ]
+
+
+async def test_space_timetable_frames_reach_members_only(env):
+    svc, bus, ws = env
+    member = _FakeWS()
+    nonmember = _FakeWS()
+    await ws.register("u3", member)  # member of sp-1, not a household user
+    await ws.register("u9", nonmember)
+    await bus.publish(TimetableSaved(timetable=_timetable(), space_id="sp-1"))
+    await bus.publish(TimetableDeleted(timetable_id="tt1", space_id="sp-1"))
+    types = [json.loads(m)["type"] for m in member.sent]
+    assert types == ["timetable.changed", "timetable.deleted"]
+    assert all(json.loads(m)["space_id"] == "sp-1" for m in member.sent)
+    assert nonmember.sent == []

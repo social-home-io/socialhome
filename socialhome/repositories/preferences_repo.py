@@ -71,6 +71,7 @@ class SqlitePreferencesRepo:
             feat_calendar=bool(row["feat_calendar"]),
             feat_presence=bool(row["feat_presence"]),
             feat_gallery=bool(row["feat_gallery"]),
+            feat_timetable=bool(row["feat_timetable"]),
             allow_text=bool(row["allow_text"]),
             allow_image=bool(row["allow_image"]),
             allow_video=bool(row["allow_video"]),
