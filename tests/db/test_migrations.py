@@ -904,3 +904,85 @@ async def test_0054_rebuild_preserves_rows_index_and_fk(tmp_path):
         assert left == []
     finally:
         await db.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_0063_timetable_tables_and_feature_columns(tmp_path):
+    """0063 adds the two timetable tables and the two feature toggles.
+
+    The toggle defaults are the behavioural contract: the household module
+    is ON by default (like every ``feat_*``), the space tab OFF until an
+    admin enables it. The space table cascades with its space and carries
+    the ``deleted_at`` tombstone; the household table has assignees.
+    """
+    db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        common = {
+            "id",
+            "name",
+            "color",
+            "week_start",
+            "tz",
+            "days_json",
+            "defaults_json",
+            "entries_json",
+            "overrides_json",
+            "valid_from",
+            "valid_until",
+            "excluded_weeks_json",
+            "version",
+            "created_by",
+            "updated_by",
+            "created_at",
+            "updated_at",
+        }
+        hh = {r["name"] for r in await db.fetchall("PRAGMA table_info(timetables)")}
+        assert hh == common | {"assignees_json"}
+        sp = {
+            r["name"] for r in await db.fetchall("PRAGMA table_info(space_timetables)")
+        }
+        assert sp == common | {"space_id", "deleted_at"}
+
+        idx = await db.fetchall("PRAGMA index_list(space_timetables)")
+        assert "idx_space_timetables_space" in {r["name"] for r in idx}
+
+        for table, col, default in (
+            ("preferences", "feat_timetable", "1"),
+            ("spaces", "feature_timetable", "0"),
+        ):
+            cols = {
+                r["name"]: r for r in await db.fetchall(f"PRAGMA table_info({table})")
+            }
+            assert col in cols, f"{table} missing {col}"
+            assert cols[col]["notnull"] == 1
+            assert str(cols[col]["dflt_value"]) == default
+
+        # CHECKs hold.
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.enqueue(
+                "INSERT INTO timetables(id, name, created_by, week_start)"
+                " VALUES('t', 'n', 'u', 3)"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.enqueue(
+                "INSERT INTO timetables(id, name, created_by, version)"
+                " VALUES('t', 'n', 'u', 0)"
+            )
+
+        # Deleting the space cascades its timetables.
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES(?,?,?,?,?)",
+            ("sp-tt", "S", "inst-x", "alice", "aabb" * 16),
+        )
+        await db.enqueue(
+            "INSERT INTO space_timetables(id, space_id, name, created_by)"
+            " VALUES('stt', 'sp-tt', 'n', 'u')"
+        )
+        row = await db.fetchone("SELECT feature_timetable FROM spaces WHERE id='sp-tt'")
+        assert row["feature_timetable"] == 0
+        await db.enqueue("DELETE FROM spaces WHERE id='sp-tt'")
+        assert await db.fetchall("SELECT 1 FROM space_timetables") == []
+    finally:
+        await db.shutdown()
