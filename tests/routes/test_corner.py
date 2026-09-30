@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 from .conftest import _auth
 
@@ -187,3 +188,103 @@ async def test_corner_followed_drops_stale_space(client):
     r = await client.get("/api/me/corner", headers=_auth(client._tok))
     body = await r.json()
     assert body["followed_spaces_feed"] == []
+
+
+# ─── Today's schedule (timetable + calendar overlay) ────────────────
+
+
+async def test_corner_empty_today_slices(client):
+    r = await client.get("/api/me/corner", headers=_auth(client._tok))
+    body = await r.json()
+    assert body["today_timetable"] == []
+    assert body["today_events"] == []
+
+
+async def test_corner_serialises_today_timetable_and_events(client):
+    h = _auth(client._tok)
+    r = await client.post(
+        "/api/timetables",
+        json={
+            "name": "Emma 3a",
+            "template": "school",
+            "days": [0, 1, 2, 3, 4, 5, 6],
+            "tz": "UTC",
+            "color": "sky",
+        },
+        headers=h,
+    )
+    assert r.status == 201
+    tt = (await r.json())["timetable"]
+    tt_id = tt["id"]
+    # Fill the template's untitled slots — empty slots never reach the card.
+    entries = [
+        {**e, "title": "Mathe"} if e["kind"] == "lesson" else e for e in tt["entries"]
+    ]
+    r = await client.put(
+        f"/api/timetables/{tt_id}/entries",
+        json={"version": tt["version"], "entries": entries},
+        headers=h,
+    )
+    assert r.status == 200
+
+    r = await client.post("/api/calendars", json={"name": "Me"}, headers=h)
+    cid = (await r.json())["id"]
+    midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    r = await client.post(
+        f"/api/calendars/{cid}/events",
+        json={
+            "summary": "Early swim",
+            "start": midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": (midnight + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        headers=h,
+    )
+    assert r.status == 201
+
+    r = await client.get("/api/me/corner", headers=h)
+    assert r.status == 200
+    body = await r.json()
+
+    [today] = body["today_timetable"]
+    assert today["timetable_id"] == tt_id
+    assert today["name"] == "Emma 3a"
+    assert today["color"] == "sky"
+    assert today["tz"] == "UTC"
+    assert today["date"] == midnight.date().isoformat()
+    first = today["lessons"][0]
+    assert {
+        "source_id",
+        "date",
+        "start",
+        "end",
+        "kind",
+        "label",
+        "title",
+        "room",
+        "status",
+        "original",
+        "icon",
+        "start_at",
+        "end_at",
+    } <= set(first)
+    assert first["start"] == "08:00"
+    assert first["status"] == "normal"
+    assert first["start_at"] == f"{midnight.date().isoformat()}T08:00:00+00:00"
+
+    # The morning event is on today's list even though it already ended,
+    # with the same shape as ``upcoming_events`` rows.
+    [ev] = body["today_events"]
+    assert ev["summary"] == "Early swim"
+    assert set(ev) == {
+        "id",
+        "calendar_id",
+        "summary",
+        "description",
+        "start",
+        "end",
+        "all_day",
+        "attendees",
+        "created_by",
+    }

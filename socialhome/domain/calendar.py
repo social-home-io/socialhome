@@ -9,7 +9,9 @@ calendar — in which case ``mirrored_from`` points to the source event id.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
+
+from ..utils.timezones import is_valid_tz, local_date
 
 
 @dataclass(slots=True, frozen=True)
@@ -255,3 +257,22 @@ class EventReminder:
     minutes_before: int
     fire_at: str
     sent_at: str | None = None
+
+
+def all_day_covers(event: CalendarEvent, day: date, fallback_tz: str) -> bool:
+    """Whether the all-day ``event`` covers the local date ``day``.
+
+    The event's dates are read in its own ``tz`` (``fallback_tz`` — the
+    household's — when it has none): from the start date to the date of
+    the last inclusive moment, ``end − 1 s``, so an ICS-style exclusive
+    midnight end doesn't spill into the next day. The backend twin of the
+    SPA's ``lastInclusiveMoment`` rule (``client/src/utils/calendar.ts``).
+    """
+    tz = event.tz if event.tz and is_valid_tz(event.tz) else fallback_tz
+    first = local_date(event.start, tz)
+    last = (
+        local_date(event.end - timedelta(seconds=1), tz)
+        if event.end > event.start
+        else first
+    )
+    return first <= day <= max(first, last)

@@ -38,10 +38,86 @@ describe('DashboardPage', () => {
     expect(wsTypes).toEqual(expect.arrayContaining([
       'notification.new', 'notification.unread_count',
       'calendar.created', 'calendar.updated', 'calendar.deleted',
+      'timetable.changed', 'timetable.deleted',
     ]))
     expect(wsTypes).not.toContain('notification.created')
     expect(wsTypes).not.toContain('notification.read_changed')
     expect(wsTypes.filter(t => t.startsWith('calendar.event.'))).toEqual([])
+  })
+
+  it('renders the merged schedule card instead of the Today card on a timetable day', async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { default: DashboardPage } = await import('./DashboardPage')
+    const { api } = await import('@/api')
+    const start = new Date()
+    start.setHours(23, 0, 0, 0)
+    const end = new Date(start)
+    end.setMinutes(45)
+    const ev = {
+      id: 'ev1', summary: 'Dentist', start: start.toISOString(), end: end.toISOString(),
+      all_day: false,
+    }
+    vi.mocked(api.get).mockImplementation(async (url: string) => (url === '/api/me/corner' ? {
+      unread_notifications: 0, unread_conversations: 0, upcoming_events: [ev],
+      presence: [], tasks_due_today: [],
+      bazaar: { active_listings: 0, pending_offers: 0, ending_soon: 0 },
+      followed_space_ids: [], followed_spaces_feed: [], today_events: [ev],
+      today_timetable: [{
+        timetable_id: 'tt1', name: 'Emma', color: null, tz: 'UTC', date: '2026-09-28',
+        lessons: [{
+          source_id: 'l1', date: '2026-09-28', start: '23:00', end: '23:45', kind: 'lesson',
+          label: null, title: 'Mathe', room: null, teacher: null, note: null, color: null,
+          icon: null, status: 'normal', override_id: null, original: null,
+          start_at: start.toISOString(), end_at: end.toISOString(),
+        }],
+      }],
+    } : []) as never)
+    const { container } = render(<DashboardPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-welcome-card--schedule')).not.toBeNull()
+    })
+    expect(container.textContent).toContain('Mathe')
+    expect(container.textContent).toContain('Dentist')
+    expect(container.querySelector('a.sh-welcome-card[href="/calendar"]')).toBeNull()
+    // The event overlaps the lesson → both rows are flagged.
+    expect(container.querySelectorAll('.sh-schedule__warn')).toHaveLength(2)
+  })
+
+  it('keeps "Up next" on a school day without calendar events today', async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { default: DashboardPage } = await import('./DashboardPage')
+    const { api } = await import('@/api')
+    const start = new Date()
+    start.setHours(23, 0, 0, 0)
+    const end = new Date(start)
+    end.setMinutes(45)
+    const later = new Date()
+    later.setDate(later.getDate() + 3)
+    vi.mocked(api.get).mockImplementation(async (url: string) => (url === '/api/me/corner' ? {
+      unread_notifications: 0, unread_conversations: 0,
+      upcoming_events: [{
+        id: 'e9', summary: 'Dinner', start: later.toISOString(), end: later.toISOString(),
+        all_day: false,
+      }],
+      presence: [], tasks_due_today: [],
+      bazaar: { active_listings: 0, pending_offers: 0, ending_soon: 0 },
+      followed_space_ids: [], followed_spaces_feed: [], today_events: [],
+      today_timetable: [{
+        timetable_id: 'tt1', name: 'Emma', color: null, tz: 'UTC', date: '2026-09-28',
+        lessons: [{
+          source_id: 'l1', date: '2026-09-28', start: '23:00', end: '23:45', kind: 'lesson',
+          label: null, title: 'Mathe', room: null, teacher: null, note: null, color: null,
+          icon: null, status: 'normal', override_id: null, original: null,
+          start_at: start.toISOString(), end_at: end.toISOString(),
+        }],
+      }],
+    } : []) as never)
+    const { container } = render(<DashboardPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-welcome-card--schedule')).not.toBeNull()
+    })
+    expect(container.textContent).toContain('Up next')
+    expect(container.textContent).toContain('Dinner')
   })
 
   it('module exports a default component', async () => {

@@ -10973,6 +10973,356 @@ a.sh-welcome-card:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── Today's schedule (timetable lessons + calendar events) ─────────
+ * TodayScheduleCard: one time column, a timetable-colour bar per lesson
+ * (``--tt-edge`` from .sh-timetable-c--<token>), a calendar dot per
+ * event, thin break dividers and a "now" line. Past rows fade; an
+ * event overlapping a lesson marks both with a honey ⚠. */
+.sh-welcome-card--schedule {
+  cursor: default;
+  --sh-schedule-time-w: 44px;
+  --sh-schedule-warn: color-mix(in srgb, var(--sh-warning) 62%, #000);
+  --sh-schedule-warn-bg: color-mix(in srgb, var(--sh-warning) 14%, transparent);
+}
+.sh-theme-dark .sh-welcome-card--schedule {
+  --sh-schedule-warn: var(--sh-warning);
+  --sh-schedule-warn-bg: color-mix(in srgb, var(--sh-warning) 16%, transparent);
+}
+.sh-schedule__status {
+  margin: 0;
+  font-size: var(--sh-font-size-md);
+  font-weight: 600;
+  color: var(--sh-text);
+  overflow-wrap: anywhere;
+}
+.sh-schedule__status--now::before,
+.sh-schedule__status--next::before {
+  content: '';
+  display: inline-block;
+  width: 8px; height: 8px;
+  margin-right: 8px;
+  vertical-align: 2px;
+  border-radius: 50%;
+  background: var(--sh-primary);
+}
+.sh-schedule__status--next::before { background: transparent; box-shadow: inset 0 0 0 2px var(--sh-primary); }
+.sh-schedule__soon { color: var(--sh-text-muted); font-weight: 500; }
+.sh-schedule__day {
+  display: block;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--sh-text-muted);
+}
+.sh-schedule__status--done,
+.sh-schedule__status--none { color: var(--sh-text-muted); font-weight: 500; }
+.sh-schedule__filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs);
+}
+.sh-schedule__filter-label,
+.sh-schedule__allday-label {
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+}
+.sh-schedule__filter-label { margin-right: 2px; }
+/* All-day events: a quiet labelled strip above the list, styled like
+ * event rows (dot + title), never like the filter's chip buttons. */
+.sh-schedule__allday {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
+  padding: 2px 0;
+  border-bottom: 1px dashed var(--sh-border);
+}
+.sh-schedule__allday-label {
+  flex: 0 0 var(--sh-schedule-time-w);
+  line-height: 44px;
+  white-space: nowrap;
+}
+.sh-schedule__allday-list {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--sh-space-md);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sh-schedule__allday-list > li { min-width: 0; max-width: 100%; }
+.sh-schedule__allday-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 44px;
+  color: inherit;
+  text-decoration: none;
+  border-radius: var(--sh-radius-sm);
+}
+.sh-schedule__allday-item:hover .sh-schedule__name { text-decoration: underline; }
+.sh-schedule__allday-item .sh-schedule__dot { margin-inline: 0; }
+.sh-schedule__earlier {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 4px;
+  margin-bottom: -6px;
+  border: none;
+  background: transparent;
+  color: var(--sh-primary-text);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: var(--sh-radius-sm);
+}
+.sh-schedule__earlier::before {
+  content: '';
+  width: 7px; height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-135deg) translate(-1px, -1px);
+}
+.sh-schedule__earlier[aria-expanded="true"]::before { transform: rotate(45deg) translate(-2px, -2px); }
+.sh-schedule__earlier:hover { text-decoration: underline; }
+.sh-schedule__earlier:focus-visible,
+.sh-schedule__allday-item:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-schedule__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: var(--sh-radius-full);
+  border: 1px solid var(--sh-border);
+  background: var(--sh-bg-tertiary, rgba(0, 0, 0, 0.04));
+  color: inherit;
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--sh-transition-fast), border-color var(--sh-transition-fast);
+}
+.sh-schedule__chip:hover { border-color: var(--sh-border-strong); }
+.sh-schedule__chip[aria-pressed="true"] {
+  background: var(--sh-primary-soft);
+  border-color: var(--sh-primary);
+  color: var(--sh-primary-on-soft);
+  font-weight: 700;
+}
+.sh-schedule__chip:focus-visible,
+.sh-schedule__link:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+}
+.sh-schedule__chip-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--tt-edge);
+}
+.sh-schedule__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sh-schedule__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 44px;
+  padding: 4px 0;
+  font-size: var(--sh-font-size-md);
+}
+.sh-schedule__row + .sh-schedule__row { border-top: 1px dashed var(--sh-border); }
+.sh-schedule__link {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  color: inherit;
+  text-decoration: none;
+  border-radius: var(--sh-radius-sm);
+}
+.sh-schedule__link:hover .sh-schedule__name { text-decoration: underline; }
+.sh-welcome-card--schedule.sh-schedule--12h { --sh-schedule-time-w: 68px; }
+.sh-schedule__time {
+  flex: 0 0 var(--sh-schedule-time-w);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-primary-text);
+}
+.sh-schedule__bar {
+  flex: 0 0 4px;
+  align-self: stretch;
+  margin-block: 4px;
+  border-radius: 2px;
+  background: var(--tt-edge);
+}
+.sh-timetable-c--neutral .sh-schedule__bar { background: var(--sh-primary); }
+.sh-schedule__dot {
+  flex: 0 0 10px;
+  width: 10px; height: 10px;
+  margin-inline: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--sh-text-muted);
+  box-sizing: border-box;
+}
+.sh-schedule__icon {
+  flex: 0 0 auto;
+  font-size: 1.25em;
+  line-height: 1;
+}
+.sh-schedule__row.is-picture { min-height: 60px; }
+.sh-schedule__row.is-picture .sh-schedule__icon {
+  display: inline-grid;
+  place-items: center;
+  width: 48px; height: 48px;
+  font-size: 2rem;
+  font-weight: 700;
+  border-radius: var(--sh-radius-md);
+  background: var(--tt-bg);
+  color: var(--tt-fg);
+}
+.sh-schedule__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.sh-schedule__title {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+.sh-schedule__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-schedule__meta {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-schedule__meta--change { color: var(--sh-text); font-weight: 700; }
+.sh-schedule__label {
+  flex: 0 0 auto;
+  min-width: 28px;
+  padding: 1px 6px;
+  border-radius: var(--sh-radius-full);
+  background: var(--tt-bg);
+  color: var(--tt-fg);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.sh-schedule__warn {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: var(--sh-schedule-warn-bg);
+  color: var(--sh-schedule-warn);
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.sh-schedule__row.has-overlap .sh-schedule__time { color: var(--sh-schedule-warn); }
+.sh-schedule__row.is-cancelled .sh-schedule__name {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  color: var(--sh-text-muted);
+}
+.sh-schedule__row.is-cancelled .sh-schedule__bar {
+  background: repeating-linear-gradient(180deg, var(--tt-edge) 0 3px, transparent 3px 6px);
+}
+.sh-schedule__row.is-cancelled .sh-schedule__icon { opacity: 0.55; filter: grayscale(1); }
+.sh-schedule__row.is-changed .sh-schedule__bar { box-shadow: 0 0 0 2px var(--sh-bg-elev-1, var(--sh-bg-secondary)), 0 0 0 3px var(--tt-edge); }
+.sh-schedule__row.is-past > :not(.sr-only),
+.sh-schedule__row.is-past .sh-schedule__link > :not(.sr-only) { opacity: 0.5; }
+.sh-schedule__row.is-current .sh-schedule__name { font-weight: 700; }
+.sh-schedule__row--break {
+  min-height: 0;
+  padding: 2px 0;
+}
+.sh-schedule__break {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  width: 100%;
+  padding-left: calc(var(--sh-schedule-time-w) + var(--sh-space-sm));
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+}
+.sh-schedule__break::after {
+  content: '';
+  flex: 1;
+  border-top: 1px dotted var(--sh-border-strong);
+}
+.sh-schedule__now {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  height: 22px;
+  margin: 0;
+}
+.sh-schedule__now::after {
+  content: '';
+  flex: 1;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--sh-primary);
+}
+.sh-schedule__now-time {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-primary);
+  color: #fff;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+.sh-theme-dark .sh-schedule__now-time { color: #1b0f0a; }
+.sh-schedule__now + .sh-schedule__row { border-top-color: transparent; }
+.sh-schedule__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sh-space-xs) var(--sh-space-md);
+}
+.sh-schedule__links .sh-welcome-card__more {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  text-decoration: none;
+}
+.sh-schedule__links .sh-welcome-card__more:hover { text-decoration: underline; }
+.sh-schedule__arrow { margin-inline-start: 0.3em; }
+
 /* All-clear — the page when nothing is waiting.  Calming, not empty. */
 .sh-welcome-allclear {
   display: flex;

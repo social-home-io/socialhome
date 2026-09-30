@@ -2186,3 +2186,94 @@ class TestIdCharset:
                 assignees=("uid-alice", "u_bob"),
             )
         )
+
+
+# ─── Today on the absolute time line (home screen) ───────────────────────
+
+
+class TestTodayTimetable:
+    def test_lessons_carry_utc_instants(self):
+        tt = copy.replace(std(), tz="Europe/Berlin", color="sky")
+        today = tt_mod.today_timetable(tt, MON)
+        assert today is not None
+        assert (today.timetable_id, today.name, today.color, today.tz) == (
+            "tt-1",
+            "Anna 5b",
+            "sky",
+            "Europe/Berlin",
+        )
+        assert today.date == MON
+        first = today.lessons[0]
+        assert first.lesson.title == "Mathe"
+        assert first.start_at == datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc)
+        assert first.end_at == datetime(2026, 9, 28, 6, 45, tzinfo=timezone.utc)
+        assert [ls.lesson.source_id for ls in today.lessons] == ["m1", "m2", "mb"]
+
+    def test_invalid_day_is_none(self):
+        tt = copy.replace(std(), validity=TimetableValidity(excluded_weeks=(MON,)))
+        assert tt_mod.today_timetable(tt, MON) is None
+        assert tt_mod.today_timetable(std(), SAT) is None
+
+    def test_cancelled_lessons_are_kept(self):
+        tt = copy.replace(
+            std(),
+            overrides=(
+                TimetableOverride(
+                    id="o1", date=MON, kind=OverrideKind.CANCEL, entry_id="m2"
+                ),
+            ),
+        )
+        today = tt_mod.today_timetable(tt, MON)
+        assert today is not None
+        status = {ls.lesson.source_id: ls.lesson.status for ls in today.lessons}
+        assert status["m2"] is LessonStatus.CANCELLED
+
+    def test_untitled_slots_are_dropped_before_the_cap(self):
+        tt = tt_(
+            entries=(
+                ent("u1", 0, "07:00", "07:45", label="0."),  # untitled slot
+                ent("u2", 0, "07:50", "08:35", label="1."),
+                ent("i1", 0, "08:40", "09:25", icon="🔢"),  # icon only
+                ent("m1", 0, "09:30", "10:15", title="Mathe"),
+                ent("b1", 0, "10:15", "10:30", kind=EntryKind.BREAK),
+            )
+        )
+        today = tt_mod.today_timetable(tt, MON, max_lessons=2)
+        assert today is not None
+        assert [ls.lesson.source_id for ls in today.lessons] == ["i1", "m1"]
+        full = tt_mod.today_timetable(tt, MON)
+        assert full is not None
+        assert [ls.lesson.source_id for ls in full.lessons] == ["i1", "m1", "b1"]
+
+    def test_capped(self):
+        tt = copy.replace(std(), tz="UTC")
+        today = tt_mod.today_timetable(tt, MON, max_lessons=2)
+        assert today is not None
+        assert [ls.lesson.source_id for ls in today.lessons] == ["m1", "m2"]
+
+    def test_dst_day(self):
+        # A Sunday lesson across the spring-forward gap stays ordered.
+        tt = tt_(
+            tz="Europe/Berlin",
+            days=(6,),
+            entries=(ent("s1", 6, "01:30", "02:30", title="Nacht"),),
+        )
+        today = tt_mod.today_timetable(tt, date(2026, 3, 29))
+        assert today is not None
+        ls = today.lessons[0]
+        assert ls.start_at == datetime(2026, 3, 29, 0, 30, tzinfo=timezone.utc)
+        assert ls.end_at == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+        assert ls.end_at > ls.start_at
+
+    def test_to_dict_flattens_the_lesson(self):
+        today = tt_mod.today_timetable(copy.replace(std(), tz="Europe/Berlin"), MON)
+        assert today is not None
+        d = tt_mod.today_timetable_to_dict(today)
+        assert set(d) == {"timetable_id", "name", "color", "tz", "date", "lessons"}
+        assert d["date"] == "2026-09-28"
+        first = d["lessons"][0]
+        assert first["title"] == "Mathe"
+        assert first["start"] == "08:00"
+        assert first["status"] == "normal"
+        assert first["start_at"] == "2026-09-28T06:00:00+00:00"
+        assert first["end_at"] == "2026-09-28T06:45:00+00:00"

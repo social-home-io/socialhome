@@ -11,6 +11,8 @@
  * own data fetching, hero copy, and section orchestration.
  */
 import { Avatar } from '@/components/Avatar'
+import { t } from '@/i18n/i18n'
+import type { EffectiveLesson, TimetableColor } from '@/types'
 
 // ─── Types — match the slice of ``GET /api/me/corner`` we render ───
 
@@ -41,12 +43,32 @@ export interface WelcomeFollowedPost {
   created_at: string
 }
 
+/** An effective lesson placed on the time line (UTC ISO instants). */
+export interface TodayLesson extends EffectiveLesson {
+  start_at: string
+  end_at: string
+}
+
+/** One timetable's lessons for today (``today_timetable`` row). */
+export interface TodayTimetable {
+  timetable_id: string
+  name: string
+  color: TimetableColor | null
+  tz: string
+  date: string
+  lessons: TodayLesson[]
+}
+
 export interface WelcomeBundle {
   unread_notifications: number
   unread_conversations: number
   upcoming_events: WelcomeEvent[]
   tasks_due_today: WelcomeTask[]
   followed_spaces_feed: WelcomeFollowedPost[]
+  /** Today's lessons of the caller's timetables in effect today. */
+  today_timetable: TodayTimetable[]
+  /** Every event overlapping today — including this morning's. */
+  today_events: WelcomeEvent[]
 }
 
 // ─── Time / formatting helpers ─────────────────────────────────────
@@ -177,8 +199,14 @@ export function dayShape(
   tasks: WelcomeTask[],
   upNext: WelcomeEvent[],
   b: Pick<WelcomeBundle, 'unread_notifications' | 'unread_conversations'>,
+  lessons = 0,
 ): string {
   const parts: string[] = []
+  if (lessons > 0) {
+    parts.push(t(lessons === 1 ? 'welcome.schedule.shape_one' : 'welcome.schedule.shape', {
+      n: String(lessons),
+    }))
+  }
   if (events.length > 0) {
     parts.push(events.length === 1 ? '1 event' : `${events.length} events`)
   }

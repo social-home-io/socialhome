@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -14,6 +14,7 @@ from socialhome.domain.calendar import (
     CalendarEventUpdate,
     CalendarRSVP,
     RSVPStatus,
+    all_day_covers,
 )
 
 
@@ -169,3 +170,58 @@ def test_calendar_event_copy_is_frozen():
     )
     with pytest.raises((AttributeError, TypeError)):
         copy.event_id = "evt-2"  # type: ignore[misc]
+
+
+# ─── all_day_covers ──────────────────────────────────────────────────────
+
+
+def _all_day(start: str, end: str, tz: str = "UTC") -> CalendarEvent:
+    return CalendarEvent(
+        id="e",
+        calendar_id="c",
+        summary="x",
+        start=datetime.fromisoformat(start),
+        end=datetime.fromisoformat(end),
+        created_by="u",
+        all_day=True,
+        tz=tz,
+    )
+
+
+def test_all_day_yesterday_ics_event_is_not_today_in_berlin():
+    # ICS all-day for 29 Sep: 00:00Z … 00:00Z next day (exclusive end).
+    ev = _all_day("2026-09-29T00:00:00+00:00", "2026-09-30T00:00:00+00:00")
+    assert all_day_covers(ev, date(2026, 9, 30), "Europe/Berlin") is False
+    assert all_day_covers(ev, date(2026, 9, 29), "Europe/Berlin") is True
+
+
+def test_all_day_tomorrow_is_not_today_west_of_utc():
+    ev = _all_day("2026-10-01T00:00:00+00:00", "2026-10-02T00:00:00+00:00")
+    assert all_day_covers(ev, date(2026, 9, 30), "America/Bogota") is False
+    assert all_day_covers(ev, date(2026, 10, 1), "America/Bogota") is True
+
+
+def test_all_day_multi_day_covers_every_day_in_its_own_zone():
+    # SPA shape: 00:00 … 23:59 Berlin, 28 Sep – 2 Oct.
+    ev = _all_day(
+        "2026-09-27T22:00:00+00:00", "2026-10-02T21:59:00+00:00", "Europe/Berlin"
+    )
+    assert [all_day_covers(ev, date(2026, 9, d), "UTC") for d in (27, 28, 30)] == [
+        False,
+        True,
+        True,
+    ]
+    assert all_day_covers(ev, date(2026, 10, 2), "UTC") is True
+    assert all_day_covers(ev, date(2026, 10, 3), "UTC") is False
+
+
+def test_all_day_without_a_zone_uses_the_fallback():
+    ev = _all_day("2026-09-29T22:00:00+00:00", "2026-09-30T21:59:00+00:00", tz="")
+    assert all_day_covers(ev, date(2026, 9, 30), "Europe/Berlin") is True
+    assert all_day_covers(ev, date(2026, 9, 29), "Europe/Berlin") is False
+    assert all_day_covers(ev, date(2026, 9, 29), "UTC") is True
+
+
+def test_all_day_degenerate_end_is_the_start_day():
+    ev = _all_day("2026-09-30T00:00:00+00:00", "2026-09-30T00:00:00+00:00")
+    assert all_day_covers(ev, date(2026, 9, 30), "UTC") is True

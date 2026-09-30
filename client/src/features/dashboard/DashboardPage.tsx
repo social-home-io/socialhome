@@ -41,6 +41,8 @@ import {
   type WelcomeBundle,
   type WelcomeFollowedPost,
 } from '../welcome/cards'
+import { TodayScheduleCard } from '../welcome/TodayScheduleCard'
+import { activeTimetables, lessonCount } from '../welcome/schedule'
 
 interface CornerPresence {
   user_id: string
@@ -75,6 +77,8 @@ const EMPTY: CornerBundle = {
   bazaar: { active_listings: 0, pending_offers: 0, ending_soon: 0 },
   followed_space_ids: [],
   followed_spaces_feed: [],
+  today_timetable: [],
+  today_events: [],
 }
 
 export default function DashboardPage() {
@@ -109,6 +113,7 @@ export default function DashboardPage() {
       'dm.message',
       'calendar.created', 'calendar.updated',
       'calendar.deleted',
+      'timetable.changed', 'timetable.deleted',
       'presence.updated',
       'task.created', 'task.updated', 'task.deleted',
       'task.completed', 'task.assigned',
@@ -151,14 +156,20 @@ export default function DashboardPage() {
   }
 
   const b = bundle ?? EMPTY
-  const today = todaysEvents(b.upcoming_events)
+  // With a timetable in effect today the merged schedule card replaces
+  // the Today card — it lists today's events (this morning's too).
+  const schedule = activeTimetables(b.today_timetable ?? [])
+  const hasSchedule = schedule.length > 0
+  const today = hasSchedule ? (b.today_events ?? []) : todaysEvents(b.upcoming_events)
+  const lessons = lessonCount(schedule)
   const upNext = today.length === 0 ? nextEvents(b.upcoming_events) : []
   const tasks = b.tasks_due_today
   const catchUp = b.followed_spaces_feed.slice(0, 3)
   // Corner has more surfaces than Welcome, so "all clear" applies
   // only when every section is empty (presence and bazaar included).
   const cornerAllClear =
-    today.length === 0
+    !hasSchedule
+    && today.length === 0
     && upNext.length === 0
     && tasks.length === 0
     && catchUp.length === 0
@@ -174,7 +185,7 @@ export default function DashboardPage() {
     : timeOfDayGreeting()
   const heroSub = cornerAllClear
     ? `${longDate(new Date())} · all clear`
-    : `${longDate(new Date())} · ${dayShape(today, tasks, upNext, b)}`
+    : `${longDate(new Date())} · ${dayShape(today, tasks, upNext, b, lessons)}`
 
   // Presence is "showing on the corner-only" — Welcome doesn't have
   // it, so the card lives here even on otherwise-empty days.
@@ -190,7 +201,9 @@ export default function DashboardPage() {
 
       <div class="sh-welcome-stack">
         {/* ── Welcome-shared cards ───────────────────────────────── */}
-        {today.length > 0 && <TodayCard events={today} />}
+        {hasSchedule
+          ? <TodayScheduleCard timetables={schedule} events={today} />
+          : today.length > 0 && <TodayCard events={today} />}
         {today.length === 0 && upNext.length > 0 && (
           <UpNextCard events={upNext} />
         )}

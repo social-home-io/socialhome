@@ -14,6 +14,7 @@ import dataclasses
 from aiohttp import web
 
 from ..app_keys import corner_service_key, media_signer_key
+from ..domain.timetable import today_timetable_to_dict
 from ..media_signer import sign_media_urls_in
 from ..security import sanitise_for_api
 from .base import BaseView
@@ -49,6 +50,8 @@ def _bundle_to_dict(bundle) -> dict:
     d["followed_spaces_feed"] = [
         dataclasses.asdict(p) for p in bundle.followed_spaces_feed
     ]
+    d["today_timetable"] = [today_timetable_to_dict(t) for t in bundle.today_timetable]
+    d["today_events"] = [_event_to_dict(e) for e in bundle.today_events]
     return sanitise_for_api(d)
 
 
