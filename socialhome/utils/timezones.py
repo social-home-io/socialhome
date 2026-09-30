@@ -14,9 +14,13 @@ Two entry points, matching the two policies already in the codebase:
   reject with a domain error (``update_event``).
 * :func:`coerce_tz` — validate-or-``"UTC"``, for untrusted input where
   the event must still land. Fails closed on the *value*, not the event.
+
+Plus the wall-clock ↔ instant helpers every "today in zone X" caller
+shares: :func:`zone_of`, :func:`local_date`, :func:`local_instant`.
 """
 
 import logging
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 log = logging.getLogger(__name__)
@@ -68,3 +72,26 @@ def coerce_tz(value: object, *, context: str) -> str:
         DEFAULT_TZ,
     )
     return DEFAULT_TZ
+
+
+def zone_of(tz: str) -> ZoneInfo | timezone:
+    """The zone for an IANA name — UTC when it is unknown."""
+    return ZoneInfo(tz) if is_valid_tz(tz) else timezone.utc
+
+
+def local_date(now: datetime, tz: str) -> date:
+    """The calendar date of the instant ``now`` in ``tz``."""
+    return now.astimezone(zone_of(tz)).date()
+
+
+def local_instant(d: date, t: time, tz: str) -> datetime:
+    """The UTC instant of wall-clock ``t`` on ``d`` in ``tz``.
+
+    Deterministic across DST changes: an ambiguous time (the autumn
+    fold) takes its first occurrence (``fold=0``); a nonexistent time
+    (the spring gap) is shifted forward by the gap — zoneinfo applies
+    the pre-transition offset, so 02:30 in a 02:00→03:00 gap becomes
+    03:30 local.
+    """
+    local = datetime.combine(d, t).replace(tzinfo=zone_of(tz), fold=0)
+    return local.astimezone(timezone.utc)

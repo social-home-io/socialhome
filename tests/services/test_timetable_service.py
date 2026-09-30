@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import TimetableDeleted, TimetableSaved
 from socialhome.domain.preferences import FeatureDisabledError, HouseholdPreferences
+from socialhome.domain.timetable import entry_to_dict as td_entry_to_dict
 from socialhome.domain.timetable import (
     EntryKind,
     LessonStatus,
@@ -725,3 +727,122 @@ async def test_duplicate_drops_no_longer_active_assignees(env):
     await env.db.enqueue("UPDATE users SET state='inactive' WHERE user_id='u-ben'")
     dup = await env.svc.duplicate(src.id, name="copy", by="u-anna")
     assert dup.assignees == ("u-anna",)
+
+
+# ─── today_for_user (home screen) ────────────────────────────────────────
+
+
+def _at(d, hhmm="07:00"):
+    """``hhmm`` UTC on date ``d`` as an aware datetime."""
+    h, m = hhmm.split(":")
+    return datetime(d.year, d.month, d.day, int(h), int(m), tzinfo=timezone.utc)
+
+
+async def _titled(env, **kw) -> Timetable:
+    """A school template whose lessons all have a title (a filled plan)."""
+    tt = await env.svc.create(**kw)
+    entries = [
+        {**td_entry_to_dict(e), "title": "Fach"}
+        if e.kind is EntryKind.LESSON
+        else td_entry_to_dict(e)
+        for e in tt.entries
+    ]
+    return await env.svc.replace_entries(
+        tt.id, version=tt.version, by="u-anna", entries=entries
+    )
+
+
+async def test_today_for_user_assigned_and_valid(env):
+    anna = await _titled(env, name="Anna", created_by="u-anna")
+    await _titled(env, name="Ben", created_by="u-anna", assignees=["u-ben"])
+    got = await env.svc.today_for_user("u-anna", _at(MON))
+    assert [t.timetable_id for t in got] == [anna.id]
+    assert got[0].date == MON
+    # School template: 08:00 Berlin (CEST/CET) → 06:00Z / 07:00Z.
+    first = got[0].lessons[0]
+    assert first.lesson.start == time(8, 0)
+    assert first.start_at.utcoffset() == timedelta(0)
+    assert first.start_at.astimezone(ZoneInfo("Europe/Berlin")).time() == time(8, 0)
+    # Saturday isn't a school day.
+    assert await env.svc.today_for_user("u-anna", _at(MON + timedelta(days=5))) == ()
+
+
+async def test_today_for_user_uses_the_timetable_zone(env):
+    # 23:30 UTC on Sunday is already Monday in Berlin.
+    await _titled(env, name="Anna", created_by="u-anna")
+    sunday_late = _at(MON - timedelta(days=1), "23:30")
+    got = await env.svc.today_for_user("u-anna", sunday_late)
+    assert len(got) == 1 and got[0].date == MON
+
+
+async def test_today_for_user_skips_holiday_week(env):
+    anna = await _titled(env, name="Anna", created_by="u-anna")
+    await env.svc.set_validity(
+        anna.id,
+        version=anna.version,
+        by="u-anna",
+        valid_from=None,
+        valid_until=None,
+        excluded_weeks=[MON],
+    )
+    assert await env.svc.today_for_user("u-anna", _at(MON)) == ()
+
+
+async def test_today_for_user_is_empty_when_feature_off(env):
+    await _titled(env, name="Anna", created_by="u-anna")
+    env.prefs.enabled = False
+    assert await env.svc.today_for_user("u-anna", _at(MON)) == ()
+
+
+async def test_today_for_user_caps_timetables(env):
+    for i in range(ts.MAX_TODAY_TIMETABLES + 2):
+        await _titled(env, name=f"T{i}", created_by="u-anna")
+    got = await env.svc.today_for_user("u-anna", _at(MON))
+    assert len(got) == ts.MAX_TODAY_TIMETABLES
+
+
+async def test_today_for_user_extra_timetables_dedupe(env):
+    anna = await _titled(env, name="Anna", created_by="u-anna")
+    pinned = await _titled(env, name="Pinned", created_by="u-anna", assignees=[])
+    got = await env.svc.today_for_user("u-anna", _at(MON), extra=[pinned, anna])
+    assert [t.timetable_id for t in got] == [anna.id, pinned.id]
+
+
+async def test_today_for_user_skips_a_day_without_slots(env):
+    await _empty(env)  # valid on Monday, but no entries
+    assert await env.svc.today_for_user("u-anna", _at(MON)) == ()
+
+
+async def test_today_for_user_unfilled_templates_do_not_use_up_the_cap(env):
+    # Three untouched school templates (untitled slots only) …
+    for i in range(ts.MAX_TODAY_TIMETABLES):
+        await env.svc.create(name=f"Blank {i}", created_by="u-anna")
+    # … and one real timetable, created last.
+    real = await _empty(env, name="Real")
+    real = await env.svc.add_entry(
+        real.id,
+        version=real.version,
+        by="u-anna",
+        fields={"weekday": 0, "start": "08:00", "end": "08:45", "title": "Mathe"},
+    )
+    got = await env.svc.today_for_user("u-anna", _at(MON))
+    assert [t.timetable_id for t in got] == [real.id]
+
+
+async def test_today_for_user_one_bad_timetable_does_not_empty_the_slice(
+    env, monkeypatch, caplog
+):
+    bad = await _titled(env, name="Bad", created_by="u-anna")
+    good = await _titled(env, name="Good", created_by="u-anna")
+    real = ts.td.today_timetable
+
+    def boom(tt, d, **kw):
+        if tt.id == bad.id:
+            raise ValueError("corrupt row")
+        return real(tt, d, **kw)
+
+    monkeypatch.setattr(ts.td, "today_timetable", boom)
+    with caplog.at_level("WARNING"):
+        got = await env.svc.today_for_user("u-anna", _at(MON))
+    assert [t.timetable_id for t in got] == [good.id]
+    assert any("corrupt row" in r.getMessage() for r in caplog.records)

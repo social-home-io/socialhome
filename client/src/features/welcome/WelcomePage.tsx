@@ -37,6 +37,8 @@ import {
   todaysEvents,
   type WelcomeBundle,
 } from './cards'
+import { TodayScheduleCard } from './TodayScheduleCard'
+import { activeTimetables, lessonCount } from './schedule'
 
 const EMPTY: WelcomeBundle = {
   unread_notifications: 0,
@@ -44,6 +46,8 @@ const EMPTY: WelcomeBundle = {
   upcoming_events: [],
   tasks_due_today: [],
   followed_spaces_feed: [],
+  today_timetable: [],
+  today_events: [],
 }
 
 export default function WelcomePage() {
@@ -76,6 +80,7 @@ export default function WelcomePage() {
       'dm.message',
       'calendar.created', 'calendar.updated',
       'calendar.deleted',
+      'timetable.changed', 'timetable.deleted',
       'task.created', 'task.updated', 'task.deleted', 'task.completed',
     ]
     const offs = events.map(e => ws.on(e, debounced))
@@ -112,12 +117,18 @@ export default function WelcomePage() {
   }
 
   const b = bundle ?? EMPTY
-  const today = todaysEvents(b.upcoming_events)
+  // With a timetable in effect today the merged schedule card replaces
+  // the Today card — it lists today's events (this morning's too).
+  const schedule = activeTimetables(b.today_timetable ?? [])
+  const hasSchedule = schedule.length > 0
+  const today = hasSchedule ? (b.today_events ?? []) : todaysEvents(b.upcoming_events)
+  const lessons = lessonCount(schedule)
   const upNext = today.length === 0 ? nextEvents(b.upcoming_events) : []
   const tasks = b.tasks_due_today
   const catchUp = b.followed_spaces_feed.slice(0, 3)
   const allClear =
-    today.length === 0
+    !hasSchedule
+    && today.length === 0
     && upNext.length === 0
     && tasks.length === 0
     && catchUp.length === 0
@@ -130,7 +141,7 @@ export default function WelcomePage() {
     : timeOfDayGreeting()
   const heroSub = allClear
     ? `${longDate(new Date())} · all clear`
-    : `${longDate(new Date())} · ${dayShape(today, tasks, upNext, b)}`
+    : `${longDate(new Date())} · ${dayShape(today, tasks, upNext, b, lessons)}`
 
   return (
     <div class="sh-welcome">
@@ -143,7 +154,9 @@ export default function WelcomePage() {
         <AllClearCard />
       ) : (
         <div class="sh-welcome-stack">
-          {today.length > 0 && (
+          {hasSchedule ? (
+            <TodayScheduleCard timetables={schedule} events={today} />
+          ) : today.length > 0 && (
             <TodayCard events={today} />
           )}
           {today.length === 0 && upNext.length > 0 && (

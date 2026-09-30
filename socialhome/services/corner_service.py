@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import orjson
 
-from ..domain.calendar import CalendarEvent
+from ..domain.calendar import CalendarEvent, all_day_covers
 from ..domain.post import BazaarStatus
 from ..domain.presence import PersonPresence
 from ..domain.task import Task
+from ..domain.timetable import TodayTimetable
+from ..utils.timezones import DEFAULT_TZ, local_date, local_instant
 
 if TYPE_CHECKING:
     from ..repositories.bazaar_repo import AbstractBazaarRepo
@@ -33,13 +35,17 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.task_repo import AbstractTaskRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from ..services.preferences_service import PreferencesService
     from ..services.presence_service import PresenceService
+    from ..services.timetable_service import TimetableService
 
 log = logging.getLogger(__name__)
 
 
 #: Cap the per-slice list sizes so a power-user's dashboard stays light.
 MAX_EVENTS = 8
+#: Events on today's merged schedule (from local midnight, not from now).
+MAX_TODAY_EVENTS = 20
 MAX_TASKS = 8
 UPCOMING_DAYS = 7
 
@@ -90,6 +96,11 @@ class CornerBundle:
     bazaar: BazaarCornerSummary
     followed_space_ids: tuple[str, ...]
     followed_spaces_feed: tuple[FollowedSpacePost, ...]
+    #: Today's lessons of the caller's timetables in effect today.
+    today_timetable: tuple[TodayTimetable, ...] = ()
+    #: The caller's events overlapping today (household-tz day bounds) —
+    #: unlike ``upcoming_events`` this includes this morning's.
+    today_events: tuple[CalendarEvent, ...] = ()
 
 
 class CornerService:
@@ -105,6 +116,8 @@ class CornerService:
         "_users",
         "_spaces",
         "_space_posts",
+        "_timetables",
+        "_preferences",
     )
 
     def __init__(
@@ -119,6 +132,8 @@ class CornerService:
         user_repo: "AbstractUserRepo",
         space_repo: "AbstractSpaceRepo",
         space_post_repo: "AbstractSpacePostRepo",
+        timetable_service: "TimetableService | None" = None,
+        preferences_service: "PreferencesService | None" = None,
     ) -> None:
         self._notifications = notification_repo
         self._conversations = conversation_repo
@@ -129,25 +144,37 @@ class CornerService:
         self._users = user_repo
         self._spaces = space_repo
         self._space_posts = space_post_repo
+        self._timetables = timetable_service
+        self._preferences = preferences_service
 
     async def build(
         self,
         *,
         user_id: str,
         username: str,
+        now: datetime | None = None,
     ) -> CornerBundle:
+        now = now or datetime.now(timezone.utc)
         unread_notifications = await _safe_int(
             "notifications.count_unread",
             self._notifications.count_unread(user_id),
         )
         unread_conversations = await self._count_unread_dms(username)
-        upcoming_events = await self._upcoming_events(username)
+        upcoming_events = await self._upcoming_events(username, now)
         presence = await self._presence_list()
         tasks_due = await self._tasks_due_today(user_id)
         bazaar_summary = await self._bazaar_summary(user_id)
         followed_ids, followed_feed = await self._followed_spaces_feed(
             username, user_id
         )
+        # Two different "todays", on purpose: each timetable's lessons are
+        # for today in *that timetable's* tz (a Berlin school plan seen
+        # from a UTC household is still Monday's plan at 00:30 Berlin),
+        # while ``today_events`` is today in the *household* tz — the
+        # same local day the calendar views use. ``tasks_due_today``
+        # predates both and still uses the server's ``date.today()``.
+        today_timetable = await self._today_timetable(user_id, now)
+        today_events = await self._today_events(username, now)
         return CornerBundle(
             unread_notifications=unread_notifications,
             unread_conversations=unread_conversations,
@@ -157,6 +184,8 @@ class CornerService:
             bazaar=bazaar_summary,
             followed_space_ids=followed_ids,
             followed_spaces_feed=followed_feed,
+            today_timetable=today_timetable,
+            today_events=today_events,
         )
 
     # ── Per-slice helpers ──────────────────────────────────────────────
@@ -181,8 +210,8 @@ class CornerService:
     async def _upcoming_events(
         self,
         username: str,
+        now: datetime,
     ) -> tuple[CalendarEvent, ...]:
-        now = datetime.now(timezone.utc)
         window_end = now + timedelta(days=UPCOMING_DAYS)
         try:
             events = await self._calendar.list_events_for_user_in_range(
@@ -195,6 +224,58 @@ class CornerService:
             return ()
         events.sort(key=lambda e: e.start)
         return tuple(events[:MAX_EVENTS])
+
+    async def _household_tz(self) -> str:
+        if self._preferences is None:
+            return DEFAULT_TZ
+        try:
+            return (await self._preferences.get_household()).tz
+        except Exception as exc:  # defensive — fall back to UTC
+            log.warning("corner: household tz failed: %s", exc)
+            return DEFAULT_TZ
+
+    async def _today_timetable(
+        self,
+        user_id: str,
+        now: datetime,
+    ) -> tuple[TodayTimetable, ...]:
+        if self._timetables is None:
+            return ()
+        try:
+            return await self._timetables.today_for_user(user_id, now)
+        except Exception as exc:  # defensive — one widget never fails the page
+            log.warning("corner: today's timetable failed: %s", exc)
+            return ()
+
+    async def _today_events(
+        self,
+        username: str,
+        now: datetime,
+    ) -> tuple[CalendarEvent, ...]:
+        """The caller's events overlapping today in the household tz.
+
+        Same repo read (and so the same visibility) as
+        :meth:`_upcoming_events`, but the window opens at local midnight
+        so this morning's events stay on the merged schedule.
+        """
+        tz = await self._household_tz()
+        today = local_date(now, tz)
+        start = local_instant(today, time(0, 0), tz)
+        end = local_instant(today + timedelta(days=1), time(0, 0), tz)
+        try:
+            events = await self._calendar.list_events_for_user_in_range(
+                username,
+                start=start,
+                end=end,
+            )
+        except Exception as exc:  # defensive
+            log.warning("corner: today's events failed: %s", exc)
+            return ()
+        # An all-day row overlapping the window may still be another
+        # day's (an ICS midnight-UTC day seen from Berlin / Bogotá).
+        events = [e for e in events if not e.all_day or all_day_covers(e, today, tz)]
+        events.sort(key=lambda e: e.start)
+        return tuple(events[:MAX_TODAY_EVENTS])
 
     async def _presence_list(self) -> tuple[PersonPresence, ...]:
         try:

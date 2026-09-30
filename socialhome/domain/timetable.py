@@ -34,7 +34,7 @@ from typing import Any, Final
 
 import orjson
 
-from ..utils.timezones import is_valid_tz
+from ..utils.timezones import is_valid_tz, local_instant
 
 
 class EntryKind(StrEnum):
@@ -79,6 +79,8 @@ TIMETABLE_COLORS: Final[frozenset[str]] = frozenset(
 )
 
 MAX_ENTRIES_PER_DAY = 24
+#: Lessons per timetable in :func:`today_timetable` (the home screen).
+MAX_TODAY_LESSONS = 24
 MAX_ENTRIES = 200
 MAX_OVERRIDES = 200
 MAX_EXCLUDED_WEEKS = 110
@@ -304,6 +306,32 @@ class ResolvedWeek:
     anchor: date
     valid: bool
     days: tuple[ResolvedDay, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class TodayLesson:
+    """An :class:`EffectiveLesson` placed on the absolute time line.
+
+    ``start_at`` / ``end_at`` are tz-aware UTC instants of the lesson's
+    wall-clock times in the timetable's zone (see :func:`~socialhome.utils.timezones.local_instant`),
+    so the home screen can merge lessons with calendar events.
+    """
+
+    lesson: EffectiveLesson
+    start_at: datetime
+    end_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class TodayTimetable:
+    """One timetable's lessons for one local date (the home-screen card)."""
+
+    timetable_id: str
+    name: str
+    color: str | None
+    tz: str
+    date: date  # the local date in ``tz``
+    lessons: tuple[TodayLesson, ...]
 
 
 # ─── Small helpers ───────────────────────────────────────────────────────
@@ -768,6 +796,46 @@ def resolve_week(tt: Timetable, any_date: date) -> ResolvedWeek:
         anchor=anchor,
         valid=any(day.valid for day in days),
         days=days,
+    )
+
+
+def is_filled(ls: EffectiveLesson) -> bool:
+    """A break, or a lesson with a title or an icon — not one of the
+    template's untitled slots the UI brush fills in later. Mirrors the
+    home card's ``isShown`` (``client/src/features/welcome/schedule.ts``)."""
+    return ls.kind is EntryKind.BREAK or bool((ls.title or "").strip() or ls.icon)
+
+
+def has_lessons(today: TodayTimetable) -> bool:
+    """At least one filled lesson (breaks alone don't make a school day)."""
+    return any(ls.lesson.kind is EntryKind.LESSON for ls in today.lessons)
+
+
+def today_timetable(
+    tt: Timetable, d: date, *, max_lessons: int = MAX_TODAY_LESSONS
+) -> TodayTimetable | None:
+    """``tt``'s lessons on ``d`` with UTC instants, or ``None`` when the
+    timetable isn't in effect that day. Cancelled lessons are kept (the
+    card strikes them through); untitled slots are dropped (see
+    :func:`is_filled`) before at most ``max_lessons`` are taken."""
+    day = resolve_day(tt, d)
+    if not day.valid:
+        return None
+    lessons = tuple(
+        TodayLesson(
+            lesson=ls,
+            start_at=local_instant(d, ls.start, tt.tz),
+            end_at=local_instant(d, ls.end, tt.tz),
+        )
+        for ls in [ls for ls in day.lessons if is_filled(ls)][:max_lessons]
+    )
+    return TodayTimetable(
+        timetable_id=tt.id,
+        name=tt.name,
+        color=tt.color,
+        tz=tt.tz,
+        date=d,
+        lessons=lessons,
     )
 
 
@@ -1571,6 +1639,26 @@ def resolved_day_to_dict(day: ResolvedDay) -> dict[str, Any]:
         "date": day.date.isoformat(),
         "valid": day.valid,
         "lessons": [effective_lesson_to_dict(ls) for ls in day.lessons],
+    }
+
+
+def today_lesson_to_dict(ls: TodayLesson) -> dict[str, Any]:
+    """:func:`effective_lesson_to_dict` plus ISO ``start_at`` / ``end_at``."""
+    return {
+        **effective_lesson_to_dict(ls.lesson),
+        "start_at": ls.start_at.isoformat(),
+        "end_at": ls.end_at.isoformat(),
+    }
+
+
+def today_timetable_to_dict(today: TodayTimetable) -> dict[str, Any]:
+    return {
+        "timetable_id": today.timetable_id,
+        "name": today.name,
+        "color": today.color,
+        "tz": today.tz,
+        "date": today.date.isoformat(),
+        "lessons": [today_lesson_to_dict(ls) for ls in today.lessons],
     }
 
 

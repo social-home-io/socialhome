@@ -2202,6 +2202,8 @@ def create_app(config: Config | None = None) -> web.Application:
         user_repo=user_repo,
         space_repo=space_repo,
         space_post_repo=space_post_repo,
+        timetable_service=timetable_service,
+        preferences_service=preferences_service,
     )
 
     # ── Typing service (relay typing indicators) ────────────────────────

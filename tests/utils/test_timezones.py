@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, time, timezone
 
 import pytest
 
-from socialhome.utils.timezones import DEFAULT_TZ, coerce_tz, is_valid_tz
+from socialhome.utils.timezones import (
+    DEFAULT_TZ,
+    coerce_tz,
+    is_valid_tz,
+    local_date,
+    local_instant,
+    zone_of,
+)
 
 
 @pytest.mark.parametrize(
@@ -56,3 +64,37 @@ def test_is_valid_tz_rejects_overlong_name_instead_of_raising():
     """A 5000-char key makes the tz database lookup raise ``OSError``
     (ENAMETOOLONG) — that is "not a zone", not a crash."""
     assert is_valid_tz("a" * 5000) is False
+
+
+def hm(s: str) -> time:
+    h, m = s.split(":")
+    return time(int(h), int(m))
+
+
+def test_zone_of_and_local_date():
+    assert zone_of("Mars/Base") is timezone.utc
+    late = datetime(2026, 9, 27, 23, 30, tzinfo=timezone.utc)
+    assert local_date(late, "Europe/Berlin") == date(2026, 9, 28)
+    assert local_date(late, "UTC") == date(2026, 9, 27)
+
+
+class TestLocalInstant:
+    def test_berlin_summer_is_utc_plus_two(self):
+        got = local_instant(date(2026, 9, 28), hm("08:00"), "Europe/Berlin")
+        assert got == datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc)
+        assert got.tzinfo is timezone.utc
+
+    def test_unknown_zone_falls_back_to_utc(self):
+        got = local_instant(date(2026, 9, 28), hm("08:00"), "Mars/Base")
+        assert got == datetime(2026, 9, 28, 8, 0, tzinfo=timezone.utc)
+
+    def test_nonexistent_time_shifts_forward(self):
+        # 2026-03-29 02:30 doesn't exist in Berlin (02:00 → 03:00): it
+        # lands on 03:30 CEST, i.e. 01:30 UTC.
+        got = local_instant(date(2026, 3, 29), hm("02:30"), "Europe/Berlin")
+        assert got == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+
+    def test_ambiguous_time_takes_first_occurrence(self):
+        # 2026-10-25 02:30 happens twice in Berlin; fold=0 → CEST (+2).
+        got = local_instant(date(2026, 10, 25), hm("02:30"), "Europe/Berlin")
+        assert got == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)

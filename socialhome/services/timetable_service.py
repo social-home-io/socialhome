@@ -26,7 +26,6 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Final, Literal
-from zoneinfo import ZoneInfo
 
 from ..domain import timetable as td
 from ..domain.events import TimetableDeleted, TimetableSaved
@@ -39,10 +38,11 @@ from ..domain.timetable import (
     TimetableLimitError,
     TimetableValidationError,
     TimetableValidity,
+    TodayTimetable,
 )
 from ..repositories.timetable_repo import AbstractTimetableRepo
 from ..repositories.user_repo import AbstractUserRepo
-from ..utils.timezones import DEFAULT_TZ, is_valid_tz
+from ..utils.timezones import DEFAULT_TZ, local_date
 from .bus_publisher import BusPublisherMixin
 
 if TYPE_CHECKING:
@@ -55,6 +55,8 @@ log = logging.getLogger(__name__)
 
 #: Household-wide cap on timetables (one per child is the common case).
 MAX_TIMETABLES: Final = 30
+#: Timetables on the home screen's "today" card (one per child).
+MAX_TODAY_TIMETABLES: Final = 3
 #: Upper bound on a single shift, before the domain's midnight check.
 _MAX_SHIFT_MINUTES: Final = 24 * 60 - 1
 _SECTION: Final = "timetable"
@@ -118,8 +120,7 @@ class TimetableEditorMixin:
     @staticmethod
     def today_in(tz: str) -> date:
         """Today's date in ``tz`` (UTC when the zone is unknown)."""
-        zone = ZoneInfo(tz) if is_valid_tz(tz) else timezone.utc
-        return _utcnow().astimezone(zone).date()
+        return local_date(_utcnow(), tz)
 
     def _check_not_expired(self, tt: Timetable, ov: td.TimetableOverride) -> None:
         """Refuse an override the next save would prune (422, not silence)."""
@@ -625,3 +626,46 @@ class TimetableService(BusPublisherMixin, TimetableEditorMixin):
             for tt in await self.list_all()
             if user_id in tt.assignees and td.resolve_day(tt, on).valid
         ]
+
+    async def today_for_user(
+        self,
+        user_id: str,
+        now: datetime | None = None,
+        *,
+        extra: Sequence[Timetable] = (),
+    ) -> tuple[TodayTimetable, ...]:
+        """Today's lessons of every timetable assigned to ``user_id`` that
+        is in effect today — "today" in each timetable's own zone. A
+        timetable without a filled lesson today (only untitled template
+        slots, or none at all) is left out before the cap is applied, and
+        one that fails to resolve is logged and skipped.
+
+        The home screen's read: an empty tuple (never
+        :class:`FeatureDisabledError`) when ``feat_timetable`` is off.
+        ``extra`` appends timetables the caller found elsewhere (pinned
+        space timetables, later) after the assigned ones; duplicates by
+        id are dropped. At most :data:`MAX_TODAY_TIMETABLES`.
+        """
+        if self._household is not None:
+            prefs = await self._household.get_household()
+            if not prefs.is_enabled(_SECTION):
+                return ()
+        now = now or _utcnow()
+        assigned = [tt for tt in await self._repo.list_all() if user_id in tt.assignees]
+        out: list[TodayTimetable] = []
+        seen: set[str] = set()
+        for tt in (*assigned, *extra):
+            if tt.id in seen:
+                continue
+            seen.add(tt.id)
+            try:
+                today = td.today_timetable(tt, local_date(now, tt.tz))
+            except Exception as exc:  # one bad row never empties the slice
+                log.warning("timetable %s: today's lessons failed: %s", tt.id, exc)
+                continue
+            if today is None or not td.has_lessons(today):
+                continue  # not in effect, or no filled lesson today
+            out.append(today)
+            if len(out) >= MAX_TODAY_TIMETABLES:
+                break
+        return tuple(out)
