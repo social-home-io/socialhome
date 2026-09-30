@@ -20010,12 +20010,6 @@ a.sh-btn--ghost:hover {
 .sh-timetable-list__break > * { color: var(--sh-text-muted); font-style: italic; }
 .sh-timetable-list__break .sh-link { color: inherit; }
 .sh-timetable-print-only { display: none; }
-@media print {
-  .sh-timetable-visual, .sh-timetable-toolbar, .sh-timetable-head__actions,
-  .sh-timetable-cards, .sh-timetable-day, .sh-calendar-host > .sh-space-subheader { display: none !important; }
-  .sh-timetable-print-only { display: flex !important; }
-  .sh-timetable-list__day { break-inside: avoid; }
-}
 
 /* ── Phone day view ────────────────────────────────────────────────── */
 .sh-timetable-day { display: flex; flex-direction: column; gap: var(--sh-space-sm); min-width: 0; }
@@ -20397,3 +20391,574 @@ a.sh-btn--ghost:hover {
 .sh-timetable-day__row--double .sh-timetable-block--day:not(.sh-timetable-block--picture) { min-height: 96px; }
 /* ``.sh-form label`` would turn the RadioCardGroup cards into blocks. */
 .sh-timetable-form .sh-radio-card { display: flex; margin-bottom: 0; font-weight: inherit; }
+
+/* ── Timetable: header chip, Fill toggle, mode bar, banners ────────── */
+.sh-timetable-head__weeks {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  margin: 2px 0 0 -6px;
+  padding: 2px 10px 2px 6px;
+  background: transparent;
+  border: 1px dashed var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  color: var(--sh-text-muted);
+  font: inherit;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.sh-timetable-head__weeks:hover { border-color: var(--sh-primary); color: var(--sh-text); }
+.sh-timetable-head__weeks:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-timetable-toggle--brush.is-on {
+  background: var(--sh-primary);
+  border-color: var(--sh-primary);
+  color: var(--sh-bg);
+}
+.sh-timetable-modebar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-sm) var(--sh-space-md);
+}
+.sh-timetable-modebar .sh-timetable-seg__btn { min-height: 36px; font-size: var(--sh-font-size-sm); padding: 4px 16px; }
+.sh-timetable-modebar__changes {
+  min-height: 36px;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.sh-timetable-modebar__changes:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; border-radius: 4px; }
+.sh-timetable-weeknav { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.sh-timetable-weeknav__step {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  color: var(--sh-text);
+  font: inherit;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.sh-timetable-weeknav__step:hover { border-color: var(--sh-primary); }
+.sh-timetable-weeknav__step:focus-visible,
+.sh-timetable-weeknav__today:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-timetable-weeknav__label {
+  min-width: 9.5rem;
+  padding: 0 var(--sh-space-xs);
+  text-align: center;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.sh-timetable-weeknav__today:disabled { opacity: 0.55; cursor: default; }
+.sh-timetable-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-sm) var(--sh-space-md);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg-tertiary));
+  border: 1px solid color-mix(in srgb, var(--sh-primary) 30%, var(--sh-border));
+  border-radius: var(--sh-radius-lg);
+}
+.sh-timetable-banner__icon { font-size: 1.3rem; line-height: 1; }
+.sh-timetable-banner__text { flex: 1 1 220px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sh-timetable-banner__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+.sh-timetable-banner--off {
+  padding: var(--sh-space-lg) var(--sh-space-md);
+  background:
+    repeating-linear-gradient(135deg, var(--sh-tt-hatch) 0 2px, transparent 2px 10px),
+    var(--sh-bg-secondary);
+  border-style: dashed;
+  border-color: var(--sh-border-strong);
+}
+.sh-timetable-banner--off .sh-timetable-banner__text strong { font-size: var(--sh-font-size-lg); }
+.sh-timetable-weekhint { margin: 0; font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); }
+
+/* ── Week mode statuses ───────────────────────────────────────────── */
+.sh-timetable-block { position: relative; }
+.sh-timetable-block--cancelled {
+  background:
+    repeating-linear-gradient(135deg, color-mix(in srgb, var(--tt-edge) 18%, transparent) 0 2px, transparent 2px 9px),
+    var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+  border-left-style: dotted;
+}
+.sh-timetable-block--cancelled .sh-timetable-block__title {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+}
+.sh-timetable-block--cancelled .sh-timetable-block__icon { opacity: 0.55; filter: grayscale(1); }
+.sh-timetable-block--changed {
+  outline: 2px dashed var(--tt-edge);
+  outline-offset: -2px;
+}
+.sh-timetable-block__change {
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+.sh-timetable-block--timeline .sh-timetable-block__change,
+.sh-timetable-block--cell .sh-timetable-block__change { -webkit-line-clamp: 1; }
+.sh-timetable-badge {
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: 1px;
+  padding: 0 5px;
+  border-radius: var(--sh-radius-full);
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+.sh-timetable-badge--cancelled { background: var(--sh-danger); color: #fff; }
+.sh-timetable-badge--added { background: var(--tt-fg); color: var(--tt-bg); }
+.sh-timetable-block--added { box-shadow: inset 0 0 0 2px var(--tt-edge); }
+.sh-timetable-block--inert { cursor: not-allowed; }
+.sh-timetable-block--inert:hover { transform: none; box-shadow: none; }
+.is-week .sh-timetable-block--inert:not(.sh-timetable-block--break) { opacity: 0.72; }
+.sh-timetable-dayhead__date { font-weight: 400; color: var(--sh-text-muted); }
+.sh-timetable-dayhead--today .sh-timetable-dayhead__date { color: inherit; }
+.sh-timetable-day__chipdate { display: block; font-size: 0.7rem; font-weight: 400; line-height: 1; }
+.sh-timetable-week-note {
+  margin: 0;
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border-radius: var(--sh-radius-sm);
+  background: color-mix(in srgb, var(--sh-danger) 12%, transparent);
+  color: var(--sh-text);
+  font-weight: 600;
+}
+.sh-timetable-week-actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+.sh-timetable-week-change {
+  margin: var(--sh-space-xs) 0 0;
+  padding-top: var(--sh-space-sm);
+  border-top: 1px dashed var(--sh-border);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 700;
+  color: var(--sh-text-muted);
+}
+.sh-timetable-add[aria-disabled="true"],
+.sh-timetable-cell-add[aria-disabled="true"],
+.sh-timetable-day__add[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+
+/* ── Day heading tools + day builder ──────────────────────────────── */
+.sh-timetable-dayhead__tools { display: inline-flex; align-items: center; gap: 0; }
+.sh-timetable-dayhead__tools .sh-post-overflow-wrap { margin-left: 0; }
+.sh-timetable-dayhead__more { font-size: 1.2rem; }
+.sh-timetable-menu--floating { position: fixed; right: auto; }
+.sh-timetable-timeline__setup {
+  position: absolute;
+  inset: 8px 4px auto 4px;
+  display: flex;
+  justify-content: center;
+  z-index: 1;
+}
+.sh-timetable-setup { width: 100%; white-space: normal; }
+.sh-timetable-day__nothing p { margin: 0 0 var(--sh-space-sm); }
+.sh-timetable-day__setup { min-height: 44px; }
+.sh-timetable-day__tools { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--sh-space-xs); }
+.sh-timetable-day__tools .sh-btn { min-height: 44px; }
+
+.sh-modal:has(.sh-timetable-builder) { max-width: 720px; }
+.sh-timetable-builder__params {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sh-space-sm);
+}
+.sh-timetable-builder__slots { display: flex; flex-direction: column; gap: var(--sh-space-xs); }
+.sh-timetable-builder__slots .sh-form-hint { margin: 0; }
+.sh-timetable-builder__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.sh-timetable-builder__row {
+  display: grid;
+  grid-template-columns: 1.8rem 6.6rem 6.6rem 5.4rem minmax(6rem, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+}
+.sh-timetable-builder__row--break {
+  background:
+    repeating-linear-gradient(135deg, var(--sh-tt-hatch) 0 2px, transparent 2px 8px),
+    var(--sh-bg-secondary);
+}
+.sh-timetable-builder__row.is-invalid { border-color: var(--sh-danger); }
+.sh-timetable-builder__num { font-weight: 800; text-align: right; color: var(--sh-text); }
+.sh-timetable-builder__row--break .sh-timetable-builder__num { color: var(--sh-text-muted); }
+.sh-timetable-builder__time { font-variant-numeric: tabular-nums; font-size: var(--sh-font-size-sm); font-weight: 600; }
+.sh-timetable-builder__row select,
+.sh-timetable-builder__row input { min-height: 36px; margin: 0; }
+.sh-timetable-builder__min { display: inline-flex; align-items: center; gap: 4px; }
+.sh-timetable-builder__min input { width: 4.2rem !important; padding-left: 8px !important; padding-right: 4px !important; }
+.sh-timetable-builder__min span { font-size: var(--sh-font-size-xs); color: var(--sh-text-muted); }
+.sh-timetable-builder__title { min-width: 0; width: 100%; }
+.sh-timetable-builder__actions { display: inline-flex; gap: 2px; }
+.sh-timetable-builder__icon {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--sh-radius-full);
+  color: var(--sh-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.sh-timetable-builder__icon:hover:not(:disabled) { background: var(--sh-bg-secondary); color: var(--sh-text); }
+.sh-timetable-builder__icon:disabled { opacity: 0.3; cursor: default; }
+.sh-timetable-builder__icon:focus-visible,
+.sh-timetable-builder__before:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 1px; }
+.sh-timetable-builder__err {
+  grid-column: 2 / -1;
+  margin: 0;
+  color: var(--sh-danger);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+}
+.sh-timetable-builder__before {
+  align-self: flex-start;
+  min-height: 36px;
+  padding: 4px 12px;
+  background: transparent;
+  border: 1.5px dashed var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text-muted);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.sh-timetable-builder__before:hover { border-color: var(--sh-primary); color: var(--sh-primary-text); }
+.sh-timetable-builder__add { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+.sh-timetable-check__hint { display: block; margin-top: 2px; }
+.sh-timetable-copy .sh-timetable-days__custom { margin-bottom: var(--sh-space-sm); }
+
+/* ── Brush mode ───────────────────────────────────────────────────── */
+.sh-timetable-brushbar {
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sh-space-sm);
+  background: var(--sh-bg-tertiary);
+  border: 1.5px solid var(--sh-primary);
+  border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-md);
+}
+.sh-timetable-brushbar__hint { margin: 0; font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); }
+.sh-timetable-brushbar__row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sh-space-xs); }
+.sh-timetable-brushbar__scroll { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1 1 260px; min-width: 0; }
+.sh-timetable-brushbar__chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.sh-timetable-brush {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 4px 14px 4px 10px;
+  background: var(--tt-bg, var(--sh-bg));
+  color: var(--tt-fg, var(--sh-text));
+  border: 1px solid transparent;
+  border-left: 4px solid var(--tt-edge, var(--sh-border-strong));
+  border-radius: var(--sh-radius-md);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+.sh-timetable-brush--erase {
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  border: 1.5px dashed var(--sh-border-strong);
+}
+.sh-timetable-brush.is-on {
+  box-shadow: 0 0 0 2px var(--sh-bg-tertiary), 0 0 0 4px var(--sh-text);
+}
+.sh-timetable-brush:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 5px; }
+.sh-timetable-brushbar__new { min-height: 40px; }
+.sh-timetable-grid.is-brushing { user-select: none; -webkit-user-select: none; }
+.sh-timetable-block--brush { cursor: copy; }
+.sh-timetable-block--brush:hover,
+.sh-timetable-block--brush.is-stroke {
+  box-shadow: 0 0 0 2px var(--sh-primary);
+  transform: none;
+}
+.sh-timetable-block--brush.is-stroke { background: color-mix(in srgb, var(--sh-primary) 20%, var(--tt-bg)); }
+.is-brushing .sh-timetable-timeline__col { cursor: default; }
+.is-brushing .sh-timetable-timeline__col:hover { background: transparent; }
+
+/* Stronger focus ring on the tinted blocks — an outer halo in the page
+ * colour plus a ring in the text colour reads on every tint and on the
+ * paper card, light or dark. */
+.sh-timetable-block:focus-visible,
+.sh-timetable-band:focus-visible,
+.sh-timetable-cell-add:focus-visible {
+  outline: 3px solid var(--sh-text);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--sh-bg-tertiary);
+  z-index: 2;
+}
+
+/* ── School weeks & holidays dialog ───────────────────────────────── */
+.sh-modal:has(.sh-timetable-weeks) { max-width: 760px; }
+.sh-timetable-weeks { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-timetable-weeks__range { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sh-space-sm); }
+.sh-timetable-weeks__range legend { grid-column: 1 / -1; }
+.sh-timetable-weeks__end { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sh-timetable-weeks__end input[type="date"] { min-height: 40px; }
+.sh-timetable-weeks__end input:disabled { opacity: 0.5; }
+.sh-timetable-weeks__yearbar { display: flex; align-items: center; justify-content: center; gap: var(--sh-space-sm); }
+.sh-timetable-weeks__year { margin: 0; min-width: 4ch; text-align: center; font-size: var(--sh-font-size-lg); }
+.sh-timetable-weeks__nav {
+  width: 40px;
+  height: 40px;
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  color: var(--sh-text);
+  font: inherit;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.sh-timetable-weeks__nav:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-timetable-weeks__quick { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.sh-timetable-weeks__months { display: flex; flex-direction: column; gap: 4px; touch-action: pan-y; }
+.sh-timetable-weeks__month { display: grid; grid-template-columns: 4.6rem minmax(0, 1fr); align-items: center; gap: 6px; }
+.sh-timetable-weeks__mname { font-size: var(--sh-font-size-xs); font-weight: 700; color: var(--sh-text-muted); text-transform: uppercase; }
+.sh-timetable-weeks__chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.sh-timetable-week {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 3.8rem;
+  min-height: 36px;
+  padding: 2px 6px;
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  font: inherit;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.sh-timetable-week--school {
+  background: color-mix(in srgb, var(--sh-success) 22%, var(--sh-bg));
+  border-color: color-mix(in srgb, var(--sh-success) 45%, var(--sh-border));
+  color: var(--sh-text);
+}
+.sh-timetable-week--holiday {
+  background:
+    repeating-linear-gradient(135deg, var(--sh-tt-hatch) 0 2px, transparent 2px 7px),
+    var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+  border-style: dashed;
+  text-decoration: line-through;
+}
+.sh-timetable-week__mark { text-decoration: none; display: inline-block; }
+.sh-timetable-week--outside {
+  background: transparent;
+  color: var(--sh-text-muted);
+  border-color: var(--sh-border);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.sh-timetable-week.is-current { box-shadow: 0 0 0 2px var(--sh-bg-tertiary), 0 0 0 4px var(--sh-primary); }
+.sh-timetable-week:focus-visible { outline: 3px solid var(--sh-text); outline-offset: 3px; z-index: 1; }
+.sh-timetable-week--key {
+  display: inline-block;
+  min-width: 1.6rem;
+  min-height: 1rem;
+  margin: 0 4px 0 12px;
+  padding: 0 2px;
+  vertical-align: middle;
+  font-size: 0.7rem;
+  cursor: default;
+}
+.sh-timetable-week--key:first-child { margin-left: 0; }
+.sh-timetable-weeks__legend { margin: 0; font-size: var(--sh-font-size-xs); color: var(--sh-text-muted); line-height: 2; }
+.sh-timetable-weeks__summary { margin: 0; font-weight: 700; }
+
+@media (max-width: 639px) {
+  .sh-modal:has(.sh-timetable-weeks) {
+    height: calc(100vh - 16px);
+    height: calc(100dvh - 16px);
+    max-height: none;
+  }
+  .sh-timetable-weeks__range { grid-template-columns: 1fr; }
+  .sh-timetable-weeks__month { grid-template-columns: 1fr; gap: 2px; }
+  .sh-timetable-week { min-height: 44px; min-width: 3.4rem; flex: 1 0 3.4rem; }
+  .sh-timetable-weeknav { width: 100%; justify-content: space-between; }
+  .sh-timetable-weeknav__step { width: 44px; height: 44px; }
+  .sh-timetable-weeknav__label { flex: 1; min-width: 0; }
+  .sh-timetable-weeknav__today { min-height: 44px; }
+  .sh-timetable-modebar .sh-timetable-seg { width: 100%; }
+  .sh-timetable-modebar .sh-timetable-seg__btn { flex: 1; min-height: 40px; }
+  .sh-timetable-modebar__changes { min-height: 44px; }
+  .sh-timetable-brush, .sh-timetable-brushbar__new { min-height: 44px; }
+  /* Phones: a compact palette docked above the bottom tab bar, within
+   * thumb reach while the lessons scroll behind it; the chips scroll
+   * sideways inside the bar (never the page). */
+  .sh-timetable-brushbar {
+    order: 10;
+    position: sticky;
+    bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+    padding: 6px;
+    gap: 4px;
+  }
+  .sh-timetable-brushbar__hint { font-size: var(--sh-font-size-xs); }
+  .sh-timetable-brushbar__row { flex-wrap: nowrap; }
+  .sh-timetable-brushbar__scroll {
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 5px 4px;
+  }
+  .sh-timetable-brushbar__scroll::-webkit-scrollbar { display: none; }
+  .sh-timetable-brushbar__chips { flex-wrap: nowrap; }
+  .sh-timetable-brush, .sh-timetable-brushbar__new { flex: 0 0 auto; }
+  .sh-modal:has(.sh-timetable-builder) { max-width: 720px; }
+.sh-timetable-builder__params { grid-template-columns: 1fr 1fr; }
+  .sh-timetable-builder__params > :first-child { grid-column: 1 / -1; }
+  .sh-timetable-builder__row {
+    grid-template-columns: 1.6rem minmax(0, 1fr) auto;
+    grid-template-areas:
+      "num time actions"
+      "num kind min"
+      "num title title"
+      "num err err";
+    row-gap: 4px;
+  }
+  .sh-timetable-builder__num { grid-area: num; align-self: start; padding-top: 10px; }
+  .sh-timetable-builder__time { grid-area: time; }
+  .sh-timetable-builder__actions { grid-area: actions; }
+  .sh-timetable-builder__kind { grid-area: kind; }
+  .sh-timetable-builder__min { grid-area: min; }
+  .sh-timetable-builder__title { grid-area: title; }
+  .sh-timetable-builder__err { grid-area: err; }
+  .sh-timetable-builder__row select, .sh-timetable-builder__row input { min-height: 44px; }
+  .sh-timetable-builder__icon { width: 44px; height: 44px; }
+  .sh-timetable-builder__before { min-height: 44px; }
+  .sh-timetable-builder__add .sh-chip { min-height: 44px; }
+}
+@media (pointer: coarse) {
+  .sh-timetable-builder__icon, .sh-timetable-weeknav__step { width: 44px; height: 44px; }
+  .sh-timetable-week { min-height: 44px; }
+}
+
+/* ── Print: the selected timetable on landscape A4 ─────────────────── */
+.sh-timetable-list__badge { margin: 0 0 0 6px; }
+.sh-timetable-list__change { display: block; font-size: var(--sh-font-size-xs); font-weight: 700; }
+.sh-timetable-list__row--cancelled > * { color: var(--sh-text-muted); }
+@page timetable { size: A4 landscape; margin: 12mm; }
+@media print {
+  body:has(.sh-timetable-print) .sh-sidenav,
+  body:has(.sh-timetable-print) .sh-mobile-nav,
+  body:has(.sh-timetable-print) .sh-topbar,
+  body:has(.sh-timetable-print) .sh-skip-link,
+  body:has(.sh-timetable-print) .sh-toast-container,
+  body:has(.sh-timetable-print) .sh-back-to-top,
+  .sh-calendar-host > .sh-space-subheader,
+  .sh-timetable-cards, .sh-timetable-head, .sh-timetable-modebar, .sh-timetable-banner,
+  .sh-timetable-weekhint, .sh-timetable-brushbar, .sh-timetable-toolbar,
+  .sh-timetable-visual, .sh-timetable-day, .sh-timetable-grid > .sh-timetable-list { display: none !important; }
+  html:has(.sh-timetable-print), body:has(.sh-timetable-print) { background: #fff !important; }
+  body:has(.sh-timetable-print) .sh-layout,
+  body:has(.sh-timetable-print) .sh-content,
+  body:has(.sh-timetable-print) .sh-main { display: block !important; margin: 0 !important; padding: 0 !important; max-width: none !important; }
+  /* The whole document takes the named page, so no wrapper spills
+   * onto a default-size (portrait / Letter) page. */
+  body:has(.sh-timetable-print) { page: timetable; }
+  .sh-timetable-print-only { display: block !important; }
+  .sh-timetable-print { color: #000; font-size: 10pt; }
+  .sh-timetable-print__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12pt; margin-bottom: 6pt; border-bottom: 1.5pt solid #000; }
+  .sh-timetable-print__name { margin: 0; font-size: 16pt; }
+  .sh-timetable-print__meta { margin: 0; font-size: 10pt; }
+  .sh-timetable-print__foot { margin-top: 6pt; font-size: 8pt; text-align: right; color: #333; }
+  .sh-timetable-print button { cursor: default; }
+  .sh-timetable-print .sh-timetable-add,
+  .sh-timetable-print .sh-post-overflow-wrap,
+  .sh-timetable-print .sh-timetable-cell-add { display: none !important; }
+  .sh-timetable-print .sh-timetable-periods { border-spacing: 2pt; }
+  .sh-timetable-print .sh-timetable-periods td > .sh-timetable-block { min-height: 34pt; }
+  .sh-timetable-print .sh-timetable-block {
+    background: #fff !important;
+    color: #000 !important;
+    border: 0.75pt solid #999;
+    border-left: 4pt solid var(--tt-edge);
+    box-shadow: none !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .sh-timetable-print .sh-timetable-block--empty { border-style: dashed; }
+  .sh-timetable-print .sh-timetable-block__meta,
+  .sh-timetable-print .sh-timetable-block__time { color: #333 !important; }
+  .sh-timetable-print .sh-timetable-band,
+  .sh-timetable-print .sh-timetable-block--break,
+  .sh-timetable-print .sh-timetable-list__break > * {
+    background: repeating-linear-gradient(135deg, #bbb 0 1pt, transparent 1pt 5pt) !important;
+    color: #000 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .sh-timetable-print .sh-timetable-badge--cancelled { background: #000 !important; color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* All days side by side on landscape A4 (5 × ~52 mm) with a small
+   * font; whole words only — hyphenated in the page language (lang on
+   * the print root), never broken mid-word. */
+  .sh-timetable-print .sh-timetable-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(48mm, 1fr)); gap: 4pt; }
+  .sh-timetable-print .sh-timetable-list__day { font-size: 8pt; line-height: 1.25; table-layout: auto; overflow: visible; }
+  .sh-timetable-print .sh-timetable-list__day caption { font-size: 10pt; padding: 0 0 2pt 3pt; }
+  .sh-timetable-print .sh-timetable-list__day tbody th { width: auto; white-space: nowrap; }
+  .sh-timetable-print .sh-timetable-list__day th,
+  .sh-timetable-print .sh-timetable-list__day td {
+    word-break: normal;
+    overflow-wrap: normal;
+    -webkit-hyphens: auto;
+    hyphens: auto;
+  }
+  .sh-timetable-print .sh-timetable-list__day thead th { background: #eee !important; }
+  .sh-timetable-print .sh-timetable-list__change { font-size: 6.5pt; }
+  .sh-timetable-print .sh-timetable-list__day { break-inside: avoid; background: #fff; border-color: #999; }
+  .sh-timetable-print .sh-timetable-list__day td,
+  .sh-timetable-print .sh-timetable-list__day th { color: #000; border-color: #bbb; padding: 1.5pt 3pt; }
+  .sh-timetable-print .sh-timetable-periods__time,
+  .sh-timetable-print .sh-timetable-dayhead__name { color: #000; }
+}
+/* Week mode: the chip carries the date, so today's dot moves to the corner. */
+.sh-timetable-day__chip.is-today:has(.sh-timetable-day__chipdate)::after {
+  left: auto;
+  right: 6px;
+  top: 6px;
+  bottom: auto;
+  margin-left: 0;
+}
+/* Legend swatches stay small at every width (the chip touch-size rules
+ * above must not inflate them). */
+.sh-timetable-weeks__legend .sh-timetable-week--key {
+  flex: none;
+  min-width: 1.6rem;
+  min-height: 1rem;
+  height: 1rem;
+}

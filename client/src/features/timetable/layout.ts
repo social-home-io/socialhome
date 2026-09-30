@@ -66,6 +66,9 @@ export interface PeriodCell {
   /** The run's latest entry — what the next slot must continue. */
   last: TimetableEntry
   rowSpan: number
+  /** Ids of every entry the merged cell covers (just ``entry`` alone
+   *  when not merged) — actions on the block apply to all of them. */
+  ids: string[]
   /** End of the last merged slot (``entry.end`` when not merged). */
   end: string
 }
@@ -86,6 +89,11 @@ export interface PeriodRow {
   cells: Record<number, PeriodCell | null | 'merged'>
 }
 
+/** Extra identity that must match for two lessons to merge — week
+ *  mode tags each synthesised entry with its status, so a cancelled
+ *  "Mathe" never merges into (and hides behind) a normal one. */
+export const mergeTags = new WeakMap<TimetableEntry, string>()
+
 /**
  * Can ``b`` continue the lesson ``a`` as one block (a double "Mathe")?
  * Both are lessons with the same (non-empty) title, room and icon, and
@@ -98,6 +106,7 @@ export function canMerge(a: TimetableEntry, b: TimetableEntry, maxGap: number): 
   const title = (s: string | null) => (s ?? '').trim().toLowerCase()
   const gap = toMinutes(b.start) - toMinutes(a.end)
   return a.kind === 'lesson' && b.kind === 'lesson'
+    && mergeTags.get(a) === mergeTags.get(b)
     && title(a.title) !== '' && title(a.title) === title(b.title)
     && (a.room ?? '') === (b.room ?? '') && (a.icon ?? '') === (b.icon ?? '')
     && gap >= 0 && gap <= maxGap
@@ -108,6 +117,8 @@ export interface MergedRun {
   entry: TimetableEntry
   end: string
   count: number
+  /** Ids of the run's entries, in order. */
+  ids: string[]
 }
 
 /** A day's entries (in time order) with consecutive mergeable lessons
@@ -120,11 +131,12 @@ export function mergeRuns(entries: readonly TimetableEntry[], maxGap: number): M
       prev.end = e.end
       prev.last = e
       prev.count += 1
+      prev.ids.push(e.id)
     } else {
-      out.push({ entry: e, end: e.end, count: 1, last: e })
+      out.push({ entry: e, end: e.end, count: 1, last: e, ids: [e.id] })
     }
   }
-  return out.map(({ entry, end, count }) => ({ entry, end, count }))
+  return out.map(({ entry, end, count, ids }) => ({ entry, end, count, ids }))
 }
 
 /** Rows of the Periods table — the union of every visible day's
@@ -165,12 +177,13 @@ export function periodRows(tt: Timetable, days: readonly number[]): PeriodRow[] 
       }
       if (above && canMerge(above.last, e, tt.defaults.gap_minutes)) {
         above.rowSpan += 1
+        above.ids.push(e.id)
         above.end = e.end
         above.last = e
         cells[d] = 'merged'
         continue
       }
-      const cell = { entry: e, last: e, rowSpan: 1, end: e.end }
+      const cell = { entry: e, last: e, rowSpan: 1, end: e.end, ids: [e.id] }
       open.set(d, cell)
       cells[d] = cell
     }

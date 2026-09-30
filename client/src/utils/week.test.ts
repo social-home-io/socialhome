@@ -13,6 +13,7 @@ import {
   detectLocaleWeekStart,
   getWeekStartPref,
   isoWeekday,
+  isoWeekNumber,
   resolveWeekStart,
   startOfWeek,
   weekdayOrder,
@@ -193,5 +194,33 @@ describe('getWeekStartPref / resolveWeekStart', () => {
     stubLocale(() => ({ getWeekInfo: () => ({ firstDay: 7 }) }))
     expect(resolveWeekStart('auto')).toBe(6)
     expect(resolveWeekStart()).toBe(6)
+  })
+})
+
+describe('isoWeekNumber', () => {
+  it('numbers ordinary weeks Monday to Sunday', () => {
+    expect(isoWeekNumber(new Date(2026, 9, 5))).toBe(41)  // Mon 5 Oct 2026
+    expect(isoWeekNumber(new Date(2026, 9, 11))).toBe(41) // Sun 11 Oct 2026
+    expect(isoWeekNumber(new Date(2026, 9, 12))).toBe(42)
+  })
+
+  it('week 1 is the week with the year\'s first Thursday', () => {
+    // 1 Jan 2026 is a Thursday → Mon 29 Dec 2025 opens week 1 of 2026.
+    expect(isoWeekNumber(new Date(2025, 11, 29))).toBe(1)
+    expect(isoWeekNumber(new Date(2026, 0, 1))).toBe(1)
+    // 1 Jan 2027 is a Friday → it still belongs to week 53 of 2026.
+    expect(isoWeekNumber(new Date(2027, 0, 1))).toBe(53)
+    expect(isoWeekNumber(new Date(2027, 0, 4))).toBe(1)
+  })
+
+  it('has a week 53 only in long years', () => {
+    expect(isoWeekNumber(new Date(2026, 11, 28))).toBe(53) // 2026 is long
+    expect(isoWeekNumber(new Date(2025, 11, 28))).toBe(52) // Sun 28 Dec 2025
+    expect(isoWeekNumber(new Date(2020, 11, 31))).toBe(53)
+  })
+
+  it('ignores the time of day and DST', () => {
+    expect(isoWeekNumber(new Date(2026, 2, 29, 23, 30))).toBe(13) // DST Sunday (EU)
+    expect(isoWeekNumber(new Date(2026, 2, 30, 0, 5))).toBe(14)
   })
 })

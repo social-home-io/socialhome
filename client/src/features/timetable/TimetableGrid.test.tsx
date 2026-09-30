@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, onTestFinished } from 'vitest'
 import { render, fireEvent, within } from '@testing-library/preact'
 import { TimetableGrid, todayColumn } from './TimetableGrid'
 import type { EntryPrefill } from './layout'
@@ -85,7 +85,8 @@ describe('TimetableGrid — Periods table', () => {
     expect(merged.textContent).toContain('08:00–09:35')
     expect(merged.querySelector('button')!.getAttribute('aria-label'))
       .toBe('Monday, 1st lesson, 08:00–09:35, Mathe')
-    expect(container.querySelectorAll('tbody td button[aria-label*="Mathe"]')).toHaveLength(1)
+    expect(container.querySelectorAll('.sh-timetable-visual tbody td button[aria-label*="Mathe"]'))
+      .toHaveLength(1)
   })
 
   it('opens the entry on click', () => {
@@ -229,10 +230,20 @@ describe('TimetableGrid — Picture view and List view', () => {
     expect(container.querySelector('.sh-timetable-seg')).toBeNull()
   })
 
-  it('keeps a hidden list under the visual grid for printing', () => {
+  it('keeps a hidden print twin: the Periods table when the days line up, else the list', () => {
+    expect(renderGrid(timetable({ id: 'tt0', entries: schoolWeek() })).container
+      .querySelector('.sh-timetable-print')).toBeNull() // only while printing
+    window.dispatchEvent(new Event('beforeprint'))
+    onTestFinished(() => { window.dispatchEvent(new Event('afterprint')) })
     const { container } = renderGrid(timetable({ entries: schoolWeek() }))
     const print = container.querySelector('.sh-timetable-print-only')!
     expect(print.getAttribute('aria-hidden')).toBe('true')
+    expect(print.querySelector('table.sh-timetable-periods')).not.toBeNull()
+    const uneven = [...schoolWeek([0, 2, 3, 4]), entry(1, '07:15', '08:00', { title: 'Musik' })]
+    const other = renderGrid(timetable({ id: 'tt2', entries: uneven })).container
+    const print2 = other.querySelector('.sh-timetable-print-only')!
+    expect(print2.querySelector('table.sh-timetable-periods')).toBeNull()
+    expect(print2.querySelectorAll('table.sh-timetable-list__day')).toHaveLength(5)
   })
 })
 

@@ -4,7 +4,7 @@
  * for confirmation and retry with the flag; WS frames upsert / remove
  * household timetables and ignore space ones.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { Timetable, TimetableEntry } from '@/types'
 
 const apiGet = vi.fn()
@@ -47,7 +47,10 @@ import {
   timetables, selectedId, loaded, loadTimetables, createTimetable, patchHeader,
   addEntry, patchEntry, deleteEntry, replaceEntries, copyDay,
   deleteTimetable, duplicateTimetable, wireTimetablesWs,
+  generateDay, setValidity, fetchWeek, addOverride, patchOverride, deleteOverride, clearWeek,
+  applyOverrides,
 } from './timetables'
+import type { TimetableOverride } from '@/types'
 
 export function entry(id: string, weekday: number, start: string, end: string,
   extra: Partial<TimetableEntry> = {}): TimetableEntry {
@@ -332,5 +335,187 @@ describe('review fixes', () => {
     apiPatch.mockResolvedValue({ timetable: tt('a b', 2) })
     await patchEntry('a b', 'e/1', { title: 'X' })
     expect(apiPatch).toHaveBeenCalledWith('/api/timetables/a%20b/entries/e%2F1', { version: 1, title: 'X' })
+  })
+})
+
+function ov(id: string, date: string, extra: Partial<TimetableOverride> = {}): TimetableOverride {
+  return {
+    id, date, kind: 'cancel', entry_id: 'e1', start: null, end: null, entry_kind: 'lesson',
+    label: null, title: null, room: null, teacher: null, note: null, color: null, icon: null,
+    ...extra,
+  }
+}
+
+describe('day tools', () => {
+  it('generateDay POSTs the slots; a busy day confirms, then retries with replace', async () => {
+    timetables.value = [tt('a', 1)]
+    const slots = [{ start: '08:00', end: '08:45', kind: 'lesson' as const }]
+    apiPost
+      .mockRejectedValueOnce(apiError(409, 'DAY_HAS_ENTRIES', { count: 6 }))
+      .mockResolvedValueOnce({ timetable: tt('a', 2) })
+    confirmDialog.mockResolvedValue(true)
+    const out = await generateDay('a', 0, slots)
+    expect(confirmDialog.mock.calls[0][0]).toBe('Replace 6 lessons on Monday?')
+    expect(apiPost).toHaveBeenNthCalledWith(1, '/api/timetables/a/days/0/generate',
+      { version: 1, slots })
+    expect(apiPost).toHaveBeenLastCalledWith('/api/timetables/a/days/0/generate',
+      { version: 1, slots, replace: true })
+    expect(out?.version).toBe(2)
+  })
+
+  it('copyDay with an undo puts the previous entries back based on its version', async () => {
+    const before = [entry('e1', 0, '08:00', '08:45', { title: 'Mathe' })]
+    timetables.value = [tt('a', 4, { entries: before })]
+    apiPost.mockResolvedValue({ timetable: tt('a', 5, { entries: [...before, entry('c1', 1, '08:00', '08:45')] }) })
+    await copyDay('a', 0, [1], false, { undo: { message: 'Copied' } })
+    expect(apiPost).toHaveBeenCalledWith('/api/timetables/a/days/0/copy',
+      { version: 4, to: [1], with_subjects: false })
+    const [msg, , opts] = showToast.mock.calls[0]
+    expect(msg).toBe('Copied')
+    apiPut.mockResolvedValue({ timetable: tt('a', 6, { entries: before }) })
+    opts.action.onClick()
+    await vi.waitFor(() => expect(apiPut).toHaveBeenCalledWith(
+      '/api/timetables/a/entries', { version: 5, entries: before }))
+  })
+})
+
+describe('validity + weeks', () => {
+  it('setValidity PUTs the whole validity with the version', async () => {
+    timetables.value = [tt('a', 3)]
+    apiPut.mockResolvedValue({ timetable: tt('a', 4) })
+    const validity = { valid_from: '2026-09-01', valid_until: null, excluded_weeks: ['2026-10-26'] }
+    await setValidity('a', validity, { baseVersion: 2 })
+    expect(apiPut).toHaveBeenCalledWith('/api/timetables/a/validity', { version: 2, ...validity })
+  })
+
+  it('fetchWeek GETs the resolved week', async () => {
+    apiGet.mockResolvedValue({ week: { anchor: '2026-10-05', valid: true, days: [] } })
+    const week = await fetchWeek('a b', '2026-10-07')
+    expect(apiGet).toHaveBeenCalledWith('/api/timetables/a%20b/weeks/2026-10-07')
+    expect(week.anchor).toBe('2026-10-05')
+  })
+})
+
+describe('overrides', () => {
+  it('add / patch / delete send the version', async () => {
+    timetables.value = [tt('a', 1)]
+    apiPost.mockResolvedValue({ timetable: tt('a', 2) })
+    await addOverride('a', { date: '2026-10-05', kind: 'cancel', entry_id: 'e1' })
+    expect(apiPost).toHaveBeenCalledWith('/api/timetables/a/overrides',
+      { version: 1, date: '2026-10-05', kind: 'cancel', entry_id: 'e1' })
+    apiPatch.mockResolvedValue({ timetable: tt('a', 3) })
+    await patchOverride('a', 'o1', { room: '112' })
+    expect(apiPatch).toHaveBeenCalledWith('/api/timetables/a/overrides/o1', { version: 2, room: '112' })
+    apiDelete.mockResolvedValue({ timetable: tt('a', 4) })
+    await deleteOverride('a', 'o1')
+    expect(apiDelete).toHaveBeenCalledWith('/api/timetables/a/overrides/o1?version=3')
+  })
+
+  it('an undo reverts the overrides a mutation changed (delete the new, restore the old)', async () => {
+    const replaced = ov('o1', '2026-10-05', { kind: 'replace', room: '112' })
+    timetables.value = [tt('a', 1, { overrides: [replaced] })]
+    // The replace became a cancel (PATCH, same id).
+    const cancelled = { ...replaced, kind: 'cancel' as const, room: null }
+    apiPatch.mockResolvedValueOnce({ timetable: tt('a', 2, { overrides: [cancelled] }) })
+    await patchOverride('a', 'o1', { kind: 'cancel', room: null }, { undo: { message: 'Cancelled' } })
+    const opts = showToast.mock.calls[0][2]
+    apiPatch.mockResolvedValueOnce({ timetable: tt('a', 3, { overrides: [replaced] }) })
+    opts.action.onClick()
+    const { id: _id, ...fields } = replaced
+    void _id
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenLastCalledWith(
+      '/api/timetables/a/overrides/o1', { version: 2, ...fields }))
+  })
+
+  it('clearWeek DELETEs the week and its undo re-adds the overrides in one sequence', async () => {
+    const a = ov('o1', '2026-10-05')
+    const b = ov('o2', '2026-10-06', { kind: 'add', entry_id: null, start: '14:00', end: '14:45', title: 'AG' })
+    timetables.value = [tt('a', 5, { overrides: [a, b] })]
+    apiDelete.mockResolvedValue({ timetable: tt('a', 6, { overrides: [] }) })
+    await clearWeek('a', '2026-10-07', { undo: { message: 'Cleared' } })
+    expect(apiDelete).toHaveBeenCalledWith('/api/timetables/a/weeks/2026-10-07/overrides?version=5')
+    const opts = showToast.mock.calls[0][2]
+    apiPost
+      .mockResolvedValueOnce({ timetable: tt('a', 7, { overrides: [{ ...a, id: 'n1' }] }) })
+      .mockResolvedValueOnce({ timetable: tt('a', 8, { overrides: [{ ...a, id: 'n1' }, { ...b, id: 'n2' }] }) })
+    opts.action.onClick()
+    const { id: _a, ...fa } = a
+    const { id: _b, ...fb } = b
+    void _a; void _b
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2))
+    expect(apiPost).toHaveBeenNthCalledWith(1, '/api/timetables/a/overrides', { version: 6, ...fa })
+    expect(apiPost).toHaveBeenNthCalledWith(2, '/api/timetables/a/overrides', { version: 7, ...fb })
+  })
+
+  it('an override undo whose version moved reports that it is unavailable', async () => {
+    timetables.value = [tt('a', 5, { overrides: [ov('o1', '2026-10-05')] })]
+    apiDelete.mockResolvedValue({ timetable: tt('a', 6, { overrides: [] }) })
+    await clearWeek('a', '2026-10-05', { undo: { message: 'Cleared' } })
+    const opts = showToast.mock.calls[0][2]
+    handlers['timetable.changed']({ type: 'timetable.changed',
+      data: { space_id: null, timetable: tt('a', 7, { overrides: [] }) } })
+    opts.action.onClick()
+    await vi.waitFor(() => expect(showToast).toHaveBeenLastCalledWith(
+      "Can't undo — the timetable was changed meanwhile", 'error'))
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+})
+
+describe('override undo — edges', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(Date.UTC(2026, 9, 7, 10)))
+  })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('clear-all undo skips overrides older than 14 days (the backend would refuse them)', async () => {
+    const old = ov('o1', '2026-09-21')
+    const kept = ov('o2', '2026-09-23')
+    timetables.value = [tt('a', 5, { overrides: [old, kept] })]
+    apiDelete.mockResolvedValue({ timetable: tt('a', 6, { overrides: [] }) })
+    await clearWeek('a', '2026-09-21', { undo: { message: 'Cleared' } })
+    apiPost.mockResolvedValue({ timetable: tt('a', 7, { overrides: [{ ...kept, id: 'n2' }] }) })
+    showToast.mock.calls[0][2].action.onClick()
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(apiPost.mock.calls[0][1]).toMatchObject({ version: 6, date: '2026-09-23' })
+  })
+
+  it('a replay that fails midway stops, refetches and says it only partly applied', async () => {
+    const a = ov('o1', '2026-10-05')
+    const b = ov('o2', '2026-10-06', { entry_id: 'e2' })
+    const c = ov('o3', '2026-10-07', { entry_id: 'e3' })
+    timetables.value = [tt('a', 5, { overrides: [a, b, c] })]
+    apiDelete.mockResolvedValue({ timetable: tt('a', 6, { overrides: [] }) })
+    await clearWeek('a', '2026-10-05', { undo: { message: 'Cleared' } })
+    apiPost
+      .mockResolvedValueOnce({ timetable: tt('a', 7, { overrides: [a] }) })
+      .mockRejectedValueOnce(apiError(422, 'UNPROCESSABLE'))
+    apiGet.mockResolvedValue({ timetable: tt('a', 8, { overrides: [a] }) })
+    showToast.mock.calls[0][2].action.onClick()
+    await vi.waitFor(() => expect(showToast).toHaveBeenLastCalledWith(
+      'Undo only partly applied — reloaded', 'error'))
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(apiGet).toHaveBeenCalledWith('/api/timetables/a')
+    expect(timetables.value[0].version).toBe(8)
+  })
+
+  it('applyOverrides runs its steps in sequence, chaining versions, under one undo', async () => {
+    timetables.value = [tt('a', 3)]
+    apiPost
+      .mockResolvedValueOnce({ timetable: tt('a', 4, { overrides: [ov('n1', '2026-10-05')] }) })
+      .mockResolvedValueOnce({ timetable: tt('a', 5, { overrides: [ov('n1', '2026-10-05'), ov('n2', '2026-10-05', { entry_id: 'e2' })] }) })
+    await applyOverrides('a', [
+      { op: 'add', fields: { date: '2026-10-05', kind: 'cancel', entry_id: 'e1' } },
+      { op: 'add', fields: { date: '2026-10-05', kind: 'cancel', entry_id: 'e2' } },
+    ], { undo: { message: 'Both cancelled' } })
+    expect(apiPost.mock.calls.map(c => c[1].version)).toEqual([3, 4])
+    expect(showToast).toHaveBeenCalledTimes(1)
+    apiDelete
+      .mockResolvedValueOnce({ timetable: tt('a', 6, { overrides: [ov('n2', '2026-10-05', { entry_id: 'e2' })] }) })
+      .mockResolvedValueOnce({ timetable: tt('a', 7, { overrides: [] }) })
+    showToast.mock.calls[0][2].action.onClick()
+    await vi.waitFor(() => expect(apiDelete).toHaveBeenCalledTimes(2))
+    expect(apiDelete.mock.calls.map(c => c[0])).toEqual([
+      '/api/timetables/a/overrides/n1?version=5', '/api/timetables/a/overrides/n2?version=6'])
   })
 })

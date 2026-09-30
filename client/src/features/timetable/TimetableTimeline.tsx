@@ -7,12 +7,17 @@
  * inside the component when the day is tall.
  */
 import type { JSX } from 'preact'
-import { useMemo } from 'preact/hooks'
+import { useContext, useMemo } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 import type { Timetable, TimetableEntry } from '@/types'
+import { brushOn } from './brush'
 import { DayHeading } from './DayHeading'
 import { LessonBlock } from './LessonBlock'
 import { blockBox, dayEntries, timelineGeometry } from './layout'
-import { fromMinutes, snapTo5 } from './time'
+import type { MenuItem } from './OverflowMenu'
+import { fromMinutes, snapTo5, weekdayName } from './time'
+import { useGridNav, type GridNavHandlers } from './useGridNav'
+import { WeekContext, addBlockedReason } from './weekView'
 
 /** Picture view needs room for a big icon + caption. */
 const PICTURE_MIN_BLOCK = 76
@@ -25,9 +30,19 @@ interface Props {
   onEdit: (entry: TimetableEntry) => void
   onAddAt: (weekday: number, startMin: number) => void
   onAddDay: (weekday: number) => void
+  dayMenu?: (weekday: number) => MenuItem[]
+  /** An empty day's "Set up Monday" call to action (regular mode). */
+  onSetupDay?: (weekday: number) => void
+  nav?: GridNavHandlers
 }
 
-export function TimetableTimeline({ tt, days, today, picture, onEdit, onAddAt, onAddDay }: Props) {
+export function TimetableTimeline({
+  tt, days, today, picture, onEdit, onAddAt, onAddDay, dayMenu, onSetupDay, nav,
+}: Props) {
+  const week = useContext(WeekContext)
+  const grid = useGridNav(days, nav)
+  const addBlocked = (d: number) => week ? addBlockedReason(week, d)
+    : brushOn(tt.id) ? t('timetable.brush.no_add') : null
   const daysKey = days.join(',')
   // Recomputed per timetable version (each version is a new object).
   const geo = useMemo(
@@ -39,18 +54,21 @@ export function TimetableTimeline({ tt, days, today, picture, onEdit, onAddAt, o
   const cols = { '--tt-cols': String(days.length) } as JSX.CSSProperties
 
   const onColumnClick = (weekday: number) => (ev: MouseEvent) => {
+    // Brush mode paints; a past week-mode day can't take changes.
+    if (addBlocked(weekday)) return
     const col = ev.currentTarget as HTMLElement
     const y = ev.clientY - col.getBoundingClientRect().top
     onAddAt(weekday, snapTo5(geo.minuteAt(y)))
   }
 
   return (
-    <div class="sh-timetable-timeline" style={cols}>
+    <div class="sh-timetable-timeline" style={cols} ref={grid.ref}
+         onKeyDown={grid.onKeyDown} onFocusIn={grid.onFocusIn}>
       <div class="sh-timetable-timeline__head">
         <div class="sh-timetable-timeline__corner" aria-hidden="true" />
         {days.map(d => (
           <DayHeading key={d} weekday={d} id={headId(d)} today={d === today}
-                      onAdd={() => onAddDay(d)} />
+                      onAdd={() => onAddDay(d)} menu={dayMenu?.(d)} blocked={addBlocked(d)} />
         ))}
       </div>
       <div class="sh-timetable-timeline__body" style={{ height: `${geo.height}px` }}>
@@ -80,6 +98,16 @@ export function TimetableTimeline({ tt, days, today, picture, onEdit, onAddAt, o
             class={`sh-timetable-timeline__col${d === today ? ' sh-timetable-timeline__col--today' : ''}`}
             onClick={onColumnClick(d)}
           >
+            {onSetupDay && dayEntries(tt, d).length === 0 && (
+              <div role="listitem" class="sh-timetable-timeline__setup">
+                <button type="button" class="sh-btn sh-btn--secondary sh-timetable-setup"
+                        data-tt-nav="" data-day={d} data-start={0} data-kind="setup"
+                        aria-label={t('timetable.day.setup_cta', { day: weekdayName(d, 'long') })}
+                        onClick={(e) => { e.stopPropagation(); onSetupDay(d) }}>
+                  {t('timetable.day.setup_cta', { day: weekdayName(d, 'short') })}
+                </button>
+              </div>
+            )}
             {dayEntries(tt, d).map(e => {
               const box = blockBox(geo, e)
               return (
