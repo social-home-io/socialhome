@@ -314,8 +314,12 @@ async def test_bad_weekday_in_path_404(client):
         json={"version": 1, "slots": []},
         headers=_h(client),
     )
-    # No timetable route matches; the SPA catch-all answers POST with 405.
-    assert r.status == 405
+    # The ``{weekday:[0-6]}`` pattern refuses 7, so no timetable route
+    # matches. What answers depends on whether a built SPA is present:
+    # its GET catch-all turns a path miss into 405, without it aiohttp
+    # returns 404 (CI's test job never builds the SPA). Either way the
+    # handler never ran.
+    assert r.status in (404, 405)
 
 
 async def test_copy_and_shift_day(client):
