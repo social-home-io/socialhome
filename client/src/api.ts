@@ -74,11 +74,15 @@ export class ApiError extends Error {
   /** Human-readable string safe to display in the UI. ``null`` if the
    *  body had no ``detail`` field. */
   public readonly detail: string | null
+  /** Every other field of the ``error`` object — the machine-readable
+   *  hints ``error_response(extra=…)`` merges in (``count``,
+   *  ``current_version``, ``section``…). ``{}`` when there are none. */
+  public readonly extra: Readonly<Record<string, unknown>>
 
   constructor(
     public readonly status: number,
     public readonly path: string,
-    parsed?: { code?: unknown; detail?: unknown } | null,
+    parsed?: { code?: unknown; detail?: unknown; [extra: string]: unknown } | null,
   ) {
     const code = typeof parsed?.code === 'string' ? parsed.code : null
     const detail = typeof parsed?.detail === 'string' ? parsed.detail : null
@@ -92,6 +96,9 @@ export class ApiError extends Error {
     this.name = 'ApiError'
     this.code = code
     this.detail = detail
+    this.extra = Object.fromEntries(
+      Object.entries(parsed ?? {}).filter(([k]) => k !== 'code' && k !== 'detail'),
+    )
   }
 }
 
@@ -197,11 +204,18 @@ class ApiClient {
     return _parseJsonOrNull<T>(res)
   }
 
-  async delete(path: string): Promise<void> {
-    await this._handle(
+  /** Resolves to the parsed JSON body when the response is JSON (the
+   *  timetable routes answer a DELETE with the updated resource),
+   *  ``null`` otherwise — callers that don't care simply ignore it. */
+  async delete<T = void>(path: string): Promise<T> {
+    const res = await this._handle(
       await fetch(_rel(path), { method: 'DELETE', headers: this.headers() }),
       path,
     )
+    // Only a JSON response is parsed (older DELETE routes answer with
+    // an empty / plain body); a malformed JSON body still rejects.
+    if (!(res.headers.get('content-type') ?? '').includes('json')) return null as T
+    return _parseJsonOrNull<T>(res)
   }
 
   /** POST a raw (non-JSON) body with an explicit ``Content-Type`` — an

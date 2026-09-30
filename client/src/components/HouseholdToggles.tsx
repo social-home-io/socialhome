@@ -15,7 +15,7 @@ import { t } from '@/i18n/i18n'
 interface Toggles {
   feat_feed: boolean; feat_pages: boolean; feat_tasks: boolean
   feat_stickies: boolean; feat_calendar: boolean; feat_presence: boolean
-  feat_gallery: boolean
+  feat_gallery: boolean; feat_timetable: boolean
   allow_text: boolean; allow_image: boolean; allow_video: boolean
   allow_file: boolean; allow_poll: boolean; allow_schedule: boolean
   allow_highlight_share: boolean
@@ -66,6 +66,7 @@ export function HouseholdToggles() {
     { value: 'feat_tasks', icon: '✅', title: 'Tasks', subtitle: 'Shared to-do lists' },
     { value: 'feat_stickies', icon: '📝', title: 'Stickies', subtitle: 'A shared sticky-note board' },
     { value: 'feat_calendar', icon: '🗓', title: 'Calendar', subtitle: 'The shared household calendar' },
+    { value: 'feat_timetable', icon: '🏫', title: 'Timetable', subtitle: 'Weekly school-style timetables' },
     { value: 'feat_presence', icon: '👥', title: 'Presence', subtitle: "Show who's home and online" },
     { value: 'feat_gallery', icon: '🖼', title: 'Gallery', subtitle: 'Shared photo galleries' },
   ]

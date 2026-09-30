@@ -43,6 +43,11 @@ vi.mock('@/components/CalendarEventDialog', () => ({
   openEditEventDialog: vi.fn(),
 }))
 
+// The Timetable tab has its own tests; here it only needs to show up.
+vi.mock('@/features/timetable/TimetablePage', () => ({
+  default: () => <div data-testid="timetable-page" />,
+}))
+
 const VIS_KEY = 'sh-cal-visible:u1'
 
 describe('CalendarPage', () => {
@@ -637,5 +642,69 @@ describe('CalendarPage', () => {
     // "Show in calendar" jumps the view to the imported event's month.
     fireEvent.click(utils.getByRole('button', { name: 'Show in calendar' }))
     await utils.findByText('October 2026')
+  })
+})
+
+describe('CalendarPage — Calendar | Timetable tabs', () => {
+  const ON = {
+    feat_feed: true, feat_pages: true, feat_tasks: true, feat_stickies: true,
+    feat_calendar: true, feat_presence: true, feat_gallery: true, feat_timetable: true,
+    allow_text: true, allow_image: true, allow_video: true, allow_file: true,
+    allow_poll: true, allow_schedule: true, allow_highlight_share: true,
+    allow_link_preview: true, household_name: 'Home',
+  }
+
+  async function renderAt(url: string, toggleState: Partial<typeof ON> | null) {
+    const { toggles } = await import('@/components/HouseholdToggles')
+    toggles.value = toggleState === null ? null : { ...ON, ...toggleState }
+    window.history.replaceState(null, '', url)
+    const { render } = await import('@testing-library/preact')
+    const { LocationProvider } = await import('preact-iso')
+    const mod = await import('./CalendarPage')
+    return render(<LocationProvider><mod.default /></LocationProvider>)
+  }
+
+  beforeEach(async () => {
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockResolvedValue([])
+  })
+
+  it('shows both tabs, the calendar by default (no query param)', async () => {
+    const { getByRole, queryByTestId } = await renderAt('/calendar', ON)
+    expect(getByRole('tab', { name: 'Calendar' }).getAttribute('aria-selected')).toBe('true')
+    expect(getByRole('tab', { name: 'Timetable' }).getAttribute('aria-selected')).toBe('false')
+    expect(queryByTestId('timetable-page')).toBeNull()
+  })
+
+  it('?tab=timetable opens the Timetable tab; the Calendar tab drops the param', async () => {
+    const { fireEvent, waitFor } = await import('@testing-library/preact')
+    const { getByRole, getByTestId, queryByTestId } = await renderAt('/calendar?tab=timetable', ON)
+    expect(getByRole('tab', { name: 'Timetable' }).getAttribute('aria-selected')).toBe('true')
+    expect(getByTestId('timetable-page')).toBeTruthy()
+    fireEvent.click(getByRole('tab', { name: 'Calendar' }))
+    await waitFor(() => expect(queryByTestId('timetable-page')).toBeNull())
+    expect(window.location.search).toBe('')
+    fireEvent.click(getByRole('tab', { name: 'Timetable' }))
+    await waitFor(() => expect(getByTestId('timetable-page')).toBeTruthy())
+    expect(window.location.search).toBe('?tab=timetable')
+  })
+
+  it('treats not-yet-loaded toggles as all on', async () => {
+    const { getByRole } = await renderAt('/calendar', null)
+    expect(getByRole('tab', { name: 'Timetable' })).toBeTruthy()
+  })
+
+  it('feat_timetable off: no tab strip, and ?tab=timetable falls back to the calendar', async () => {
+    const { queryByRole, queryByTestId } = await renderAt('/calendar?tab=timetable',
+      { feat_timetable: false })
+    expect(queryByRole('tablist', { name: 'Calendar sections' })).toBeNull()
+    expect(queryByTestId('timetable-page')).toBeNull()
+  })
+
+  it('feat_calendar off + feat_timetable on: only the Timetable tab', async () => {
+    const { getAllByRole, getByTestId } = await renderAt('/calendar', { feat_calendar: false })
+    const tabs = getAllByRole('tab').filter(el => el.closest('[aria-label="Calendar sections"]'))
+    expect(tabs.map(el => el.textContent)).toEqual(['Timetable'])
+    expect(getByTestId('timetable-page')).toBeTruthy()
   })
 })

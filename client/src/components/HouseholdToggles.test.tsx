@@ -13,7 +13,7 @@ vi.mock('@/api', () => ({
     get: vi.fn().mockResolvedValue({
       feat_feed: true, feat_pages: true, feat_tasks: true,
       feat_stickies: true, feat_calendar: true,
-      feat_presence: true, feat_gallery: true,
+      feat_presence: true, feat_gallery: true, feat_timetable: true,
       allow_text: true, allow_image: true, allow_video: true,
       allow_file: true, allow_poll: true, allow_schedule: true,
       allow_highlight_share: true,
@@ -83,9 +83,9 @@ describe('HouseholdToggles', () => {
     expect(getByText('Text')).toBeTruthy()
     expect(getByText('Allow text posts in the feed')).toBeTruthy()
     expect(getByText('Highlight share')).toBeTruthy()
-    // 7 features + 7 post types + 1 link-preview switch = 15 cards
+    // 8 features + 7 post types + 1 link-preview switch = 16 cards
     const cards = container.querySelectorAll('.sh-radio-card')
-    expect(cards).toHaveLength(15)
+    expect(cards).toHaveLength(16)
   })
 
   it('the admin can switch link previews off', async () => {
@@ -121,6 +121,22 @@ describe('HouseholdToggles', () => {
     fireEvent.click(box)
     expect(api.put).toHaveBeenCalledWith('/api/household/preferences', {
       toggles: { feat_feed: false },
+    })
+  })
+
+  it('lists Timetable right after Calendar and toggles feat_timetable', async () => {
+    const { api } = await import('@/api')
+    const { HouseholdToggles, loadToggles } = await import('./HouseholdToggles')
+    await loadToggles()
+    const { getByText, container } = render(<HouseholdToggles />)
+    const titles = Array.from(container.querySelectorAll('.sh-radio-card__title'))
+      .map(el => el.textContent)
+    expect(titles.indexOf('Timetable')).toBe(titles.indexOf('Calendar') + 1)
+    expect(getByText('Weekly school-style timetables')).toBeTruthy()
+    const card = getByText('Timetable').closest('.sh-radio-card')!
+    fireEvent.click(card.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    expect(api.put).toHaveBeenCalledWith('/api/household/preferences', {
+      toggles: { feat_timetable: false },
     })
   })
 })

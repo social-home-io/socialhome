@@ -26,6 +26,7 @@ function defaultItems() {
     { label: 'Spaces', href: '/spaces', type: 'page' },
     { label: 'Messages', href: '/dms', type: 'page' },
     { label: 'Calendar', href: '/calendar', type: 'page' },
+    { label: 'Timetable', href: '/calendar?tab=timetable', type: 'page' },
     { label: 'Tasks', href: '/organize', type: 'page' },
     { label: 'Shopping', href: '/organize?tab=shopping', type: 'page' },
     { label: 'Stickies', href: '/organize?tab=stickies', type: 'page' },

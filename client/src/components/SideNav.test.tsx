@@ -18,7 +18,7 @@ import { SideNav } from './SideNav'
 const ALL_FEATURES_ON = {
   feat_feed: true, feat_pages: true, feat_tasks: true,
   feat_stickies: true, feat_calendar: true,
-  feat_presence: true, feat_gallery: true,
+  feat_presence: true, feat_gallery: true, feat_timetable: true,
   allow_text: true, allow_image: true, allow_video: true,
   allow_file: true, allow_poll: true, allow_schedule: true,
   allow_highlight_share: true,
@@ -109,6 +109,23 @@ describe('SideNav', () => {
     // Other items in the same group still render.
     expect(queryByText('Feed')).toBeTruthy()
     expect(queryByText('Gallery')).toBeTruthy()
+  })
+
+  it('keeps Calendar in the nav while either Calendar or Timetable is on', () => {
+    setUser()
+    toggles.value = { ...ALL_FEATURES_ON, feat_calendar: false, feat_timetable: true }
+    const onlyTimetable = renderAt('/')
+    expect(onlyTimetable.queryByText('Calendar')).toBeTruthy()
+    onlyTimetable.unmount()
+
+    toggles.value = { ...ALL_FEATURES_ON, feat_calendar: true, feat_timetable: false }
+    const onlyCalendar = renderAt('/')
+    expect(onlyCalendar.queryByText('Calendar')).toBeTruthy()
+    onlyCalendar.unmount()
+
+    toggles.value = { ...ALL_FEATURES_ON, feat_calendar: false, feat_timetable: false }
+    const neither = renderAt('/')
+    expect(neither.queryByText('Calendar')).toBeNull()
   })
 
   it('shows Bazaar when hide_bazaar is false — it renders unless the user opted out', () => {

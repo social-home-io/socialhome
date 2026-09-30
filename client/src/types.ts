@@ -826,3 +826,114 @@ export interface BazaarOffer {
   created_at: string
   responded_at: string | null
 }
+
+// ─── Timetables (household school timetables, "Stundenplan") ─────────
+// Mirror ``socialhome/domain/timetable.py`` ``to_wire_dict`` /
+// ``timetable_view_dict`` / ``resolved_*_to_dict``. Weekdays are
+// 0 = Mon … 6 = Sun; times are ``"HH:MM"``; dates ``"YYYY-MM-DD"``.
+
+/** Theme colour token — never a hex value (the SPA maps it to a tint). */
+export type TimetableColor =
+  | 'terracotta' | 'amber' | 'olive' | 'moss' | 'teal' | 'sky'
+  | 'indigo' | 'violet' | 'rose' | 'slate' | 'sand' | 'coral'
+
+export type TimetableEntryKind = 'lesson' | 'break'
+
+export interface TimetableDefaults {
+  lesson_minutes: number
+  gap_minutes: number
+  day_start: string
+}
+
+export interface TimetableEntry {
+  id: string
+  weekday: number
+  start: string
+  end: string
+  kind: TimetableEntryKind
+  label: string | null
+  title: string | null
+  room: string | null
+  teacher: string | null
+  note: string | null
+  color: TimetableColor | null
+  /** Exactly one emoji, for children who can't read yet. */
+  icon: string | null
+}
+
+export interface TimetableOverride {
+  id: string
+  date: string
+  kind: 'cancel' | 'replace' | 'add'
+  entry_id: string | null
+  start: string | null
+  end: string | null
+  entry_kind: TimetableEntryKind
+  label: string | null
+  title: string | null
+  room: string | null
+  teacher: string | null
+  note: string | null
+  color: TimetableColor | null
+  icon: string | null
+}
+
+export interface TimetableValidity {
+  valid_from: string | null
+  valid_until: string | null
+  excluded_weeks: string[]
+}
+
+export interface Timetable {
+  schema: number
+  id: string
+  name: string
+  created_by: string
+  created_at: string
+  updated_at: string
+  updated_by: string | null
+  version: number
+  week_start: 0 | 6
+  tz: string
+  color: TimetableColor | null
+  days: number[]
+  defaults: TimetableDefaults
+  entries: TimetableEntry[]
+  overrides: TimetableOverride[]
+  validity: TimetableValidity
+  assignees: string[]
+  /** Computed by the REST view in the timetable's tz; absent on the
+   *  ``timetable.changed`` WS frame (the bare wire dict). */
+  active_this_week?: boolean
+  valid_today?: boolean
+}
+
+export interface EffectiveLesson {
+  source_id: string
+  date: string
+  start: string
+  end: string
+  kind: TimetableEntryKind
+  label: string | null
+  title: string | null
+  room: string | null
+  teacher: string | null
+  note: string | null
+  color: TimetableColor | null
+  icon: string | null
+  status: 'normal' | 'cancelled' | 'changed' | 'added'
+  override_id: string | null
+  original: TimetableEntry | null
+}
+
+export interface ResolvedDay {
+  date: string
+  valid: boolean
+  lessons: EffectiveLesson[]
+}
+
+export interface ResolvedWeek {
+  anchor: string
+  valid: boolean
+  days: ResolvedDay[]
+}
