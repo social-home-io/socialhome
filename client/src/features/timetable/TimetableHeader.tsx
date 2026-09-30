@@ -1,17 +1,21 @@
 /**
  * TimetableHeader — the selected timetable's name (click to rename
  * inline: Enter or leaving the field saves, Esc cancels, an empty name
- * is refused) and one compact row of view controls: Picture view, List
- * view, and an overflow menu (Settings, Duplicate, New timetable,
- * Delete). Below 400 px the two toggles switch to short labels
- * ("Pictures" / "List") without their emoji; the accessible name stays
- * the full label.
+ * is refused), a chip with the school weeks it runs in (opens the
+ * Weeks dialog), and one compact row of view controls: Fill (brush
+ * mode), Picture view, List view, and an overflow menu (Settings,
+ * School weeks & holidays, Print, Duplicate, New timetable, Delete).
+ * Below 400 px the toggles switch to short labels ("Fill" / "Pictures"
+ * / "List") without their emoji; the accessible name stays the full
+ * label.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import { patchHeader } from '@/store/timetables'
 import type { Timetable } from '@/types'
 import { colorClass } from './colors'
+import { validitySummary } from './dates'
+import { OverflowMenu, type MenuItem } from './OverflowMenu'
 
 interface Props {
   tt: Timetable
@@ -23,20 +27,23 @@ interface Props {
   onDuplicate: () => void
   onNew: () => void
   onDelete: () => void
+  onWeeks: () => void
+  onPrint: () => void
+  /** Brush mode ("Fill"); the toggle is hidden when ``onBrush`` is
+   *  absent (week mode edits one week, not the regular plan). */
+  brush?: boolean
+  onBrush?: (on: boolean) => void
 }
 
 export function TimetableHeader({
   tt, picture, onPicture, list, onList, onSettings, onDuplicate, onNew, onDelete,
+  onWeeks, onPrint, brush = false, onBrush,
 }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(tt.name)
   const [error, setError] = useState<string | null>(null)
-  const [menuOpen, setMenuOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const nameBtnRef = useRef<HTMLButtonElement | null>(null)
-  const moreRef = useRef<HTMLButtonElement | null>(null)
-  const wrapRef = useRef<HTMLDivElement | null>(null)
-  const menuRef = useRef<HTMLDivElement | null>(null)
   // Esc and a finished save unmount the input — its blur must not
   // commit (again).
   const closing = useRef(false)
@@ -80,46 +87,17 @@ export function TimetableHeader({
     }
   }
 
-  // Menu: first item focused on open, ArrowUp / ArrowDown move (wrapping).
-  const items = () => Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
-  useEffect(() => {
-    if (menuOpen) items()[0]?.focus()
-  }, [menuOpen])
-  // Outside press closes (Safari never focuses a clicked button, so
-  // focusout alone can't be relied on).
-  useEffect(() => {
-    if (!menuOpen) return
-    const onDown = (e: PointerEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setMenuOpen(false)
-    }
-    document.addEventListener('pointerdown', onDown)
-    return () => document.removeEventListener('pointerdown', onDown)
-  }, [menuOpen])
-  const onMenuKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && menuOpen) {
-      e.stopPropagation()
-      setMenuOpen(false)
-      moreRef.current?.focus()
-      return
-    }
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
-    const list = items()
-    if (list.length === 0) return
-    e.preventDefault()
-    const i = list.indexOf(document.activeElement as HTMLElement)
-    const next = e.key === 'ArrowDown' ? (i + 1) % list.length : (i - 1 + list.length) % list.length
-    list[next].focus()
-  }
-  // Pick an item: park focus on the trigger first, so a dialog the
-  // action opens hands focus back to it when it closes.
-  const pick = (action: () => void) => () => {
-    moreRef.current?.focus()
-    setMenuOpen(false)
-    action()
-  }
-  // Pressing an item must not blur the trigger / item first (focusout
-  // would close the menu before the click lands).
-  const keepFocus = (e: PointerEvent) => e.preventDefault()
+  const menu: MenuItem[] = [
+    { label: t('timetable.header.settings'), onSelect: onSettings },
+    { label: t('timetable.header.weeks'), onSelect: onWeeks },
+    { label: t('timetable.header.print'), onSelect: onPrint },
+    { label: t('timetable.header.duplicate'), onSelect: onDuplicate },
+    // Also here so creating one stays discoverable when the "+ New"
+    // card is scrolled off-screen on a phone.
+    { label: t('timetable.new'), onSelect: onNew },
+    { label: t('timetable.header.delete'), onSelect: onDelete, danger: true },
+  ]
+  const summary = validitySummary(tt.validity)
 
   return (
     <div class={`sh-timetable-head ${colorClass(tt.color)}`}>
@@ -155,8 +133,28 @@ export function TimetableHeader({
             </button>
           </h2>
         )}
+        <button type="button" class="sh-timetable-head__weeks" onClick={onWeeks}
+                aria-label={t('timetable.validity.chip_aria', { summary })}
+                title={t('timetable.header.weeks')}>
+          <span aria-hidden="true">🗓️</span>
+          <span aria-hidden="true">{summary}</span>
+        </button>
       </div>
       <div class="sh-timetable-head__actions">
+        {onBrush && (
+          <button
+            type="button"
+            class={`sh-timetable-toggle sh-timetable-toggle--brush${brush ? ' is-on' : ''}`}
+            aria-pressed={brush}
+            aria-label={t('timetable.brush.toggle')}
+            title={t('timetable.brush.toggle_hint')}
+            onClick={() => onBrush(!brush)}
+          >
+            <span class="sh-timetable-toggle__icon" aria-hidden="true">🖌️</span>
+            <span class="sh-timetable-toggle__text" aria-hidden="true">{t('timetable.brush.toggle')}</span>
+            <span class="sh-timetable-toggle__short" aria-hidden="true">{t('timetable.brush.toggle')}</span>
+          </button>
+        )}
         <button
           type="button"
           class={`sh-timetable-toggle sh-timetable-toggle--picture${picture ? ' is-on' : ''}`}
@@ -181,49 +179,10 @@ export function TimetableHeader({
           <span class="sh-timetable-toggle__text" aria-hidden="true">{t('timetable.view.list')}</span>
           <span class="sh-timetable-toggle__short" aria-hidden="true">{t('timetable.view.list_short')}</span>
         </button>
-        <div
-          ref={wrapRef}
-          class="sh-post-overflow-wrap"
-          onFocusOut={(e) => {
-            const next = e.relatedTarget as Node | null
-            if (next && !(e.currentTarget as HTMLElement).contains(next)) setMenuOpen(false)
-          }}
-          onKeyDown={onMenuKey}
-        >
-          <button
-            ref={moreRef}
-            type="button"
-            class="sh-post-overflow sh-timetable-head__more"
-            aria-label={t('timetable.header.actions')}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen(v => !v)}
-          >
-            ···
-          </button>
-          {menuOpen && (
-            <div ref={menuRef} class="sh-post-menu" role="menu">
-              <button type="button" role="menuitem" tabIndex={-1} onPointerDown={keepFocus}
-                      onClick={pick(onSettings)}>
-                {t('timetable.header.settings')}
-              </button>
-              <button type="button" role="menuitem" tabIndex={-1} onPointerDown={keepFocus}
-                      onClick={pick(onDuplicate)}>
-                {t('timetable.header.duplicate')}
-              </button>
-              {/* Also here so creating one stays discoverable when the
-               *  "+ New" card is scrolled off-screen on a phone. */}
-              <button type="button" role="menuitem" tabIndex={-1} onPointerDown={keepFocus}
-                      onClick={pick(onNew)}>
-                {t('timetable.new')}
-              </button>
-              <button type="button" role="menuitem" tabIndex={-1} class="sh-post-menu-danger"
-                      onPointerDown={keepFocus} onClick={pick(onDelete)}>
-                {t('timetable.header.delete')}
-              </button>
-            </div>
-          )}
-        </div>
+        <OverflowMenu label={t('timetable.header.actions')} triggerClass="sh-timetable-head__more"
+                      items={menu}>
+          ···
+        </OverflowMenu>
       </div>
     </div>
   )

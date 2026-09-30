@@ -9,25 +9,32 @@
  * as thin dividers and double lessons merged into one block (the same
  * ``canMerge`` rule as the Periods table).
  */
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useContext, useEffect, useRef, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import type { Timetable, TimetableEntry } from '@/types'
 import { isoWeekday } from '@/utils/week'
 import { LessonBlock } from './LessonBlock'
 import { dayEntries, mergeRuns, nextStartFor, prefillAt, type EntryPrefill } from './layout'
+import { dayOfMonth, fullDate, isoDate } from './dates'
 import { nextDayFrom, orderedDays, toMinutes, weekdayName } from './time'
+import { brushOn } from './brush'
+import { WeekContext, addBlockedReason, blockedLabel } from './weekView'
 
 const SWIPE_PX = 50
 
 interface Props {
   tt: Timetable
   picture: boolean
-  onEdit: (entry: TimetableEntry) => void
+  onEdit: (entry: TimetableEntry, group?: string[], run?: string[]) => void
   onAdd: (prefill: EntryPrefill) => void
+  /** Day tools (regular mode): open the day builder / copy dialog. */
+  onSetupDay?: (weekday: number) => void
+  onCopyDay?: (weekday: number) => void
   now?: Date
 }
 
-export function TimetableDayView({ tt, picture, onEdit, onAdd, now }: Props) {
+export function TimetableDayView({ tt, picture, onEdit, onAdd, onSetupDay, onCopyDay, now }: Props) {
+  const week = useContext(WeekContext)
   const days = orderedDays(tt.days, tt.week_start)
   const todayWd = isoWeekday(now ?? new Date())
   const [picked, setPicked] = useState<number | null>(null)
@@ -105,7 +112,11 @@ export function TimetableDayView({ tt, picture, onEdit, onAdd, now }: Props) {
   // Double lessons read as one block, exactly as in the Periods table.
   const runs = mergeRuns(dayEntries(tt, day), tt.defaults.gap_minutes)
   const panelId = `sh-tt-${tt.id}-day-panel`
-  const isToday = (d: number) => d === todayWd && tt.valid_today !== false
+  const isToday = (d: number) => week
+    ? week.dates[d] === isoDate(now ?? new Date())
+    : d === todayWd && tt.valid_today !== false
+  const blocked = week ? addBlockedReason(week, day)
+    : brushOn(tt.id) ? t('timetable.brush.no_add') : null
 
   return (
     <div class="sh-timetable-day">
@@ -121,11 +132,13 @@ export function TimetableDayView({ tt, picture, onEdit, onAdd, now }: Props) {
             tabIndex={d === day ? 0 : -1}
             data-day={d}
             aria-controls={panelId}
-            aria-label={weekdayName(d, 'long') + (isToday(d) ? `, ${t('timetable.grid.today')}` : '')}
+            aria-label={(week?.dates[d] ? fullDate(week.dates[d]) : weekdayName(d, 'long'))
+              + (isToday(d) ? `, ${t('timetable.grid.today')}` : '')}
             class={`sh-timetable-day__chip${d === day ? ' is-on' : ''}${isToday(d) ? ' is-today' : ''}`}
             onClick={() => setPicked(d)}
           >
             {weekdayName(d, 'short')}
+            {week?.dates[d] && <span class="sh-timetable-day__chipdate">{dayOfMonth(week.dates[d])}</span>}
           </button>
         ))}
       </div>
@@ -140,12 +153,18 @@ export function TimetableDayView({ tt, picture, onEdit, onAdd, now }: Props) {
         onClickCapture={onClickCapture}
       >
         {runs.length === 0 ? (
-          <p class="sh-timetable-day__nothing">
-            {t('timetable.day.nothing', { day: weekdayName(day, 'long') })}
-          </p>
+          <div class="sh-timetable-day__nothing">
+            <p>{t('timetable.day.nothing', { day: weekdayName(day, 'long') })}</p>
+            {onSetupDay && (
+              <button type="button" class="sh-btn sh-btn--primary sh-timetable-day__setup"
+                      onClick={() => onSetupDay(day)}>
+                {t('timetable.day.setup_cta', { day: weekdayName(day, 'long') })}
+              </button>
+            )}
+          </div>
         ) : (
           <ol class="sh-timetable-day__list">
-            {runs.map(({ entry: e, end, count }) => (
+            {runs.map(({ entry: e, end, count, ids }) => (
               <li key={e.id}
                   class={`sh-timetable-day__row sh-timetable-day__row--${e.kind}${count > 1 ? ' sh-timetable-day__row--double' : ''}`}>
                 <span class="sh-timetable-day__time" aria-hidden="true">
@@ -153,7 +172,8 @@ export function TimetableDayView({ tt, picture, onEdit, onAdd, now }: Props) {
                   {e.kind === 'lesson' && <span class="sh-timetable-day__end">{end}</span>}
                 </span>
                 <LessonBlock tt={tt} entry={e} variant="day" picture={picture}
-                             spanEnd={count > 1 ? end : undefined} hideTime onOpen={onEdit} />
+                             spanEnd={count > 1 ? end : undefined} hideTime runIds={ids}
+                             onOpen={(entry, run) => (run ? onEdit(entry, undefined, run) : onEdit(entry))} />
               </li>
             ))}
           </ol>
@@ -161,10 +181,27 @@ export function TimetableDayView({ tt, picture, onEdit, onAdd, now }: Props) {
         <button
           type="button"
           class="sh-btn sh-btn--secondary sh-timetable-day__add"
-          onClick={() => onAdd(prefillAt(tt, day, toMinutes(nextStartFor(tt, day))))}
+          aria-disabled={blocked ? 'true' : undefined}
+          title={blocked ?? undefined}
+          aria-label={blocked ? blockedLabel(`+ ${t(week ? 'timetable.week.add_extra' : 'timetable.grid.add_lesson')}`, blocked) : undefined}
+          onClick={() => { if (!blocked) onAdd(prefillAt(tt, day, toMinutes(nextStartFor(tt, day)))) }}
         >
-          + {t('timetable.grid.add_lesson')}
+          + {t(week ? 'timetable.week.add_extra' : 'timetable.grid.add_lesson')}
         </button>
+        {!week && runs.length > 0 && (onSetupDay || onCopyDay) && (
+          <div class="sh-timetable-day__tools">
+            {onSetupDay && (
+              <button type="button" class="sh-btn sh-btn--ghost" onClick={() => onSetupDay(day)}>
+                {t('timetable.day.setup')}
+              </button>
+            )}
+            {onCopyDay && tt.days.length > 1 && (
+              <button type="button" class="sh-btn sh-btn--ghost" onClick={() => onCopyDay(day)}>
+                {t('timetable.day.copy')}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

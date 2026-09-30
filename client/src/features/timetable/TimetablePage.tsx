@@ -21,22 +21,38 @@ import { useTitle } from '@/store/pageTitle'
 import {
   deleteTimetable, duplicateTimetable, loaded, loadTimetables, selectedId, timetables,
 } from '@/store/timetables'
-import type { Timetable, TimetableEntry } from '@/types'
-import { EntryDialog, openEntryDialog } from './EntryDialog'
+import type { Timetable } from '@/types'
+import { CopyDayDialog } from './CopyDayDialog'
+import { isIsoDate } from './dates'
+import { DayBuilder, openDayBuilder } from './DayBuilder'
+import { EntryDialog } from './EntryDialog'
+import { SelectedTimetable } from './SelectedTimetable'
 import { TimetableCard } from './TimetableCard'
 import { TimetableCreateDialog, openCreateDialog } from './TimetableCreateDialog'
-import { TimetableGrid } from './TimetableGrid'
-import type { EntryPrefill } from './layout'
-import { TimetableHeader } from './TimetableHeader'
-import { TimetableSettingsDialog, openSettingsDialog } from './TimetableSettingsDialog'
+import { TimetableSettingsDialog } from './TimetableSettingsDialog'
+import { orderedDays } from './time'
 import { useNarrow } from './useNarrow'
-import { useViewPrefs } from './viewPrefs'
+import { WeekValidityPicker } from './WeekValidityPicker'
 
 const BASE = '/calendar?tab=timetable'
 
+const query = (url: string | undefined) => new URLSearchParams((url ?? '').split('?')[1] ?? '')
+
 export function ttFromUrl(url: string | undefined): string | null {
-  const q = (url ?? '').split('?')[1] ?? ''
-  return new URLSearchParams(q).get('tt')
+  return query(url).get('tt')
+}
+
+/** ``&week=YYYY-MM-DD`` — its presence means week mode. */
+export function weekFromUrl(url: string | undefined): string | null {
+  const w = query(url).get('week')
+  return isIsoDate(w) ? w : null
+}
+
+function pageUrl(tt: string | null, week: string | null): string {
+  let url = BASE
+  if (tt) url += `&tt=${encodeURIComponent(tt)}`
+  if (tt && week) url += `&week=${week}`
+  return url
 }
 
 export default function TimetablePage() {
@@ -56,9 +72,11 @@ export default function TimetablePage() {
 
   useEffect(() => { selectedId.value = ttFromUrl(loc.url) }, [loc.url])
 
+  const week = weekFromUrl(loc.url)
+  // Switching timetables keeps week mode (compare two children's weeks).
   const select = useCallback((id: string | null) => {
     selectedId.value = id
-    const next = id ? `${BASE}&tt=${encodeURIComponent(id)}` : BASE
+    const next = pageUrl(id, weekFromUrl(loc.url))
     if (loc.url !== next) loc.route?.(next, true)
   }, [loc])
 
@@ -66,17 +84,55 @@ export default function TimetablePage() {
   const onlyId = list.length === 1 ? list[0].id : null
   const selected = list.find(x => x.id === selectedId.value) ?? (onlyId ? list[0] : null)
   const isLoaded = loaded.value
+  const setWeek = (date: string | null) => {
+    const next = pageUrl(selected?.id ?? null, date)
+    if (loc.url !== next) loc.route?.(next, true)
+  }
 
   // Exactly one timetable → select it so its id lands in the URL.
   useEffect(() => {
     if (isLoaded && onlyId && selectedId.value !== onlyId) select(onlyId)
   }, [isLoaded, onlyId, select])
 
+  const onDuplicate = async (tt: Timetable) => {
+    try {
+      const copy = await duplicateTimetable(tt.id)
+      showToast(t('timetable.duplicated'), 'success')
+      select(copy.id)
+    } catch (e) {
+      showToast((e as Error).message, 'error')
+    }
+  }
+  const onDelete = async (tt: Timetable) => {
+    const ok = await confirmDialog(t('timetable.delete_confirm', { name: tt.name }), {
+      title: t('timetable.delete_title'),
+      confirmLabel: t('timetable.header.delete'),
+      destructive: true,
+    })
+    if (!ok) return
+    try {
+      await deleteTimetable(tt.id)
+      showToast(t('timetable.deleted'), 'success')
+      select(null)
+    } catch (e) {
+      showToast((e as Error).message, 'error')
+    }
+  }
+
   const dialogs = (
     <>
-      <TimetableCreateDialog onCreated={(tt) => select(tt.id)} />
+      <TimetableCreateDialog onCreated={(tt) => {
+        select(tt.id)
+        // An *Empty* timetable starts with its first day's times.
+        if (tt.entries.length === 0 && tt.days.length > 0) {
+          openDayBuilder({ timetableId: tt.id, weekday: orderedDays(tt.days, tt.week_start)[0] })
+        }
+      }} />
       <TimetableSettingsDialog />
       <EntryDialog />
+      <DayBuilder />
+      <CopyDayDialog />
+      <WeekValidityPicker />
     </>
   )
 
@@ -133,63 +189,12 @@ export default function TimetablePage() {
       </div>
       {selected && (
         <SelectedTimetable key={selected.id} tt={selected} narrow={narrow}
-                           onSelect={select} />
+                           week={week} onWeek={setWeek}
+                           onDuplicate={() => void onDuplicate(selected)}
+                           onNew={() => openCreateDialog('school')}
+                           onDelete={() => void onDelete(selected)} />
       )}
       {dialogs}
     </div>
-  )
-}
-
-function SelectedTimetable({ tt, narrow, onSelect }: {
-  tt: Timetable
-  narrow: boolean
-  onSelect: (id: string | null) => void
-}) {
-  const [prefs, setPrefs] = useViewPrefs(tt.id)
-  const onEdit = (entry: TimetableEntry, group?: string[]) =>
-    openEntryDialog({ timetableId: tt.id, entry, group })
-  const onAdd = (prefill: EntryPrefill) => openEntryDialog({ timetableId: tt.id, entry: null, prefill })
-
-  const onDuplicate = async () => {
-    try {
-      const copy = await duplicateTimetable(tt.id)
-      showToast(t('timetable.duplicated'), 'success')
-      onSelect(copy.id)
-    } catch (e) {
-      showToast((e as Error).message, 'error')
-    }
-  }
-  const onDelete = async () => {
-    const ok = await confirmDialog(t('timetable.delete_confirm', { name: tt.name }), {
-      title: t('timetable.delete_title'),
-      confirmLabel: t('timetable.header.delete'),
-      destructive: true,
-    })
-    if (!ok) return
-    try {
-      await deleteTimetable(tt.id)
-      showToast(t('timetable.deleted'), 'success')
-      onSelect(null)
-    } catch (e) {
-      showToast((e as Error).message, 'error')
-    }
-  }
-
-  return (
-    <article class="sh-timetable-selected">
-      <TimetableHeader
-        tt={tt}
-        picture={prefs.picture}
-        onPicture={(picture) => setPrefs({ picture })}
-        list={prefs.list}
-        onList={(list) => setPrefs({ list })}
-        onSettings={() => openSettingsDialog(tt.id)}
-        onDuplicate={() => void onDuplicate()}
-        onNew={() => openCreateDialog('school')}
-        onDelete={() => void onDelete()}
-      />
-      <TimetableGrid tt={tt} prefs={prefs} onPrefs={setPrefs} onEdit={onEdit} onAdd={onAdd}
-                     narrow={narrow} />
-    </article>
   )
 }

@@ -79,3 +79,14 @@ export function startOfWeek(d: Date, ws: WeekStart): Date {
 export function weekdayOrder(ws: WeekStart): number[] {
   return Array.from({ length: 7 }, (_, i) => (ws + i) % 7)
 }
+
+/** ISO 8601 week number (1–53) of ``d``'s local calendar day: weeks
+ *  run Monday–Sunday and week 1 holds the year's first Thursday. Math
+ *  on UTC midnights so a DST switch can't shift the day count. */
+export function isoWeekNumber(d: Date): number {
+  const day = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())
+  // The Thursday of d's week decides the ISO year.
+  const thursday = new Date(day + (3 - isoWeekday(d)) * 86_400_000)
+  const jan1 = Date.UTC(thursday.getUTCFullYear(), 0, 1)
+  return Math.floor((thursday.getTime() - jan1) / (7 * 86_400_000)) + 1
+}
