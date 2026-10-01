@@ -76,6 +76,27 @@
   /* Legacy alias — pre-existing rules use a flat --sh-shadow. */
   --sh-shadow:    var(--sh-shadow-sm);
 
+  /* ── Sticky notes — paper on the board ────────────────────────
+     Note backgrounds are user-chosen pastels in BOTH themes, so the
+     ink is a fixed dark brown: ≥ 10:1 on every palette colour (muted
+     ≥ 5.9:1). Shadows / tape follow the theme. */
+  --sh-sticky-ink:        #1F1A14;
+  --sh-sticky-ink-muted:  #4A4033;
+  /* Light ink for a note in a DARK custom colour (``.sh-ink-light``,
+     chosen by ``features/stickies/ink.ts`` when the dark ink would
+     fall under 4.5:1). ≥ 11:1 / 9:1 on #123456. */
+  --sh-sticky-ink-light:        #FBF7F0;
+  --sh-sticky-ink-light-muted:  #E2DACD;
+  --sh-sticky-tape-on-dark:       rgba(255, 255, 255, 0.14);
+  --sh-sticky-tape-on-dark-hover: rgba(255, 255, 255, 0.24);
+  --sh-sticky-shadow:     0 1px 0 rgba(26, 24, 20, 0.12),
+                          0 18px 36px -22px rgba(26, 24, 20, 0.55);
+  --sh-sticky-shadow-lift: 0 1px 0 rgba(26, 24, 20, 0.16),
+                           0 28px 60px -28px rgba(26, 24, 20, 0.6);
+  --sh-sticky-tape:       rgba(255, 255, 255, 0.55);
+  --sh-sticky-tape-hover: rgba(255, 255, 255, 0.8);
+  --sh-swatch-ring: rgba(26, 24, 20, 0.25);
+
   /* ── Typography — Manrope (geometric, free, warm-leaning) ─────
      Loaded from fonts.googleapis.com via the @import in app.css.
      Keep the system fallback chain so the first paint isn't
@@ -239,6 +260,18 @@
   --sh-shadow-pinned: 0 1px 0 rgba(0, 0, 0, 0.5),
                       0 26px 60px -28px rgba(0, 0, 0, 0.85);
   --sh-shadow:    var(--sh-shadow-sm);
+
+  --sh-sticky-shadow:     0 1px 0 rgba(0, 0, 0, 0.5),
+                          0 18px 36px -20px rgba(0, 0, 0, 0.85);
+  --sh-sticky-shadow-lift: 0 1px 0 rgba(0, 0, 0, 0.55),
+                           0 28px 60px -26px rgba(0, 0, 0, 0.95);
+  --sh-sticky-ink-light:        #F1E9DA;
+  --sh-sticky-ink-light-muted:  #D9D0C2;
+  --sh-sticky-tape-on-dark:       rgba(255, 255, 255, 0.12);
+  --sh-sticky-tape-on-dark-hover: rgba(255, 255, 255, 0.22);
+  --sh-sticky-tape:       rgba(255, 255, 255, 0.45);
+  --sh-sticky-tape-hover: rgba(255, 255, 255, 0.7);
+  --sh-swatch-ring: rgba(255, 255, 255, 0.3);
 }
 .sh-theme-dark :focus-visible {
   outline-color: #F1D9CA;    /* hearth-tint — high luminance on dark paper */

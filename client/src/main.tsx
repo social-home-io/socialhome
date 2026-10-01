@@ -17,7 +17,7 @@ import { wireCalendarWs } from './store/calendar'
 import { wireTasksWs, resetTasks } from './store/tasks'
 import { wireNotificationsWs } from './store/notifications'
 import { wirePresenceWs, loadPresence } from './store/presence'
-import { wireStickiesWs, resetHouseholdStickies } from './store/stickies'
+import { wireStickiesWs, resetStickies } from './store/stickies'
 import { wireDmWs } from './store/dms'
 import { wireCallsWs } from './store/calls'
 import { wireConnectionsWs } from './store/connections'
@@ -60,7 +60,7 @@ setUnauthorizedHandler(logout)
 // account never sees them.
 onLogout(resetShopping)
 onLogout(resetTasks)
-onLogout(resetHouseholdStickies)
+onLogout(resetStickies)
 
 ws.connect()
 

@@ -6595,8 +6595,27 @@ body.sh-dm-thread-open .sh-messages {
   color: var(--sh-text-muted);
 }
 
-/* Stickies */
-.sh-sticky-board { padding: 0; display: flex; flex-direction: column; gap: var(--sh-space-md); }
+/* ─── Stickies ────────────────────────────────────────────────────────
+ *
+ * Wide screens: a free-position board (``.sh-sticky-canvas``). Notes
+ * are 18 % × 20 % of the board (with a minimum size) and placed by the
+ * inline ``--sh-sticky-x`` / ``--sh-sticky-y`` percentages; ``min()``
+ * keeps a note the minimum size pushed past an edge inside the board.
+ * The board never captures touch — only the grip (``touch-action:
+ * none``) does, so swiping over the board scrolls the page.
+ * Boards under 760 px wide: a reading-order grid (``.sh-sticky-grid``),
+ * two columns on a phone.
+ *
+ * Note backgrounds are user-chosen pastels in BOTH themes, so the ink
+ * is the fixed dark ``--sh-sticky-ink`` (≥ 4.5:1 on every palette
+ * colour) and focus rings use it too — the theme's light dark-mode
+ * ring would vanish on yellow. */
+.sh-sticky-board {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-md);
+  margin-top: var(--sh-space-sm);
+}
 .sh-sticky-canvas {
   position: relative;
   width: 100%;
@@ -6612,51 +6631,56 @@ body.sh-dm-thread-open .sh-messages {
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
   overflow: hidden;
-  touch-action: none;  /* pointer drag works on touch */
-}
-.sh-sticky-canvas .sh-sticky {
-  position: absolute;
-  cursor: grab;
-  user-select: none;
-  transition: box-shadow var(--sh-transition-fast), transform var(--sh-transition-fast);
-}
-.sh-sticky-canvas .sh-sticky:hover {
-  transform: translateY(-2px) rotate(-1deg);
-  z-index: 2;
-}
-.sh-sticky--dragging {
-  cursor: grabbing !important;
-  transform: rotate(-2deg) scale(1.04) !important;
-  box-shadow: var(--sh-shadow-xl) !important;
-  z-index: 10;
-  transition: none !important;
-}
-.sh-sticky-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: var(--sh-space-md);
 }
 .sh-sticky {
   position: relative;
-  min-height: 140px;
-  padding: var(--sh-space-md);
   border-radius: var(--sh-radius-md);
-  box-shadow:
-    0 1px 0 rgba(0, 0, 0, 0.12),
-    0 18px 36px -22px rgba(26, 24, 20, 0.55);
-  transform: rotate(var(--sh-sticky-rot, 0deg));
+  box-shadow: var(--sh-sticky-shadow);
+  color: var(--sh-sticky-ink);
   transition: transform var(--sh-transition-fast),
               box-shadow var(--sh-transition-fast);
-  color: #1A1A1A;  /* sticky backgrounds are saturated pastels — keep ink dark */
+}
+.sh-sticky-canvas .sh-sticky {
+  /* The canvas only shows on boards ≥ 760 px (``CANVAS_MIN_PX``), so
+   * a note is never narrower than 150 px. */
+  --sh-sticky-w: max(18%, 150px);
+  --sh-sticky-h: max(20%, 110px);
+  position: absolute;
+  width: var(--sh-sticky-w);
+  height: var(--sh-sticky-h);
+  left: min(var(--sh-sticky-x, 0%), 100% - var(--sh-sticky-w));
+  top: min(var(--sh-sticky-y, 0%), 100% - var(--sh-sticky-h));
+}
+.sh-sticky-canvas .sh-sticky:hover,
+.sh-sticky-canvas .sh-sticky:focus-within {
+  box-shadow: var(--sh-sticky-shadow-lift);
+  z-index: 2;
+}
+.sh-sticky--dragging,
+.sh-sticky-canvas .sh-sticky--dragging:hover {
+  transform: rotate(-2deg) scale(1.04);
+  box-shadow: var(--sh-sticky-shadow-lift);
+  z-index: 10;
+  transition: none;
+}
+.sh-sticky-grid {
+  display: grid;
+  /* Two columns on a phone; a mid-width board (tablet, a window with
+   * the sidebar) fits more. */
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--sh-space-md);
+}
+.sh-sticky-grid .sh-sticky {
+  min-height: 120px;
+  transform: rotate(var(--sh-sticky-rot, 0deg));
 }
 /* Hand-pinned rotation stagger so the wall doesn't look like a grid. */
 .sh-sticky-grid > :nth-child(4n+1) { --sh-sticky-rot: -1.2deg; }
 .sh-sticky-grid > :nth-child(4n+2) { --sh-sticky-rot:  0.8deg; }
 .sh-sticky-grid > :nth-child(4n+3) { --sh-sticky-rot: -0.6deg; }
 .sh-sticky-grid > :nth-child(4n)   { --sh-sticky-rot:  1.4deg; }
-/* Tiny washi-tape patch on the upper-left of every sticky — small
- * enough to feel like a thumbtack rather than a poster strip. */
-.sh-sticky::before {
+/* A washi-tape patch on grid notes (on the board the grip is the tape). */
+.sh-sticky-grid .sh-sticky::before {
   content: "";
   position: absolute;
   top: -6px;
@@ -6664,64 +6688,115 @@ body.sh-dm-thread-open .sh-messages {
   width: 36px;
   height: 10px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.55);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  background: var(--sh-sticky-tape);
+  box-shadow: var(--sh-shadow-xs);
   transform: rotate(-6deg);
   pointer-events: none;
   z-index: 1;
 }
-.sh-sticky:hover {
-  transform: rotate(0deg) translateY(-2px);
-  box-shadow:
-    0 1px 0 rgba(0, 0, 0, 0.16),
-    0 28px 60px -28px rgba(26, 24, 20, 0.55);
-  z-index: 2;
+/* A note (or the dialog preview) in a dark custom colour: swap the ink
+ * tokens, so its text, grip glyph, tape and focus ring all follow. */
+.sh-ink-light {
+  --sh-sticky-ink: var(--sh-sticky-ink-light);
+  --sh-sticky-ink-muted: var(--sh-sticky-ink-light-muted);
+  --sh-sticky-tape: var(--sh-sticky-tape-on-dark);
+  --sh-sticky-tape-hover: var(--sh-sticky-tape-on-dark-hover);
 }
-.sh-sticky-content {
-  background: transparent;
-  border: none;
-  padding: 0;
-  text-align: left;
-  width: 100%;
-  cursor: pointer;
-  font: inherit;
-  color: inherit;
-  white-space: pre-wrap;
-}
-.sh-sticky-delete,
-.sh-sticky-edit-btn {
-  position: absolute;
-  top: var(--sh-space-xs);
-  right: var(--sh-space-xs);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: var(--sh-text-muted);
-  opacity: 0;
-  transition: opacity var(--sh-transition-fast),
-              background var(--sh-transition-fast);
-  width: 24px;
-  height: 24px;
-  border-radius: var(--sh-radius-full);
+/* The note body: the one edit target, filling the note. */
+.sh-sticky__body {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: stretch;
+  width: 100%;
+  height: 100%;
+  min-height: inherit;
+  padding: var(--sh-space-md);
+  border: none;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   font-size: var(--sh-font-size-sm);
+  line-height: 1.4;
+  text-align: start;
+  cursor: pointer;
+  overflow: hidden;
 }
-.sh-sticky:hover .sh-sticky-delete,
-.sh-sticky:focus-within .sh-sticky-delete,
-.sh-sticky:hover .sh-sticky-edit-btn,
-.sh-sticky:focus-within .sh-sticky-edit-btn { opacity: 1; }
-.sh-sticky-delete:hover,
-.sh-sticky-edit-btn:hover { background: rgba(0,0,0,0.1); }
+.sh-sticky-canvas .sh-sticky__body { padding-top: 22px; }
+.sh-sticky__text {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+}
+/* On the board a note has a fixed size: the text fills it and a long
+ * note fades out over its last line instead of being cut mid-line. */
+.sh-sticky-canvas .sh-sticky__text {
+  flex: 1;
+  min-height: 0;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.4em), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.4em), transparent);
+}
+/* In the grid a note grows with its text, up to seven lines. */
+.sh-sticky-grid .sh-sticky__text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 7;
+  line-clamp: 7;
+}
+.sh-sticky .sh-sticky__body:focus-visible,
+.sh-sticky .sh-sticky__grip:focus-visible {
+  outline: 2px solid var(--sh-sticky-ink);
+  outline-offset: -4px;
+}
+/* The grip — a strip of tape at the top of a board note. Dragging and
+ * arrow-key moving start here only. */
+.sh-sticky__grip {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 44px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 0 0 var(--sh-radius-sm) var(--sh-radius-sm);
+  background: var(--sh-sticky-tape);
+  color: var(--sh-sticky-ink-muted);
+  font-size: var(--sh-font-size-xs);
+  line-height: 18px;
+  cursor: grab;
+  touch-action: none;
+  /* A press-and-hold must not select text or open the iOS callout. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  z-index: 1;
+  transition: background var(--sh-transition-fast);
+}
+.sh-sticky__grip:hover { background: var(--sh-sticky-tape-hover); }
+.sh-sticky--dragging .sh-sticky__grip { cursor: grabbing; }
+.sh-sticky .sh-sticky__grip:focus-visible { outline-offset: 0; }
+@media (pointer: coarse) {
+  /* 44 × 44 px hit box without a bigger tape. */
+  .sh-sticky__grip::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: max(100%, 44px);
+    height: 44px;
+    transform: translateX(-50%);
+  }
+}
 
 /* ───── Sticky create / edit dialog ────────────────────────────────────
  *
  * The textarea live-tints to the selected colour so the dialog reads
- * as a preview of the saved sticky. Swatches sit beneath in a
- * 6-tile grid; the active one gets a terracotta ring + a subtle lift.
- * Delete sits flush-left in the action row so destructive intent is
- * deliberate (you don't click it when you mean to save). */
+ * as a preview of the saved note. The colours are a named radiogroup
+ * (``ChipRadioGroup`` with swatch dots). Delete sits flush-left in the
+ * action row so destructive intent is deliberate. */
 .sh-sticky-dialog .sh-sticky-dialog-textarea {
   width: 100%;
   resize: vertical;
@@ -6732,61 +6807,41 @@ body.sh-dm-thread-open .sh-messages {
   font-family: inherit;
   font-size: var(--sh-font-size-base);
   line-height: 1.45;
-  color: #2a1d10;     /* dark ink reads on every swatch hue */
+  color: var(--sh-sticky-ink);
   box-shadow: var(--sh-shadow-xs);
   transition: background var(--sh-transition-fast);
 }
-.sh-sticky-dialog .sh-sticky-dialog-textarea:focus {
+.sh-sticky-dialog .sh-sticky-dialog-textarea::placeholder { color: var(--sh-sticky-ink-muted); }
+.sh-sticky-dialog .sh-sticky-dialog-textarea:focus-visible {
   outline: 2px solid var(--sh-primary);
   outline-offset: 2px;
 }
 .sh-sticky-dialog .sh-sticky-dialog-counter {
   display: block;
-  text-align: right;
+  text-align: end;
   font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
   margin-top: 2px;
 }
-
 .sh-sticky-dialog-colors {
-  border: none;
-  padding: 0;
-  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
 }
-.sh-sticky-dialog-colors legend {
+.sh-sticky-dialog-colors__label {
   font-size: var(--sh-font-size-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  margin-bottom: var(--sh-space-xs);
+  color: var(--sh-text-muted);
 }
-.sh-sticky-dialog-swatches {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sh-space-sm);
-}
-.sh-sticky-dialog-swatch {
-  width: 36px;
-  height: 36px;
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  cursor: pointer;
-  padding: 0;
-  box-shadow: var(--sh-shadow-xs);
-  transition: transform var(--sh-transition-fast),
-              box-shadow var(--sh-transition-fast);
-}
-.sh-sticky-dialog-swatch:hover { transform: translateY(-2px); }
-.sh-sticky-dialog-swatch--active {
-  outline: 2px solid var(--sh-primary);
-  outline-offset: 2px;
-  transform: translateY(-2px);
-  box-shadow: var(--sh-shadow-pinned);
-}
-
+.sh-sticky-dialog-swatches.sh-locale-options { margin: 0; }
 .sh-sticky-dialog-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--sh-space-sm);
 }
+.sh-sticky-dialog-actions__spacer { flex: 1; }
 
 /* CallTypePickerDialog — two cream-paper tiles, terracotta on hover. */
 .sh-call-picker {
@@ -15659,6 +15714,17 @@ a.sh-link-preview-link:focus-visible {
   background: var(--sh-primary-fill);
   color: var(--sh-bg);
   border-color: var(--sh-primary-fill);
+}
+/* ChipRadioGroup option ``swatch``: a colour dot before the label
+ * (the sticky colour picker). */
+.sh-chip-swatch {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-inline-end: var(--sh-space-xs);
+  border-radius: var(--sh-radius-full);
+  box-shadow: inset 0 0 0 1px var(--sh-swatch-ring);
 }
 
 /* ─── Admin page extras (§A1-A9) ────────────────────────────────────── */

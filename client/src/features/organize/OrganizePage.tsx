@@ -16,8 +16,8 @@
  * - tasks: open tasks across EVERY household list (``ensureAll``), not
  *   just the list the Tasks tab has open;
  * - shopping: unbought items, minus rows hidden behind an Undo toast;
- * - stickies: the household count only — the shared ``stickies``
- *   signal may hold a space board's notes.
+ * - stickies: the household store's notes (minus pending deletes) —
+ *   space boards have stores of their own.
  *
  * Every load is deduped with the tab that needs the same data, so a
  * deep link fetches each source once.
@@ -28,7 +28,7 @@ import { useLocation } from 'preact-iso'
 import { TabHeader } from '@/components/TabHeader'
 import { items as shoppingItems, ensureShopping } from '@/store/shopping'
 import { pendingDeletes } from '@/utils/undoableDelete'
-import { householdStickyCount, ensureHouseholdStickies } from '@/store/stickies'
+import { householdStickyCount, householdStickyStore } from '@/store/stickies'
 import { householdTaskStore } from '@/store/tasks'
 import { t } from '@/i18n/i18n'
 import TaskPage from '@/features/tasks/TaskPage'
@@ -59,7 +59,7 @@ export default function OrganizePage() {
   useEffect(() => {
     ensureShopping().catch(() => { /* the Shopping tab reports it */ })
     householdTaskStore.ensureAll().catch(() => { /* the Tasks tab reports it */ })
-    ensureHouseholdStickies().catch(() => { /* the Stickies tab reports it */ })
+    householdStickyStore.ensure().catch(() => { /* the Stickies tab reports it */ })
   }, [])
 
   useEffect(() => {

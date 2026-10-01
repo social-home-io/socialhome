@@ -1,72 +1,83 @@
 /**
- * StickyDialog — focused create / edit dialog for sticky notes (§19).
+ * StickyDialog — create / edit dialog for sticky notes (§19).
  *
- * Replaces the inline ``prompt()`` / ``await confirmDialog()`` flow on
- * ``StickyBoardPage``. Mirrors the pattern of
- * :class:`CalendarEventDialog`: a single global signal drives open
- * state; ``openCreateStickyDialog(spaceId?)`` and
- * ``openEditStickyDialog(sticky, spaceId?)`` flip it; the dialog
- * lives once at the App root next to the other global dialogs.
+ * One global instance at the App root, driven by signals:
+ * ``openCreateStickyDialog(spaceId, position, colour)`` and
+ * ``openEditStickyDialog(sticky, spaceId)``. Every write goes through
+ * the scope's store (``stickyStoreFor``), so a space note never lands
+ * on the household board.
  *
  * Form surface:
- *   • Content — multiline textarea (stickies are 1–500 chars; the
- *     server caps but the UI also enforces).
- *   • Colour — 6-swatch picker matching the hardcoded palette in
- *     ``StickyBoardPage``. Click a swatch to pick; the active one
- *     gets a terracotta ring.
- *   • Delete button (edit mode only) — destructive secondary, with
- *     a one-step confirmation via ``await confirmDialog()``.
+ *   • Note — multiline textarea (1–500 chars), tinted with the chosen
+ *     colour so it previews the saved note.
+ *   • Colour — a radiogroup of named colours (``ChipRadioGroup`` with a
+ *     swatch dot). Stored values stay hex; a hex outside the palette
+ *     (e.g. from an older client) shows as "Custom".
+ *   • Delete (edit mode) — closes the dialog at once and offers Undo;
+ *     the DELETE is sent when the toast expires.
  *
- * Position is left to the board: new stickies pick a randomised
- * mid-board slot in :func:`StickyBoardPage`'s open call (so a flood
- * of new notes doesn't stack); existing stickies keep their drag-set
- * coordinates untouched on edit.
+ * Position is the board's job: new notes get a spread-out slot from
+ * ``StickyBoardPage``; edits leave position untouched.
  */
 import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
-import { api } from '@/api'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
-import { stickies, trackHouseholdSticky, type StickyRow } from '@/store/stickies'
-import { confirmDialog } from '@/components/confirm'
+import { ChipRadioGroup, type ChipRadioOption } from './ChipRadioGroup'
+import { stickyStoreFor, type StickyRow } from '@/store/stickies'
+import { isOne } from '@/store/tasks'
+import { t } from '@/i18n/i18n'
+import { inkClass, stickyBackground } from '@/features/stickies/ink'
 
-/** Sticky-note swatch palette — same six colours the board cycles
- *  through on quick-create, exposed here so users can override the
- *  auto-pick. */
-export const STICKY_COLORS = [
-  '#FFF9B1', // soft yellow (default)
-  '#FFB3B3', // coral
-  '#B3FFB3', // mint
-  '#B3D4FF', // sky
-  '#E8B3FF', // lilac
-  '#FFD4B3', // peach
+export interface StickyColor {
+  hex: string
+  /** ``stickies.color.<key>`` names it. */
+  key: 'yellow' | 'coral' | 'mint' | 'sky' | 'lilac' | 'peach'
+}
+
+/** The palette the board cycles through on create; the dialog lets the
+ *  user pick another. Hex values are stored as-is (user data). */
+export const STICKY_COLORS: readonly StickyColor[] = [
+  { hex: '#FFF9B1', key: 'yellow' },
+  { hex: '#FFB3B3', key: 'coral' },
+  { hex: '#B3FFB3', key: 'mint' },
+  { hex: '#B3D4FF', key: 'sky' },
+  { hex: '#E8B3FF', key: 'lilac' },
+  { hex: '#FFD4B3', key: 'peach' },
 ] as const
+
+/** The palette entry for a stored hex (case-insensitive), if any. */
+export function paletteColor(hex: string): StickyColor | undefined {
+  const h = hex.toUpperCase()
+  return STICKY_COLORS.find(c => c.hex === h)
+}
 
 const CONTENT_MAX = 500
 
 const open = signal(false)
 const editingId = signal<string | null>(null)
 const scopeSpaceId = signal<string | null>(null)
-/** Position the new sticky should land at — set by the caller so the
- *  caller can spread successive new stickies across the board rather
- *  than stacking them. Edit mode reads the existing values from the
- *  store and leaves them untouched. */
+/** Where a new note lands — the board spreads new notes out. */
 const newPosition = signal<{ x: number; y: number }>({ x: 0, y: 0 })
 
 const content = signal('')
-const color = signal<string>(STICKY_COLORS[0])
+const color = signal<string>(STICKY_COLORS[0].hex)
+/** The colour the dialog opened with. A hex outside the palette stays
+ *  on offer as "Custom" even after the user tried a palette colour. */
+const originalColor = signal<string>(STICKY_COLORS[0].hex)
 const submitting = signal(false)
 
 function reset(): void {
   editingId.value = null
   content.value = ''
-  color.value = STICKY_COLORS[0]
+  color.value = STICKY_COLORS[0].hex
+  originalColor.value = STICKY_COLORS[0].hex
   submitting.value = false
 }
 
 /** Open the dialog in create mode. ``spaceId`` is ``null`` for the
- *  household board, the space id for the per-space board. */
+ *  household board, the space id for a space board. */
 export function openCreateStickyDialog(
   spaceId: string | null,
   position?: { x: number; y: number },
@@ -75,35 +86,46 @@ export function openCreateStickyDialog(
   reset()
   scopeSpaceId.value = spaceId
   newPosition.value = position ?? { x: 0, y: 0 }
-  if (defaultColor && (STICKY_COLORS as readonly string[]).includes(defaultColor)) {
-    color.value = defaultColor
-  }
+  const picked = defaultColor ? paletteColor(defaultColor) : undefined
+  if (picked) color.value = picked.hex
+  originalColor.value = color.value
   open.value = true
 }
 
-/** Open the dialog in edit mode for an existing sticky. Pre-fills
- *  content + colour; submit PATCHes those fields, leaves position
- *  alone. */
-export function openEditStickyDialog(
-  sticky: StickyRow,
-  spaceId: string | null,
-): void {
+/** Open the dialog in edit mode for an existing note. */
+export function openEditStickyDialog(sticky: StickyRow, spaceId: string | null): void {
   reset()
   editingId.value = sticky.id
   scopeSpaceId.value = spaceId
   content.value = sticky.content
   color.value = sticky.color
+  originalColor.value = sticky.color
   open.value = true
 }
 
-function endpointBase(spaceId: string | null): string {
-  return spaceId ? `/api/spaces/${spaceId}/stickies` : '/api/stickies'
+function errText(err: unknown): string {
+  return String((err as Error)?.message ?? err)
+}
+
+/** Focus the board's Add button once the dialog (and the deleted
+ *  note it would hand focus back to) is gone. */
+function focusBoardAdd(): void {
+  requestAnimationFrame(() => {
+    document.querySelector<HTMLElement>('[data-sticky-add]')?.focus()
+  })
+}
+
+function focusSticky(id: string): void {
+  requestAnimationFrame(() => {
+    const note = [...document.querySelectorAll<HTMLElement>('[data-sticky-id]')]
+      .find(el => el.dataset.stickyId === id)
+    note?.querySelector<HTMLElement>('.sh-sticky__body')?.focus()
+  })
 }
 
 export function StickyDialog() {
-  // Autofocus the textarea on open so the user can just start typing.
-  // We also pre-select the existing text in edit mode so a quick
-  // overwrite "just works" without manually selecting first.
+  // Autofocus the textarea on open; in edit mode select its text so a
+  // quick overwrite just works.
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   useEffect(() => {
     if (!open.value) return
@@ -120,38 +142,23 @@ export function StickyDialog() {
     const trimmed = content.value.trim()
     if (!trimmed || submitting.value) return
     submitting.value = true
+    const store = stickyStoreFor(scopeSpaceId.value)
+    const sid = editingId.value
     try {
-      const sid = editingId.value
-      const base = endpointBase(scopeSpaceId.value)
       if (sid) {
-        const updated = await api.patch(`${base}/${sid}`, {
-          content: trimmed,
-          color: color.value,
-        }) as StickyRow
-        // Optimistic merge — WS will follow up but we want immediate
-        // feedback so the closing animation reads as "saved", not
-        // "queued".
-        stickies.value = stickies.value.map(s =>
-          s.id === sid ? { ...s, ...updated } : s,
-        )
-        showToast('Sticky updated', 'success')
+        await store.patch(sid, { content: trimmed, color: color.value })
       } else {
-        const row = await api.post(base, {
+        await store.create({
           content: trimmed,
           color: color.value,
           position_x: newPosition.value.x,
           position_y: newPosition.value.y,
-        }) as StickyRow
-        if (!stickies.value.some(s => s.id === row.id)) {
-          stickies.value = [...stickies.value, row]
-        }
-        if (scopeSpaceId.value === null) trackHouseholdSticky(row.id, true)
-        showToast('Sticky added', 'success')
+        })
       }
       open.value = false
     } catch (err: unknown) {
       showToast(
-        `${editingId.value ? 'Update' : 'Add'} failed: ${(err as Error)?.message ?? err}`,
+        t(sid ? 'stickies.error.save' : 'stickies.error.add', { error: errText(err) }),
         'error',
       )
     } finally {
@@ -159,53 +166,57 @@ export function StickyDialog() {
     }
   }
 
-  const handleDelete = async () => {
+  const handleDelete = () => {
     const sid = editingId.value
     if (!sid) return
-    if (!await confirmDialog('Delete this sticky?', { destructive: true })) return
-    submitting.value = true
-    try {
-      await api.delete(`${endpointBase(scopeSpaceId.value)}/${sid}`)
-      stickies.value = stickies.value.filter(s => s.id !== sid)
-      if (scopeSpaceId.value === null) trackHouseholdSticky(sid, false)
-      open.value = false
-      showToast('Sticky deleted', 'info')
-    } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error)?.message ?? err}`, 'error')
-    } finally {
-      submitting.value = false
-    }
+    const store = stickyStoreFor(scopeSpaceId.value)
+    const sticky = store.find(sid)
+    open.value = false
+    if (!sticky) return
+    store.remove(sticky, { onUndone: () => focusSticky(sid) })
+    focusBoardAdd()
   }
 
   if (!open.value) return null
 
   const isEdit = !!editingId.value
   const remaining = CONTENT_MAX - content.value.length
+  const custom = paletteColor(originalColor.value) ? null : originalColor.value
+  const options: ChipRadioOption<string>[] = STICKY_COLORS.map(c => ({
+    value: c.hex,
+    // Keys for i18n:check: t('stickies.color.yellow') t('stickies.color.coral')
+    // t('stickies.color.mint') t('stickies.color.sky') t('stickies.color.lilac')
+    // t('stickies.color.peach')
+    label: t(`stickies.color.${c.key}`),
+    swatch: c.hex,
+  }))
+  if (custom) {
+    options.push({ value: custom, label: t('stickies.color.custom'), swatch: stickyBackground(custom) })
+  }
+  const checked = paletteColor(color.value)?.hex ?? color.value
 
   return (
     <Modal
       open={open.value}
       onClose={() => { open.value = false }}
-      title={isEdit ? 'Edit sticky' : 'New sticky'}
+      title={t(isEdit ? 'stickies.dialog.edit' : 'stickies.dialog.new')}
     >
       <form class="sh-form sh-sticky-dialog" onSubmit={submit}>
         <label>
-          Note
+          {t('stickies.dialog.note')}
           <textarea
             ref={textareaRef}
-            class="sh-sticky-dialog-textarea"
+            class={['sh-sticky-dialog-textarea', inkClass(color.value)].filter(Boolean).join(' ')}
             value={content.value}
             maxLength={CONTENT_MAX}
             rows={5}
-            style={{ background: color.value }}
-            placeholder="What do you want to pin?"
+            style={{ background: stickyBackground(color.value) }}
+            placeholder={t('stickies.dialog.placeholder')}
             onInput={(e) => {
               content.value = (e.target as HTMLTextAreaElement).value
             }}
             onKeyDown={(e) => {
-              // Cmd/Ctrl-Enter submits; plain Enter inserts a newline
-              // — sticky notes are short enough that "newline by
-              // default" beats "submit by default".
+              // Cmd/Ctrl-Enter submits; plain Enter is a newline.
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                 e.preventDefault()
                 void submit(new Event('submit'))
@@ -213,59 +224,51 @@ export function StickyDialog() {
             }}
             required
           />
-          <span class="sh-sticky-dialog-counter sh-muted">
-            {remaining} characters left
+          <span class="sh-sticky-dialog-counter">
+            {t(isOne(remaining) ? 'stickies.dialog.remaining_one' : 'stickies.dialog.remaining',
+              { n: String(remaining) })}
           </span>
         </label>
 
-        <fieldset class="sh-sticky-dialog-colors" aria-label="Sticky colour">
-          <legend class="sh-muted">Colour</legend>
-          <div class="sh-sticky-dialog-swatches" role="radiogroup">
-            {STICKY_COLORS.map(c => (
-              <button
-                key={c}
-                type="button"
-                role="radio"
-                aria-checked={color.value === c}
-                aria-label={`Use ${c}`}
-                class={
-                  color.value === c
-                    ? 'sh-sticky-dialog-swatch sh-sticky-dialog-swatch--active'
-                    : 'sh-sticky-dialog-swatch'
-                }
-                style={{ background: c }}
-                onClick={() => { color.value = c }}
-              />
-            ))}
-          </div>
-        </fieldset>
+        <div class="sh-sticky-dialog-colors">
+          <span class="sh-sticky-dialog-colors__label" id="sh-sticky-colour-label">
+            {t('stickies.dialog.colour')}
+          </span>
+          <ChipRadioGroup<string>
+            labelledBy="sh-sticky-colour-label"
+            options={options}
+            value={checked}
+            onChange={(v) => { color.value = v }}
+            class="sh-sticky-dialog-swatches"
+          />
+        </div>
 
         <div class="sh-form-actions sh-sticky-dialog-actions">
           {isEdit && (
             <Button
               variant="danger"
               type="button"
-              onClick={() => void handleDelete()}
+              onClick={handleDelete}
               disabled={submitting.value}
             >
-              Delete
+              {t('common.delete')}
             </Button>
           )}
-          <span style={{ flex: 1 }} />
+          <span class="sh-sticky-dialog-actions__spacer" />
           <Button
             variant="secondary"
             type="button"
             onClick={() => { open.value = false }}
             disabled={submitting.value}
           >
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button
             type="submit"
             loading={submitting.value}
             disabled={!content.value.trim()}
           >
-            {isEdit ? 'Save' : 'Add'}
+            {t(isEdit ? 'common.save' : 'stickies.add')}
           </Button>
         </div>
       </form>
