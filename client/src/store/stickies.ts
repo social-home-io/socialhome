@@ -6,7 +6,8 @@
  * frames into the signal — prior to §SX1 the backend didn't publish
  * anything and this store was a placeholder.
  */
-import { signal } from '@preact/signals'
+import { computed, signal } from '@preact/signals'
+import { api } from '@/api'
 import { ws } from '@/ws'
 
 export interface StickyRow {
@@ -41,9 +42,66 @@ function _scopedToActive(spaceId: string | null | undefined): boolean {
   return (spaceId ?? null) === activeStickyScope.value
 }
 
+// ─── Household count (the Organize hub's "Stickies · N" chip) ─────────
+//
+// ``stickies`` may hold a SPACE board's notes (the last board opened),
+// so the hub can't count it. The household's ids are kept apart here:
+// loaded from ``/api/stickies`` (the household board loads through
+// ``loadHouseholdStickies`` too, so the two share one request) and kept
+// current by household-scoped WS frames and local adds / deletes,
+// whatever board is mounted. The per-scope sticky cache that replaces
+// this is a follow-up.
+
+/** Household sticky ids; ``null`` until loaded. */
+const householdIds = signal<ReadonlySet<string> | null>(null)
+let _householdInflight: Promise<StickyRow[]> | null = null
+let _householdGen = 0
+
+/** How many household stickies there are; ``null`` while unknown. */
+export const householdStickyCount = computed(() => householdIds.value?.size ?? null)
+
+/** GET the household board (shared while in flight) and note its ids. */
+export function loadHouseholdStickies(): Promise<StickyRow[]> {
+  if (_householdInflight) return _householdInflight
+  const gen = _householdGen
+  const run = (async () => {
+    const rows = await api.get('/api/stickies') as StickyRow[]
+    if (gen === _householdGen) householdIds.value = new Set(rows.map(r => r.id))
+    return rows
+  })().finally(() => {
+    if (_householdInflight === run) _householdInflight = null
+  })
+  _householdInflight = run
+  return run
+}
+
+/** Load the household count unless it is known (or loading). */
+export async function ensureHouseholdStickies(): Promise<void> {
+  if (householdIds.value !== null) return
+  await loadHouseholdStickies()
+}
+
+/** A household sticky was added (``true``) or deleted here. */
+export function trackHouseholdSticky(id: string, present: boolean): void {
+  const ids = householdIds.value
+  if (ids === null || ids.has(id) === present) return
+  const next = new Set(ids)
+  if (present) next.add(id)
+  else next.delete(id)
+  householdIds.value = next
+}
+
+/** Logout: forget the count. */
+export function resetHouseholdStickies(): void {
+  _householdGen++
+  _householdInflight = null
+  householdIds.value = null
+}
+
 export function wireStickiesWs(): void {
   ws.on('sticky.created', (e) => {
     const s = e.data as unknown as StickyRow
+    if ((s.space_id ?? null) === null) trackHouseholdSticky(s.id, true)
     if (!_scopedToActive(s.space_id)) return
     if (!stickies.value.some((x) => x.id === s.id)) {
       stickies.value = [...stickies.value, s]
@@ -58,6 +116,7 @@ export function wireStickiesWs(): void {
   })
   ws.on('sticky.deleted', (e) => {
     const { id, space_id } = e.data as { id: string; space_id?: string | null }
+    if ((space_id ?? null) === null) trackHouseholdSticky(id, false)
     if (!_scopedToActive(space_id)) return
     stickies.value = stickies.value.filter((x) => x.id !== id)
   })

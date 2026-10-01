@@ -127,11 +127,12 @@ export function SpaceTasksTab({ spaceId }: Props) {
     }
   }
 
-  const cycleStatus = async (t: TaskItem) => {
-    const next: 'todo' | 'in_progress' | 'done' =
-      t.status === 'todo' ? 'in_progress'
-        : t.status === 'in_progress' ? 'done'
-          : 'todo'
+  const cycleStatus = (t: TaskItem) => setStatus(
+    t,
+    t.status === 'todo' ? 'in_progress' : t.status === 'in_progress' ? 'done' : 'todo',
+  )
+
+  const setStatus = async (t: TaskItem, next: TaskItem['status']) => {
     try {
       const updated = await api.patch(
         `/api/spaces/${spaceId}/tasks/${t.id}`, { status: next },
@@ -235,10 +236,7 @@ export function SpaceTasksTab({ spaceId }: Props) {
                 <li key={t.id}
                     class={`sh-task-row ${t.status === 'done' ? 'sh-task--done' : ''}`}>
                   <input type="checkbox" checked={t.status === 'done'}
-                    onChange={() => void cycleStatus({
-                      ...t,
-                      status: t.status === 'done' ? 'todo' : 'done',
-                    })}
+                    onChange={() => void setStatus(t, t.status === 'done' ? 'todo' : 'done')}
                     aria-label={`Toggle ${t.title}`} />
                   <span class="sh-task-title">{t.title}</span>
                   <div class="sh-task-meta">

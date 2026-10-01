@@ -1,0 +1,518 @@
+/**
+ * Tasks store: one ``createTaskStore(spaceId)`` per scope. Loads are
+ * in-flight deduped (the Organize hub's count chip and the Tasks tab
+ * mounting together fetch once), status changes are optimistic with a
+ * rollback scoped to the one row, deletes are deferred behind an Undo
+ * toast, and WS frames route by ``space_id``.
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type { TaskItem } from '@/types'
+
+const apiGet = vi.fn()
+const apiPost = vi.fn()
+const apiPatch = vi.fn()
+const apiDelete = vi.fn()
+
+vi.mock('@/api', () => ({
+  api: {
+    get: (...a: unknown[]) => apiGet(...a),
+    post: (...a: unknown[]) => apiPost(...a),
+    patch: (...a: unknown[]) => apiPatch(...a),
+    delete: (...a: unknown[]) => apiDelete(...a),
+  },
+}))
+
+const handlers: Record<string, (e: { type: string; data: Record<string, unknown> }) => void> = {}
+vi.mock('@/ws', async () => {
+  const { signal } = await import('@preact/signals')
+  return {
+    connectionState: signal('open'),
+    ws: {
+      on: (type: string, h: (e: { type: string; data: Record<string, unknown> }) => void) => {
+        handlers[type] = h
+        return () => { delete handlers[type] }
+      },
+    },
+  }
+})
+
+import { connectionState } from '@/ws'
+import { toasts } from '@/components/Toast'
+import { pendingDeletes, resetPendingDeletes } from '@/utils/undoableDelete'
+import {
+  createTaskStore, householdTaskStore, spaceTaskStore, wireTasksWs, resetTasks, canEditTask,
+  type TaskStore,
+} from './tasks'
+
+function task(id: string, list: string, status: TaskItem['status'] = 'todo',
+  extra: Partial<TaskItem> = {}): TaskItem {
+  return {
+    id, list_id: list, title: id, description: null, status, position: 0,
+    due_date: null, assignees: [], created_by: 'u1', ...extra,
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (v: T) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+const flush = () => new Promise(r => setTimeout(r, 0))
+
+let store: TaskStore
+
+beforeEach(() => {
+  apiGet.mockReset()
+  apiPost.mockReset()
+  apiPatch.mockReset()
+  apiDelete.mockReset()
+  resetTasks()
+  resetPendingDeletes()
+  toasts.value = []
+  store = createTaskStore(null)
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+function serve(lists: { id: string; name: string }[], byList: Record<string, TaskItem[]>) {
+  apiGet.mockImplementation(async (url: string) => {
+    if (url.endsWith('/tasks/lists')) return lists
+    const m = /\/tasks\/lists\/([^/]+)\/tasks$/.exec(url)
+    if (m) return byList[m[1]] ?? []
+    throw new Error(`unexpected ${url}`)
+  })
+}
+
+describe('scopes', () => {
+  it('household store talks to /api/tasks, a space store to /api/spaces/{id}/tasks', async () => {
+    serve([{ id: 'l1', name: 'A' }], { l1: [task('t1', 'l1')] })
+    await store.loadLists()
+    await store.loadList('l1')
+    expect(apiGet).toHaveBeenCalledWith('/api/tasks/lists')
+    expect(apiGet).toHaveBeenCalledWith('/api/tasks/lists/l1/tasks')
+
+    const sp = createTaskStore('s 1')
+    await sp.loadLists()
+    await sp.loadList('l1')
+    expect(apiGet).toHaveBeenCalledWith('/api/spaces/s%201/tasks/lists')
+    expect(apiGet).toHaveBeenCalledWith('/api/spaces/s%201/tasks/lists/l1/tasks')
+  })
+
+  it('spaceTaskStore caches one store per space', () => {
+    expect(spaceTaskStore('s1')).toBe(spaceTaskStore('s1'))
+    expect(spaceTaskStore('s1')).not.toBe(spaceTaskStore('s2'))
+    expect(householdTaskStore.spaceId).toBeNull()
+  })
+})
+
+describe('loading', () => {
+  it('concurrent ensureLists / loadLists share one request', async () => {
+    const d = deferred<unknown>()
+    apiGet.mockReturnValue(d.promise)
+    const a = store.ensureLists()
+    const b = store.loadLists()
+    const c = store.ensureLists()
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    d.resolve([{ id: 'l1', name: 'A' }])
+    await Promise.all([a, b, c])
+    expect(store.lists.value).toEqual([{ id: 'l1', name: 'A' }])
+    expect(store.listsLoaded.value).toBe(true)
+  })
+
+  it('a list fetched a moment ago is not fetched again; later it revalidates', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    serve([{ id: 'l1', name: 'A' }], { l1: [task('t1', 'l1')] })
+    await store.ensureList('l1')
+    await store.loadList('l1')
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    vi.setSystemTime(Date.now() + 10_000)
+    await store.loadList('l1')
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    await store.loadList('l1', { force: true })
+    expect(apiGet).toHaveBeenCalledTimes(3)
+  })
+
+  it('ensureAll loads the roster and every list exactly once', async () => {
+    serve([{ id: 'l1', name: 'A' }, { id: 'l2', name: 'B' }], {
+      l1: [task('t1', 'l1'), task('t2', 'l1', 'done')],
+      l2: [task('t3', 'l2', 'in_progress')],
+    })
+    await Promise.all([store.ensureAll(), store.ensureAll()])
+    await store.ensureAll()
+    expect(apiGet.mock.calls.map(c => c[0]).sort()).toEqual([
+      '/api/tasks/lists', '/api/tasks/lists/l1/tasks', '/api/tasks/lists/l2/tasks',
+    ])
+    expect(store.allTasks.value.map(t => t.id).sort()).toEqual(['t1', 't2', 't3'])
+    expect(store.loadedListIds.value.has('l2')).toBe(true)
+  })
+
+  it('a failed load rejects and leaves the list unloaded', async () => {
+    apiGet.mockRejectedValue(new Error('boom'))
+    await expect(store.loadList('l1')).rejects.toThrow('boom')
+    expect(store.loadedListIds.value.has('l1')).toBe(false)
+  })
+
+  it('a reload drops lists that are gone and their tasks', async () => {
+    serve([{ id: 'l1', name: 'A' }, { id: 'l2', name: 'B' }], { l1: [], l2: [task('t3', 'l2')] })
+    await store.ensureAll()
+    serve([{ id: 'l1', name: 'A' }], {})
+    await store.loadLists({ force: true })
+    expect(store.lists.value.map(l => l.id)).toEqual(['l1'])
+    expect(store.tasksByList.value.l2).toBeUndefined()
+    expect(store.loadedListIds.value.has('l2')).toBe(false)
+  })
+})
+
+describe('status changes', () => {
+  beforeEach(async () => {
+    serve([{ id: 'l1', name: 'A' }], {
+      l1: [task('t1', 'l1', 'todo'), task('t2', 'l1', 'in_progress'), task('t3', 'l1', 'done')],
+    })
+    await store.ensureAll()
+  })
+
+  const statusOf = (id: string) => store.findTask(id)?.status
+
+  it('toggleDone: todo → done, in_progress → done, done → todo', async () => {
+    apiPatch.mockImplementation(async (url: string, body: Partial<TaskItem>) =>
+      ({ ...store.findTask(url.split('/').pop()!)!, ...body }))
+    await store.toggleDone('t1')
+    await store.toggleDone('t2')
+    await store.toggleDone('t3')
+    expect(apiPatch.mock.calls).toEqual([
+      ['/api/tasks/t1', { status: 'done' }],
+      ['/api/tasks/t2', { status: 'done' }],
+      ['/api/tasks/t3', { status: 'todo' }],
+    ])
+    expect([statusOf('t1'), statusOf('t2'), statusOf('t3')]).toEqual(['done', 'done', 'todo'])
+  })
+
+  it('setStatus applies at once and keeps the server answer', async () => {
+    const d = deferred<TaskItem>()
+    apiPatch.mockReturnValue(d.promise)
+    const p = store.setStatus('t1', 'in_progress')
+    expect(statusOf('t1')).toBe('in_progress')
+    d.resolve(task('t1', 'l1', 'in_progress', { updated_at: 'now' }))
+    await p
+    expect(store.findTask('t1')?.updated_at).toBe('now')
+  })
+
+  it('setStatus to the current status is a no-op', async () => {
+    await store.setStatus('t1', 'todo')
+    expect(apiPatch).not.toHaveBeenCalled()
+  })
+
+  it('a failed change rolls back only that row, keeping a newer change to another', async () => {
+    const d1 = deferred<TaskItem>()
+    apiPatch.mockReturnValueOnce(d1.promise)
+    apiPatch.mockResolvedValueOnce(task('t2', 'l1', 'done'))
+    const p1 = store.setStatus('t1', 'done')
+    await store.setStatus('t2', 'done')
+    d1.reject(new Error('nope'))
+    await expect(p1).rejects.toThrow('nope')
+    expect(statusOf('t1')).toBe('todo')
+    expect(statusOf('t2')).toBe('done')
+  })
+
+  it('a rollback leaves a field alone that a WS frame changed meanwhile', async () => {
+    const d = deferred<TaskItem>()
+    apiPatch.mockReturnValue(d.promise)
+    const p = store.setStatus('t1', 'done')
+    store.onTaskUpsert(task('t1', 'l1', 'in_progress'))
+    d.reject(new Error('nope'))
+    await expect(p).rejects.toThrow()
+    expect(statusOf('t1')).toBe('in_progress')
+  })
+
+  it('an older PATCH response arriving after a newer one is ignored', async () => {
+    const d1 = deferred<TaskItem>()
+    const d2 = deferred<TaskItem>()
+    apiPatch.mockReturnValueOnce(d1.promise).mockReturnValueOnce(d2.promise)
+    const p1 = store.setStatus('t1', 'in_progress')
+    const p2 = store.setStatus('t1', 'done')
+    d2.resolve(task('t1', 'l1', 'done'))
+    await p2
+    d1.resolve(task('t1', 'l1', 'in_progress'))
+    await p1
+    expect(statusOf('t1')).toBe('done')
+  })
+
+  it('patchTask sends the fields and adopts the response', async () => {
+    apiPatch.mockResolvedValue(task('t1', 'l1', 'todo', { title: 'New', due_date: '2026-10-03' }))
+    await store.patchTask('t1', { title: 'New', due_date: '2026-10-03' })
+    expect(apiPatch).toHaveBeenCalledWith('/api/tasks/t1', { title: 'New', due_date: '2026-10-03' })
+    expect(store.findTask('t1')?.title).toBe('New')
+  })
+})
+
+describe('creating', () => {
+  it('createTask appends the new task; a WS echo does not duplicate it', async () => {
+    serve([{ id: 'l1', name: 'A' }], { l1: [] })
+    await store.ensureAll()
+    apiPost.mockResolvedValue(task('t9', 'l1'))
+    await store.createTask('l1', 'Buy milk')
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/lists/l1/tasks', { title: 'Buy milk' })
+    store.onTaskUpsert(task('t9', 'l1'))
+    expect(store.tasksByList.value.l1.map(t => t.id)).toEqual(['t9'])
+  })
+
+  it('createList adds the list once, selects it, and counts it as loaded', async () => {
+    apiPost.mockResolvedValue({ id: 'l5', name: 'Garden' })
+    await store.createList('Garden')
+    store.onListUpsert('l5', 'Garden')
+    expect(store.lists.value).toEqual([{ id: 'l5', name: 'Garden' }])
+    expect(store.activeListId.value).toBe('l5')
+    expect(store.loadedListIds.value.has('l5')).toBe(true)
+  })
+
+  it('renameList is optimistic and rolls back on failure', async () => {
+    serve([{ id: 'l1', name: 'A' }], {})
+    await store.ensureLists()
+    apiPatch.mockRejectedValue(new Error('x'))
+    const p = store.renameList('l1', 'B')
+    expect(store.lists.value[0].name).toBe('B')
+    await expect(p).rejects.toThrow()
+    expect(store.lists.value[0].name).toBe('A')
+  })
+})
+
+describe('deleting with Undo', () => {
+  beforeEach(async () => {
+    serve([{ id: 'l1', name: 'A' }], {
+      l1: [task('t1', 'l1'), task('t2', 'l1', 'done'), task('t3', 'l1', 'done')],
+    })
+    await store.ensureAll()
+  })
+
+  const toast = (msg: string) => toasts.value.find(x => x.message === msg)!
+
+  it('removeTask hides the task and only DELETEs when the toast expires', async () => {
+    apiDelete.mockResolvedValue(undefined)
+    store.removeTask(store.findTask('t1')!)
+    expect(pendingDeletes.value.has('t1')).toBe(true)
+    expect(apiDelete).not.toHaveBeenCalled()
+    expect(store.openCount.value).toBe(0)
+    toast('Deleted t1').onExpire!()
+    await flush()
+    expect(apiDelete).toHaveBeenCalledWith('/api/tasks/t1')
+    expect(store.findTask('t1')).toBeUndefined()
+    expect(pendingDeletes.value.has('t1')).toBe(false)
+  })
+
+  it('Undo brings it back and never DELETEs', async () => {
+    const onUndone = vi.fn()
+    store.removeTask(store.findTask('t1')!, { onUndone })
+    toast('Deleted t1').action!.onClick()
+    expect(pendingDeletes.value.has('t1')).toBe(false)
+    expect(store.findTask('t1')).toBeTruthy()
+    expect(onUndone).toHaveBeenCalled()
+    expect(apiDelete).not.toHaveBeenCalled()
+  })
+
+  it('a 404 on commit counts as gone', async () => {
+    apiDelete.mockRejectedValue(Object.assign(new Error('nf'), { status: 404 }))
+    store.removeTask(store.findTask('t1')!)
+    toast('Deleted t1').onExpire!()
+    await flush()
+    expect(store.findTask('t1')).toBeUndefined()
+    expect(toasts.value.some(x => x.type === 'error')).toBe(false)
+  })
+
+  it('a failed commit brings the task back with an error toast', async () => {
+    apiDelete.mockRejectedValue(Object.assign(new Error('down'), { status: 500 }))
+    store.removeTask(store.findTask('t1')!)
+    toast('Deleted t1').onExpire!()
+    await flush()
+    expect(store.findTask('t1')).toBeTruthy()
+    expect(pendingDeletes.value.has('t1')).toBe(false)
+    expect(toasts.value.some(x => x.type === 'error')).toBe(true)
+  })
+
+  it('a WS echo of a committed delete cannot bring the task back', async () => {
+    apiDelete.mockResolvedValue(undefined)
+    store.removeTask(store.findTask('t1')!)
+    toast('Deleted t1').onExpire!()
+    await flush()
+    store.onTaskUpsert(task('t1', 'l1'))
+    expect(store.findTask('t1')).toBeUndefined()
+  })
+
+  it('clearDone deletes exactly the done tasks hidden now (per id, allSettled)', async () => {
+    apiDelete.mockImplementation(async (url: string) => {
+      if (url.endsWith('/t3')) throw Object.assign(new Error('gone'), { status: 404 })
+    })
+    expect(store.clearDone('l1')).toBe(2)
+    expect([...pendingDeletes.value].sort()).toEqual(['t2', 't3'])
+    // Ticked off during the Undo window: not part of this clear.
+    store.onTaskUpsert(task('t1', 'l1', 'done'))
+    toast('Cleared 2 done tasks').onExpire!()
+    await flush()
+    expect(apiDelete.mock.calls.map(c => c[0]).sort()).toEqual(['/api/tasks/t2', '/api/tasks/t3'])
+    expect(store.tasksByList.value.l1.map(t => t.id)).toEqual(['t1'])
+  })
+
+  it('clearDone only takes the tasks the predicate allows, and counts those', async () => {
+    apiDelete.mockResolvedValue(undefined)
+    expect(store.clearDone('l1', { canDelete: (x) => x.id === 't3' })).toBe(1)
+    expect([...pendingDeletes.value]).toEqual(['t3'])
+    toast('Cleared 1 done task').onExpire!()
+    await flush()
+    expect(apiDelete.mock.calls.map(c => c[0])).toEqual(['/api/tasks/t3'])
+    expect(store.clearDone('l1', { canDelete: () => false })).toBe(0)
+  })
+
+  it('a 403 on a delete commit restores the task with a translated reason', async () => {
+    apiDelete.mockRejectedValue(Object.assign(new Error("only the task's creator, an assignee or an admin can change it"), { status: 403 }))
+    store.removeTask(store.findTask('t1')!)
+    toast('Deleted t1').onExpire!()
+    await flush()
+    expect(store.findTask('t1')).toBeTruthy()
+    expect(toasts.value.find(x => x.type === 'error')!.message)
+      .toBe("Couldn't delete: Only the creator, an assignee or an admin can change this task.")
+  })
+
+  it('clearDone with one task uses the singular message; with none does nothing', () => {
+    store.removeTask(store.findTask('t3')!)
+    expect(store.clearDone('l1')).toBe(1)
+    expect(toast('Cleared 1 done task')).toBeTruthy()
+    expect(store.clearDone('l1')).toBe(0)
+  })
+
+  it('leaving the page commits pending deletes with keepalive', async () => {
+    apiDelete.mockResolvedValue(undefined)
+    store.removeTask(store.findTask('t1')!)
+    window.dispatchEvent(new Event('pagehide'))
+    await flush()
+    expect(apiDelete).toHaveBeenCalledWith('/api/tasks/t1', { keepalive: true })
+  })
+
+  it('removeList hides the list and its tasks; the commit DELETEs the list', async () => {
+    apiDelete.mockResolvedValue(undefined)
+    store.activeListId.value = 'l1'
+    store.removeList({ id: 'l1', name: 'A' })
+    expect(store.visibleLists.value).toEqual([])
+    expect(store.openCount.value).toBe(0)
+    toast('Deleted list A').onExpire!()
+    await flush()
+    expect(apiDelete).toHaveBeenCalledWith('/api/tasks/lists/l1')
+    expect(store.lists.value).toEqual([])
+    expect(store.tasksByList.value.l1).toBeUndefined()
+  })
+
+  it('Undo of removeList restores the list and re-selects it', () => {
+    store.activeListId.value = 'l1'
+    store.removeList({ id: 'l1', name: 'A' })
+    store.activeListId.value = null
+    toast('Deleted list A').action!.onClick()
+    expect(store.visibleLists.value.map(l => l.id)).toEqual(['l1'])
+    expect(store.activeListId.value).toBe('l1')
+  })
+})
+
+describe('canEditTask', () => {
+  const me = (user_id: string, is_admin = false) => ({ user_id, is_admin })
+  it('household: creator, assignee or admin; nobody else', () => {
+    const x = task('t', 'l', 'todo', { created_by: 'a', assignees: ['b'] })
+    expect(canEditTask(x, me('a'), null)).toBe(true)
+    expect(canEditTask(x, me('b'), null)).toBe(true)
+    expect(canEditTask(x, me('z', true), null)).toBe(true)
+    expect(canEditTask(x, me('z'), null)).toBe(false)
+    expect(canEditTask(x, null, null)).toBe(false)
+  })
+  it('space tasks are collaborative', () => {
+    expect(canEditTask(task('t', 'l', 'todo', { created_by: 'a' }), me('z'), 's1')).toBe(true)
+  })
+})
+
+describe('counts', () => {
+  it('openCount counts not-done tasks across every list', async () => {
+    serve([{ id: 'l1', name: 'A' }, { id: 'l2', name: 'B' }], {
+      l1: [task('t1', 'l1'), task('t2', 'l1', 'done')],
+      l2: [task('t3', 'l2', 'in_progress'), task('t4', 'l2')],
+    })
+    await store.ensureAll()
+    expect(store.openCount.value).toBe(3)
+  })
+})
+
+describe('WebSocket routing', () => {
+  beforeEach(() => { wireTasksWs() })
+
+  const fire = (type: string, data: Record<string, unknown>) => handlers[type]({ type, data })
+
+  it('household frames reach the household store only; space frames their space', () => {
+    const sp = spaceTaskStore('s1')
+    fire('task.created', { space_id: null, task: task('h1', 'l1') })
+    fire('task.created', { space_id: 's1', task: task('s1t', 'sl') })
+    fire('task.created', { space_id: 's-unknown', task: task('x', 'xl') })
+    expect(householdTaskStore.findTask('h1')).toBeTruthy()
+    expect(householdTaskStore.findTask('s1t')).toBeUndefined()
+    expect(sp.findTask('s1t')).toBeTruthy()
+    expect(sp.findTask('h1')).toBeUndefined()
+  })
+
+  it('updated / completed / deleted frames update the row', () => {
+    fire('task.created', { task: task('h1', 'l1') })
+    fire('task.updated', { space_id: null, task: task('h1', 'l1', 'in_progress', { title: 'T' }) })
+    expect(householdTaskStore.findTask('h1')?.title).toBe('T')
+    fire('task.completed', { space_id: null, task_id: 'h1' })
+    expect(householdTaskStore.findTask('h1')?.status).toBe('done')
+    fire('task.deleted', { space_id: null, task_id: 'h1', list_id: 'l1' })
+    expect(householdTaskStore.findTask('h1')).toBeUndefined()
+  })
+
+  it('list frames add, rename and remove lists (and their tasks)', () => {
+    fire('task_list.created', { space_id: null, list_id: 'l1', name: 'A' })
+    fire('task_list.created', { space_id: null, list_id: 'l1', name: 'A' })
+    fire('task_list.updated', { space_id: null, list_id: 'l1', name: 'B' })
+    expect(householdTaskStore.lists.value).toEqual([{ id: 'l1', name: 'B' }])
+    fire('task.created', { task: task('h1', 'l1') })
+    fire('task_list.deleted', { space_id: null, list_id: 'l1' })
+    expect(householdTaskStore.lists.value).toEqual([])
+    expect(householdTaskStore.findTask('h1')).toBeUndefined()
+  })
+
+  it('a reconnect revalidates what was loaded', async () => {
+    serve([{ id: 'l1', name: 'A' }], { l1: [task('t1', 'l1')] })
+    await householdTaskStore.ensureAll()
+    apiGet.mockClear()
+    serve([{ id: 'l1', name: 'A' }], { l1: [task('t1', 'l1'), task('t2', 'l1')] })
+    connectionState.value = 'reconnecting'
+    connectionState.value = 'open'
+    await flush()
+    await flush()
+    expect(apiGet.mock.calls.map(c => c[0]).sort()).toEqual([
+      '/api/tasks/lists', '/api/tasks/lists/l1/tasks',
+    ])
+    expect(householdTaskStore.findTask('t2')).toBeTruthy()
+  })
+})
+
+describe('reset', () => {
+  it('resetTasks forgets the household and every space store', async () => {
+    serve([{ id: 'l1', name: 'A' }], { l1: [task('t1', 'l1')] })
+    await householdTaskStore.ensureAll()
+    householdTaskStore.activeListId.value = 'l1'
+    const sp = spaceTaskStore('s1')
+    resetTasks()
+    expect(householdTaskStore.lists.value).toEqual([])
+    expect(householdTaskStore.allTasks.value).toEqual([])
+    expect(householdTaskStore.listsLoaded.value).toBe(false)
+    expect(householdTaskStore.activeListId.value).toBeNull()
+    expect(spaceTaskStore('s1')).not.toBe(sp)
+  })
+
+  it('a load that was in flight at reset does not write afterwards', async () => {
+    const d = deferred<unknown>()
+    apiGet.mockReturnValue(d.promise)
+    const p = householdTaskStore.loadLists()
+    resetTasks()
+    d.resolve([{ id: 'l1', name: 'A' }])
+    await p
+    expect(householdTaskStore.lists.value).toEqual([])
+  })
+})

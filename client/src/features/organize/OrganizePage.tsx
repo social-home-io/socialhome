@@ -10,10 +10,17 @@
  *
  * Tab state is URL-driven via ``?tab=`` so deep links from the corner
  * dashboard / quick-action chips / push notifications open on the
- * right tab. The summary count chips on each tab pull from the
- * existing ``tasks`` / ``shopping`` / ``stickies`` stores so a member
- * can see "3 to do · 4 in cart · 2 stickies" at a glance before
- * picking a tab.
+ * right tab. The count chips ("Tasks · 3", "Shopping · 4",
+ * "Stickies · 2") read the stores, so they track WS updates:
+ *
+ * - tasks: open tasks across EVERY household list (``ensureAll``), not
+ *   just the list the Tasks tab has open;
+ * - shopping: unbought items, minus rows hidden behind an Undo toast;
+ * - stickies: the household count only — the shared ``stickies``
+ *   signal may hold a space board's notes.
+ *
+ * Every load is deduped with the tab that needs the same data, so a
+ * deep link fetches each source once.
  */
 import { useEffect } from 'preact/hooks'
 import { signal, useComputed } from '@preact/signals'
@@ -21,8 +28,9 @@ import { useLocation } from 'preact-iso'
 import { TabHeader } from '@/components/TabHeader'
 import { items as shoppingItems, ensureShopping } from '@/store/shopping'
 import { pendingDeletes } from '@/utils/undoableDelete'
-import { stickies } from '@/store/stickies'
-import { tasks } from '@/store/tasks'
+import { householdStickyCount, ensureHouseholdStickies } from '@/store/stickies'
+import { householdTaskStore } from '@/store/tasks'
+import { t } from '@/i18n/i18n'
 import TaskPage from '@/features/tasks/TaskPage'
 import ShoppingPage from '@/features/shopping/ShoppingPage'
 import StickyBoardPage from '@/features/stickies/StickyBoardPage'
@@ -45,14 +53,13 @@ function tabFromUrl(url: string): OrganizeTab {
 export default function OrganizePage() {
   const loc = useLocation()
 
-  // Live count chips — pull straight from the per-feature stores so
-  // the labels track WS-driven updates without a refetch round-trip.
-  // ``ensureShopping`` fetches only when nothing is loaded yet and
-  // shares the in-flight request with the Shopping tab when both
-  // mount together — one fetch, not two. A failure here is silent:
-  // the chip just shows no count, and the tab shows its own error.
+  // Count chips. Each ``ensure*`` loads only what isn't loaded yet and
+  // shares an in-flight request with the tab mounting alongside. A
+  // failure is silent here: the chip shows no count, the tab its error.
   useEffect(() => {
     ensureShopping().catch(() => { /* the Shopping tab reports it */ })
+    householdTaskStore.ensureAll().catch(() => { /* the Tasks tab reports it */ })
+    ensureHouseholdStickies().catch(() => { /* the Stickies tab reports it */ })
   }, [])
 
   useEffect(() => {
@@ -60,16 +67,20 @@ export default function OrganizePage() {
   }, [loc.url])
 
   const labels = useComputed<Readonly<Record<OrganizeTab, string>>>(() => {
-    const todo = tasks.value.filter(t => t.status !== 'done').length
     const hidden = pendingDeletes.value
-    const inCart = shoppingItems.value
-      .filter(i => !i.completed && !hidden.has(i.id)).length
-    const stuck = stickies.value.length
-    return {
-      tasks:    todo > 0    ? `Tasks · ${todo}`    : 'Tasks',
-      shopping: inCart > 0  ? `Shopping · ${inCart}` : 'Shopping',
-      stickies: stuck > 0   ? `Stickies · ${stuck}` : 'Stickies',
+    const counts: Record<OrganizeTab, number> = {
+      tasks: householdTaskStore.openCount.value,
+      shopping: shoppingItems.value.filter(i => !i.completed && !hidden.has(i.id)).length,
+      stickies: householdStickyCount.value ?? 0,
     }
+    const label = (tab: OrganizeTab) => {
+      // Keys for i18n:check: t('organize.tab.tasks') t('organize.tab.shopping') t('organize.tab.stickies')
+      const name = t(`organize.tab.${tab}`)
+      return counts[tab] > 0
+        ? t('organize.tab_count', { name, n: String(counts[tab]) })
+        : name
+    }
+    return { tasks: label('tasks'), shopping: label('shopping'), stickies: label('stickies') }
   })
 
   // Each child page owns its own ``useTitle`` ('Tasks' / list name,
@@ -91,7 +102,7 @@ export default function OrganizePage() {
         activeTab={activeTab.value}
         visibleTabs={TABS}
         labels={labels.value}
-        ariaLabel="Organize sections"
+        ariaLabel={t('organize.label')}
         onSelectTab={onSelectTab}
       />
       {activeTab.value === 'tasks'    && <TaskPage />}

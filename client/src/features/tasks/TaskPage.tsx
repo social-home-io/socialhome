@@ -1,638 +1,592 @@
 /**
- * TaskPage — multi-list task manager (§23.54 / §15).
+ * TaskPage — the household's task lists, as the Organize "Tasks" tab
+ * (§23.54 / §15).
  *
- * Sidebar holds the list roster with create + rename + delete. Main
- * pane shows the active list's tasks with inline-add, a status
- * segmented control (todo / in-progress / done), due-date pill, edit
- * dialog, and status changes via the central store so WS frames from
- * other tabs merge automatically.
+ * The sidebar holds the list roster (pick, add, ⋯ rename / delete);
+ * the main pane shows the active list grouped by status: "To do" and
+ * "In progress" sections, then the done archive under a
+ * "Done (N) · Clear all" divider. Built on the shared Organize
+ * primitives so it reads like Shopping:
+ *
+ * - ``useLoad`` twice — the roster, then the active list's tasks (keyed
+ *   by list id). Both render cached data at once on a revisit and
+ *   revalidate behind it; a failed first load shows ``LoadErrorState``
+ *   with Retry, never the empty state.
+ * - ``CheckToggle``: unticked → done, ticked → to do (from in progress
+ *   → done). Drag a row onto another status section to move it; the
+ *   keyboard path is the edit dialog's status picker.
+ * - Delete and "Clear all" are instant with Undo (deferred DELETE).
+ *   Deleting a whole list asks first — it takes every task with it —
+ *   and then also offers Undo.
+ *
+ * Data lives in ``householdTaskStore`` (``store/tasks.ts``).
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { signal } from '@preact/signals'
-import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
-import { TasksSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
+import { confirmDialog } from '@/components/confirm'
+import { CheckToggle } from '@/components/CheckToggle'
+import { RowActionButton, ROW_REVEAL_HOST } from '@/components/RowActionButton'
+import { QuickAddBar } from '@/components/QuickAddBar'
+import { ListSkeleton } from '@/components/Skeleton'
+import { LoadErrorState } from '@/components/LoadErrorState'
+import { OverflowMenu } from '@/components/OverflowMenu'
+import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { useTitle } from '@/store/pageTitle'
 import {
-  lists,
-  tasks,
-  clearCompletedTasks,
-  patchTaskStatus,
+  householdTaskStore, canEditTask, isOne, type TaskPatch, type TaskStatus,
 } from '@/store/tasks'
 import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
+import { locale, t } from '@/i18n/i18n'
+import { useLoad } from '@/utils/useLoad'
+import { pendingDeletes } from '@/utils/undoableDelete'
+import { OrganizeSectionHeader } from '@/features/organize/shared/OrganizeSectionHeader'
+import { ArchiveDivider } from '@/features/organize/shared/ArchiveDivider'
+import { DropPad } from '@/features/organize/shared/DropPad'
+import { useDragBuckets, type DragItemProps } from '@/features/organize/shared/useDragBuckets'
 import type { TaskItem, TaskListEntry } from '@/types'
-import { confirmDialog } from '@/components/confirm'
+import { useNarrow } from '@/features/timetable/useNarrow'
+import { useAutofocus } from '@/features/timetable/useAutofocus'
+import { dueLabel, parseDueDate } from './dueLabel'
 
-const activeList = signal<string | null>(null)
-const loading = signal(true)
-const editingTask = signal<TaskItem | null>(null)
+const store = householdTaskStore
 
-const newListName = signal('')
-const newTaskTitle = signal('')
-
-type Status = 'todo' | 'in_progress' | 'done'
-const STATUS_LABEL: Record<Status, string> = {
-  todo:        'To do',
-  in_progress: 'In progress',
-  done:        'Done',
-}
-const STATUS_CYCLE: Record<Status, Status> = {
-  todo:        'in_progress',
-  in_progress: 'done',
-  done:        'todo',
-}
-/** Render order for the grouped view. Mirrors how a household
- *  actually scans the list — "what's next" reads first, the
- *  in-flight items are the middle band, and "what's already off
- *  my plate" sits at the bottom as quiet confirmation. */
-const STATUS_ORDER: Status[] = ['todo', 'in_progress', 'done']
-
-/** Drag-data MIME used to differentiate task drags from any other
- *  drag-and-drop layer in the same DOM tree. Drop targets read
- *  ``e.dataTransfer.types.includes(DRAG_TASK_MIME)`` before
- *  triggering a status reassignment. Same shape as the shopping
- *  list's per-store drop targets. */
+/** Marks a task-row drag on ``dataTransfer`` (see ``useDragBuckets``). */
 const DRAG_TASK_MIME = 'application/x-sh-task'
 
-function dueLabel(due: string): { text: string; modifier: 'due' | 'overdue' | null } {
-  // Parse a YYYY-MM-DD or ISO timestamp; reduce to a date-only comparison
-  // against "today" so a task due today doesn't read as "overdue" until
-  // tomorrow rolls over.
-  const d = new Date(due)
-  if (Number.isNaN(d.getTime())) return { text: due, modifier: null }
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const dueDay = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  const ms = dueDay.getTime() - today.getTime()
-  const days = Math.round(ms / 86400000)
-  if (days < 0) return { text: 'overdue', modifier: 'overdue' }
-  if (days === 0) return { text: 'today', modifier: 'due' }
-  if (days === 1) return { text: 'tomorrow', modifier: 'due' }
-  if (days <= 7) return { text: 'this week', modifier: 'due' }
-  return { text: due, modifier: null }
+const OPEN_STATUSES: TaskStatus[] = ['todo', 'in_progress']
+
+/** The backend's list-name cap. */
+const LIST_NAME_MAX = 100
+
+/** Status names. Keys for ``i18n:check``:
+ *  t('tasks.status.todo') t('tasks.status.in_progress') t('tasks.status.done') */
+function statusLabel(s: TaskStatus): string {
+  return t(`tasks.status.${s}`)
+}
+
+/** ``t()`` with a count: the ``_one`` key for exactly one.
+ *  For ``i18n:check``: t('tasks.lists_count') t('tasks.lists_count_one') */
+function tn(key: string, n: number, params: Record<string, string> = {}): string {
+  return t(isOne(n) ? `${key}_one` : key, { ...params, n: String(n) })
+}
+
+/** "You & Lena" / "Lena, Max & you" in the UI language. */
+function joinNames(names: string[]): string {
+  try {
+    return new Intl.ListFormat(locale.value || undefined, { style: 'short', type: 'conjunction' })
+      .format(names)
+  } catch {
+    return names.join(', ')
+  }
+}
+
+function errText(err: unknown): string {
+  return String((err as Error)?.message ?? err)
+}
+
+/** Error toast for a failed task write: a 403 (not allowed to change
+ *  this task) says so in the UI language; anything else is
+ *  "<what failed>: <detail>". */
+function failToast(key: string, err: unknown) {
+  const forbidden = (err as { status?: unknown } | null)?.status === 403
+  showToast(forbidden ? t('tasks.error.forbidden') : t(key, { error: errText(err) }), 'error')
+}
+
+/** No drag for a task the user may not change. */
+const NO_DRAG = {
+  draggable: false,
+  onDragStart: (e: DragEvent) => e.preventDefault(),
+  onDragEnd: () => {},
+}
+
+/** After a keyboard delete, focus the next row's tick (or the add field). */
+function focusNeighbour(li: HTMLElement | null) {
+  const next = (li?.nextElementSibling ?? li?.previousElementSibling) as HTMLElement | null
+  requestAnimationFrame(() => {
+    const target = next?.isConnected
+      ? next.querySelector<HTMLElement>('.sh-check-toggle')
+      : document.querySelector<HTMLElement>('.sh-tasks-add input')
+    target?.focus()
+  })
+}
+
+function focusTask(id: string) {
+  requestAnimationFrame(() => {
+    const row = Array.from(document.querySelectorAll<HTMLElement>('[data-task-id]'))
+      .find(el => el.dataset.taskId === id)
+    row?.querySelector<HTMLElement>('.sh-check-toggle')?.focus()
+  })
 }
 
 export default function TaskPage() {
-  useEffect(() => {
-    void loadHouseholdUsers()
-    void (async () => {
-      try {
-        const rows = await api.get('/api/tasks/lists') as TaskListEntry[]
-        lists.value = rows
-        if (rows.length > 0 && !activeList.value) {
-          activeList.value = rows[0].id
-          await loadTasks(rows[0].id)
-        }
-      } finally {
-        loading.value = false
-      }
-    })()
-  }, [])
+  useTitle(t('tasks.title'))
+  const addRef = useRef<HTMLInputElement | null>(null)
+  const newListRef = useRef<HTMLInputElement | null>(null)
+  const [draft, setDraft] = useState('')
+  const [listDraft, setListDraft] = useState('')
+  const [editing, setEditing] = useState<TaskItem | null>(null)
+  // Phones: a compact list picker replaces the lists card, so the tasks
+  // start near the top instead of below the fold.
+  const narrow = useNarrow()
 
-  const loadTasks = async (listId: string) => {
-    activeList.value = listId
-    try {
-      const rows = await api.get(
-        `/api/tasks/lists/${listId}/tasks`,
-      ) as TaskItem[]
-      // Keep any tasks from other lists already in the store (e.g. from
-      // a WS frame); replace the ones for this list with the fresh REST
-      // response so it's the source of truth for what we just loaded.
-      const other = tasks.value.filter(t => t.list_id !== listId)
-      tasks.value = [...other, ...rows]
-    } catch (err: unknown) {
-      showToast(`Could not load tasks: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
+  useEffect(() => { void loadHouseholdUsers() }, [])
 
-  const submitList = async (e: Event) => {
-    e.preventDefault()
-    const name = newListName.value.trim()
-    if (!name) return
-    try {
-      const list = await api.post(
-        '/api/tasks/lists', { name },
-      ) as TaskListEntry
-      if (!lists.value.some(l => l.id === list.id)) {
-        lists.value = [...lists.value, list]
-      }
-      activeList.value = list.id
-      newListName.value = ''
-    } catch (err: unknown) {
-      showToast(`Create list failed: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
+  // The store revalidates every loaded list itself after a WebSocket
+  // reconnect, so neither load re-runs on one.
+  const listsLoad = useLoad(() => store.loadLists(), {
+    cached: store.listsLoaded.value,
+    revalidateOnReconnect: false,
+  })
 
-  const renameList = async (list: TaskListEntry, nextName: string) => {
-    const trimmed = nextName.trim()
-    if (!trimmed || trimmed === list.name) return
-    try {
-      const updated = await api.patch(
-        `/api/tasks/lists/${list.id}`, { name: trimmed },
-      ) as TaskListEntry
-      lists.value = lists.value.map(l => l.id === list.id ? updated : l)
-    } catch (err: unknown) {
-      showToast(`Rename failed: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
+  const visibleLists = store.visibleLists.value
+  const chosen = store.activeListId.value
+  // The remembered list, else the first one (also after it was deleted).
+  const activeId = visibleLists.some(l => l.id === chosen) ? chosen : visibleLists[0]?.id ?? null
+  const activeList = visibleLists.find(l => l.id === activeId) ?? null
 
-  const deleteList = async (list: TaskListEntry) => {
-    if (!await confirmDialog(
-      `Delete "${list.name}" and all its tasks? This can't be undone.`, { destructive: true })) return
-    try {
-      await api.delete(`/api/tasks/lists/${list.id}`)
-      lists.value = lists.value.filter(l => l.id !== list.id)
-      tasks.value = tasks.value.filter(t => t.list_id !== list.id)
-      if (activeList.value === list.id) {
-        activeList.value = lists.value[0]?.id ?? null
-        if (activeList.value) void loadTasks(activeList.value)
-      }
-      showToast(`Deleted "${list.name}"`, 'info')
-    } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
+  const tasksLoad = useLoad(
+    () => (activeId ? store.loadList(activeId) : Promise.resolve()),
+    {
+      key: activeId ?? '',
+      cached: activeId ? store.loadedListIds.value.has(activeId) : true,
+      revalidateOnReconnect: false,
+      onRecovered: () => requestAnimationFrame(() => addRef.current?.focus()),
+    },
+  )
 
-  const submitTask = async (e: Event) => {
-    e.preventDefault()
-    if (!activeList.value) return
-    const title = newTaskTitle.value.trim()
-    if (!title) return
-    try {
-      const task = await api.post(
-        `/api/tasks/lists/${activeList.value}/tasks`, { title },
-      ) as TaskItem
-      if (!tasks.value.some(t => t.id === task.id)) {
-        tasks.value = [...tasks.value, task]
-      }
-      newTaskTitle.value = ''
-    } catch (err: unknown) {
-      showToast(`Add task failed: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
+  const drag = useDragBuckets<TaskStatus>({
+    mime: DRAG_TASK_MIME,
+    onDrop: (id, status) => { void changeStatus(id, status) },
+  })
 
-  const cycleStatus = async (task: TaskItem) => {
-    const next = STATUS_CYCLE[task.status as Status]
-    await setTaskStatus(task, next)
-  }
-
-  /** Reassign a task's status. Optimistic — flips the row locally
-   *  first so a drag visibly lands in the new section the instant
-   *  the mouse releases; rolls back + toasts on error. The store
-   *  helper handles the actual PATCH + server reconcile. */
-  const setTaskStatus = async (task: TaskItem, next: Status) => {
-    try {
-      await patchTaskStatus(task.id, next)
-    } catch (err: unknown) {
-      showToast(`Update failed: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
-
-  const handleClearCompleted = async () => {
-    const listId = activeList.value
-    if (!listId) return
-    const doneCount = tasks.value.filter(
-      t => t.list_id === listId && t.status === 'done',
-    ).length
-    if (doneCount === 0) return
-    if (!await confirmDialog(
-      `Clear ${doneCount} completed task${doneCount === 1 ? '' : 's'}? This can't be undone.`,
-      { destructive: true },
-    )) return
-    const { ok, failed } = await clearCompletedTasks(listId)
-    if (failed > 0 && ok === 0) {
-      showToast(`Clear failed for all ${failed} task${failed === 1 ? '' : 's'}`, 'error')
-    } else if (failed > 0) {
-      showToast(`Cleared ${ok}, ${failed} failed`, 'error')
-    } else if (ok > 0) {
-      showToast(`Cleared ${ok} done task${ok === 1 ? '' : 's'}`, 'success')
-    }
-  }
-
-  const deleteTask = async (task: TaskItem) => {
-    if (!await confirmDialog(`Delete "${task.title}"?`, { destructive: true })) return
-    try {
-      await api.delete(`/api/tasks/${task.id}`)
-      tasks.value = tasks.value.filter(t => t.id !== task.id)
-      showToast('Task deleted', 'info')
-    } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error).message ?? err}`, 'error')
-    }
-  }
+  const hidden = pendingDeletes.value
+  const visibleTasks = (activeId ? store.tasksByList.value[activeId] ?? [] : [])
+    .filter(x => !hidden.has(x.id))
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+  const byStatus = (s: TaskStatus) => visibleTasks.filter(x => x.status === s)
+  const doneTasks = byStatus('done')
+  const openTasks = visibleTasks.length - doneTasks.length
 
   const me = currentUser.value
-  const userNameById = (uid: string): string => {
-    if (me?.user_id === uid) return 'you'
+  const userName = (uid: string): string => {
+    if (me?.user_id === uid) return t('tasks.you')
     const found = householdUsers.value.get(uid)
     return found?.display_name || found?.username || uid.slice(0, 6)
   }
 
-  const visibleTasks = tasks.value
-    .filter(t => t.list_id === activeList.value)
-    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
-
-  const activeListEntry = lists.value.find(l => l.id === activeList.value)
-  // Reactive page title — flips when the user picks a different list.
-  useTitle(activeListEntry?.name || 'Tasks')
-
-  // Count of open tasks across every list — gives the sidebar header
-  // a real "you have N things on your plate" stat.  Tasks store
-  // currently keeps the active-list rows; the count is approximate
-  // for lists not yet visited (we don't paginate-eagerly), but the
-  // active list always shows its real total.
-  const totalOpen = tasks.value.filter(t => t.status !== 'done').length
-  const newListInputRef = useRef<HTMLInputElement | null>(null)
-
-  // Drag-and-drop state for moving a task between status groups.
-  // Mirrors the shopping-list per-store flow. ``draggingId`` keeps
-  // the in-flight row id so the source group can render a faded
-  // ghost; ``dropTarget`` paints the destination's outline / pad
-  // while the cursor is hovering over it. Both clear on dragend.
-  const [draggingId, setDraggingId] = useState<string | null>(null)
-  const [dropTarget, setDropTarget] = useState<Status | null>(null)
-
-  // Loading guard sits below every hook so hook call-order stays stable
-  // across the loading→loaded transition (react-hooks/rules-of-hooks).
-  if (loading.value) return <TasksSkeleton />
-
-  const handleTaskDrop = (target: Status) => {
-    const id = draggingId
-    setDraggingId(null)
-    setDropTarget(null)
-    if (!id) return
-    const t = tasks.value.find(x => x.id === id)
-    if (!t || t.status === target) return
-    void setTaskStatus(t, target)
+  async function changeStatus(id: string, status: TaskStatus) {
+    try {
+      await store.setStatus(id, status)
+    } catch (err) {
+      failToast('tasks.error.update', err)
+    }
   }
+
+  async function toggle(id: string) {
+    try {
+      await store.toggleDone(id)
+    } catch (err) {
+      failToast('tasks.error.update', err)
+    }
+  }
+
+  const selectList = (id: string) => { store.activeListId.value = id }
+
+  const addTask = async () => {
+    const title = draft.trim()
+    if (!title || !activeId) return
+    try {
+      await store.createTask(activeId, title)
+      setDraft('')
+    } catch (err) {
+      showToast(t('tasks.error.add', { error: errText(err) }), 'error')
+    }
+  }
+
+  /** Create a list and open it; ``false`` when it failed (toasted). */
+  const addListNamed = async (raw: string, focusAdd = true): Promise<boolean> => {
+    const name = raw.trim()
+    if (!name) return false
+    try {
+      await store.createList(name)
+      if (focusAdd) requestAnimationFrame(() => addRef.current?.focus())
+      return true
+    } catch (err) {
+      showToast(t('tasks.error.add_list', { error: errText(err) }), 'error')
+      return false
+    }
+  }
+
+  const addList = async () => {
+    if (await addListNamed(listDraft)) setListDraft('')
+  }
+
+  const renameList = async (list: TaskListEntry, name: string) => {
+    const next = name.trim()
+    if (!next || next === list.name) return
+    try {
+      await store.renameList(list.id, next)
+    } catch (err) {
+      showToast(t('tasks.error.rename', { error: errText(err) }), 'error')
+    }
+  }
+
+  /** A whole list is many tasks at once — ask first, then still offer Undo. */
+  const deleteList = async (list: TaskListEntry) => {
+    const ok = await confirmDialog(t('tasks.list.delete_confirm', { name: list.name }), {
+      destructive: true,
+      confirmLabel: t('tasks.list.delete'),
+    })
+    if (ok) store.removeList(list)
+  }
+
+  const deleteTask = (task: TaskItem) => {
+    store.removeTask(task, { onUndone: () => focusTask(task.id) })
+  }
+
+  /** Household tasks: creator, assignee or admin (the server's rule). */
+  const editable = (x: TaskItem) => canEditTask(x, me, store.spaceId)
+  const clearable = doneTasks.filter(editable)
+
+  const clearDone = () => {
+    if (!activeId) return
+    const first = clearable[0]?.id
+    store.clearDone(activeId, {
+      canDelete: editable,
+      onUndone: () => { if (first) focusTask(first) },
+    })
+    addRef.current?.focus()
+  }
+
+  const header = (
+    <OrganizeSectionHeader
+      title={activeList?.name}
+      // On phones the list picker already shows the name.
+      hideTitle={narrow}
+      // No "0 open · 0 done" over an empty list's "All caught up".
+      counts={activeList && tasksLoad.state === 'ready' && visibleTasks.length > 0 ? [
+        { label: t('tasks.counts.open', { n: String(openTasks) }), tone: 'open' },
+        { label: t('tasks.counts.done', { n: String(doneTasks.length) }), tone: 'done' },
+      ] : []}
+    />
+  )
+
+  if (listsLoad.state !== 'ready') {
+    return (
+      <div class="sh-tasks-page">
+        {listsLoad.state === 'error'
+          ? <LoadErrorState message={t('tasks.load_failed')} onRetry={listsLoad.retry} />
+          : <ListSkeleton variant="list" rows={6} label={t('tasks.loading')} />}
+      </div>
+    )
+  }
+
+  const rowProps = (task: TaskItem) => ({
+    task,
+    editable: editable(task),
+    dragging: drag.draggingId === task.id,
+    dragProps: editable(task) ? drag.itemProps(task.id) : NO_DRAG,
+    userName,
+    onToggle: () => { void toggle(task.id) },
+    onEdit: () => setEditing(task),
+    onDelete: () => deleteTask(task),
+  })
 
   return (
     <div class="sh-tasks">
-      <aside class="sh-tasks-sidebar">
-        <header class="sh-tasks-sidebar-header">
-          <h3>Lists</h3>
-          <span class="sh-muted">
-            {lists.value.length === 1
-              ? '1 list'
-              : `${lists.value.length} lists`}
-            {lists.value.length > 0 && totalOpen > 0 && (
-              <> · {totalOpen} open</>
-            )}
-          </span>
-        </header>
-        {lists.value.map(l => (
-          <ListRow
-            key={l.id} list={l}
-            active={activeList.value === l.id}
-            onSelect={() => void loadTasks(l.id)}
-            onRename={(name) => void renameList(l, name)}
-            onDelete={() => void deleteList(l)}
-          />
-        ))}
-        <form class="sh-form-row" onSubmit={submitList}
-              style={{ marginTop: '0.5rem' }}>
-          <input
-            ref={newListInputRef}
-            type="text"
-            value={newListName.value}
-            placeholder="+ New list"
-            onInput={(e) => newListName.value = (e.target as HTMLInputElement).value}
-            aria-label="New list name"
-          />
-        </form>
-      </aside>
-
-      <div class="sh-tasks-content">
-        {activeListEntry && (
-          <div class="sh-page-header sh-tasks-page-header">
-            <h2 class="sh-tasks-page-title">{activeListEntry.name}</h2>
-            <span class="sh-tasks-page-counts">
-              <span class="sh-tasks-page-counts__open">
-                {visibleTasks.filter(t => t.status !== 'done').length} open
-              </span>
-              <span class="sh-tasks-page-counts__sep" aria-hidden="true">·</span>
-              <span class="sh-tasks-page-counts__done">
-                {visibleTasks.filter(t => t.status === 'done').length} done
-              </span>
+      {narrow ? (
+        <ListPicker
+          lists={visibleLists}
+          active={activeList}
+          newListRef={newListRef}
+          onSelect={selectList}
+          onCreate={(name) => addListNamed(name, false)}
+          onRename={(l, name) => void renameList(l, name)}
+          onDelete={(l) => void deleteList(l)}
+        />
+      ) : (
+        <aside class="sh-tasks-sidebar" aria-label={t('tasks.lists')}>
+          <header class="sh-tasks-sidebar-header">
+            <h3>{t('tasks.lists')}</h3>
+            <span class="sh-tasks-sidebar-header__count">
+              {tn('tasks.lists_count', visibleLists.length)}
             </span>
-          </div>
-        )}
-
-        {activeList.value && (
-          <form class="sh-form-row sh-composer" onSubmit={submitTask}
-                style={{ marginBottom: 0, padding: '0.5rem 0.75rem' }}>
-            <input
-              type="text"
-              value={newTaskTitle.value}
-              placeholder="Add a task and press Enter…"
-              onInput={(e) => newTaskTitle.value = (e.target as HTMLInputElement).value}
-              aria-label="New task title"
+          </header>
+          {visibleLists.map(l => (
+            <ListRow
+              key={l.id}
+              list={l}
+              active={l.id === activeId}
+              onSelect={() => selectList(l.id)}
+              onRename={(name) => void renameList(l, name)}
+              onDelete={() => void deleteList(l)}
             />
-            <Button type="submit" disabled={!newTaskTitle.value.trim()}>Add</Button>
-          </form>
-        )}
-
-        {visibleTasks.length > 0 && STATUS_ORDER.map(group => {
-          const inGroup = visibleTasks.filter(t => t.status === group)
-          const isDropTarget = dropTarget === group
-          const isDone = group === 'done'
-          // Render rule:
-          //  - Open groups (todo / in_progress) always render. While
-          //    a drag is in flight they also show a drop-pad if
-          //    empty so the user can drop into a fresh bucket.
-          //    When NO drag is in flight, an empty open group
-          //    simply collapses — no "Nothing here." noise.
-          //  - The Done group skips the inline render here entirely;
-          //    it appears below the open groups separated by a
-          //    divider + "Clear all" link (see the block after
-          //    this map). That matches the shopping list's
-          //    "Already bought" trailer pattern.
-          if (isDone) return null
-          if (inGroup.length === 0 && draggingId === null) return null
-          return (
-            <section
-              key={group}
-              class={
-                'sh-task-group '
-                + `sh-task-group--${group} `
-                + (isDropTarget ? 'sh-task-group--drop-target ' : '')
-              }
-              onDragOver={(e) => {
-                if (!e.dataTransfer?.types.includes(DRAG_TASK_MIME)) return
-                e.preventDefault()
-                if (dropTarget !== group) setDropTarget(group)
-              }}
-              onDragLeave={(e) => {
-                if (e.currentTarget === e.target && dropTarget === group) {
-                  setDropTarget(null)
-                }
-              }}
-              onDrop={(e) => {
-                if (!e.dataTransfer?.types.includes(DRAG_TASK_MIME)) return
-                e.preventDefault()
-                handleTaskDrop(group)
-              }}
-            >
-              <header class="sh-task-group__header">
-                <span class={`sh-task-group__dot sh-task-group__dot--${group}`} aria-hidden="true" />
-                <h3 class="sh-task-group__name">{STATUS_LABEL[group]}</h3>
-                <span class="sh-task-group__count">
-                  {inGroup.length}
-                </span>
-              </header>
-              {inGroup.length === 0 ? (
-                // Reached only when ``draggingId !== null`` (the
-                // collapse-when-idle branch is the early-return
-                // above). Drop-pad with the destination's label so
-                // there's a visible target even with no rows yet.
-                <div class="sh-task-group__droppad" aria-hidden="true">
-                  Drop here to move into {STATUS_LABEL[group]}
-                </div>
-              ) : (
-                <ul class="sh-list-card" style={{ listStyle: 'none', margin: 0 }}>
-                  {inGroup.map(t => {
-                    const due = t.due_date ? dueLabel(t.due_date) : null
-                    const owners = (t.assignees ?? [])
-                      .map(uid => userNameById(uid))
-                      .filter(Boolean)
-                    const ownerLine =
-                      owners.length > 0
-                        ? owners.join(' · ')
-                        : t.created_by ? `+ ${userNameById(t.created_by)}` : ''
-                    return (
-                      <li
-                        key={t.id}
-                        class={
-                          `sh-task-row ${t.status === 'done' ? 'sh-task--done' : ''} `
-                          + (draggingId === t.id ? 'sh-task-row--dragging' : '')
-                        }
-                        draggable={true}
-                        onDragStart={(e) => {
-                          // ``DRAG_TASK_MIME`` is the mark a section
-                          // drop handler checks before reassigning;
-                          // ``effectAllowed = move`` keeps Chrome's
-                          // default ``copy`` cursor from suggesting
-                          // the wrong semantic.
-                          e.dataTransfer?.setData(DRAG_TASK_MIME, t.id)
-                          if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
-                          setDraggingId(t.id)
-                        }}
-                        onDragEnd={() => {
-                          setDraggingId(null)
-                          setDropTarget(null)
-                        }}
-                      >
-                        <input type="checkbox" checked={t.status === 'done'}
-                          onChange={() => cycleStatus({
-                            ...t,
-                            status: t.status === 'done' ? 'todo' : 'done',
-                          })}
-                          aria-label={`Toggle ${t.title}`} />
-                        <button
-                          type="button"
-                          class="sh-task-title"
-                          onClick={() => (editingTask.value = t)}
-                          title="Edit task"
-                          aria-label={`Edit task: ${t.title}`}
-                        >
-                          {t.title}
-                        </button>
-                        <div class="sh-task-meta">
-                          {ownerLine && (
-                            <span class="sh-byline">{ownerLine}</span>
-                          )}
-                          {due && due.text !== t.due_date && (
-                            <span class="sh-byline sh-byline--accent">
-                              · {due.text}
-                            </span>
-                          )}
-                          {due && due.text === t.due_date && (
-                            <span class="sh-byline">· {due.text}</span>
-                          )}
-                        </div>
-                        {due?.modifier === 'overdue' && (
-                          <span class="sh-task-pin sh-task-pin--overdue">overdue</span>
-                        )}
-                        {due?.modifier === 'due' && (
-                          <span class="sh-task-pin sh-task-pin--due">due</span>
-                        )}
-                        <button type="button" class="sh-icon-btn"
-                                aria-label={`Delete ${t.title}`}
-                                onClick={() => void deleteTask(t)}>🗑️</button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </section>
-          )
-        })}
-
-        {/* Done — rendered separately AFTER the open buckets,
-         *  trailing a "n done · Clear all" divider. Mirrors the
-         *  shopping list's "Already bought · Clear all" pattern so
-         *  the completed pile reads as archive, not as a peer
-         *  status bucket. Renders when there ARE done items OR a
-         *  drag is in flight (so the user can drop a row into an
-         *  empty Done bucket). */}
-        {(() => {
-          const doneTasks = visibleTasks.filter(t => t.status === 'done')
-          const showDone = doneTasks.length > 0 || draggingId !== null
-          if (!showDone) return null
-          const isDropTarget = dropTarget === 'done'
-          return (
-            <>
-              <div class="sh-shopping-divider sh-tasks-done-divider">
-                <span>
-                  {doneTasks.length === 0
-                    ? 'No done tasks yet'
-                    : `${doneTasks.length} done`}
-                </span>
-                {doneTasks.length > 0 && (
-                  <button
-                    type="button"
-                    class="sh-link"
-                    onClick={() => void handleClearCompleted()}
-                  >
-                    Clear all
-                  </button>
-                )}
-              </div>
-              <section
-                class={
-                  'sh-task-group sh-task-group--done sh-task-group--archive '
-                  + (isDropTarget ? 'sh-task-group--drop-target ' : '')
-                }
-                onDragOver={(e) => {
-                  if (!e.dataTransfer?.types.includes(DRAG_TASK_MIME)) return
-                  e.preventDefault()
-                  if (dropTarget !== 'done') setDropTarget('done')
-                }}
-                onDragLeave={(e) => {
-                  if (e.currentTarget === e.target && dropTarget === 'done') {
-                    setDropTarget(null)
-                  }
-                }}
-                onDrop={(e) => {
-                  if (!e.dataTransfer?.types.includes(DRAG_TASK_MIME)) return
-                  e.preventDefault()
-                  handleTaskDrop('done')
-                }}
-              >
-                {doneTasks.length === 0 ? (
-                  <div class="sh-task-group__droppad" aria-hidden="true">
-                    Drop here to mark done
-                  </div>
-                ) : (
-                  <ul
-                    class="sh-list-card sh-list-card--moss sh-shopping-list--done"
-                    style={{ listStyle: 'none', margin: 0 }}
-                  >
-                    {doneTasks.map(t => {
-                      const due = t.due_date ? dueLabel(t.due_date) : null
-                      const owners = (t.assignees ?? [])
-                        .map(uid => userNameById(uid))
-                        .filter(Boolean)
-                      const ownerLine =
-                        owners.length > 0
-                          ? owners.join(' · ')
-                          : t.created_by ? `+ ${userNameById(t.created_by)}` : ''
-                      return (
-                        <li
-                          key={t.id}
-                          class={
-                            'sh-task-row sh-task--done '
-                            + (draggingId === t.id ? 'sh-task-row--dragging' : '')
-                          }
-                          draggable={true}
-                          onDragStart={(e) => {
-                            e.dataTransfer?.setData(DRAG_TASK_MIME, t.id)
-                            if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
-                            setDraggingId(t.id)
-                          }}
-                          onDragEnd={() => {
-                            setDraggingId(null)
-                            setDropTarget(null)
-                          }}
-                        >
-                          <input type="checkbox" checked={true}
-                            onChange={() => cycleStatus({ ...t, status: 'todo' })}
-                            aria-label={`Toggle ${t.title}`} />
-                          <button
-                            type="button"
-                            class="sh-task-title"
-                            onClick={() => (editingTask.value = t)}
-                            title="Edit task"
-                            aria-label={`Edit task: ${t.title}`}
-                          >
-                            {t.title}
-                          </button>
-                          <div class="sh-task-meta">
-                            {ownerLine && (
-                              <span class="sh-byline">{ownerLine}</span>
-                            )}
-                            {due && (
-                              <span class="sh-byline">· {due.text}</span>
-                            )}
-                          </div>
-                          <button type="button" class="sh-icon-btn"
-                                  aria-label={`Delete ${t.title}`}
-                                  onClick={() => void deleteTask(t)}>🗑️</button>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-              </section>
-            </>
-          )
-        })()}
-
-        {visibleTasks.length === 0 && activeList.value && (
-          <div class="sh-empty-state">
-            <div aria-hidden="true">✅</div>
-            <h3>All caught up</h3>
-            <p>No tasks in this list. Type above to add one.</p>
-          </div>
-        )}
-        {!activeList.value && (
+          ))}
+          <QuickAddBar
+            class="sh-tasks-new-list"
+            value={listDraft}
+            inputRef={newListRef}
+            placeholder={t('tasks.new_list_placeholder')}
+            inputLabel={t('tasks.new_list')}
+            submitLabel={t('tasks.add_list')}
+            onValueChange={setListDraft}
+            onSubmit={() => { void addList() }}
+            inputProps={{ maxLength: LIST_NAME_MAX }}
+          />
+        </aside>
+      )}
+      <div class="sh-tasks-content">
+        {!activeList ? (
           <div class="sh-empty-state">
             <div aria-hidden="true">📋</div>
-            <h3>No task lists yet</h3>
-            <p>
-              Lists keep work pinned to a topic — "House projects",
-              "Groceries", "School run". Pick a name and you're off.
-            </p>
-            <Button
-              onClick={() => {
-                // Defer a tick so the focus call hits a mounted input
-                // (avoids racing with the empty-state render unmount).
-                setTimeout(() => newListInputRef.current?.focus(), 0)
-              }}
-            >
-              + Create your first list
-            </Button>
+            <h3>{t('tasks.no_lists.title')}</h3>
+            <p>{t('tasks.no_lists.body')}</p>
+            <div class="sh-empty-state__cta-row">
+              <Button onClick={() => newListRef.current?.focus()}>
+                {t('tasks.no_lists.cta')}
+              </Button>
+            </div>
           </div>
+        ) : (
+          <>
+            {header}
+            {/* After a failed load only the error and its Retry show. */}
+            {tasksLoad.state !== 'error' && <QuickAddBar
+              class="sh-tasks-add"
+              value={draft}
+              inputRef={addRef}
+              placeholder={t('tasks.add_placeholder')}
+              inputLabel={t('tasks.add_label', { name: activeList.name })}
+              submitLabel={t('tasks.add')}
+              onValueChange={setDraft}
+              onSubmit={() => { void addTask() }}
+              inputProps={{ maxLength: 200 }}
+            />}
+            {tasksLoad.stale && (
+              <p class="sh-tasks-stale" role="status">
+                {t('tasks.stale')}{' '}
+                <button type="button" class="sh-link" onClick={tasksLoad.retry}>
+                  {t('common.retry')}
+                </button>
+              </p>
+            )}
+            {tasksLoad.state === 'error' && (
+              <LoadErrorState message={t('tasks.load_tasks_failed')} onRetry={tasksLoad.retry} />
+            )}
+            {tasksLoad.state === 'loading' && (
+              <ListSkeleton variant="list" rows={4} label={t('tasks.loading')} />
+            )}
+            {tasksLoad.state === 'ready' && visibleTasks.length === 0 && (
+              <div class="sh-empty-state">
+                <div aria-hidden="true">✅</div>
+                <h3>{t('tasks.empty.title')}</h3>
+                <p>{t('tasks.empty.body')}</p>
+              </div>
+            )}
+            {tasksLoad.state === 'ready' && visibleTasks.length > 0 && (
+              <>
+                {OPEN_STATUSES.map(status => {
+                  const rows = byStatus(status)
+                  // An empty open section only shows while dragging, as a target.
+                  if (rows.length === 0 && drag.draggingId === null) return null
+                  const over = drag.overBucket === status
+                  return (
+                    <section
+                      key={status}
+                      class={`sh-task-group sh-task-group--${status}${over ? ' sh-task-group--drop-target' : ''}`}
+                      aria-labelledby={`sh-task-group-${status}`}
+                      {...drag.bucketProps(status)}
+                    >
+                      <header class="sh-task-group__header">
+                        <span class={`sh-task-group__dot sh-task-group__dot--${status}`} aria-hidden="true" />
+                        <h3 class="sh-task-group__name" id={`sh-task-group-${status}`}>
+                          {statusLabel(status)}
+                        </h3>
+                        <span class="sh-task-group__count">{rows.length}</span>
+                      </header>
+                      {rows.length === 0 ? (
+                        <DropPad active={over} label={t('tasks.drop_into', { name: statusLabel(status) })} />
+                      ) : (
+                        <ul class="sh-task-items sh-list-card">
+                          {rows.map(x => <TaskRow key={x.id} {...rowProps(x)} />)}
+                        </ul>
+                      )}
+                    </section>
+                  )
+                })}
+                {(doneTasks.length > 0 || drag.draggingId !== null) && (
+                  <section
+                    class={`sh-task-group sh-task-group--done sh-task-group--archive${drag.overBucket === 'done' ? ' sh-task-group--drop-target' : ''}`}
+                    aria-label={statusLabel('done')}
+                    {...drag.bucketProps('done')}
+                  >
+                    {doneTasks.length === 0 ? (
+                      <DropPad active={drag.overBucket === 'done'} label={t('tasks.drop_done')} />
+                    ) : (
+                      <>
+                        <ArchiveDivider
+                          class="sh-tasks-done-divider"
+                          label={t('tasks.done_heading', { n: String(doneTasks.length) })}
+                          actionLabel={clearable.length > 0 ? t('tasks.clear_all') : undefined}
+                          actionAriaLabel={t('tasks.clear_all_label')}
+                          onAction={clearable.length > 0 ? clearDone : undefined}
+                        />
+                        <ul class="sh-task-items sh-list-card sh-list-card--moss">
+                          {doneTasks.map(x => <TaskRow key={x.id} {...rowProps(x)} />)}
+                        </ul>
+                      </>
+                    )}
+                  </section>
+                )}
+              </>
+            )}
+          </>
         )}
       </div>
 
-      {editingTask.value && (
+      {editing && (
         <TaskEditDialog
-          task={editingTask.value}
-          onClose={() => (editingTask.value = null)}
-          onSaved={(updated) => {
-            tasks.value = tasks.value.map(t =>
-              t.id === updated.id ? updated : t,
-            )
-            editingTask.value = null
+          task={editing}
+          editable={editable(store.findTask(editing.id) ?? editing)}
+          userName={userName}
+          onClose={() => setEditing(null)}
+          onSave={async (patch) => {
+            if (!store.findTask(editing.id)) {
+              showToast(t('tasks.error.deleted'), 'info')
+              setEditing(null)
+              return
+            }
+            try {
+              await store.patchTask(editing.id, patch)
+              setEditing(null)
+            } catch (err) {
+              failToast('tasks.error.save', err)
+            }
           }}
         />
       )}
     </div>
   )
 }
+
+// ─── Task row ─────────────────────────────────────────────────────────
+
+interface TaskRowProps {
+  task: TaskItem
+  /** The user may change it (else: inert tick with the reason, no ✕). */
+  editable: boolean
+  dragging: boolean
+  dragProps: DragItemProps
+  userName: (uid: string) => string
+  onToggle: () => void
+  onEdit: () => void
+  onDelete: () => void
+}
+
+function TaskRow({
+  task, editable, dragging, dragProps, userName, onToggle, onEdit, onDelete,
+}: TaskRowProps) {
+  const rowRef = useRef<HTMLLIElement | null>(null)
+  const done = task.status === 'done'
+  const due = task.due_date ? dueLabel(task.due_date) : null
+  const people = (task.assignees ?? []).map(userName)
+  const hasNotes = !!task.description?.trim()
+  const metaId = `sh-task-meta-${task.id}`
+  const dueId = `sh-task-due-${task.id}`
+  const showMeta = people.length > 0 || hasNotes || !editable
+  const describedBy = [showMeta ? metaId : '', due && !done ? dueId : ''].filter(Boolean).join(' ')
+  const readOnlyReason = editable ? undefined : t('tasks.error.forbidden')
+  return (
+    <li
+      ref={rowRef}
+      data-task-id={task.id}
+      class={'sh-task-item ' + ROW_REVEAL_HOST
+        + (done ? ' sh-task-item--done' : '')
+        + (dragging ? ' sh-task-item--dragging' : '')}
+      {...dragProps}
+    >
+      <CheckToggle
+        checked={done}
+        label={t('tasks.check_label', { title: task.title })}
+        disabledReason={readOnlyReason}
+        onChange={onToggle}
+      />
+      {/* The title + byline together are the edit button, so it fills
+        * the row height (a 44 px target on touch). */}
+      <button
+        type="button"
+        class="sh-task-item__body"
+        aria-label={t('tasks.edit_label', { title: task.title })}
+        title={t('tasks.edit_title')}
+        aria-describedby={describedBy || undefined}
+        onClick={onEdit}
+      >
+        <span class="sh-task-item__title">{task.title}</span>
+        {showMeta && (
+          <span class="sh-task-item__meta" id={metaId}>
+            {!editable && (
+              <span class="sh-task-item__lock" title={readOnlyReason}>
+                <span aria-hidden="true">🔒</span>
+                <span class="sr-only">{t('tasks.read_only')}</span>
+              </span>
+            )}
+            {people.length > 0 && (
+              <>
+                <span class="sh-task-item__icon" aria-hidden="true">👤</span>
+                <span class="sh-task-item__people">
+                  <span class="sr-only">{t('tasks.assigned_to')} </span>
+                  {joinNames(people)}
+                </span>
+              </>
+            )}
+            {hasNotes && (
+              <span class="sh-task-item__notes" title={t('tasks.has_notes')}>
+                <span aria-hidden="true">≡</span>
+                <span class="sr-only">{t('tasks.has_notes')}</span>
+              </span>
+            )}
+          </span>
+        )}
+      </button>
+      {/* One due chip; a finished task's due date no longer matters. */}
+      {due && !done && (
+        <span id={dueId} class={`sh-task-due${due.tone ? ` sh-task-due--${due.tone}` : ''}`}
+              title={due.title}>
+          {due.short === due.text ? due.text : (
+            <>
+              {/* Narrow rows show "! Sep 28"; the full text stays for
+                * screen readers. */}
+              <span class="sh-task-due__full">{due.text}</span>
+              <span class="sh-task-due__short" aria-hidden="true">! {due.short}</span>
+            </>
+          )}
+        </span>
+      )}
+      {editable ? (
+        <RowActionButton
+          class="sh-task-item__delete"
+          label={t('tasks.delete_label', { title: task.title })}
+          icon="✕"
+          danger
+          reveal
+          onClick={(e) => {
+            const li = rowRef.current
+            onDelete()
+            if (e.detail === 0) focusNeighbour(li)
+          }}
+        />
+      ) : (
+        // Keeps the due chips of all rows in one column.
+        <span class="sh-task-item__delete-spacer" aria-hidden="true" />
+      )}
+    </li>
+  )
+}
+
+// ─── List roster row ──────────────────────────────────────────────────
 
 function ListRow({
   list, active, onSelect, onRename, onDelete,
@@ -643,30 +597,31 @@ function ListRow({
   onRename: (next: string) => void
   onDelete: () => void
 }) {
-  const [menuOpen, setMenuOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(list.name)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const btnRef = useRef<HTMLButtonElement | null>(null)
+  /** Set once Enter / Escape / blur ended the edit, so the blur that
+   *  follows Enter or Escape can't save (again). */
+  const doneRef = useRef(false)
 
-  // Auto-focus + select-all when entering edit mode so the existing name
-  // is immediately replaceable.
   useEffect(() => {
-    if (editing) {
-      const el = inputRef.current
-      if (el) {
-        el.focus()
-        el.select()
-      }
-    }
+    if (!editing) return
+    inputRef.current?.focus()
+    inputRef.current?.select()
   }, [editing])
 
-  const commit = () => {
-    onRename(draft)
-    setEditing(false)
-  }
-  const cancel = () => {
+  const start = () => {
+    doneRef.current = false
     setDraft(list.name)
+    setEditing(true)
+  }
+  const finish = (save: boolean, refocus: boolean) => {
+    if (doneRef.current) return
+    doneRef.current = true
+    if (save) onRename(draft)
     setEditing(false)
+    if (refocus) requestAnimationFrame(() => btnRef.current?.focus())
   }
 
   if (editing) {
@@ -676,141 +631,353 @@ function ListRow({
           ref={inputRef}
           type="text"
           value={draft}
-          maxLength={120}
-          aria-label={`Rename ${list.name}`}
+          maxLength={LIST_NAME_MAX}
+          aria-label={t('tasks.list.rename_label', { name: list.name })}
           onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') { e.preventDefault(); commit() }
-            if (e.key === 'Escape') { e.preventDefault(); cancel() }
+            if (e.key === 'Enter') { e.preventDefault(); finish(true, true) }
+            if (e.key === 'Escape') { e.preventDefault(); finish(false, true) }
           }}
-          onBlur={commit}
+          onBlur={() => finish(true, false)}
         />
       </div>
     )
   }
 
   return (
-    <div class="sh-task-list-row">
+    <div class={`sh-task-list-row ${ROW_REVEAL_HOST}`}>
       <button
-        class={`sh-task-list-btn ${active ? 'sh-task-list-btn--active' : ''}`}
+        ref={btnRef}
+        type="button"
+        class={`sh-task-list-btn${active ? ' sh-task-list-btn--active' : ''}`}
+        aria-current={active ? 'true' : undefined}
         onClick={onSelect}
-        onDblClick={() => setEditing(true)}
-        title="Click to open · double-click to rename"
+        onDblClick={start}
       >
         {list.name}
       </button>
-      <button
-        type="button" class="sh-icon-btn"
-        aria-label={`More actions for ${list.name}`}
-        onClick={() => setMenuOpen(v => !v)}
-        onBlur={() => setTimeout(() => setMenuOpen(false), 120)}
-      >⋯</button>
-      {menuOpen && (
-        <div class="sh-post-menu" role="menu">
-          <button role="menuitem"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => { setMenuOpen(false); setDraft(list.name); setEditing(true) }}>
-            Rename
-          </button>
-          <button role="menuitem" class="sh-post-menu-danger"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => { setMenuOpen(false); onDelete() }}>
-            Delete list
-          </button>
-        </div>
+      <OverflowMenu
+        label={t('tasks.list.menu', { name: list.name })}
+        bareTrigger
+        triggerClass="sh-icon-btn sh-row-action sh-row-action--reveal"
+        items={[
+          { label: t('tasks.list.rename'), onSelect: start },
+          { label: t('tasks.list.delete'), danger: true, onSelect: onDelete },
+        ]}
+      >
+        <span aria-hidden="true">⋯</span>
+      </OverflowMenu>
+    </div>
+  )
+}
+
+// ─── Phone list picker ────────────────────────────────────────────────
+
+/** Below 640 px: the current list as one button that opens a sheet of
+ *  lists (✓ on the active one) plus New / Rename / Delete — instead of
+ *  the lists card, which would push the tasks below the fold. With no
+ *  lists yet it is just the new-list field.
+ *
+ *  While the sheet is open a real scrim covers the page: it takes the
+ *  tap that closes the sheet, so that tap never lands on the row
+ *  underneath. It stays until the press's click arrives (the menu
+ *  itself already closed on pointerdown). After Enter / Escape in the
+ *  rename or new-list field, focus goes back to the picker. */
+function ListPicker({
+  lists, active, newListRef, onSelect, onCreate, onRename, onDelete,
+}: {
+  lists: TaskListEntry[]
+  active: TaskListEntry | null
+  newListRef: { current: HTMLInputElement | null }
+  onSelect: (id: string) => void
+  onCreate: (name: string) => Promise<boolean>
+  onRename: (list: TaskListEntry, name: string) => void
+  onDelete: (list: TaskListEntry) => void
+}) {
+  const [mode, setMode] = useState<'idle' | 'new' | 'rename'>('idle')
+  const [draft, setDraft] = useState('')
+  const [open, setOpen] = useState(false)
+  const [scrim, setScrim] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const renameRef = useRef<HTMLInputElement | null>(null)
+  /** The rename / new-list edit already ended (Enter, Escape or blur). */
+  const doneRef = useRef(false)
+  /** A press on the scrim is in progress — keep it for its click. */
+  const pressRef = useRef(false)
+  /** Focus the trigger once we are back in ``idle``. */
+  const refocusRef = useRef(false)
+  const savingRef = useRef(false)
+  const creating = mode === 'new' || lists.length === 0
+
+  useEffect(() => {
+    if (mode === 'new') newListRef.current?.focus()
+    if (mode === 'rename') { renameRef.current?.focus(); renameRef.current?.select() }
+    if (mode === 'idle' && refocusRef.current) {
+      refocusRef.current = false
+      rootRef.current?.querySelector<HTMLElement>('.sh-tasks-picker__trigger')?.focus()
+    }
+  }, [mode, newListRef])
+
+  const enter = (next: 'new' | 'rename', value: string) => {
+    doneRef.current = false
+    setDraft(value)
+    setMode(next)
+  }
+  const leave = (refocus: boolean) => {
+    doneRef.current = true
+    refocusRef.current = refocus
+    setMode('idle')
+  }
+  const finishRename = (save: boolean, refocus: boolean) => {
+    if (doneRef.current) return
+    if (save && active) onRename(active, draft)
+    leave(refocus)
+  }
+  const create = () => {
+    if (savingRef.current) return
+    savingRef.current = true
+    void onCreate(draft).then((ok) => {
+      savingRef.current = false
+      if (ok) { setDraft(''); leave(true) }
+    })
+  }
+
+  const onOpenChange = (next: boolean) => {
+    setOpen(next)
+    if (next) setScrim(true)
+    else if (!pressRef.current) setScrim(false)
+  }
+
+  return (
+    <div class="sh-tasks-picker" ref={rootRef}>
+      {scrim && (
+        <div
+          class="sh-tasks-picker__scrim"
+          aria-hidden="true"
+          onPointerDown={(e) => {
+            e.preventDefault()
+            pressRef.current = true
+          }}
+          onPointerCancel={() => { pressRef.current = false; setScrim(false) }}
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            pressRef.current = false
+            setScrim(false)
+            setOpen(false)
+          }}
+        />
+      )}
+      {mode === 'rename' && active ? (
+        <input
+          ref={renameRef}
+          class="sh-tasks-picker__rename"
+          type="text"
+          value={draft}
+          maxLength={LIST_NAME_MAX}
+          aria-label={t('tasks.list.rename_label', { name: active.name })}
+          onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); finishRename(true, true) }
+            if (e.key === 'Escape') { e.preventDefault(); finishRename(false, true) }
+          }}
+          onBlur={() => finishRename(true, false)}
+        />
+      ) : active && (
+        <OverflowMenu
+          label={t('tasks.picker.label', { name: active.name })}
+          bareTrigger
+          open={open}
+          onOpenChange={onOpenChange}
+          triggerClass="sh-tasks-picker__trigger"
+          wrapClass="sh-tasks-picker__wrap"
+          menuClass="sh-tasks-picker__menu"
+          items={[
+            ...lists.map(l => ({
+              key: l.id, label: l.name, checked: l.id === active.id, onSelect: () => onSelect(l.id),
+            })),
+            { key: '__new', label: t('tasks.picker.new'), class: 'sh-tasks-picker__first-action',
+              onSelect: () => enter('new', '') },
+            { key: '__rename', label: t('tasks.list.rename_current'),
+              onSelect: () => enter('rename', active.name) },
+            { key: '__delete', label: t('tasks.list.delete'), danger: true, onSelect: () => onDelete(active) },
+          ]}
+        >
+          <span class="sh-tasks-picker__name">{active.name}</span>
+          <span class="sh-tasks-picker__caret" aria-hidden="true">▾</span>
+        </OverflowMenu>
+      )}
+      {creating && (
+        <QuickAddBar
+          class="sh-tasks-new-list"
+          value={draft}
+          inputRef={newListRef}
+          placeholder={t('tasks.new_list_placeholder')}
+          inputLabel={t('tasks.new_list')}
+          submitLabel={t('tasks.add_list')}
+          onValueChange={setDraft}
+          onSubmit={create}
+          inputProps={{
+            maxLength: LIST_NAME_MAX,
+            onKeyDown: (e) => {
+              if (e.key === 'Escape' && lists.length > 0) { e.preventDefault(); leave(true) }
+            },
+          }}
+        />
       )}
     </div>
   )
 }
 
+// ─── Edit dialog ──────────────────────────────────────────────────────
+
 function TaskEditDialog({
-  task, onClose, onSaved,
+  task, editable, userName, onClose, onSave,
 }: {
+  /** The row as it was when the dialog opened. */
   task: TaskItem
+  /** ``false``: show the task read-only, with the reason and no Save. */
+  editable: boolean
+  userName: (uid: string) => string
   onClose: () => void
-  onSaved: (t: TaskItem) => void
+  onSave: (patch: TaskPatch) => Promise<void>
 }) {
-  // ``useState`` (not ``signal()``) for the form fields. The old
-  // ``signal(initialValue)`` calls ran inside the component body —
-  // every re-render created a *new* signal, so clicking a status
-  // button updated a soon-to-be-discarded signal and the next
-  // re-render reset the value to ``task.status``. That's the bug
-  // behind "I can't change the status in the edit dialog": the click
-  // registered for a frame, then bounced back to the original.
-  const [title, setTitle]             = useState(task.title)
-  const [description, setDescription] = useState(task.description ?? '')
-  const [dueDate, setDueDate]         = useState(task.due_date ?? '')
-  const [status, setStatus]           = useState<Status>(task.status as Status)
-  const [saving, setSaving]           = useState(false)
+  // What the dialog opened with: Save diffs against THIS, not the live
+  // row, so a field someone else changed meanwhile (and this user left
+  // alone) isn't sent back with its old value.
+  const snap = useRef(task)
+  const base = snap.current
+  // ``useState`` (not ``signal()``) for the fields — a signal created in
+  // the render body is replaced on every render and resets the value.
+  const [title, setTitle] = useState(base.title)
+  const [description, setDescription] = useState(base.description ?? '')
+  const [dueDate, setDueDate] = useState(base.due_date ?? '')
+  const [status, setStatus] = useState<TaskStatus>(base.status)
+  const [saving, setSaving] = useState(false)
+  const [titleError, setTitleError] = useState(false)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+  // The Name field takes focus — except on touch, where (as Modal does)
+  // the soft keyboard stays down until the user taps a field.
+  useAutofocus(nameRef, editable)
 
   const save = async (e: Event) => {
     e.preventDefault()
+    if (!editable) return
     if (!title.trim()) {
-      showToast('Title cannot be empty', 'error')
+      setTitleError(true)
+      return
+    }
+    const patch: TaskPatch = {}
+    if (title.trim() !== base.title) patch.title = title.trim()
+    if ((description.trim() || null) !== (base.description || null)) {
+      patch.description = description.trim() || null
+    }
+    if ((dueDate || null) !== (base.due_date || null)) patch.due_date = dueDate || null
+    if (status !== base.status) patch.status = status
+    if (Object.keys(patch).length === 0) {
+      onClose()
       return
     }
     setSaving(true)
     try {
-      const body: Record<string, unknown> = {
-        title:       title.trim(),
-        description: description.trim() || null,
-        due_date:    dueDate || null,
-        status,
-      }
-      const updated = await api.patch(
-        `/api/tasks/${task.id}`, body,
-      ) as TaskItem
-      showToast('Task updated', 'success')
-      onSaved(updated)
-    } catch (err: unknown) {
-      showToast(`Save failed: ${(err as Error).message ?? err}`, 'error')
+      await onSave(patch)
     } finally {
       setSaving(false)
     }
   }
 
-  return (
-    <Modal open={true} onClose={onClose} title="Edit task">
-      <form onSubmit={save}>
-        {/* Status moved to the TOP of the dialog — it's the most
-         *  common edit (move a task between buckets) and burying it
-         *  at the bottom under three text fields hid the affordance.
-         *  Mirrors the at-a-glance status grouping on the page
-         *  behind the dialog. */}
-        <label class="sh-form-label">Status</label>
-        <div class="sh-task-status-picker" role="radiogroup" aria-label="Status">
-          {STATUS_ORDER.map(s => (
-            <button
-              key={s}
-              type="button"
-              role="radio"
-              aria-checked={status === s}
-              class={`sh-task-status sh-task-status--${s} ${status === s ? 'sh-task-status--active' : ''}`}
-              onClick={() => setStatus(s)}
-            >
-              {STATUS_LABEL[s]}
-            </button>
-          ))}
+  const readOnly = !editable
+  const addedBy = base.created_by && (
+    <p class="sh-task-edit__added">
+      {base.created_by === currentUser.value?.user_id
+        ? t('tasks.edit.added_by_you')
+        : t('tasks.edit.added_by', { name: userName(base.created_by) })}
+    </p>
+  )
+
+  if (readOnly) {
+    // Read-only: plain labelled text, no form controls — nothing that
+    // looks like it could be typed into.
+    const due = base.due_date ? parseDueDate(base.due_date) : null
+    const notes = base.description?.trim()
+    return (
+      <Modal open={true} onClose={onClose} title={t('tasks.edit.title_readonly')}>
+        <div class="sh-task-edit">
+          <p class="sh-task-edit__readonly">
+            <span aria-hidden="true">🔒 </span>{t('tasks.error.forbidden')}
+          </p>
+          <dl class="sh-task-view">
+            <dt>{t('tasks.edit.status')}</dt>
+            <dd>
+              <span class={`sh-task-edit__status-text sh-task-edit__status-text--${base.status}`}>
+                {statusLabel(base.status)}
+              </span>
+            </dd>
+            <dt>{t('tasks.edit.name')}</dt>
+            <dd class="sh-task-view__name">{base.title}</dd>
+            <dt>{t('tasks.edit.description')}</dt>
+            {notes
+              ? <dd class="sh-task-edit__notes">{base.description}</dd>
+              : <dd class="sh-task-edit__empty">{t('tasks.edit.no_notes')}</dd>}
+            <dt>{t('tasks.edit.due')}</dt>
+            {base.due_date
+              ? <dd>{due ? due.toLocaleDateString(locale.value || undefined, { dateStyle: 'full' }) : base.due_date}</dd>
+              : <dd class="sh-task-edit__empty">{t('tasks.edit.no_due')}</dd>}
+          </dl>
+          {addedBy}
+          <div class="sh-form-actions">
+            <Button variant="secondary" onClick={onClose}>{t('common.close')}</Button>
+          </div>
         </div>
+      </Modal>
+    )
+  }
+
+  return (
+    <Modal open={true} onClose={onClose} title={t('tasks.edit.title')}>
+      <form onSubmit={save} class="sh-task-edit">
+        {/* Status first — the most common edit, and the keyboard way to
+          * do what dragging a row does. */}
+        <span class="sh-form-label" id="sh-task-edit-status">{t('tasks.edit.status')}</span>
+        <ChipRadioGroup<TaskStatus>
+          variant="segmented"
+          class="sh-task-edit__status"
+          labelledBy="sh-task-edit-status"
+          value={status}
+          onChange={setStatus}
+          options={(['todo', 'in_progress', 'done'] as const).map(s => ({ value: s, label: statusLabel(s) }))}
+        />
         <label>
-          Title
-          <input type="text" value={title} maxLength={200}
-            onInput={(e) => setTitle((e.target as HTMLInputElement).value)}
-            autoFocus />
+          {t('tasks.edit.name')}
+          <input ref={nameRef} type="text" value={title} maxLength={200} required
+            aria-invalid={titleError ? 'true' : undefined}
+            aria-describedby={titleError ? 'sh-task-edit-title-err' : undefined}
+            onInput={(e) => { setTitle((e.target as HTMLInputElement).value); setTitleError(false) }} />
         </label>
+        {titleError && (
+          <p class="sh-form-error" id="sh-task-edit-title-err" role="alert">
+            {t('tasks.edit.name_required')}
+          </p>
+        )}
         <label>
-          Description
-          <textarea value={description} maxLength={2000}
+          {t('tasks.edit.description')}
+          <textarea value={description} maxLength={2000} rows={3}
             onInput={(e) => setDescription((e.target as HTMLTextAreaElement).value)} />
         </label>
-        <label>
-          Due date
-          <input type="date" value={dueDate}
+        <label for="sh-task-edit-due">{t('tasks.edit.due')}</label>
+        <span class="sh-task-edit__due">
+          <input id="sh-task-edit-due" type="date" value={dueDate}
             onInput={(e) => setDueDate((e.target as HTMLInputElement).value)} />
-        </label>
+          {dueDate && (
+            <button type="button" class="sh-link" onClick={() => setDueDate('')}>
+              {t('tasks.edit.clear_due')}
+            </button>
+          )}
+        </span>
+        {addedBy}
         <div class="sh-form-actions">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" loading={saving}>Save</Button>
+          <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
+          <Button type="submit" loading={saving}>{t('common.save')}</Button>
         </div>
       </form>
     </Modal>

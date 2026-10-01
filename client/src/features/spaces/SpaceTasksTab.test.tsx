@@ -29,3 +29,31 @@ describe('SpaceTasksTab', () => {
     expect(typeof mod.resetSpaceTasks).toBe('function')
   })
 })
+
+describe('SpaceTasksTab checkbox', () => {
+  it('ticks to done from to do / in progress and back to to do from done', async () => {
+    const { api } = await import('@/api')
+    const rows = [
+      { id: 'a', list_id: 'l1', title: 'A', status: 'todo', position: 1, assignees: [], created_by: 'u1' },
+      { id: 'b', list_id: 'l1', title: 'B', status: 'in_progress', position: 2, assignees: [], created_by: 'u1' },
+      { id: 'c', list_id: 'l1', title: 'C', status: 'done', position: 3, assignees: [], created_by: 'u1' },
+    ]
+    vi.mocked(api.get).mockImplementation(async (url: string) =>
+      url.endsWith('/tasks/lists') ? [{ id: 'l1', name: 'L', created_by: 'u1' }] : rows)
+    vi.mocked(api.patch).mockImplementation(async (url: string, body: unknown) =>
+      ({ ...rows.find(r => url.endsWith(r.id)), ...(body as object) }))
+    const { render, waitFor, fireEvent } = await import('@testing-library/preact')
+    const { SpaceTasksTab, resetSpaceTasks } = await import('./SpaceTasksTab')
+    resetSpaceTasks()
+    const { getByLabelText } = render(<SpaceTasksTab spaceId="s1" />)
+    await waitFor(() => expect(getByLabelText('Toggle A')).toBeTruthy())
+    fireEvent.click(getByLabelText('Toggle A'))
+    fireEvent.click(getByLabelText('Toggle B'))
+    fireEvent.click(getByLabelText('Toggle C'))
+    await waitFor(() => expect(vi.mocked(api.patch).mock.calls).toEqual([
+      ['/api/spaces/s1/tasks/a', { status: 'done' }],
+      ['/api/spaces/s1/tasks/b', { status: 'done' }],
+      ['/api/spaces/s1/tasks/c', { status: 'todo' }],
+    ]))
+  })
+})
