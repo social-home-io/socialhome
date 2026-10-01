@@ -10,6 +10,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.timetable import (
+    MAX_REMOTE_VERSION_JUMP,
     EntryKind,
     OverrideKind,
     Timetable,
@@ -348,6 +349,16 @@ class TestApplyRemote:
         newer = copy.replace(tt, name="Newer", version=3)
         assert await env.space_repo.apply_remote(newer, space_id="sp-1") is True
         assert (await env.space_repo.get("r-1"))[1] == newer
+
+    async def test_a_version_jump_past_the_limit_is_refused(self, env):
+        """A replica can't freeze the row by leaping its version ahead."""
+        tt = _tt("r-1", version=2)
+        await env.space_repo.apply_remote(tt, space_id="sp-1")
+        leap = copy.replace(tt, name="Leap", version=2 + MAX_REMOTE_VERSION_JUMP + 1)
+        assert await env.space_repo.apply_remote(leap, space_id="sp-1") is False
+        step = copy.replace(tt, name="Step", version=2 + MAX_REMOTE_VERSION_JUMP)
+        assert await env.space_repo.apply_remote(step, space_id="sp-1") is True
+        assert (await env.space_repo.get("r-1"))[1] == step
 
     async def test_older_version_ignored(self, env):
         tt = _tt("r-1", version=5)

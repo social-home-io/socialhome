@@ -359,6 +359,10 @@ export interface Space {
 
 export interface SpaceFeatures {
   calendar: boolean
+  /** A shared weekly timetable (e.g. a class schedule) in the Calendar
+   *  tab — members read it, owners / admins edit it. Opt-in; absent →
+   *  treat as false. */
+  timetable?: boolean
   todo: boolean
   /** When true, the space exposes the per-member GPS map (§23.8.6).
    *  Each member must additionally opt in via PATCH

@@ -38,7 +38,9 @@ opaque string it always was.
 v_34 bound space gallery albums; v_36 binds every other federated row
 with an owner — space posts (and so the bazaar / poll / schedule rows
 hung off a wrapper post) and comments, gallery items, calendar events,
-tasks, pages, stickies — and moments. A moment belongs to no space, so
+tasks, pages, stickies — and moments. v_39 space timetables are bound
+from their first release (:data:`SPACE_TIMETABLE_KIND`), so a receiver
+refuses a timetable id of any other shape outright. A moment belongs to no space, so
 its kind is **unscoped** (:data:`UNSCOPED_KINDS`): the space component is
 the empty string and the commitment covers only the kind, the author and
 the nonce — the author's ``user_id`` already derives from its home
@@ -69,6 +71,8 @@ SPACE_CALENDAR_EVENT_KIND: str = "space-calendar-event"
 SPACE_TASK_KIND: str = "space-task"
 SPACE_PAGE_KIND: str = "space-page"
 SPACE_STICKY_KIND: str = "space-sticky"
+#: A space timetable (v_39). Its owner is the admin who created it.
+SPACE_TIMETABLE_KIND: str = "space-timetable"
 MOMENT_KIND: str = "moment"
 #: A group conversation (v_37). Its "owner" is the **authority household**
 #: — the ``instance_id`` that created the group and alone may change its

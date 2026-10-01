@@ -23,7 +23,8 @@ Two guards run on every mutation, in this order:
   are collaborative (any writer household, attribution kept);
   votes, RSVPs, schedule answers and bids are the voter's own; closing a
   poll, finalising a schedule and settling a listing are the owner's
-  alone; zones are moderator-only.
+  alone; zones are moderator-only, and timetables are moderator-only *per
+  user* (the named editor is an admin seated on the sender).
 
 A refusal is a WARNING; a benign no-op (a replayed delete, a status change
 for a listing already settled) is DEBUG — see :func:`log_not_applied`.
@@ -44,6 +45,8 @@ from ...domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    TimetableDeleted,
+    TimetableSaved,
 )
 from ...domain.federation import FederationEventType
 from ...federation.owner_bound_id import (
@@ -53,6 +56,7 @@ from ...federation.owner_bound_id import (
     SPACE_PAGE_KIND,
     SPACE_STICKY_KIND,
     SPACE_TASK_KIND,
+    SPACE_TIMETABLE_KIND,
     OwnerBinding,
     check_owner_bound_id,
     owner_bound_id_refused,
@@ -75,6 +79,14 @@ from ...domain.post import (
 from ...domain.space import SpaceZone
 from ...domain.sticky import Sticky
 from ...domain.task import Task, TaskStatus
+from ...domain.timetable import (
+    Timetable,
+    TimetableValidationError,
+    from_wire_dict,
+    remote_version_refusal,
+    validate,
+)
+from ...domain.timetable import parse_datetime as parse_timetable_datetime
 from ...domain.user import SYSTEM_AUTHOR
 from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
@@ -100,6 +112,7 @@ if TYPE_CHECKING:
     from ...repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ...repositories.sticky_repo import AbstractStickyRepo
     from ...repositories.task_repo import AbstractSpaceTaskRepo
+    from ...repositories.timetable_repo import AbstractSpaceTimetableRepo
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +142,7 @@ class SpaceContentInboundHandlers:
         "_gallery_repo",
         "_zone_repo",
         "_bazaar_repo",
+        "_timetable_repo",
         "_media_dir",
         "_media_refs",
         "_album_tombstones",
@@ -148,6 +162,7 @@ class SpaceContentInboundHandlers:
         gallery_repo: "AbstractGalleryRepo | None" = None,
         zone_repo: "AbstractSpaceZoneRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
+        timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
         media_dir: "pathlib.Path | None" = None,
         media_refs: "AbstractMediaReferenceRepo | None" = None,
         gallery_tombstones: "GalleryAlbumTombstones | None" = None,
@@ -163,6 +178,7 @@ class SpaceContentInboundHandlers:
         self._gallery_repo = gallery_repo
         self._zone_repo = zone_repo
         self._bazaar_repo = bazaar_repo
+        self._timetable_repo = timetable_repo
         #: Where a federated gallery delete removes the files it leaves
         #: unreferenced. Without both, files are kept for the orphan sweep.
         self._media_dir = media_dir
@@ -285,6 +301,17 @@ class SpaceContentInboundHandlers:
             registry.register(
                 FederationEventType.SPACE_ZONE_DELETED,
                 self._on_zone_deleted,
+            )
+
+        # Space timetables (v_39) — moderator-only, like zones.
+        if self._timetable_repo is not None:
+            registry.register(
+                FederationEventType.SPACE_TIMETABLE_UPSERTED,
+                self._on_timetable_upserted,
+            )
+            registry.register(
+                FederationEventType.SPACE_TIMETABLE_DELETED,
+                self._on_timetable_deleted,
             )
 
         # Bazaar listings. Only registered when a bazaar_repo is wired
@@ -1484,6 +1511,255 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="zone", row_id=zone_id
             )
 
+    # ─── Space timetables (v_39) ─────────────────────────────────────────
+
+    async def _on_timetable_upserted(self, event: "FederationEvent") -> None:
+        """Apply a remote ``SPACE_TIMETABLE_UPSERTED`` (the whole timetable).
+
+        Checks, in order — each refusal is a WARNING (a replay is DEBUG),
+        never an exception out of the handler:
+
+        1. the gated space (:func:`resolve_space_id`);
+        2. the timetable parses and passes the domain :func:`validate`
+           (schema, bounds, timestamps in 1970–2199, the 96 KiB wire cap);
+        3. no assignees — space timetables have none;
+        4. an id this household holds lives in this space;
+        5. the id is owner-bound to its ``created_by`` in this space
+           (timetables are bound from their first release, so any other
+           shape is refused) and, for an id new here, that creator is the
+           sender's to name;
+        6. the editor (``updated_by``) moderates the space from the
+           sending household (:meth:`_timetable_write_allowed`);
+        7. a deleted id stays deleted;
+        8. the version stays clear of the cap and moves at most
+           ``MAX_REMOTE_VERSION_JUMP`` past the held copy (no freezing);
+        9. last-writer-wins in the repo — an older or replayed version is a
+           no-op; a write that lands is published for the realtime layer.
+        """
+        if self._timetable_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        tt = self._parse_timetable(event, space_id)
+        if tt is None:
+            return
+        if tt.assignees:
+            log.warning(
+                "%s from %s: timetable %s in space %s names assignees — space "
+                "timetables have none; dropping",
+                event.event_type,
+                event.from_instance,
+                tt.id,
+                space_id,
+            )
+            return
+        existing = await self._timetable_repo.get(tt.id)
+        if existing is not None and existing[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="timetable", row_id=tt.id
+            )
+            return
+        if not self._timetable_id_bound(event, space_id, tt):
+            return
+        if existing is None and not await self._creator_named_by_sender(
+            event, space_id, tt
+        ):
+            return
+        if not await self._timetable_write_allowed(
+            event, space_id, tt.id, tt.updated_by or ""
+        ):
+            return
+        if await self._timetable_repo.is_tombstoned(tt.id):
+            log_not_applied(
+                event, what="timetable", row_id=tt.id, reason="deleted here"
+            )
+            return
+        refusal = remote_version_refusal(
+            tt.version, existing[1].version if existing is not None else None
+        )
+        if refusal is not None:
+            log.warning(
+                "%s from %s: timetable %s in space %s — %s; dropping",
+                event.event_type,
+                event.from_instance,
+                tt.id,
+                space_id,
+                refusal,
+            )
+            return
+        if not await self._timetable_repo.apply_remote(tt, space_id=space_id):
+            log_not_applied(
+                event,
+                what="timetable",
+                row_id=tt.id,
+                reason="not newer than the copy held here",
+            )
+            return
+        await self._bus.publish(
+            TimetableSaved(
+                timetable=tt,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_timetable_deleted(self, event: "FederationEvent") -> None:
+        """Tombstone a timetable a space moderator deleted.
+
+        An id this household never saw is tombstoned too, so a create the
+        delete overtook can't land afterwards — but only when the id commits
+        to the payload's ``created_by`` in THIS space. Otherwise a moderator
+        of any space we share could pre-tombstone another space's timetable
+        id under its own space and silently eat every later upsert of it
+        (the tombstone owns the id), and junk ids would grow the table. A
+        replay is a DEBUG no-op; a bad ``deleted_at`` is dropped.
+        """
+        if self._timetable_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        p = event.payload
+        tt_id = p.get("timetable_id")
+        if not isinstance(tt_id, str) or not 0 < len(tt_id) <= _MAX_ROW_ID:
+            log.warning(
+                "%s from %s: malformed timetable id in space %s — dropping",
+                event.event_type,
+                event.from_instance,
+                space_id,
+            )
+            return
+        existing = await self._timetable_repo.get(tt_id)
+        if existing is not None and existing[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="timetable", row_id=tt_id
+            )
+            return
+        deleted_by = p.get("deleted_by")
+        if not await self._timetable_write_allowed(
+            event,
+            space_id,
+            tt_id,
+            deleted_by if isinstance(deleted_by, str) else "",
+        ):
+            return
+        if await self._timetable_repo.is_tombstoned(tt_id):
+            log_not_applied(
+                event, what="timetable", row_id=tt_id, reason="already deleted"
+            )
+            return
+        try:
+            at = parse_timetable_datetime(p.get("deleted_at"), "deleted_at")
+        except TimetableValidationError as exc:
+            log.warning(
+                "%s from %s: timetable %s in space %s — %s; dropping",
+                event.event_type,
+                event.from_instance,
+                tt_id,
+                space_id,
+                exc,
+            )
+            return
+        if existing is not None:
+            created_by = existing[1].created_by
+        else:
+            claimed = p.get("created_by")
+            created_by = claimed if isinstance(claimed, str) else ""
+            if (
+                check_owner_bound_id(
+                    SPACE_TIMETABLE_KIND,
+                    tt_id,
+                    space_id=space_id,
+                    owner_user_id=created_by,
+                )
+                is not OwnerBinding.VALID
+            ):
+                log.warning(
+                    "%s from %s: timetable id %s is not bound to %r in space %s "
+                    "— no tombstone for an id this space does not own",
+                    event.event_type,
+                    event.from_instance,
+                    tt_id,
+                    created_by,
+                    space_id,
+                )
+                return
+        if not await self._timetable_repo.tombstone(tt_id, space_id=space_id, at=at):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="timetable", row_id=tt_id
+            )
+            return
+        await self._bus.publish(
+            TimetableDeleted(
+                timetable_id=tt_id,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+                deleted_by=str(deleted_by),
+                created_by=created_by,
+            )
+        )
+
+    @staticmethod
+    def _parse_timetable(event: "FederationEvent", space_id: str) -> Timetable | None:
+        """The payload's timetable, parsed and validated — or ``None``
+        (logged at WARNING) for anything malformed or out of bounds."""
+        raw = event.payload.get("timetable")
+        try:
+            if not isinstance(raw, dict):
+                raise TypeError("timetable must be an object")
+            tt = from_wire_dict(raw)
+            validate(tt)
+        except Exception as exc:  # hostile input: never raise out of here
+            log.warning(
+                "%s from %s: unusable timetable in space %s — dropping: %.200s",
+                event.event_type,
+                event.from_instance,
+                space_id,
+                exc,
+            )
+            return None
+        return tt
+
+    @staticmethod
+    def _timetable_id_bound(
+        event: "FederationEvent", space_id: str, tt: Timetable
+    ) -> bool:
+        """Every space timetable id commits to its creator in its space
+        (they are owner-bound from their first release): any other shape,
+        or a commitment to anyone / anywhere else, is refused."""
+        binding = check_owner_bound_id(
+            SPACE_TIMETABLE_KIND, tt.id, space_id=space_id, owner_user_id=tt.created_by
+        )
+        if binding is OwnerBinding.VALID:
+            return True
+        log.warning(
+            "%s from %s: timetable id %s is not bound to %r in space %s "
+            "— refusing the write",
+            event.event_type,
+            event.from_instance,
+            tt.id,
+            tt.created_by,
+            space_id,
+        )
+        return False
+
+    async def _creator_named_by_sender(
+        self, event: "FederationEvent", space_id: str, tt: Timetable
+    ) -> bool:
+        """A timetable new to this household names a creator the sender
+        speaks for (its own seated user, or the host relaying a remote one)."""
+        if await self._authorship.may_author(event, space_id, tt.created_by):
+            return True
+        await self._authorship.hold_or_refuse(
+            event,
+            space_id=space_id,
+            what="timetable",
+            row_id=tt.id,
+            user_id=tt.created_by,
+        )
+        return False
+
     # ─── Bazaar listings ─────────────────────────────────────────────────
 
     async def _on_bazaar_listing_created(self, event: "FederationEvent") -> None:
@@ -2024,6 +2300,47 @@ class SpaceContentInboundHandlers:
             space_id,
         )
         return False
+
+    async def _timetable_write_allowed(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        timetable_id: str,
+        user_id: str,
+    ) -> bool:
+        """Timetables are owner / admin-only locally
+        (``SpaceTimetableService``): the sending household must moderate the
+        space (the host, or a live admin seat), and the user the write is
+        recorded as must be a moderator seated on it — never a plain member
+        of an admin household, another household's admin, or a banned user
+        (:meth:`SpaceAuthorship.moderates_as`)."""
+        if not await self._authorship.is_moderator(event, space_id):
+            log.warning(
+                "%s from %s: timetable %s in space %s — the sending household "
+                "does not moderate this space; refusing the write",
+                event.event_type,
+                event.from_instance,
+                timetable_id,
+                space_id,
+            )
+            return False
+        if await self._authorship.moderates_as(event, space_id, user_id):
+            return True
+        log.warning(
+            "%s from %s: timetable %s in space %s is recorded as %r, who is "
+            "not a moderator seated on the sending household — refusing the "
+            "write",
+            event.event_type,
+            event.from_instance,
+            timetable_id,
+            space_id,
+            user_id,
+        )
+        return False
+
+
+#: Upper bound on a row id read from a delete payload (the domain's id cap).
+_MAX_ROW_ID = 64
 
 
 def _album_text_ok(name: str, description: object) -> bool:

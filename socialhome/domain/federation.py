@@ -242,6 +242,13 @@ class FederationEventType(str, enum.Enum):
     # replace coordinates on the wire, and HA zones do not propagate.
     SPACE_ZONE_UPSERTED = "space_zone_upserted"
     SPACE_ZONE_DELETED = "space_zone_deleted"
+    # ── Space timetables (v_39). A class *Stundenplan* the space admins
+    # maintain; the whole timetable rides as one upserted aggregate
+    # (last-writer-wins on ``version``), and a delete tombstones the id.
+    # Admin-only at the source; the inbound handler refuses anything not
+    # authored by a moderator seated on the sending household.
+    SPACE_TIMETABLE_UPSERTED = "space_timetable_upserted"
+    SPACE_TIMETABLE_DELETED = "space_timetable_deleted"
     # ── Gallery (§23.119) — per-event push complementing the chunked
     # initial sync. Items carry the thumbnail and the full ``url``; both
     # files follow over the media outbox (``SPACE_MEDIA_BLOB``). Albums
@@ -596,6 +603,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_LOCATION_UPDATED,
         FederationEventType.SPACE_ZONE_UPSERTED,
         FederationEventType.SPACE_ZONE_DELETED,
+        #: The space's shared timetables (v_39) — space content like tasks.
+        FederationEventType.SPACE_TIMETABLE_UPSERTED,
+        FederationEventType.SPACE_TIMETABLE_DELETED,
         #: Moderation reports raised inside the space.
         FederationEventType.SPACE_REPORT,
         # ── Media ──
@@ -661,7 +671,8 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 #: Space-content **writes** — every event type that mutates content inside
 #: a space (create, update or delete of a post, comment, page, task, poll,
 #: sticky, calendar event, RSVP, schedule, gallery album or item, bazaar listing /
-#: bid / offer, zone, location pin, or the media bytes a post references).
+#: bid / offer, zone, timetable, location pin, or the media bytes a post
+#: references).
 #:
 #: This is the vocabulary the §24.11 ``check_space_writer`` step refuses
 #: from a household that holds only **Follower** seats in the space
@@ -735,6 +746,9 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_LOCATION_UPDATED,
         FederationEventType.SPACE_ZONE_UPSERTED,
         FederationEventType.SPACE_ZONE_DELETED,
+        # ── Shared timetables (admin-authored) ──
+        FederationEventType.SPACE_TIMETABLE_UPSERTED,
+        FederationEventType.SPACE_TIMETABLE_DELETED,
     }
 )
 

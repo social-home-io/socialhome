@@ -48,7 +48,7 @@ import {
   addEntry, patchEntry, deleteEntry, replaceEntries, copyDay,
   deleteTimetable, duplicateTimetable, wireTimetablesWs,
   generateDay, setValidity, fetchWeek, addOverride, patchOverride, deleteOverride, clearWeek,
-  applyOverrides,
+  applyOverrides, spaceTimetableStore, householdTimetableStore,
 } from './timetables'
 import type { TimetableOverride } from '@/types'
 
@@ -517,5 +517,86 @@ describe('override undo — edges', () => {
     await vi.waitFor(() => expect(apiDelete).toHaveBeenCalledTimes(2))
     expect(apiDelete.mock.calls.map(c => c[0])).toEqual([
       '/api/timetables/a/overrides/n1?version=5', '/api/timetables/a/overrides/n2?version=6'])
+  })
+})
+
+describe('scoped stores (space timetables)', () => {
+  const space = spaceTimetableStore('s1')
+  beforeEach(() => {
+    space.timetables.value = []
+    space.selectedId.value = null
+    space.loaded.value = false
+  })
+
+  it('one store per space, the household store is the module one', () => {
+    expect(spaceTimetableStore('s1')).toBe(space)
+    expect(spaceTimetableStore('s2')).not.toBe(space)
+    expect(householdTimetableStore.timetables).toBe(timetables)
+    expect(space.spaceId).toBe('s1')
+    expect(space.base).toBe('/api/spaces/s1/timetables')
+  })
+
+  it('talks to the space endpoints and keeps its own list', async () => {
+    timetables.value = [tt('h')]
+    apiGet.mockResolvedValue({ timetables: [tt('a')] })
+    await space.loadTimetables()
+    expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1/timetables')
+    expect(space.timetables.value.map(x => x.id)).toEqual(['a'])
+    expect(space.loaded.value).toBe(true)
+    expect(timetables.value.map(x => x.id)).toEqual(['h'])
+    expect(loaded.value).toBe(false)
+
+    apiPatch.mockResolvedValue({ timetable: tt('a', 2, { name: 'Class 4b' }) })
+    await space.patchHeader('a', { name: 'Class 4b' })
+    expect(apiPatch).toHaveBeenCalledWith('/api/spaces/s1/timetables/a', { version: 1, name: 'Class 4b' })
+    expect(space.timetables.value[0].name).toBe('Class 4b')
+
+    apiPost.mockResolvedValue({ timetable: tt('a', 3) })
+    await space.addEntry('a', { weekday: 0, start: '08:00', end: '08:45' })
+    expect(apiPost).toHaveBeenLastCalledWith('/api/spaces/s1/timetables/a/entries',
+      { version: 2, weekday: 0, start: '08:00', end: '08:45' })
+
+    apiGet.mockResolvedValue({ week: { anchor: '2026-10-05' } })
+    await space.fetchWeek('a', '2026-10-05')
+    expect(apiGet).toHaveBeenLastCalledWith('/api/spaces/s1/timetables/a/weeks/2026-10-05')
+
+    apiDelete.mockResolvedValue({ ok: true })
+    await space.deleteTimetable('a')
+    expect(apiDelete).toHaveBeenLastCalledWith('/api/spaces/s1/timetables/a')
+    expect(space.timetables.value).toEqual([])
+  })
+
+  it('creates in the space', async () => {
+    apiPost.mockResolvedValue({ timetable: tt('n') })
+    await space.createTimetable({ name: 'Class', template: 'school' })
+    expect(apiPost).toHaveBeenCalledWith('/api/spaces/s1/timetables', { name: 'Class', template: 'school' })
+    expect(space.timetables.value.map(x => x.id)).toEqual(['n'])
+    expect(timetables.value).toEqual([])
+  })
+
+  it('routes a space frame to that space store only', () => {
+    timetables.value = [tt('a', 1)]
+    space.timetables.value = [tt('a', 1)]
+    handlers['timetable.changed']({ type: 'timetable.changed',
+      data: { space_id: 's1', timetable: tt('a', 2, { name: 'Space rename' }) } })
+    expect(space.timetables.value[0].name).toBe('Space rename')
+    expect(timetables.value[0].name).toBe('TT a')
+
+    handlers['timetable.changed']({ type: 'timetable.changed',
+      data: { space_id: null, timetable: tt('a', 3, { name: 'Household rename' }) } })
+    expect(timetables.value[0].name).toBe('Household rename')
+    expect(space.timetables.value[0].name).toBe('Space rename')
+
+    handlers['timetable.deleted']({ type: 'timetable.deleted',
+      data: { timetable_id: 'a', space_id: 's1' } })
+    expect(space.timetables.value).toEqual([])
+    expect(timetables.value).toHaveLength(1)
+  })
+
+  it('drops a frame for a space nobody opened', () => {
+    handlers['timetable.changed']({ type: 'timetable.changed',
+      data: { space_id: 'never-opened', timetable: tt('z', 1) } })
+    expect(timetables.value).toEqual([])
+    expect(space.timetables.value).toEqual([])
   })
 })

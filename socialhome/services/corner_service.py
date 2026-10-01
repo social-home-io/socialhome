@@ -23,8 +23,9 @@ from ..domain.calendar import CalendarEvent, all_day_covers
 from ..domain.post import BazaarStatus
 from ..domain.presence import PersonPresence
 from ..domain.task import Task
-from ..domain.timetable import TodayTimetable
+from ..domain.timetable import Timetable, TodayTimetable
 from ..utils.timezones import DEFAULT_TZ, local_date, local_instant
+from .user_preferences import parse_timetable_home_pins
 
 if TYPE_CHECKING:
     from ..repositories.bazaar_repo import AbstractBazaarRepo
@@ -37,7 +38,10 @@ if TYPE_CHECKING:
     from ..repositories.user_repo import AbstractUserRepo
     from ..services.preferences_service import PreferencesService
     from ..services.presence_service import PresenceService
-    from ..services.timetable_service import TimetableService
+    from ..services.timetable_service import (
+        SpaceTimetableService,
+        TimetableService,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +121,7 @@ class CornerService:
         "_spaces",
         "_space_posts",
         "_timetables",
+        "_space_timetables",
         "_preferences",
     )
 
@@ -134,6 +139,7 @@ class CornerService:
         space_post_repo: "AbstractSpacePostRepo",
         timetable_service: "TimetableService | None" = None,
         preferences_service: "PreferencesService | None" = None,
+        space_timetable_service: "SpaceTimetableService | None" = None,
     ) -> None:
         self._notifications = notification_repo
         self._conversations = conversation_repo
@@ -145,6 +151,7 @@ class CornerService:
         self._spaces = space_repo
         self._space_posts = space_post_repo
         self._timetables = timetable_service
+        self._space_timetables = space_timetable_service
         self._preferences = preferences_service
 
     async def build(
@@ -241,11 +248,31 @@ class CornerService:
     ) -> tuple[TodayTimetable, ...]:
         if self._timetables is None:
             return ()
+        pinned = await self._pinned_space_timetables(user_id)
         try:
-            return await self._timetables.today_for_user(user_id, now)
+            return await self._timetables.today_for_user(user_id, now, extra=pinned)
         except Exception as exc:  # defensive — one widget never fails the page
             log.warning("corner: today's timetable failed: %s", exc)
             return ()
+
+    async def _pinned_space_timetables(self, user_id: str) -> list[Timetable]:
+        """Space timetables the user pinned to their Home
+        (``preferences_json.timetable_home_pins``) and may still read —
+        pins into a space they left, or whose timetable feature is off,
+        are dropped by :meth:`SpaceTimetableService.pinned_for_user`."""
+        if self._space_timetables is None:
+            return []
+        try:
+            user = await self._users.get_by_user_id(user_id)
+            pins = parse_timetable_home_pins(
+                user.preferences_json if user is not None else None
+            )
+            if not pins:
+                return []
+            return await self._space_timetables.pinned_for_user(user_id, pins)
+        except Exception as exc:  # defensive — pins never fail the page
+            log.warning("corner: pinned space timetables failed: %s", exc)
+            return []
 
     async def _today_events(
         self,

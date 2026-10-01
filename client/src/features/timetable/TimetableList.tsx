@@ -8,7 +8,8 @@ import { useContext } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import type { Timetable, TimetableEntry } from '@/types'
 import { weekdayDate } from './dates'
-import { displayTitle } from './labels'
+import { displayTitle, isUntitledLesson } from './labels'
+import { useTimetableScope } from './scope'
 import { dayEntries } from './layout'
 import { formatRange, weekdayName } from './time'
 import { WeekContext, changesOf } from './weekView'
@@ -21,12 +22,13 @@ interface Props {
 
 export function TimetableList({ tt, days, onEdit }: Props) {
   const week = useContext(WeekContext)
+  const { editable } = useTimetableScope()
   return (
     <div
       class="sh-timetable-list"
     >
       {days.map(d => {
-        const entries = dayEntries(tt, d)
+        const entries = dayEntries(tt, d).filter(e => editable || !isUntitledLesson(e))
         // Columns nobody fills only squeeze the others (narrow print
         // columns broke words mid-way).
         const hasRoom = entries.some(e => e.room)

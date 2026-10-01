@@ -422,11 +422,19 @@ class TimetableSaved(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class TimetableDeleted(DomainEvent):
-    """A timetable was deleted. Broadcast as ``timetable.deleted``."""
+    """A timetable was deleted. Broadcast as ``timetable.deleted``.
+
+    ``deleted_by`` names the space admin who deleted a space timetable and
+    ``created_by`` its creator — the federated delete carries both, so a
+    receiver binds the admin to the sending household and tombstones an id
+    it never held only when that id commits to ``created_by`` in the space.
+    """
 
     timetable_id: str
     space_id: str | None = None
     origin_instance_id: str | None = None
+    deleted_by: str | None = None
+    created_by: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

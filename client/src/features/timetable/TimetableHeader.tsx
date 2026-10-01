@@ -7,15 +7,17 @@
  * School weeks & holidays, Print, Duplicate, New timetable, Delete).
  * Below 400 px the toggles switch to short labels ("Fill" / "Pictures"
  * / "List") without their emoji; the accessible name stays the full
- * label.
+ * label. A view-only scope (a space member) shows the name and the
+ * weeks as plain text and keeps only Print in the menu.
  */
+import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
-import { patchHeader } from '@/store/timetables'
 import type { Timetable } from '@/types'
 import { colorClass } from './colors'
 import { validitySummary } from './dates'
 import { OverflowMenu, type MenuItem } from './OverflowMenu'
+import { useTimetableScope } from './scope'
 
 interface Props {
   tt: Timetable
@@ -33,12 +35,17 @@ interface Props {
    *  absent (week mode edits one week, not the regular plan). */
   brush?: boolean
   onBrush?: (on: boolean) => void
+  /** Extra toggles after Pictures / List (a space's Home pin). */
+  extra?: ComponentChildren
+  /** A small muted line under the name (e.g. "View only — …"). */
+  caption?: string
 }
 
 export function TimetableHeader({
   tt, picture, onPicture, list, onList, onSettings, onDuplicate, onNew, onDelete,
-  onWeeks, onPrint, brush = false, onBrush,
+  onWeeks, onPrint, brush = false, onBrush, extra, caption,
 }: Props) {
+  const { store, editable } = useTimetableScope()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(tt.name)
   const [error, setError] = useState<string | null>(null)
@@ -79,7 +86,7 @@ export function TimetableHeader({
     if (name === tt.name) { stop(); return }
     saving.current = true
     try {
-      if (await patchHeader(tt.id, { name })) stop()
+      if (await store.patchHeader(tt.id, { name })) stop()
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -87,7 +94,10 @@ export function TimetableHeader({
     }
   }
 
-  const menu: MenuItem[] = [
+  // View only: printing is the one action left.
+  const menu: MenuItem[] = !editable ? [
+    { label: t('timetable.header.print'), onSelect: onPrint },
+  ] : [
     { label: t('timetable.header.settings'), onSelect: onSettings },
     { label: t('timetable.header.weeks'), onSelect: onWeeks },
     { label: t('timetable.header.print'), onSelect: onPrint },
@@ -123,6 +133,10 @@ export function TimetableHeader({
               <p id={`sh-tt-${tt.id}-rename-err`} class="sh-form-error" role="alert">{error}</p>
             )}
           </form>
+        ) : !editable ? (
+          <h2 class="sh-timetable-head__h">
+            <span class="sh-timetable-head__name sh-timetable-head__name--static">{tt.name}</span>
+          </h2>
         ) : (
           <h2 class="sh-timetable-head__h">
             <button ref={nameBtnRef} type="button" class="sh-timetable-head__name"
@@ -133,15 +147,23 @@ export function TimetableHeader({
             </button>
           </h2>
         )}
-        <button type="button" class="sh-timetable-head__weeks" onClick={onWeeks}
-                aria-label={t('timetable.validity.chip_aria', { summary })}
-                title={t('timetable.header.weeks')}>
-          <span aria-hidden="true">🗓️</span>
-          <span aria-hidden="true">{summary}</span>
-        </button>
+        {editable ? (
+          <button type="button" class="sh-timetable-head__weeks" onClick={onWeeks}
+                  aria-label={t('timetable.validity.chip_aria', { summary })}
+                  title={t('timetable.header.weeks')}>
+            <span aria-hidden="true">🗓️</span>
+            <span aria-hidden="true">{summary}</span>
+          </button>
+        ) : (
+          <span class="sh-timetable-head__weeks sh-timetable-head__weeks--static">
+            <span aria-hidden="true">🗓️</span>
+            <span>{summary}</span>
+          </span>
+        )}
+        {caption && <p class="sh-timetable-head__caption">{caption}</p>}
       </div>
       <div class="sh-timetable-head__actions">
-        {onBrush && (
+        {onBrush && editable && (
           <button
             type="button"
             class={`sh-timetable-toggle sh-timetable-toggle--brush${brush ? ' is-on' : ''}`}
@@ -179,6 +201,7 @@ export function TimetableHeader({
           <span class="sh-timetable-toggle__text" aria-hidden="true">{t('timetable.view.list')}</span>
           <span class="sh-timetable-toggle__short" aria-hidden="true">{t('timetable.view.list_short')}</span>
         </button>
+        {extra}
         <OverflowMenu label={t('timetable.header.actions')} triggerClass="sh-timetable-head__more"
                       items={menu}>
           ···

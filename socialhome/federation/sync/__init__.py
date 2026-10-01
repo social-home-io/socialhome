@@ -35,6 +35,7 @@ from .space.exporters import (
     StickiesExporter,
     TasksArchivedExporter,
     TasksExporter,
+    TimetablesExporter,
     ZonesExporter,
 )
 
@@ -59,5 +60,6 @@ __all__ = [
     "StickiesExporter",
     "TasksArchivedExporter",
     "TasksExporter",
+    "TimetablesExporter",
     "ZonesExporter",
 ]

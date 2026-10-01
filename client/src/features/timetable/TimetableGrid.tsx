@@ -19,7 +19,6 @@ import { signal } from '@preact/signals'
 import { useContext } from 'preact/hooks'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
-import { deleteEntry, patchEntry, replaceEntries } from '@/store/timetables'
 import type { Timetable, TimetableEntry } from '@/types'
 import { isoWeekday } from '@/utils/week'
 import { applyBrush, brushOn, type PaintBrush } from './brush'
@@ -37,6 +36,7 @@ import { orderedDays, toMinutes } from './time'
 import type { GridNavHandlers } from './useGridNav'
 import type { LayoutChoice, ViewPrefs } from './viewPrefs'
 import { WeekContext } from './weekView'
+import { useTimetableScope } from './scope'
 
 /** The block copied with Ctrl/⌘+C (in-app; the system clipboard is left alone). */
 export const copiedBlock = signal<PaintBrush | null>(null)
@@ -75,6 +75,7 @@ const LAYOUTS: LayoutChoice[] = ['auto', 'periods', 'timeline']
 export function TimetableGrid({
   tt, prefs, onPrefs, onEdit, onAdd, narrow = false, now, onSetupDay, onCopyDay, printWeek,
 }: Props) {
+  const { store, editable } = useTimetableScope()
   const week = useContext(WeekContext)
   const days = orderedDays(tt.days, tt.week_start)
   const layout = resolveLayout(tt, days, prefs.layout)
@@ -89,14 +90,15 @@ export function TimetableGrid({
       ? [{ label: t('timetable.day.copy'), onSelect: () => onCopyDay(d) }]
       : []),
   ]
-  const nav: GridNavHandlers = week ? {} : {
+  // Keyboard editing: the regular plan, for an editor only.
+  const nav: GridNavHandlers = week || !editable ? {} : {
     onDelete: (ids, focusNext) => {
       const onUndone = () => focusGrid(tt.id)
       const gone = new Set(ids)
       // A merged double lesson goes as a whole, in one PUT (one Undo).
       const call = ids.length === 1
-        ? deleteEntry(tt.id, ids[0], { onUndone })
-        : replaceEntries(tt.id, tt.entries.filter(e => !gone.has(e.id)), {
+        ? store.deleteEntry(tt.id, ids[0], { onUndone })
+        : store.replaceEntries(tt.id, tt.entries.filter(e => !gone.has(e.id)), {
             undo: { message: t('timetable.entry.deleted_n', { n: String(ids.length) }), onUndone },
           })
       void call
@@ -125,13 +127,13 @@ export function TimetableGrid({
           if (next) changed = true
           return next ?? e
         })
-        if (changed) void replaceEntries(tt.id, list, { undo }).catch(fail)
+        if (changed) void store.replaceEntries(tt.id, list, { undo }).catch(fail)
         return
       }
       const e = tt.entries.find(x => x.id === ids[0])
       const next = e ? applyBrush(e, src) : null
       if (!e || !next) return
-      void patchEntry(tt.id, e.id, {
+      void store.patchEntry(tt.id, e.id, {
         title: next.title, icon: next.icon, color: next.color, room: next.room, teacher: next.teacher,
       }, { undo }).catch(fail)
     },
@@ -161,7 +163,7 @@ export function TimetableGrid({
       )}
 
       {prefs.list ? (
-        <TimetableList tt={tt} days={days} onEdit={onEdit} />
+        <TimetableList tt={tt} days={days} onEdit={editable ? onEdit : undefined} />
       ) : narrow ? (
         <TimetableDayView tt={tt} picture={prefs.picture} onEdit={onEdit} onAdd={onAdd} now={now}
                           onSetupDay={week ? undefined : onSetupDay}

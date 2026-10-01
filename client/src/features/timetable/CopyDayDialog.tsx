@@ -10,11 +10,11 @@ import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { t } from '@/i18n/i18n'
-import { copyDay, timetables } from '@/store/timetables'
 import type { Timetable } from '@/types'
 import { CopyTargets } from './CopyTargets'
 import { focusGrid } from './focus'
 import { weekdayName } from './time'
+import { useTimetableScope } from './scope'
 
 interface CopyTarget {
   timetableId: string
@@ -32,8 +32,9 @@ export function closeCopyDay(): void {
 }
 
 export function CopyDayDialog() {
+  const { store } = useTimetableScope()
   const target = copyDayDialog.value
-  const tt = target ? timetables.value.find(x => x.id === target.timetableId) : undefined
+  const tt = target ? store.timetables.value.find(x => x.id === target.timetableId) : undefined
   if (!target || !tt) return null
   return (
     <Modal open onClose={closeCopyDay}
@@ -44,6 +45,7 @@ export function CopyDayDialog() {
 }
 
 function CopyForm({ tt: live, weekday }: { tt: Timetable; weekday: number }) {
+  const { store } = useTimetableScope()
   const [tt, setTt] = useState(live)
   const [targets, setTargets] = useState<number[]>([])
   const [withSubjects, setWithSubjects] = useState(false)
@@ -57,7 +59,7 @@ function CopyForm({ tt: live, weekday }: { tt: Timetable; weekday: number }) {
     setError(null)
     setSaving(true)
     try {
-      const out = await copyDay(tt.id, weekday, targets, withSubjects, {
+      const out = await store.copyDay(tt.id, weekday, targets, withSubjects, {
         baseVersion: tt.version,
         undo: {
           message: t('timetable.copy.done', {
@@ -68,7 +70,7 @@ function CopyForm({ tt: live, weekday }: { tt: Timetable; weekday: number }) {
         },
       })
       if (out) closeCopyDay()
-      else setTt(timetables.value.find(x => x.id === tt.id) ?? tt)
+      else setTt(store.timetables.value.find(x => x.id === tt.id) ?? tt)
     } catch (e) {
       setError((e as Error).message)
     } finally {

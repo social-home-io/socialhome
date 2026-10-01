@@ -19,6 +19,12 @@ export function displayTitle(entry: Pick<TimetableEntry, 'title' | 'icon' | 'kin
   return entry.kind === 'break' ? t('timetable.kind.break') : ''
 }
 
+/** A lesson slot with nothing in it yet (no title, no icon) — an editor's
+ *  "+" placeholder, which a view-only viewer never sees. */
+export function isUntitledLesson(entry: Pick<TimetableEntry, 'title' | 'icon' | 'kind'>): boolean {
+  return entry.kind !== 'break' && !entry.title?.trim() && !entry.icon
+}
+
 /** "room 204 · Frau Huber" — the muted second line. */
 export function metaLine(entry: Pick<TimetableEntry, 'room' | 'teacher'>): string {
   return [entry.room, entry.teacher].filter(Boolean).join(' · ')

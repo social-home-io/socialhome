@@ -168,15 +168,15 @@ describe('SpaceSettings', () => {
     ).toBe(false)
   })
 
-  it('renders the Features fieldset with six toggle checkboxes', () => {
+  it('renders the Features fieldset with seven toggle checkboxes', () => {
     const space = makeSpace()
     const { getByTestId } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
     const fieldset = getByTestId('space-features')
     const checkboxes = fieldset.querySelectorAll('input[type="checkbox"]')
-    // Pages, Calendar, Tasks, Stickies, Gallery, Bazaar.
-    expect(checkboxes.length).toBe(6)
+    // Pages, Calendar, Timetable, Tasks, Stickies, Gallery, Bazaar.
+    expect(checkboxes.length).toBe(7)
   })
 
   it('mirrors the space features in the Features fieldset', () => {
@@ -196,10 +196,11 @@ describe('SpaceSettings', () => {
     const checkboxes = Array.from(
       fieldset.querySelectorAll('input[type="checkbox"]'),
     ) as HTMLInputElement[]
-    // Order matches the JSX: pages, calendar, tasks, stickies, gallery,
-    // bazaar. ``bazaar`` is omitted from the payload → defaults on.
+    // Order matches the JSX: pages, calendar, timetable, tasks, stickies,
+    // gallery, bazaar. ``bazaar`` is omitted from the payload → defaults
+    // on; ``timetable`` is an opt-in → defaults off.
     expect(checkboxes.map((c) => c.checked)).toEqual([
-      false, false, true, true, true, true,
+      false, false, false, true, true, true, true,
     ])
   })
 
@@ -224,9 +225,10 @@ describe('SpaceSettings', () => {
     const checkboxes = Array.from(
       fieldset.querySelectorAll('input[type="checkbox"]'),
     ) as HTMLInputElement[]
-    // pages, calendar, tasks, stickies, gallery, bazaar — all on.
+    // pages, calendar, tasks, stickies, gallery, bazaar — all on; the
+    // timetable (3rd) is an opt-in and stays off.
     expect(checkboxes.map((c) => c.checked)).toEqual([
-      true, true, true, true, true, true,
+      true, true, false, true, true, true, true,
     ])
   })
 
@@ -242,7 +244,7 @@ describe('SpaceSettings', () => {
     ) as HTMLInputElement[]
     // Flip pages OFF (was true) and gallery OFF (was true).
     fireEvent.change(checkboxes[0], { target: { checked: false } })
-    fireEvent.change(checkboxes[4], { target: { checked: false } })
+    fireEvent.change(checkboxes[5], { target: { checked: false } })
     fireEvent.click(getByText('Save changes'))
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).toHaveBeenCalledOnce()
@@ -274,8 +276,8 @@ describe('SpaceSettings', () => {
     const checkboxes = Array.from(
       fieldset.querySelectorAll('input[type="checkbox"]'),
     ) as HTMLInputElement[]
-    // Gallery is the 5th checkbox — should default to checked.
-    expect(checkboxes[4].checked).toBe(true)
+    // Gallery is the 6th checkbox — should default to checked.
+    expect(checkboxes[5].checked).toBe(true)
     // Flip calendar (was off) so there is something to save: the defaulted
     // gallery=true counts as unchanged, so it isn't re-sent.
     fireEvent.change(checkboxes[1], { target: { checked: true } })
@@ -283,6 +285,45 @@ describe('SpaceSettings', () => {
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body).toEqual({ features: { calendar: true } })
+  })
+
+  it('offers the Timetable feature (off by default) and sends it in the diff', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const { getByLabelText, getByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    )
+    const box = getByLabelText(/space\.feature\.timetable/) as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(getByText('space.feature.timetable_sub')).toBeTruthy()
+    fireEvent.change(box, { target: { checked: true } })
+    fireEvent.click(getByText('Save changes'))
+    await new Promise(r => setTimeout(r, 0))
+    const [, body] = apiMock.patch.mock.calls[0]
+    expect(body).toEqual({ features: { timetable: true } })
+  })
+
+  it('mirrors an enabled Timetable feature and turns it off', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const space = makeSpace({
+      features: {
+        calendar: true, todo: true, location: false,
+        stickies: false, pages: true, gallery: true, timetable: true,
+        posts_access: 'open', pages_access: 'open',
+        stickies_access: 'open', calendar_access: 'open',
+        tasks_access: 'open',
+        allowed_post_types: ['text'],
+      },
+    })
+    const { getByLabelText, getByText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    const box = getByLabelText(/space\.feature\.timetable/) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    fireEvent.change(box, { target: { checked: false } })
+    fireEvent.click(getByText('Save changes'))
+    await new Promise(r => setTimeout(r, 0))
+    const [, body] = apiMock.patch.mock.calls[0]
+    expect(body).toEqual({ features: { timetable: false } })
   })
 
   it('renders the Post types fieldset reflecting allowed_post_types', () => {

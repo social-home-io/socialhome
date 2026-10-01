@@ -25,6 +25,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.timetable import (
+    MAX_REMOTE_VERSION_JUMP,
     Timetable,
     defaults_from_dict,
     defaults_to_dict,
@@ -220,7 +221,8 @@ _SP_SAVE_SQL = (
 )
 # Last-writer-wins upsert for federation replicas. The DO UPDATE guard
 # refuses a cross-space id (``space_id`` is authoritative, §24.11), never
-# touches a tombstone, and only lets a strictly newer
+# touches a tombstone, refuses a version jump past MAX_REMOTE_VERSION_JUMP
+# (a hostile peer freezing the row), and only lets a strictly newer
 # (version, updated_at, updated_by) through — so a replayed or reordered
 # event is a no-op, and two replicas that saw concurrent edits with the
 # same version and timestamp still converge on the same row (NULL
@@ -233,6 +235,7 @@ _SP_APPLY_REMOTE_SQL = (
     + ", ".join(f"{c}=excluded.{c}" for c in _MUTABLE_COLS)
     + " WHERE space_timetables.space_id = excluded.space_id"
     " AND space_timetables.deleted_at IS NULL"
+    f" AND excluded.version <= space_timetables.version + {MAX_REMOTE_VERSION_JUMP}"
     " AND (excluded.version > space_timetables.version"
     " OR (excluded.version = space_timetables.version"
     " AND excluded.updated_at > space_timetables.updated_at)"

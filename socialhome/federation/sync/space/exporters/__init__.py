@@ -24,6 +24,7 @@ from .schedules import SchedulesExporter
 from .stickies import StickiesExporter
 from .tasks import TasksExporter
 from .tasks_archived import TasksArchivedExporter
+from .timetables import TimetablesExporter
 from .zones import ZonesExporter
 
 __all__ = [
@@ -41,5 +42,6 @@ __all__ = [
     "StickiesExporter",
     "TasksExporter",
     "TasksArchivedExporter",
+    "TimetablesExporter",
     "ZonesExporter",
 ]

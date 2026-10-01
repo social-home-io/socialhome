@@ -31,11 +31,15 @@ class _Space:
 
 
 class _Spaces:
-    def __init__(self, spaces: dict[str, _Space]) -> None:
+    def __init__(self, spaces: dict[str, _Space], banned=()) -> None:
         self._spaces = spaces
+        self.banned = set(banned)
 
     async def get(self, space_id: str):
         return self._spaces.get(space_id)
+
+    async def is_banned(self, space_id: str, user_id: str) -> bool:
+        return (space_id, user_id) in self.banned
 
 
 class _Seats:
@@ -362,3 +366,88 @@ async def test_without_a_buffer_an_unknown_user_is_refused(
             _ev(OTHER_HOUSE), space_id=SPACE, what="post", row_id="p", user_id="u-new"
         )
     assert "refusing the write" in caplog.text
+
+
+# ── moderates_as: moderator-only content (zones' rule, per user) ─────
+
+
+async def test_an_admin_seated_on_the_sender_moderates_as_themself(
+    authorship,
+) -> None:
+    assert await authorship.moderates_as(_ev(ADMIN_HOUSE), SPACE, "u-admin")
+
+
+async def test_a_plain_member_does_not_moderate(authorship) -> None:
+    assert not await authorship.moderates_as(_ev(AUTHOR_HOUSE), SPACE, "u-author")
+
+
+async def test_an_admin_household_cannot_moderate_as_its_plain_member() -> None:
+    """The household holds an admin seat, but the named editor is not it."""
+    a = SpaceAuthorship(
+        space_repo=_Spaces({SPACE: _Space(owner_instance_id=HOST)}),
+        remote_member_repo=_Seats(
+            [_seat(ADMIN_HOUSE, "u-admin", role="admin"), _seat(ADMIN_HOUSE, "u-kid")]
+        ),
+        user_repo=_Users(set()),
+    )
+    assert not await a.moderates_as(_ev(ADMIN_HOUSE), SPACE, "u-kid")
+
+
+async def test_nobody_moderates_as_somebody_elses_admin(authorship) -> None:
+    for sender in (AUTHOR_HOUSE, OTHER_HOUSE):
+        assert not await authorship.moderates_as(_ev(sender), SPACE, "u-admin")
+
+
+async def test_the_host_records_its_writers_and_relays_live_admins() -> None:
+    """The host (the roster authority) records any user holding a live
+    writer seat on it — the owner is mirrored as a plain member — and relays
+    a live admin of another household; never a follower, a removed seat, a
+    remote plain member or one of our local users."""
+    a = SpaceAuthorship(
+        space_repo=_Spaces({SPACE: _Space(owner_instance_id=HOST)}),
+        remote_member_repo=_Seats(
+            [
+                _seat(HOST, "u-owner"),  # the owner, mirrored as a member
+                _seat(HOST, "u-host-admin", role="admin"),
+                _seat(HOST, "u-host-sub", role="subscriber"),
+                _seat(HOST, "u-host-gone", tombstoned=True),
+                _seat(ADMIN_HOUSE, "u-admin", role="admin"),
+                _seat(AUTHOR_HOUSE, "u-author"),
+                _seat(AUTHOR_HOUSE, "u-sub", role="subscriber"),
+                _seat(ADMIN_HOUSE, "u-ex", role="admin", tombstoned=True),
+            ]
+        ),
+        user_repo=_Users({"u-local"}),
+    )
+    for user in ("u-owner", "u-host-admin", "u-admin"):
+        assert await a.moderates_as(_ev(HOST), SPACE, user), user
+    for user in (
+        "u-host-sub",
+        "u-host-gone",
+        "u-author",
+        "u-sub",
+        "u-ex",
+        "u-local",
+        "u-nobody",
+    ):
+        assert not await a.moderates_as(_ev(HOST), SPACE, user), user
+    # A non-host household gets no such latitude for its plain members.
+    assert not await a.moderates_as(_ev(AUTHOR_HOUSE), SPACE, "u-author")
+
+
+async def test_blank_system_removed_and_banned_editors_never_moderate() -> None:
+    a = SpaceAuthorship(
+        space_repo=_Spaces(
+            {SPACE: _Space(owner_instance_id=HOST)}, banned={(SPACE, "u-bad")}
+        ),
+        remote_member_repo=_Seats(
+            [
+                _seat(ADMIN_HOUSE, "u-bad", role="admin"),
+                _seat(ADMIN_HOUSE, "u-old", role="admin", tombstoned=True),
+            ]
+        ),
+        user_repo=_Users(set()),
+    )
+    for user in ("", SYSTEM_AUTHOR, "u-old", "u-bad"):
+        assert not await a.moderates_as(_ev(ADMIN_HOUSE), SPACE, user)
+    assert not await a.moderates_as(_ev(""), SPACE, "u-bad")

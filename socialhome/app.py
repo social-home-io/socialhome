@@ -165,7 +165,10 @@ from .repositories.report_repo import SqliteReportRepo
 from .repositories.search_repo import SqliteSearchRepo
 from .repositories.space_key_repo import SqliteSpaceKeyRepo
 from .repositories.theme_repo import SqliteThemeRepo
-from .repositories.timetable_repo import SqliteTimetableRepo
+from .repositories.timetable_repo import (
+    SqliteSpaceTimetableRepo,
+    SqliteTimetableRepo,
+)
 from .routes import setup_routes
 from .services.auto_pair_inbox import AutoPairInbox
 from .services import (
@@ -249,6 +252,7 @@ from .services.space_zone_service import SpaceZoneService
 from .services.page_federation_outbound import PageFederationOutbound
 from .services.peer_unpair_service import PeerUnpairService
 from .services.task_federation_outbound import TaskFederationOutbound
+from .services.timetable_federation_outbound import TimetableFederationOutbound
 from .services.federation_inbound import (
     PairingInboundHandlers,
     PersonalCalendarInboundHandlers,
@@ -276,6 +280,7 @@ from .federation.sync import (
     StickiesExporter,
     TasksArchivedExporter,
     TasksExporter,
+    TimetablesExporter,
     ZonesExporter,
 )
 from .federation.sync.dm_history import (
@@ -328,7 +333,7 @@ from .services.storage_quota_service import StorageQuotaService
 from .services.setup_service import SetupService
 from .services.stt_service import SttService
 from .services.task_service import SpaceTaskService, TaskService
-from .services.timetable_service import TimetableService
+from .services.timetable_service import SpaceTimetableService, TimetableService
 from .services.theme_service import ThemeService
 from .services.typing_service import TypingService
 from .services.call_service import CallSignalingService, StaleCallCleanupScheduler
@@ -748,6 +753,7 @@ def _build_repos(db: AsyncDatabase):
         conversation=SqliteConversationRepo(db),
         task=SqliteTaskRepo(db),
         timetable=SqliteTimetableRepo(db),
+        space_timetable=SqliteSpaceTimetableRepo(db),
         space_task=SqliteSpaceTaskRepo(db),
         calendar=SqliteCalendarRepo(db),
         space_cal=SqliteSpaceCalendarRepo(db),
@@ -849,6 +855,7 @@ def _wire_federation_stack(
     ws_manager,
     peer_user_visibility_repo,
     media_reference_repo,
+    space_timetable_repo,
 ):
     """Build :class:`FederationService` + attach the whole federation stack.
 
@@ -1142,6 +1149,7 @@ def _wire_federation_stack(
         gallery_repo=gallery_repo,
         zone_repo=space_zone_repo,
         bazaar_repo=bazaar_repo,
+        timetable_repo=space_timetable_repo,
         # A federated gallery delete removes the files it leaves unused.
         media_dir=pathlib.Path(config.media_path),
         media_refs=media_reference_repo,
@@ -1173,6 +1181,7 @@ def _wire_federation_stack(
         "schedules": SchedulesExporter(space_poll_repo, space_post_repo),
         "space_zones": ZonesExporter(space_zone_repo),
         "bazaar": BazaarExporter(bazaar_repo),
+        "timetables": TimetablesExporter(space_timetable_repo),
     }
     chunk_builder = ChunkBuilder(
         encoder=federation_service._encoder,
@@ -1210,6 +1219,7 @@ def _wire_federation_stack(
         pending_decrypts=app[K.pending_decrypts_cache_key],
         authorship=space_authorship,
         gallery_tombstones=gallery_tombstones,
+        timetable_repo=space_timetable_repo,
     )
     federation_service.attach_space_sync(
         service=space_sync_service,
@@ -1280,6 +1290,13 @@ def _wire_federation_stack(
         federation_service=federation_service,
     )
     space_zone_outbound.wire()
+
+    # v_39 — federate space-timetable edits to the space's member households.
+    timetable_federation_outbound = TimetableFederationOutbound(
+        bus=bus,
+        federation_service=federation_service,
+    )
+    timetable_federation_outbound.wire()
 
     schedule_federation_outbound = ScheduleFederationOutbound(
         bus=bus,
@@ -1532,6 +1549,14 @@ def _build_timetables(repos: SimpleNamespace, bus: EventBus) -> TimetableService
     ``attach_household_features``.
     """
     return TimetableService(repos.timetable, bus, user_repo=repos.user)
+
+
+def _build_space_timetables(
+    repos: SimpleNamespace, bus: EventBus
+) -> SpaceTimetableService:
+    """A space's shared timetables — members read, owners / admins edit,
+    behind the space's ``timetable`` feature."""
+    return SpaceTimetableService(repos.space_timetable, repos.space, bus)
 
 
 def _build_link_previews(
@@ -1805,6 +1830,7 @@ def create_app(config: Config | None = None) -> web.Application:
     task_service = TaskService(task_repo, bus, user_repo=user_repo)
     space_task_service = SpaceTaskService(space_task_repo, bus)
     timetable_service = _build_timetables(repos, bus)
+    space_timetable_service = _build_space_timetables(repos, bus)
     calendar_service = CalendarService(calendar_repo, bus)
     # Subscribe to UserProvisioned so every freshly-created household
     # member gets a default calendar row — without this, the household
@@ -2204,6 +2230,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_post_repo=space_post_repo,
         timetable_service=timetable_service,
         preferences_service=preferences_service,
+        space_timetable_service=space_timetable_service,
     )
 
     # ── Typing service (relay typing indicators) ────────────────────────
@@ -2384,6 +2411,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.task_service_key] = task_service
     app[K.space_task_service_key] = space_task_service
     app[K.timetable_service_key] = timetable_service
+    app[K.space_timetable_service_key] = space_timetable_service
     app[K.calendar_service_key] = calendar_service
     app[K.space_cal_service_key] = space_cal_service
     app[K.shopping_service_key] = shopping_service
@@ -2775,6 +2803,7 @@ def create_app(config: Config | None = None) -> web.Application:
             ws_manager=ws_manager,
             peer_user_visibility_repo=repos.peer_user_visibility,
             media_reference_repo=repos.media_reference,
+            space_timetable_repo=repos.space_timetable,
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager

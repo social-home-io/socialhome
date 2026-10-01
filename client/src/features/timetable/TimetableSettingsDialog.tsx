@@ -14,13 +14,14 @@ import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { t } from '@/i18n/i18n'
-import { patchHeader, timetables, type HeaderPatch } from '@/store/timetables'
 import type { Timetable, TimetableColor } from '@/types'
 import type { WeekStart } from '@/utils/week'
 import { AssigneePicker } from './AssigneePicker'
 import { ColorSwatches } from './ColorSwatches'
 import { DaysPicker } from './DaysPicker'
 import { WeekStartField } from './WeekStartField'
+import type { HeaderPatch } from '@/store/timetables'
+import { useTimetableScope } from './scope'
 
 const settingsFor = signal<string | null>(null)
 
@@ -42,7 +43,8 @@ function timeZones(): string[] {
 }
 
 export function TimetableSettingsDialog() {
-  const tt = timetables.value.find(x => x.id === settingsFor.value)
+  const { store } = useTimetableScope()
+  const tt = store.timetables.value.find(x => x.id === settingsFor.value)
   if (!tt) return null
   return (
     <Modal open onClose={closeSettingsDialog} title={t('timetable.settings.title')}>
@@ -62,6 +64,7 @@ function minutesIn(raw: string, min: number, max: number): number | null {
 }
 
 function SettingsForm({ tt: live }: { tt: Timetable }) {
+  const { store, assignees: withAssignees } = useTimetableScope()
   const [tt, setTt] = useState(live)
   const [name, setName] = useState(tt.name)
   const [color, setColor] = useState<TimetableColor | null>(tt.color)
@@ -99,8 +102,8 @@ function SettingsForm({ tt: live }: { tt: Timetable }) {
     setError(null)
     setSaving(true)
     try {
-      if (await patchHeader(tt.id, patch, { baseVersion: tt.version })) closeSettingsDialog()
-      else setTt(timetables.value.find(x => x.id === tt.id) ?? tt)
+      if (await store.patchHeader(tt.id, patch, { baseVersion: tt.version })) closeSettingsDialog()
+      else setTt(store.timetables.value.find(x => x.id === tt.id) ?? tt)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -118,8 +121,10 @@ function SettingsForm({ tt: live }: { tt: Timetable }) {
       </div>
       <ColorSwatches name="sh-tt-set-color" value={color} onChange={setColor}
                      noneLabel={t('timetable.color.none')} />
-      <AssigneePicker value={assignees} onChange={setAssignees}
-                      legend={t('timetable.create.assignees')} />
+      {withAssignees && (
+        <AssigneePicker value={assignees} onChange={setAssignees}
+                        legend={t('timetable.create.assignees')} />
+      )}
       <DaysPicker value={days} onChange={setDays} weekStart={weekStart} />
       <WeekStartField name="sh-tt-set-ws" value={weekStart} onChange={setWeekStart} />
       <fieldset class="sh-timetable-defaults">

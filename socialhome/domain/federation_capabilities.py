@@ -589,7 +589,19 @@ from __future__ import annotations
 #:   origin. **Gated, no fallback**: a household below v_38 would relay it,
 #:   so it is not sent the protected account's moments at all. Unmarked
 #:   moments sign the unchanged v1 bytes.
-OURS: int = 38
+#: * **v_39** (2026-09-30) — space timetables. A space whose admins turn
+#:   on the ``timetable`` feature holds shared timetables (a class
+#:   *Stundenplan*): :data:`FederationEventType.SPACE_TIMETABLE_UPSERTED`
+#:   ships the whole timetable (last-writer-wins on ``version``) and
+#:   :data:`FederationEventType.SPACE_TIMETABLE_DELETED` tombstones one,
+#:   both to member households only; the ``timetables`` sync resource
+#:   backfills a joiner. Ids are owner-bound (kind ``space-timetable``)
+#:   from the first release, and a receiver applies a write only when the
+#:   named editor is a moderator seated on the sending household.
+#:   **Gated, no fallback**: a household below v_39 is simply not sent
+#:   them — the Timetable tab is absent for its members. An older peer
+#:   drops the unknown ``timetables`` sync resource on its own.
+OURS: int = 39
 
 
 class FederationCapability:
@@ -936,6 +948,12 @@ class FederationCapability:
     #: protected account's moments go only to households at or above it.
     MIN_FOR_MOMENT_NO_RELAY = 38
 
+    #: Minimum proto_version that knows space timetables (v_39):
+    #: ``SPACE_TIMETABLE_UPSERTED`` / ``SPACE_TIMETABLE_DELETED`` and the
+    #: ``timetables`` sync resource. The outbound skips a member household
+    #: below it — its members just don't see the Timetable tab.
+    MIN_FOR_SPACE_TIMETABLE = 39
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1044,6 +1062,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MOMENT_NO_RELAY,
         "Direct-only moments",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_TIMETABLE,
+        "Space timetables",
+    ),
 ]
 
 
@@ -1107,6 +1129,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC,
         FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID,
         FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID,
+        FederationCapability.MIN_FOR_SPACE_TIMETABLE,
     }
 )
 

@@ -47,6 +47,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.domain.timetable import Timetable, to_wire_dict
 
 pytestmark = pytest.mark.security
 
@@ -89,7 +90,34 @@ CONTENT_TABLES = (
     "space_zones",
     "bazaar_listings",
     "bazaar_bids",
+    "space_timetables",
 )
+
+
+def timetable_wire(
+    tt_id: str,
+    *,
+    created_by: str,
+    updated_by: str,
+    version: int = 2,
+    name: str = "Plan",
+    **extra,
+) -> dict:
+    """A complete, valid ``SPACE_TIMETABLE_UPSERTED`` timetable wire dict."""
+    at = datetime(2026, 6, 2, 10, 0, tzinfo=timezone.utc)
+    return to_wire_dict(
+        Timetable(
+            id=tt_id,
+            name=name,
+            created_by=created_by,
+            created_at=at,
+            updated_at=at,
+            updated_by=updated_by,
+            version=version,
+            **extra,
+        )
+    )
+
 
 _NOW = "2026-06-01T10:00:00+00:00"
 _OCC = "2026-06-10T18:00:00+00:00"
@@ -335,6 +363,20 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
         ),
     ],
     FET.SPACE_ZONE_DELETED: [("delete B's zone", {"zone_id": "zone-b"})],
+    # ── Timetables ──
+    FET.SPACE_TIMETABLE_UPSERTED: [
+        (
+            "overwrite B's timetable",
+            {
+                "timetable": timetable_wire(
+                    "tt-b", created_by="u-evil", updated_by="u-evil", version=9
+                )
+            },
+        ),
+    ],
+    FET.SPACE_TIMETABLE_DELETED: [
+        ("delete B's timetable", {"timetable_id": "tt-b", "deleted_by": "u-evil"}),
+    ],
     # ── Bazaar ──
     FET.BAZAAR_LISTING_CREATED: [
         (
@@ -591,6 +633,16 @@ _SEED = [
         " title, end_time, currency) VALUES('post-b-listing', ?, 'u-b', 'offer',"
         " 'Bike', '2099-01-01T00:00:00', 'EUR')",
         (VICTIM,),
+    ),
+    (
+        "INSERT INTO space_timetables(id, space_id, name, created_by, updated_by,"
+        " created_at, updated_at) VALUES('tt-b', ?, 'B plan', 'u-b-admin',"
+        " 'u-b-admin', ?, ?)",
+        (
+            VICTIM,
+            "2026-06-01T10:00:00.000000+00:00",
+            "2026-06-01T10:00:00.000000+00:00",
+        ),
     ),
     (
         "INSERT INTO bazaar_bids(id, listing_post_id, bidder_user_id, amount)"
@@ -889,6 +941,10 @@ _SYNC_ATTACKS = [
                 "end_time": "2099-01-01T00:00:00",
             }
         ],
+    ),
+    (
+        "timetables",
+        [timetable_wire("tt-b", created_by="u-b-admin", updated_by="u-b-admin")],
     ),
 ]
 

@@ -62,6 +62,9 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # has an FK to space_posts(id) — the wrapper post must already be
     # persisted on the receiver side before the listing INSERT lands.
     "bazaar",
+    # Space timetables (v_39). Self-contained rows; an older receiver drops
+    # the unknown resource.
+    "timetables",
 )
 
 

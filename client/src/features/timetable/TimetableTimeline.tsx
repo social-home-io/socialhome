@@ -13,8 +13,10 @@ import type { Timetable, TimetableEntry } from '@/types'
 import { brushOn } from './brush'
 import { DayHeading } from './DayHeading'
 import { LessonBlock } from './LessonBlock'
+import { isUntitledLesson } from './labels'
 import { blockBox, dayEntries, timelineGeometry } from './layout'
 import type { MenuItem } from './OverflowMenu'
+import { useTimetableScope } from './scope'
 import { fromMinutes, snapTo5, weekdayName } from './time'
 import { useGridNav, type GridNavHandlers } from './useGridNav'
 import { WeekContext, addBlockedReason } from './weekView'
@@ -40,6 +42,7 @@ export function TimetableTimeline({
   tt, days, today, picture, onEdit, onAddAt, onAddDay, dayMenu, onSetupDay, nav,
 }: Props) {
   const week = useContext(WeekContext)
+  const { editable } = useTimetableScope()
   const grid = useGridNav(days, nav)
   const addBlocked = (d: number) => week ? addBlockedReason(week, d)
     : brushOn(tt.id) ? t('timetable.brush.no_add') : null
@@ -54,8 +57,9 @@ export function TimetableTimeline({
   const cols = { '--tt-cols': String(days.length) } as JSX.CSSProperties
 
   const onColumnClick = (weekday: number) => (ev: MouseEvent) => {
-    // Brush mode paints; a past week-mode day can't take changes.
-    if (addBlocked(weekday)) return
+    // Brush mode paints; a past week-mode day can't take changes; a
+    // view-only scope adds nothing.
+    if (!editable || addBlocked(weekday)) return
     const col = ev.currentTarget as HTMLElement
     const y = ev.clientY - col.getBoundingClientRect().top
     onAddAt(weekday, snapTo5(geo.minuteAt(y)))
@@ -108,7 +112,7 @@ export function TimetableTimeline({
                 </button>
               </div>
             )}
-            {dayEntries(tt, d).map(e => {
+            {dayEntries(tt, d).filter(e => editable || !isUntitledLesson(e)).map(e => {
               const box = blockBox(geo, e)
               return (
                 <div key={e.id} role="listitem" class="sh-timetable-timeline__slot"

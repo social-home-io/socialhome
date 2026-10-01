@@ -17,7 +17,7 @@ is a member of this space *on the household that signed the envelope*.
 No new key, table or field — the same lookup the
 ``SPACE_MEMBER_PROFILE_UPDATED`` handler uses.
 
-Four rules, picked per event family by the handlers:
+Five rules, picked per event family by the handlers:
 
 * :meth:`acts_for` — strict: the named user is seated on the sender.
   Personal actions (a vote, an RSVP, a schedule answer, a bid) and the
@@ -35,6 +35,10 @@ Four rules, picked per event family by the handlers:
   calendar events), which any member may edit or delete locally: any
   writer household, the row's attribution untouched (the repo upserts
   never rewrite ``created_by`` / ``author``).
+* :meth:`moderates_as` — moderator-only content (timetables): the named
+  editor holds a live ``admin`` seat on the sender, or — from the host, the
+  roster authority — a live writer seat on the host (the owner is mirrored
+  as a member) or a relayed remote user's live ``admin`` seat.
 * :meth:`may_mutate` — edits / deletes of an owned row: :meth:`acts_for`
   for the row's owner, or a **moderator** household — the host, or a
   household holding a live ``admin`` seat. That is the federated form of
@@ -133,6 +137,65 @@ class SpaceAuthorship:
             space_id, sender, include_tombstoned=False
         )
         return any(s.role == SpaceRole.ADMIN.value for s in seats)
+
+    async def moderates_as(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        user_id: str,
+    ) -> bool:
+        """May the sender record a moderator-only write as ``user_id``?
+
+        The per-user form of :meth:`is_moderator`, for content only a space
+        owner / admin may change (timetables):
+
+        * sent by a **non-host** household: ``user_id`` holds a live
+          ``admin`` seat on that household — an admin household cannot pass
+          off its plain member's edit, and nobody names another household's
+          admin;
+        * sent by the **host**: ``user_id`` holds a live writer seat
+          (``member`` / ``admin``) on the host, or the host relays a remote
+          user whose own live seat is ``admin``.
+
+        Why a host-seated *member* passes: the roster wire mirrors the
+        space's owner as a plain ``member`` seat (a remote seat has no owner
+        role), and member households — mesh-only and invite-link ones above
+        all — hold no other record of who the owner is, so demanding an
+        admin seat would refuse the owner's (the teacher's) every live edit
+        there. It costs nothing: the host is the roster authority and could
+        authority-sign any of its users into an ``admin`` seat anyway, and an
+        honest host never emits a plain member's edit — its local
+        ``SpaceTimetableScope`` refuses one.
+
+        Followers, removed (tombstoned) seats, banned, blank and local
+        users, and the shared bot identity, moderate nothing.
+        """
+        if not user_id or user_id == SYSTEM_AUTHOR or not space_id:
+            return False
+        if await self._spaces.is_banned(space_id, user_id):
+            return False
+        if await self._is_local_user(user_id):
+            return False
+        sender = str(event.from_instance or "")
+        if not sender:
+            return False
+        seat = await self._seats.get(space_id, sender, user_id)
+        is_host = await self.is_host(event, space_id)
+        if seat is not None:
+            if seat.role == SpaceRole.ADMIN.value:
+                return True
+            return is_host and seat.role in _WRITER_ROLES
+        if not is_host:
+            return False
+        # The host relaying a remote user: a live admin seat on the user's
+        # own household (keyed on (space, user) — a user has one household).
+        row = await self._seats.get_including_tombstones(space_id, "", user_id)
+        return (
+            row is not None
+            and not row.tombstoned
+            and row.instance_id != sender
+            and row.role == SpaceRole.ADMIN.value
+        )
 
     async def writes_here(self, event: "FederationEvent", space_id: str) -> bool:
         """The host, or a household holding a live ``member`` / ``admin`` seat.

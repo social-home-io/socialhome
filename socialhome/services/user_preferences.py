@@ -5,8 +5,8 @@ backend services read it: notification preferences, retention, etc.
 This module centralises parsing so callers don't reinvent the
 defensive defaults each time.
 
-For now there's only the :class:`HighlightsPreferences` shape; add more as
-they appear.
+Shapes so far: :class:`HighlightsPreferences`, :class:`MomentPreferences`
+and the timetable home pins; add more as they appear.
 """
 
 from __future__ import annotations
@@ -148,12 +148,45 @@ def parse_moment_preferences(preferences_json: str | None) -> MomentPreferences:
     return MomentPreferences(max_hops=max_hops)
 
 
+# ─── Timetable home pins ────────────────────────────────────────────────────
+
+
+#: The space timetables a user pinned to their Home (the Today card), as
+#: ``preferences_json["timetable_home_pins"]`` — written by the SPA. Parsing
+#: caps the list so a hostile blob can't make the home read unbounded.
+MAX_TIMETABLE_HOME_PINS: int = 20
+_MAX_PIN_LEN: int = 64  # the timetable id cap
+
+
+def parse_timetable_home_pins(preferences_json: str | None) -> tuple[str, ...]:
+    """The user's pinned space-timetable ids, in pin order.
+
+    Never raises: bad JSON, a non-list, non-string / blank / over-long
+    entries are ignored; duplicates collapse (first wins); at most
+    :data:`MAX_TIMETABLE_HOME_PINS`.
+    """
+    try:
+        blob = orjson.loads(preferences_json) if preferences_json else {}
+    except orjson.JSONDecodeError:
+        log.debug("preferences_json is not valid JSON; no timetable pins")
+        return ()
+    raw = blob.get("timetable_home_pins") if isinstance(blob, dict) else None
+    if not isinstance(raw, list):
+        return ()
+    pins = dict.fromkeys(
+        p for p in raw if isinstance(p, str) and 0 < len(p) <= _MAX_PIN_LEN
+    )
+    return tuple(pins)[:MAX_TIMETABLE_HOME_PINS]
+
+
 __all__ = [
     "DEFAULT_HIGHLIGHTS_MAX_COUNT",
     "DEFAULT_HIGHLIGHTS_RETENTION_DAYS",
     "DEFAULT_MOMENT_MAX_HOPS",
     "HighlightsPreferences",
+    "MAX_TIMETABLE_HOME_PINS",
     "MomentPreferences",
     "parse_highlights_preferences",
     "parse_moment_preferences",
+    "parse_timetable_home_pins",
 ]

@@ -34,6 +34,7 @@ import {
 } from './brush'
 import { colorClass, entryColor } from './colors'
 import { displayTitle, entryAriaLabel, metaLine } from './labels'
+import { useTimetableScope } from './scope'
 import { formatRange, toMinutes } from './time'
 import { WeekContext, changesOf, isLocked, statusAria } from './weekView'
 
@@ -67,11 +68,13 @@ export function LessonBlock({
   const status = lesson?.status ?? 'normal'
   const locked = week ? isLocked(week, entry.weekday) : false
   const brushing = !week && brushOn(tt.id)
-  const inert = (brushing && entry.kind === 'break') || locked
-
+  const { editable } = useTimetableScope()
   const title = displayTitle(entry)
   const isBreak = entry.kind === 'break'
   const empty = !isBreak && !entry.title?.trim() && !entry.icon
+  // A view-only viewer has nothing to open on an empty slot.
+  const inert = (brushing && isBreak) || locked || (!editable && empty)
+
   const meta = metaLine(entry)
   const changes = lesson ? changesOf(lesson) : []
   const cls = [
@@ -127,7 +130,7 @@ export function LessonBlock({
       onPointerEnter={brushing ? () => strokeEnter(entry, ids) : undefined}
     >
       {empty ? (
-        <span class="sh-timetable-block__plus" aria-hidden="true">+</span>
+        editable ? <span class="sh-timetable-block__plus" aria-hidden="true">+</span> : null
       ) : (
         <>
           {entry.icon && (

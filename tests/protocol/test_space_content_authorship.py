@@ -52,6 +52,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    SPACE_TIMETABLE_KIND,
     mint_owner_bound_id,
 )
 from socialhome.federation.inbound_validator import (
@@ -64,7 +65,12 @@ from socialhome.services.space_crypto_service import (
     strip_authority_sig_fields,
 )
 
-from .test_space_content_scope import ATTACKS, CONTENT_TABLES, NOT_ROW_SCOPED
+from .test_space_content_scope import (
+    ATTACKS,
+    CONTENT_TABLES,
+    NOT_ROW_SCOPED,
+    timetable_wire,
+)
 
 pytestmark = pytest.mark.security
 
@@ -83,6 +89,14 @@ _NOW = "2026-06-01T10:00:00+00:00"
 _OCC = "2026-06-10T18:00:00+00:00"
 _END = "2026-06-10T19:00:00+00:00"
 _FAR = "2099-01-01T00:00:00"
+_TS = "2026-06-01T10:00:00.000000+00:00"
+#: Fresh timetable ids: bound to their creator in SP, bound to somebody
+#: else, and of the legacy (unbound) shape no timetable ever had.
+_TT_A = mint_owner_bound_id(SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-adm")
+_TT_NEW = mint_owner_bound_id(SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-adm")
+_TT_FOR_U_A = mint_owner_bound_id(
+    SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-a"
+)
 
 
 def _config(tmp_dir) -> Config:
@@ -270,6 +284,11 @@ _SEED = [
         "INSERT INTO bazaar_bids(id, listing_post_id, bidder_user_id, amount)"
         " VALUES('bid-o', 'post-a-listing', 'u-o', 50)",
         (),
+    ),
+    (
+        "INSERT INTO space_timetables(id, space_id, name, created_by, updated_by,"
+        " created_at, updated_at) VALUES(?, ?, 'Plan', 'u-adm', 'u-adm', ?, ?)",
+        (_TT_A, SP, _TS, _TS),
     ),
 ]
 
@@ -816,6 +835,84 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         {"zone_id": "zone-a"},
         (ADMIN, HOST),
         (AUTHOR, OTHER),
+    ),
+    # ── Timetables: moderators only, recorded as a moderator of the sender ──
+    (
+        FET.SPACE_TIMETABLE_UPSERTED,
+        "edit the timetable as u-adm",
+        {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by="u-adm")},
+        (ADMIN, HOST),
+        (AUTHOR, OTHER, THIRD, STRANGER),
+    ),
+    (
+        FET.SPACE_TIMETABLE_UPSERTED,
+        # u-a is a plain member of ANOTHER household: the host may relay
+        # only a remote user's edit whose own seat is a live admin.
+        "edit the timetable as a plain member",
+        {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by="u-a")},
+        (),
+        (AUTHOR, ADMIN, OTHER, HOST),
+    ),
+    (
+        FET.SPACE_TIMETABLE_UPSERTED,
+        "edit the timetable as a follower",
+        {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by="u-sub")},
+        (),
+        (AUTHOR, ADMIN, OTHER),
+    ),
+    (
+        FET.SPACE_TIMETABLE_UPSERTED,
+        "edit the timetable as our local user",
+        {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by=LOCAL_USER)},
+        (),
+        (AUTHOR, ADMIN, HOST),
+    ),
+    (
+        FET.SPACE_TIMETABLE_UPSERTED,
+        "create a timetable as u-adm",
+        {
+            "timetable": timetable_wire(
+                _TT_NEW, created_by="u-adm", updated_by="u-adm", version=1
+            )
+        },
+        (ADMIN, HOST),
+        (AUTHOR, OTHER, STRANGER),
+    ),
+    (
+        FET.SPACE_TIMETABLE_UPSERTED,
+        "create a timetable under an id bound to u-a",
+        {
+            "timetable": timetable_wire(
+                _TT_FOR_U_A, created_by="u-adm", updated_by="u-adm", version=1
+            )
+        },
+        (),
+        (ADMIN, HOST, AUTHOR),
+    ),
+    (
+        FET.SPACE_TIMETABLE_UPSERTED,
+        "create a timetable under an unbound id",
+        {
+            "timetable": timetable_wire(
+                "tt-legacy", created_by="u-adm", updated_by="u-adm", version=1
+            )
+        },
+        (),
+        (ADMIN, HOST),
+    ),
+    (
+        FET.SPACE_TIMETABLE_DELETED,
+        "delete the timetable as u-adm",
+        {"timetable_id": _TT_A, "deleted_by": "u-adm", "deleted_at": _NOW},
+        (ADMIN, HOST),
+        (AUTHOR, OTHER, STRANGER),
+    ),
+    (
+        FET.SPACE_TIMETABLE_DELETED,
+        "delete the timetable as a plain member",
+        {"timetable_id": _TT_A, "deleted_by": "u-a", "deleted_at": _NOW},
+        (),
+        (AUTHOR, ADMIN, HOST),
     ),
 ]
 
@@ -1663,6 +1760,27 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         ],
         (AUTHOR, HOST),
         (OTHER,),
+    ),
+    (
+        "timetables",
+        "rewrite the timetable as u-adm",
+        [timetable_wire(_TT_A, created_by="u-adm", updated_by="u-adm")],
+        (ADMIN, HOST),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "timetables",
+        "a new timetable by u-adm",
+        [timetable_wire(_TT_NEW, created_by="u-adm", updated_by="u-adm", version=1)],
+        (ADMIN, HOST),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "timetables",
+        "a timetable edit recorded as a plain member",
+        [timetable_wire(_TT_A, created_by="u-adm", updated_by="u-a")],
+        (HOST,),
+        (AUTHOR, ADMIN),
     ),
     (
         "bazaar",

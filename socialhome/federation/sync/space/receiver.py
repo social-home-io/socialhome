@@ -45,6 +45,13 @@ from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import SpaceMember, SpaceZone
 from ....domain.sticky import Sticky
 from ....domain.task import RecurrenceRule, Task, TaskStatus
+from ....domain.events import TimetableSaved
+from ....domain.timetable import (
+    Timetable,
+    from_wire_dict,
+    remote_version_refusal,
+    validate,
+)
 from ....infrastructure.event_bus import EventBus
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -55,6 +62,7 @@ from ...owner_bound_id import (
     SPACE_POST_KIND,
     SPACE_STICKY_KIND,
     SPACE_TASK_KIND,
+    SPACE_TIMETABLE_KIND,
     OwnerBinding,
     check_owner_bound_id,
     owner_bound_id_refused,
@@ -80,6 +88,7 @@ if TYPE_CHECKING:
     from ....repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ....repositories.sticky_repo import AbstractStickyRepo
     from ....repositories.task_repo import AbstractSpaceTaskRepo
+    from ....repositories.timetable_repo import AbstractSpaceTimetableRepo
     from ....services.pending_decrypts_cache import PendingDecryptsCache
     from ....services.space_crypto_service import SpaceContentEncryption
     from ...encoder import FederationEncoder
@@ -118,6 +127,7 @@ class SpaceSyncReceiver:
         "_pending_decrypts",
         "_authorship",
         "_gallery_tombstones",
+        "_timetable_repo",
     )
 
     def __init__(
@@ -141,8 +151,10 @@ class SpaceSyncReceiver:
         pending_decrypts: "PendingDecryptsCache | None" = None,
         authorship: "SpaceAuthorship | None" = None,
         gallery_tombstones: "GalleryAlbumTombstones | None" = None,
+        timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
     ) -> None:
         self._bus = bus
+        self._timetable_repo = timetable_repo
         #: Space albums deleted here — a sync from a household that missed
         #: the delete must not bring one (or its items) back.
         self._gallery_tombstones = gallery_tombstones
@@ -380,7 +392,18 @@ class SpaceSyncReceiver:
         *,
         provider: str,
     ) -> None:
-        records = await self._admit(resource, space_id, records, provider=provider)
+        if not isinstance(records, list):
+            records = []
+        shaped = [r for r in records if isinstance(r, dict)]
+        if len(shaped) != len(records):
+            log.warning(
+                "space sync: dropped %d non-object %s record(s) from %s for %s",
+                len(records) - len(shaped),
+                resource,
+                provider,
+                space_id,
+            )
+        records = await self._admit(resource, space_id, shaped, provider=provider)
         # v_36: whoever streams it — the host included — a record may not
         # claim an owner-bound id for anybody but the user it commits to.
         records = [r for r in records if not _claims_bound_id(resource, space_id, r)]
@@ -624,6 +647,45 @@ class SpaceSyncReceiver:
                             exc,
                         )
 
+        elif resource == "timetables":
+            await self._persist_timetables(records, space_id, provider=provider)
+
+    async def _persist_timetables(
+        self, records: list[dict[str, Any]], space_id: str, *, provider: str
+    ) -> None:
+        """Space timetables (v_39): each record is a domain wire dict,
+        parsed and validated like the live event; applied last-writer-wins
+        (a stale copy, a deleted id or another space's id is a no-op)."""
+        if self._timetable_repo is None:
+            log.debug(
+                "received %d timetable records — no timetable_repo wired, skipping",
+                len(records),
+            )
+            return
+        for r in records:
+            tt = _timetable_from_record(r, space_id)
+            if tt is None:
+                continue
+            held = await self._timetable_repo.get(tt.id)
+            refusal = remote_version_refusal(
+                tt.version,
+                held[1].version if held is not None and held[0] == space_id else None,
+            )
+            if refusal is not None:
+                log.warning(
+                    "space sync: timetable %s for %s — %s; skipped",
+                    tt.id,
+                    space_id,
+                    refusal,
+                )
+                continue
+            if await self._timetable_repo.apply_remote(tt, space_id=space_id):
+                await self._bus.publish(
+                    TimetableSaved(
+                        timetable=tt, space_id=space_id, origin_instance_id=provider
+                    )
+                )
+
     # ─── Who may stream what (§24.11 authorship) ─────────────────────
 
     async def _admit(
@@ -771,6 +833,23 @@ class SpaceSyncReceiver:
                 return await self._anchor_author_ok(event, space_id, post_id)
             case "space_zones":
                 return await auth.is_moderator(event, space_id)
+            case "timetables":
+                # Moderator-only, per user, like the live event: the
+                # household moderates and the recorded editor is its admin;
+                # a timetable new here also names a creator it speaks for.
+                if self._timetable_repo is None or not rid:
+                    return False
+                if not await auth.is_moderator(event, space_id):
+                    return False
+                if not await auth.moderates_as(
+                    event, space_id, str(r.get("updated_by") or "")
+                ):
+                    return False
+                if await self._timetable_repo.get(rid) is not None:
+                    return True
+                return await auth.may_author(
+                    event, space_id, str(r.get("created_by") or "")
+                )
             case "bazaar":
                 post_id = str(r.get("post_id") or "")
                 if self._bazaar_repo is None or not post_id:
@@ -903,6 +982,7 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "tasks_archived": (SPACE_TASK_KIND, ("created_by",)),
     "pages": (SPACE_PAGE_KIND, ("created_by",)),
     "stickies": (SPACE_STICKY_KIND, ("author", "created_by")),
+    "timetables": (SPACE_TIMETABLE_KIND, ("created_by",)),
 }
 
 
@@ -1186,3 +1266,41 @@ def _bazaar_listing_from_record(
         winning_price=r.get("winning_price"),
         sold_at=r.get("sold_at"),
     )
+
+
+def _timetable_from_record(r: dict[str, Any], space_id: str) -> Timetable | None:
+    """A synced timetable record, or ``None`` (logged at WARNING) when it is
+    malformed, out of bounds, carries assignees, or its id is not bound to
+    its creator in this space — space timetables are owner-bound from their
+    first release, so a legacy-shaped id is refused too."""
+    try:
+        tt = from_wire_dict(r)
+        validate(tt)
+    except Exception as exc:  # hostile input: never raise out of the stream
+        log.warning(
+            "space sync: unusable timetable record for %s — skipped: %.200s",
+            space_id,
+            exc,
+        )
+        return None
+    if tt.assignees:
+        log.warning(
+            "space sync: timetable %s for %s names assignees — skipped",
+            tt.id,
+            space_id,
+        )
+        return None
+    if (
+        check_owner_bound_id(
+            SPACE_TIMETABLE_KIND, tt.id, space_id=space_id, owner_user_id=tt.created_by
+        )
+        is not OwnerBinding.VALID
+    ):
+        log.warning(
+            "space sync: timetable id %s is not bound to %r in space %s — skipped",
+            tt.id,
+            tt.created_by,
+            space_id,
+        )
+        return None
+    return tt

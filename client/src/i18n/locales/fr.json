@@ -753,5 +753,25 @@
   "welcome.schedule.view_timetable": "Voir l'emploi du temps",
   "welcome.schedule.until": "{title} jusqu'à {time}",
   "welcome.schedule.show_earlier": "Afficher {n} précédents",
-  "welcome.schedule.hide_earlier": "Masquer les précédents"
+  "welcome.schedule.hide_earlier": "Masquer les précédents",
+
+  "timetable.space.empty_admin_title": "Créer un emploi du temps pour cet espace",
+  "timetable.space.empty_admin_body": "Un planning hebdomadaire partagé que tout l’espace peut voir — l’emploi du temps d’une classe, un planning d’entraînement.",
+  "timetable.space.empty_member_title": "Pas encore d’emploi du temps",
+  "timetable.space.empty_member_body": "Dès qu’un administrateur en ajoute un, il apparaît ici.",
+  "timetable.space.pin": "Afficher sur mon accueil",
+  "timetable.space.pin_hint": "Ajoute les cours du jour à ta carte Aujourd’hui",
+  "timetable.space.pinned": "Ajouté à ta carte Aujourd’hui les jours de cours",
+  "timetable.space.unpinned": "Retiré de ton accueil",
+  "timetable.space.pin_limit": "Tu peux afficher jusqu’à {n} emplois du temps sur ton accueil",
+  "timetable.space.read_only": "Lecture seule — les administrateurs de l’espace modifient cet emploi du temps",
+  "timetable.space.view_aria": "Vue du calendrier",
+  "timetable.space.events": "Événements",
+  "timetable.info.when": "Quand",
+  "timetable.info.changed": "Modifié cette semaine",
+  "timetable.week.no_changes": "Aucun changement cette semaine.",
+  "space.feature.timetable": "Emploi du temps",
+  "space.feature.timetable_sub": "Un emploi du temps hebdomadaire partagé, p. ex. celui d’une classe",
+  "timetable.space.pinned_household_off": "Les emplois du temps sont désactivés pour ton foyer, les emplois du temps épinglés n’apparaîtront donc pas sur l’accueil",
+  "timetable.space.pin_short": "Accueil"
 }

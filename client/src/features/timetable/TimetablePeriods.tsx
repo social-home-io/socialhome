@@ -11,7 +11,9 @@ import type { Timetable, TimetableEntry } from '@/types'
 import { DayHeading } from './DayHeading'
 import { brushOn } from './brush'
 import { LessonBlock } from './LessonBlock'
+import { isUntitledLesson } from './labels'
 import { periodRows } from './layout'
+import { useTimetableScope } from './scope'
 import type { MenuItem } from './OverflowMenu'
 import { formatRange, toMinutes, weekdayName } from './time'
 import { useGridNav, type GridNavHandlers } from './useGridNav'
@@ -35,8 +37,14 @@ export function TimetablePeriods({
 }: Props) {
   const daysKey = days.join(',')
   const week = useContext(WeekContext)
+  const { editable } = useTimetableScope()
   // Recomputed per timetable version (each version is a new object).
-  const rows = useMemo(() => periodRows(tt, days), [tt, daysKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const all = useMemo(() => periodRows(tt, days), [tt, daysKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  // View only: an untitled slot is no lesson — its cell stays blank and a
+  // row with nothing else in it goes.
+  const blank = (c: (typeof all)[number]['cells'][number]) =>
+    c === null || (c !== 'merged' && c.rowSpan === 1 && isUntitledLesson(c.entry))
+  const rows = editable ? all : all.filter(r => r.band || !days.every(d => blank(r.cells[d])))
   const headId = (d: number) => `sh-tt-${tt.id}-p${printCopy ? 'x' : ''}-${d}`
   const grid = useGridNav(days, nav)
   // A band edits the break on every day — not in week mode (one week's
@@ -98,6 +106,17 @@ export function TimetablePeriods({
                 {days.map(d => {
                   const cell = row.cells[d]
                   if (cell === 'merged') return null
+                  if (!editable && cell !== null && isUntitledLesson(cell.entry)) {
+                    return (
+                      <td key={d} rowSpan={cell.rowSpan > 1 ? cell.rowSpan : undefined}
+                          class={`sh-timetable-periods__empty${d === today ? ' sh-timetable-periods__today' : ''}`} />
+                    )
+                  }
+                  if (cell === null && !editable) {
+                    return (
+                      <td key={d} class={`sh-timetable-periods__empty${d === today ? ' sh-timetable-periods__today' : ''}`} />
+                    )
+                  }
                   if (cell === null) {
                     const blocked = addBlocked(d)
                     return (

@@ -1,6 +1,14 @@
-"""Timetable routes — ``/api/timetables/*`` (household school timetables).
+"""Timetable routes — ``/api/timetables/*`` (household school timetables)
+and ``/api/spaces/{space_id}/timetables/*`` (a space's shared timetables).
 
-Thin :class:`BaseView` handlers over :class:`TimetableService`. Every
+Thin :class:`BaseView` handlers over :class:`TimetableService` and, for a
+space, :class:`SpaceTimetableScope`. The space views reuse every
+household handler and only swap :meth:`_TimetableView._svc`: membership
+first, then the space's ``timetable`` feature, then the space-scoped
+service (which re-checks both, and refuses a non-admin write with 403).
+There is no space ``/day`` view — that is the household's "my lessons".
+
+Every
 mutation except create / delete carries the client's ``version`` (body,
 or ``?version=N`` on DELETE) for the service's compare-and-swap, and
 answers with the full timetable: the wire dict plus ``active_this_week``
@@ -10,7 +18,7 @@ Errors are mapped centrally by ``BaseView._iter``: 404 unknown id,
 422 ``TimetableValidationError``, 409 ``TIMETABLE_CONFLICT`` (with
 ``current_version``) / ``DAY_HAS_ENTRIES`` / ``DAYS_ORPHAN_ENTRIES``
 (with ``count``) / ``TIMETABLE_LIMIT``, 403 when ``feat_timetable`` is
-off.
+off; for a space, 403 for a non-member / non-admin write.
 """
 
 from __future__ import annotations
@@ -20,11 +28,25 @@ from typing import Any
 
 from aiohttp import web
 
-from ..app_keys import timetable_service_key
+from ..app_keys import (
+    space_repo_key,
+    space_timetable_service_key,
+    timetable_service_key,
+)
 from ..domain import timetable as td
+from ..domain.space import SpacePermissionError
 from ..domain.timetable import Timetable, TimetableValidationError
-from ..services.timetable_service import TimetableService
+from ..services.timetable_service import (
+    SpaceTimetableScope,
+    TimetableEditorMixin,
+    TimetableService,
+)
 from .base import BaseView
+
+#: What a handler edits through: the household service or a space scope.
+#: Both expose the same editing surface (:class:`TimetableEditorMixin`)
+#: plus ``list_all`` / ``create`` / ``delete`` / ``duplicate``.
+Editor = TimetableService | SpaceTimetableScope
 
 _SECTION = "timetable"
 #: ``?version=N`` — ASCII digits only (``str.isdigit`` admits "١" / "²").
@@ -67,17 +89,20 @@ def _fields(body: dict) -> dict:
     return {k: v for k, v in body.items() if k != "version"}
 
 
-def _view(svc: TimetableService, tt: Timetable) -> dict:
+def _view(svc: TimetableEditorMixin, tt: Timetable) -> dict:
     return td.timetable_view_dict(tt, svc.today_in(tt.tz))
 
 
 class _TimetableView(BaseView):
     """Shared plumbing: feature gate, service, body/version, response."""
 
-    async def _svc(self) -> TimetableService:
+    async def _household(self) -> TimetableService:
         self.user  # auth check
         await self.require_household_feature(_SECTION)
         return self.svc(timetable_service_key)
+
+    async def _svc(self) -> Editor:
+        return await self._household()
 
     async def _body(self, *, optional: bool = False) -> dict:
         if optional and not self.request.can_read_body:
@@ -100,7 +125,7 @@ class _TimetableView(BaseView):
     def _weekday(self) -> int:
         return int(self.match("weekday"))  # the route regex pins 0..6
 
-    def _tt(self, svc: TimetableService, tt: Timetable, status: int = 200):
+    def _tt(self, svc: Editor, tt: Timetable, status: int = 200):
         return self._json({"timetable": _view(svc, tt)}, status=status)
 
 
@@ -144,7 +169,7 @@ class TimetableDayView(_TimetableView):
     """
 
     async def get(self) -> web.Response:
-        svc = await self._svc()
+        svc = await self._household()
         raw = self.request.query.get("date")
         on = td.parse_date(raw, "date") if raw else await svc.household_today()
         active = await svc.active_for_user(self.user.user_id, on)
@@ -417,3 +442,83 @@ class TimetableOverrideDetailView(_TimetableView):
             by=self.user.user_id,
         )
         return self._tt(svc, tt)
+
+
+# ─── Space timetables ────────────────────────────────────────────────────
+
+
+class _SpaceTimetablesBase(_TimetableView):
+    """``/api/spaces/{space_id}/timetables…`` — the household handlers,
+    bound to the space's timetables.
+
+    The member check and the feature check run here, in that order, so a
+    non-member learns nothing about the space's features; the scope the
+    handler then uses re-checks both on every call and adds the owner /
+    admin gate for writes.
+    """
+
+    async def _svc(self) -> Editor:
+        user = self.user
+        space_id = self.match("space_id")
+        if await self.svc(space_repo_key).get_member(space_id, user.user_id) is None:
+            raise SpacePermissionError("not a member of this space")
+        await self.require_space_feature(space_id, _SECTION)
+        return self.svc(space_timetable_service_key).scope(space_id, user.user_id)
+
+
+class SpaceTimetableCollectionView(_SpaceTimetablesBase, TimetableCollectionView):
+    """``GET`` / ``POST /api/spaces/{space_id}/timetables``."""
+
+
+class SpaceTimetableDetailView(_SpaceTimetablesBase, TimetableDetailView):
+    """``GET`` / ``PATCH`` / ``DELETE …/timetables/{id}`` (delete tombstones)."""
+
+
+class SpaceTimetableDuplicateView(_SpaceTimetablesBase, TimetableDuplicateView):
+    """``POST …/timetables/{id}/duplicate``."""
+
+
+class SpaceTimetableDayGenerateView(_SpaceTimetablesBase, TimetableDayGenerateView):
+    """``POST …/timetables/{id}/days/{weekday}/generate``."""
+
+
+class SpaceTimetableDayCopyView(_SpaceTimetablesBase, TimetableDayCopyView):
+    """``POST …/timetables/{id}/days/{weekday}/copy``."""
+
+
+class SpaceTimetableDayShiftView(_SpaceTimetablesBase, TimetableDayShiftView):
+    """``POST …/timetables/{id}/days/{weekday}/shift``."""
+
+
+class SpaceTimetableEntryCollectionView(
+    _SpaceTimetablesBase, TimetableEntryCollectionView
+):
+    """``POST`` / ``PUT …/timetables/{id}/entries``."""
+
+
+class SpaceTimetableEntryDetailView(_SpaceTimetablesBase, TimetableEntryDetailView):
+    """``PATCH`` / ``DELETE …/timetables/{id}/entries/{entry_id}``."""
+
+
+class SpaceTimetableValidityView(_SpaceTimetablesBase, TimetableValidityView):
+    """``PUT …/timetables/{id}/validity``."""
+
+
+class SpaceTimetableWeekView(_SpaceTimetablesBase, TimetableWeekView):
+    """``GET …/timetables/{id}/weeks/{date}``."""
+
+
+class SpaceTimetableWeekOverridesView(_SpaceTimetablesBase, TimetableWeekOverridesView):
+    """``DELETE …/timetables/{id}/weeks/{date}/overrides?version=N``."""
+
+
+class SpaceTimetableOverrideCollectionView(
+    _SpaceTimetablesBase, TimetableOverrideCollectionView
+):
+    """``POST …/timetables/{id}/overrides``."""
+
+
+class SpaceTimetableOverrideDetailView(
+    _SpaceTimetablesBase, TimetableOverrideDetailView
+):
+    """``PATCH`` / ``DELETE …/timetables/{id}/overrides/{override_id}``."""
