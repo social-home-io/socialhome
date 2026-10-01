@@ -68,7 +68,7 @@ dev = [
     "pytest-xdist>=3",
     "aiohttp[speedups]",
     "freezegun",
-    "mypy>=1.10",
+    "mypy>=2.4",
     "types-aiofiles>=23",
     # Keep the floor aligned with ``.pre-commit-config.yaml``'s
     # ``ruff-pre-commit`` rev — ruff format rules change between
