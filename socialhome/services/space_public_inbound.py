@@ -12,6 +12,9 @@ trusted by the receiver:
    against the locally-mirrored ``spaces.identity_public_key``. A space we
    don't mirror, a space with no pinned pubkey, or a failed/forged
    signature → drop (WARNING).
+   A space that is **archived** (or dissolved) here is a read-only
+   snapshot — the relayed post is dropped before any further work, the
+   same rule every other inbound door enforces.
 2. **Decrypt** — decrypt the envelope's ``encrypted_payload`` under the
    per-space content key for the stated epoch. If we don't hold that
    epoch's key (subscribers receive it in Phase 5b) → drop gracefully.
@@ -56,6 +59,7 @@ from ..authority_sig import (
 from ..domain.events import SpacePostCreated
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
+from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
 from .inbound_media_store import local_media_ref, local_media_refs
@@ -132,6 +136,18 @@ class SpacePublicInbound:
             log.warning(
                 "space_public.inbound: no local space / pubkey for %s — dropped",
                 space_id,
+            )
+            return
+        # Read-only snapshot here, like every other inbound door. The relay
+        # frame names no household, so there is no host to exempt: ask as
+        # an anonymous sender.
+        reason = archive_refusal(space, "")
+        if reason is not None:
+            log.info(
+                "space_public.inbound: space %s is %s here (read-only) "
+                "— relayed post dropped",
+                space_id,
+                reason,
             )
             return
         if not self._verify_authority(space_id, envelope, space.identity_public_key):

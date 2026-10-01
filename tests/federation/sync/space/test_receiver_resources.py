@@ -210,7 +210,13 @@ class _SpaceRepoStub:
         # The chunks in this file come from the space's host, whose stream
         # is taken whole; non-host providers are covered in
         # tests/protocol/test_space_content_authorship.py.
-        return SimpleNamespace(id=space_id, owner_instance_id="peer-a")
+        return SimpleNamespace(
+            id=space_id,
+            owner_instance_id="peer-a",
+            archived=False,
+            archived_reason=None,
+            dissolved=False,
+        )
 
     async def save_member(self, member):
         self._c.members.append(member)

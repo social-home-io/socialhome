@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
+    from ..domain.space import Space
 
 log = logging.getLogger(__name__)
 
@@ -101,3 +102,51 @@ def log_not_applied(
         row_id,
         reason,
     )
+
+
+def archive_refusal(space: "Space | None", sender: str) -> str | None:
+    """Why a content write from ``sender`` may not land in ``space``, or ``None``.
+
+    An archived space is a **read-only snapshot** — locally
+    (``SpaceService._require_writable_space`` and its siblings refuse new
+    content over REST) and therefore to peers too: a federated write is the same
+    write arriving by another door. This is the one decision both inbound
+    doors share — the §24.11 ``check_space_archived`` step (live events,
+    their mesh-routed and held replays, and the §25.6 resume replay, which
+    re-sends live events) and the §25.6 sync receiver — so the two cannot
+    drift.
+
+    * **not archived, not dissolved → ``None``** (the write is judged by
+      the other gates as usual);
+    * **terminated** (``dissolved``, or ``archived_reason`` set: the host
+      dissolved the space or removed us) → refused from **everybody**. The
+      content is frozen for good; nobody, the host included, writes into
+      it again;
+    * **reversibly archived** (``archived_reason`` NULL) → refused from
+      every household **except the space's host**. The archive flag on a
+      member's copy is the host's own decision (it arrives over the
+      authority-signed ``SPACE_CONFIG_CHANGED``; a member's archive request
+      is forwarded to the host), and the host's local API is read-only for
+      the same space — so what the host still sends is the pre-archive
+      state a member missed (resume replay, catch-up sync), which is part
+      of the snapshot. Exempting it costs nothing: a host could unarchive
+      over the same signed channel at will.
+
+    Removals are the callers' exception, not this function's: the live gate
+    lets :data:`~socialhome.domain.federation.ARCHIVED_ALLOWED_REMOVAL_TYPES`
+    through before asking.
+
+    ``space is None`` (we don't hold the space) is ``None`` — whether a
+    write may land in a space we never seated is the handlers' question.
+    """
+    if space is None:
+        return None
+    if space.dissolved:
+        return "dissolved"
+    if not space.archived:
+        return None
+    if space.archived_reason:
+        return f"archived ({space.archived_reason})"
+    if sender and sender == space.owner_instance_id:
+        return None
+    return "archived"

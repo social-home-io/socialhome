@@ -696,6 +696,13 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 #: (:meth:`FederationService.broadcast_to_space_members`), so a member
 #: household is a first-class enforcement point, not a mirror of one.
 #:
+#: It is also the vocabulary the ``check_space_archived`` step refuses into
+#: a space that is **archived** here (read-only to peers as it is locally),
+#: so a type classified here is frozen by an archive the moment it is
+#: classified — removals excepted
+#: (:data:`ARCHIVED_ALLOWED_REMOVAL_TYPES`) — and a type in :data:`SPACE_READER_EVENT_TYPES` (config —
+#: including the host's unarchive —, roster, key epochs, sync) still applies.
+#:
 #: The classification is **exhaustive over the enum**: every ``SPACE_*`` /
 #: ``BAZAAR_*`` type is either here or in
 #: :data:`SPACE_READER_EVENT_TYPES`, pinned by a test that enumerates
@@ -759,6 +766,36 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_ZONE_DELETED,
         # ── Shared timetables (admin-authored) ──
         FederationEventType.SPACE_TIMETABLE_UPSERTED,
+        FederationEventType.SPACE_TIMETABLE_DELETED,
+    }
+)
+
+#: The removals the ``check_space_archived`` step lets through into a space
+#: that is archived (or dissolved) here, from any sender.
+#:
+#: An archive freezes the space against new content, but a removal must
+#: always propagate: the local API still lets an author delete their own
+#: post or comment in an archived space, and if every peer dropped that
+#: delete the row would live on in every other copy forever — a privacy
+#: regression, not a read-only guarantee. Whether the sender may remove
+#: THAT row is still decided by the handler (authorship / ``may_mutate``),
+#: exactly as in a live space.
+#:
+#: Exactly the ``*_DELETED`` members of :data:`SPACE_WRITE_EVENT_TYPES`,
+#: pinned by a test, so a new delete type is either listed here or fails.
+ARCHIVED_ALLOWED_REMOVAL_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.SPACE_POST_DELETED,
+        FederationEventType.SPACE_COMMENT_DELETED,
+        FederationEventType.SPACE_PAGE_DELETED,
+        FederationEventType.SPACE_TASK_DELETED,
+        FederationEventType.SPACE_TASK_LIST_DELETED,
+        FederationEventType.SPACE_STICKY_DELETED,
+        FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+        FederationEventType.SPACE_RSVP_DELETED,
+        FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+        FederationEventType.SPACE_GALLERY_ITEM_DELETED,
+        FederationEventType.SPACE_ZONE_DELETED,
         FederationEventType.SPACE_TIMETABLE_DELETED,
     }
 )

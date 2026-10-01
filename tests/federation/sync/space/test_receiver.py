@@ -75,7 +75,11 @@ class _FakeSpaceRepo:
         # chunks are taken whole (non-host providers are covered by the
         # authorship protocol tests).
         return self.spaces.get(space_id) or SimpleNamespace(
-            id=space_id, owner_instance_id="peer-a"
+            id=space_id,
+            owner_instance_id="peer-a",
+            archived=False,
+            archived_reason=None,
+            dissolved=False,
         )
 
     async def save_member(self, member):
@@ -487,7 +491,9 @@ async def test_on_chunk_verifies_mesh_host_via_space_host_identity_pk(
     _peer, kp = peer_setup
     host = "mesh-host-iid"
     space_repo.host_identity_pks["sp-mesh"] = kp.public_key.hex()
-    space_repo.spaces["sp-mesh"] = SimpleNamespace(owner_instance_id=host)
+    space_repo.spaces["sp-mesh"] = SimpleNamespace(
+        owner_instance_id=host, archived=False, archived_reason=None, dissolved=False
+    )
 
     crypto = _FakeCrypto()
     _, ciphertext = await crypto.encrypt_chunk(
@@ -538,7 +544,12 @@ async def test_on_chunk_rejects_mesh_chunk_from_a_non_host_instance(
     r, space_repo, _ = receiver
     _peer, kp = peer_setup
     space_repo.host_identity_pks["sp-mesh"] = kp.public_key.hex()
-    space_repo.spaces["sp-mesh"] = SimpleNamespace(owner_instance_id="the-real-host")
+    space_repo.spaces["sp-mesh"] = SimpleNamespace(
+        owner_instance_id="the-real-host",
+        archived=False,
+        archived_reason=None,
+        dissolved=False,
+    )
 
     envelope = await _sign_as_peer(
         kp,
@@ -570,7 +581,9 @@ async def test_on_chunk_rejects_mesh_chunk_signed_by_the_wrong_key(
     # The stub holds the REAL host key; the chunk is signed by someone else.
     real_host = generate_identity_keypair()
     space_repo.host_identity_pks["sp-mesh"] = real_host.public_key.hex()
-    space_repo.spaces["sp-mesh"] = SimpleNamespace(owner_instance_id=host)
+    space_repo.spaces["sp-mesh"] = SimpleNamespace(
+        owner_instance_id=host, archived=False, archived_reason=None, dissolved=False
+    )
 
     envelope = await _sign_as_peer(
         attacker,

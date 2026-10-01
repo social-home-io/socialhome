@@ -71,7 +71,13 @@ from ...owner_bound_id import (
 )
 from ....services.inbound_media_store import local_media_ref, local_media_refs
 from ....services.link_preview_service import wire_link_preview
-from .exporter import ALLOWED_RESOURCES, SENTINEL_RESOURCE, parse_chunk
+from ...space_scope import archive_refusal
+from .exporter import (
+    ALLOWED_RESOURCES,
+    ROSTER_RESOURCES,
+    SENTINEL_RESOURCE,
+    parse_chunk,
+)
 
 if TYPE_CHECKING:
     from ....federation.space_authorship import SpaceAuthorship
@@ -727,8 +733,28 @@ class SpaceSyncReceiver:
         (never overwrite one we hold, whose author, content and moderation
         state stand), each attributed to a member seated on it; the roster
         and bans are the host's alone, and zones a moderator's.
+
+        Content into a space that is **archived** here is refused first,
+        from any provider :func:`~socialhome.federation.space_scope
+        .archive_refusal` refuses — the same decision the live §24.11 gate
+        takes, so a peer cannot write into the read-only snapshot by
+        streaming it instead of sending it. The roster
+        (:data:`ROSTER_RESOURCES`) still converges.
         """
         space = await self._space_repo.get(space_id)
+        if resource not in ROSTER_RESOURCES:
+            reason = archive_refusal(space, provider)
+            if reason is not None:
+                log.info(
+                    "space sync: refused %d %s record(s) from %s — space %s "
+                    "is %s here (read-only)",
+                    len(records),
+                    resource,
+                    provider,
+                    space_id,
+                    reason,
+                )
+                return []
         if space is not None and provider and space.owner_instance_id == provider:
             return records
         if self._authorship is None:

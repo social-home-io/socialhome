@@ -7,7 +7,9 @@ import logging
 import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.federation.space_scope import (
+    archive_refusal,
     log_cross_space_refusal,
     log_not_applied,
     resolve_space_id,
@@ -73,3 +75,42 @@ def test_a_benign_no_op_is_logged_at_debug_only(
     records = [r for r in caplog.records if "c1" in r.getMessage()]
     assert records and all(r.levelno == logging.DEBUG for r in records)
     assert "already deleted" in records[0].getMessage()
+
+
+def _space(**kw) -> Space:
+    return Space(
+        id="sp",
+        name="S",
+        owner_instance_id="host",
+        owner_username="anna",
+        identity_public_key="00" * 32,
+        config_sequence=0,
+        features=SpaceFeatures(),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+        **kw,
+    )
+
+
+def test_archive_refusal_passes_a_live_or_unknown_space() -> None:
+    assert archive_refusal(None, "peer") is None
+    assert archive_refusal(_space(), "peer") is None
+
+
+def test_archive_refusal_refuses_peers_but_not_the_host_on_a_reversible_archive() -> (
+    None
+):
+    space = _space(archived=True)
+    assert archive_refusal(space, "peer") == "archived"
+    assert archive_refusal(space, "") == "archived"
+    assert archive_refusal(space, "host") is None
+
+
+def test_archive_refusal_freezes_a_terminated_space_for_everybody() -> None:
+    for space in (
+        _space(archived=True, archived_reason="dissolved"),
+        _space(archived=True, archived_reason="removed"),
+        _space(dissolved=True),
+    ):
+        assert archive_refusal(space, "host") is not None
+        assert archive_refusal(space, "peer") is not None
