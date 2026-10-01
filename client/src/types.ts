@@ -646,7 +646,13 @@ export interface TaskItem {
   created_by: string
   created_at?: string
   updated_at?: string
+  /** ``null`` = no priority. Optional only for older fixtures / peers. */
+  priority?: TaskPriority | null
+  /** Free-form tags, ≤ 10 × ≤ 32 chars, de-duplicated case-insensitively. */
+  labels?: string[]
 }
+
+export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent'
 
 export interface TaskListEntry {
   id: string

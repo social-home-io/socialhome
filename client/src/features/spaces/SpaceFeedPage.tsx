@@ -31,9 +31,9 @@ import { PostCard } from '@/components/PostCard'
 import { Composer } from '@/components/Composer'
 import { openCommentOverlay } from '@/components/CommentOverlay'
 import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
-import { SpaceTasksTab, resetSpaceTasks } from './SpaceTasksTab'
+import { SpaceTasksTab } from './SpaceTasksTab'
 import { SpaceCalendarHost } from './SpaceCalendarHost'
-import { calendarTabLabel, visibleSpaceTabs } from './spaceTabs'
+import { calendarTabLabel, parseSpaceTab, visibleSpaceTabs } from './spaceTabs'
 import { SpaceBazaarTab } from './SpaceBazaarTab'
 import StickyBoardPage from '@/features/stickies/StickyBoardPage'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
@@ -148,6 +148,9 @@ const viewerRole = signal<
   'owner' | 'admin' | 'member' | 'subscriber' | undefined
 >(undefined)
 const spaceDetail = signal<SpaceDetail | null>(null)
+/** The member list answered (or failed) — until then ``viewerRole`` is
+ *  unknown, not "no role". */
+const roleKnown = signal(false)
 const memberCount = signal<number | null>(null)
 
 /** The space header + the viewer's role: ``GET /api/spaces/{id}`` (name,
@@ -176,9 +179,10 @@ async function loadSpaceHeader(spaceId: string) {
           )
             ? mine.role
             : undefined
+          roleKnown.value = true
         })
-        .catch(() => { /* keep the last role */ })
-      : Promise.resolve(),
+        .catch(() => { roleKnown.value = true /* keep the last role */ })
+      : Promise.resolve().then(() => { roleKnown.value = true }),
   ])
 }
 
@@ -227,8 +231,10 @@ function setSpaceCalendarView(mode: CalendarViewMode, spaceId: string) {
 }
 
 export default function SpaceFeedPage() {
-  const { params } = useRoute()
+  const { params, query } = useRoute()
   const spaceId = params.id
+  // ``?tab=tasks`` (e.g. from a task notification) opens that tab.
+  const linkedTab = parseSpaceTab(query?.tab)
 
   // Apply the space's custom theme (§23 customization). The hook
   // fetches /api/spaces/{id}/theme, sets CSS vars, and cleans up on
@@ -251,9 +257,9 @@ export default function SpaceFeedPage() {
     activeTab.value = 'feed'
     loading.value = true
     viewerRole.value = undefined
+    roleKnown.value = false
     spaceDetail.value = null
     memberCount.value = null
-    resetSpaceTasks()
     spaceCalEvents.value = []
     spaceCalCursor.value = new Date()
     spaceCalView.value = 'month'
@@ -316,6 +322,18 @@ export default function SpaceFeedPage() {
       offCalDeleted()
     }
   }, [spaceId])
+
+  // A deep link picks the tab once the page reset to the feed above…
+  useEffect(() => {
+    if (linkedTab && linkedTab !== activeTab.value) loadTabData(linkedTab)
+  }, [spaceId, linkedTab]) // eslint-disable-line react-hooks/exhaustive-deps
+  // …and falls back to the feed if the space turns out not to have it
+  // (feature off), or turns it off while it's open.
+  const features = spaceDetail.value?.features
+  useEffect(() => {
+    if (!spaceDetail.value || activeTab.value === 'moderation') return
+    if (!visibleSpaceTabs(features, true).includes(activeTab.value)) activeTab.value = 'feed'
+  }, [features])
 
   const loadTabData = (tab: SpaceTab) => {
     activeTab.value = tab
@@ -769,7 +787,16 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'tasks' && (
-        <SpaceTasksTab spaceId={spaceId} />
+        <SpaceTasksTab
+          spaceId={spaceId}
+          // Unknown until the member list answers: the tab waits rather
+          // than flashing locked cards at a member.
+          writable={roleKnown.value
+            ? viewerRole.value === 'owner' || viewerRole.value === 'admin'
+              || viewerRole.value === 'member'
+            : undefined}
+          archived={!!s?.archived}
+        />
       )}
 
       {activeTab.value === 'stickies' && (

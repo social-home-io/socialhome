@@ -44,3 +44,15 @@ describe('calendarModes / calendarTabLabel', () => {
     expect(calendarTabLabel({ calendar: false, timetable: true })).toBe('Timetable')
   })
 })
+
+describe('parseSpaceTab', () => {
+  it('accepts a linkable tab name and nothing else', async () => {
+    const { parseSpaceTab } = await import('./spaceTabs')
+    expect(parseSpaceTab('tasks')).toBe('tasks')
+    expect(parseSpaceTab('stickies')).toBe('stickies')
+    expect(parseSpaceTab('moderation')).toBeNull()
+    expect(parseSpaceTab('nope')).toBeNull()
+    expect(parseSpaceTab(undefined)).toBeNull()
+    expect(parseSpaceTab(['tasks'])).toBeNull()
+  })
+})

@@ -19,6 +19,8 @@ export interface ChipRadioOption<T extends string> {
   title?: string
   /** A colour dot shown before the label (e.g. a sticky colour). */
   swatch?: string
+  /** Extra attributes on the chip (e.g. ``data-*`` hooks). */
+  attrs?: Record<string, string>
 }
 
 interface ChipRadioGroupProps<T extends string> {
@@ -90,6 +92,7 @@ export function ChipRadioGroup<T extends string>({
             aria-checked={checked}
             tabIndex={checked ? 0 : -1}
             title={o.title}
+            {...o.attrs}
             class={checked ? `${opt} ${opt}--active` : opt}
             onKeyDown={e => onKeyDown(e, idx)}
             onClick={() => onChange(o.value)}

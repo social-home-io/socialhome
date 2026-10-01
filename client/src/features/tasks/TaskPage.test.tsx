@@ -90,6 +90,9 @@ const ONE_LIST = [{ id: 'l1', name: 'House' }]
 
 beforeEach(() => {
   auth.currentUser.value = ADMIN
+  // These tests cover the List view (the board has its own suite).
+  localStorage.clear()
+  for (const id of ['l1', 'l2', 'l9']) localStorage.setItem(`sh-tasks-view:${id}`, 'list')
   vi.resetModules()
   apiGet.mockReset()
   apiPost.mockReset()
@@ -467,7 +470,7 @@ describe('TaskPage edit rights (household)', () => {
     t.fireEvent.click(await t.findByRole('button', { name: 'Edit theirs' }))
     const dialog = await t.findByRole('dialog', { name: 'Task details' })
     const none = Array.from(dialog.querySelectorAll('dd.sh-task-edit__empty')).map(d => d.textContent)
-    expect(none).toEqual(['No notes', 'No due date'])
+    expect(none).toEqual(['No notes', 'No due date', 'None', 'No labels', 'Nobody assigned'])
   })
 
   it('an editable task keeps the "Edit task" title and form fields', async () => {
@@ -620,16 +623,24 @@ describe('TaskPage on a phone', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/lists', { name: 'Errands' })
   })
 
-  it('the picker renames and deletes the current list', async () => {
+  it('the picker only picks: "+ New list…" first, then the lists', async () => {
+    const t = await setup({ lists: LISTS, tasks: TASKS })
+    t.fireEvent.click(await t.findByRole('button', { name: 'List: House — switch or manage lists' }))
+    const items = Array.from(t.getByRole('menu').querySelectorAll('[role^="menuitem"]')).map(i => i.textContent)
+    expect(items).toEqual(['+ New list…', 'House✓', 'Garden'])
+  })
+
+  it("the current list's ⋯ renames and deletes it", async () => {
     const t = await setup({ lists: LISTS, tasks: TASKS })
     apiPatch.mockResolvedValue({ id: 'l1', name: 'Home' })
-    t.fireEvent.click(await t.findByRole('button', { name: 'List: House — switch or manage lists' }))
+    t.fireEvent.click(await t.findByRole('button', { name: 'List actions for House' }))
+    expect(t.getAllByRole('menuitem').map(i => i.textContent)).toEqual(['Rename list', 'Delete list'])
     t.fireEvent.click(t.getByRole('menuitem', { name: 'Rename list' }))
     const input = t.getByRole('textbox', { name: 'Rename House' })
     t.fireEvent.input(input, { target: { value: 'Home' } })
     t.fireEvent.keyDown(input, { key: 'Enter' })
     await t.waitFor(() => expect(apiPatch).toHaveBeenCalledWith('/api/tasks/lists/l1', { name: 'Home' }))
-    t.fireEvent.click(await t.findByRole('button', { name: 'List: Home — switch or manage lists' }))
+    t.fireEvent.click(await t.findByRole('button', { name: 'List actions for Home' }))
     t.fireEvent.click(t.getByRole('menuitem', { name: 'Delete list' }))
     await t.waitFor(() => expect(t.getByRole('button', { name: 'List: Garden — switch or manage lists' })).toBeTruthy())
   })
@@ -653,7 +664,7 @@ describe('TaskPage on a phone', () => {
 
   it('Escape in the picker rename returns focus to the picker and saves nothing', async () => {
     const t = await setup({ lists: LISTS, tasks: TASKS })
-    t.fireEvent.click(await t.findByRole('button', { name: 'List: House — switch or manage lists' }))
+    t.fireEvent.click(await t.findByRole('button', { name: 'List actions for House' }))
     t.fireEvent.click(t.getByRole('menuitem', { name: 'Rename list' }))
     const input = t.getByRole('textbox', { name: 'Rename House' })
     expect(input.getAttribute('maxlength')).toBe('100')

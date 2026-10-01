@@ -413,6 +413,15 @@ describe('deleting with Undo', () => {
   })
 })
 
+describe('logout', () => {
+  it('resetTasks also forgets the board filters', async () => {
+    const f = await import('@/features/tasks/board/filters')
+    f.setFilters('household:l1', { ...f.EMPTY_FILTERS, mine: true })
+    resetTasks()
+    expect(f.getFilters('household:l1')).toBe(f.EMPTY_FILTERS)
+  })
+})
+
 describe('canEditTask', () => {
   const me = (user_id: string, is_admin = false) => ({ user_id, is_admin })
   it('household: creator, assignee or admin; nobody else', () => {
@@ -514,5 +523,138 @@ describe('reset', () => {
     d.resolve([{ id: 'l1', name: 'A' }])
     await p
     expect(householdTaskStore.lists.value).toEqual([])
+  })
+})
+
+describe('board moves', () => {
+  async function seed(s: TaskStore, rows: TaskItem[]) {
+    apiGet.mockResolvedValueOnce(rows)
+    await s.loadList('l1', { force: true })
+  }
+
+  it('createTask sends the column status, priority and labels in one request', async () => {
+    apiPost.mockResolvedValue(task('n', 'l1', 'in_progress', { priority: 'high', labels: ['Garden'] }))
+    await store.createTask('l1', 'n', { status: 'in_progress', priority: 'high', labels: ['Garden'] })
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/lists/l1/tasks',
+      { title: 'n', status: 'in_progress', priority: 'high', labels: ['Garden'] })
+    expect(store.findTask('n')?.status).toBe('in_progress')
+  })
+
+  it('a move within a column only reorders, with {order, moved_id}', async () => {
+    await seed(store, [task('a', 'l1', 'todo', { position: 0 }), task('b', 'l1', 'todo', { position: 1 })])
+    apiPost.mockResolvedValue({ ok: true, count: 2 })
+    const p = store.moveTask('b', 'todo', ['b', 'a'])
+    // Optimistic at once.
+    expect(store.findTask('b')?.position).toBe(0)
+    expect(store.findTask('a')?.position).toBe(1)
+    await p
+    expect(apiPatch).not.toHaveBeenCalled()
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/lists/l1/reorder', { order: ['b', 'a'], moved_id: 'b' })
+  })
+
+  it('a move across columns PATCHes the status, then reorders the target column', async () => {
+    await seed(store, [task('a', 'l1', 'todo'), task('c', 'l1', 'in_progress', { position: 0 })])
+    apiPatch.mockImplementation(async (_u: string, body: object) => ({ ...task('a', 'l1'), ...body }))
+    apiPost.mockResolvedValue({ ok: true })
+    const p = store.moveTask('a', 'in_progress', ['c', 'a'])
+    expect(store.findTask('a')?.status).toBe('in_progress')
+    expect(store.findTask('a')?.position).toBe(1)
+    await p
+    expect(apiPatch).toHaveBeenCalledWith('/api/tasks/a', { status: 'in_progress' })
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/lists/l1/reorder', { order: ['c', 'a'], moved_id: 'a' })
+    expect(store.findTask('a')?.position).toBe(1)
+  })
+
+  it('a WS echo of the status change (old position) does not make the card jump', async () => {
+    await seed(store, [task('a', 'l1', 'todo', { position: 2 }), task('c', 'l1', 'in_progress', { position: 0 })])
+    const reorder = deferred<unknown>()
+    apiPatch.mockImplementation(async (_u: string, body: object) => ({ ...task('a', 'l1', 'todo', { position: 2 }), ...body }))
+    apiPost.mockReturnValue(reorder.promise)
+    const p = store.moveTask('a', 'in_progress', ['a', 'c'])
+    store.onTaskUpsert(task('a', 'l1', 'in_progress', { position: 2 }))
+    store.onTaskUpsert(task('c', 'l1', 'in_progress', { position: 0 }))
+    await flush()
+    expect(store.findTask('a')?.position).toBe(0)
+    expect(store.findTask('c')?.position).toBe(1)
+    reorder.resolve({ ok: true })
+    await p
+    // Confirmed: later frames are the truth again.
+    store.onTaskUpsert(task('a', 'l1', 'in_progress', { position: 5 }))
+    expect(store.findTask('a')?.position).toBe(5)
+  })
+
+  it('status saved but reorder failed: rejects with partial: true', async () => {
+    await seed(store, [task('a', 'l1', 'todo', { position: 2 }), task('c', 'l1', 'done', { position: 0 })])
+    apiPatch.mockImplementation(async (_u: string, body: object) => ({ ...task('a', 'l1'), ...body }))
+    apiPost.mockRejectedValue(Object.assign(new Error('bad'), { status: 500 }))
+    await expect(store.moveTask('a', 'done', ['a', 'c'])).rejects.toMatchObject({ partial: true })
+  })
+
+  it('a reorder failure without a status change is not partial', async () => {
+    await seed(store, [task('a', 'l1', 'todo', { position: 0 }), task('b', 'l1', 'todo', { position: 1 })])
+    apiPost.mockRejectedValue(Object.assign(new Error('bad'), { status: 500 }))
+    const err = await store.moveTask('b', 'todo', ['b', 'a']).catch(e => e)
+    expect(err.partial).toBeUndefined()
+  })
+
+  it('serial runs jobs of one list one after another', async () => {
+    const order: string[] = []
+    const first = deferred<void>()
+    const p1 = store.serial('l1', async () => { order.push('1 start'); await first.promise; order.push('1 end') })
+    const p2 = store.serial('l1', async () => { order.push('2') })
+    await flush()
+    expect(order).toEqual(['1 start'])
+    first.resolve()
+    await Promise.all([p1, p2])
+    expect(order).toEqual(['1 start', '1 end', '2'])
+  })
+
+  it('a failed job does not block the next one', async () => {
+    const p1 = store.serial('l1', async () => { throw new Error('x') })
+    const p2 = store.serial('l1', async () => 'ok')
+    await expect(p1).rejects.toThrow('x')
+    await expect(p2).resolves.toBe('ok')
+  })
+
+  it('a frame overridden by a pin reloads the list once the pin goes', async () => {
+    await seed(store, [task('a', 'l1', 'todo', { position: 0 }), task('b', 'l1', 'todo', { position: 1 })])
+    const reorder = deferred<unknown>()
+    apiPost.mockReturnValue(reorder.promise)
+    const p = store.moveTask('b', 'todo', ['b', 'a'])
+    // Someone else's change lands meanwhile and is held back by the pin.
+    store.onTaskUpsert(task('a', 'l1', 'todo', { position: 7 }))
+    expect(store.findTask('a')?.position).toBe(1)
+    apiGet.mockResolvedValueOnce([task('a', 'l1', 'todo', { position: 7 }), task('b', 'l1', 'todo', { position: 0 })])
+    reorder.resolve({ ok: true })
+    await p
+    await flush()
+    expect(apiGet).toHaveBeenLastCalledWith('/api/tasks/lists/l1/tasks')
+    expect(store.findTask('a')?.position).toBe(7)
+  })
+
+  it('a space store reorders on the space route', async () => {
+    const s = spaceTaskStore('s1')
+    await seed(s, [task('a', 'l1', 'todo'), task('b', 'l1', 'todo', { position: 1 })])
+    apiPost.mockResolvedValue({ ok: true })
+    await s.moveTask('b', 'todo', ['b', 'a'])
+    expect(apiPost).toHaveBeenCalledWith('/api/spaces/s1/tasks/lists/l1/reorder', { order: ['b', 'a'], moved_id: 'b' })
+  })
+
+  it('a failed status PATCH rolls the status and positions back and skips the reorder', async () => {
+    await seed(store, [task('a', 'l1', 'todo', { position: 3 }), task('c', 'l1', 'done', { position: 0 })])
+    apiPatch.mockRejectedValue(Object.assign(new Error('nope'), { status: 403 }))
+    await expect(store.moveTask('a', 'done', ['a', 'c'])).rejects.toMatchObject({ status: 403 })
+    expect(store.findTask('a')).toMatchObject({ status: 'todo', position: 3 })
+    expect(store.findTask('c')?.position).toBe(0)
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('a failed reorder puts the positions back but keeps the saved status', async () => {
+    await seed(store, [task('a', 'l1', 'todo', { position: 2 }), task('c', 'l1', 'done', { position: 0 })])
+    apiPatch.mockImplementation(async (_u: string, body: object) => ({ ...task('a', 'l1', 'todo', { position: 2 }), ...body }))
+    apiPost.mockRejectedValue(Object.assign(new Error('bad'), { status: 422 }))
+    await expect(store.moveTask('a', 'done', ['a', 'c'])).rejects.toMatchObject({ status: 422 })
+    expect(store.findTask('a')).toMatchObject({ status: 'done', position: 2 })
+    expect(store.findTask('c')?.position).toBe(0)
   })
 })

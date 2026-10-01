@@ -8,28 +8,17 @@
  * on ``--tt-bg`` in both themes).
  */
 import type { Timetable, TimetableColor, TimetableEntry } from '@/types'
+import {
+  TOKEN_COLORS, colorClass, hashColor, normalizeTokenKey,
+} from '@/utils/tokenColor'
 
-export const TIMETABLE_COLORS: readonly TimetableColor[] = [
-  'terracotta', 'amber', 'olive', 'moss', 'teal', 'sky',
-  'indigo', 'violet', 'rose', 'slate', 'sand', 'coral',
-] as const
+// The palette and the name → colour hash are shared with task labels.
+export { colorClass, hashColor }
+
+export const TIMETABLE_COLORS: readonly TimetableColor[] = TOKEN_COLORS
 
 /** Lowercase, trimmed, diacritics stripped — "Música" ≡ "musica". */
-export function normalizeSubject(title: string): string {
-  return title.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().trim()
-    .replace(/\s+/g, ' ')
-}
-
-/** FNV-1a over the normalised title — only used past the palette. */
-export function hashColor(title: string): TimetableColor {
-  const key = normalizeSubject(title)
-  let h = 0x811c9dc5
-  for (let i = 0; i < key.length; i++) {
-    h ^= key.charCodeAt(i)
-    h = Math.imul(h, 0x01000193) >>> 0
-  }
-  return TIMETABLE_COLORS[h % TIMETABLE_COLORS.length]
-}
+export const normalizeSubject = normalizeTokenKey
 
 const cache = new WeakMap<Timetable, Map<string, TimetableColor>>()
 
@@ -73,8 +62,4 @@ export function entryColor(
   if (entry.color) return entry.color
   const key = normalizeSubject(entry.title ?? '')
   return key ? (subjectColors(tt).get(key) ?? hashColor(key)) : null
-}
-
-export function colorClass(token: TimetableColor | null): string {
-  return `sh-timetable-c--${token ?? 'neutral'}`
 }
