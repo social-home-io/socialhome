@@ -179,6 +179,7 @@
   "settings.tab.privacy": "Privacy",
   "settings.tab.notifications": "Meldingen",
   "settings.tab.appearance": "Weergave",
+  "settings.locale.save_failed": "Taal kon niet worden opgeslagen — op andere apparaten blijft de oude",
   "settings.week_start.title": "Eerste dag van de week",
   "settings.week_start.auto": "Automatisch ({day})",
   "settings.week_start.monday": "Maandag",

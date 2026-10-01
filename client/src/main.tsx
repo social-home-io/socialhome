@@ -22,6 +22,8 @@ import { wireDmWs } from './store/dms'
 import { wireCallsWs } from './store/calls'
 import { wireConnectionsWs } from './store/connections'
 import { wireUserPreferencesWs } from './store/userPreferences'
+import { wireLocalePreference } from './store/localePreference'
+import { initLocale } from './i18n/i18n'
 import { wireMediaReadyWs } from './store/mediaReady'
 import { wireSpacesWs } from './store/spaces'
 import { wireProtectionWs } from './store/protection'
@@ -43,6 +45,8 @@ wireDmWs()
 wireCallsWs()
 wireConnectionsWs()
 wireUserPreferencesWs()
+wireLocalePreference()
+void initLocale()
 wireMediaReadyWs()
 wireSpacesWs()
 wireProtectionWs()

@@ -179,6 +179,7 @@
   "settings.tab.privacy": "Confidentialité",
   "settings.tab.notifications": "Notifications",
   "settings.tab.appearance": "Apparence",
+  "settings.locale.save_failed": "Impossible d'enregistrer la langue — elle ne suivra pas sur vos autres appareils",
   "settings.week_start.title": "Premier jour de la semaine",
   "settings.week_start.auto": "Automatique ({day})",
   "settings.week_start.monday": "Lundi",

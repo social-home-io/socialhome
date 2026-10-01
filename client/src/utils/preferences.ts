@@ -28,6 +28,8 @@ interface Preferences {
   /** First day of the week for calendar-style views. Absent = follow
    *  the browser locale (see ``utils/week.ts``). */
   week_start?: 'mon' | 'sun' | null
+  /** UI language (a code from ``i18n/locales/_meta.json``). */
+  locale?: string
   /** Space timetables whose lessons join this user's Today card, in pin
    *  order (the server reads at most 20). */
   timetable_home_pins?: string[]
