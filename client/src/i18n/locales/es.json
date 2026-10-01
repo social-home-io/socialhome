@@ -191,6 +191,7 @@
   "settings.tab.privacy": "Privacidad",
   "settings.tab.notifications": "Notificaciones",
   "settings.tab.appearance": "Apariencia",
+  "settings.locale.save_failed": "No se pudo guardar el idioma; en otros dispositivos seguirá el anterior",
   "settings.week_start.title": "Primer día de la semana",
   "settings.week_start.auto": "Automático ({day})",
   "settings.week_start.monday": "Lunes",

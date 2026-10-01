@@ -250,6 +250,7 @@
   "settings.tab.privacy": "Privacy",
   "settings.tab.notifications": "Notifications",
   "settings.tab.appearance": "Appearance",
+  "settings.locale.save_failed": "Couldn't save your language — it will reset on other devices",
   "settings.week_start.title": "First day of the week",
   "settings.week_start.auto": "Automatic ({day})",
   "settings.week_start.monday": "Monday",

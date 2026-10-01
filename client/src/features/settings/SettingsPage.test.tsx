@@ -532,3 +532,37 @@ describe('SettingsPage — first day of the week', () => {
     expect(getByRole('radio', { name: 'Sunday' }).getAttribute('aria-checked')).toBe('true')
   })
 })
+
+describe('SettingsPage — language picker keyboard', () => {
+  it('is a single Tab stop and arrow keys switch the language', async () => {
+    const { locale } = await import('@/i18n/i18n')
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole } = render(<SettingsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Appearance' }))
+    const group = getByRole('radiogroup', { name: 'Language' })
+    const radios = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]'))
+    const checked = radios.findIndex(r => r.getAttribute('aria-checked') === 'true')
+    expect(radios.map(r => r.tabIndex).filter(t => t === 0)).toHaveLength(1)
+    expect(radios[checked].tabIndex).toBe(0)
+    const before = locale.value
+    fireEvent.keyDown(radios[checked], { key: 'ArrowRight' })
+    await waitFor(() => expect(locale.value).not.toBe(before))
+    const after = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]'))
+    expect(document.activeElement).toBe(after[(checked + 1) % after.length])
+  })
+})
+
+describe('SettingsPage — language is saved', () => {
+  it('choosing a language persists it to the user preferences', async () => {
+    mockPatch.mockClear()
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole } = render(<SettingsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Appearance' }))
+    fireEvent.click(getByRole('radio', { name: 'Nederlands' }))
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith('/api/me', { preferences: { locale: 'nl' } })
+    })
+    const { setLocale } = await import('@/i18n/i18n')
+    await setLocale('en')
+  })
+})

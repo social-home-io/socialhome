@@ -8,6 +8,7 @@ import type { User } from '@/types'
 import { Button } from '@/components/Button'
 import { ProtectedAccountSection } from './ProtectedAccountSection'
 import { showToast } from '@/components/Toast'
+import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { theme, type Theme } from '@/store/theme'
 import { HouseholdThemeStudio } from '@/components/HouseholdThemeStudio'
 import { locale, setLocale, t } from '@/i18n/i18n'
@@ -1114,25 +1115,16 @@ function AppearanceTab() {
 
       <div class="sh-locale-picker">
         <h3>Language</h3>
-        <div class="sh-locale-options" role="radiogroup" aria-label="Language">
-          {Object.entries(localeMeta.locales).map(([code, info]) => (
-            <button
-              key={code}
-              type="button"
-              role="radio"
-              aria-checked={locale.value === code}
-              class={
-                locale.value === code
-                  ? 'sh-locale-option sh-locale-option--active'
-                  : 'sh-locale-option'
-              }
-              onClick={() => { void setLocale(code) }}
-              title={(info as { english_name: string }).english_name}
-            >
-              {(info as { native_name: string }).native_name}
-            </button>
-          ))}
-        </div>
+        <ChipRadioGroup
+          ariaLabel="Language"
+          value={locale.value}
+          onChange={code => { void chooseLocale(code) }}
+          options={Object.entries(localeMeta.locales).map(([code, info]) => ({
+            value: code,
+            label: (info as { native_name: string }).native_name,
+            title: (info as { english_name: string }).english_name,
+          }))}
+        />
         <p class="sh-muted">
           Translations are contributed by the community. Missing or awkward
           text? <a href={localeMeta.weblate_url} target="_blank" rel="noopener noreferrer">
@@ -1143,6 +1135,18 @@ function AppearanceTab() {
       {currentUser.value?.is_admin && <HouseholdThemeStudio />}
     </section>
   )
+}
+
+/** Switch the UI language now and save it so it follows the user to
+ *  other devices. A failed save keeps the switch (it is still cached
+ *  locally) and just says so. */
+async function chooseLocale(code: string) {
+  await setLocale(code)
+  try {
+    await setPreference('locale', code)
+  } catch {
+    showToast(t('settings.locale.save_failed'), 'error')
+  }
 }
 
 function WeekStartPicker() {
@@ -1157,8 +1161,8 @@ function WeekStartPicker() {
   ]
   // Only the latest save may revert / toast — an older PATCH failing
   // after a newer one succeeded must not roll the picker back.
+  // ChipRadioGroup keeps focus on the re-checked chip after a revert.
   const seq = useRef(0)
-  const group = useRef<HTMLDivElement>(null)
   const select = async (next: WeekStartPref) => {
     if (next === choice.value) return
     const prev = choice.value
@@ -1169,9 +1173,6 @@ function WeekStartPicker() {
     } catch (err: unknown) {
       if (mine !== seq.current) return
       choice.value = prev
-      // Keep focus on the (re-)checked radio, the group's only Tab stop.
-      const idx = options.findIndex(o => o.value === prev)
-      group.current?.querySelectorAll<HTMLElement>('[role="radio"]')[idx]?.focus()
       showToast(
         t('settings.week_start.save_failed', {
           error: (err as Error).message ?? String(err),
@@ -1181,42 +1182,15 @@ function WeekStartPicker() {
     }
   }
 
-  // ARIA radiogroup: one Tab stop (the checked radio); arrows move
-  // focus and selection together, wrapping at either end.
-  const onKeyDown = (e: KeyboardEvent, idx: number) => {
-    const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1
-      : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
-    if (step === 0) return
-    e.preventDefault()
-    const next = (idx + step + options.length) % options.length
-    group.current?.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus()
-    void select(options[next].value)
-  }
-
   return (
     <div class="sh-locale-picker">
       <h3 id="sh-week-start-heading">{t('settings.week_start.title')}</h3>
-      <div class="sh-locale-options" role="radiogroup" ref={group}
-           aria-labelledby="sh-week-start-heading">
-        {options.map((o, idx) => (
-          <button
-            key={o.value}
-            type="button"
-            role="radio"
-            aria-checked={choice.value === o.value}
-            tabIndex={choice.value === o.value ? 0 : -1}
-            onKeyDown={e => onKeyDown(e, idx)}
-            class={
-              choice.value === o.value
-                ? 'sh-locale-option sh-locale-option--active'
-                : 'sh-locale-option'
-            }
-            onClick={() => { void select(o.value) }}
-          >
-            {o.label}
-          </button>
-        ))}
-      </div>
+      <ChipRadioGroup
+        labelledBy="sh-week-start-heading"
+        value={choice.value}
+        onChange={v => { void select(v) }}
+        options={options}
+      />
       <p class="sh-muted">{t('settings.week_start.hint')}</p>
     </div>
   )

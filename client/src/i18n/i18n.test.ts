@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { t, locale } from './i18n'
 
 describe('i18n', () => {
@@ -17,5 +17,55 @@ describe('i18n', () => {
 
   it('default locale is en', () => {
     expect(locale.value).toBe('en')
+  })
+})
+
+describe('setLocale / initLocale', () => {
+  afterEach(async () => {
+    const { setLocale } = await import('./i18n')
+    await setLocale('en')
+    try { localStorage.removeItem('sh_locale') } catch { /* ignore */ }
+  })
+
+  it('switches translations and sets <html lang> and dir', async () => {
+    const { setLocale, t: tt, locale: loc } = await import('./i18n')
+    await setLocale('de')
+    expect(loc.value).toBe('de')
+    expect(document.documentElement.lang).toBe('de')
+    expect(document.documentElement.dir).toBe('ltr')
+    expect(tt('settings.week_start.monday')).toBe('Montag')
+  })
+
+  it('caches the choice so the next cold start uses it', async () => {
+    const { setLocale } = await import('./i18n')
+    await setLocale('fr')
+    expect(localStorage.getItem('sh_locale')).toBe('fr')
+  })
+
+  it('initLocale applies a cached locale', async () => {
+    const { initLocale, locale: loc } = await import('./i18n')
+    localStorage.setItem('sh_locale', 'nl')
+    await initLocale()
+    expect(loc.value).toBe('nl')
+    expect(document.documentElement.lang).toBe('nl')
+  })
+
+  it('ignores unknown locale codes (never imports an arbitrary path)', async () => {
+    const { initLocale, setLocale, locale: loc } = await import('./i18n')
+    localStorage.setItem('sh_locale', '../../secrets')
+    await initLocale()
+    expect(loc.value).toBe('en')
+    await setLocale('xx')
+    expect(loc.value).toBe('en')
+  })
+
+  it('survives storage that throws', async () => {
+    const { initLocale, setLocale, locale: loc } = await import('./i18n')
+    const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
+    const spy2 = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked') })
+    await initLocale()
+    await setLocale('es')
+    expect(loc.value).toBe('es')
+    spy.mockRestore(); spy2.mockRestore()
   })
 })
