@@ -1,34 +1,49 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useTitle } from '@/store/pageTitle'
-import { signal } from '@preact/signals'
 import {
   items,
   stores,
   loadShopping,
+  shoppingLoaded,
   wireShoppingWs,
   addItem,
   updateItem,
   toggleItem,
-  deleteItem,
-  clearCompleted,
+  deleteItems,
+  reinsertItems,
   reorderStores,
   sameName,
 } from '@/store/shopping'
 import type { ShoppingItem } from '@/types'
-import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
+import { CheckToggle } from '@/components/CheckToggle'
+import { RowActionButton } from '@/components/RowActionButton'
+import { QuickAddBar } from '@/components/QuickAddBar'
+import { ListSkeleton } from '@/components/Skeleton'
+import { LoadErrorState } from '@/components/LoadErrorState'
+import { ChipRadioGroup } from '@/components/ChipRadioGroup'
+import { OverflowMenu, type MenuItem } from '@/components/OverflowMenu'
 import { currentUser } from '@/store/auth'
 import {
   householdDisplayName,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
-import { confirmDialog } from '@/components/confirm'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { parseItemInput } from '@/utils/shoppingParse'
+import { useLoad } from '@/utils/useLoad'
+import { undoableDelete, pendingDeletes } from '@/utils/undoableDelete'
+import { t } from '@/i18n/i18n'
+import { OrganizeSectionHeader } from '@/features/organize/shared/OrganizeSectionHeader'
+import { ArchiveDivider } from '@/features/organize/shared/ArchiveDivider'
+import { DropPad } from '@/features/organize/shared/DropPad'
+import {
+  useDragBuckets,
+  composeDragHandlers,
+  type DragItemProps,
+  type DragBuckets,
+} from '@/features/organize/shared/useDragBuckets'
 import { StoreManagerDialog } from './StoreManagerDialog'
-
-const loading = signal(true)
 
 /** Key the "Group by store" toggle off ``localStorage`` so the
  *  toggle survives reloads. Default is "auto" — turn on automatically
@@ -59,22 +74,53 @@ function writeGroupPref(v: GroupPref) {
 const NO_STORE_KEY = '__no_store__'
 
 /** Distinguishes item drags from store-header drags in the same
- *  drag-and-drop layer. Stamped on ``dataTransfer`` so a section's
- *  drop handler can decide whether to reassign an item or reorder
- *  stores. The string is opaque — we only look at the *presence* of
- *  ``DRAG_ITEM_MIME``. */
+ *  drag-and-drop layer (one ``useDragBuckets`` instance per kind). */
 const DRAG_ITEM_MIME = 'application/x-sh-shopping-item'
 const DRAG_STORE_MIME = 'application/x-sh-shopping-store'
 
+/** ``t()`` with a count: picks the ``_one`` key for exactly one.
+ *  Keys reached this way (for ``i18n:check``):
+ *  t('shopping.dupes_skipped') t('shopping.dupes_skipped_one')
+ *  t('shopping.cleared') t('shopping.cleared_one') */
+function tn(key: string, n: number, params: Record<string, string> = {}): string {
+  return t(n === 1 ? `${key}_one` : key, { ...params, n: String(n) })
+}
+
+function errText(err: unknown): string {
+  return String((err as Error)?.message ?? err)
+}
+
+/** Touch devices: don't pop the on-screen keyboard on arrival. */
+function prefersNoAutofocus(): boolean {
+  try {
+    return typeof window.matchMedia === 'function'
+      && window.matchMedia('(pointer: coarse)').matches
+  } catch {
+    return false
+  }
+}
+
 export default function ShoppingPage() {
-  useTitle('Shopping')
+  useTitle(t('shopping.title'))
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     wireShoppingWs()
     void loadHouseholdUsers()
-    loadShopping().then(() => { loading.value = false })
   }, [])
+
+  // Cached signals render at once on a revisit; the loader revalidates
+  // behind them and again after a WebSocket reconnect.
+  // A reconnect revalidation forces a fresh fetch past any in-flight
+  // one; a recovered Retry hands focus to the add field (the Retry
+  // button it replaces held it).
+  const { state, retry } = useLoad(
+    ({ reason }) => loadShopping({ force: reason === 'reconnect' }),
+    {
+      cached: shoppingLoaded.value,
+      onRecovered: () => requestAnimationFrame(() => inputRef.current?.focus()),
+    },
+  )
 
   const [draft, setDraft] = useState('')
   const [showSuggest, setShowSuggest] = useState(false)
@@ -88,18 +134,25 @@ export default function ShoppingPage() {
   const [caretPos, setCaretPos] = useState(0)
   const [groupPref, setGroupPref] = useState<GroupPref>(readGroupPref())
   const [editingId, setEditingId] = useState<string | null>(null)
+  /** Row whose rename trigger should take focus back once its editor
+   *  closed from the keyboard (Enter / Escape / Save / Cancel). A blur
+   *  commit leaves focus wherever the user moved it. */
+  const [refocusId, setRefocusId] = useState<string | null>(null)
+  const clearRefocus = useCallback(() => setRefocusId(null), [])
   /** Whether the store-catalogue manager dialog is open. */
   const [storesOpen, setStoresOpen] = useState(false)
-  /** Currently-dragged store name (header drag), or ``null``. */
-  const [dragStore, setDragStore] = useState<string | null>(null)
-  /** Currently-dragged item id (row drag), or ``null``. ``null`` and
-   *  ``dragStore=null`` together mean nothing is being dragged. The
-   *  two states are mutually exclusive: a single drag is *either* a
-   *  store reorder or an item reassign, never both. */
-  const [dragItemId, setDragItemId] = useState<string | null>(null)
-  /** Section currently hovered as a drop target while a row is being
-   *  dragged. Drives the section's drop-zone highlight. */
-  const [dropTarget, setDropTarget] = useState<string | null>(null)
+
+  const itemDrag = useDragBuckets<string>({
+    mime: DRAG_ITEM_MIME,
+    onDrop: (id, bucket) => {
+      void handleReassignStore(id, bucket === NO_STORE_KEY ? null : bucket)
+    },
+  })
+  const storeDrag = useDragBuckets<string>({
+    mime: DRAG_STORE_MIME,
+    canDrop: (bucket) => bucket !== NO_STORE_KEY,
+    onDrop: (name, target) => { void handleStoreHeaderDrop(name, target) },
+  })
 
   /** ``@ store`` autocomplete context. ``null`` when the caret isn't
    *  inside a store-name suffix (no ``@`` before the caret on this
@@ -154,9 +207,17 @@ export default function ShoppingPage() {
     })
   }
 
+  // Hidden-but-uncommitted deletes (Undo window) stay out of every
+  // view, even if a WS frame or a revalidate brings the row back.
+  const pending = pendingDeletes.value
+  const visible = useMemo(
+    () => items.value.filter(i => !pending.has(i.id)),
+    [items.value, pending],
+  )
+
   // Suggest re-adding any completed item by name (existing pattern).
   const pastNames = useMemo(() => {
-    const names = items.value
+    const names = visible
       .filter(i => i.completed)
       .map(i => (i.text || '').trim())
       .filter(Boolean)
@@ -168,10 +229,9 @@ export default function ShoppingPage() {
       out.push(n)
     }
     return out.slice(0, 12)
-  }, [items.value])
+  }, [visible])
 
-  const handleQuickAdd = async (e: Event) => {
-    e.preventDefault()
+  const handleQuickAdd = async () => {
     const raw = draft.trim()
     if (!raw) return
     // Comma-split first, then ``@``-split each segment so the user
@@ -182,7 +242,7 @@ export default function ShoppingPage() {
       .filter(p => p.text)
     if (parts.length === 0) return
     const existing = new Set(
-      items.value
+      visible
         .filter(i => !i.completed)
         .map(i => (i.text || '').toLowerCase()),
     )
@@ -199,12 +259,12 @@ export default function ShoppingPage() {
       setDraft('')
       setShowSuggest(false)
       if (dupes.length && parts.length === dupes.length) {
-        showToast('All items are already on the list', 'info')
+        showToast(t('shopping.all_dupes'), 'info')
       } else if (dupes.length) {
-        showToast(`${dupes.length} duplicate skipped`, 'info')
+        showToast(tn('shopping.dupes_skipped', dupes.length), 'info')
       }
     } catch (err: unknown) {
-      showToast(`Add failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('shopping.error.add', { error: errText(err) }), 'error')
     }
   }
 
@@ -213,7 +273,7 @@ export default function ShoppingPage() {
       await addItem(name)
       inputRef.current?.focus()
     } catch (err: unknown) {
-      showToast(`Add failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('shopping.error.add', { error: errText(err) }), 'error')
     }
   }
 
@@ -221,45 +281,68 @@ export default function ShoppingPage() {
     try {
       await toggleItem(id, !completed)
     } catch (err: unknown) {
-      showToast(`Update failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('shopping.error.update', { error: errText(err) }), 'error')
     }
   }
 
-  const handleDelete = async (id: string) => {
-    try {
-      await deleteItem(id)
-    } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error)?.message ?? err}`, 'error')
-    }
+  /** Instant delete with Undo: the row hides now, the DELETE goes out
+   *  when the toast expires. */
+  const handleDelete = (item: ShoppingItem) => {
+    const snapshot = [item]
+    undoableDelete({
+      ids: [item.id],
+      message: t('shopping.deleted', { text: item.text }),
+      // ``deleteItems`` treats a 404 as gone and only drops gone ids.
+      commit: ({ keepalive }) => deleteItems([item.id], { keepalive }),
+      restore: () => reinsertItems(snapshot),
+      onUndone: () => focusItemCheck(item.id),
+    })
   }
 
-  const handleClearCompleted = async () => {
-    if (!await confirmDialog('Clear all completed items? This cannot be undone.', { destructive: true })) return
-    try {
-      await clearCompleted()
-    } catch (err: unknown) {
-      showToast(`Clear failed: ${(err as Error)?.message ?? err}`, 'error')
-    }
+  /** "Clear all" bought items, with Undo. On expiry it deletes exactly
+   *  the ids hidden now — not the atomic ``clear-completed``, which
+   *  would also take items ticked off during the Undo window. */
+  const handleClearCompleted = () => {
+    const done = visible.filter(i => i.completed)
+    if (done.length === 0) return
+    const ids = done.map(i => i.id)
+    undoableDelete({
+      ids,
+      message: tn('shopping.cleared', ids.length),
+      commit: ({ keepalive }) => deleteItems(ids, { keepalive }),
+      restore: () => reinsertItems(done),
+      onUndone: () => focusItemCheck(ids[0]),
+    })
+    inputRef.current?.focus()
   }
 
-  /** Rename-only save path. The store assignment moved to the
-   *  ``StorePicker`` popover (single-tap on the row's store pill) so
-   *  this entry point doesn't need a second field. */
-  const handleEditSave = async (id: string, nextText: string) => {
+  /** Rename-only save path. The store assignment lives in the row's
+   *  ``StorePicker`` so this entry point doesn't need a second field.
+   *  ``refocus`` is set when the edit ended from the keyboard. */
+  const handleEditSave = async (item: ShoppingItem, nextText: string, refocus: boolean) => {
     const trimmedText = nextText.trim()
-    if (!trimmedText) return
-    try {
-      await updateItem(id, { text: trimmedText })
+    if (!trimmedText || trimmedText === item.text) {
       setEditingId(null)
-    } catch (err: unknown) {
-      showToast(`Update failed: ${(err as Error)?.message ?? err}`, 'error')
+      if (refocus) setRefocusId(item.id)
+      return
     }
+    try {
+      await updateItem(item.id, { text: trimmedText })
+      setEditingId(null)
+      if (refocus) setRefocusId(item.id)
+    } catch (err: unknown) {
+      showToast(t('shopping.error.update', { error: errText(err) }), 'error')
+    }
+  }
+
+  const handleEditCancel = (item: ShoppingItem, refocus: boolean) => {
+    setEditingId(null)
+    if (refocus) setRefocusId(item.id)
   }
 
   /** Reassign an item to a different store (or clear the store).
    *  Drives both the StorePicker popover and the drag-and-drop path
-   *  in GroupedView — both call straight here. ``null`` clears the
-   *  store ("No store"). */
+   *  in GroupedView. ``null`` clears the store ("No store"). */
   const handleReassignStore = async (
     id: string,
     nextStore: string | null,
@@ -267,7 +350,7 @@ export default function ShoppingPage() {
     try {
       await updateItem(id, { store: nextStore })
     } catch (err: unknown) {
-      showToast(`Reassign failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('shopping.error.reassign', { error: errText(err) }), 'error')
     }
   }
 
@@ -282,45 +365,44 @@ export default function ShoppingPage() {
     try {
       await reorderStores(next)
     } catch (err: unknown) {
-      showToast(`Reorder failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('shopping.error.reorder', { error: errText(err) }), 'error')
     }
   }
 
-  const handleStoreHeaderDrop = async (target: string) => {
-    if (!dragStore || dragStore === target) {
-      setDragStore(null)
-      return
-    }
+  const handleStoreHeaderDrop = async (dragged: string, target: string) => {
+    if (dragged === target) return
     const order = stores.value.map(s => s.name)
-    const from = order.indexOf(dragStore)
+    const from = order.indexOf(dragged)
     const to = order.indexOf(target)
-    if (from < 0 || to < 0) {
-      setDragStore(null)
-      return
-    }
+    if (from < 0 || to < 0) return
     const next = order.slice()
     next.splice(from, 1)
-    next.splice(to, 0, dragStore)
-    setDragStore(null)
+    next.splice(to, 0, dragged)
     try {
       await reorderStores(next)
     } catch (err: unknown) {
-      showToast(`Reorder failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('shopping.error.reorder', { error: errText(err) }), 'error')
     }
   }
 
-  // Autofocus on mount so keyboard flow ("open page → start typing →
-  // Enter → repeat") works without an extra click.
+  // Autofocus once the list is on screen so keyboard flow ("open page
+  // → start typing → Enter → repeat") works without an extra click.
+  // Skipped on touch, where it would pop the keyboard over the list.
+  const autofocused = useRef(false)
   useEffect(() => {
-    inputRef.current?.focus()
-  }, [])
+    if (state !== 'ready' || autofocused.current) return
+    autofocused.current = true
+    // Never steal focus the user already placed somewhere.
+    const idle = !document.activeElement || document.activeElement === document.body
+    if (idle && !prefersNoAutofocus()) inputRef.current?.focus()
+  }, [state])
 
-  const active    = items.value.filter(i => !i.completed)
-  const completed = items.value.filter(i =>  i.completed)
+  const active    = visible.filter(i => !i.completed)
+  const completed = visible.filter(i =>  i.completed)
   const me        = currentUser.value
 
   const userNameById = (uid: string): string =>
-    me?.user_id === uid ? 'you' : householdDisplayName(uid)
+    me?.user_id === uid ? t('shopping.you') : householdDisplayName(uid)
 
   // Group rendering kicks in when the catalogue has ≥2 stores OR the
   // user explicitly toggled it on. ``auto`` (default) flips ON as
@@ -328,9 +410,9 @@ export default function ShoppingPage() {
   // overrides stick.
   const distinctStores = useMemo(() => {
     const s = new Set<string>()
-    for (const i of items.value) if (i.store) s.add(i.store)
+    for (const i of visible) if (i.store) s.add(i.store)
     return s
-  }, [items.value])
+  }, [visible])
   const grouped =
     groupPref === 'on' ||
     (groupPref === 'auto' && (stores.value.length >= 2 || distinctStores.size >= 2))
@@ -342,103 +424,133 @@ export default function ShoppingPage() {
 
   const storeNames = stores.value.map(s => s.name)
 
-  // Loading guard sits below every hook so hook call-order is stable across
-  // the loading→loaded transition (react-hooks/rules-of-hooks).
-  if (loading.value) return <Spinner />
+  const header = (
+    <OrganizeSectionHeader
+      // The top bar already shows the page title; keep it for screen
+      // readers so the store sections (h3) sit under an h2.
+      title={t('shopping.title')}
+      hideTitle
+      counts={state === 'ready' ? [
+        { label: t('shopping.counts.to_buy', { n: String(active.length) }), tone: 'open' },
+        { label: t('shopping.counts.done', { n: String(completed.length) }), tone: 'done' },
+      ] : []}
+    >
+      {state === 'ready' && (stores.value.length > 0 || distinctStores.size > 0) && (
+        <ChipRadioGroup<'on' | 'off'>
+          variant="segmented"
+          ariaLabel={t('shopping.view.label')}
+          value={grouped ? 'on' : 'off'}
+          onChange={setGroupedPref}
+          options={[
+            { value: 'on', label: t('shopping.view.grouped') },
+            { value: 'off', label: t('shopping.view.list') },
+          ]}
+        />
+      )}
+      {/* Always rendered once loaded — with zero items (or zero ACTIVE
+       *  items) there is no item row to hang store management off. */}
+      {state === 'ready' && (
+        <button
+          type="button"
+          class="sh-chip sh-shopping-stores-btn"
+          aria-haspopup="dialog"
+          aria-expanded={storesOpen}
+          title={t('shopping.stores.button_title')}
+          onClick={() => setStoresOpen(true)}
+        >
+          <span aria-hidden="true">🏪</span> {t('shopping.stores.button')}
+        </button>
+      )}
+    </OrganizeSectionHeader>
+  )
+
+  if (state !== 'ready') {
+    return (
+      <div class="sh-shopping">
+        {header}
+        {state === 'error'
+          ? <LoadErrorState message={t('shopping.load_failed')} onRetry={retry} />
+          : <ListSkeleton variant="list" rows={6} label={t('shopping.loading')} />}
+      </div>
+    )
+  }
+
+  const viewProps: ViewProps = {
+    active,
+    completed,
+    editingId,
+    refocusId,
+    onRefocused: clearRefocus,
+    onEditStart: setEditingId,
+    onEditCancel: handleEditCancel,
+    onEditSave: handleEditSave,
+    onToggle: handleToggle,
+    onDelete: handleDelete,
+    onClearCompleted: handleClearCompleted,
+    onReassignStore: handleReassignStore,
+    userNameById,
+    storeNames,
+  }
 
   return (
     <div class="sh-shopping">
-      <div class="sh-shopping-header">
-        <span class="sh-muted">
-          {active.length} to buy · {completed.length} done
-        </span>
-        <div class="sh-shopping-header__actions">
-          {(stores.value.length > 0 || distinctStores.size > 0) && (
-            <div class="sh-shopping-grouptoggle" role="group" aria-label="View mode">
-              <button
-                type="button"
-                class={'sh-chip ' + (grouped ? 'sh-chip--active' : '')}
-                onClick={() => setGroupedPref('on')}
-              >
-                Group by store
-              </button>
-              <button
-                type="button"
-                class={'sh-chip ' + (!grouped ? 'sh-chip--active' : '')}
-                onClick={() => setGroupedPref('off')}
-              >
-                Show as list
-              </button>
-            </div>
-          )}
-          {/* Always rendered — with zero items (or zero ACTIVE items)
-           *  there is no item row to hang store management off, and the
-           *  catalogue used to become unreachable entirely. */}
-          <button
-            type="button"
-            class="sh-chip sh-shopping-stores-btn"
-            aria-haspopup="dialog"
-            aria-expanded={storesOpen}
-            title="Rename, reorder or remove your stores"
-            onClick={() => setStoresOpen(true)}
-          >
-            <span aria-hidden="true">🏪</span> Stores
-          </button>
-        </div>
-      </div>
+      {header}
 
       <StoreManagerDialog
         open={storesOpen}
         onClose={() => setStoresOpen(false)}
       />
 
-      <form onSubmit={handleQuickAdd} class="sh-shopping-add">
-        <input
-          ref={inputRef}
-          name="text"
-          value={draft}
-          placeholder="Add one — or paste several. Tip: end with @ Store"
-          autoComplete="off"
-          onInput={(e) => {
-            const el = e.target as HTMLInputElement
-            setDraft(el.value)
+      <QuickAddBar
+        class="sh-shopping-add"
+        value={draft}
+        inputRef={inputRef}
+        placeholder={t('shopping.placeholder')}
+        inputLabel={t('shopping.input_label')}
+        submitLabel={t('shopping.add')}
+        onSubmit={() => { void handleQuickAdd() }}
+        onValueChange={(value, el) => {
+          setDraft(value)
+          setCaretPos(el.selectionStart ?? value.length)
+        }}
+        inputProps={{
+          name: 'text',
+          onKeyUp: (e) => {
+            const el = e.currentTarget as HTMLInputElement
             setCaretPos(el.selectionStart ?? el.value.length)
-          }}
-          onKeyUp={(e) => {
-            const el = e.target as HTMLInputElement
+          },
+          onClick: (e) => {
+            const el = e.currentTarget as HTMLInputElement
             setCaretPos(el.selectionStart ?? el.value.length)
-          }}
-          onClick={(e) => {
-            const el = e.target as HTMLInputElement
-            setCaretPos(el.selectionStart ?? el.value.length)
-          }}
-          onFocus={(e) => {
-            const el = e.target as HTMLInputElement
+          },
+          onFocus: (e) => {
+            const el = e.currentTarget as HTMLInputElement
             setCaretPos(el.selectionStart ?? el.value.length)
             setShowSuggest(true)
-          }}
-          onBlur={() => {
+          },
+          onBlur: () => {
             setTimeout(() => {
               if (!suggestHeld) setShowSuggest(false)
             }, 120)
-          }}
-          aria-label="New shopping item"
-        />
-        <Button type="submit" disabled={!draft.trim()}>Add</Button>
-      </form>
+          },
+        }}
+      />
 
       {/* Store-name autocomplete takes priority over the re-add chips
-       *  whenever the user is in a ``@ …<caret>`` context. Both
-       *  popovers share the ``.sh-shopping-suggest`` shell so blur
-       *  handling (the suggestHeld latch) stays uniform. */}
+       *  whenever the user is in a ``@ …<caret>`` context. Both share
+       *  the ``.sh-shopping-suggest`` shell so blur handling (the
+       *  suggestHeld latch) stays uniform. A group of plain buttons —
+       *  not a listbox, which would promise arrow-key options. */}
       {storeMatches.length > 0 ? (
         <div
-          class="sh-shopping-suggest" role="listbox"
-          aria-label="Pick a store"
+          class="sh-shopping-suggest" role="group"
+          aria-label={t('shopping.suggest.store_label')}
           onMouseDown={() => setSuggestHeld(true)}
           onMouseUp={() => setSuggestHeld(false)}
         >
-          <span class="sh-muted">Store:</span>
+          <span class="sh-shopping-suggest__label" aria-hidden="true">
+            {t('shopping.suggest.store')}
+          </span>
           {storeMatches.map((name) => (
             <button
               key={name}
@@ -464,11 +576,14 @@ export default function ShoppingPage() {
       ) : (
         showSuggest && pastNames.length > 0 && (
           <div
-            class="sh-shopping-suggest" role="listbox"
+            class="sh-shopping-suggest" role="group"
+            aria-label={t('shopping.suggest.recent_label')}
             onMouseDown={() => setSuggestHeld(true)}
             onMouseUp={() => setSuggestHeld(false)}
           >
-            <span class="sh-muted">Re-add recent:</span>
+            <span class="sh-shopping-suggest__label" aria-hidden="true">
+              {t('shopping.suggest.recent')}
+            </span>
             {pastNames.map((name) => (
               <button
                 key={name}
@@ -491,51 +606,26 @@ export default function ShoppingPage() {
         )
       )}
 
-      {items.value.length === 0 ? (
+      {visible.length === 0 ? (
         <div class="sh-empty-state">
           <div aria-hidden="true">🛒</div>
-          <h3>Your list is empty</h3>
-          <p>Type an item above. Paste multiple, separated by commas.</p>
+          <h3>{t('shopping.empty.title')}</h3>
+          <p>{t('shopping.empty.body')}</p>
+          <div class="sh-empty-state__cta-row">
+            <Button onClick={() => inputRef.current?.focus()}>
+              {t('shopping.empty.cta')}
+            </Button>
+          </div>
         </div>
       ) : grouped ? (
         <GroupedView
-          active={active}
-          completed={completed}
-          editingId={editingId}
-          onEditStart={setEditingId}
-          onEditCancel={() => setEditingId(null)}
-          onEditSave={handleEditSave}
-          onToggle={handleToggle}
-          onDelete={handleDelete}
-          onClearCompleted={handleClearCompleted}
-          onReassignStore={handleReassignStore}
-          onDragStoreStart={setDragStore}
-          onStoreHeaderDrop={handleStoreHeaderDrop}
-          dragStore={dragStore}
+          {...viewProps}
+          itemDrag={itemDrag}
+          storeDrag={storeDrag}
           onMoveStore={handleMoveStore}
-          dragItemId={dragItemId}
-          onDragItemStart={setDragItemId}
-          onDragItemEnd={() => { setDragItemId(null); setDropTarget(null) }}
-          dropTarget={dropTarget}
-          onDropTargetChange={setDropTarget}
-          userNameById={userNameById}
-          storeNames={storeNames}
         />
       ) : (
-        <FlatView
-          active={active}
-          completed={completed}
-          editingId={editingId}
-          onEditStart={setEditingId}
-          onEditCancel={() => setEditingId(null)}
-          onEditSave={handleEditSave}
-          onToggle={handleToggle}
-          onDelete={handleDelete}
-          onClearCompleted={handleClearCompleted}
-          onReassignStore={handleReassignStore}
-          userNameById={userNameById}
-          storeNames={storeNames}
-        />
+        <FlatView {...viewProps} />
       )}
     </div>
   )
@@ -547,59 +637,64 @@ interface ViewProps {
   active: ShoppingItem[]
   completed: ShoppingItem[]
   editingId: string | null
+  refocusId: string | null
+  onRefocused: () => void
   onEditStart: (id: string) => void
-  onEditCancel: () => void
-  onEditSave: (id: string, text: string) => void
+  onEditCancel: (item: ShoppingItem, refocus: boolean) => void
+  onEditSave: (item: ShoppingItem, text: string, refocus: boolean) => void
   onToggle: (id: string, completed: boolean) => void
-  onDelete: (id: string) => void
+  onDelete: (item: ShoppingItem) => void
   onClearCompleted: () => void
   onReassignStore: (id: string, nextStore: string | null) => void
   userNameById: (uid: string) => string
   storeNames: string[]
 }
 
-function FlatView(props: ViewProps) {
-  const renderRow = (item: ShoppingItem, done: boolean) => (
-    <ItemRow
-      key={item.id}
-      item={item}
-      done={done}
-      isEditing={props.editingId === item.id}
-      onEditStart={() => props.onEditStart(item.id)}
-      onEditCancel={props.onEditCancel}
-      onEditSave={(t) => props.onEditSave(item.id, t)}
-      onToggle={() => props.onToggle(item.id, item.completed)}
-      onDelete={() => props.onDelete(item.id)}
-      onReassignStore={(s) => props.onReassignStore(item.id, s)}
-      userNameById={props.userNameById}
-      storeNames={props.storeNames}
-      draggable={false}
-      onDragItemStart={null}
-      onDragItemEnd={null}
-    />
-  )
+function rowProps(props: ViewProps, item: ShoppingItem, done: boolean) {
+  return {
+    item,
+    done,
+    isEditing: props.editingId === item.id,
+    refocus: props.refocusId === item.id,
+    onRefocused: props.onRefocused,
+    onEditStart: () => props.onEditStart(item.id),
+    onEditCancel: (refocus: boolean) => props.onEditCancel(item, refocus),
+    onEditSave: (text: string, refocus: boolean) => props.onEditSave(item, text, refocus),
+    onToggle: () => props.onToggle(item.id, item.completed),
+    onDelete: () => props.onDelete(item),
+    onReassignStore: (s: string | null) => props.onReassignStore(item.id, s),
+    userNameById: props.userNameById,
+    storeNames: props.storeNames,
+  }
+}
+
+function DoneTrailer(props: ViewProps) {
+  if (props.completed.length === 0) return null
   return (
     <>
-      <ul class="sh-shopping-list sh-list-card">
-        {props.active.map(i => renderRow(i, false))}
+      <ArchiveDivider
+        class="sh-shopping-divider"
+        label={t('shopping.done_heading', { n: String(props.completed.length) })}
+        actionLabel={t('shopping.clear_all')}
+        actionAriaLabel={t('shopping.clear_all_label')}
+        onAction={props.onClearCompleted}
+      />
+      <ul class="sh-shopping-list sh-list-card sh-list-card--moss sh-shopping-list--done">
+        {props.completed.map(i => <ItemRow key={i.id} {...rowProps(props, i, true)} />)}
       </ul>
-      {props.completed.length > 0 && (
-        <>
-          <div class="sh-shopping-divider">
-            <span>Already bought ({props.completed.length})</span>
-            <button
-              type="button"
-              class="sh-link"
-              onClick={props.onClearCompleted}
-            >
-              Clear all
-            </button>
-          </div>
-          <ul class="sh-shopping-list sh-list-card sh-list-card--moss sh-shopping-list--done">
-            {props.completed.map(i => renderRow(i, true))}
-          </ul>
-        </>
+    </>
+  )
+}
+
+function FlatView(props: ViewProps) {
+  return (
+    <>
+      {props.active.length > 0 && (
+        <ul class="sh-shopping-list sh-list-card">
+          {props.active.map(i => <ItemRow key={i.id} {...rowProps(props, i, false)} />)}
+        </ul>
       )}
+      <DoneTrailer {...props} />
     </>
   )
 }
@@ -607,18 +702,13 @@ function FlatView(props: ViewProps) {
 // ─── Grouped-by-store rendering ────────────────────────────────────────
 
 interface GroupedProps extends ViewProps {
-  onDragStoreStart: (name: string | null) => void
-  onStoreHeaderDrop: (target: string) => void
-  dragStore: string | null
+  itemDrag: DragBuckets<string>
+  storeDrag: DragBuckets<string>
   onMoveStore: (name: string, delta: number) => void
-  dragItemId: string | null
-  onDragItemStart: (id: string) => void
-  onDragItemEnd: () => void
-  dropTarget: string | null
-  onDropTargetChange: (target: string | null) => void
 }
 
 function GroupedView(props: GroupedProps) {
+  const { itemDrag, storeDrag } = props
   // Build an ordered list of section keys. Catalogue stores first
   // (in their sort_order), then the synthetic "No store" bucket.
   const sections: { key: string; label: string; draggable: boolean }[] = [
@@ -627,8 +717,9 @@ function GroupedView(props: GroupedProps) {
       label: s.name,
       draggable: true,
     })),
-    { key: NO_STORE_KEY, label: 'No store', draggable: false },
+    { key: NO_STORE_KEY, label: t('shopping.no_store'), draggable: false },
   ]
+  const dragging = itemDrag.draggingId !== null
 
   return (
     <>
@@ -636,136 +727,83 @@ function GroupedView(props: GroupedProps) {
         const itemsHere = props.active.filter((i) =>
           section.key === NO_STORE_KEY
             ? !i.store
-            // Fold the same way the server does. The DB is canonical
-            // since 0048 and every write path stores a server-returned
-            // spelling, so an exact compare works today — but an item
-            // that slips out of step with its catalogue row renders in
-            // NO section (it isn't in the "No store" bucket either),
-            // and that silent disappearance is the bug this whole
-            // change exists to fix. Cheap insurance.
+            // Fold the same way the server does — an item that slips
+            // out of step with its catalogue row must not render in NO
+            // section at all.
             : sameName(i.store, section.key),
         )
-        // Hide a section when no ACTIVE items are at this store and
-        // no item drag is in flight. Completed items don't count any
-        // more — they no longer render inline per store; they're
-        // collected at the bottom of the page under the "n bought ·
-        // Clear all" trailer. During a drag every section needs to
-        // be a visible drop target so the user can drag onto a
-        // currently-empty store.
-        if (itemsHere.length === 0 && props.dragItemId === null) return null
+        // Hide a section with no ACTIVE items unless an item drag is
+        // in flight — then every section is a visible drop target.
+        if (itemsHere.length === 0 && !dragging) return null
         const isFirst = idx === 0
         const isLast = idx === stores.value.length - 1 // before "No store"
-        const isDropTarget = props.dropTarget === section.key
+        const isDropTarget = itemDrag.overBucket === section.key
         return (
           <section
             key={section.key}
+            aria-labelledby={`sh-shopping-group-${idx}`}
             class={
               'sh-shopping-group ' +
-              (props.dragStore === section.key
-                ? 'sh-shopping-group--dragging '
-                : '') +
+              (storeDrag.draggingId === section.key ? 'sh-shopping-group--dragging ' : '') +
               (isDropTarget ? 'sh-shopping-group--drop-target ' : '') +
               (section.key === NO_STORE_KEY ? 'sh-shopping-group--unassigned' : '')
             }
-            onDragOver={(e) => {
-              // Two drag shapes converge on the same dragover: store
-              // headers (existing reorder) and item rows (the new
-              // reassign path). Both must call preventDefault to make
-              // this element a valid drop target.
-              const types = e.dataTransfer?.types
-              const isItemDrag = !!types?.includes(DRAG_ITEM_MIME)
-              const isStoreDrag = !!types?.includes(DRAG_STORE_MIME)
-              if (isItemDrag) {
-                e.preventDefault()
-                if (props.dropTarget !== section.key) {
-                  props.onDropTargetChange(section.key)
-                }
-              } else if (isStoreDrag && section.draggable) {
-                e.preventDefault()
-              }
-            }}
-            onDragLeave={(e) => {
-              // ``dragleave`` fires when crossing into a child element
-              // too. Only clear the drop highlight when the cursor
-              // really left the section root.
-              if (e.currentTarget === e.target) {
-                if (props.dropTarget === section.key) {
-                  props.onDropTargetChange(null)
-                }
-              }
-            }}
-            onDrop={(e) => {
-              const types = e.dataTransfer?.types
-              if (types?.includes(DRAG_ITEM_MIME)) {
-                e.preventDefault()
-                const id = e.dataTransfer?.getData(DRAG_ITEM_MIME)
-                if (id) {
-                  props.onReassignStore(
-                    id,
-                    section.key === NO_STORE_KEY ? null : section.key,
-                  )
-                }
-                props.onDropTargetChange(null)
-              } else if (types?.includes(DRAG_STORE_MIME) && section.draggable) {
-                e.preventDefault()
-                props.onStoreHeaderDrop(section.key)
-              }
-            }}
+            {...composeDragHandlers(
+              itemDrag.bucketProps(section.key),
+              storeDrag.bucketProps(section.key),
+            )}
           >
             <header
               class="sh-shopping-group__header"
-              draggable={section.draggable}
-              onDragStart={(e) => {
-                if (!section.draggable) return
-                e.dataTransfer?.setData(DRAG_STORE_MIME, section.key)
-                props.onDragStoreStart(section.key)
-              }}
-              onDragEnd={() => props.onDragStoreStart(null)}
+              {...(section.draggable ? storeDrag.itemProps(section.key) : {})}
             >
               {section.draggable && (
                 <span
                   class="sh-shopping-group__drag"
                   aria-hidden="true"
-                  title="Drag to reorder"
+                  title={t('shopping.drag_reorder')}
                 >
                   ⋮⋮
                 </span>
               )}
-              <h3 class="sh-shopping-group__name">{section.label}</h3>
+              <h3 class="sh-shopping-group__name" id={`sh-shopping-group-${idx}`}>
+                {section.label}
+              </h3>
               <span class="sh-shopping-group__count">
                 {itemsHere.length}
               </span>
               {section.draggable && (
-                <div class="sh-shopping-group__nudge" role="group" aria-label="Reorder">
+                <div
+                  class="sh-shopping-group__nudge" role="group"
+                  aria-label={t('shopping.reorder_group', { name: section.label })}
+                >
                   <button
                     type="button"
                     class="sh-shopping-group__nudge-btn"
-                    aria-label="Move up"
+                    aria-label={t('shopping.move_up', { name: section.label })}
                     disabled={isFirst}
                     onClick={() => props.onMoveStore(section.key, -1)}
                   >
-                    ▲
+                    <span aria-hidden="true">▲</span>
                   </button>
                   <button
                     type="button"
                     class="sh-shopping-group__nudge-btn"
-                    aria-label="Move down"
+                    aria-label={t('shopping.move_down', { name: section.label })}
                     disabled={isLast}
                     onClick={() => props.onMoveStore(section.key, +1)}
                   >
-                    ▼
+                    <span aria-hidden="true">▼</span>
                   </button>
                 </div>
               )}
             </header>
 
-            {/* Empty-during-drag placeholder so a freshly-created
-             *  section without items still reads as a valid drop
-             *  target while the user is mid-drag. */}
-            {itemsHere.length === 0 && props.dragItemId !== null && (
-              <div class="sh-shopping-group__droppad" aria-hidden="true">
-                Drop here to move into {section.label}
-              </div>
+            {itemsHere.length === 0 && dragging && (
+              <DropPad
+                label={t('organize.drop_here', { name: section.label })}
+                active={isDropTarget}
+              />
             )}
 
             {itemsHere.length > 0 && (
@@ -773,21 +811,9 @@ function GroupedView(props: GroupedProps) {
                 {itemsHere.map((item) => (
                   <ItemRow
                     key={item.id}
-                    item={item}
-                    done={false}
-                    isEditing={props.editingId === item.id}
-                    onEditStart={() => props.onEditStart(item.id)}
-                    onEditCancel={props.onEditCancel}
-                    onEditSave={(t) => props.onEditSave(item.id, t)}
-                    onToggle={() => props.onToggle(item.id, item.completed)}
-                    onDelete={() => props.onDelete(item.id)}
-                    onReassignStore={(s) => props.onReassignStore(item.id, s)}
+                    {...rowProps(props, item, false)}
                     compact={true}
-                    userNameById={props.userNameById}
-                    storeNames={props.storeNames}
-                    draggable={true}
-                    onDragItemStart={props.onDragItemStart}
-                    onDragItemEnd={props.onDragItemEnd}
+                    dragProps={itemDrag.itemProps(item.id)}
                   />
                 ))}
               </ul>
@@ -795,48 +821,9 @@ function GroupedView(props: GroupedProps) {
           </section>
         )
       })}
-      {/* Global "Already bought" trailer in the grouped view —
-       *  collects done items from every store into one quiet pile
-       *  at the bottom of the page. Matches the flat view's trailer
-       *  and the tasks page's archive trailer; replaces the old
-       *  per-store ``doneHere`` lists that scattered completed
-       *  items across the page and made the open work harder to
-       *  scan. */}
-      {props.completed.length > 0 && (
-        <>
-          <div class="sh-shopping-divider">
-            <span>{props.completed.length} bought</span>
-            <button
-              type="button"
-              class="sh-link"
-              onClick={props.onClearCompleted}
-            >
-              Clear all
-            </button>
-          </div>
-          <ul class="sh-shopping-list sh-list-card sh-list-card--moss sh-shopping-list--done">
-            {props.completed.map((item) => (
-              <ItemRow
-                key={item.id}
-                item={item}
-                done={true}
-                isEditing={props.editingId === item.id}
-                onEditStart={() => props.onEditStart(item.id)}
-                onEditCancel={props.onEditCancel}
-                onEditSave={(t) => props.onEditSave(item.id, t)}
-                onToggle={() => props.onToggle(item.id, item.completed)}
-                onDelete={() => props.onDelete(item.id)}
-                onReassignStore={(s) => props.onReassignStore(item.id, s)}
-                userNameById={props.userNameById}
-                storeNames={props.storeNames}
-                draggable={false}
-                onDragItemStart={null}
-                onDragItemEnd={null}
-              />
-            ))}
-          </ul>
-        </>
-      )}
+      {/* Global "Already bought" trailer — done items from every store
+       *  in one quiet pile at the bottom, like the flat view. */}
+      <DoneTrailer {...props} />
     </>
   )
 }
@@ -847,34 +834,61 @@ interface RowProps {
   item: ShoppingItem
   done: boolean
   isEditing: boolean
+  /** Focus the rename trigger now (its editor just closed by key). */
+  refocus: boolean
+  onRefocused: () => void
   onEditStart: () => void
-  onEditCancel: () => void
-  onEditSave: (text: string) => void
+  onEditCancel: (refocus: boolean) => void
+  onEditSave: (text: string, refocus: boolean) => void
   onToggle: () => void
   onDelete: () => void
   onReassignStore: (nextStore: string | null) => void
   /** When ``true`` the store pill renders icon-only (no store name) —
    *  used in the grouped view, where the section header already names
-   *  the store, so repeating it on every row is redundant noise. The
-   *  icon still opens the picker (assign / reassign), so touch
-   *  users keep a tap target even though drag is desktop-only. The flat
-   *  view leaves it ``false`` so the row shows which store it's in. */
+   *  the store. The icon still opens the picker, so touch users keep
+   *  a reassign target even though drag is desktop-only. */
   compact?: boolean
   userNameById: (uid: string) => string
   storeNames: string[]
-  /** When true, the whole row carries HTML5 ``draggable=true`` so the
-   *  user can drag it onto another store section. Only set in the
-   *  grouped-view active list — completed items and the flat view
-   *  stay non-draggable so a reorder doesn't suggest an unsupported
-   *  meaning. */
-  draggable: boolean
-  onDragItemStart: ((id: string) => void) | null
-  onDragItemEnd: (() => void) | null
+  /** Grouped-view active rows only: drag onto another store section. */
+  dragProps?: DragItemProps
+}
+
+/** After an Undo, put focus on the restored row's check (next frame,
+ *  once it has re-rendered). */
+function focusItemCheck(id: string) {
+  requestAnimationFrame(() => {
+    const row = [...document.querySelectorAll<HTMLElement>('.sh-shopping-item[data-item-id]')]
+      .find(li => li.dataset.itemId === id)
+    row?.querySelector<HTMLElement>('.sh-check-toggle')?.focus()
+  })
+}
+
+/** After the focused row disappears (deleted), hand focus to a
+ *  neighbour's delete button — or the quick-add input — so keyboard
+ *  users aren't dropped back at the top of the document. */
+function focusNeighbour(li: HTMLElement | null) {
+  const next = (li?.nextElementSibling ?? li?.previousElementSibling) as HTMLElement | null
+  requestAnimationFrame(() => {
+    const target = next?.isConnected
+      ? next.querySelector<HTMLElement>('.sh-shopping-item__delete')
+      : document.querySelector<HTMLElement>('.sh-shopping-add input')
+    target?.focus()
+  })
 }
 
 function ItemRow(props: RowProps) {
-  const { item, done } = props
-  if (props.isEditing) return (
+  const { item, done, refocus, isEditing, onRefocused } = props
+  const textRef = useRef<HTMLButtonElement | null>(null)
+  const rowRef = useRef<HTMLLIElement | null>(null)
+
+  useEffect(() => {
+    if (!refocus || isEditing) return
+    textRef.current?.focus()
+    onRefocused()
+  }, [refocus, isEditing, onRefocused])
+
+  if (isEditing) return (
     <li class="sh-shopping-item sh-shopping-item--edit">
       <EditRow
         initialText={item.text}
@@ -886,54 +900,35 @@ function ItemRow(props: RowProps) {
 
   return (
     <li
-      class={'sh-shopping-item ' + (done ? 'sh-item--done' : '')}
-      draggable={props.draggable}
-      onDragStart={(e) => {
-        if (!props.draggable) return
-        e.dataTransfer?.setData(DRAG_ITEM_MIME, item.id)
-        // Force the move cursor — Chrome's default ``copy`` would
-        // suggest the wrong semantic (the item moves between stores,
-        // not gets duplicated).
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
-        props.onDragItemStart?.(item.id)
-      }}
-      onDragEnd={() => props.onDragItemEnd?.()}
+      ref={rowRef}
+      data-item-id={item.id}
+      // ``sh-row-reveal-host``: the ✕ (RowActionButton reveal) shows
+      // while this row is hovered or holds focus.
+      class={'sh-shopping-item sh-row-reveal-host' + (done ? ' sh-item--done' : '')}
+      {...(props.dragProps ?? { draggable: false })}
     >
-      {/* Standalone checkbox button — no ``<label>`` wrapping the row
-       *  content. Clicking the box is the ONLY toggle action; clicks
-       *  on the text / pill / delete never accidentally check the
-       *  item off (the long-standing "I meant to edit but I marked
-       *  it done" trap).
-       *
-       *  The button is the *tap target* — sized to a comfortable
-       *  hit area; the visible round mark lives in the nested
-       *  ``__dot`` so the visual weight stays compact while
-       *  fingertips still get a generous landing zone. */}
-      <button
-        type="button"
-        class={
-          'sh-shopping-item__check '
-          + (done ? 'sh-shopping-item__check--done' : '')
-        }
-        onClick={props.onToggle}
-        aria-label={
-          done
-            ? `Put ${item.text} back on the list`
-            : `Mark ${item.text} as bought`
-        }
-        aria-pressed={done}
-      >
-        <span class="sh-shopping-item__check-dot" aria-hidden="true">
-          {done ? '✓' : ''}
-        </span>
-      </button>
-      <span
-        class="sh-shopping-item__text"
-        onClick={() => { if (!done) props.onEditStart() }}
-        title={done ? '' : 'Click to rename'}
-      >
-        {item.text}
-      </span>
+      {/* Standalone checkbox — never wrapping the row content, so a
+       *  click on the text / pill / delete can't tick the item off. */}
+      <CheckToggle
+        class="sh-shopping-item__check"
+        checked={done}
+        label={t('shopping.check_label', { text: item.text })}
+        onChange={props.onToggle}
+      />
+      {done ? (
+        <span class="sh-shopping-item__text">{item.text}</span>
+      ) : (
+        <button
+          ref={textRef}
+          type="button"
+          class="sh-shopping-item__text"
+          aria-label={t('shopping.rename_label', { text: item.text })}
+          title={t('shopping.rename_title')}
+          onClick={props.onEditStart}
+        >
+          {item.text}
+        </button>
+      )}
       {!done && (
         <StorePicker
           currentStore={item.store ?? null}
@@ -946,84 +941,121 @@ function ItemRow(props: RowProps) {
         class="sh-shopping-item__meta"
         title={
           item.created_at
-            ? `Added ${relativeDocsTime(item.created_at)}`
+            ? t('shopping.added_at', { when: relativeDocsTime(item.created_at) })
             : undefined
         }
       >
         {item.created_by && (
-          <span>+ {props.userNameById(item.created_by)}</span>
+          <span>{t('shopping.added_by', { name: props.userNameById(item.created_by) })}</span>
         )}
       </div>
-      <button
-        type="button"
+      <RowActionButton
         class="sh-shopping-item__delete"
-        aria-label={`Delete ${item.text}`}
-        title="Delete"
-        onClick={props.onDelete}
-      >
-        ✕
-      </button>
+        label={t('shopping.delete_label', { text: item.text })}
+        icon="✕"
+        danger
+        reveal
+        onClick={(e) => {
+          const li = rowRef.current
+          props.onDelete()
+          // Keyboard activation (Enter / Space reports ``detail === 0``).
+          if (e.detail === 0) focusNeighbour(li)
+        }}
+      />
     </li>
   )
 }
 
+/** Inline rename. Enter / Save commits, Escape / Cancel backs out,
+ *  and clicking or tabbing away commits too (an unchanged or blank
+ *  name just closes) — the edit is never silently thrown away. */
 function EditRow({
   initialText,
   onSave,
   onCancel,
 }: {
   initialText: string
-  onSave: (text: string) => void
-  onCancel: () => void
+  onSave: (text: string, refocus: boolean) => void
+  onCancel: (refocus: boolean) => void
 }) {
   const [text, setText] = useState(initialText)
   const textRef = useRef<HTMLInputElement | null>(null)
+  /** Set once the edit is resolved so a late focusout can't fire a
+   *  second save after Enter / Escape. */
+  const doneRef = useRef(false)
   useEffect(() => {
     textRef.current?.focus()
     textRef.current?.select()
   }, [])
-  const submit = () => onSave(text)
-  const cancel = () => onCancel()
+  const submit = (refocus: boolean) => {
+    if (doneRef.current) return
+    doneRef.current = true
+    onSave(text, refocus)
+    // A failed save keeps the editor open — allow another try.
+    requestAnimationFrame(() => { doneRef.current = false })
+  }
+  const cancel = (refocus: boolean) => {
+    if (doneRef.current) return
+    doneRef.current = true
+    onCancel(refocus)
+  }
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault()
-      submit()
+      submit(true)
     } else if (e.key === 'Escape') {
       e.preventDefault()
-      cancel()
+      e.stopPropagation()
+      cancel(true)
     }
   }
   return (
-    <div class="sh-shopping-edit">
+    <div
+      class="sh-shopping-edit"
+      onFocusOut={(e) => {
+        const next = e.relatedTarget as Node | null
+        if (next && (e.currentTarget as HTMLElement).contains(next)) return
+        submit(false)
+      }}
+    >
       <input
         ref={textRef}
         type="text"
         value={text}
-        aria-label="Item text"
+        aria-label={t('shopping.edit.label')}
         onInput={(e) => setText((e.target as HTMLInputElement).value)}
         onKeyDown={onKey}
         class="sh-shopping-edit__text"
       />
-      <Button type="button" onClick={submit} disabled={!text.trim()}>Save</Button>
+      <Button
+        type="button"
+        // Keep focus in the input so its focusout doesn't save first
+        // (Safari never focuses a clicked button).
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => submit(true)}
+        disabled={!text.trim()}
+      >
+        {t('common.save')}
+      </Button>
       <button
         type="button"
         class="sh-link sh-shopping-edit__cancel"
-        onClick={cancel}
+        // Keep the input's focusout from committing before the click.
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => cancel(true)}
       >
-        Cancel
+        {t('common.cancel')}
       </button>
     </div>
   )
 }
 
-// ─── Store picker popover (replaces the second text input in EditRow) ──
+// ─── Store picker (row pill → OverflowMenu) ────────────────────────────
 
 interface StorePickerProps {
   /** Current store on the item, or ``null`` for "No store". */
   currentStore: string | null
-  /** Household catalogue. The picker also offers "+ New store…" to
-   *  extend this list inline (no native ``prompt()`` — the
-   *  popover swaps to a focused text input instead). */
+  /** Household catalogue. The picker also offers "+ New store…". */
   storeNames: string[]
   onPick: (next: string | null) => void
   /** Icon-only pill (no store-name label) — used in the grouped view
@@ -1033,201 +1065,148 @@ interface StorePickerProps {
 
 /** One-tap reassign affordance on the item row.
  *
- *  Replaces the typing-required second text input that used to live
- *  inside ``EditRow``: the user no longer has to remember the store
- *  name or enter rename mode at all to drop an item onto Migros. The
- *  button surface stays a pill so it reads as paired metadata at
- *  rest. The popover anchors under the pill on desktop and docks as
- *  a bottom-sheet on mobile.
- *
- *  Two-mode state machine inside the popover:
- *   - ``list`` (default): existing stores + "No store" + "+ New
- *     store…" call-to-action.
- *   - ``new``: the menu items are replaced by a focused text input
- *     ("Type a store name") + Save / "← Back". Submit creates the
- *     store *and* assigns the item to it in one round-trip via
- *     ``onPick(name)`` — the parent's ``updateItem`` already
- *     server-side upserts a new catalogue row whenever it sees an
- *     unknown store name. Replaces the previous ``window.prompt``
- *     call (poor mobile UX + the native dialog hid the picker). */
+ *  The pill opens the shared ``OverflowMenu`` (arrow keys, Escape
+ *  returns focus to the pill, opens on the current store) with the
+ *  catalogue, "No store" and "+ New store…". The last swaps to a small
+ *  inline name-entry panel — Save creates the store *and* assigns the
+ *  item in one round-trip (the server upserts unknown store names);
+ *  Escape / Back return to the list. Rename / delete live in the
+ *  header's Stores dialog. On ≤640 px both dock as a bottom sheet. */
 function StorePicker({
   currentStore,
   storeNames,
   onPick,
   compact,
 }: StorePickerProps) {
-  const [open, setOpen] = useState(false)
-  /** Sub-view inside the popover.
-   *  - ``list`` is the default;
-   *  - ``new`` swaps to the inline name-entry input.
-   *
-   *  Rename / delete deliberately do NOT live here — they're in the
-   *  header's Stores dialog (``StoreManagerDialog``), the one place
-   *  that stays reachable on an empty list. */
-  const [mode, setMode] = useState<'list' | 'new'>('list')
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [adding, setAdding] = useState(false)
   const [newName, setNewName] = useState('')
-  const ref = useRef<HTMLDivElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const newInputRef = useRef<HTMLInputElement | null>(null)
 
-  // Click-outside closes the menu. ``useLayoutEffect`` would be
-  // overkill — the menu is small enough that one async paint frame
-  // of stale state is invisible.
-  useEffect(() => {
-    if (!open) return
-    const onDocClick = (e: MouseEvent) => {
-      if (!ref.current) return
-      if (!ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        // Escape unwinds one step at a time: from ``new`` back to
-        // ``list``, from ``list`` to closed. Mirrors the way a
-        // native iOS / Android picker handles the back button.
-        if (mode === 'new') {
-          setMode('list')
-          setNewName('')
-        } else {
-          setOpen(false)
-        }
-      }
-    }
-    document.addEventListener('mousedown', onDocClick)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDocClick)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open, mode])
+  const trigger = () =>
+    wrapRef.current?.querySelector<HTMLElement>('button[aria-haspopup="menu"]')
 
-  // Reset to list mode whenever the picker closes — the next open
-  // should always start from the store list, not from a stale
-  // half-typed new-store name.
+  const closeAdding = (refocus: boolean) => {
+    setAdding(false)
+    setNewName('')
+    if (refocus) trigger()?.focus()
+  }
+
+  const backToList = () => {
+    setAdding(false)
+    setNewName('')
+    setMenuOpen(true)
+  }
+
   useEffect(() => {
-    if (!open) {
-      setMode('list')
+    if (adding) newInputRef.current?.focus()
+  }, [adding])
+
+  // Outside press closes the new-store panel.
+  useEffect(() => {
+    if (!adding) return
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current?.contains(e.target as Node)) return
+      setAdding(false)
       setNewName('')
     }
-  }, [open])
-
-  // Autofocus the relevant input when entering a typed-mode so the
-  // mobile keyboard pops up immediately.
-  useEffect(() => {
-    if (mode === 'new') {
-      newInputRef.current?.focus()
-    }
-  }, [mode])
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [adding])
 
   const pick = (next: string | null) => {
     if (next !== currentStore) onPick(next)
-    setOpen(false)
   }
 
   const saveNew = () => {
     const trimmed = newName.trim()
     if (!trimmed) return
     onPick(trimmed)
-    setOpen(false)
+    closeAdding(true)
   }
 
-  const label = currentStore || 'Set store'
+  const optClass = (current: boolean) =>
+    'sh-shopping-store-picker__opt'
+    + (current ? ' sh-shopping-store-picker__opt--current' : '')
+
+  const menuItems: MenuItem[] = [
+    ...storeNames.map((name) => ({
+      key: `store:${name}`,
+      label: name,
+      checked: sameName(currentStore, name),
+      class: optClass(sameName(currentStore, name)),
+      onSelect: () => pick(name),
+    })),
+    {
+      key: '__none__',
+      label: t('shopping.no_store'),
+      checked: currentStore === null,
+      class: optClass(currentStore === null) + ' sh-shopping-store-picker__opt--none',
+      onSelect: () => pick(null),
+    },
+    {
+      key: '__new__',
+      label: t('shopping.picker.new'),
+      class: 'sh-shopping-store-picker__opt sh-shopping-store-picker__opt--new',
+      onSelect: () => setAdding(true),
+    },
+  ]
+
+  const label = currentStore || t('shopping.picker.set')
+  const ariaLabel = currentStore
+    ? t('shopping.picker.label_current', { name: currentStore })
+    : t('shopping.picker.set')
 
   return (
-    <div class="sh-shopping-store-picker" ref={ref}>
-      <button
-        type="button"
-        class={
-          'sh-shopping-store-pill '
-          + (currentStore ? '' : 'sh-shopping-store-pill--empty')
+    <div class="sh-shopping-store-picker" ref={wrapRef}>
+      <OverflowMenu
+        label={ariaLabel}
+        title={currentStore
+          ? t('shopping.picker.title_current', { name: currentStore })
+          : t('shopping.picker.title_empty')}
+        items={menuItems}
+        bareTrigger
+        wrapClass="sh-shopping-store-picker__wrap"
+        menuClass="sh-shopping-store-picker__menu"
+        triggerClass={
+          'sh-shopping-store-pill'
+          + (currentStore ? '' : ' sh-shopping-store-pill--empty')
           + (compact ? ' sh-shopping-store-pill--compact' : '')
         }
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={
-          compact
-            ? currentStore
-              ? `Store: ${label} — tap to change`
-              : 'Set a store'
-            : undefined
-        }
-        title={currentStore ? `At ${label} — tap to change` : 'Tap to set a store'}
-        onClick={(e) => {
-          e.stopPropagation()
-          setOpen((v) => !v)
-        }}
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
       >
         <span aria-hidden="true">📍</span>
         {!compact && <span>{label}</span>}
         <span aria-hidden="true" class="sh-shopping-store-pill__chev">▾</span>
-      </button>
-      {open && mode === 'list' && (
-        <ul class="sh-shopping-store-picker__menu" role="menu">
-          {storeNames.length === 0 && (
-            <li class="sh-shopping-store-picker__empty" role="presentation">
-              No stores yet — tap below to add one.
-            </li>
-          )}
-          {storeNames.map((name) => (
-            <li key={name} role="none" class="sh-shopping-store-picker__row">
-              <button
-                type="button"
-                role="menuitem"
-                class={
-                  'sh-shopping-store-picker__opt '
-                  + (currentStore === name ? 'sh-shopping-store-picker__opt--current' : '')
-                }
-                onClick={() => pick(name)}
-              >
-                {name}
-                {currentStore === name && (
-                  <span aria-hidden="true" class="sh-shopping-store-picker__check">✓</span>
-                )}
-              </button>
-            </li>
-          ))}
-          <li role="separator" class="sh-shopping-store-picker__sep" />
-          <li role="none">
-            <button
-              type="button"
-              role="menuitem"
-              class={
-                'sh-shopping-store-picker__opt '
-                + (currentStore === null ? 'sh-shopping-store-picker__opt--current' : '')
-              }
-              onClick={() => pick(null)}
-            >
-              No store
-              {currentStore === null && (
-                <span aria-hidden="true" class="sh-shopping-store-picker__check">✓</span>
-              )}
-            </button>
-          </li>
-          <li role="none">
-            <button
-              type="button"
-              role="menuitem"
-              class="sh-shopping-store-picker__opt sh-shopping-store-picker__opt--new"
-              onClick={() => setMode('new')}
-            >
-              + New store…
-            </button>
-          </li>
-        </ul>
-      )}
-      {open && mode === 'new' && (
-        <div class="sh-shopping-store-picker__menu sh-shopping-store-picker__new" role="dialog" aria-label="Add a new store">
+      </OverflowMenu>
+      {adding && (
+        <div
+          class="sh-shopping-store-picker__menu sh-shopping-store-picker__new"
+          role="dialog"
+          aria-label={t('shopping.picker.new_dialog')}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              e.stopPropagation()
+              backToList()
+            }
+          }}
+        >
           <button
             type="button"
             class="sh-shopping-store-picker__back"
-            onClick={() => { setMode('list'); setNewName('') }}
+            onClick={backToList}
           >
-            ‹ Back
+            {t('shopping.picker.back')}
           </button>
           <input
             ref={newInputRef}
             type="text"
             class="sh-shopping-store-picker__new-input"
-            placeholder="Store name (e.g. Migros)"
-            aria-label="New store name"
+            placeholder={t('shopping.stores.placeholder')}
+            aria-label={t('shopping.stores.new_label')}
             value={newName}
             onInput={(e) => setNewName((e.target as HTMLInputElement).value)}
             onKeyDown={(e) => {
@@ -1242,7 +1221,7 @@ function StorePicker({
             onClick={saveNew}
             disabled={!newName.trim()}
           >
-            Save
+            {t('common.save')}
           </Button>
         </div>
       )}

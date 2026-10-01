@@ -11,6 +11,7 @@ import {
   deleteStore,
   reorderStores,
 } from '@/store/shopping'
+import { t } from '@/i18n/i18n'
 
 /** Drag payload for a store row inside this dialog. Scoped to the
  *  dialog so it can never be confused with the page's item /
@@ -23,8 +24,13 @@ interface StoreManagerDialogProps {
   onClose: () => void
 }
 
-function plural(n: number): string {
-  return n === 1 ? 'item' : 'items'
+/** "1 item" / "3 items", translated.
+ *  Keys reached dynamically (for ``i18n:check``): t('shopping.stores.items')
+ *  t('shopping.stores.items_one') t('shopping.error.reorder')
+ *  t('shopping.error.rename') t('shopping.error.delete_store')
+ *  t('shopping.error.add_store') */
+function itemCount(n: number): string {
+  return t(n === 1 ? 'shopping.stores.items_one' : 'shopping.stores.items', { n: String(n) })
 }
 
 /** Store catalogue manager (§23.120).
@@ -89,14 +95,14 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
     if (adding) addRef.current?.focus()
   }, [adding])
 
-  const fail = (what: string, err: unknown) =>
-    showToast(`${what} failed: ${(err as Error)?.message ?? err}`, 'error')
+  const fail = (key: string, err: unknown) =>
+    showToast(t(key, { error: String((err as Error)?.message ?? err) }), 'error')
 
   const commitOrder = async (next: string[]) => {
     try {
       await reorderStores(next)
     } catch (err: unknown) {
-      fail('Reorder', err)
+      fail('shopping.error.reorder', err)
     }
   }
 
@@ -153,9 +159,10 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
     if (target) {
       const n = countFor(from)
       const ok = await confirmDialog(
-        `"${target.name}" already exists. Merge "${from}" into it? `
-        + `${n} ${plural(n)} will move.`,
-        { destructive: true, confirmLabel: 'Merge' },
+        t('shopping.stores.merge_confirm', {
+          target: target.name, from, count: itemCount(n),
+        }),
+        { destructive: true, confirmLabel: t('shopping.stores.merge') },
       )
       if (!ok) return
     }
@@ -166,32 +173,32 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
         // ``new_name`` is the spelling that SURVIVED — on a merge
         // that's the target's casing, not what the user typed.
         showToast(
-          `Merged into ${result.new_name} — `
-          + `${result.moved_items} ${plural(result.moved_items)} moved`,
+          t('shopping.stores.merged', {
+            name: result.new_name, count: itemCount(result.moved_items),
+          }),
           'info',
         )
       } else {
-        showToast(`Renamed to ${result.new_name}`, 'info')
+        showToast(t('shopping.stores.renamed', { name: result.new_name }), 'info')
       }
     } catch (err: unknown) {
-      fail('Rename', err)
+      fail('shopping.error.rename', err)
     }
   }
 
   const removeStore = async (name: string) => {
     const n = countFor(name)
     const ok = await confirmDialog(
-      `Delete the "${name}" store? `
-      + (n > 0
-        ? `Its ${n} ${plural(n)} will move to "No store".`
-        : 'Items in it would move to "No store".'),
-      { destructive: true, confirmLabel: 'Delete' },
+      n > 0
+        ? t('shopping.stores.delete_confirm', { name, count: itemCount(n) })
+        : t('shopping.stores.delete_confirm_empty', { name }),
+      { destructive: true, confirmLabel: t('common.delete') },
     )
     if (!ok) return
     try {
       await deleteStore(name)
     } catch (err: unknown) {
-      fail('Delete', err)
+      fail('shopping.error.delete_store', err)
     }
   }
 
@@ -209,28 +216,28 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
       setNewName('')
       setAdding(false)
       if (existed) {
-        showToast(`"${store.name}" is already in your stores`, 'info')
+        showToast(t('shopping.stores.exists', { name: store.name }), 'info')
       }
     } catch (err: unknown) {
-      fail('Add store', err)
+      fail('shopping.error.add_store', err)
     }
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Stores">
+    <Modal open={open} onClose={onClose} title={t('shopping.stores.title')}>
       {/* Only meaningful once there is an order to speak of — the
         * empty state below already explains what stores are for. */}
       {ordered.length > 0 && (
         <p class="sh-muted sh-store-manager__hint">
-          The order here is the order you shop in.
+          {t('shopping.stores.hint')}
         </p>
       )}
 
       {ordered.length === 0 ? (
         <div class="sh-empty-state sh-store-manager__empty">
           <div aria-hidden="true">🏪</div>
-          <h3>No stores yet</h3>
-          <p>Add the shops you visit to sort your list by trip order.</p>
+          <h3>{t('shopping.stores.empty_title')}</h3>
+          <p>{t('shopping.stores.empty_body')}</p>
         </div>
       ) : (
         <ul class="sh-store-manager">
@@ -259,7 +266,7 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
                 <span
                   class="sh-store-manager__drag"
                   aria-hidden="true"
-                  title="Drag to reorder"
+                  title={t('shopping.drag_reorder')}
                   draggable={!isRenaming}
                   onDragStart={(e) => {
                     e.dataTransfer?.setData(DRAG_MIME, name)
@@ -271,11 +278,11 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
                   ⋮⋮
                 </span>
 
-                <div class="sh-store-manager__nudge" role="group" aria-label={`Reorder ${name}`}>
+                <div class="sh-store-manager__nudge" role="group" aria-label={t('shopping.reorder_group', { name })}>
                   <button
                     type="button"
                     class="sh-store-manager__nudge-btn"
-                    aria-label={`Move ${name} up`}
+                    aria-label={t('shopping.move_up', { name })}
                     disabled={idx === 0}
                     onClick={() => nudge(name, -1)}
                   >
@@ -284,7 +291,7 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
                   <button
                     type="button"
                     class="sh-store-manager__nudge-btn"
-                    aria-label={`Move ${name} down`}
+                    aria-label={t('shopping.move_down', { name })}
                     disabled={idx === ordered.length - 1}
                     onClick={() => nudge(name, +1)}
                   >
@@ -298,7 +305,7 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
                       ref={renameRef}
                       type="text"
                       class="sh-store-manager__input"
-                      aria-label={`New name for ${name}`}
+                      aria-label={t('shopping.stores.rename_input', { name })}
                       value={renameDraft}
                       onInput={(e) =>
                         setRenameDraft((e.target as HTMLInputElement).value)}
@@ -321,40 +328,40 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
                       onClick={() => void saveRename()}
                       disabled={!renameDraft.trim()}
                     >
-                      Save
+                      {t('common.save')}
                     </Button>
                     <button
                       type="button"
                       class="sh-link sh-store-manager__cancel"
                       onClick={cancelRename}
                     >
-                      Cancel
+                      {t('common.cancel')}
                     </button>
                   </div>
                 ) : (
                   <>
                     <span class="sh-store-manager__name">{name}</span>
                     <span class="sh-store-manager__count">
-                      {n} {plural(n)}
+                      {itemCount(n)}
                     </span>
                     <div class="sh-store-manager__actions">
                       <button
                         type="button"
                         class="sh-store-manager__action"
-                        aria-label={`Rename ${name}`}
-                        title={`Rename ${name}`}
+                        aria-label={t('shopping.stores.rename_label', { name })}
+                        title={t('shopping.stores.rename_label', { name })}
                         onClick={() => startRename(name)}
                       >
-                        Rename
+                        {t('shopping.stores.rename')}
                       </button>
                       <button
                         type="button"
                         class="sh-store-manager__action sh-store-manager__action--danger"
-                        aria-label={`Delete ${name}`}
-                        title={`Delete ${name}`}
+                        aria-label={t('shopping.stores.delete_label', { name })}
+                        title={t('shopping.stores.delete_label', { name })}
                         onClick={() => void removeStore(name)}
                       >
-                        Delete
+                        {t('common.delete')}
                       </button>
                     </div>
                   </>
@@ -371,8 +378,8 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
             ref={addRef}
             type="text"
             class="sh-store-manager__add-input"
-            placeholder="Store name (e.g. Migros)"
-            aria-label="New store name"
+            placeholder={t('shopping.stores.placeholder')}
+            aria-label={t('shopping.stores.new_label')}
             value={newName}
             onInput={(e) => setNewName((e.target as HTMLInputElement).value)}
             onKeyDown={(e) => {
@@ -388,14 +395,14 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
             }}
           />
           <Button type="button" onClick={() => void saveNew()} disabled={!newName.trim()}>
-            Save
+            {t('common.save')}
           </Button>
           <button
             type="button"
             class="sh-link sh-store-manager__cancel"
             onClick={() => { setAdding(false); setNewName('') }}
           >
-            Cancel
+            {t('common.cancel')}
           </button>
         </div>
       ) : (
@@ -415,7 +422,7 @@ export function StoreManagerDialog({ open, onClose }: StoreManagerDialogProps) {
           }
           onClick={() => { cancelRename(); setAdding(true) }}
         >
-          + Add store
+          {t('shopping.stores.add')}
         </button>
       )}
     </Modal>

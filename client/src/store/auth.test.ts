@@ -113,3 +113,21 @@ describe('auth store', () => {
     toastSpy.mockRestore()
   })
 })
+
+describe('onLogout hooks', () => {
+  it('runs every registered hook on logout, isolated from failures', async () => {
+    const { onLogout, logout: doLogout } = await import('./auth')
+    const a = vi.fn()
+    const boom = vi.fn(() => { throw new Error('x') })
+    const b = vi.fn()
+    const offA = onLogout(a)
+    onLogout(boom)
+    onLogout(b)
+    doLogout()
+    expect(a).toHaveBeenCalledTimes(1)
+    expect(b).toHaveBeenCalledTimes(1)
+    offA()
+    doLogout()
+    expect(a).toHaveBeenCalledTimes(1)
+  })
+})

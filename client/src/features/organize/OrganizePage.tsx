@@ -19,7 +19,8 @@ import { useEffect } from 'preact/hooks'
 import { signal, useComputed } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { TabHeader } from '@/components/TabHeader'
-import { items as shoppingItems, loadShopping } from '@/store/shopping'
+import { items as shoppingItems, ensureShopping } from '@/store/shopping'
+import { pendingDeletes } from '@/utils/undoableDelete'
 import { stickies } from '@/store/stickies'
 import { tasks } from '@/store/tasks'
 import TaskPage from '@/features/tasks/TaskPage'
@@ -46,11 +47,12 @@ export default function OrganizePage() {
 
   // Live count chips — pull straight from the per-feature stores so
   // the labels track WS-driven updates without a refetch round-trip.
-  // ``loadShopping`` is idempotent at the store level; calling it
-  // here ensures the chip says "0 in cart" instead of "—" before any
-  // member has visited the Shopping tab.
+  // ``ensureShopping`` fetches only when nothing is loaded yet and
+  // shares the in-flight request with the Shopping tab when both
+  // mount together — one fetch, not two. A failure here is silent:
+  // the chip just shows no count, and the tab shows its own error.
   useEffect(() => {
-    void loadShopping()
+    ensureShopping().catch(() => { /* the Shopping tab reports it */ })
   }, [])
 
   useEffect(() => {
@@ -59,7 +61,9 @@ export default function OrganizePage() {
 
   const labels = useComputed<Readonly<Record<OrganizeTab, string>>>(() => {
     const todo = tasks.value.filter(t => t.status !== 'done').length
-    const inCart = shoppingItems.value.filter(i => !i.completed).length
+    const hidden = pendingDeletes.value
+    const inCart = shoppingItems.value
+      .filter(i => !i.completed && !hidden.has(i.id)).length
     const stuck = stickies.value.length
     return {
       tasks:    todo > 0    ? `Tasks · ${todo}`    : 'Tasks',

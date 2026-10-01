@@ -113,4 +113,26 @@ describe('ChipRadioGroup', () => {
     )
     expect(getByRole('radiogroup', { name: 'Pick one' })).toBeTruthy()
   })
+
+  it('renders the segmented variant with its own classes, same radio semantics', () => {
+    const { container, getByRole } = render(
+      <ChipRadioGroup options={OPTIONS} value="a" ariaLabel="View" variant="segmented"
+                      onChange={() => {}} />,
+    )
+    const group = getByRole('radiogroup', { name: 'View' })
+    expect(group.className).toContain('sh-segmented')
+    expect(group.className).not.toContain('sh-locale-options')
+    const [first, second] = radios(container)
+    expect(first.className).toContain('sh-segmented__opt--active')
+    expect(second.className).toContain('sh-segmented__opt')
+    expect(second.className).not.toContain('--active')
+  })
+
+  it('appends an extra class to the group', () => {
+    const { getByRole } = render(
+      <ChipRadioGroup options={OPTIONS} value="a" ariaLabel="View" class="extra"
+                      onChange={() => {}} />,
+    )
+    expect(getByRole('radiogroup').className).toBe('sh-locale-options extra')
+  })
 })

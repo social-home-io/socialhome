@@ -14,6 +14,7 @@ import {
   CommentThreadSkeleton,
   NotificationListSkeleton,
   DmThreadSkeleton,
+  ListSkeleton,
 } from './Skeleton'
 
 describe('Skeleton primitive', () => {
@@ -148,5 +149,48 @@ describe('Page-shaped skeletons', () => {
     const { container } = render(<DmThreadSkeleton count={4} />)
     const mine = container.querySelectorAll('.sh-message--mine.sh-message--skeleton')
     expect(mine.length).toBe(2)
+  })
+})
+
+describe('ListSkeleton', () => {
+  it('is ONE busy region with ONE status label — no per-bone status', () => {
+    const { container } = render(<ListSkeleton />)
+    const busy = container.querySelectorAll('[aria-busy="true"]')
+    expect(busy.length).toBe(1)
+    const status = container.querySelectorAll('[role="status"]')
+    expect(status.length).toBe(1)
+    expect(status[0].textContent).toBe('Loading...')
+    expect(status[0].className).toBe('sr-only')
+    // The status line is a sibling of the busy art, not inside it —
+    // assistive tech skips announcing content under aria-busy.
+    expect(busy[0].contains(status[0])).toBe(false)
+    expect(busy[0].classList.contains('sh-list-skeleton__art')).toBe(true)
+    // No landmark (the page already has its <main>).
+    expect(container.querySelector('main')).toBeNull()
+  })
+
+  it('list variant renders the requested number of rows', () => {
+    const { container } = render(<ListSkeleton rows={3} label="Loading shopping list" />)
+    expect(container.querySelector('.sh-list-skeleton--list')).not.toBeNull()
+    expect(container.querySelectorAll('.sh-list-skeleton__row').length).toBe(3)
+    expect(container.querySelector('[role="status"]')!.textContent).toBe('Loading shopping list')
+  })
+
+  it('board variant renders three columns of cards', () => {
+    const { container } = render(<ListSkeleton variant="board" />)
+    expect(container.querySelectorAll('.sh-list-skeleton__column').length).toBe(3)
+    expect(container.querySelectorAll('.sh-list-skeleton__card').length).toBeGreaterThan(3)
+  })
+
+  it('sticky variant renders note tiles', () => {
+    const { container } = render(<ListSkeleton variant="sticky" rows={4} />)
+    expect(container.querySelectorAll('.sh-list-skeleton__note').length).toBe(4)
+  })
+
+  it('keeps its decorative bones hidden from assistive tech', () => {
+    const { container } = render(<ListSkeleton />)
+    const art = container.querySelector('.sh-list-skeleton__art')!
+    expect(art.getAttribute('aria-hidden')).toBe('true')
+    expect(art.getAttribute('aria-busy')).toBe('true')
   })
 })
