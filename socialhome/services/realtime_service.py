@@ -1028,6 +1028,12 @@ class RealtimeService:
     # ─── Tasks ────────────────────────────────────────────────────────────
 
     async def _on_task_assigned(self, event: TaskAssigned) -> None:
+        # Defence in depth: a space task's frame carries its title +
+        # description, so it never reaches a non-member.
+        if event.space_id is not None and event.assigned_to not in (
+            await self._space_repo.list_local_member_user_ids(event.space_id)
+        ):
+            return
         await self._ws.broadcast_to_user(
             event.assigned_to,
             {
@@ -1037,13 +1043,16 @@ class RealtimeService:
         )
 
     async def _on_task_completed(self, event: TaskCompleted) -> None:
-        await self._broadcast_household(
-            {
-                "type": "task.completed",
-                "task_id": event.task.id,
-                "completed_by": event.completed_by,
-            }
-        )
+        payload = {
+            "type": "task.completed",
+            "task_id": event.task.id,
+            "completed_by": event.completed_by,
+            "space_id": event.space_id,
+        }
+        if event.space_id is None:
+            await self._broadcast_household(payload)
+        else:
+            await self._broadcast_space(event.space_id, payload)
 
     async def _on_task_deadline(self, event: TaskDeadlineDue) -> None:
         for assignee in event.task.assignees or ():

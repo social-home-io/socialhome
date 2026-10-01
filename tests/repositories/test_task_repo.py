@@ -260,8 +260,15 @@ async def test_space_list_by_list(env):
             updated_at=now,
         )
         await env.space_repo.save(t, space_id="sp-1")
-    results = await env.space_repo.list_by_list("spl-lbl")
+    results = await env.space_repo.list_by_list("spl-lbl", space_id="sp-1")
     assert len(results) == 3
+    # The read is space-filtered: the same list id seen from another
+    # space yields nothing.
+    assert await env.space_repo.list_by_list("spl-lbl", space_id="sp-other") == []
+    done_hidden = await env.space_repo.list_by_list(
+        "spl-lbl", space_id="sp-1", include_done=False
+    )
+    assert len(done_hidden) == 3
 
 
 async def test_space_list_by_space(env):
@@ -360,7 +367,10 @@ async def test_space_task_save_refuses_foreign_parent_list(two_spaces):
         is False
     )
     assert await two_spaces.space_repo.get("t-new") is None
-    assert [t.id for t in await two_spaces.space_repo.list_by_list("l-2")] == ["t-2"]
+    assert [
+        t.id for t in await two_spaces.space_repo.list_by_list("l-2", space_id="sp-2")
+    ] == ["t-2"]
+    assert await two_spaces.space_repo.list_by_list("l-2", space_id="sp-1") == []
 
 
 async def test_space_task_delete_refuses_foreign_space(two_spaces):

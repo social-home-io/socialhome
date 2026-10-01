@@ -574,6 +574,44 @@ async def test_task_completed_fans_to_household(env):
     assert any("task.completed" in m for m in sock.sent)
 
 
+async def test_space_task_completed_fans_to_space_members_only(env):
+    """A space completion is a space frame — never a household broadcast."""
+    svc, bus, ws = env
+    member = _FakeWS()
+    household_only = _FakeWS()
+    await ws.register("u3", member)  # sp-1 member, not a household user
+    await ws.register("u9", household_only)
+    svc._user_repo = _FakeUserRepo([_user("u3"), _user("u9")])
+    svc._space_repo = _FakeSpaceRepo({"sp-1": ["u3"]})
+    await bus.publish(
+        TaskCompleted(
+            task=_task(status=TaskStatus.DONE), completed_by="u3", space_id="sp-1"
+        )
+    )
+    assert household_only.sent == []
+    frames = [json.loads(m) for m in member.sent]
+    assert frames == [
+        {
+            "type": "task.completed",
+            "task_id": "t1",
+            "completed_by": "u3",
+            "space_id": "sp-1",
+        }
+    ]
+
+
+async def test_space_task_assigned_skips_a_non_member(env):
+    svc, bus, ws = env
+    outsider = _FakeWS()
+    member = _FakeWS()
+    await ws.register("eve", outsider)
+    await ws.register("u3", member)
+    await bus.publish(TaskAssigned(task=_task(), assigned_to="eve", space_id="sp-1"))
+    await bus.publish(TaskAssigned(task=_task(), assigned_to="u3", space_id="sp-1"))
+    assert outsider.sent == []
+    assert any("task.assigned" in m for m in member.sent)
+
+
 async def test_task_deadline_due_fans_to_each_assignee(env):
     svc, bus, ws = env
     sock_a = _FakeWS()

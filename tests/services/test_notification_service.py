@@ -1490,6 +1490,86 @@ async def test_task_completed_notifies_assignees(stack):
     assert any(n.type == "task_completed" for n in notifs)
 
 
+async def _space_task_env(stack, sid: str, member_ids: list[str]) -> None:
+    owner = await stack.provision_user(f"owner-{sid}")
+    await stack.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'S', 'inst', ?, ?)",
+        (sid, owner.username, "ab" * 32),
+    )
+    for uid in member_ids:
+        await stack.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'member')",
+            (sid, uid),
+        )
+
+
+def _space_task(*, assignees=(), status=TaskStatus.TODO) -> Task:
+    now = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    return Task(
+        id="st1",
+        list_id="sl1",
+        title="Space secret",
+        status=status,
+        position=0,
+        created_by="me",
+        created_at=now,
+        updated_at=now,
+        assignees=assignees,
+    )
+
+
+async def test_space_task_assigned_skips_a_non_member(stack):
+    from socialhome.domain.events import TaskAssigned
+
+    member = await stack.provision_user("member-ta")
+    outsider = await stack.provision_user("outsider-ta")
+    await _space_task_env(stack, "sp-ta", [member.user_id])
+    for uid in (member.user_id, outsider.user_id):
+        await stack.bus.publish(
+            TaskAssigned(task=_space_task(), assigned_to=uid, space_id="sp-ta")
+        )
+    assert await stack.notif_repo.list(outsider.user_id, limit=10) == []
+    got = await stack.notif_repo.list(member.user_id, limit=10)
+    assert [n.type for n in got] == ["task_assigned"]
+
+
+async def test_space_task_completed_links_to_the_space_tasks_tab(stack):
+    from socialhome.domain.events import TaskCompleted
+
+    alice = await stack.provision_user("alice-stc")
+    bob = await stack.provision_user("bob-stc")
+    outsider = await stack.provision_user("outsider-stc")
+    await _space_task_env(stack, "sp-tc", [alice.user_id, bob.user_id])
+    await stack.bus.publish(
+        TaskCompleted(
+            task=_space_task(
+                assignees=(bob.user_id, outsider.user_id), status=TaskStatus.DONE
+            ),
+            completed_by=alice.user_id,
+            space_id="sp-tc",
+        )
+    )
+    notifs = await stack.notif_repo.list(bob.user_id, limit=10)
+    assert [n.link_url for n in notifs] == ["/spaces/sp-tc?tab=tasks"]
+    assert await stack.notif_repo.list(outsider.user_id, limit=10) == []
+
+
+async def test_household_task_completed_keeps_the_tasks_link(stack):
+    from socialhome.domain.events import TaskCompleted
+
+    alice = await stack.provision_user("alice-htc")
+    bob = await stack.provision_user("bob-htc")
+    await stack.bus.publish(
+        TaskCompleted(
+            task=_space_task(assignees=(bob.user_id,), status=TaskStatus.DONE),
+            completed_by=alice.user_id,
+        )
+    )
+    notifs = await stack.notif_repo.list(bob.user_id, limit=10)
+    assert [n.link_url for n in notifs] == ["/tasks/sl1"]
+
+
 # ─── SpacePostModerated handler ───────────────────────────────────────
 
 

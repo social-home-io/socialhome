@@ -5450,6 +5450,18 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         self._assert_writable_member(member, action=action, space=space)
 
     @staticmethod
+    def assert_writable_member(
+        member: SpaceMember,
+        *,
+        action: str = "post",
+        space: "Space | None" = None,
+    ) -> None:
+        """Public entry to :meth:`_assert_writable_member` for sibling
+        services (e.g. :class:`SpaceTaskService`) that own a space write
+        path but not the member lookup's service — same rule, one copy."""
+        SpaceService._assert_writable_member(member, action=action, space=space)
+
+    @staticmethod
     def _assert_writable_member(
         member: SpaceMember,
         *,

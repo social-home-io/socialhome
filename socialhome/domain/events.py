@@ -351,6 +351,8 @@ class SpaceZoneDeleted(DomainEvent):
 class TaskAssigned(DomainEvent):
     task: "Task"
     assigned_to: str  # user_id
+    #: Set for a space task — consumers gate delivery on membership.
+    space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -359,6 +361,8 @@ class TaskCompleted(DomainEvent):
     task: "Task"
     completed_by: str  # user_id
     spawned_next: "Task | None" = None
+    #: Set for a space task — fans out to the space, not the household.
+    space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

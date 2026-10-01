@@ -421,13 +421,8 @@ class AbstractSpaceTaskRepo(Protocol):
         self,
         list_id: str,
         *,
+        space_id: str,
         include_done: bool = True,
-        status: str | None = None,
-        assignee: str | None = None,
-        due_from: date | None = None,
-        due_to: date | None = None,
-        limit: int | None = None,
-        offset: int = 0,
     ) -> list[Task]: ...
     async def list_by_space(self, space_id: str) -> list[Task]: ...
     async def list_since(
@@ -569,19 +564,21 @@ class SqliteSpaceTaskRepo:
         self,
         list_id: str,
         *,
+        space_id: str,
         include_done: bool = True,
     ) -> list[Task]:
+        """Tasks of ``list_id`` — only those stored in ``space_id``."""
         if include_done:
             rows = await self._db.fetchall(
-                "SELECT * FROM space_tasks WHERE list_id=? "
+                "SELECT * FROM space_tasks WHERE list_id=? AND space_id=? "
                 "ORDER BY position, created_at",
-                (list_id,),
+                (list_id, space_id),
             )
         else:
             rows = await self._db.fetchall(
-                "SELECT * FROM space_tasks WHERE list_id=? AND status != ? "
-                "ORDER BY position, created_at",
-                (list_id, TaskStatus.DONE.value),
+                "SELECT * FROM space_tasks WHERE list_id=? AND space_id=?"
+                " AND status != ? ORDER BY position, created_at",
+                (list_id, space_id, TaskStatus.DONE.value),
             )
         return [_row_to_task(d) for d in rows_to_dicts(rows)]
 

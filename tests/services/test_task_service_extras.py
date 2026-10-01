@@ -11,6 +11,7 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
 from socialhome.services.task_service import SpaceTaskService, TaskService
 
@@ -36,7 +37,9 @@ async def env(tmp_dir):
     e.task_repo = SqliteTaskRepo(db)
     e.space_task_repo = SqliteSpaceTaskRepo(db)
     e.task_svc = TaskService(e.task_repo)
-    e.space_task_svc = SpaceTaskService(e.space_task_repo)
+    e.space_task_svc = SpaceTaskService(
+        e.space_task_repo, space_repo=SqliteSpaceRepo(db)
+    )
     yield e
     await db.shutdown()
 
