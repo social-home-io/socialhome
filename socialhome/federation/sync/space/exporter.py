@@ -75,6 +75,14 @@ RESOURCE_ORDER: tuple[str, ...] = (
 #: resource-dispatch table must stay in sync with this.
 ALLOWED_RESOURCES: frozenset[str] = frozenset(RESOURCE_ORDER)
 
+#: The sync resources that are the space's **roster**, not its content.
+#: Everything else in :data:`RESOURCE_ORDER` is space content, and the
+#: receiver refuses it into a space that is archived here — the sync
+#: counterpart of the §24.11 ``check_space_archived`` step (see
+#: :func:`socialhome.federation.space_scope.archive_refusal`). The roster
+#: still converges on an archived space, like the roster events do.
+ROSTER_RESOURCES: frozenset[str] = frozenset({"bans", "members", "member_pictures"})
+
 
 #: Sentinel resource sent over the channel after all real chunks.
 #: Not encrypted (no payload to hide); only signed.

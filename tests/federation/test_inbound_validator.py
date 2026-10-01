@@ -21,6 +21,7 @@ from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
 )
+from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
     RELAY_QUEUE_TTL_SECONDS,
@@ -31,6 +32,7 @@ from socialhome.federation.inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_peer_class,
+    make_check_space_archived,
     make_check_space_writer,
     make_check_replay,
     make_check_timestamp,
@@ -767,8 +769,8 @@ async def test_the_space_writer_gate_is_a_step_in_the_shipped_pipeline():
         lookup_step=_noop_step,
     )
     names = [getattr(s, "__name__", "") for s in steps]
-    assert names[-1] == "check_space_writer"
-    assert names.index("persist_replay") < names.index("check_space_writer")
+    assert names[-2:] == ["check_space_archived", "check_space_writer"]
+    assert names.index("persist_replay") < names.index("check_space_archived")
 
 
 async def test_the_mesh_gate_set_carries_both_the_ban_and_writer_checks():
@@ -782,7 +784,7 @@ async def test_the_mesh_gate_set_carries_both_the_ban_and_writer_checks():
         getattr(s, "__name__", "")
         for s in owner.post_decrypt_gate_steps(include_ban_check=True)
     ]
-    assert names == ["ban_check", "check_space_writer"]
+    assert names == ["ban_check", "check_space_archived", "check_space_writer"]
 
 
 async def _noop_step(ctx):
@@ -1387,3 +1389,102 @@ async def test_space_writer_holds_a_seatless_write_when_a_buffer_is_wired():
     assert full.early_response == REFUSED
     blob = await _run(step, FederationEventType.SPACE_MEDIA_BLOB, {"filename": "f"})
     assert blob.early_response == REFUSED
+
+
+# ─── Step 12a: check_space_archived (an archived space is read-only) ─────
+
+
+class _ArchiveSpaceRepo:
+    def __init__(self, space=None, *, raises: bool = False) -> None:
+        self._space = space
+        self._raises = raises
+
+    async def get(self, space_id):
+        if self._raises:
+            raise RuntimeError("db down")
+        return self._space
+
+
+def _archived_space(*, archived=True, reason=None, dissolved=False):
+    return Space(
+        id="sp-1",
+        name="S",
+        owner_instance_id="host-1",
+        owner_username="anna",
+        identity_public_key="00" * 32,
+        config_sequence=0,
+        features=SpaceFeatures(),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+        archived=archived,
+        archived_reason=reason,
+        dissolved=dissolved,
+    )
+
+
+def _archived_ctx(event_type=FederationEventType.SPACE_POST_CREATED, **kw):
+    ctx = InboundContext()
+    ctx.event = FederationEvent(
+        msg_id="m1",
+        event_type=event_type,
+        from_instance=kw.get("sender", "peer-1"),
+        to_instance="us",
+        timestamp="2026-01-01T00:00:00+00:00",
+        payload=kw.get("payload", {}),
+        space_id=kw.get("space_id", "sp-1"),
+    )
+    return ctx
+
+
+async def test_archived_gate_refuses_a_write_into_an_archived_space():
+    step = make_check_space_archived(space_repo=_ArchiveSpaceRepo(_archived_space()))
+    ctx = _archived_ctx()
+    await step(ctx)
+    assert ctx.early_response == {"status": "ok", "dropped": "archived-space"}
+
+
+async def test_archived_gate_reads_the_payload_space_id_when_unrouted():
+    step = make_check_space_archived(space_repo=_ArchiveSpaceRepo(_archived_space()))
+    ctx = _archived_ctx(space_id=None, payload={"space_id": "sp-1"})
+    await step(ctx)
+    assert ctx.early_response is not None
+
+
+async def test_archived_gate_ignores_non_write_types():
+    step = make_check_space_archived(space_repo=_ArchiveSpaceRepo(_archived_space()))
+    ctx = _archived_ctx(FederationEventType.SPACE_CONFIG_CHANGED)
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_archived_gate_passes_a_live_or_unknown_space():
+    for repo in (
+        _ArchiveSpaceRepo(_archived_space(archived=False)),
+        _ArchiveSpaceRepo(),
+    ):
+        ctx = _archived_ctx()
+        await make_check_space_archived(space_repo=repo)(ctx)
+        assert ctx.early_response is None
+
+
+async def test_archived_gate_leaves_an_unattributable_write_to_the_writer_step():
+    step = make_check_space_archived(space_repo=_ArchiveSpaceRepo(_archived_space()))
+    ctx = _archived_ctx(space_id=None)
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_archived_gate_fails_soft_on_a_lookup_error(caplog):
+    step = make_check_space_archived(space_repo=_ArchiveSpaceRepo(raises=True))
+    ctx = _archived_ctx()
+    with caplog.at_level("WARNING"):
+        await step(ctx)
+    assert ctx.early_response is None
+    assert "archived-space lookup failed" in caplog.text
+
+
+async def test_archived_gate_ignores_a_missing_event():
+    step = make_check_space_archived(space_repo=_ArchiveSpaceRepo(_archived_space()))
+    ctx = InboundContext()
+    await step(ctx)
+    assert ctx.early_response is None

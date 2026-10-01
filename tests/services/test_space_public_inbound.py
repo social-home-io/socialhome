@@ -654,3 +654,14 @@ async def test_relayed_link_preview_unknown_suite_dropped(env, caplog):
     got = await env["post_repo"].get("post-1")
     assert got is not None and got[1].link_preview is None
     assert "link preview dropped" in caplog.text
+
+
+@pytest.mark.parametrize("reason", [None, "dissolved"])
+async def test_a_relayed_post_into_an_archived_space_is_dropped(env, reason):
+    """An archived space is a read-only snapshot on every inbound door; the
+    relay frame names no household, so not even the host is exempt."""
+    await env["space_repo"].set_archived("sp-1", True, reason=reason)
+    envelope = await _make_envelope(env)
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert await env["post_repo"].get("post-1") is None
+    assert env["events"] == []

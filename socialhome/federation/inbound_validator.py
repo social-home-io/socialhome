@@ -45,11 +45,12 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import orjson
 
 from ..domain.federation import (
+    ARCHIVED_ALLOWED_REMOVAL_TYPES,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     SPACE_WRITE_EVENT_TYPES,
     FederationEvent,
@@ -59,6 +60,10 @@ from ..domain.federation import (
     RemoteInstance,
 )
 from ..domain.space import SpaceRole
+from .space_scope import archive_refusal
+
+if TYPE_CHECKING:
+    from ..repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
 
@@ -727,6 +732,81 @@ _REFUSED_WRITE = {"status": "ok", "dropped": "subscriber-write"}
 
 #: Early-response body for a write held until its household's seat lands.
 _HELD_WRITE = {"status": "ok", "held": "awaiting-seat"}
+
+#: Early-response body for a write into a locally archived space. ``ok``
+#: for the same reason as :data:`_REFUSED_WRITE`: redelivering it cannot
+#: change the answer until the space is unarchived.
+_ARCHIVED_WRITE = {"status": "ok", "dropped": "archived-space"}
+
+
+def make_check_space_archived(*, space_repo: "AbstractSpaceRepo") -> InboundStep:
+    """Step 12a: refuse a space-content write into a locally archived space.
+
+    An archived space is read-only on this household — the REST layer
+    refuses new content (``SpaceService._require_writable_space``,
+    ``SpaceTaskService.require_writer``, ``StickyService.require_writer``)
+    — and a federated write is the same write arriving by another door.
+    Without this step a peer's post, comment, task, sticky, page, calendar
+    event, vote, listing, zone or media blob still landed in the snapshot.
+
+    One step, not one check per handler: it fires on the whole
+    :data:`~socialhome.domain.federation.SPACE_WRITE_EVENT_TYPES`
+    vocabulary, ``*_UPDATED`` included, **except removals**
+    (:data:`~socialhome.domain.federation.ARCHIVED_ALLOWED_REMOVAL_TYPES`):
+    an author may still delete their own post in an archived space here,
+    so a peer's delete must land too or the row outlives its deletion on
+    every other copy. The handler's authorship check still decides whether
+    that sender may remove that row. And because it is a
+    post-decrypt gate it runs on every inbound door those gates guard: the
+    §24.11 pipeline, the inner event of a ``SPACE_ROUTED`` unwrap, a held
+    write replayed when its seat lands, and the §25.6 resume replay (which
+    re-sends live events). The decision itself is
+    :func:`~socialhome.federation.space_scope.archive_refusal`, shared with
+    the §25.6 sync receiver.
+
+    Everything that is NOT a content write still applies to an archived
+    space — the roster, bans, config (including the ``SPACE_CONFIG_CHANGED``
+    that unarchives it), dissolve / removal, content-key epochs, sync
+    machinery and reports — because none of it is in the write vocabulary.
+
+    Runs BEFORE :func:`make_check_space_writer` so a write into an archived
+    space is refused rather than held for a seat. A space we don't hold is
+    passed on (the handlers decide); a lookup that RAISES passes at WARNING,
+    like the writer step's seat lookup — refusing would acknowledge the
+    envelope and lose a legitimate write to a transient DB error.
+    """
+
+    async def check_space_archived(ctx: InboundContext) -> None:
+        event = ctx.event
+        if event is None or event.event_type not in SPACE_WRITE_EVENT_TYPES:
+            return
+        if event.event_type in ARCHIVED_ALLOWED_REMOVAL_TYPES:
+            return  # removals always propagate; the handler judges the row
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        space_id = str(event.space_id or payload.get("space_id") or "")
+        if not space_id:
+            return  # the writer step refuses an unattributable write
+        try:
+            space = await space_repo.get(space_id)
+        except Exception as exc:
+            log.warning(
+                "inbound: archived-space lookup failed for %s: %s", space_id, exc
+            )
+            return
+        reason = archive_refusal(space, event.from_instance)
+        if reason is None:
+            return
+        log.info(
+            "inbound: refused %s in space %s from %s — the space is %s here "
+            "(read-only)",
+            event.event_type.value,
+            space_id,
+            event.from_instance,
+            reason,
+        )
+        ctx.early_response = dict(_ARCHIVED_WRITE)
+
+    return check_space_archived
 
 
 def make_check_space_writer(

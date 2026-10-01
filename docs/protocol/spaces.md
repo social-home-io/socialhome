@@ -727,6 +727,63 @@ deleting anything, and is reversible.
   `archived_reason` on its own space (it purges); only member copies carry
   it, and it is never re-federated.
 
+### An archived space is read-only to peers too
+
+The REST gate alone left a door open: a peer's federated write still
+landed in a space archived here. Every inbound door now refuses new space
+**content** in a space that is archived (or dissolved) locally —
+one decision, `federation/space_scope.archive_refusal`, shared by:
+
+- the §24.11 post-decrypt gate `check_space_archived`
+  (`federation/inbound_validator.py`), which runs on the whole
+  `SPACE_WRITE_EVENT_TYPES` vocabulary except removals — every create and
+  `*_UPDATED` of posts, comments, pages, tasks, task lists, polls,
+  stickies, calendar events, RSVPs, schedules, gallery albums and items,
+  bazaar listings / bids / offers, zones, timetables, location pins and
+  media blobs. Being a post-decrypt gate, it also covers the inner event
+  of a `SPACE_ROUTED` unwrap, a held write replayed when its seat lands,
+  and the §25.6 resume replay (which re-sends live events). It runs
+  **before** `check_space_writer`, so such a write is refused, never held.
+  The envelope is answered `{"status": "ok", "dropped": "archived-space"}`
+  so the sender's outbox stops redelivering; the refusal is logged at INFO;
+- the §25.6 sync receiver (`SpaceSyncReceiver._admit`) for every resource
+  except the roster (`ROSTER_RESOURCES`: `members`, `bans`,
+  `member_pictures`);
+- the GFS public-post relay consumer (`SpacePublicInbound`).
+
+Who may still write content into an archived copy:
+
+| Local state | Space host | Any other household |
+|---|---|---|
+| live | judged by the other gates | judged by the other gates |
+| archived, `archived_reason` NULL (reversible) | **accepted** — the archive is the host's own decision, its API is read-only for the space, so what it still sends is pre-archive state a member missed (resume / catch-up); it could unarchive over the same signed channel anyway | refused |
+| archived, `archived_reason` set (`dissolved` / `removed`), or `dissolved` | refused | refused |
+
+The GFS relay frame names no household, so it is refused in every
+archived state.
+
+**Still applied** to an archived space, because none of it is a content
+write (`SPACE_READER_EVENT_TYPES`): config (`SPACE_CONFIG_CHANGED` —
+including the host's **unarchive**), dissolve / `SPACE_SYNC_REJECTED`,
+roster and bans, content-key epochs, sync machinery, routing, invites, and
+`SPACE_REPORT` (a report is about content, not content).
+
+**Removals always propagate.** The `*_DELETED` content types
+(`ARCHIVED_ALLOWED_REMOVAL_TYPES` in `domain/federation.py`: post, comment,
+page, task, task list, sticky, calendar event, RSVP, gallery album, gallery
+item, zone, timetable) pass the archive gate from any sender, on a reversibly
+archived and a terminated copy alike. An author can still delete their own
+post or comment in an archived space locally; if every peer dropped that
+delete, the row would outlive its deletion on every other copy. Passing the
+archive gate is not an authorization: the handler's authorship /
+`may_mutate` check still decides whether that sender may remove that row.
+The §25.6 sync stream carries no tombstones (the exporters ship live rows
+only), so there is no sync-side removal to let through.
+
+Receiver-side only — no protocol version bump: no wire shape changes, and
+a sender of any version gets the same `status: ok` it gets for any other
+dropped write.
+
 ## Post-type allow-list (per-space feed composer gating)
 
 A space admin chooses which post kinds members may compose in the feed

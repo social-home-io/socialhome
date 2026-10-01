@@ -273,10 +273,13 @@ Whether an envelope arrives over RTC, HTTPS or the connection-server
 relay is invisible to the per-event handlers; every path lands in
 `federation/inbound_validator.InboundPipeline`.
 
-The two authorize steps run **after** the replay-id is persisted, so a
+The authorize steps run **after** the replay-id is persisted, so a
 dropped envelope still answers 200 and the sender's outbox stops
 redelivering: `check_deprovisioned_author` drops user-scoped events
-from a remote user we have hidden, and `check_space_writer` drops a
+from a remote user we have hidden, `check_space_archived` drops a
+space-content write into a space that is archived here (read-only to peers
+as it is locally — see [`protocol/spaces.md`](./protocol/spaces.md#an-archived-space-is-read-only-to-peers-too)),
+and `check_space_writer` drops a
 space-content write from a household that holds only read-only
 Follower seats in that space (`space_remote_members.role =
 'subscriber'`) — or only tombstoned ones.
@@ -297,7 +300,7 @@ same household. A household the receiver holds **no** roster row for
 (the space host excepted) is not a writer: its write is held in a bounded
 buffer and replayed through the same gates once a seat for it lands —
 roster convergence, not trust — and a removed household is read back
-**including its tombstones**, so it is refused, never held. The same two gates re-run on the inner event
+**including its tombstones**, so it is refused, never held. The same gates re-run on the inner event
 of a `SPACE_ROUTED` envelope after the mesh unwrap
 (`run_post_decrypt_gates`), which would otherwise dispatch without
 passing through the pipeline at all.

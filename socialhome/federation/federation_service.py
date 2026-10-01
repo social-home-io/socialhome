@@ -89,6 +89,7 @@ from .inbound_validator import (
     _InboxInstance,
     make_ban_check,
     make_check_deprovisioned_author,
+    make_check_space_archived,
     make_check_space_writer,
     make_check_replay,
     make_check_peer_class,
@@ -427,6 +428,10 @@ class FederationService:
             steps.append(
                 make_check_deprovisioned_author(user_repo=self._user_repo),
             )
+        if self._space_repo is not None:
+            # Before the writer gate: a write into an archived space is
+            # refused outright, never held for a seat.
+            steps.append(make_check_space_archived(space_repo=self._space_repo))
         if self._space_repo is not None and self._space_remote_member_repo is not None:
             steps.append(
                 make_check_space_writer(

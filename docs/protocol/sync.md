@@ -171,6 +171,16 @@ same pipeline RTC chunks go through. The receiver verifies the
 per-chunk signature, decrypts, persists. Tier 3 (`sync_mode="full"`)
 still aborts on `DIRECT_FAILED` per §25.8.18.
 
+A space that is **archived here** is a read-only snapshot to sync as well:
+`SpaceSyncReceiver._admit` drops every content resource (anything but the
+roster — `members`, `bans`, `member_pictures`) unless the provider is the
+host of a *reversibly* archived space; a terminated copy (`archived_reason`
+set) takes content from nobody. The stream carries no tombstones, so
+removals reach an archived copy only as live `*_DELETED` events, which the
+archive gate lets through. The resume replay above is a burst of live
+events, so the §24.11 `check_space_archived` gate refuses it the same way.
+See [`spaces.md`](./spaces.md#an-archived-space-is-read-only-to-peers-too).
+
 ## Mesh-only host catch-up
 
 ### Authenticating a chunk from an unpaired host
