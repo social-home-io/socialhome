@@ -17,6 +17,8 @@ export interface ChipRadioOption<T extends string> {
   value: T
   label: string
   title?: string
+  /** A colour dot shown before the label (e.g. a sticky colour). */
+  swatch?: string
 }
 
 interface ChipRadioGroupProps<T extends string> {
@@ -92,6 +94,9 @@ export function ChipRadioGroup<T extends string>({
             onKeyDown={e => onKeyDown(e, idx)}
             onClick={() => onChange(o.value)}
           >
+            {o.swatch && (
+              <span class="sh-chip-swatch" aria-hidden="true" style={{ background: o.swatch }} />
+            )}
             {o.label}
           </button>
         )

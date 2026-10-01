@@ -122,15 +122,26 @@ describe('OrganizePage', () => {
     expect(urls.filter(u => u === '/api/stickies')).toHaveLength(1)
   })
 
-  it('the stickies chip ignores a space board left in the shared sticky signal', async () => {
+  it('the stickies chip ignores a loaded space board', async () => {
     stubTabs()
     const stickies = await import('@/store/stickies')
-    stickies.stickies.value = Array.from({ length: 5 }, (_, i) => ({
+    const space = stickies.spaceStickyStore('space-1')
+    space.rows.value = Array.from({ length: 5 }, (_, i) => ({
       id: `sp${i}`, author: 'u1', content: '', color: '#fff', position_x: 0, position_y: 0,
       created_at: '', updated_at: '', space_id: 'space-1',
     }))
+    space.loaded.value = true
     const t = await mount('/organize')
     await t.waitFor(() => expect(t.tabs()[2]).toBe('Stickies · 2'))
+  })
+
+  it('a sticky hidden behind Undo drops out of the chip', async () => {
+    stubTabs()
+    const t = await mount('/organize')
+    await t.waitFor(() => expect(t.tabs()[2]).toBe('Stickies · 2'))
+    const { undoableDelete } = await import('@/utils/undoableDelete')
+    undoableDelete({ ids: ['s1'], message: 'Deleted note', commit: async () => {} })
+    await t.waitFor(() => expect(t.tabs()[2]).toBe('Stickies · 1'))
   })
 
   it('a shopping item hidden behind Undo drops out of the chip', async () => {

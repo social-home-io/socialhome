@@ -1,14 +1,38 @@
 /**
- * Stickies store — household + space-scoped sticky notes (§19).
+ * Stickies store — sticky notes (§19), one store per scope.
  *
- * Canonical row shape matches the backend (``content`` + ``position_x``
- * / ``position_y``), and the WS handlers now actually merge server
- * frames into the signal — prior to §SX1 the backend didn't publish
- * anything and this store was a placeholder.
+ * ``createStickyStore(spaceId)`` builds the store for the household
+ * (``null`` → ``/api/stickies``) or one space
+ * (``/api/spaces/{id}/stickies``). ``householdStickyStore`` is the
+ * household's; ``spaceStickyStore(id)`` makes a space's on first use
+ * and keeps it, so a space board never shares a signal with the
+ * household board (or another space). Modelled on ``store/tasks.ts``.
+ *
+ * - **Loads** are deduped: a call while a request is in flight shares
+ *   it, and a board fetched a moment ago (``FRESH_MS``) is not fetched
+ *   again — the Organize hub's count chip and the Stickies tab mounting
+ *   together fetch once. ``force`` skips both; ``ensure`` loads only
+ *   when never loaded.
+ * - **Edits and moves** are optimistic. A failure rolls back only the
+ *   fields of that one row that still hold our optimistic value, so it
+ *   never reverts another row or a newer WS update, then revalidates.
+ *   While a move is in progress (``holdPosition``) server positions for
+ *   that note are ignored. A move is applied
+ *   locally while dragging (``moveLocal``) and sent once on release
+ *   (``commitMove``) with the position the drag started from.
+ * - **Deletes** go through ``undoableDelete``: hidden at once (``visible``
+ *   filters ``pendingDeletes``), the DELETE is sent when the Undo toast
+ *   expires; a 404 counts as gone. Ids deleted here stay out of late WS
+ *   echoes and list responses for a minute.
+ * - **WS frames** route by ``space_id``: none → the household store, a
+ *   space id → that space's store if one was made. A reconnect
+ *   revalidates every store that had loaded.
  */
-import { computed, signal } from '@preact/signals'
+import { computed, signal, type ReadonlySignal, type Signal } from '@preact/signals'
 import { api } from '@/api'
-import { ws } from '@/ws'
+import { connectionState, ws } from '@/ws'
+import { t } from '@/i18n/i18n'
+import { pendingDeletes, undoableDelete } from '@/utils/undoableDelete'
 
 export interface StickyRow {
   id:         string
@@ -22,102 +46,354 @@ export interface StickyRow {
   space_id:   string | null
 }
 
-/** All known stickies for the current scope. The page component sets
- * this from the REST list, WS handlers merge live updates in.   */
-export const stickies = signal<StickyRow[]>([])
+/** Fields a PATCH may change. */
+export type StickyPatch = Partial<Pick<StickyRow, 'content' | 'color' | 'position_x' | 'position_y'>>
 
-/** Scope of the sticky board currently mounted: a ``space_id`` for a
- *  space board, or ``null`` for the household board. The ``stickies``
- *  signal feeds BOTH boards (``StickyBoardPage``), so WS handlers below
- *  short-circuit when an inbound frame's scope doesn't match — without
- *  this gate, a sticky created on a space board leaks into the
- *  household board (and vice versa). The page owns this signal: set on
- *  load, reset to ``null`` on unmount. Mirrors calendar.ts's
- *  ``activeCalendarScope``. */
-export const activeStickyScope = signal<string | null>(null)
-
-/** True when an inbound sticky frame's scope (``space_id``, ``null`` =
- *  household) matches the currently-mounted board. */
-function _scopedToActive(spaceId: string | null | undefined): boolean {
-  return (spaceId ?? null) === activeStickyScope.value
+export interface StickyDraft {
+  content: string
+  color: string
+  position_x: number
+  position_y: number
 }
 
-// ─── Household count (the Organize hub's "Stickies · N" chip) ─────────
-//
-// ``stickies`` may hold a SPACE board's notes (the last board opened),
-// so the hub can't count it. The household's ids are kept apart here:
-// loaded from ``/api/stickies`` (the household board loads through
-// ``loadHouseholdStickies`` too, so the two share one request) and kept
-// current by household-scoped WS frames and local adds / deletes,
-// whatever board is mounted. The per-scope sticky cache that replaces
-// this is a follow-up.
+export interface LoadOpts {
+  /** Fetch even when a request is in flight or just finished. */
+  force?: boolean
+}
 
-/** Household sticky ids; ``null`` until loaded. */
-const householdIds = signal<ReadonlySet<string> | null>(null)
-let _householdInflight: Promise<StickyRow[]> | null = null
-let _householdGen = 0
+export interface StickyStore {
+  spaceId: string | null
+  /** Every known sticky of this scope (including pending deletes). */
+  rows: Signal<StickyRow[]>
+  /** The board has loaded at least once. */
+  loaded: Signal<boolean>
+  /** ``rows`` minus stickies hidden behind an Undo toast. */
+  visible: ReadonlySignal<StickyRow[]>
 
-/** How many household stickies there are; ``null`` while unknown. */
-export const householdStickyCount = computed(() => householdIds.value?.size ?? null)
+  load(opts?: LoadOpts): Promise<void>
+  ensure(): Promise<void>
+  /** Reload if loaded before (after a reconnect). */
+  revalidate(): Promise<void>
 
-/** GET the household board (shared while in flight) and note its ids. */
-export function loadHouseholdStickies(): Promise<StickyRow[]> {
-  if (_householdInflight) return _householdInflight
-  const gen = _householdGen
-  const run = (async () => {
-    const rows = await api.get('/api/stickies') as StickyRow[]
-    if (gen === _householdGen) householdIds.value = new Set(rows.map(r => r.id))
-    return rows
-  })().finally(() => {
-    if (_householdInflight === run) _householdInflight = null
+  find(id: string): StickyRow | undefined
+  create(draft: StickyDraft): Promise<StickyRow>
+  /** Optimistic PATCH. ``before`` overrides the rollback values (a
+   *  drag already moved the row locally). */
+  patch(id: string, patch: StickyPatch, before?: StickyPatch): Promise<StickyRow | null>
+  /** Move a sticky on screen only (while dragging / arrow-keying). */
+  moveLocal(id: string, x: number, y: number): void
+  /** Send the current position; on failure put it back to ``from``. */
+  commitMove(id: string, from: { x: number; y: number }): Promise<void>
+  /** A drag / keyboard move of ``id`` is in progress: until released,
+   *  positions from WS frames and loads are ignored for it. */
+  holdPosition(id: string): void
+  releasePosition(id: string): void
+  remove(sticky: StickyRow, cb?: { onUndone?: () => void }): void
+
+  onUpsert(frame: Partial<StickyRow> & { id: string }, create: boolean): void
+  onDeleted(id: string): void
+  reset(): void
+}
+
+/** A fetch this recent is reused instead of repeated. */
+const FRESH_MS = 2_000
+/** How long a deleted id stays out of late responses / WS echoes. */
+const RECENTLY_GONE_MS = 60_000
+
+const ROW_FIELDS: ReadonlyArray<keyof StickyRow> = [
+  'id', 'author', 'content', 'color', 'position_x', 'position_y',
+  'created_at', 'updated_at', 'space_id',
+]
+
+/** Keep only sticky fields (a WS frame also carries ``type``). */
+function pick(frame: Partial<StickyRow>): Partial<StickyRow> {
+  const out: Record<string, unknown> = {}
+  for (const k of ROW_FIELDS) if (frame[k] !== undefined) out[k] = frame[k]
+  return out as Partial<StickyRow>
+}
+
+function isNotFound(err: unknown): boolean {
+  return (err as { status?: unknown } | null)?.status === 404
+}
+
+/** A store for one scope: ``null`` = the household, else a space id. */
+export function createStickyStore(spaceId: string | null): StickyStore {
+  const base = spaceId === null
+    ? '/api/stickies'
+    : `/api/spaces/${encodeURIComponent(spaceId)}/stickies`
+  const itemPath = (id: string) => `${base}/${encodeURIComponent(id)}`
+
+  const rows = signal<StickyRow[]>([])
+  const loaded = signal(false)
+  const visible = computed(() => {
+    const hidden = pendingDeletes.value
+    return rows.value.filter(r => !hidden.has(r.id))
   })
-  _householdInflight = run
-  return run
-}
 
-/** Load the household count unless it is known (or loading). */
-export async function ensureHouseholdStickies(): Promise<void> {
-  if (householdIds.value !== null) return
-  await loadHouseholdStickies()
-}
+  /** Bumped by ``reset`` so a request in flight then never writes. */
+  let epoch = 0
+  let inflight: Promise<void> | null = null
+  let fetchedAt = 0
+  let gen = 0
+  const recentlyGone = new Map<string, number>()
+  const patchSeq = new Map<string, number>()
+  /** Ids being moved here right now (ref-counted). A WS frame or a load
+   *  landing mid-drag carries the OLD server position (or another
+   *  member's); applying it would yank the note from under the pointer
+   *  and the release would then commit a jump. Other fields still apply. */
+  const held = new Map<string, number>()
 
-/** A household sticky was added (``true``) or deleted here. */
-export function trackHouseholdSticky(id: string, present: boolean): void {
-  const ids = householdIds.value
-  if (ids === null || ids.has(id) === present) return
-  const next = new Set(ids)
-  if (present) next.add(id)
-  else next.delete(id)
-  householdIds.value = next
-}
+  function withoutHeldPosition<T extends Partial<StickyRow>>(r: T & { id: string }): T {
+    if (!held.has(r.id)) return r
+    const rest = { ...r }
+    delete rest.position_x
+    delete rest.position_y
+    return rest
+  }
 
-/** Logout: forget the count. */
-export function resetHouseholdStickies(): void {
-  _householdGen++
-  _householdInflight = null
-  householdIds.value = null
-}
-
-export function wireStickiesWs(): void {
-  ws.on('sticky.created', (e) => {
-    const s = e.data as unknown as StickyRow
-    if ((s.space_id ?? null) === null) trackHouseholdSticky(s.id, true)
-    if (!_scopedToActive(s.space_id)) return
-    if (!stickies.value.some((x) => x.id === s.id)) {
-      stickies.value = [...stickies.value, s]
+  function isGone(id: string): boolean {
+    const at = recentlyGone.get(id)
+    if (at === undefined) return false
+    if (Date.now() - at > RECENTLY_GONE_MS) {
+      recentlyGone.delete(id)
+      return false
     }
+    return true
+  }
+
+  function find(id: string): StickyRow | undefined {
+    return rows.value.find(r => r.id === id)
+  }
+
+  function mapRow(id: string, fn: (r: StickyRow) => StickyRow) {
+    if (!find(id)) return
+    rows.value = rows.value.map(r => r.id === id ? fn(r) : r)
+  }
+
+  /** Merge a server row / frame in. Only ``create`` may add a new row —
+   *  a partial update frame for an unknown id is not a whole sticky. */
+  function upsert(frame: Partial<StickyRow> & { id: string }, create: boolean) {
+    if (!frame?.id || isGone(frame.id)) return
+    const fields = pick(find(frame.id) ? withoutHeldPosition(frame) : frame)
+    if (find(frame.id)) {
+      mapRow(frame.id, r => ({ ...r, ...fields }))
+    } else if (create) {
+      rows.value = [...rows.value, {
+        author: '', content: '', color: '#FFF9B1', position_x: 0, position_y: 0,
+        created_at: '', updated_at: '', space_id: spaceId,
+        ...fields,
+      } as StickyRow]
+    }
+  }
+
+  function load({ force = false }: LoadOpts = {}): Promise<void> {
+    if (!force && inflight) return inflight
+    if (!force && loaded.value && Date.now() - fetchedAt < FRESH_MS) return Promise.resolve()
+    const mine = ++gen
+    const myEpoch = epoch
+    const run: Promise<void> = (async () => {
+      const list = await api.get(base) as StickyRow[]
+      if (myEpoch !== epoch || mine !== gen) return
+      rows.value = list.filter(r => !isGone(r.id)).map((r) => {
+        const local = held.has(r.id) ? find(r.id) : undefined
+        return local ? { ...r, position_x: local.position_x, position_y: local.position_y } : r
+      })
+      loaded.value = true
+      fetchedAt = Date.now()
+    })().finally(() => {
+      if (inflight === run) inflight = null
+    })
+    inflight = run
+    return run
+  }
+
+  function ensure(): Promise<void> {
+    if (loaded.value) return Promise.resolve()
+    return inflight ?? load()
+  }
+
+  async function revalidate(): Promise<void> {
+    if (!loaded.value) return
+    await load({ force: true }).catch(() => { /* the board keeps what it has */ })
+  }
+
+  async function create(draft: StickyDraft): Promise<StickyRow> {
+    const row = await api.post(base, draft) as StickyRow
+    upsert(row, true)
+    return row
+  }
+
+  /** Put back the fields we changed on ONE row, only where they still
+   *  hold our optimistic value. Never re-creates a removed row. */
+  function rollback(id: string, before: StickyPatch, optimistic: StickyPatch) {
+    mapRow(id, (r) => {
+      const next = { ...r }
+      for (const k of Object.keys(optimistic) as (keyof StickyPatch)[]) {
+        if (r[k] === optimistic[k] && before[k] !== undefined) {
+          (next as Record<string, unknown>)[k] = before[k]
+        }
+      }
+      return next
+    })
+  }
+
+  async function patch(
+    id: string, change: StickyPatch, beforeOverride?: StickyPatch,
+  ): Promise<StickyRow | null> {
+    const row = find(id)
+    if (!row) return null
+    const before: StickyPatch = {}
+    for (const k of Object.keys(change) as (keyof StickyPatch)[]) {
+      (before as Record<string, unknown>)[k] = beforeOverride?.[k] ?? row[k]
+    }
+    mapRow(id, r => ({ ...r, ...change }))
+    const seq = (patchSeq.get(id) ?? 0) + 1
+    patchSeq.set(id, seq)
+    try {
+      const fresh = await api.patch(itemPath(id), change) as StickyRow
+      if (fresh?.id && patchSeq.get(id) === seq) upsert(fresh, false)
+      return fresh
+    } catch (err) {
+      rollback(id, before, change)
+      // Two overlapping failed PATCHes can each "restore" the other's
+      // optimistic value; refetch so the board ends on the server's.
+      void revalidate()
+      throw err
+    }
+  }
+
+  function holdPosition(id: string): void {
+    held.set(id, (held.get(id) ?? 0) + 1)
+  }
+
+  function releasePosition(id: string): void {
+    const n = (held.get(id) ?? 0) - 1
+    if (n > 0) held.set(id, n)
+    else held.delete(id)
+  }
+
+  function moveLocal(id: string, x: number, y: number): void {
+    mapRow(id, r => ({ ...r, position_x: x, position_y: y }))
+  }
+
+  async function commitMove(id: string, from: { x: number; y: number }): Promise<void> {
+    const row = find(id)
+    if (!row || (row.position_x === from.x && row.position_y === from.y)) return
+    await patch(
+      id,
+      { position_x: row.position_x, position_y: row.position_y },
+      { position_x: from.x, position_y: from.y },
+    )
+  }
+
+  function onDeleted(id: string) {
+    recentlyGone.set(id, Date.now())
+    if (find(id)) rows.value = rows.value.filter(r => r.id !== id)
+  }
+
+  function remove(sticky: StickyRow, cb: { onUndone?: () => void } = {}): void {
+    const snippet = sticky.content.trim().replace(/\s+/g, ' ')
+    undoableDelete({
+      ids: [sticky.id],
+      message: t('stickies.deleted', {
+        text: snippet.length > 40 ? `${snippet.slice(0, 40)}…` : snippet,
+      }),
+      commit: async ({ keepalive }) => {
+        try {
+          await (keepalive
+            ? api.delete(itemPath(sticky.id), { keepalive: true })
+            : api.delete(itemPath(sticky.id)))
+        } catch (err) {
+          if (!isNotFound(err)) throw err
+        }
+        onDeleted(sticky.id)
+      },
+      onUndone: cb.onUndone,
+    })
+  }
+
+  function reset() {
+    epoch++
+    inflight = null
+    fetchedAt = 0
+    recentlyGone.clear()
+    patchSeq.clear()
+    held.clear()
+    rows.value = []
+    loaded.value = false
+  }
+
+  return {
+    spaceId, rows, loaded, visible,
+    load, ensure, revalidate,
+    find, create, patch, moveLocal, commitMove, holdPosition, releasePosition, remove,
+    onUpsert: upsert, onDeleted, reset,
+  }
+}
+
+/** The household's sticky board. */
+export const householdStickyStore = createStickyStore(null)
+
+const spaceStores = new Map<string, StickyStore>()
+
+/** One space's sticky board (made on first use, then kept). */
+export function spaceStickyStore(spaceId: string): StickyStore {
+  let s = spaceStores.get(spaceId)
+  if (!s) {
+    s = createStickyStore(spaceId)
+    spaceStores.set(spaceId, s)
+  }
+  return s
+}
+
+/** The store for a scope: ``null`` = household. */
+export function stickyStoreFor(spaceId: string | null): StickyStore {
+  return spaceId === null ? householdStickyStore : spaceStickyStore(spaceId)
+}
+
+/** The Organize hub's "Stickies · N": household notes, minus pending
+ *  deletes; ``null`` until the household board loaded. */
+export const householdStickyCount = computed(() =>
+  householdStickyStore.loaded.value ? householdStickyStore.visible.value.length : null)
+
+/** Logout: forget every scope's stickies. */
+export function resetStickies(): void {
+  householdStickyStore.reset()
+  for (const s of spaceStores.values()) s.reset()
+  spaceStores.clear()
+}
+
+// ─── WebSocket ─────────────────────────────────────────────────────
+
+let _wired = false
+
+/** Route ``sticky.*`` frames to their scope's store. Idempotent. */
+export function wireStickiesWs(): void {
+  if (_wired) return
+  _wired = true
+  type Frame = Partial<StickyRow> & { id?: string; space_id?: string | null }
+  const target = (d: Frame): StickyStore | undefined =>
+    d.space_id == null ? householdStickyStore : spaceStores.get(d.space_id)
+
+  ws.on('sticky.created', (e) => {
+    const d = e.data as Frame
+    if (d.id) target(d)?.onUpsert(d as Frame & { id: string }, true)
   })
   ws.on('sticky.updated', (e) => {
-    const u = e.data as unknown as Partial<StickyRow> & { id: string }
-    if (!_scopedToActive(u.space_id)) return
-    stickies.value = stickies.value.map((x) =>
-      x.id === u.id ? { ...x, ...u } : x,
-    )
+    const d = e.data as Frame
+    if (d.id) target(d)?.onUpsert(d as Frame & { id: string }, false)
   })
   ws.on('sticky.deleted', (e) => {
-    const { id, space_id } = e.data as { id: string; space_id?: string | null }
-    if ((space_id ?? null) === null) trackHouseholdSticky(id, false)
-    if (!_scopedToActive(space_id)) return
-    stickies.value = stickies.value.filter((x) => x.id !== id)
+    const d = e.data as Frame
+    if (d.id) target(d)?.onDeleted(d.id)
+  })
+
+  let prev = connectionState.value
+  connectionState.subscribe((next) => {
+    if (prev === 'reconnecting' && next === 'open') {
+      void householdStickyStore.revalidate()
+      for (const s of spaceStores.values()) void s.revalidate()
+    }
+    prev = next
   })
 }

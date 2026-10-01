@@ -135,4 +135,15 @@ describe('ChipRadioGroup', () => {
     )
     expect(getByRole('radiogroup').className).toBe('sh-locale-options extra')
   })
+
+  it('draws a colour dot for a swatch option, hidden from assistive tech', () => {
+    const { getByRole } = render(
+      <ChipRadioGroup options={[{ value: 'y', label: 'Yellow', swatch: '#FFF9B1' }]} value="y"
+                      ariaLabel="Colour" onChange={() => {}} />,
+    )
+    const radio = getByRole('radio', { name: 'Yellow' })
+    const dot = radio.querySelector('.sh-chip-swatch') as HTMLElement
+    expect(dot.getAttribute('aria-hidden')).toBe('true')
+    expect(dot.style.background).toContain('255, 249, 177')
+  })
 })
