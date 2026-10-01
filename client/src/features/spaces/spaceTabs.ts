@@ -57,3 +57,16 @@ export function calendarTabLabel(f: SpaceTabFeatures | undefined): string {
   const modes = calendarModes(f)
   return modes.length === 1 && modes[0] === 'timetable' ? t('nav.timetable') : t('nav.calendar')
 }
+
+/** Tabs a ``?tab=`` deep link may open (moderation needs a role that
+ *  loads later, so a link never lands there). */
+const LINKABLE_TABS: readonly SpaceTab[] = [
+  'feed', 'members', 'pages', 'calendar', 'tasks', 'stickies', 'gallery', 'bazaar', 'map',
+]
+
+/** The tab a ``?tab=`` query value names, or ``null`` (unknown / none). */
+export function parseSpaceTab(v: unknown): SpaceTab | null {
+  return typeof v === 'string' && (LINKABLE_TABS as readonly string[]).includes(v)
+    ? v as SpaceTab
+    : null
+}

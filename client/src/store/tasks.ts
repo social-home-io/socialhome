@@ -30,13 +30,25 @@ import { api } from '@/api'
 import { connectionState, ws } from '@/ws'
 import { locale, t } from '@/i18n/i18n'
 import { pendingDeletes, undoableDelete, type CommitOptions } from '@/utils/undoableDelete'
-import type { TaskItem, TaskListEntry } from '@/types'
+import type { TaskItem, TaskListEntry, TaskPriority } from '@/types'
+import { resetFilters } from '@/features/tasks/board/filters'
 
 export type TaskStatus = TaskItem['status']
 
 /** Fields a PATCH may change. ``null`` clears a nullable field. */
 export type TaskPatch = Partial<Pick<TaskItem,
-  'title' | 'description' | 'status' | 'due_date' | 'assignees' | 'position'>>
+  'title' | 'description' | 'status' | 'due_date' | 'assignees' | 'position'
+  | 'priority' | 'labels'>>
+
+/** Optional fields of a new task (the server appends it at the bottom). */
+export interface NewTaskFields {
+  status?: TaskStatus
+  priority?: TaskPriority | null
+  labels?: string[]
+  assignees?: string[]
+  due_date?: string | null
+  description?: string | null
+}
 
 export interface LoadOpts {
   /** Fetch even when a request is in flight or just finished. */
@@ -104,7 +116,17 @@ export interface TaskStore {
   createList(name: string): Promise<TaskListEntry>
   renameList(listId: string, name: string): Promise<void>
   removeList(list: TaskListEntry, cb?: UndoCallbacks): void
-  createTask(listId: string, title: string): Promise<TaskItem>
+  createTask(listId: string, title: string, fields?: NewTaskFields): Promise<TaskItem>
+  /** A board drop: ``id`` goes to ``status`` and ``order`` (that column's
+   *  ids, top to bottom) becomes the column's order — at once, then a
+   *  status PATCH (when it changed) and a reorder ``{order, moved_id}``.
+   *  A failure rolls back what the server didn't take and rethrows; when
+   *  the status was saved but the reorder failed, the error carries
+   *  ``partial: true`` (the card did change column). */
+  moveTask(id: string, status: TaskStatus, order: readonly string[]): Promise<void>
+  /** Run ``job`` after every move queued before it on ``listId`` — so a
+   *  move is planned from the state the previous one left. */
+  serial<T>(listId: string, job: () => Promise<T>): Promise<T>
   patchTask(id: string, patch: TaskPatch): Promise<TaskItem | null>
   setStatus(id: string, status: TaskStatus): Promise<void>
   /** The checkbox: done → to do, anything else → done. */
@@ -154,6 +176,7 @@ export function createTaskStore(spaceId: string | null): TaskStore {
   const listPath = (id: string) => `${listsPath}/${enc(id)}`
   const listTasksPath = (id: string) => `${listPath(id)}/tasks`
   const taskPath = (id: string) => `${base}/${enc(id)}`
+  const reorderPath = (id: string) => `${listPath(id)}/reorder`
 
   const lists = signal<TaskListEntry[]>([])
   const tasksByList = signal<Readonly<Record<string, TaskItem[]>>>({})
@@ -188,6 +211,15 @@ export function createTaskStore(spaceId: string | null): TaskStore {
   const recentlyGone = new Map<string, number>()
   /** Per-row PATCH sequence: only the newest request's answer is kept. */
   const patchSeq = new Map<string, number>()
+  /** Positions a board move set and the server hasn't confirmed yet:
+   *  a WS echo of the status PATCH (still the old position) mustn't
+   *  make the card jump back and forth. */
+  const pinnedPos = new Map<string, number>()
+  /** Pinned ids whose latest frame said another position: the frame
+   *  was overridden, so the list reloads once the pin goes. */
+  const pinOverridden = new Set<string>()
+  /** Per-list tail of the move queue. */
+  const moveQueue = new Map<string, Promise<unknown>>()
 
   function markGone(ids: Iterable<string>) {
     const now = Date.now()
@@ -239,8 +271,14 @@ export function createTaskStore(spaceId: string | null): TaskStore {
     setList(row.list_id, (tasksByList.value[row.list_id] ?? []).map(x => x.id === id ? fn(x) : x))
   }
 
-  function upsert(task: TaskItem) {
-    if (!task?.id || isGone(task.id)) return
+  function upsert(incoming: TaskItem) {
+    if (!incoming?.id || isGone(incoming.id)) return
+    const pin = pinnedPos.get(incoming.id)
+    if (pin !== undefined) {
+      if (incoming.position !== pin) pinOverridden.add(incoming.id)
+      else pinOverridden.delete(incoming.id)
+    }
+    const task = pin === undefined ? incoming : { ...incoming, position: pin }
     const prev = findTask(task.id)
     if (prev && prev.list_id !== task.list_id) {
       setList(prev.list_id, (tasksByList.value[prev.list_id] ?? []).filter(x => x.id !== task.id))
@@ -395,10 +433,83 @@ export function createTaskStore(spaceId: string | null): TaskStore {
 
   // ─── Tasks ────────────────────────────────────────────────────────
 
-  async function createTask(listId: string, title: string): Promise<TaskItem> {
-    const task = await api.post(listTasksPath(listId), { title }) as TaskItem
+  async function createTask(
+    listId: string, title: string, fields: NewTaskFields = {},
+  ): Promise<TaskItem> {
+    const task = await api.post(listTasksPath(listId), { title, ...fields }) as TaskItem
     upsert(task)
     return task
+  }
+
+  async function moveTask(id: string, status: TaskStatus, order: readonly string[]): Promise<void> {
+    const row = findTask(id)
+    if (!row) return
+    const listId = row.list_id
+    const statusChanged = row.status !== status
+    const beforeStatus = row.status
+    const wanted = new Map(order.map((tid, i) => [tid, i]))
+    const beforePos = new Map<string, number>()
+    for (const x of tasksByList.value[listId] ?? []) {
+      if (wanted.has(x.id)) beforePos.set(x.id, x.position)
+    }
+    setList(listId, (tasksByList.value[listId] ?? []).map((x) => {
+      const pos = wanted.get(x.id)
+      if (pos === undefined && x.id !== id) return x
+      return { ...x, ...(pos !== undefined ? { position: pos } : {}),
+        ...(x.id === id ? { status } : {}) }
+    }))
+    // A late answer to an earlier PATCH of this row must not undo the move.
+    const seq = (patchSeq.get(id) ?? 0) + 1
+    patchSeq.set(id, seq)
+    for (const [tid, pos] of wanted) pinnedPos.set(tid, pos)
+    const unpin = () => {
+      let heal = false
+      for (const [tid, pos] of wanted) {
+        if (pinnedPos.get(tid) !== pos) continue
+        pinnedPos.delete(tid)
+        if (pinOverridden.delete(tid)) heal = true
+      }
+      // A frame we overrode may have been the server's last word.
+      if (heal) void loadList(listId, { force: true }).catch(() => {})
+    }
+    const undoPositions = () => {
+      setList(listId, (tasksByList.value[listId] ?? []).map((x) => {
+        const was = beforePos.get(x.id)
+        // Only where our optimistic position still stands.
+        return was !== undefined && x.position === wanted.get(x.id) ? { ...x, position: was } : x
+      }))
+    }
+    if (statusChanged) {
+      try {
+        const fresh = await api.patch(taskPath(id), { status }) as TaskItem
+        // (``upsert`` keeps the pinned position until the reorder answers.)
+        if (fresh?.id && patchSeq.get(id) === seq) upsert(fresh)
+      } catch (err) {
+        unpin()
+        undoPositions()
+        mapTask(id, x => x.status === status ? { ...x, status: beforeStatus } : x)
+        throw translateTaskError(err)
+      }
+    }
+    try {
+      await api.post(reorderPath(listId), { order: [...order], moved_id: id })
+      unpin()
+    } catch (err) {
+      unpin()
+      undoPositions()
+      const e = translateTaskError(err)
+      // The status went through: the card did move, only its place didn't.
+      throw statusChanged ? Object.assign(e instanceof Error ? e : new Error(String(e)), { partial: true }) : e
+    }
+  }
+
+  function serial<T>(listId: string, job: () => Promise<T>): Promise<T> {
+    const prev = moveQueue.get(listId) ?? Promise.resolve()
+    const run = prev.catch(() => {}).then(job)
+    const tail = run.catch(() => {})
+    moveQueue.set(listId, tail)
+    void tail.then(() => { if (moveQueue.get(listId) === tail) moveQueue.delete(listId) })
+    return run
   }
 
   /** Put back the fields we changed on ONE row, only where they still
@@ -506,6 +617,9 @@ export function createTaskStore(spaceId: string | null): TaskStore {
     listFetchedAt.clear()
     recentlyGone.clear()
     patchSeq.clear()
+    pinnedPos.clear()
+    pinOverridden.clear()
+    moveQueue.clear()
     lists.value = []
     tasksByList.value = {}
     listsLoaded.value = false
@@ -518,7 +632,7 @@ export function createTaskStore(spaceId: string | null): TaskStore {
     visibleLists, allTasks, openCount,
     loadLists, ensureLists, loadList, ensureList, ensureAll, revalidate,
     findTask, createList, renameList, removeList,
-    createTask, patchTask, setStatus, toggleDone, removeTask, clearDone, deleteTasks,
+    createTask, moveTask, serial, patchTask, setStatus, toggleDone, removeTask, clearDone, deleteTasks,
     onTaskUpsert: upsert, onTaskDeleted, onTaskCompleted, onListUpsert, onListDeleted,
     reset,
   }
@@ -541,6 +655,7 @@ export function spaceTaskStore(spaceId: string): TaskStore {
 
 /** Logout: forget every scope's tasks. */
 export function resetTasks(): void {
+  resetFilters()
   householdTaskStore.reset()
   for (const s of spaceStores.values()) s.reset()
   spaceStores.clear()
