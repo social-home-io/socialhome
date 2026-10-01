@@ -24,6 +24,7 @@ from socialhome.domain.events import (
     TaskUpdated,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.federation.owner_bound_id import (
     SPACE_TASK_LIST_KIND,
     mint_owner_bound_id,
@@ -920,6 +921,76 @@ async def test_sticky_deleted(repos, handlers):
         )
     )
     assert repos["sticky"].deleted == ["s-1"]
+
+
+async def test_sticky_saved_non_hex_color_falls_back_to_default(repos, handlers):
+    """A peer's ``color`` is rendered as CSS — never store ``url(...)``."""
+    for i, color in enumerate(
+        ("url(https://evil.example/t.png)", "red;x:y", "yellow", 5, None)
+    ):
+        await handlers._on_sticky_saved(
+            _event(
+                FederationEventType.SPACE_STICKY_CREATED,
+                {"id": f"s-c{i}", "author": "u-1", "content": "x", "color": color},
+                space_id="sp-1",
+            )
+        )
+    assert [s.color for s in repos["sticky"].saved] == [DEFAULT_STICKY_COLOR] * 5
+
+
+async def test_sticky_saved_valid_hex_round_trips(repos, handlers):
+    await handlers._on_sticky_saved(
+        _event(
+            FederationEventType.SPACE_STICKY_CREATED,
+            {"id": "s-h", "author": "u-1", "content": "x", "color": "#ffd6e0"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["sticky"].saved[0].color == "#FFD6E0"
+
+
+async def test_sticky_saved_coordinates_clamped_and_overflow_safe(repos, handlers):
+    await handlers._on_sticky_saved(
+        _event(
+            FederationEventType.SPACE_STICKY_CREATED,
+            {
+                "id": "s-p",
+                "author": "u-1",
+                "content": "x",
+                "position_x": 10**400,
+                "position_y": 9999.0,
+            },
+            space_id="sp-1",
+        )
+    )
+    s = repos["sticky"].saved[0]
+    assert (s.position_x, s.position_y) == (0.0, 700.0)
+
+
+async def test_sticky_saved_content_sanitised_and_truncated_with_warning(
+    repos, handlers, caplog
+):
+    with caplog.at_level("WARNING"):
+        await handlers._on_sticky_saved(
+            _event(
+                FederationEventType.SPACE_STICKY_CREATED,
+                {"id": "s-l", "author": "u-1", "content": "\u202e" + "y" * 3000},
+                space_id="sp-1",
+            )
+        )
+    assert repos["sticky"].saved[0].content == "y" * MAX_STICKY_CONTENT_LENGTH
+    assert any("truncat" in r.message for r in caplog.records)
+
+
+async def test_sticky_saved_invisible_content_drops(repos, handlers):
+    await handlers._on_sticky_saved(
+        _event(
+            FederationEventType.SPACE_STICKY_CREATED,
+            {"id": "s-i", "author": "u-1", "content": "\u202e\u200b\x00"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["sticky"].saved == []
 
 
 # ─── Calendar events ────────────────────────────────────────────────

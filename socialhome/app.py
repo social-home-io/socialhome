@@ -333,6 +333,7 @@ from .services.space_crypto_service import (
 from .services.storage_quota_service import StorageQuotaService
 from .services.setup_service import SetupService
 from .services.stt_service import SttService
+from .services.sticky_service import StickyService
 from .services.task_service import SpaceTaskService, TaskService
 from .services.timetable_service import SpaceTimetableService, TimetableService
 from .services.theme_service import ThemeService
@@ -1836,6 +1837,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo=space_repo,
         remote_member_repo=repos.space_remote_member,
     )
+    sticky_service = StickyService(sticky_repo, bus, space_repo=space_repo)
     timetable_service = _build_timetables(repos, bus)
     space_timetable_service = _build_space_timetables(repos, bus)
     calendar_service = CalendarService(calendar_repo, bus)
@@ -2468,6 +2470,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.bazaar_service_key] = bazaar_service
     app[K.corner_service_key] = corner_service
     app[K.sticky_repo_key] = sticky_repo
+    app[K.sticky_service_key] = sticky_service
     app[K.bazaar_repo_key] = bazaar_repo
     app[K.shopping_repo_key] = shopping_repo
     app[K.highlight_repo_key] = highlight_repo

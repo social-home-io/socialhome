@@ -43,7 +43,7 @@ from ....domain.post import (
 )
 from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import SpaceMember, SpaceZone
-from ....domain.sticky import Sticky
+from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
 from ....domain.events import TimetableSaved
 from ....domain.timetable import (
@@ -1146,15 +1146,32 @@ def _page_from_record(r: dict[str, Any], space_id: str) -> Page | None:
 
 
 def _sticky_from_record(r: dict[str, Any], space_id: str) -> Sticky | None:
-    if not r.get("id") or not r.get("author") or not r.get("content"):
+    if not r.get("id") or not r.get("author"):
         return None
+    # Shared sticky field rules: a non-hex colour (rendered as CSS) is
+    # replaced, coordinates clamped, content sanitised + capped.
+    fields = coerce_peer_sticky(
+        content=r.get("content"),
+        color=r.get("color"),
+        position_x=r.get("position_x"),
+        position_y=r.get("position_y"),
+    )
+    if not fields.content:
+        return None
+    if fields.truncated:
+        log.warning(
+            "space sync: sticky %s in space %s — content over %d characters, truncated",
+            r["id"],
+            space_id,
+            MAX_STICKY_CONTENT_LENGTH,
+        )
     return Sticky(
         id=str(r["id"]),
         author=str(r["author"]),
-        content=str(r["content"]),
-        color=str(r.get("color") or "yellow"),
-        position_x=float(r.get("position_x") or 0.0),
-        position_y=float(r.get("position_y") or 0.0),
+        content=fields.content,
+        color=fields.color,
+        position_x=fields.position_x,
+        position_y=fields.position_y,
         created_at=str(r.get("created_at") or ""),
         updated_at=str(r.get("updated_at") or ""),
         space_id=space_id or r.get("space_id"),

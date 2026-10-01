@@ -282,3 +282,35 @@ async def test_a_space_sticky_id_commits_to_its_author(env):
     )
     home = await env.repo.add(author="uid-alice", content="y")
     assert not is_owner_bound(home.id)
+
+
+async def test_get_scoped_only_returns_rows_in_scope(env):
+    """``get_scoped`` is the defence-in-depth read: a household lookup
+    never sees a space row and a space lookup never sees another
+    space's (or a household) row."""
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-1', 'S', 'inst', 'admin', ?)",
+        ("ab" * 32,),
+    )
+    home = await env.repo.add(author="u1", content="home")
+    space = await env.repo.add(author="u1", content="space", space_id="sp-1")
+
+    assert (await env.repo.get_scoped(home.id, space_id=None)).content == "home"
+    assert await env.repo.get_scoped(home.id, space_id="sp-1") is None
+    assert (await env.repo.get_scoped(space.id, space_id="sp-1")).content == "space"
+    assert await env.repo.get_scoped(space.id, space_id=None) is None
+    assert await env.repo.get_scoped(space.id, space_id="sp-2") is None
+    assert await env.repo.get_scoped("missing", space_id=None) is None
+
+
+async def test_read_never_returns_a_legacy_non_hex_color(env):
+    """Rows stored before colours were validated (a peer's ``url(...)``,
+    the old inbound default ``"yellow"``) read back as the default."""
+    await env.db.enqueue(
+        "INSERT INTO stickies(id, space_id, author, content, color)"
+        " VALUES('legacy', NULL, 'u1', 'x', 'url(https://evil.example/t.png)')",
+    )
+    s = await env.repo.get("legacy")
+    assert s is not None and s.color == DEFAULT_COLOR
+    assert [x.color for x in await env.repo.list(space_id=None)] == [DEFAULT_COLOR]

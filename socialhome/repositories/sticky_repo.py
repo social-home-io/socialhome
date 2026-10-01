@@ -14,16 +14,16 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.sticky import DEFAULT_STICKY_COLOR, Sticky, normalize_sticky_color
 from ..federation.owner_bound_id import SPACE_STICKY_KIND, mint_owner_bound_id
 from .base import row_to_dict, rows_to_dicts
 
 
-DEFAULT_COLOR = "#FFF9B1"
-
-
-# Domain dataclass lives in ``socialhome/domain/sticky.py``;
-# re-exported here so existing repo-level imports keep working.
-from ..domain.sticky import Sticky  # noqa: F401,E402
+# Domain dataclass + field rules live in ``socialhome/domain/sticky.py``;
+# ``Sticky`` / ``DEFAULT_COLOR`` stay importable from here for existing
+# repo-level imports.
+DEFAULT_COLOR = DEFAULT_STICKY_COLOR
+__all__ = ["DEFAULT_COLOR", "AbstractStickyRepo", "SqliteStickyRepo", "Sticky"]
 
 
 @runtime_checkable
@@ -39,6 +39,9 @@ class AbstractStickyRepo(Protocol):
         space_id: str | None = None,
     ) -> Sticky: ...
     async def get(self, sticky_id: str) -> Sticky | None: ...
+    async def get_scoped(
+        self, sticky_id: str, *, space_id: str | None
+    ) -> Sticky | None: ...
     async def list(self, *, space_id: str | None = None) -> builtins.list[Sticky]: ...
     async def list_since(
         self,
@@ -138,6 +141,27 @@ class SqliteStickyRepo:
         row = await self._db.fetchone(
             "SELECT * FROM stickies WHERE id=?",
             (sticky_id,),
+        )
+        return _row_to_sticky(row_to_dict(row))
+
+    async def get_scoped(
+        self,
+        sticky_id: str,
+        *,
+        space_id: str | None,
+    ) -> Sticky | None:
+        """The sticky only if it lives in ``space_id`` (``None`` = the
+        household board, matched null-safely via ``IS``).
+
+        Route/service read path: a household lookup must never surface a
+        space row and a space lookup never another space's row, so an id
+        from the wrong scope reads as "not found". The unscoped
+        :meth:`get` stays for federation inbound, which needs to tell a
+        cross-space id apart from a missing one.
+        """
+        row = await self._db.fetchone(
+            "SELECT * FROM stickies WHERE id=? AND space_id IS ?",
+            (sticky_id, space_id),
         )
         return _row_to_sticky(row_to_dict(row))
 
@@ -290,7 +314,10 @@ def _row_to_sticky(row: dict | None) -> Sticky | None:
         id=row["id"],
         author=row["author"],
         content=row["content"],
-        color=row.get("color", DEFAULT_COLOR),
+        # Read-side guard: a row stored before colours were validated
+        # (e.g. ``url(...)`` or the legacy inbound default ``"yellow"``)
+        # must never reach the SPA's CSS ``background``.
+        color=normalize_sticky_color(row.get("color")) or DEFAULT_COLOR,
         position_x=float(row.get("position_x") or 0.0),
         position_y=float(row.get("position_y") or 0.0),
         created_at=row["created_at"],

@@ -85,7 +85,7 @@ from ...domain.post import (
     Post,
 )
 from ...domain.space import SpaceZone
-from ...domain.sticky import Sticky
+from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
     Timetable,
@@ -738,10 +738,28 @@ class SpaceContentInboundHandlers:
         p = event.payload
         sticky_id = str(p.get("id") or p.get("sticky_id") or "")
         author = str(p.get("author") or p.get("created_by") or "")
-        content = str(p.get("content") or p.get("text") or "")
-        if not sticky_id or not content:
+        # Display fields go through the shared sticky rules: a peer's
+        # ``color`` is rendered as CSS, so a non-hex value (``url(...)``
+        # tracking beacon, ``red; ...``) is replaced, never stored.
+        fields = coerce_peer_sticky(
+            content=p.get("content") or p.get("text"),
+            color=p.get("color") or p.get("colour"),
+            position_x=p.get("position_x"),
+            position_y=p.get("position_y"),
+        )
+        if not sticky_id or not fields.content:
             log.debug("SPACE_STICKY_* missing required field")
             return
+        if fields.truncated:
+            log.warning(
+                "%s from %s: sticky %s in space %s — content over %d "
+                "characters, truncated",
+                event.event_type,
+                event.from_instance,
+                sticky_id,
+                space_id,
+                MAX_STICKY_CONTENT_LENGTH,
+            )
         existing = await self._sticky_repo.get(sticky_id)
         if existing is not None and existing.space_id != space_id:
             log_cross_space_refusal(
@@ -773,10 +791,10 @@ class SpaceContentInboundHandlers:
         sticky = Sticky(
             id=sticky_id,
             author=author,
-            content=content,
-            color=str(p.get("color") or p.get("colour") or "yellow"),
-            position_x=float(p.get("position_x") or 0.0),
-            position_y=float(p.get("position_y") or 0.0),
+            content=fields.content,
+            color=fields.color,
+            position_x=fields.position_x,
+            position_y=fields.position_y,
             created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
             updated_at=now_iso,
             space_id=space_id,

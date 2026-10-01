@@ -235,7 +235,7 @@ async def test_stickies_update_position_round_trips(client):
     assert r.status == 200
     body = await r.json()
     assert body["position_x"] == 100
-    assert body["color"] == "#aabbcc"
+    assert body["color"] == "#AABBCC"  # canonical #RRGGBB
 
 
 async def test_stickies_update_bad_json_400(client):
