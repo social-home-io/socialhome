@@ -544,7 +544,7 @@ a:focus:not(:focus-visible) { outline: none; }
   height: 16px;
   padding: 0 4px;
   border-radius: var(--sh-radius-full);
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
   font-size: 0.62rem;
   font-weight: 700;
@@ -661,7 +661,7 @@ a:focus:not(:focus-visible) { outline: none; }
 .sh-btn:not(:disabled):active { transform: translateY(0); }
 
 .sh-btn--primary {
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: var(--sh-bg);
   border-color: transparent;
   box-shadow:
@@ -1083,7 +1083,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   width: 40px;
   height: 40px;
   border-radius: var(--sh-radius-full);
-  background: linear-gradient(135deg, var(--sh-primary), var(--sh-primary-hover));
+  background: linear-gradient(135deg, var(--sh-primary-fill), var(--sh-primary-hover));
   color: #fff;
   font-weight: 600;
   font-size: var(--sh-font-size-sm);
@@ -1552,7 +1552,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   border: 1px solid transparent;
 }
 .sh-update-banner__btn--primary {
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: var(--sh-bg);
   font-weight: 600;
 }
@@ -3449,7 +3449,7 @@ button.sh-friends-member-chip:not(:disabled):hover {
 }
 .sh-type-btn:hover { background: var(--sh-bg); }
 .sh-type-btn--active {
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
   box-shadow: var(--sh-shadow-sm);
 }
@@ -4919,7 +4919,7 @@ body.sh-dm-thread-open .sh-messages {
   font-size: var(--sh-font-size-sm);
   font-weight: 600;
   color: var(--sh-bg);
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   border: none;
   border-radius: 999px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
@@ -4987,7 +4987,7 @@ body.sh-dm-thread-open .sh-messages {
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 .sh-message--mine {
-  background: linear-gradient(135deg, var(--sh-primary), var(--sh-primary-hover));
+  background: linear-gradient(135deg, var(--sh-primary-fill), var(--sh-primary-hover));
   border-color: transparent;
   color: var(--sh-bg);
   align-self: flex-end;
@@ -6473,7 +6473,7 @@ body.sh-dm-thread-open .sh-messages {
   color: var(--sh-text);
 }
 .sh-task-pin--overdue {
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: var(--sh-bg);
 }
 
@@ -8087,9 +8087,9 @@ a.sh-btn { text-decoration: none; }
   font-weight: 600;
 }
 .sh-page-editor-mobile-tabs button[aria-pressed="true"] {
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
-  border-color: var(--sh-primary);
+  border-color: var(--sh-primary-fill);
 }
 @media (max-width: 768px) {
   .sh-page-editor-panes { grid-template-columns: 1fr; }
@@ -8970,7 +8970,7 @@ a.sh-btn { text-decoration: none; }
   color: #fff;
   border: 2px solid var(--sh-bg);
 }
-.sh-onboard-avatar--a { background: var(--sh-primary); }
+.sh-onboard-avatar--a { background: var(--sh-primary-fill); }
 .sh-onboard-avatar--b { background: var(--sh-success); }
 .sh-onboard-avatar--c { background: var(--sh-warning); }
 .sh-onboard-avatars-more {
@@ -9591,7 +9591,7 @@ hr {
   display: inline-flex;
   font-size: var(--sh-font-size-xs);
   padding: 2px 8px;
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
   border-radius: var(--sh-radius-full);
   text-transform: uppercase;
@@ -11299,7 +11299,7 @@ a.sh-welcome-card:hover {
   flex: 0 0 auto;
   padding: 1px 6px;
   border-radius: var(--sh-radius-full);
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
   font-size: var(--sh-font-size-xs);
   font-weight: 700;
@@ -11977,9 +11977,12 @@ a.sh-welcome-card:hover {
 .sh-notif-prefs-menu__item--active {
   font-weight: 600;
 }
-.sh-notif-prefs-menu__item > span:last-child:not(:only-child) {
+/* The trailing ✓ (third span: icon · label · check). ``:last-child``
+ * also caught the LABEL of every unchecked row, pushing it right and
+ * tinting it hearth. */
+.sh-notif-prefs-menu__item > span:nth-child(3) {
   margin-left: auto;
-  color: var(--sh-accent);
+  color: var(--sh-accent, var(--sh-primary-text));
 }
 .sh-notif-prefs-menu__divider {
   height: 1px;
@@ -12280,8 +12283,8 @@ a.sh-welcome-card:hover {
   display: inline-block;
   margin-top: var(--sh-space-xs);
   padding: 2px 10px;
-  background: color-mix(in srgb, var(--preview-accent, var(--sh-accent)) 20%, transparent);
-  color: var(--preview-accent, var(--sh-accent));
+  background: color-mix(in srgb, var(--preview-accent, var(--sh-accent, var(--sh-primary))) 20%, transparent);
+  color: var(--preview-accent, var(--sh-accent, var(--sh-primary-text)));
   border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-sm);
   font-weight: 600;
@@ -12372,9 +12375,9 @@ a.sh-welcome-card:hover {
   color: var(--sh-primary-text);
 }
 .sh-pairing-step--active .sh-pairing-step-dot {
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
-  border-color: var(--sh-primary);
+  border-color: var(--sh-primary-fill);
 }
 
 .sh-pairing-start, .sh-pairing-success, .sh-pairing-failed,
@@ -13914,9 +13917,9 @@ a.sh-welcome-card:hover {
 .sh-schedule-btn:hover:not(:disabled) { transform: translateY(-1px); }
 .sh-schedule-btn:active:not(:disabled) { transform: translateY(0); }
 .sh-schedule-btn--active {
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
-  border-color: var(--sh-primary);
+  border-color: var(--sh-primary-fill);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 25%, transparent);
 }
 .sh-schedule-btn--active[data-a="yes"] {
@@ -14358,7 +14361,7 @@ a.sh-link-preview-link:focus-visible {
   color: var(--sh-text);
 }
 /* Dark: the lifted hearth / honey are light, so the ink goes dark. */
-.sh-theme-dark .sh-mention--self { background: var(--sh-primary); }
+.sh-theme-dark .sh-mention--self { background: var(--sh-primary-fill); }
 .sh-theme-dark .sh-mention--here { color: var(--sh-bg); }
 .sh-mention-autocomplete-here {
   width: 28px;
@@ -15452,7 +15455,7 @@ a.sh-link-preview-link:focus-visible {
   border-radius: var(--sh-radius-md);
 }
 .sh-invite-artifact--primary {
-  border-color: var(--sh-accent);
+  border-color: var(--sh-accent, var(--sh-primary));
   background: var(--sh-bg);
 }
 .sh-invite-artifact--qr {
@@ -15541,7 +15544,7 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-invite-role:hover { background: var(--sh-bg-secondary); }
 .sh-invite-role--active {
-  border-color: var(--sh-accent);
+  border-color: var(--sh-accent, var(--sh-primary));
   background: var(--sh-bg-secondary);
 }
 .sh-invite-role input { grid-area: radio; margin: 0; }
@@ -15847,8 +15850,8 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-space-location__mode-banner {
   padding: var(--sh-space-sm);
-  background: color-mix(in srgb, var(--sh-accent) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--sh-accent) 25%, var(--sh-border));
+  background: color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 25%, var(--sh-border));
   border-radius: var(--sh-radius-md);
   font-size: var(--sh-font-size-sm);
 }
@@ -15887,9 +15890,9 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-locale-option--active,
 .sh-locale-option--active:hover {
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: var(--sh-bg);
-  border-color: var(--sh-primary);
+  border-color: var(--sh-primary-fill);
 }
 
 /* ─── Admin page extras (§A1-A9) ────────────────────────────────────── */
@@ -15923,13 +15926,13 @@ a.sh-link-preview-link:focus-visible {
 .sh-admin-progress {
   height: 8px;
   background: color-mix(in srgb, var(--sh-border) 40%, transparent);
-  border-radius: var(--sh-radius-pill);
+  border-radius: var(--sh-radius-full);
   overflow: hidden;
   margin-bottom: var(--sh-space-md);
 }
 .sh-admin-progress__bar {
   height: 100%;
-  background: var(--sh-accent);
+  background: var(--sh-accent, var(--sh-primary));
   transition: width 200ms ease-out;
 }
 .sh-admin-actions {
@@ -15983,7 +15986,7 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-browser-toolbar__clear:hover {
   color: var(--sh-text);
-  border-color: var(--sh-accent);
+  border-color: var(--sh-accent, var(--sh-primary));
 }
 .sh-browser-toolbar .sh-input {
   flex: 1;
@@ -16016,8 +16019,8 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-browser-tab:hover { color: var(--sh-text); }
 .sh-browser-tab--active {
-  color: var(--sh-accent);
-  border-bottom-color: var(--sh-accent);
+  color: var(--sh-accent, var(--sh-primary-text));
+  border-bottom-color: var(--sh-accent, var(--sh-primary));
 }
 .sh-browser-grid {
   display: grid;
@@ -16238,7 +16241,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-subscribe-btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 12px;
-  border-radius: var(--sh-radius-pill);
+  border-radius: var(--sh-radius-full);
   border: 1px solid var(--sh-border);
   background: transparent;
   color: var(--sh-fg);
@@ -16279,7 +16282,7 @@ a.sh-link-preview-link:focus-visible {
   margin-left: auto;
   display: inline-flex; align-items: center; gap: 4px;
   padding: 2px 8px;
-  border-radius: var(--sh-radius-pill);
+  border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-xs);
   font-weight: 500;
   background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
@@ -16296,7 +16299,7 @@ a.sh-link-preview-link:focus-visible {
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  border-radius: var(--sh-radius-pill);
+  border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-xs);
   font-weight: 500;
   background: var(--sh-bg-tertiary);
@@ -16512,15 +16515,15 @@ a.sh-link-preview-link:focus-visible {
 .sh-scope-chip, .sh-join-mode-chip, .sh-age-chip {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 2px 8px;
-  border-radius: var(--sh-radius-pill);
+  border-radius: var(--sh-radius-full);
   font-size: var(--sh-font-size-xs);
   font-weight: 500;
   line-height: 1.4;
   white-space: nowrap;
 }
 .sh-scope-chip--household {
-  background: color-mix(in srgb, var(--sh-accent) 12%, transparent);
-  color: var(--sh-accent);
+  background: color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 12%, transparent);
+  color: var(--sh-accent, var(--sh-primary-on-soft));
 }
 .sh-scope-chip--public {
   background: color-mix(in srgb, var(--sh-primary) 14%, transparent);
@@ -16603,10 +16606,10 @@ a.sh-link-preview-link:focus-visible {
   padding: var(--sh-space-md);
   background: linear-gradient(
     135deg,
-    color-mix(in srgb, var(--sh-accent) 10%, var(--sh-surface)) 0%,
+    color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 10%, var(--sh-surface)) 0%,
     color-mix(in srgb, var(--sh-primary) 10%, var(--sh-surface)) 100%
   );
-  border: 1px solid color-mix(in srgb, var(--sh-accent) 25%, var(--sh-border));
+  border: 1px solid color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 25%, var(--sh-border));
   border-radius: var(--sh-radius-lg);
 }
 .sh-remote-invite-banner h2 {
@@ -16699,9 +16702,9 @@ a.sh-link-preview-link:focus-visible {
   font-family: inherit;
   cursor: pointer;
 }
-.sh-remote-invite-row:hover { border-color: var(--sh-accent); }
+.sh-remote-invite-row:hover { border-color: var(--sh-accent, var(--sh-primary)); }
 .sh-remote-invite-row--picked {
-  border-color: var(--sh-accent);
+  border-color: var(--sh-accent, var(--sh-primary));
   background: var(--sh-bg-secondary);
 }
 .sh-remote-invite-row__name {
@@ -18138,7 +18141,7 @@ a.sh-btn--ghost:hover {
 }
 .sh-highlight-row-unseen {
   margin-left: auto;
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
   border-radius: var(--sh-radius-full);
   min-width: 24px;
@@ -20400,8 +20403,8 @@ a.sh-btn--ghost:hover {
   background: var(--sh-primary);
 }
 .sh-timetable-day__chip.is-on {
-  background: var(--sh-primary);
-  border-color: var(--sh-primary);
+  background: var(--sh-primary-fill);
+  border-color: var(--sh-primary-fill);
   color: var(--sh-bg);
 }
 .sh-timetable-day__chip.is-on.is-today::after { background: var(--sh-bg); }
@@ -20509,7 +20512,7 @@ a.sh-btn--ghost:hover {
   font-weight: 600;
   cursor: pointer;
 }
-.sh-timetable-days__day.is-on { background: var(--sh-primary); border-color: var(--sh-primary); color: var(--sh-bg); }
+.sh-timetable-days__day.is-on { background: var(--sh-primary-fill); border-color: var(--sh-primary-fill); color: var(--sh-bg); }
 .sh-timetable-days__day:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
 .sh-timetable-person {
   display: inline-flex;
@@ -20765,8 +20768,8 @@ a.sh-btn--ghost:hover {
 .sh-timetable-head__weeks:hover { border-color: var(--sh-primary); color: var(--sh-text); }
 .sh-timetable-head__weeks:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
 .sh-timetable-toggle--brush.is-on {
-  background: var(--sh-primary);
-  border-color: var(--sh-primary);
+  background: var(--sh-primary-fill);
+  border-color: var(--sh-primary-fill);
   color: var(--sh-bg);
 }
 .sh-timetable-modebar {

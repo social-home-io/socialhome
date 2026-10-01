@@ -39,6 +39,14 @@
   /* …and one notch deeper where that text sits on a hearth-tinted chip
      (--sh-primary-soft or a 12% primary mix): ≥ 4.8:1 there. */
   --sh-primary-on-soft: color-mix(in srgb, var(--sh-primary-text) 92%, #000);
+  /* Hearth as a FILLED SURFACE THAT CARRIES TEXT (primary buttons,
+     selected chips, count badges): paper text on the plain hearth is
+     only 3.55:1, so the fill is deepened 14% toward ink → #B54824,
+     4.58:1 under --sh-bg text (AA). Derived from --sh-primary so a
+     space / household override still tints the fill. Borders, links,
+     icons, focus rings and decorative bars keep --sh-primary; hover
+     keeps --sh-primary-hover. Not the same job as --sh-primary-text. */
+  --sh-primary-fill: color-mix(in srgb, var(--sh-primary) 86%, #000);
 
   /* ── Surface ladder — cream parchment, never pure white ───────── */
   --sh-bg:              #F4ECE0;     /* paper — primary surface */
@@ -198,6 +206,8 @@
   /* Hearth lifted toward the cream ink: ≥ 6:1 on --sh-primary-soft and
      on the dark surfaces (the plain dark hearth is ~4.2:1 on its tint). */
   --sh-primary-on-soft: color-mix(in srgb, var(--sh-primary) 55%, var(--sh-text));
+  /* Dark text (--sh-bg) on the lifted hearth is already 5.65:1. */
+  --sh-primary-fill: var(--sh-primary);
 
   --sh-bg:             #1A1612;  /* deep ember — warm coffee */
   --sh-bg-secondary:   #251E18;  /* one notch up for chrome */
@@ -297,7 +307,7 @@
   position: absolute;
   top: -9999px;
   left: 0;
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
   padding: var(--sh-space-sm) var(--sh-space-md);
   text-decoration: none;
@@ -322,7 +332,7 @@
   align-items: center;
   gap: var(--sh-space-sm);
   padding: var(--sh-space-sm) var(--sh-space-md);
-  background: var(--sh-primary);
+  background: var(--sh-primary-fill);
   color: #fff;
   border-radius: 0 0 var(--sh-radius-md) var(--sh-radius-md);
   box-shadow: var(--sh-shadow);
