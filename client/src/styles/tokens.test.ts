@@ -42,7 +42,7 @@ const KNOWN_UNDEFINED: Record<string, number> = {
   '--sh-fg': 4,
   '--sh-fg-secondary': 2,
   '--sh-space-2': 1,
-  '--sh-muted': 19,
+  '--sh-muted': 16,
   '--sh-surface-2': 9,
   '--sh-surface-1': 2,
   '--sh-surface-0': 2,

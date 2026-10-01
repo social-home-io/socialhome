@@ -13,6 +13,7 @@
  * the shared shimmer animation.
  */
 import type { JSX } from 'preact'
+import { t } from '@/i18n/i18n'
 
 
 interface SkeletonProps {
@@ -488,6 +489,74 @@ export function TasksSkeleton() {
           </div>
         ))}
       </main>
+    </div>
+  )
+}
+
+
+/** A decorative shimmer bar — no role, no label. Only for use inside a
+ *  container that already announces itself (``ListSkeleton``). */
+function Bone({ class: cls = '', width, height }: {
+  class?: string
+  width?: string | number
+  height?: number
+}) {
+  const style: JSX.CSSProperties = {}
+  if (width != null) style.width = typeof width === 'number' ? `${width}px` : width
+  if (height != null) style.height = `${height}px`
+  return <span class={`sh-skeleton sh-skeleton--line ${cls}`.trim()} style={style} />
+}
+
+const ROW_WIDTHS = ['62%', '48%', '71%', '40%', '56%', '66%', '44%']
+
+/** Stand-in for the Organize lists while they load.
+ *
+ *  - ``list``: rows with a round tick and a text bar (Shopping, Tasks).
+ *  - ``board``: three columns of cards (the task board).
+ *  - ``sticky``: a grid of note tiles (Stickies).
+ *
+ *  One visually-hidden status line, announced once, next to one
+ *  ``aria-busy`` / ``aria-hidden`` block of bones — so a screen reader
+ *  hears "Loading" once, not once per bar. */
+export function ListSkeleton({
+  variant = 'list',
+  rows = 5,
+  label,
+}: {
+  variant?: 'list' | 'board' | 'sticky'
+  rows?: number
+  label?: string
+} = {}) {
+  return (
+    <div class={`sh-list-skeleton sh-list-skeleton--${variant}`}>
+      {/* A sibling of the busy art, so it IS announced (content under
+        * aria-busy is skipped until it clears). */}
+      <span class="sr-only" role="status">{label ?? t('common.loading')}</span>
+      <div class="sh-list-skeleton__art" aria-hidden="true" aria-busy="true">
+        {variant === 'list' && Array.from({ length: rows }).map((_, i) => (
+          <div key={i} class="sh-list-skeleton__row">
+            <span class="sh-skeleton sh-skeleton--circle sh-list-skeleton__tick" />
+            <Bone width={ROW_WIDTHS[i % ROW_WIDTHS.length]} height={13} />
+          </div>
+        ))}
+        {variant === 'board' && [3, 2, 1].map((cards, col) => (
+          <div key={col} class="sh-list-skeleton__column">
+            <Bone width="40%" height={14} />
+            {Array.from({ length: cards }).map((_, i) => (
+              <div key={i} class="sh-list-skeleton__card">
+                <Bone width={ROW_WIDTHS[(col + i) % ROW_WIDTHS.length]} height={12} />
+                <Bone width="30%" height={10} />
+              </div>
+            ))}
+          </div>
+        ))}
+        {variant === 'sticky' && Array.from({ length: rows }).map((_, i) => (
+          <div key={i} class="sh-list-skeleton__note">
+            <Bone width="80%" height={12} />
+            <Bone width="55%" height={12} />
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

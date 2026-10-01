@@ -49,7 +49,16 @@ import {
   deleteStore,
   sameName,
   wireShoppingWs,
+  loadShopping,
+  ensureShopping,
+  shoppingLoaded,
+  deleteItems,
+  updateItem,
+  toggleItem,
+  reorderStores,
+  resetShopping,
 } from './shopping'
+import { pendingDeletes, undoableDelete, resetPendingDeletes } from '@/utils/undoableDelete'
 import type { ShoppingItem } from '@/types'
 
 function item(id: string, text: string, store: string | null): ShoppingItem {
@@ -253,5 +262,235 @@ describe('sameName', () => {
     expect(sameName('Müller', 'MÜLLER')).toBe(false)
     expect(sameName('Müller', 'müller')).toBe(true)
     expect(sameName('ÜBER', 'über')).toBe(false)
+  })
+})
+
+describe('loadShopping', () => {
+  function deferredGets() {
+    const resolvers: Array<() => void> = []
+    apiGet.mockImplementation((url: string) => new Promise((res) => {
+      resolvers.push(() => res(url.includes('/stores') ? [] : [item('i1', 'Milk', null)]))
+    }))
+    return () => resolvers.splice(0).forEach(r => r())
+  }
+
+  beforeEach(() => {
+    shoppingLoaded.value = false
+  })
+
+  it('dedupes concurrent calls onto one in-flight request pair', async () => {
+    const flush = deferredGets()
+    const a = loadShopping()
+    const b = loadShopping()
+    expect(a).toBe(b)
+    expect(apiGet).toHaveBeenCalledTimes(2) // items + stores, once
+    flush()
+    await a
+    expect(items.value.map(i => i.id)).toEqual(['i1'])
+    expect(shoppingLoaded.value).toBe(true)
+  })
+
+  it('fetches again once the previous load has settled', async () => {
+    const flush = deferredGets()
+    const first = loadShopping()
+    flush()
+    await first
+    const second = loadShopping()
+    expect(second).not.toBe(first)
+    flush()
+    await second
+    expect(apiGet).toHaveBeenCalledTimes(4)
+  })
+
+  it('a failed load rejects, leaves loaded false, and does not wedge later loads', async () => {
+    apiGet.mockRejectedValueOnce(new Error('offline'))
+    apiGet.mockResolvedValue([])
+    await expect(loadShopping()).rejects.toThrow('offline')
+    expect(shoppingLoaded.value).toBe(false)
+    await loadShopping()
+    expect(shoppingLoaded.value).toBe(true)
+  })
+
+  it('ensureShopping only fetches when nothing is loaded yet', async () => {
+    apiGet.mockResolvedValue([])
+    await ensureShopping()
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    await ensureShopping()
+    expect(apiGet).toHaveBeenCalledTimes(2)
+  })
+})
+
+
+describe('deleteItems', () => {
+  it('deletes each id, in batches of at most 10, and drops them locally', async () => {
+    items.value = Array.from({ length: 12 }, (_, i) => item(`d${i}`, `x${i}`, null))
+    let inFlight = 0
+    let peak = 0
+    apiDelete.mockImplementation(async () => {
+      inFlight++; peak = Math.max(peak, inFlight)
+      await Promise.resolve()
+      inFlight--
+    })
+    await deleteItems(items.value.map(i => i.id))
+    expect(apiDelete).toHaveBeenCalledTimes(12)
+    expect(peak).toBeLessThanOrEqual(10)
+    expect(items.value).toEqual([])
+  })
+
+  it('treats 404 as gone, keeps the failures and rejects', async () => {
+    items.value = [item('a', 'A', null), item('b', 'B', null), item('c', 'C', null)]
+    apiDelete.mockImplementation(async (url: string) => {
+      if (url.endsWith('/b')) throw Object.assign(new Error('gone'), { status: 404 })
+      if (url.endsWith('/c')) throw Object.assign(new Error('boom'), { status: 500 })
+    })
+    await expect(deleteItems(['a', 'b', 'c'])).rejects.toThrow('boom')
+    expect(items.value.map(i => i.id)).toEqual(['c'])
+  })
+})
+
+describe('row-scoped rollback (concurrent commits)', () => {
+  it('a failed toggle restores only its own row — an item deleted meanwhile stays deleted', async () => {
+    items.value = [item('a', 'A', null), item('b', 'B', null)]
+    let fail!: (e: unknown) => void
+    apiPatch.mockImplementation(() => new Promise((_, rej) => { fail = rej }))
+    apiDelete.mockResolvedValue(undefined)
+    const toggling = toggleItem('a', true)
+    await deleteItems(['b'])
+    fail(new Error('boom'))
+    await expect(toggling).rejects.toThrow('boom')
+    expect(items.value.map(i => [i.id, i.completed])).toEqual([['a', false]])
+  })
+
+  it('a failed update restores only the patched fields of that row', async () => {
+    items.value = [item('a', 'A', 'Aldi'), item('b', 'B', null)]
+    let fail!: (e: unknown) => void
+    apiPatch.mockImplementation(() => new Promise((_, rej) => { fail = rej }))
+    const updating = updateItem('a', { text: 'A2' })
+    // Meanwhile a WS frame moves "a" to another store and "b" goes away.
+    items.value = items.value
+      .filter(i => i.id !== 'b')
+      .map(i => (i.id === 'a' ? { ...i, store: 'Migros' } : i))
+    fail(new Error('boom'))
+    await expect(updating).rejects.toThrow('boom')
+    expect(items.value).toEqual([{ ...item('a', 'A', 'Migros') }])
+  })
+
+  it('a failed update does not resurrect a row deleted meanwhile', async () => {
+    items.value = [item('a', 'A', null)]
+    let fail!: (e: unknown) => void
+    apiPatch.mockImplementation(() => new Promise((_, rej) => { fail = rej }))
+    const updating = updateItem('a', { text: 'A2' })
+    items.value = []
+    fail(new Error('boom'))
+    await expect(updating).rejects.toThrow('boom')
+    expect(items.value).toEqual([])
+  })
+
+  it('a failed reorder restores the old order but keeps a store added meanwhile', async () => {
+    stores.value = [{ name: 'Aldi', sort_order: 0 }, { name: 'Migros', sort_order: 1 }]
+    let fail!: (e: unknown) => void
+    apiPut.mockImplementation(() => new Promise((_, rej) => { fail = rej }))
+    const moving = reorderStores(['Migros', 'Aldi'])
+    stores.value = [...stores.value, { name: 'Coop', sort_order: 2 }]
+    fail(new Error('boom'))
+    await expect(moving).rejects.toThrow('boom')
+    expect(stores.value.map(s => s.name)).toEqual(['Aldi', 'Migros', 'Coop'])
+  })
+
+  it('a failed store delete restores that store and only the items it cleared', async () => {
+    stores.value = [{ name: 'Aldi', sort_order: 0 }, { name: 'Migros', sort_order: 1 }]
+    items.value = [item('a', 'A', 'Aldi'), item('b', 'B', 'Aldi')]
+    let fail!: (e: unknown) => void
+    apiDelete.mockImplementation(() => new Promise((_, rej) => { fail = rej }))
+    const removing = deleteStore('Aldi')
+    // Meanwhile "b" is re-assigned by hand and Migros is deleted elsewhere.
+    items.value = items.value.map(i => (i.id === 'b' ? { ...i, store: 'Coop' } : i))
+    stores.value = stores.value.filter(s => s.name !== 'Migros')
+    fail(new Error('boom'))
+    await expect(removing).rejects.toThrow('boom')
+    expect(stores.value.map(s => s.name)).toEqual(['Aldi'])
+    expect(items.value.map(i => i.store)).toEqual(['Aldi', 'Coop'])
+  })
+
+  it('a failed store rename puts back only what it moved', async () => {
+    stores.value = [{ name: 'Aldi', sort_order: 0 }]
+    items.value = [item('a', 'A', 'Aldi')]
+    let fail!: (e: unknown) => void
+    apiPatch.mockImplementation(() => new Promise((_, rej) => { fail = rej }))
+    const renaming = renameStore('Aldi', 'Lidl')
+    items.value = [...items.value, item('n', 'New', null)]
+    fail(new Error('boom'))
+    await expect(renaming).rejects.toThrow('boom')
+    expect(stores.value.map(s => s.name)).toEqual(['Aldi'])
+    expect(items.value.map(i => [i.id, i.store])).toEqual([['a', 'Aldi'], ['n', null]])
+  })
+})
+
+describe('deleteItems — keepalive flush', () => {
+  it('with keepalive sends every DELETE at once (no batching) with keepalive', async () => {
+    items.value = Array.from({ length: 12 }, (_, i) => item(`k${i}`, `x${i}`, null))
+    let inFlight = 0
+    let peak = 0
+    apiDelete.mockImplementation(async () => {
+      inFlight++; peak = Math.max(peak, inFlight)
+      await Promise.resolve()
+      inFlight--
+    })
+    await deleteItems(items.value.map(i => i.id), { keepalive: true })
+    expect(peak).toBe(12)
+    expect(apiDelete.mock.calls.every(c => c[1]?.keepalive === true)).toBe(true)
+  })
+})
+
+describe('loadShopping — force + late responses', () => {
+  beforeEach(() => { shoppingLoaded.value = false; resetPendingDeletes() })
+
+  it('force starts a fresh request even while one is in flight, and the newest wins', async () => {
+    const resolvers: Array<(v: unknown) => void> = []
+    apiGet.mockImplementation((url: string) => new Promise((res) => {
+      resolvers.push(() => res(url.includes('/stores') ? [] : [item(`gen${resolvers.length}`, 'x', null)]))
+    }))
+    const first = loadShopping()
+    const second = loadShopping({ force: true })
+    expect(second).not.toBe(first)
+    expect(apiGet).toHaveBeenCalledTimes(4)
+    // Newer answers first, the old one lands late — it must not win.
+    resolvers[2](undefined); resolvers[3](undefined)
+    await second
+    const fresh = items.value.map(i => i.id)
+    resolvers[0](undefined); resolvers[1](undefined)
+    await first
+    expect(items.value.map(i => i.id)).toEqual(fresh)
+  })
+
+  it('a late response cannot resurrect rows committed or pending meanwhile', async () => {
+    let answer!: () => void
+    apiGet.mockImplementation((url: string) => new Promise((res) => {
+      if (url.includes('/stores')) return res([])
+      answer = () => res([item('x', 'X', null), item('y', 'Y', null), item('z', 'Z', null)])
+    }))
+    items.value = [item('x', 'X', null), item('y', 'Y', null), item('z', 'Z', null)]
+    const loading = loadShopping()
+    apiDelete.mockResolvedValue(undefined)
+    await deleteItems(['x'])
+    undoableDelete({ ids: ['y'], message: 'D', commit: async () => {} })
+    answer()
+    await loading
+    expect(items.value.map(i => i.id)).toEqual(['z'])
+    expect(pendingDeletes.value.has('y')).toBe(true)
+  })
+})
+
+describe('resetShopping (logout)', () => {
+  it('clears items, stores, the loaded flag and pending deletes', () => {
+    items.value = [item('a', 'A', null)]
+    stores.value = [{ name: 'Aldi', sort_order: 0 }]
+    shoppingLoaded.value = true
+    undoableDelete({ ids: ['a'], message: 'D', commit: async () => {} })
+    resetShopping()
+    expect(items.value).toEqual([])
+    expect(stores.value).toEqual([])
+    expect(shoppingLoaded.value).toBe(false)
+    expect(pendingDeletes.value.size).toBe(0)
   })
 })

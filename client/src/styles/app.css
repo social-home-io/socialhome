@@ -740,7 +740,10 @@ a:focus:not(:focus-visible) { outline: none; }
   color: var(--sh-text);
 }
 
-.sh-icon-btn, .sh-emoji-btn {
+/* ``.sh-icon-btn`` is defined once, with ``.sh-attach-btn`` (Messages
+ * section) — this rule used to declare it too and was silently
+ * overridden. */
+.sh-emoji-btn {
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--sh-radius-full);
@@ -754,7 +757,7 @@ a:focus:not(:focus-visible) { outline: none; }
   color: var(--sh-text-muted);
   transition: background var(--sh-transition-fast), color var(--sh-transition-fast);
 }
-.sh-icon-btn:hover, .sh-emoji-btn:hover {
+.sh-emoji-btn:hover {
   background: var(--sh-bg-secondary);
   color: var(--sh-text);
 }
@@ -7277,46 +7280,6 @@ a.sh-btn { text-decoration: none; }
 
 /* Shopping */
 .sh-shopping { display: flex; flex-direction: column; gap: var(--sh-space-md); }
-.sh-shopping-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sh-space-sm);
-  flex-wrap: wrap;
-}
-/* Grouped / list view toggle. Renders as a true segmented control
- * (shared border, no gap between buttons, the active one pops with
- * a soft fill) instead of two adjacent independent chips. Reads as
- * "an A/B switch" rather than "two unrelated buttons next to each
- * other." */
-.sh-shopping-grouptoggle {
-  display: inline-flex;
-  flex-shrink: 0;
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-full);
-  background: var(--sh-bg);
-  padding: 2px;
-  gap: 0;
-}
-.sh-shopping-grouptoggle .sh-chip {
-  border: none;
-  background: transparent;
-  color: var(--sh-text-muted);
-  border-radius: var(--sh-radius-full);
-  padding: 4px 12px;
-  font-size: calc(var(--sh-font-size-xs) - 1px);
-  cursor: pointer;
-  transition: background-color 120ms, color 120ms;
-}
-.sh-shopping-grouptoggle .sh-chip:hover {
-  color: var(--sh-text);
-}
-.sh-shopping-grouptoggle .sh-chip--active {
-  background: color-mix(in srgb, var(--sh-primary) 18%, transparent);
-  color: var(--sh-primary-text);
-}
-.sh-shopping-add { display: flex; gap: var(--sh-space-sm); }
-.sh-shopping-add input { flex: 1; }
 .sh-shopping-suggest {
   display: flex;
   gap: var(--sh-space-xs);
@@ -7326,6 +7289,10 @@ a.sh-btn { text-decoration: none; }
   background: var(--sh-bg);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
+}
+.sh-shopping-suggest__label {
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
 }
 /* Shopping list — same tape-card surface as tasks. Items use dashed
  * dividers; the "+ NAME" added-by byline is a .sh-byline mono pill on
@@ -7339,72 +7306,39 @@ a.sh-btn { text-decoration: none; }
    * flush against the card edge. ``--sh-space-md`` keeps the row
    * visually aligned with the section header (which also pads
    * to ``--sh-space-md`` on the left). */
-  padding: var(--sh-space-sm) var(--sh-space-md);
+  padding: var(--sh-space-xs) var(--sh-space-sm) var(--sh-space-xs) var(--sh-space-xs);
   border-bottom: 1px dashed var(--sh-border);
-  transition: background-color 120ms;
+  transition: background-color var(--sh-transition-fast);
 }
 .sh-shopping-list li:last-child { border-bottom: none; }
-/* Two-layer toggle: the outer ``__check`` button is the tap
- * target — sized generously for fingertips but visually
- * transparent so it doesn't take over the row. The inner
- * ``__dot`` is the visible round mark. Previously the whole
- * 36×36 surface was the visible circle, which read as heavy on a
- * mobile list (each row screamed "DECISION" instead of "item").
- * The decoupling lets us keep the comfortable hit-area while
- * shrinking the visual weight to a compact ~20 px dot — same
- * pattern Apple Reminders / Things / Todoist use. */
-.sh-shopping-item__check {
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  background: transparent;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* Reset the text-color the ``--done`` modifier uses so the
-   * inner ✓ inherits the same colour as the dot's fill. */
-  color: var(--sh-on-primary, #fff);
-}
-.sh-shopping-item__check:focus-visible {
-  /* Focus ring on the tap-target button, not the dot, so keyboard
-   * users see a generous ring around the whole interactive
-   * surface — not a tiny ~20 px dot. */
-  outline: 2px solid var(--sh-primary);
-  outline-offset: -4px;
-  border-radius: 50%;
-}
-.sh-shopping-item__check-dot {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: 1.5px solid var(--sh-border);
-  background: var(--sh-bg);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  line-height: 1;
-  transition: background-color 120ms, border-color 120ms;
-}
-.sh-shopping-item__check:hover .sh-shopping-item__check-dot {
-  border-color: var(--sh-primary);
-  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
-}
-.sh-shopping-item__check--done .sh-shopping-item__check-dot {
-  background: var(--sh-primary);
-  border-color: var(--sh-primary);
-}
+/* Item text. On open items it is the rename button — a real,
+ * focusable control (it used to be a clickable <span>), reset to read
+ * as plain text; done items render a plain span. */
 .sh-shopping-item__text {
   flex: 1;
   min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: none;
+  border: 0;
+  padding: var(--sh-space-xs) 2px;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  min-height: 36px;
+  border-radius: var(--sh-radius-sm);
+}
+button.sh-shopping-item__text { cursor: text; }
+/* Done rows render a plain span: no button box, so it centres on the
+ * tick like the open rows' button does. */
+span.sh-shopping-item__text { min-height: 0; padding-block: 0; }
+button.sh-shopping-item__text:hover { color: var(--sh-primary-text); }
+button.sh-shopping-item__text:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 1px;
 }
 .sh-shopping-item__meta {
-  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
-        ui-monospace, Menlo, Consolas, monospace;
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2 var(--sh-font-family-mono);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--sh-text-muted);
@@ -7414,41 +7348,16 @@ a.sh-btn { text-decoration: none; }
   align-items: center;
   gap: 6px;
 }
-.sh-shopping-item__delete {
-  border: none;
-  background: transparent;
-  color: var(--sh-muted);
-  font-size: var(--sh-font-size-md);
-  padding: 4px 8px;
-  border-radius: var(--sh-radius-sm);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms, background-color 120ms, color 120ms;
-}
-.sh-shopping-item:hover .sh-shopping-item__delete,
-.sh-shopping-item:focus-within .sh-shopping-item__delete {
-  opacity: 1;
-}
-.sh-shopping-item__delete:hover {
-  background: color-mix(in srgb, var(--sh-danger, #ef4444) 15%, transparent);
-  color: var(--sh-danger, #ef4444);
-}
-.sh-shopping-list--done { opacity: 0.75; margin-top: var(--sh-space-sm); }
-.sh-shopping-divider {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-muted);
-  border-top: 1px dashed var(--sh-border);
-  margin-top: var(--sh-space-sm);
-}
+/* The ✕ is a RowActionButton (``.sh-row-action``): revealed on row
+ * hover / focus, always visible where there is no hover. */
+.sh-shopping-list--done { margin-top: var(--sh-space-sm); }
+/* Bought items: greyed and struck through, the tick stays legible. */
 .sh-item--done .sh-shopping-item__text {
   text-decoration: line-through;
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
 }
 .sh-item--done .sh-shopping-item__meta { display: none; }
 @media (max-width: 640px) {
-  .sh-shopping-item__delete { opacity: 1; }  /* no hover on touch */
   .sh-shopping-item__meta { display: none; } /* keep rows compact */
 }
 
@@ -7462,6 +7371,9 @@ a.sh-btn { text-decoration: none; }
   margin-top: var(--sh-space-md);
 }
 .sh-shopping-group:first-of-type { margin-top: 0; }
+/* No washi tape on the per-store cards: it would sit on the store
+ * header right above. The flat view's single card keeps it. */
+.sh-shopping-group .sh-list-card::before { display: none; }
 .sh-shopping-group--dragging { opacity: 0.6; }
 .sh-shopping-group__header {
   display: flex;
@@ -7474,26 +7386,25 @@ a.sh-btn { text-decoration: none; }
 }
 .sh-shopping-group__header:active { cursor: grabbing; }
 .sh-shopping-group--unassigned .sh-shopping-group__header {
-  background: color-mix(in srgb, var(--sh-muted, #807766) 10%, transparent);
+  background: color-mix(in srgb, var(--sh-text-muted) 10%, transparent);
   cursor: default;
 }
 .sh-shopping-group__drag {
   color: var(--sh-text-muted);
-  font: 600 14px/1 ui-monospace, Menlo, Consolas, monospace;
+  font: 600 14px/1 var(--sh-font-family-mono);
   letter-spacing: -2px;
   cursor: grab;
 }
 .sh-shopping-group__name {
   flex: 1;
   margin: 0;
-  font-family: 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+  font-family: var(--sh-font-family-display);
   font-size: var(--sh-font-size-md);
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 .sh-shopping-group__count {
-  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1
-        ui-monospace, Menlo, Consolas, monospace;
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1 var(--sh-font-family-mono);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--sh-text-muted);
@@ -7507,11 +7418,16 @@ a.sh-btn { text-decoration: none; }
   background: transparent;
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-sm);
+  min-width: 28px;
+  min-height: 28px;
   padding: 2px 8px;
   cursor: pointer;
   color: var(--sh-text-muted);
   font-size: 11px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .sh-shopping-group__nudge-btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
@@ -7527,8 +7443,7 @@ a.sh-btn { text-decoration: none; }
  * reassign, no typing. The chevron + interactive states call out
  * the click affordance. */
 .sh-shopping-store-pill {
-  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
-        ui-monospace, Menlo, Consolas, monospace;
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2 var(--sh-font-family-mono);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--sh-primary-text);
@@ -7543,7 +7458,8 @@ a.sh-btn { text-decoration: none; }
   gap: 4px;
   cursor: pointer;
   min-height: 28px;
-  transition: background-color 120ms, border-color 120ms;
+  transition: background-color var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
 }
 .sh-shopping-store-pill:hover {
   background: color-mix(in srgb, var(--sh-primary) 18%, transparent);
@@ -7592,6 +7508,8 @@ a.sh-btn { text-decoration: none; }
   position: relative;
   flex-shrink: 0;
 }
+/* The OverflowMenu wrapper inside the picker: no auto-margin push. */
+.sh-shopping-store-picker__wrap { margin-left: 0; }
 .sh-shopping-store-picker__menu {
   position: absolute;
   top: calc(100% + 4px);
@@ -7606,7 +7524,7 @@ a.sh-btn { text-decoration: none; }
   background: var(--sh-bg);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--sh-shadow-lg);
   /* ``--sh-z-modal`` (200) instead of the previous local ``20`` so
    * the picker overlays the mobile bottom tab bar (z-index ``100``
    * via ``--sh-z-dropdown``). Without this the "+ New store…"
@@ -7614,7 +7532,7 @@ a.sh-btn { text-decoration: none; }
    * disappears behind the tab bar on small viewports. */
   z-index: var(--sh-z-modal);
 }
-.sh-shopping-store-picker__opt {
+.sh-shopping-store-picker__menu .sh-shopping-store-picker__opt {
   width: 100%;
   text-align: left;
   background: transparent;
@@ -7629,35 +7547,31 @@ a.sh-btn { text-decoration: none; }
   gap: 8px;
   min-height: 36px;
 }
-.sh-shopping-store-picker__opt:hover,
-.sh-shopping-store-picker__opt:focus-visible {
+.sh-shopping-store-picker__menu .sh-shopping-store-picker__opt:hover,
+.sh-shopping-store-picker__menu .sh-shopping-store-picker__opt:focus-visible {
   background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
   outline: none;
 }
-.sh-shopping-store-picker__opt--current {
+.sh-shopping-store-picker__menu .sh-shopping-store-picker__opt:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--sh-primary);
+}
+.sh-shopping-store-picker__menu .sh-shopping-store-picker__opt--current {
   color: var(--sh-primary-text);
   font-weight: 600;
 }
-.sh-shopping-store-picker__opt--new {
+.sh-shopping-store-picker__menu .sh-shopping-store-picker__opt--none {
+  border-top: 1px solid var(--sh-border);
+  border-radius: 0;
+  margin-top: 2px;
+}
+.sh-shopping-store-picker__menu .sh-shopping-store-picker__opt--new {
+  border-radius: 0;
   color: var(--sh-primary-text);
   border-top: 1px solid var(--sh-border);
   margin-top: 2px;
   padding-top: 12px;
 }
-.sh-shopping-store-picker__check {
-  color: var(--sh-primary-text);
-}
-.sh-shopping-store-picker__sep {
-  height: 1px;
-  background: var(--sh-border);
-  margin: 4px 0;
-}
-.sh-shopping-store-picker__empty {
-  padding: 10px 14px;
-  font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-muted);
-  font-style: italic;
-}
+
 @media (max-width: 640px) {
   /* Bottom-sheet shape on mobile. The picker pops from the bottom
    * edge of the viewport so the menu stays reachable even when the
@@ -7676,9 +7590,9 @@ a.sh-btn { text-decoration: none; }
     max-height: 70vh;
     border-radius: var(--sh-radius-md) var(--sh-radius-md) 0 0;
     padding: 8px 0 calc(env(safe-area-inset-bottom, 0) + 12px) 0;
-    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.16);
+    box-shadow: var(--sh-shadow-xl);
   }
-  .sh-shopping-store-picker__opt {
+  .sh-shopping-store-picker__menu .sh-shopping-store-picker__opt {
     padding: 14px 18px;
     min-height: 44px;
     font-size: var(--sh-font-size-md);
@@ -7760,20 +7674,7 @@ a.sh-btn { text-decoration: none; }
   outline-offset: 2px;
   background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
 }
-.sh-shopping-group__droppad {
-  margin: var(--sh-space-xs) 0;
-  padding: var(--sh-space-md);
-  border: 2px dashed var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  text-align: center;
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-text-muted);
-}
-.sh-shopping-group--drop-target .sh-shopping-group__droppad {
-  border-color: var(--sh-primary);
-  color: var(--sh-primary-text);
-  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
-}
+
 .sh-shopping-item[draggable="true"] { cursor: grab; }
 .sh-shopping-item[draggable="true"]:active { cursor: grabbing; }
 
@@ -7795,29 +7696,23 @@ a.sh-btn { text-decoration: none; }
 .sh-shopping-edit__text { flex: 2 1 200px; }
 .sh-shopping-edit__cancel { flex-shrink: 0; }
 
-/* Click affordance on the item text — only meaningful for the
- * not-completed row (clicking on a done row's text could be
- * ambiguous with the toggle); the parent ``.sh-item--done`` rule
- * already neutralises the cursor. */
-.sh-shopping-item__text {
-  cursor: pointer;
-}
-.sh-item--done .sh-shopping-item__text { cursor: default; }
+
 
 /* ── Store catalogue manager (header "Stores" dialog) ────────────────
  * The single place a household renames / reorders / deletes / adds a
  * shop. Lives in a Modal, so it stays reachable with an empty list —
  * the old per-item-row ⋯ popover disappeared along with the rows. */
-.sh-shopping-header__actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  flex-wrap: wrap;
-}
 .sh-shopping-stores-btn {
-  /* Coarse-pointer tap target (§23.21) — chips are otherwise sized
-   * for the mouse. */
   min-height: 36px;
+  gap: 4px;
+}
+/* Coarse pointers (§23.21): every Shopping control gets a ≥ 44 px
+ * hit area through the shared ``::after`` touch-target rule (Organize
+ * primitives, end of file) — the pills / nudges / chips keep their
+ * desktop size. Only the bottom-sheet's own controls really grow. */
+@media (pointer: coarse) {
+  .sh-shopping-store-picker__back,
+  .sh-shopping-edit .sh-link { min-height: 44px; }
 }
 .sh-store-manager__hint {
   margin: 0 0 var(--sh-space-sm);
@@ -7846,7 +7741,7 @@ a.sh-btn { text-decoration: none; }
 .sh-store-manager__row--dragging { opacity: 0.6; }
 .sh-store-manager__drag {
   color: var(--sh-text-muted);
-  font: 600 14px/1 ui-monospace, Menlo, Consolas, monospace;
+  font: 600 14px/1 var(--sh-font-family-mono);
   letter-spacing: -2px;
   cursor: grab;
   padding: 0 2px;
@@ -7885,8 +7780,7 @@ a.sh-btn { text-decoration: none; }
   font-weight: 600;
 }
 .sh-store-manager__count {
-  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1
-        ui-monospace, Menlo, Consolas, monospace;
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1 var(--sh-font-family-mono);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--sh-text-muted);
@@ -7964,11 +7858,12 @@ a.sh-btn { text-decoration: none; }
  * so the desktop layout keeps its tighter rhythm. */
 @media (pointer: coarse) {
   .sh-store-manager__nudge-btn {
-    min-width: 36px;
-    min-height: 36px;
+    min-width: 44px;
+    min-height: 44px;
   }
+  .sh-store-manager__action,
   .sh-store-manager__cancel {
-    min-height: 36px;
+    min-height: 44px;
     padding-inline: var(--sh-space-sm);
   }
 }
@@ -21363,4 +21258,307 @@ a.sh-btn--ghost:hover {
 @media (max-width: 640px) {
   .sh-space-calendar-host__switch { align-self: stretch; }
   .sh-space-calendar-host__switch .sh-timetable-seg__btn { flex: 1; min-height: 40px; }
+}
+
+/* ─── Organize primitives (Shopping · Tasks · Stickies) ──────────────
+ * Shared controls so the three tabs read as one family: the done tick,
+ * row actions, the quick-add bar, the segmented view switch, list
+ * skeletons, the section header, the archive divider and the drop pad.
+ * Every interactive one grows to 44 px under a coarse pointer. */
+
+/* CheckToggle — big hit area, small round mark. */
+.sh-check-toggle {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--sh-radius-full);
+  color: var(--sh-bg);
+}
+.sh-check-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
+.sh-check-toggle:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -4px;
+}
+.sh-check-toggle__dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--sh-border-strong);
+  background: var(--sh-bg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  transition: background-color var(--sh-transition-fast),
+              border-color var(--sh-transition-fast);
+}
+.sh-check-toggle:hover:not(:disabled) .sh-check-toggle__dot {
+  border-color: var(--sh-primary);
+  background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg));
+}
+.sh-check-toggle--checked .sh-check-toggle__dot,
+.sh-check-toggle--checked:hover:not(:disabled) .sh-check-toggle__dot {
+  background: var(--sh-primary-fill);
+  border-color: var(--sh-primary-fill);
+  color: var(--sh-bg);
+}
+
+/* RowActionButton — on the .sh-icon-btn base, sized for a list row. */
+.sh-row-action {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  font-size: var(--sh-font-size-md);
+  transition: opacity var(--sh-transition-fast),
+              background var(--sh-transition-fast),
+              color var(--sh-transition-fast);
+}
+.sh-row-action:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 1px;
+}
+.sh-row-action--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--sh-danger) 14%, transparent);
+  color: var(--sh-danger);
+}
+/* Reveal contract: the row carries ``.sh-row-reveal-host``
+ * (``ROW_REVEAL_HOST``); its ``reveal`` actions show on hover / focus. */
+@media (hover: hover) {
+  .sh-row-action--reveal { opacity: 0; }
+  .sh-row-reveal-host:hover .sh-row-action--reveal,
+  .sh-row-reveal-host:focus-within .sh-row-action--reveal,
+  .sh-row-action--reveal:focus-visible { opacity: 1; }
+}
+
+/* QuickAddBar */
+.sh-quick-add { display: flex; gap: var(--sh-space-sm); align-items: stretch; }
+.sh-quick-add input { flex: 1; min-width: 0; }
+
+/* ChipRadioGroup variant="segmented" — one pill, joined options. */
+.sh-segmented {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg);
+  padding: 2px;
+  gap: 0;
+}
+.sh-segmented__opt {
+  border: 0;
+  background: transparent;
+  color: var(--sh-text-muted);
+  border-radius: var(--sh-radius-full);
+  min-height: 32px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: var(--sh-font-size-xs);
+  cursor: pointer;
+  transition: background-color var(--sh-transition-fast),
+              color var(--sh-transition-fast);
+}
+.sh-segmented__opt:hover { color: var(--sh-text); }
+.sh-segmented__opt:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 1px;
+}
+.sh-segmented__opt--active,
+.sh-segmented__opt--active:hover {
+  background: color-mix(in srgb, var(--sh-primary) 18%, transparent);
+  color: var(--sh-primary-text);
+  font-weight: 600;
+}
+
+/* OverflowMenu pick-one tick */
+.sh-post-menu [role="menuitemradio"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+}
+.sh-post-menu__check { color: var(--sh-primary-text); }
+
+/* OrganizeSectionHeader */
+.sh-organize-header {
+  /* Breathing room under the Organize tab strip (the title may be
+   * sr-only, leaving only the small counts line on top). */
+  margin-top: var(--sh-space-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm) var(--sh-space-md);
+  flex-wrap: wrap;
+}
+.sh-organize-header__text {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sh-space-sm) var(--sh-space-md);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.sh-organize-header__title {
+  font: 600 var(--sh-font-size-2xl) / 1.05 var(--sh-font-family-display);
+  font-feature-settings: var(--sh-display-feat, "ss01", "case");
+  font-variation-settings: var(--sh-display-axes, "opsz" 32);
+  letter-spacing: -0.005em;
+  margin: 0;
+}
+.sh-organize-header__counts {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1 var(--sh-font-family-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+}
+.sh-organize-header__count--open { color: var(--sh-primary-text); font-weight: 600; }
+.sh-organize-header__count--done { color: var(--sh-success); }
+.sh-organize-header__sep { color: var(--sh-border-strong); }
+.sh-organize-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+}
+
+/* ArchiveDivider */
+.sh-archive-divider {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md) 0;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  border-top: 1px dashed var(--sh-border);
+  margin-top: var(--sh-space-sm);
+}
+.sh-archive-divider__action { min-height: 32px; }
+
+/* DropPad */
+.sh-drop-pad {
+  margin: var(--sh-space-xs) 0;
+  padding: var(--sh-space-md);
+  border: 2px dashed var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  text-align: center;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+.sh-drop-pad--active {
+  border-color: var(--sh-primary);
+  color: var(--sh-primary-text);
+  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
+}
+
+/* ListSkeleton */
+.sh-list-skeleton__art { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-list-skeleton--list .sh-list-skeleton__art {
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  padding: var(--sh-space-md);
+}
+.sh-list-skeleton__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 36px;
+}
+.sh-list-skeleton__tick { width: 20px; height: 20px; margin: 0 8px; flex-shrink: 0; }
+.sh-list-skeleton--board .sh-list-skeleton__art {
+  flex-direction: row;
+  gap: var(--sh-space-md);
+  overflow: hidden;
+}
+.sh-list-skeleton__column {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-secondary);
+}
+.sh-list-skeleton__card,
+.sh-list-skeleton__note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+  padding: var(--sh-space-sm);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+}
+.sh-list-skeleton--sticky .sh-list-skeleton__art {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--sh-space-md);
+}
+.sh-list-skeleton__note { min-height: 110px; }
+@media (max-width: 640px) {
+  .sh-list-skeleton__column + .sh-list-skeleton__column { display: none; }
+}
+
+/* Touch targets without touch-sized chrome: under a coarse pointer
+ * each small control gets an invisible ``::after`` hit box of at least
+ * 44 × 44 px centred on it (pseudo-elements hit-test as their element),
+ * so the visual size — and the row height — match desktop. Rows are
+ * ≥ 44 px tall, so neighbouring hit boxes don't overlap vertically. */
+@media (pointer: coarse) {
+  .sh-check-toggle,
+  .sh-row-action,
+  .sh-segmented__opt,
+  .sh-archive-divider__action,
+  .sh-shopping-store-pill,
+  .sh-shopping-group__nudge-btn,
+  .sh-shopping-stores-btn,
+  .sh-shopping-suggest .sh-chip {
+    position: relative;
+  }
+  .sh-check-toggle::after,
+  .sh-row-action::after,
+  .sh-segmented__opt::after,
+  .sh-archive-divider__action::after,
+  .sh-shopping-store-pill::after,
+  .sh-shopping-group__nudge-btn::after,
+  .sh-shopping-stores-btn::after,
+  .sh-shopping-suggest .sh-chip::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+  /* The rename text clips for its ellipsis, so it can't host a
+   * pseudo hit box — it fills the (44 px) row height instead; it has
+   * no background, so nothing visibly changes. */
+  button.sh-shopping-item__text {
+    align-self: stretch;
+    margin-block: calc(var(--sh-space-xs) * -1);
+  }
+  /* ▲ and ▼ sit far enough apart that their 44 px boxes don't overlap. */
+  .sh-shopping-group__nudge { gap: 16px; }
+  /* Wrapped suggestion chips: rows far enough apart that their 44 px
+   * boxes (36 px chips) don't overlap. */
+  .sh-shopping-suggest { row-gap: 12px; }
+  /* Keep side-by-side hit boxes (compact 📍 pill, ✕) from overlapping. */
+  .sh-shopping-item { gap: 14px; }
+  /* The store header's ▲▼ hit boxes reach past the header's edge —
+   * lift them over the card that follows. */
+  .sh-shopping-group__nudge-btn { z-index: 2; }
 }

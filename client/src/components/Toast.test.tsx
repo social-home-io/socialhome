@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 
-import { toasts, showToast, ToastContainer } from './Toast'
+import { toasts, showToast, dismissToast, ToastContainer } from './Toast'
 
 describe('Toast', () => {
   beforeEach(() => {
@@ -131,5 +131,87 @@ describe('Toast', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  describe('onExpire', () => {
+    it('fires when the toast auto-dismisses', () => {
+      vi.useFakeTimers()
+      try {
+        const onExpire = vi.fn()
+        showToast('Deleted', 'info', { action: { label: 'Undo', onClick: () => {} }, onExpire })
+        vi.advanceTimersByTime(7000)
+        expect(onExpire).not.toHaveBeenCalled()
+        vi.advanceTimersByTime(2000)
+        expect(onExpire).toHaveBeenCalledTimes(1)
+        expect(toasts.value.length).toBe(0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('fires when the toast is evicted past the visible cap', () => {
+      const onExpire = vi.fn()
+      showToast('Deleted', 'info', { action: { label: 'Undo', onClick: () => {} }, onExpire })
+      showToast('b', 'info')
+      showToast('c', 'info')
+      expect(onExpire).not.toHaveBeenCalled()
+      showToast('d', 'info')
+      expect(onExpire).toHaveBeenCalledTimes(1)
+    })
+
+    it('does NOT fire when the action is clicked — not even after the timer would have run', () => {
+      vi.useFakeTimers()
+      try {
+        const onExpire = vi.fn()
+        const onClick = vi.fn()
+        showToast('Deleted', 'info', { action: { label: 'Undo', onClick }, onExpire })
+        const { getByRole } = render(<ToastContainer />)
+        fireEvent.click(getByRole('button', { name: 'Undo' }))
+        vi.advanceTimersByTime(20000)
+        expect(onClick).toHaveBeenCalledTimes(1)
+        expect(onExpire).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('fires exactly once even after a hover pause/resume cycle', () => {
+      vi.useFakeTimers()
+      try {
+        const onExpire = vi.fn()
+        showToast('Deleted', 'info', { action: { label: 'Undo', onClick: () => {} }, onExpire })
+        const { container } = render(<ToastContainer />)
+        const row = container.querySelector('.sh-toast')!
+        fireEvent.mouseEnter(row)
+        fireEvent.mouseLeave(row)
+        vi.advanceTimersByTime(30000)
+        expect(onExpire).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  describe('dismissToast', () => {
+    it('removes a toast by id without firing onExpire', () => {
+      vi.useFakeTimers()
+      try {
+        const onExpire = vi.fn()
+        const id = showToast('Deleted', 'info', { action: { label: 'Undo', onClick: () => {} }, onExpire })
+        expect(typeof id).toBe('number')
+        dismissToast(id)
+        expect(toasts.value.length).toBe(0)
+        vi.advanceTimersByTime(20000)
+        expect(onExpire).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('showToast returns the id of a collapsed duplicate row', () => {
+      const a = showToast('Saved', 'success')
+      const b = showToast('Saved', 'success')
+      expect(b).toBe(a)
+    })
   })
 })

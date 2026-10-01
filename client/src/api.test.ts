@@ -264,3 +264,29 @@ describe('ApiClient.delete — response body', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('ApiClient — request options (keepalive)', () => {
+  function stub() {
+    const res = { ok: true, status: 204, headers: new Headers(), json: vi.fn() } as unknown as Response
+    const f = vi.fn().mockResolvedValue(res)
+    vi.stubGlobal('fetch', f)
+    return f
+  }
+  beforeEach(() => { vi.unstubAllGlobals() })
+
+  it('DELETE forwards keepalive so a pagehide flush survives the unload', async () => {
+    const f = stub()
+    await api.delete('/api/shopping/x', { keepalive: true })
+    expect(f.mock.calls[0][1]).toMatchObject({ method: 'DELETE', keepalive: true })
+  })
+
+  it('every verb accepts the options; omitted means a normal request', async () => {
+    const f = stub()
+    await api.post('/api/a', {}, { keepalive: true })
+    await api.patch('/api/a', {}, { keepalive: true })
+    await api.put('/api/a', {}, { keepalive: true })
+    await api.delete('/api/a')
+    expect(f.mock.calls.slice(0, 3).every(c => c[1].keepalive === true)).toBe(true)
+    expect(f.mock.calls[3][1].keepalive).toBeUndefined()
+  })
+})

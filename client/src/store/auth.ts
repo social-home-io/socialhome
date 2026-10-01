@@ -90,10 +90,27 @@ export function setToken(t: string) {
   _resetApiLoggedOut()
 }
 
+const _logoutHooks = new Set<() => void>()
+
+/** Run ``fn`` on every logout — feature stores clear the signed-out
+ *  household's data with it (wired in ``main.tsx`` so this module stays
+ *  import-pure). Returns an unsubscribe. */
+export function onLogout(fn: () => void): () => void {
+  _logoutHooks.add(fn)
+  return () => { _logoutHooks.delete(fn) }
+}
+
 export function logout() {
   token.value = null
   currentUser.value = null
   localStorage.removeItem('sh_token')
+  for (const fn of _logoutHooks) {
+    try {
+      fn()
+    } catch (err) {
+      console.error('logout hook failed', err)
+    }
+  }
 }
 
 // NOTE: the api 401 handler's logout is wired in ``main.tsx`` at startup via

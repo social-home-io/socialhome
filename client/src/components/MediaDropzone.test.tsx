@@ -43,7 +43,7 @@ describe('MediaDropzone', () => {
     // returns to the page but ``input.files`` is empty (the
     // WebChromeClient didn't propagate the URI). Before the toast,
     // the composer was completely silent and looked broken.
-    const toastSpy = vi.spyOn(Toast, 'showToast').mockImplementation(() => {})
+    const toastSpy = vi.spyOn(Toast, 'showToast').mockImplementation(() => 0)
     const onFiles = vi.fn()
     const { container } = render(
       <MediaDropzone onFiles={onFiles} hint="x" pickLabel="pick" />,

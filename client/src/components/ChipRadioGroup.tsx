@@ -3,7 +3,10 @@
  * radiogroup: one Tab stop (the checked chip), arrow keys move focus
  * and selection together (wrapping), Home / End jump to the ends.
  *
- * Used by the Settings language and week-start pickers. When ``value``
+ * Used by the Settings language and week-start pickers, and (as the
+ * ``segmented`` variant — one bordered pill, options joined) by the
+ * Organize view switches such as Shopping's "Group by store / List".
+ * When ``value``
  * changes while focus is inside the group (e.g. a failed save rolled
  * the choice back) focus follows the checked chip, so the group's only
  * Tab stop is never left unfocused.
@@ -22,11 +25,19 @@ interface ChipRadioGroupProps<T extends string> {
   onChange: (value: T) => void
   ariaLabel?: string
   labelledBy?: string
+  /** ``chips`` (default): spaced pill chips. ``segmented``: one
+   *  bordered pill, options joined — an A/B switch. */
+  variant?: 'chips' | 'segmented'
+  /** Extra class on the group element. */
+  class?: string
 }
 
 export function ChipRadioGroup<T extends string>({
-  options, value, onChange, ariaLabel, labelledBy,
+  options, value, onChange, ariaLabel, labelledBy, variant = 'chips',
+  class: extraClass,
 }: ChipRadioGroupProps<T>) {
+  const base = variant === 'segmented' ? 'sh-segmented' : 'sh-locale-options'
+  const opt = variant === 'segmented' ? 'sh-segmented__opt' : 'sh-locale-option'
   const group = useRef<HTMLDivElement>(null)
 
   const radioAt = (idx: number): HTMLElement | undefined =>
@@ -65,7 +76,7 @@ export function ChipRadioGroup<T extends string>({
   }
 
   return (
-    <div class="sh-locale-options" role="radiogroup" ref={group}
+    <div class={extraClass ? `${base} ${extraClass}` : base} role="radiogroup" ref={group}
          aria-label={ariaLabel} aria-labelledby={labelledBy}>
       {options.map((o, idx) => {
         const checked = o.value === value
@@ -77,7 +88,7 @@ export function ChipRadioGroup<T extends string>({
             aria-checked={checked}
             tabIndex={checked ? 0 : -1}
             title={o.title}
-            class={checked ? 'sh-locale-option sh-locale-option--active' : 'sh-locale-option'}
+            class={checked ? `${opt} ${opt}--active` : opt}
             onKeyDown={e => onKeyDown(e, idx)}
             onClick={() => onChange(o.value)}
           >

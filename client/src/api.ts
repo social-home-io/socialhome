@@ -102,6 +102,18 @@ export class ApiError extends Error {
   }
 }
 
+/** Per-request options shared by the JSON verbs. */
+export interface RequestOptions {
+  /** ``fetch``'s ``keepalive``: the request outlives the page — for the
+   *  best-effort flush on ``pagehide`` / tab hidden (``sendBeacon``
+   *  can't carry the ``Authorization`` header). */
+  keepalive?: boolean
+}
+
+function extra(opts?: RequestOptions): RequestInit {
+  return opts?.keepalive ? { keepalive: true } : {}
+}
+
 class ApiClient {
   private headers(): HeadersInit {
     return {
@@ -171,9 +183,10 @@ class ApiClient {
     return res.json()
   }
 
-  async post<T = any>(path: string, body?: unknown): Promise<T> {
+  async post<T = any>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
     const res = await this._handle(
       await fetch(_rel(path), {
+        ...extra(opts),
         method: 'POST', headers: this.headers(),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       }),
@@ -182,9 +195,10 @@ class ApiClient {
     return _parseJsonOrNull<T>(res)
   }
 
-  async put<T = any>(path: string, body?: unknown): Promise<T> {
+  async put<T = any>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
     const res = await this._handle(
       await fetch(_rel(path), {
+        ...extra(opts),
         method: 'PUT', headers: this.headers(),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       }),
@@ -193,9 +207,10 @@ class ApiClient {
     return _parseJsonOrNull<T>(res)
   }
 
-  async patch<T = any>(path: string, body?: unknown): Promise<T> {
+  async patch<T = any>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
     const res = await this._handle(
       await fetch(_rel(path), {
+        ...extra(opts),
         method: 'PATCH', headers: this.headers(),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       }),
@@ -207,9 +222,9 @@ class ApiClient {
   /** Resolves to the parsed JSON body when the response is JSON (the
    *  timetable routes answer a DELETE with the updated resource),
    *  ``null`` otherwise — callers that don't care simply ignore it. */
-  async delete<T = void>(path: string): Promise<T> {
+  async delete<T = void>(path: string, opts?: RequestOptions): Promise<T> {
     const res = await this._handle(
-      await fetch(_rel(path), { method: 'DELETE', headers: this.headers() }),
+      await fetch(_rel(path), { ...extra(opts), method: 'DELETE', headers: this.headers() }),
       path,
     )
     // Only a JSON response is parsed (older DELETE routes answer with

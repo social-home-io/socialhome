@@ -3,7 +3,7 @@ import { App } from './App'
 import { SpaUpdateBanner } from './components/SpaUpdateBanner'
 import { ws } from './ws'
 import { setUnauthorizedHandler } from './api'
-import { logout } from './store/auth'
+import { logout, onLogout } from './store/auth'
 import './styles/tokens.css'
 import './styles/app.css'
 // Eagerly initialise the theme signal + effect so the `<html>` class
@@ -12,7 +12,7 @@ import './styles/app.css'
 // keeps the signal in sync for live toggles and system-theme flips.
 import './store/theme'
 import { wireFeedWs } from './store/feed'
-import { wireShoppingWs } from './store/shopping'
+import { wireShoppingWs, resetShopping } from './store/shopping'
 import { wireCalendarWs } from './store/calendar'
 import { wireTasksWs } from './store/tasks'
 import { wireNotificationsWs } from './store/notifications'
@@ -55,6 +55,9 @@ wireProtectionWs()
 // store/auth module load) so api.ts stays free of a static import back to
 // store/auth — that's what keeps the api↔auth dependency graph acyclic.
 setUnauthorizedHandler(logout)
+// Signing out forgets the household's shopping list (items, stores,
+// pending Undo deletes) so the next account never sees it.
+onLogout(resetShopping)
 
 ws.connect()
 
