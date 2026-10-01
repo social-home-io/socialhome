@@ -36,10 +36,42 @@ from ..domain.task import (
     TaskList,
     TaskStatus,
 )
+from ..domain.space import SpacePermissionError
 from ..federation.owner_bound_id import SPACE_TASK_KIND, mint_owner_bound_id
+from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
+from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.task_repo import AbstractTaskRepo, AbstractSpaceTaskRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
+from .space_service import SpaceService
+
+#: Upper bound on assignees per task (household and space alike).
+MAX_TASK_ASSIGNEES = 10
+
+
+def parse_assignees(value: object) -> tuple[str, ...] | None:
+    """Validate a client-supplied ``assignees`` value.
+
+    ``None`` means "not supplied" and passes through. Anything else must
+    be a list of at most :data:`MAX_TASK_ASSIGNEES` non-empty user-id
+    strings — a bare string is refused rather than iterated (which would
+    split it into one "assignee" per character). Duplicates collapse,
+    first occurrence wins. Raises :class:`ValueError` (→ 422).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("assignees must be a list of user ids")
+    if len(value) > MAX_TASK_ASSIGNEES:
+        raise ValueError(f"at most {MAX_TASK_ASSIGNEES} assignees per task")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("assignees must be non-empty user id strings")
+        uid = item.strip()
+        if uid not in out:
+            out.append(uid)
+    return tuple(out)
 
 
 class TaskService(BusPublisherMixin):
@@ -146,6 +178,7 @@ class TaskService(BusPublisherMixin):
         title = title.strip()
         if not title:
             raise ValueError("task title must not be empty")
+        parsed_assignees = parse_assignees(assignees) or ()
         # Ensure list exists
         task_list = await self._repo.get_list(list_id)
         if task_list is None:
@@ -170,7 +203,7 @@ class TaskService(BusPublisherMixin):
             updated_at=now,
             description=description,
             due_date=due,
-            assignees=tuple(assignees or []),
+            assignees=parsed_assignees,
         )
         saved = await self._repo.save(task)
         if self._bus is not None:
@@ -264,8 +297,9 @@ class TaskService(BusPublisherMixin):
                 kwargs["due_date"] = date.fromisoformat(due_date[:10])
             except ValueError as exc:
                 raise ValueError(f"invalid due_date: {due_date!r}") from exc
-        if assignees is not None:
-            kwargs["assignees"] = tuple(assignees)
+        parsed_assignees = parse_assignees(assignees)
+        if parsed_assignees is not None:
+            kwargs["assignees"] = parsed_assignees
 
         updated = replace(task, **kwargs)
         saved = await self._repo.save(updated)
@@ -562,15 +596,92 @@ class SpaceTaskService(BusPublisherMixin):
     can scope fan-out correctly.
     """
 
-    __slots__ = ("_repo", "_bus")
+    __slots__ = ("_repo", "_bus", "_spaces", "_remote_members")
 
     def __init__(
         self,
         space_task_repo: AbstractSpaceTaskRepo,
         bus=None,
+        *,
+        space_repo: AbstractSpaceRepo,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
     ) -> None:
         self._repo = space_task_repo
         self._bus = bus
+        self._spaces = space_repo
+        # Optional: without it only local members are valid assignees
+        # (fail-closed for cross-household assignment).
+        self._remote_members = remote_member_repo
+
+    # ── Writer gate ──────────────────────────────────────────────────────
+
+    async def require_writer(self, space_id: str, user_id: str) -> None:
+        """Raise unless ``user_id`` may write this space's tasks.
+
+        * unknown / dissolved space → :class:`KeyError` (404);
+        * archived space (read-only) → :class:`SpacePermissionError`;
+        * not a member, or a read-only subscriber →
+          :class:`SpacePermissionError` (403), via the uniform
+          :meth:`SpaceService.assert_writable_member` rule.
+        """
+        space = await self._spaces.get(space_id)
+        if space is None or space.dissolved:
+            raise KeyError(f"space {space_id!r} not found")
+        if space.archived:
+            raise SpacePermissionError(
+                "space is archived (read-only) — unarchive it to make changes",
+            )
+        member = await self._spaces.get_member(space_id, user_id)
+        if member is None:
+            raise SpacePermissionError("not a member of this space")
+        SpaceService.assert_writable_member(member, action="edit tasks", space=space)
+
+    # ── Assignees ────────────────────────────────────────────────────────
+
+    async def _require_member_assignees(
+        self, space_id: str, user_ids: tuple[str, ...]
+    ) -> None:
+        """Every id must be a member of ``space_id`` — local
+        (``space_members``) or a live remote member. Assigning to anyone
+        else would hand them the task's title + description through the
+        ``TaskAssigned`` notification / WS frame."""
+        if not user_ids:
+            return
+        remote: set[str] | None = None
+        for uid in user_ids:
+            if await self._spaces.get_member(space_id, uid) is not None:
+                continue
+            if remote is None:
+                remote = (
+                    {
+                        m.user_id
+                        for m in await self._remote_members.list_for_space(space_id)
+                    }
+                    if self._remote_members is not None
+                    else set()
+                )
+            if uid not in remote:
+                raise ValueError("every assignee must be a member of this space")
+
+    # ── Scope guards ─────────────────────────────────────────────────────
+    #
+    # Every by-id operation takes the caller's (path) ``space_id`` and
+    # refuses a row that lives in a different space. A row id says nothing
+    # about its space, so without this a member of space A could act on
+    # space B's rows by id. Raised as KeyError (→ 404), never 403, so the
+    # response does not confirm the id exists elsewhere.
+
+    async def _list_in_space(self, list_id: str, space_id: str) -> TaskList:
+        result = await self._repo.get_list(list_id)
+        if result is None or result[0] != space_id:
+            raise KeyError(f"task list {list_id!r} not found in this space")
+        return result[1]
+
+    async def _task_in_space(self, task_id: str, space_id: str) -> Task:
+        result = await self._repo.get(task_id)
+        if result is None or result[0] != space_id:
+            raise KeyError(f"space task {task_id!r} not found in this space")
+        return result[1]
 
     # ── Lists ────────────────────────────────────────────────────────────
 
@@ -604,15 +715,13 @@ class SpaceTaskService(BusPublisherMixin):
         self,
         list_id: str,
         *,
+        space_id: str,
         name: str,
     ) -> TaskList:
         name = name.strip()
         if not name:
             raise ValueError("task list name must not be empty")
-        result = await self._repo.get_list(list_id)
-        if result is None:
-            raise KeyError(f"task list {list_id!r} not found")
-        space_id, current = result
+        current = await self._list_in_space(list_id, space_id)
         updated = replace(current, name=name)
         if not await self._repo.save_list(updated, space_id=space_id):
             raise KeyError(f"task list {list_id!r} not found")
@@ -626,11 +735,8 @@ class SpaceTaskService(BusPublisherMixin):
         )
         return saved
 
-    async def delete_list(self, list_id: str) -> None:
-        result = await self._repo.get_list(list_id)
-        if result is None:
-            raise KeyError(f"task list {list_id!r} not found")
-        space_id, _ = result
+    async def delete_list(self, list_id: str, *, space_id: str) -> None:
+        await self._list_in_space(list_id, space_id)
         await self._repo.delete_list(list_id, space_id=space_id)
         await self._emit(
             TaskListDeleted(
@@ -647,8 +753,9 @@ class SpaceTaskService(BusPublisherMixin):
     async def list_tasks(self, space_id: str) -> list[Task]:
         return await self._repo.list_by_space(space_id)
 
-    async def list_tasks_by_list(self, list_id: str) -> list[Task]:
-        return await self._repo.list_by_list(list_id)
+    async def list_tasks_by_list(self, list_id: str, *, space_id: str) -> list[Task]:
+        await self._list_in_space(list_id, space_id)
+        return await self._repo.list_by_list(list_id, space_id=space_id)
 
     async def create_task(
         self,
@@ -664,6 +771,8 @@ class SpaceTaskService(BusPublisherMixin):
         title = title.strip()
         if not title:
             raise ValueError("task title must not be empty")
+        parsed_assignees = parse_assignees(assignees) or ()
+        await self._require_member_assignees(space_id, parsed_assignees)
         due: date | None = None
         if due_date:
             try:
@@ -686,7 +795,7 @@ class SpaceTaskService(BusPublisherMixin):
             updated_at=now,
             description=description,
             due_date=due,
-            assignees=tuple(assignees or []),
+            assignees=parsed_assignees,
         )
         if not await self._repo.save(task, space_id=space_id):
             raise KeyError(f"task list {list_id!r} not found in this space")
@@ -700,6 +809,7 @@ class SpaceTaskService(BusPublisherMixin):
                     TaskAssigned(
                         task=saved,
                         assigned_to=user_id,
+                        space_id=space_id,
                     )
                 )
         return saved
@@ -708,6 +818,7 @@ class SpaceTaskService(BusPublisherMixin):
         self,
         task_id: str,
         *,
+        space_id: str,
         actor_user_id: str,
         title: str | None = None,
         description: str | None = None,
@@ -716,10 +827,7 @@ class SpaceTaskService(BusPublisherMixin):
         assignees: list[str] | None = None,
         position: int | None = None,
     ) -> Task:
-        result = await self._repo.get(task_id)
-        if result is None:
-            raise KeyError(f"space task {task_id!r} not found")
-        space_id, task = result
+        task = await self._task_in_space(task_id, space_id)
 
         kwargs: dict = {"updated_at": datetime.now(timezone.utc)}
         if title is not None:
@@ -741,8 +849,16 @@ class SpaceTaskService(BusPublisherMixin):
                 )
             except ValueError as exc:
                 raise ValueError(f"invalid due_date: {due_date!r}") from exc
-        if assignees is not None:
-            kwargs["assignees"] = tuple(assignees)
+        parsed_assignees = parse_assignees(assignees)
+        if parsed_assignees is not None:
+            # Only ids being ADDED are checked: an existing assignee who
+            # has since left must not block an unrelated edit.
+            previous_ids = set(task.assignees or ())
+            await self._require_member_assignees(
+                space_id,
+                tuple(u for u in parsed_assignees if u not in previous_ids),
+            )
+            kwargs["assignees"] = parsed_assignees
         if position is not None:
             kwargs["position"] = int(position)
 
@@ -760,6 +876,7 @@ class SpaceTaskService(BusPublisherMixin):
                     TaskAssigned(
                         task=saved,
                         assigned_to=user_id,
+                        space_id=space_id,
                     )
                 )
             if saved.status == TaskStatus.DONE and task.status != TaskStatus.DONE:
@@ -767,15 +884,13 @@ class SpaceTaskService(BusPublisherMixin):
                     TaskCompleted(
                         task=saved,
                         completed_by=actor_user_id,
+                        space_id=space_id,
                     )
                 )
         return saved
 
-    async def delete_task(self, task_id: str) -> None:
-        result = await self._repo.get(task_id)
-        if result is None:
-            raise KeyError(f"space task {task_id!r} not found")
-        space_id, task = result
+    async def delete_task(self, task_id: str, *, space_id: str) -> None:
+        task = await self._task_in_space(task_id, space_id)
         await self._repo.delete(task_id, space_id=space_id)
         await self._emit(
             TaskDeleted(
@@ -785,23 +900,27 @@ class SpaceTaskService(BusPublisherMixin):
             )
         )
 
-    async def archive_task(self, task_id: str, *, actor_user_id: str) -> Task:
-        return await self._set_archived(task_id, actor_user_id, archived=True)
+    async def archive_task(
+        self, task_id: str, *, space_id: str, actor_user_id: str
+    ) -> Task:
+        return await self._set_archived(task_id, space_id, actor_user_id, archived=True)
 
-    async def unarchive_task(self, task_id: str, *, actor_user_id: str) -> Task:
-        return await self._set_archived(task_id, actor_user_id, archived=False)
+    async def unarchive_task(
+        self, task_id: str, *, space_id: str, actor_user_id: str
+    ) -> Task:
+        return await self._set_archived(
+            task_id, space_id, actor_user_id, archived=False
+        )
 
     async def _set_archived(
         self,
         task_id: str,
+        space_id: str,
         actor_user_id: str,
         *,
         archived: bool,
     ) -> Task:
-        result = await self._repo.get(task_id)
-        if result is None:
-            raise KeyError(f"space task {task_id!r} not found")
-        space_id, task = result
+        task = await self._task_in_space(task_id, space_id)
         now = datetime.now(timezone.utc)
         updated = replace(
             task,

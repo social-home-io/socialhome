@@ -15,7 +15,14 @@ from socialhome.federation.owner_bound_id import (
     OwnerBinding,
     check_owner_bound_id,
 )
+from socialhome.domain.events import TaskAssigned, TaskCompleted
+from socialhome.domain.space import SpacePermissionError
 from socialhome.domain.user import User
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.task_service import SpaceTaskService, TaskService
@@ -42,6 +49,8 @@ async def env(tmp_dir):
     e.iid = iid
     e.task_repo = SqliteTaskRepo(db)
     e.space_task_repo = SqliteSpaceTaskRepo(db)
+    e.space_repo = SqliteSpaceRepo(db)
+    e.remote_member_repo = SqliteSpaceRemoteMemberRepo(db)
     e.user_repo = SqliteUserRepo(db)
     e.task_svc = TaskService(e.task_repo, user_repo=e.user_repo)
     yield e
@@ -111,7 +120,7 @@ async def test_space_task_crud(env):
     )
     await env.space_task_repo.save(task, space_id=space_id)
 
-    tasks = await env.space_task_repo.list_by_list(tl.id)
+    tasks = await env.space_task_repo.list_by_list(tl.id, space_id=space_id)
     assert any(t.id == task.id for t in tasks)
 
     all_tasks = await env.space_task_repo.list_by_space(space_id)
@@ -408,7 +417,7 @@ async def test_space_task_service_list(env):
     """SpaceTaskService.list_lists and list_tasks work."""
     from socialhome.services.task_service import SpaceTaskService
 
-    svc = SpaceTaskService(env.space_task_repo)
+    svc = SpaceTaskService(env.space_task_repo, space_repo=env.space_repo)
     # Need a space
     kp2 = generate_identity_keypair()
     import uuid as _uuid
@@ -433,7 +442,7 @@ async def test_space_task_service_list(env):
 async def test_a_space_task_id_commits_to_its_creator(env):
     """v_36: a space task federates, so its id is owner-bound to its
     creator in its space — no other household can announce it first."""
-    svc = SpaceTaskService(env.space_task_repo)
+    svc = SpaceTaskService(env.space_task_repo, space_repo=env.space_repo)
     await env.db.enqueue(
         "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
         ("sowner", "uid-so", "SO"),
@@ -464,3 +473,315 @@ async def test_a_space_task_id_commits_to_its_creator(env):
             )
             is expected
         )
+
+
+# ─── Cross-space scope (IDOR) ────────────────────────────────────────────
+
+
+async def _two_spaces_with_a_task(env):
+    """Seed spaces ``sp-a`` and ``sp-b``; return ``(svc, list_b, task_b)``.
+
+    The caller acts on ``sp-a``'s path while naming ``sp-b``'s rows.
+    """
+    svc = SpaceTaskService(env.space_task_repo, space_repo=env.space_repo)
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("sowner", "uid-so", "SO"),
+    )
+    for sid in ("sp-a", "sp-b"):
+        await env.db.enqueue(
+            """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+               identity_public_key, config_sequence, space_type, join_mode)
+               VALUES(?,?,?,?,?,0,'private','invite_only')""",
+            (
+                sid,
+                sid,
+                env.iid,
+                "sowner",
+                generate_identity_keypair().public_key.hex(),
+            ),
+        )
+    lst_b = await svc.create_list(space_id="sp-b", name="B", created_by="uid-so")
+    task_b = await svc.create_task(
+        space_id="sp-b", list_id=lst_b.id, title="TB", created_by="uid-so"
+    )
+    return svc, lst_b, task_b
+
+
+async def test_a_space_task_from_another_space_is_not_found(env):
+    """Every task op scoped to ``sp-a`` refuses ``sp-b``'s task with
+    KeyError (→ 404) and leaves it untouched."""
+    svc, _, task_b = await _two_spaces_with_a_task(env)
+    with pytest.raises(KeyError):
+        await svc.update_task(
+            task_b.id, space_id="sp-a", actor_user_id="uid-so", title="pwned"
+        )
+    with pytest.raises(KeyError):
+        await svc.archive_task(task_b.id, space_id="sp-a", actor_user_id="uid-so")
+    with pytest.raises(KeyError):
+        await svc.unarchive_task(task_b.id, space_id="sp-a", actor_user_id="uid-so")
+    with pytest.raises(KeyError):
+        await svc.delete_task(task_b.id, space_id="sp-a")
+    got = await env.space_task_repo.get(task_b.id)
+    assert got is not None
+    space_id, task = got
+    assert space_id == "sp-b"
+    assert task.title == "TB"
+    assert task.archived_at is None
+
+
+async def test_a_space_task_list_from_another_space_is_not_found(env):
+    """List ops scoped to ``sp-a`` refuse ``sp-b``'s list."""
+    svc, lst_b, task_b = await _two_spaces_with_a_task(env)
+    with pytest.raises(KeyError):
+        await svc.rename_list(lst_b.id, space_id="sp-a", name="pwned")
+    with pytest.raises(KeyError):
+        await svc.delete_list(lst_b.id, space_id="sp-a")
+    with pytest.raises(KeyError):
+        await svc.list_tasks_by_list(lst_b.id, space_id="sp-a")
+    got = await env.space_task_repo.get_list(lst_b.id)
+    assert got is not None
+    assert got[1].name == "B"
+    assert await env.space_task_repo.get(task_b.id) is not None
+    # Defence in depth: the repo read itself is space-filtered.
+    assert await env.space_task_repo.list_by_list(lst_b.id, space_id="sp-a") == []
+    assert len(await env.space_task_repo.list_by_list(lst_b.id, space_id="sp-b")) == 1
+
+
+async def test_space_task_ops_in_their_own_space_still_work(env):
+    """The same calls scoped to the row's own space succeed."""
+    svc, lst_b, task_b = await _two_spaces_with_a_task(env)
+    rows = await svc.list_tasks_by_list(lst_b.id, space_id="sp-b")
+    assert [t.id for t in rows] == [task_b.id]
+    renamed = await svc.rename_list(lst_b.id, space_id="sp-b", name="B2")
+    assert renamed.name == "B2"
+    updated = await svc.update_task(
+        task_b.id, space_id="sp-b", actor_user_id="uid-so", title="TB2"
+    )
+    assert updated.title == "TB2"
+    archived = await svc.archive_task(
+        task_b.id, space_id="sp-b", actor_user_id="uid-so"
+    )
+    assert archived.archived_at is not None
+    restored = await svc.unarchive_task(
+        task_b.id, space_id="sp-b", actor_user_id="uid-so"
+    )
+    assert restored.archived_at is None
+    await svc.delete_task(task_b.id, space_id="sp-b")
+    assert await env.space_task_repo.get(task_b.id) is None
+    await svc.delete_list(lst_b.id, space_id="sp-b")
+    assert await env.space_task_repo.get_list(lst_b.id) is None
+
+
+async def test_list_tasks_by_list_of_a_missing_list_is_not_found(env):
+    svc = SpaceTaskService(env.space_task_repo, space_repo=env.space_repo)
+    with pytest.raises(KeyError):
+        await svc.list_tasks_by_list("missing", space_id="sp-a")
+
+
+# ─── Assignees: membership + shape ──────────────────────────────────────
+
+
+async def _space_with_members(env, *, archived: bool = False):
+    """``sp-m``: owner ``uid-so``, member ``uid-m``, subscriber ``uid-sub``;
+    ``uid-out`` exists locally but is not a member. Returns ``(svc, bus
+    events, list)``."""
+    bus = EventBus()
+    events: list = []
+
+    async def _capture(ev):
+        events.append(ev)
+
+    bus.subscribe(TaskAssigned, _capture)
+    bus.subscribe(TaskCompleted, _capture)
+    svc = SpaceTaskService(
+        env.space_task_repo,
+        bus,
+        space_repo=env.space_repo,
+        remote_member_repo=env.remote_member_repo,
+    )
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("sowner", "uid-so", "SO"),
+    )
+    await env.db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+           identity_public_key, config_sequence, space_type, join_mode, archived)
+           VALUES(?,?,?,?,?,0,'private','invite_only',?)""",
+        (
+            "sp-m",
+            "M",
+            env.iid,
+            "sowner",
+            generate_identity_keypair().public_key.hex(),
+            1 if archived else 0,
+        ),
+    )
+    for uid, role in (
+        ("uid-so", "owner"),
+        ("uid-m", "member"),
+        ("uid-sub", "subscriber"),
+    ):
+        await env.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,?)",
+            ("sp-m", uid, role),
+        )
+    lst = await svc.create_list(space_id="sp-m", name="L", created_by="uid-so")
+    return svc, events, lst
+
+
+async def test_space_task_rejects_a_non_member_assignee(env):
+    svc, events, lst = await _space_with_members(env)
+    with pytest.raises(ValueError):
+        await svc.create_task(
+            space_id="sp-m",
+            list_id=lst.id,
+            title="SECRET",
+            created_by="uid-so",
+            assignees=["uid-m", "uid-out"],
+        )
+    assert await env.space_task_repo.list_by_list(lst.id, space_id="sp-m") == []
+    assert events == []
+
+
+async def test_space_task_accepts_members_and_remote_members(env):
+    svc, events, lst = await _space_with_members(env)
+    await env.remote_member_repo.add(
+        space_id="sp-m",
+        instance_id="peer-1",
+        user_id="uid-remote",
+        user_pk=None,
+        display_name="R",
+    )
+    task = await svc.create_task(
+        space_id="sp-m",
+        list_id=lst.id,
+        title="T",
+        created_by="uid-so",
+        assignees=["uid-m", "uid-remote"],
+    )
+    assert task.assignees == ("uid-m", "uid-remote")
+    assigned = [e for e in events if isinstance(e, TaskAssigned)]
+    assert {e.assigned_to for e in assigned} == {"uid-m", "uid-remote"}
+    assert all(e.space_id == "sp-m" for e in assigned)
+
+
+async def test_space_task_update_validates_only_added_assignees(env):
+    svc, events, lst = await _space_with_members(env)
+    task = await svc.create_task(
+        space_id="sp-m",
+        list_id=lst.id,
+        title="T",
+        created_by="uid-so",
+        assignees=["uid-m"],
+    )
+    # uid-m leaves: a stale assignee must not block unrelated edits.
+    await env.db.enqueue(
+        "DELETE FROM space_members WHERE space_id='sp-m' AND user_id='uid-m'"
+    )
+    events.clear()
+    kept = await svc.update_task(
+        task.id,
+        space_id="sp-m",
+        actor_user_id="uid-so",
+        title="T2",
+        assignees=["uid-m"],
+    )
+    assert kept.title == "T2"
+    assert events == []
+    with pytest.raises(ValueError):
+        await svc.update_task(
+            task.id,
+            space_id="sp-m",
+            actor_user_id="uid-so",
+            assignees=["uid-m", "uid-out"],
+        )
+    got = await env.space_task_repo.get(task.id)
+    assert got[1].assignees == ("uid-m",)
+    assert events == []
+
+
+async def test_space_task_completion_carries_its_space(env):
+    svc, events, lst = await _space_with_members(env)
+    task = await svc.create_task(
+        space_id="sp-m", list_id=lst.id, title="T", created_by="uid-so"
+    )
+    await svc.update_task(
+        task.id, space_id="sp-m", actor_user_id="uid-so", status="done"
+    )
+    done = [e for e in events if isinstance(e, TaskCompleted)]
+    assert len(done) == 1 and done[0].space_id == "sp-m"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "uid-m",  # a string must never be split into characters
+        ["uid-m", ""],
+        ["uid-m", "   "],
+        ["uid-m", 7],
+        [f"u{i}" for i in range(11)],
+        {"uid-m": True},
+    ],
+)
+async def test_assignees_must_be_a_short_list_of_ids(env, bad):
+    svc, _, lst = await _space_with_members(env)
+    with pytest.raises(ValueError):
+        await svc.create_task(
+            space_id="sp-m",
+            list_id=lst.id,
+            title="T",
+            created_by="uid-so",
+            assignees=bad,
+        )
+    household = await env.task_svc.create_list(name="H", created_by="u1")
+    with pytest.raises(ValueError):
+        await env.task_svc.create_task(
+            list_id=household.id, title="T", created_by="u1", assignees=bad
+        )
+    t = await env.task_svc.create_task(list_id=household.id, title="T", created_by="u1")
+    with pytest.raises(ValueError):
+        await env.task_svc.update_task(t.id, actor_user_id="u1", assignees=bad)
+
+
+async def test_household_task_accepts_a_list_of_ids(env):
+    household = await env.task_svc.create_list(name="H", created_by="u1")
+    t = await env.task_svc.create_task(
+        list_id=household.id,
+        title="T",
+        created_by="u1",
+        assignees=[f"u{i}" for i in range(10)],
+    )
+    assert len(t.assignees) == 10
+
+
+# ─── Writer gate: subscribers + archived spaces ─────────────────────────
+
+
+async def test_require_writer_admits_a_member(env):
+    svc, _, _ = await _space_with_members(env)
+    await svc.require_writer("sp-m", "uid-m")
+
+
+async def test_require_writer_refuses_a_subscriber(env):
+    svc, _, _ = await _space_with_members(env)
+    with pytest.raises(SpacePermissionError):
+        await svc.require_writer("sp-m", "uid-sub")
+
+
+async def test_require_writer_refuses_a_non_member(env):
+    svc, _, _ = await _space_with_members(env)
+    with pytest.raises(SpacePermissionError):
+        await svc.require_writer("sp-m", "uid-out")
+
+
+async def test_require_writer_refuses_an_archived_space(env):
+    svc, _, _ = await _space_with_members(env, archived=True)
+    with pytest.raises(SpacePermissionError):
+        await svc.require_writer("sp-m", "uid-so")
+
+
+async def test_require_writer_on_a_missing_space_is_not_found(env):
+    svc = SpaceTaskService(env.space_task_repo, space_repo=env.space_repo)
+    with pytest.raises(KeyError):
+        await svc.require_writer("nope", "uid-so")

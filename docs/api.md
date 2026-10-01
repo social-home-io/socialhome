@@ -305,7 +305,30 @@ unnecessary.
 | GET / PATCH / DELETE | `/api/tasks/{id}` | CRUD for a single task. |
 | GET / POST / PATCH / DELETE | `/api/tasks/{id}/comments[/{cid}]` | Task comments. |
 | GET / POST / DELETE | `/api/tasks/{id}/attachments[/{aid}]` | Task attachments. |
-| …same under `/api/spaces/{id}/tasks/...` | | Space-scoped variants. |
+| GET / POST | `/api/spaces/{id}/tasks/lists` | List / create a space's task lists. |
+| PATCH / DELETE | `/api/spaces/{id}/tasks/lists/{lid}` | Rename / delete a space task list. |
+| GET / POST | `/api/spaces/{id}/tasks/lists/{lid}/tasks` | List / create tasks in a space task list. |
+| PATCH / DELETE | `/api/spaces/{id}/tasks/{tid}` | Update / delete a space task. |
+| POST / DELETE | `/api/spaces/{id}/tasks/{tid}/archive` | Archive / unarchive a space task. |
+
+Space task routes require space membership (403 otherwise) and the
+space's `todo` feature (403 `FEATURE_DISABLED`). Writes (every
+`POST` / `PATCH` / `DELETE`) are refused with 403 for read-only
+subscribers and while the space is **archived** (archive is
+read-only; reads keep working). A `{lid}` / `{tid}` that does not
+belong to the path space `{id}` is 404 — the same as an unknown id,
+so ids of other spaces are neither readable, writable, nor confirmed
+to exist.
+
+`assignees` (household and space tasks alike) must be a JSON array of
+at most 10 non-empty user-id strings — anything else, including a bare
+string, is 422; duplicates collapse. On a space task every assignee
+must be a member of the space (local or a remote member household's
+user), else 422 — on `PATCH` only ids being *added* are checked, so an
+assignee who has since left does not block other edits. Assignment
+and completion notifications / WS frames for a space task go only to
+current local members of that space (`task.completed` fans out to the
+space, with `space_id`, not to the household).
 
 ### Timetables
 

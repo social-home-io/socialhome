@@ -355,19 +355,32 @@ class TaskAttachmentDetailView(BaseView):
 
 
 # ─── Space-scoped task routes (§15) ──────────────────────────────────────
+#
+# Every handler passes the PATH ``space_id`` into the service, which
+# refuses (KeyError → 404) a list/task id that lives in another space —
+# membership of space A must never reach space B's rows by id. Write
+# handlers additionally reject read-only subscribers and archived
+# spaces (403).
 
 
 class _SpaceTasksBase(BaseView):
     """Shared membership-check helper for every space-task view."""
 
-    async def _require_member(self, space_id: str, user_id: str) -> bool:
+    async def _require_member(
+        self, space_id: str, user_id: str, *, write: bool = False
+    ) -> bool:
         space_repo = self.svc(K.space_repo_key)
-        if await space_repo.get_member(space_id, user_id) is None:
+        member = await space_repo.get_member(space_id, user_id)
+        if member is None:
             return False
         # The admin's per-space ``todo`` toggle drives the tasks tab in
         # the SPA; mirror that here so a direct API call returns 403
         # FEATURE_DISABLED when the feature is off.
         await self.require_space_feature(space_id, "todo")
+        if write:
+            # Subscribers read space tasks and an archived space is
+            # read-only — the service owns that rule (→ 403).
+            await self.svc(K.space_task_service_key).require_writer(space_id, user_id)
         return True
 
 
@@ -391,7 +404,7 @@ class SpaceTaskListCollectionView(_SpaceTasksBase):
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         body = await self.body()
         svc = self.svc(K.space_task_service_key)
@@ -412,12 +425,13 @@ class SpaceTaskListDetailView(_SpaceTasksBase):
     async def patch(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         body = await self.body()
         svc = self.svc(K.space_task_service_key)
         lst = await svc.rename_list(
             self.match("lid"),
+            space_id=space_id,
             name=str(body.get("name") or ""),
         )
         return web.json_response(
@@ -427,10 +441,10 @@ class SpaceTaskListDetailView(_SpaceTasksBase):
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
-        await svc.delete_list(self.match("lid"))
+        await svc.delete_list(self.match("lid"), space_id=space_id)
         return web.json_response({"ok": True})
 
 
@@ -443,16 +457,18 @@ class SpaceTaskListTasksView(_SpaceTasksBase):
         if not await self._require_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
-        rows = await svc.list_tasks_by_list(self.match("lid"))
+        rows = await svc.list_tasks_by_list(self.match("lid"), space_id=space_id)
         return web.json_response([_task_dict(t) for t in rows])
 
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         body = await self.body()
         svc = self.svc(K.space_task_service_key)
+        # The repo only inserts when ``lid`` belongs to ``space_id``;
+        # otherwise the service raises KeyError (→ 404).
         task = await svc.create_task(
             space_id=space_id,
             list_id=self.match("lid"),
@@ -471,37 +487,30 @@ class SpaceTaskDetailView(_SpaceTasksBase):
     async def patch(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         body = await self.body()
         svc = self.svc(K.space_task_service_key)
-        try:
-            task = await svc.update_task(
-                self.match("tid"),
-                actor_user_id=ctx.user_id,
-                title=body.get("title"),
-                description=body.get("description"),
-                status=body.get("status"),
-                due_date=body.get("due_date"),
-                assignees=body.get("assignees"),
-                position=body.get("position"),
-            )
-        except KeyError:
-            return error_response(404, "NOT_FOUND", "Task not found.")
-        except ValueError as exc:
-            return error_response(422, "UNPROCESSABLE", str(exc))
+        task = await svc.update_task(
+            self.match("tid"),
+            space_id=space_id,
+            actor_user_id=ctx.user_id,
+            title=body.get("title"),
+            description=body.get("description"),
+            status=body.get("status"),
+            due_date=body.get("due_date"),
+            assignees=body.get("assignees"),
+            position=body.get("position"),
+        )
         return web.json_response(_task_dict(task))
 
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
-        try:
-            await svc.delete_task(self.match("tid"))
-        except KeyError:
-            return error_response(404, "NOT_FOUND", "Task not found.")
+        await svc.delete_task(self.match("tid"), space_id=space_id)
         return web.json_response({"ok": True})
 
 
@@ -511,25 +520,21 @@ class SpaceTaskArchiveView(_SpaceTasksBase):
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
-        try:
-            task = await svc.archive_task(self.match("tid"), actor_user_id=ctx.user_id)
-        except KeyError:
-            return error_response(404, "NOT_FOUND", "Task not found.")
+        task = await svc.archive_task(
+            self.match("tid"), space_id=space_id, actor_user_id=ctx.user_id
+        )
         return web.json_response(_task_dict(task))
 
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
-        try:
-            task = await svc.unarchive_task(
-                self.match("tid"), actor_user_id=ctx.user_id
-            )
-        except KeyError:
-            return error_response(404, "NOT_FOUND", "Task not found.")
+        task = await svc.unarchive_task(
+            self.match("tid"), space_id=space_id, actor_user_id=ctx.user_id
+        )
         return web.json_response(_task_dict(task))

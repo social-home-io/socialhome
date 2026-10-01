@@ -1828,7 +1828,12 @@ def create_app(config: Config | None = None) -> web.Application:
         space_post_repo=space_post_repo,
     )
     task_service = TaskService(task_repo, bus, user_repo=user_repo)
-    space_task_service = SpaceTaskService(space_task_repo, bus)
+    space_task_service = SpaceTaskService(
+        space_task_repo,
+        bus,
+        space_repo=space_repo,
+        remote_member_repo=repos.space_remote_member,
+    )
     timetable_service = _build_timetables(repos, bus)
     space_timetable_service = _build_space_timetables(repos, bus)
     calendar_service = CalendarService(calendar_repo, bus)

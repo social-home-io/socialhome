@@ -21,6 +21,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.task import RecurrenceRule
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
 from socialhome.services.task_service import (
     SpaceTaskService,
@@ -138,7 +139,9 @@ async def env(tmp_dir):
     e.task_repo = SqliteTaskRepo(db)
     e.space_task_repo = SqliteSpaceTaskRepo(db)
     e.task_svc = TaskService(e.task_repo, bus=e.bus)
-    e.space_task_svc = SpaceTaskService(e.space_task_repo, bus=e.bus)
+    e.space_task_svc = SpaceTaskService(
+        e.space_task_repo, bus=e.bus, space_repo=SqliteSpaceRepo(db)
+    )
     yield e
     await db.shutdown()
 
@@ -331,6 +334,12 @@ async def _seed_space(env, sid: str = "sp1") -> None:
         " identity_public_key) VALUES(?, 'S', 'inst', 'u1', ?)",
         (sid, "ab" * 32),
     )
+    # Assignees must be space members.
+    for uid in ("u1", "u2", "u3"):
+        await env.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'member')",
+            (sid, uid),
+        )
 
 
 async def test_space_task_service_full_crud(env):
@@ -344,7 +353,7 @@ async def test_space_task_service_full_crud(env):
     assert any(isinstance(e, TaskListCreated) for e in env.events)
 
     env.events.clear()
-    renamed = await env.space_task_svc.rename_list(lst.id, name="L2")
+    renamed = await env.space_task_svc.rename_list(lst.id, space_id="sp1", name="L2")
     assert renamed.name == "L2"
     assert any(isinstance(e, TaskListUpdated) for e in env.events)
 
@@ -363,18 +372,21 @@ async def test_space_task_service_full_crud(env):
     with pytest.raises(ValueError):
         await env.space_task_svc.update_task(
             task.id,
+            space_id="sp1",
             actor_user_id="u1",
             title="   ",
         )
     with pytest.raises(ValueError):
         await env.space_task_svc.update_task(
             task.id,
+            space_id="sp1",
             actor_user_id="u1",
             status="bogus",
         )
     with pytest.raises(ValueError):
         await env.space_task_svc.update_task(
             task.id,
+            space_id="sp1",
             actor_user_id="u1",
             due_date="not-a-date",
         )
@@ -382,6 +394,7 @@ async def test_space_task_service_full_crud(env):
     env.events.clear()
     updated = await env.space_task_svc.update_task(
         task.id,
+        space_id="sp1",
         actor_user_id="u1",
         description="d",
         position=2,
@@ -396,6 +409,7 @@ async def test_space_task_service_full_crud(env):
     env.events.clear()
     await env.space_task_svc.update_task(
         task.id,
+        space_id="sp1",
         actor_user_id="u1",
         status="done",
     )
@@ -403,11 +417,11 @@ async def test_space_task_service_full_crud(env):
 
     # Delete task + list.
     env.events.clear()
-    await env.space_task_svc.delete_task(task.id)
+    await env.space_task_svc.delete_task(task.id, space_id="sp1")
     assert any(isinstance(e, TaskDeleted) for e in env.events)
 
     env.events.clear()
-    await env.space_task_svc.delete_list(lst.id)
+    await env.space_task_svc.delete_list(lst.id, space_id="sp1")
     assert any(isinstance(e, TaskListDeleted) for e in env.events)
 
 
@@ -415,6 +429,7 @@ async def test_space_task_service_update_missing_raises(env):
     with pytest.raises(KeyError):
         await env.space_task_svc.update_task(
             "missing",
+            space_id="sp1",
             actor_user_id="u1",
             title="x",
         )
@@ -422,17 +437,17 @@ async def test_space_task_service_update_missing_raises(env):
 
 async def test_space_task_service_delete_missing_raises(env):
     with pytest.raises(KeyError):
-        await env.space_task_svc.delete_task("missing")
+        await env.space_task_svc.delete_task("missing", space_id="sp1")
 
 
 async def test_space_task_service_rename_missing_raises(env):
     with pytest.raises(KeyError):
-        await env.space_task_svc.rename_list("missing", name="X")
+        await env.space_task_svc.rename_list("missing", space_id="sp1", name="X")
 
 
 async def test_space_task_service_delete_list_missing_raises(env):
     with pytest.raises(KeyError):
-        await env.space_task_svc.delete_list("missing")
+        await env.space_task_svc.delete_list("missing", space_id="sp1")
 
 
 async def test_space_task_service_create_task_bad_due_date_raises(env):
@@ -475,5 +490,5 @@ async def test_space_task_service_list_tasks_by_list(env):
         title="T",
         created_by="u1",
     )
-    rows = await env.space_task_svc.list_tasks_by_list(lst.id)
+    rows = await env.space_task_svc.list_tasks_by_list(lst.id, space_id="sp-list")
     assert len(rows) == 1

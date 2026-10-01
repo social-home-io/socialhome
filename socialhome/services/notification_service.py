@@ -471,8 +471,17 @@ class NotificationService(ProtectionGateMixin):
         )
 
     async def on_task_assigned(self, event: TaskAssigned) -> None:
-        """Notify the assignee (unless they assigned themselves)."""
+        """Notify the assignee (unless they assigned themselves).
+
+        A space task only notifies a current local member of that space —
+        the title must never reach a non-member (defence in depth behind
+        the service-level assignee check)."""
         if event.task.created_by == event.assigned_to:
+            return
+        if (
+            event.space_id is not None
+            and await self._spaces.get_member(event.space_id, event.assigned_to) is None
+        ):
             return
         recipient = await self._users.get_by_user_id(event.assigned_to)
         await self._save_notif(
@@ -1256,13 +1265,24 @@ class NotificationService(ProtectionGateMixin):
         )
 
     async def on_task_completed(self, event: TaskCompleted) -> None:
-        """Notify task assignees when a task is completed."""
+        """Notify task assignees when a task is completed.
+
+        A space task notifies only assignees who are still local members
+        of the space and links to the space's tasks tab."""
         task = event.task
         completed_by = event.completed_by
         completer = await self._users.get_by_user_id(completed_by)
         name = completer.display_name if completer else "Someone"
+        if event.space_id is None:
+            link_url = f"/tasks/{task.list_id}"
+            members: set[str] | None = None
+        else:
+            link_url = f"/spaces/{event.space_id}?tab=tasks"
+            members = set(await self._spaces.list_local_member_user_ids(event.space_id))
         for uid in getattr(task, "assignees", ()):
             if uid == completed_by:
+                continue
+            if members is not None and uid not in members:
                 continue
             recipient = await self._users.get_by_user_id(uid)
             await self._save_notif(
@@ -1276,7 +1296,7 @@ class NotificationService(ProtectionGateMixin):
                         name=name,
                         title=task.title,
                     ),
-                    link_url=f"/tasks/{task.list_id}",
+                    link_url=link_url,
                 )
             )
 
