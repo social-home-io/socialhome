@@ -1264,3 +1264,15 @@ async def test_save_join_request_records_a_requested_admin_role(env):
     }
     assert pending["uid-alice"]["requested_role"] is None
     assert pending["uid-bob"]["requested_role"] == "admin"
+
+
+async def test_feature_timetable_round_trips(env):
+    """The Timetable tab toggle persists; a space that never set it is off."""
+    await env.repo.save(
+        replace(_space("sp-tt"), features=SpaceFeatures(timetable=True))
+    )
+    fetched = await env.repo.get("sp-tt")
+    assert fetched is not None and fetched.features.timetable is True
+    await env.repo.save(_space("sp-tt-off"))
+    off = await env.repo.get("sp-tt-off")
+    assert off is not None and off.features.timetable is False

@@ -2277,3 +2277,45 @@ class TestTodayTimetable:
         assert first["status"] == "normal"
         assert first["start_at"] == "2026-09-28T06:00:00+00:00"
         assert first["end_at"] == "2026-09-28T06:45:00+00:00"
+
+
+class TestWireTimestampsAndVersions:
+    """Hostile wire timestamps and version jumps (security review M1 / M2)."""
+
+    def test_the_wire_cap_fits_the_double_sealed_relay_path(self):
+        # See tests/federation/sync/space/exporters/test_timetables.py.
+        assert MAX_WIRE_BYTES == 96 * 1024
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "0001-01-01T00:00:00+14:00",  # astimezone(UTC) overflows
+            "9999-12-31T23:59:59-14:00",
+            "1969-12-31T23:59:59+00:00",
+            "2200-01-01T00:00:00+00:00",
+            "2026-06-01T10:00:00",  # naive
+            "yesterday",
+            7,
+        ],
+    )
+    def test_an_unusable_timestamp_is_a_validation_error(self, value):
+        with pytest.raises(TimetableValidationError):
+            tt_mod.parse_datetime(value, "at")
+        wire = to_wire_dict(std())
+        wire["updated_at"] = value
+        with pytest.raises(TimetableValidationError):
+            from_wire_dict(wire)
+
+    def test_timestamps_are_normalised_to_utc(self):
+        got = tt_mod.parse_datetime("2026-06-01T12:00:00+02:00", "at")
+        assert got == datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
+        assert got.utcoffset() == timedelta(0)
+
+    def test_remote_version_refusal(self):
+        jump = tt_mod.MAX_REMOTE_VERSION_JUMP
+        cap = tt_mod.MAX_VERSION
+        assert tt_mod.remote_version_refusal(1, None) is None
+        assert tt_mod.remote_version_refusal(1 + jump, 1) is None
+        assert tt_mod.remote_version_refusal(2 + jump, 1) is not None
+        assert tt_mod.remote_version_refusal(cap - jump, None) is not None
+        assert tt_mod.remote_version_refusal(cap - jump - 1, None) is None

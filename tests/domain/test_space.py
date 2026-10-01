@@ -70,6 +70,7 @@ def test_space_features_wire_roundtrip_every_field_non_default():
         pages=False,  # default True
         gallery=False,  # default True
         bazaar=False,  # default True
+        timetable=True,  # default False
         posts_access=SpaceFeatureAccess.MODERATED,  # default OPEN
         pages_access=SpaceFeatureAccess.ADMIN_ONLY,  # default OPEN
         stickies_access=SpaceFeatureAccess.MODERATED,  # default OPEN
@@ -88,6 +89,21 @@ def test_space_features_from_wire_dict_defaults_on_partial():
     rather than raising, and an unknown access level degrades to OPEN."""
     f = SpaceFeatures.from_wire_dict({"name_only": 1, "posts_access": "bogus"})
     assert f == SpaceFeatures()  # every field defaulted
+
+
+def test_space_features_timetable_defaults_off_and_round_trips():
+    """The timetable tab is opt-in: off by default, off for a row or a
+    wire dict that predates it, and it survives both round-trips."""
+    assert SpaceFeatures().timetable is False
+    assert SpaceFeatures.from_row({}).timetable is False
+    assert SpaceFeatures.from_wire_dict({}).timetable is False
+    on = SpaceFeatures(timetable=True)
+    assert on.to_columns()["feature_timetable"] == 1
+    assert SpaceFeatures.from_row(on.to_columns()).timetable is True
+    assert on.to_wire_dict()["timetable"] is True
+    assert SpaceFeatures.from_wire_dict(on.to_wire_dict()).timetable is True
+    # A partial edit leaves the current value alone.
+    assert SpaceFeatures.from_wire_dict({"bazaar": False}, defaults=on).timetable
 
 
 def test_space_features_gallery_roundtrip():

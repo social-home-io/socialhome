@@ -3667,6 +3667,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3689,6 +3690,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     )
 
 
@@ -3723,6 +3725,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3772,6 +3775,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features

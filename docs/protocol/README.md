@@ -117,6 +117,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Pages](./pages.md) — space pages (wiki-style, lock-protected).
   - [Tasks](./tasks.md) — task lists and tasks.
   - [Calendar](./calendar.md) — calendar events and RSVPs.
+  - [Space timetables](./timetables.md) — admin-maintained shared timetables (a class *Stundenplan*), one upserted aggregate per timetable, member households only (capability v_39).
 - **Realtime**
   - [Direct messages](./dm.md) — 1:1 and group conversations.
   - [DM media — pictures, videos, files](./dm-media.md) — `image` / `video` / `file` attachments, preview-now-sync-later for cross-household.

@@ -23,11 +23,23 @@ from socialhome.domain.timetable import (
     TimetableValidationError,
     week_anchor,
 )
-from socialhome.repositories.timetable_repo import SqliteTimetableRepo
+from socialhome.domain.space import SpacePermissionError
+from socialhome.federation.owner_bound_id import (
+    SPACE_TIMETABLE_KIND,
+    OwnerBinding,
+    check_owner_bound_id,
+)
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.timetable_repo import (
+    SqliteSpaceTimetableRepo,
+    SqliteTimetableRepo,
+)
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import timetable_service as ts
 from socialhome.services.timetable_service import (
+    MAX_SPACE_TIMETABLES,
     MAX_TIMETABLES,
+    SpaceTimetableService,
     TimetableEditorMixin,
     TimetableService,
 )
@@ -846,3 +858,272 @@ async def test_today_for_user_one_bad_timetable_does_not_empty_the_slice(
         got = await env.svc.today_for_user("u-anna", _at(MON))
     assert [t.timetable_id for t in got] == [good.id]
     assert any("corrupt row" in r.getMessage() for r in caplog.records)
+
+
+# ─── Space timetables (SpaceTimetableService) ────────────────────────────
+
+SP = "sp-class"
+SP2 = "sp-other"
+
+
+@pytest.fixture
+async def space_env(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "space.db", batch_timeout_ms=10)
+    await db.startup()
+    for sid, tz, feature in ((SP, "Europe/Berlin", 1), (SP2, "UTC", 1)):
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key, tz, feature_timetable) VALUES(?,?,?,?,?,?,?)",
+            (sid, sid, "self", "anna", "00" * 32, tz, feature),
+        )
+    for sid, uid, role in (
+        (SP, "u-owner", "owner"),
+        (SP, "u-admin", "admin"),
+        (SP, "u-member", "member"),
+        (SP, "u-sub", "subscriber"),
+        (SP2, "u-owner", "owner"),
+    ):
+        await db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,?)",
+            (sid, uid, role),
+        )
+
+    class Env:
+        pass
+
+    e = Env()
+    e.db = db
+    e.repo = SqliteSpaceTimetableRepo(db)
+    e.bus = _Bus()
+    e.svc = SpaceTimetableService(e.repo, SqliteSpaceRepo(db), e.bus)
+    yield e
+    await db.shutdown()
+
+
+async def _space_tt(env, *, space_id=SP, by="u-admin", **kw) -> Timetable:
+    kw.setdefault("name", "Klasse 5b")
+    kw.setdefault("template", "empty")
+    return await env.svc.scope(space_id, by).create(created_by=by, **kw)
+
+
+async def test_space_create_is_owner_bound_school_template_in_space_tz(space_env):
+    tt = await _space_tt(space_env, template="school")
+    assert tt.tz == "Europe/Berlin"  # the space's tz
+    assert tt.assignees == ()
+    assert tt.created_by == tt.updated_by == "u-admin"
+    assert len(tt.entries) == 8 * 5
+    assert (
+        check_owner_bound_id(
+            SPACE_TIMETABLE_KIND, tt.id, space_id=SP, owner_user_id="u-admin"
+        )
+        is OwnerBinding.VALID
+    )
+    assert await space_env.repo.get(tt.id) == (SP, tt)
+    ev = space_env.bus.events[-1]
+    assert isinstance(ev, TimetableSaved)
+    assert (ev.timetable, ev.space_id, ev.origin_instance_id) == (tt, SP, None)
+
+
+async def test_space_owner_may_write_too(space_env):
+    tt = await _space_tt(space_env, by="u-owner")
+    assert tt.created_by == "u-owner"
+
+
+@pytest.mark.parametrize("who", ["u-member", "u-sub", "u-stranger"])
+async def test_space_non_admins_cannot_create(space_env, who):
+    with pytest.raises(SpacePermissionError):
+        await _space_tt(space_env, by=who)
+    assert await space_env.repo.count_in_space(SP) == 0
+
+
+@pytest.mark.parametrize("who", ["u-member", "u-sub"])
+async def test_space_members_and_followers_read_but_never_edit(space_env, who):
+    tt = await _space_tt(space_env, template="school")
+    scope = space_env.svc.scope(SP, who)
+    assert [t.id for t in await scope.list_all()] == [tt.id]
+    assert (await scope.get(tt.id)).id == tt.id
+    assert (await scope.resolve_week(tt.id, MON)).anchor == MON
+    first = tt.entries[0]
+    writes = [
+        scope.update(tt.id, version=1, by=who, name="hijack"),
+        scope.delete(tt.id, by=who),
+        scope.duplicate(tt.id, name=None, by=who),
+        scope.add_entry(
+            tt.id,
+            version=1,
+            by=who,
+            fields={"weekday": 0, "start": "14:00", "end": "14:45"},
+        ),
+        scope.update_entry(tt.id, first.id, version=1, by=who, fields={"title": "x"}),
+        scope.delete_entry(tt.id, first.id, version=1, by=who),
+        scope.replace_entries(tt.id, version=1, by=who, entries=[]),
+        scope.generate_day(tt.id, 0, version=1, by=who, slots=[]),
+        scope.copy_day(tt.id, 0, to_weekdays=(1,), version=1, by=who),
+        scope.shift_after(tt.id, 0, from_time=time(8, 0), minutes=5, version=1, by=who),
+        scope.set_validity(
+            tt.id,
+            version=1,
+            by=who,
+            valid_from=None,
+            valid_until=None,
+            excluded_weeks=(),
+        ),
+        scope.add_override(
+            tt.id,
+            version=1,
+            by=who,
+            fields={"date": MON.isoformat(), "kind": "cancel", "entry_id": first.id},
+        ),
+        scope.clear_week(tt.id, MON, version=1, by=who),
+    ]
+    for coro in writes:
+        with pytest.raises(SpacePermissionError):
+            await coro
+    assert await space_env.repo.get(tt.id) == (SP, tt)
+
+
+async def test_space_non_member_cannot_read(space_env):
+    tt = await _space_tt(space_env)
+    scope = space_env.svc.scope(SP, "u-stranger")
+    for coro in (scope.list_all(), scope.get(tt.id), scope.resolve_day(tt.id, MON)):
+        with pytest.raises(SpacePermissionError):
+            await coro
+
+
+async def test_space_feature_off_blocks_reads_and_writes(space_env):
+    tt = await _space_tt(space_env)
+    await space_env.db.enqueue(
+        "UPDATE spaces SET feature_timetable=0 WHERE id=?", (SP,)
+    )
+    admin = space_env.svc.scope(SP, "u-admin")
+    for coro in (
+        admin.list_all(),
+        admin.get(tt.id),
+        admin.create(name="x", created_by="u-admin"),
+        admin.update(tt.id, version=1, by="u-admin", name="y"),
+        admin.delete(tt.id, by="u-admin"),
+    ):
+        with pytest.raises(FeatureDisabledError):
+            await coro
+
+
+async def test_space_cross_space_id_is_not_found(space_env):
+    other = await _space_tt(space_env, space_id=SP2, by="u-owner")
+    scope = space_env.svc.scope(SP, "u-owner")
+    for coro in (
+        scope.get(other.id),
+        scope.update(other.id, version=1, by="u-owner", name="moved"),
+        scope.delete(other.id, by="u-owner"),
+        scope.duplicate(other.id, name=None, by="u-owner"),
+    ):
+        with pytest.raises(KeyError):
+            await coro
+    assert await space_env.repo.get(other.id) == (SP2, other)
+
+
+async def test_space_timetables_carry_no_assignees(space_env):
+    with pytest.raises(TimetableValidationError):
+        await _space_tt(space_env, assignees=["u-member"])
+    tt = await _space_tt(space_env, assignees=[])
+    with pytest.raises(TimetableValidationError):
+        await space_env.svc.scope(SP, "u-admin").update(
+            tt.id, version=1, by="u-admin", assignees=["u-member"]
+        )
+
+
+async def test_space_limit(space_env):
+    for i in range(MAX_SPACE_TIMETABLES):
+        await _space_tt(space_env, name=f"T{i}")
+    with pytest.raises(TimetableLimitError):
+        await _space_tt(space_env, name="one more")
+    first = (await space_env.repo.list_by_space(SP))[0]
+    with pytest.raises(TimetableLimitError):
+        await space_env.svc.scope(SP, "u-admin").duplicate(
+            first.id, name=None, by="u-admin"
+        )
+    # The cap is per space.
+    await _space_tt(space_env, space_id=SP2, by="u-owner")
+
+
+async def test_space_edit_emits_space_scoped_event(space_env):
+    tt = await _space_tt(space_env)
+    new = await space_env.svc.scope(SP, "u-owner").update(
+        tt.id, version=1, by="u-owner", name="Renamed"
+    )
+    assert (new.version, new.name, new.updated_by) == (2, "Renamed", "u-owner")
+    ev = space_env.bus.events[-1]
+    assert isinstance(ev, TimetableSaved) and ev.space_id == SP
+    assert (await space_env.repo.get(tt.id))[1] == new
+    with pytest.raises(TimetableConflictError):
+        await space_env.svc.scope(SP, "u-owner").update(
+            tt.id, version=1, by="u-owner", name="stale"
+        )
+
+
+async def test_space_delete_tombstones(space_env):
+    tt = await _space_tt(space_env)
+    await space_env.svc.scope(SP, "u-admin").delete(tt.id, by="u-admin")
+    assert await space_env.repo.get(tt.id) is None
+    assert await space_env.repo.is_tombstoned(tt.id)
+    ev = space_env.bus.events[-1]
+    assert isinstance(ev, TimetableDeleted)
+    assert (ev.timetable_id, ev.space_id, ev.deleted_by, ev.created_by) == (
+        tt.id,
+        SP,
+        "u-admin",
+        "u-admin",
+    )
+    with pytest.raises(KeyError):
+        await space_env.svc.scope(SP, "u-admin").delete(tt.id, by="u-admin")
+
+
+async def test_space_duplicate_mints_a_bound_id_for_the_copier(space_env):
+    tt = await _space_tt(space_env, template="school")
+    dup = await space_env.svc.scope(SP, "u-owner").duplicate(
+        tt.id, name=None, by="u-owner"
+    )
+    assert dup.id != tt.id and dup.name == "Klasse 5b (copy)"
+    assert dup.created_by == "u-owner" and dup.assignees == ()
+    assert (
+        check_owner_bound_id(
+            SPACE_TIMETABLE_KIND, dup.id, space_id=SP, owner_user_id="u-owner"
+        )
+        is OwnerBinding.VALID
+    )
+    assert len(dup.entries) == len(tt.entries)
+
+
+async def test_space_pinned_for_user_filters_membership_and_feature(space_env):
+    a = await _space_tt(space_env, name="A")
+    b = await _space_tt(space_env, space_id=SP2, by="u-owner", name="B")
+    # u-member is in SP only; a pin into SP2 (never joined) is ignored,
+    # as is an unknown id; the order follows the pins.
+    got = await space_env.svc.pinned_for_user("u-member", [b.id, "nope", a.id, a.id])
+    assert [t.id for t in got] == [a.id]
+    got = await space_env.svc.pinned_for_user("u-owner", [b.id, a.id])
+    assert [t.id for t in got] == [b.id, a.id]
+    # Feature off → its space's pins drop out; leaving drops them too.
+    await space_env.db.enqueue(
+        "UPDATE spaces SET feature_timetable=0 WHERE id=?", (SP2,)
+    )
+    assert [t.id for t in await space_env.svc.pinned_for_user("u-owner", [b.id])] == []
+    await space_env.db.enqueue(
+        "DELETE FROM space_members WHERE space_id=? AND user_id='u-member'", (SP,)
+    )
+    assert await space_env.svc.pinned_for_user("u-member", [a.id]) == []
+    assert await space_env.svc.pinned_for_user("u-member", []) == []
+
+
+async def test_space_edits_are_recorded_as_the_caller(space_env):
+    """A scope never records an edit under somebody else's name."""
+    tt = await _space_tt(space_env)
+    scope = space_env.svc.scope(SP, "u-admin")
+    for coro in (
+        scope.create(name="x", created_by="u-owner"),
+        scope.update(tt.id, version=1, by="u-owner", name="y"),
+        scope.delete(tt.id, by="u-owner"),
+        scope.duplicate(tt.id, name=None, by="u-owner"),
+    ):
+        with pytest.raises(SpacePermissionError):
+            await coro
+    assert await space_env.repo.get(tt.id) == (SP, tt)

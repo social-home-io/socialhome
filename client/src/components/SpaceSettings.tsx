@@ -204,6 +204,8 @@ export function SpaceSettings({
   // a column at 0 are backfilled to 1 by the migrations.
   const featurePages = useSignal(space.features?.pages ?? true)
   const featureCalendar = useSignal(space.features?.calendar ?? true)
+  // Opt-in: the backend's ``SpaceFeatures.timetable`` defaults off.
+  const featureTimetable = useSignal(Boolean(space.features?.timetable))
   const featureTodo = useSignal(space.features?.todo ?? true)
   const featureStickies = useSignal(space.features?.stickies ?? true)
   const featureGallery = useSignal(space.features?.gallery ?? true)
@@ -337,6 +339,7 @@ export function SpaceSettings({
     const featureValues: Array<[string, unknown, unknown]> = [
       ['pages', featurePages.value, f?.pages ?? true],
       ['calendar', featureCalendar.value, f?.calendar ?? true],
+      ['timetable', featureTimetable.value, Boolean(f?.timetable)],
       ['todo', featureTodo.value, f?.todo ?? true],
       ['stickies', featureStickies.value, f?.stickies ?? true],
       ['gallery', featureGallery.value, f?.gallery ?? true],
@@ -554,6 +557,19 @@ export function SpaceSettings({
               }}
             />
             🗓 Calendar
+          </label>
+          <label class="sh-toggle-row sh-toggle-row--sub">
+            <input
+              type="checkbox"
+              checked={featureTimetable.value}
+              onChange={(e) => {
+                featureTimetable.value = (e.target as HTMLInputElement).checked
+              }}
+            />
+            <span class="sh-toggle-row__text">
+              <span>🏫 {t('space.feature.timetable')}</span>
+              <span class="sh-toggle-row__sub">{t('space.feature.timetable_sub')}</span>
+            </span>
           </label>
           <label class="sh-toggle-row">
             <input

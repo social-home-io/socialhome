@@ -778,5 +778,25 @@
   "welcome.schedule.view_timetable": "Ver horario",
   "welcome.schedule.until": "{title} hasta las {time}",
   "welcome.schedule.show_earlier": "Mostrar {n} anteriores",
-  "welcome.schedule.hide_earlier": "Ocultar anteriores"
+  "welcome.schedule.hide_earlier": "Ocultar anteriores",
+
+  "timetable.space.empty_admin_title": "Crea un horario para este espacio",
+  "timetable.space.empty_admin_body": "Un plan semanal compartido que todos en el espacio pueden ver: el horario de una clase, un plan de entrenamiento.",
+  "timetable.space.empty_member_title": "Todavía no hay horario",
+  "timetable.space.empty_member_body": "Cuando un administrador añada uno, aparecerá aquí.",
+  "timetable.space.pin": "Mostrar en mi inicio",
+  "timetable.space.pin_hint": "Añade las clases de hoy a tu tarjeta de Hoy",
+  "timetable.space.pinned": "Añadido a tu tarjeta de Hoy los días con clase",
+  "timetable.space.unpinned": "Quitado de tu inicio",
+  "timetable.space.pin_limit": "Puedes mostrar hasta {n} horarios en tu inicio",
+  "timetable.space.read_only": "Solo lectura: los administradores del espacio editan este horario",
+  "timetable.space.view_aria": "Vista del calendario",
+  "timetable.space.events": "Eventos",
+  "timetable.info.when": "Cuándo",
+  "timetable.info.changed": "Cambiada esta semana",
+  "timetable.week.no_changes": "Sin cambios esta semana.",
+  "space.feature.timetable": "Horario",
+  "space.feature.timetable_sub": "Un horario semanal compartido, p. ej. el de una clase",
+  "timetable.space.pinned_household_off": "Los horarios están desactivados en tu hogar, así que los horarios fijados no aparecerán en el inicio",
+  "timetable.space.pin_short": "Inicio"
 }

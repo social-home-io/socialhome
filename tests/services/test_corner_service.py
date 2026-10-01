@@ -8,6 +8,7 @@ rules are the production ones.
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -140,7 +141,38 @@ def _tt(tid="tt-1", *, assignees=("u-anna",), **kw) -> Timetable:
     return Timetable(**base)
 
 
-def _svc(*, tts=(), events=(), prefs=None, timetable_service="real"):
+class _Users:
+    def __init__(self, preferences_json="{}"):
+        self.preferences_json = preferences_json
+
+    async def get_by_user_id(self, user_id):
+        return SimpleNamespace(user_id=user_id, preferences_json=self.preferences_json)
+
+
+class _SpaceTimetables:
+    """Stand-in for SpaceTimetableService.pinned_for_user."""
+
+    def __init__(self, visible=(), *, boom=False):
+        self.visible = {tt.id: tt for tt in visible}
+        self.boom = boom
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    async def pinned_for_user(self, user_id, pins):
+        self.calls.append((user_id, tuple(pins)))
+        if self.boom:
+            raise RuntimeError("boom")
+        return [self.visible[p] for p in pins if p in self.visible]
+
+
+def _svc(
+    *,
+    tts=(),
+    events=(),
+    prefs=None,
+    timetable_service="real",
+    users=None,
+    space_timetables=None,
+):
     prefs = prefs or _Prefs()
     nothing = _Nothing()
     if timetable_service == "real":
@@ -154,11 +186,12 @@ def _svc(*, tts=(), events=(), prefs=None, timetable_service="real"):
         presence_service=nothing,
         task_repo=nothing,
         bazaar_repo=nothing,
-        user_repo=nothing,
+        user_repo=users or nothing,
         space_repo=nothing,
         space_post_repo=nothing,
         timetable_service=timetable_service,
         preferences_service=prefs,
+        space_timetable_service=space_timetables,
     )
     return svc, calendar
 
@@ -370,3 +403,44 @@ async def test_today_events_drop_all_day_events_of_other_days():
     svc, _ = _svc(events=[tomorrow, today], prefs=_Prefs(tz="America/Bogota"))
     bundle = await _build(svc, _utc(MON, 20))  # 15:00 Monday in Bogotá
     assert [e.id for e in bundle.today_events] == ["today"]
+
+
+# ─── Pinned space timetables ─────────────────────────────────────────────
+
+
+async def test_pinned_space_timetables_join_the_today_card():
+    mine = _tt("tt-mine")
+    pinned = _tt("tt-class", assignees=())
+    space = _SpaceTimetables([pinned])
+    users = _Users('{"timetable_home_pins": ["tt-class", "tt-left-space"]}')
+    svc, _ = _svc(tts=[mine], users=users, space_timetables=space)
+    bundle = await _build(svc, _utc(MON, 5))
+    assert [t.timetable_id for t in bundle.today_timetable] == ["tt-mine", "tt-class"]
+    # The service is asked with the parsed pins; it drops the ones the
+    # user may no longer read (a space they left, a feature turned off).
+    assert space.calls == [("u-anna", ("tt-class", "tt-left-space"))]
+
+
+async def test_no_pins_means_no_space_lookup():
+    space = _SpaceTimetables([_tt("tt-class", assignees=())])
+    svc, _ = _svc(users=_Users("{}"), space_timetables=space)
+    assert (await _build(svc, _utc(MON, 5))).today_timetable == ()
+    assert space.calls == []
+
+
+async def test_pinned_space_timetables_are_fail_soft():
+    mine = _tt("tt-mine")
+    users = _Users('{"timetable_home_pins": ["tt-class"]}')
+    svc, _ = _svc(tts=[mine], users=users, space_timetables=_SpaceTimetables(boom=True))
+    bundle = await _build(svc, _utc(MON, 5))
+    assert [t.timetable_id for t in bundle.today_timetable] == ["tt-mine"]
+
+
+async def test_pins_respect_the_today_cap():
+    pins = [_tt(f"tt-p{i}", assignees=()) for i in range(MAX_TODAY_TIMETABLES + 2)]
+    users = _Users(
+        '{"timetable_home_pins": [' + ",".join(f'"{t.id}"' for t in pins) + "]}"
+    )
+    svc, _ = _svc(users=users, space_timetables=_SpaceTimetables(pins))
+    bundle = await _build(svc, _utc(MON, 5))
+    assert len(bundle.today_timetable) == MAX_TODAY_TIMETABLES

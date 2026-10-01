@@ -3510,3 +3510,74 @@ async def test_a_refused_album_delete_keeps_the_files(gallery_env):
         )
     )
     assert (media / "a.webp").exists()
+
+
+# ─── Space timetables (v_39) ─────────────────────────────────────────
+# Registration only — the handlers run against the real app, registry and
+# SQLite in tests/protocol/test_space_timetable_federation.py.
+
+
+class _NoTimetables:
+    """The handlers must not touch the repo before a check passes."""
+
+    async def get(self, timetable_id):  # pragma: no cover — never reached
+        raise AssertionError("repo read before the payload was accepted")
+
+
+def _timetable_handlers(bus, repos, timetable_repo):
+    return SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        timetable_repo=timetable_repo,
+    )
+
+
+async def test_timetable_handlers_register_only_with_a_repo(bus, repos):
+    types = {
+        FederationEventType.SPACE_TIMETABLE_UPSERTED,
+        FederationEventType.SPACE_TIMETABLE_DELETED,
+    }
+    fed = _FakeFederationService()
+    _timetable_handlers(bus, repos, _NoTimetables()).attach_to(fed)
+    assert types <= {t for t, _ in fed._event_registry.registered}
+    fed = _FakeFederationService()
+    _timetable_handlers(bus, repos, None).attach_to(fed)
+    assert not types & {t for t, _ in fed._event_registry.registered}
+
+
+async def test_timetable_payload_without_a_space_or_timetable_is_dropped(bus, repos):
+    h = _timetable_handlers(bus, repos, _NoTimetables())
+
+    def ev(event_type, payload, space_id):
+        return FederationEvent(
+            msg_id="m",
+            event_type=event_type,
+            from_instance="peer",
+            to_instance="us",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            payload=payload,
+            space_id=space_id,
+        )
+
+    await h._on_timetable_upserted(
+        ev(FederationEventType.SPACE_TIMETABLE_UPSERTED, {"timetable": {}}, None)
+    )
+    await h._on_timetable_upserted(
+        ev(FederationEventType.SPACE_TIMETABLE_UPSERTED, {"timetable": 1}, "sp-1")
+    )
+    await h._on_timetable_deleted(
+        ev(FederationEventType.SPACE_TIMETABLE_DELETED, {"timetable_id": ""}, "sp-1")
+    )
+    # A handler set without the repo is inert.
+    none = _timetable_handlers(bus, repos, None)
+    await none._on_timetable_upserted(
+        ev(FederationEventType.SPACE_TIMETABLE_UPSERTED, {}, "sp-1")
+    )
+    await none._on_timetable_deleted(
+        ev(FederationEventType.SPACE_TIMETABLE_DELETED, {}, "sp-1")
+    )

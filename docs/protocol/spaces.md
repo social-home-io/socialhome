@@ -273,7 +273,7 @@ The rule, precisely:
   (`SPACE_WRITE_EVENT_TYPES` in `domain/federation.py`): posts, comments,
   pages, tasks, polls, stickies, calendar events, RSVPs, schedules,
   gallery albums and items, bazaar listings / bids / offers, zones,
-  location pins,
+  timetables, location pins,
   media blobs — and every `*_UPDATED` / `*_DELETED` sibling, because
   editing or deleting somebody else's row is a write. The classification
   is exhaustive over the enum and pinned by a test, so a new space event
@@ -329,6 +329,7 @@ act as one — only moderation (below) reaches a local user's rows.
 | Poll close, schedule create / finalise | the wrapper post's author's household | | |
 | Bazaar listing | the seller seated on the sender, on the seller's own wrapper post, once (a re-send is a no-op) | status (sold / expired / cancelled) and offer acceptance: the seller's household only (a non-seller's expiry of an ended listing is DEBUG noise — every household sweeps expiries, only the seller's announces) | — |
 | Zones | moderators only (the local service is admin-only); a new zone's `created_by` bound like a create | moderators | moderators |
+| Timetables (v_39) | a moderator household, recording the edit as **a moderator** (`updated_by` holds a live `admin` seat on the sender; from the host, the roster authority, any live writer seat on the host — the owner is mirrored as a member — or a relayed remote user with a live `admin` seat; never a follower); the id must be owner-bound to `created_by` in this space (no legacy window) and a new row's `created_by` bound like a create | same — last-writer-wins on `version` (a jump > 10 000 or a version near the cap refused); a tombstoned id never comes back | same, bound to `deleted_by`; an unseen id is tombstoned only when owner-bound to the payload's `created_by` in this space — see [`timetables.md`](./timetables.md) |
 
 **Creator-bound ids (v_34 albums, v_36 everything else).** The rules
 above bind the user a payload names to the signing household, but a new
@@ -388,8 +389,8 @@ co-member household on a timer, so a chunk from any **other** provider is
 held to the same rules as a live event: it may only *add* rows (never
 overwrite one the receiver holds — author, content and moderation state
 stand), each attributed to a member seated on that provider; the roster
-and bans are the host's alone, and zones a moderator's
-(`SpaceSyncReceiver._admit`).
+and bans are the host's alone, and zones a moderator's; timetables a
+moderator household's, recorded as its admin (`SpaceSyncReceiver._admit`).
 
 ### Keeping the roster mirror complete
 
@@ -833,6 +834,17 @@ is opt-in:
   payload so member households mirror the same feed visibility. Absent on
   an older sender → the receiver defaults to **visible**. Additive +
   fail-soft — **no new event type or capability bump**.
+
+## Timetable tab (opt-in)
+
+`SpaceFeatures.timetable` (column `spaces.feature_timetable`, default
+**off**, federated in `space_meta.features.timetable`) turns on shared
+timetables for the space — a class plan the admins maintain and every
+member reads, e.g. inside the Calendar tab. Writes are owner / admin-only,
+locally and on every receiving household; the events
+(`SPACE_TIMETABLE_UPSERTED` / `_DELETED`, v_39) go to member households
+only. Full flow, authorization table and sync rules:
+[`timetables.md`](./timetables.md).
 
 ## Link previews (author-built, receiver never fetches)
 

@@ -758,5 +758,25 @@
   "welcome.schedule.view_timetable": "Stundenplan ansehen",
   "welcome.schedule.until": "{title} bis {time}",
   "welcome.schedule.show_earlier": "{n} frühere anzeigen",
-  "welcome.schedule.hide_earlier": "Frühere ausblenden"
+  "welcome.schedule.hide_earlier": "Frühere ausblenden",
+
+  "timetable.space.empty_admin_title": "Stundenplan für diesen Raum anlegen",
+  "timetable.space.empty_admin_body": "Ein gemeinsamer Wochenplan, den alle im Raum sehen — ein Klassenstundenplan, ein Trainingsplan.",
+  "timetable.space.empty_member_title": "Noch kein Stundenplan",
+  "timetable.space.empty_member_body": "Sobald ein Admin einen anlegt, erscheint er hier.",
+  "timetable.space.pin": "Auf meiner Startseite zeigen",
+  "timetable.space.pin_hint": "Zeigt die heutigen Stunden in deiner Heute-Karte",
+  "timetable.space.pinned": "Erscheint an Tagen mit Unterricht in deiner Heute-Karte",
+  "timetable.space.unpinned": "Von deiner Startseite entfernt",
+  "timetable.space.pin_limit": "Du kannst höchstens {n} Stundenpläne auf deiner Startseite zeigen",
+  "timetable.space.read_only": "Nur ansehen — die Admins des Raums bearbeiten diesen Stundenplan",
+  "timetable.space.view_aria": "Kalenderansicht",
+  "timetable.space.events": "Termine",
+  "timetable.info.when": "Wann",
+  "timetable.info.changed": "Diese Woche geändert",
+  "timetable.week.no_changes": "Diese Woche keine Änderungen.",
+  "space.feature.timetable": "Stundenplan",
+  "space.feature.timetable_sub": "Ein gemeinsamer Wochenstundenplan, z. B. der einer Klasse",
+  "timetable.space.pinned_household_off": "Stundenpläne sind für deinen Haushalt ausgeschaltet, daher erscheinen angeheftete Stundenpläne nicht auf der Startseite",
+  "timetable.space.pin_short": "Start"
 }

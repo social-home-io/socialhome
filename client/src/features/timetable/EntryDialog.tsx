@@ -39,10 +39,7 @@ import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { t } from '@/i18n/i18n'
-import {
-  addEntry, addOverride, applyOverrides, deleteEntry, deleteOverride, patchEntry, patchOverride,
-  replaceEntries, timetables, type EntryInput, type OverrideStep, type UndoOpts,
-} from '@/store/timetables'
+import type { EntryInput, OverrideStep, UndoOpts } from '@/store/timetables'
 import type {
   EffectiveLesson, Timetable, TimetableColor, TimetableEntry, TimetableEntryKind,
 } from '@/types'
@@ -56,6 +53,7 @@ import { dayEntries, type EntryPrefill } from './layout'
 import { fromMinutes, orderedDays, toMinutes, weekdayName } from './time'
 import { focusGrid } from './focus'
 import { useAutofocus } from './useAutofocus'
+import { useTimetableScope } from './scope'
 
 /** Week mode: the date being changed, and the effective lesson there
  *  (``null`` = add an extra lesson on that date). */
@@ -90,8 +88,9 @@ export function closeEntryDialog(): void {
 const DURATIONS = [30, 45, 60, 90] as const
 
 export function EntryDialog() {
+  const { store } = useTimetableScope()
   const state = entryDialog.value
-  const tt = state ? timetables.value.find(x => x.id === state.timetableId) : undefined
+  const tt = state ? store.timetables.value.find(x => x.id === state.timetableId) : undefined
   if (!state || !tt) return null
   if (state.week) {
     const { date, lesson } = state.week
@@ -145,6 +144,7 @@ function EntryForm({ tt: live, entry, prefill, group }: {
   prefill?: EntryPrefill
   group?: string[]
 }) {
+  const { store } = useTimetableScope()
   // Everything below reads the snapshot taken at mount, not the live
   // store copy — see the module docstring (CAS on open dialogs).
   const [tt, setTt] = useState(live)
@@ -190,7 +190,7 @@ function EntryForm({ tt: live, entry, prefill, group }: {
   // next Save applies these edits to it (the user keeps their input).
   const done = (ok: unknown) => {
     if (ok) closeEntryDialog()
-    else setTt(timetables.value.find(x => x.id === tt.id) ?? tt)
+    else setTt(store.timetables.value.find(x => x.id === tt.id) ?? tt)
   }
 
   const save = async (ev: Event) => {
@@ -206,7 +206,7 @@ function EntryForm({ tt: live, entry, prefill, group }: {
       if (group) {
         const ids = new Set(group)
         const list: EntryInput[] = tt.entries.map(e => ids.has(e.id) ? { ...e, ...changes } : e)
-        done(await replaceEntries(tt.id, list, {
+        done(await store.replaceEntries(tt.id, list, {
           ...opts, undo: { message: t('timetable.entry.band_updated'), onUndone },
         }))
       } else if (doShift || applyAll) {
@@ -225,11 +225,11 @@ function EntryForm({ tt: live, entry, prefill, group }: {
         const message = doShift
           ? t('timetable.entry.shifted')
           : t('timetable.entry.applied_all', { title: title.trim() })
-        done(await replaceEntries(tt.id, list, { ...opts, undo: { message, onUndone } }))
+        done(await store.replaceEntries(tt.id, list, { ...opts, undo: { message, onUndone } }))
       } else if (entry) {
-        done(await patchEntry(tt.id, entry.id, changes, opts))
+        done(await store.patchEntry(tt.id, entry.id, changes, opts))
       } else {
-        done(await addEntry(tt.id, { weekday, ...fields }, opts))
+        done(await store.addEntry(tt.id, { weekday, ...fields }, opts))
       }
     } catch (e) {
       setError((e as Error).message)
@@ -243,10 +243,10 @@ function EntryForm({ tt: live, entry, prefill, group }: {
     setSaving(true)
     try {
       const out = group
-        ? await replaceEntries(tt.id, tt.entries.filter(e => !group.includes(e.id)), {
+        ? await store.replaceEntries(tt.id, tt.entries.filter(e => !group.includes(e.id)), {
             ...opts, undo: { message: t('timetable.entry.band_deleted'), onUndone },
           })
-        : await deleteEntry(tt.id, entry.id, { ...opts, onUndone })
+        : await store.deleteEntry(tt.id, entry.id, { ...opts, onUndone })
       if (out) {
         closeEntryDialog()
         focusGrid(tt.id)
@@ -525,6 +525,7 @@ function WeekEntryForm({ tt: live, target, prefill }: {
   target: WeekTarget
   prefill?: EntryPrefill
 }) {
+  const { store } = useTimetableScope()
   const [tt, setTt] = useState(live)
   const { date, lesson } = target
   const runLessons = target.run && target.run.length > 1 ? target.run : null
@@ -574,7 +575,7 @@ function WeekEntryForm({ tt: live, target, prefill }: {
     try {
       const out = await call()
       if (out) closeEntryDialog()
-      else setTt(timetables.value.find(x => x.id === tt.id) ?? tt)
+      else setTt(store.timetables.value.find(x => x.id === tt.id) ?? tt)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -590,13 +591,13 @@ function WeekEntryForm({ tt: live, target, prefill }: {
     const fields = f.fields()
     if (!lesson) {
       const { kind, ...rest } = fields
-      void run(() => addOverride(tt.id, { date, kind: 'add', entry_kind: kind, ...rest },
+      void run(() => store.addOverride(tt.id, { date, kind: 'add', entry_kind: kind, ...rest },
         { ...opts, undo: undo(t('timetable.week.added', { date: day })) }))
       return
     }
     if (status === 'added' && overrideId) {
       const { kind, ...rest } = fields
-      void run(() => patchOverride(tt.id, overrideId, { entry_kind: kind, ...rest },
+      void run(() => store.patchOverride(tt.id, overrideId, { entry_kind: kind, ...rest },
         { ...opts, undo: undo(t('timetable.week.changed_toast', { date: day })) }))
       return
     }
@@ -617,7 +618,7 @@ function WeekEntryForm({ tt: live, target, prefill }: {
         return any ? [{ op: 'add', fields: { date, kind: 'replace', entry_id: reg.id, ...d } }] : []
       })
       if (ops.length === 0) { closeEntryDialog(); return }
-      void run(() => applyOverrides(tt.id, ops,
+      void run(() => store.applyOverrides(tt.id, ops,
         { ...opts, undo: undo(t('timetable.week.changed_toast', { date: day })) }))
       return
     }
@@ -626,7 +627,7 @@ function WeekEntryForm({ tt: live, target, prefill }: {
     const changed = Object.keys(diff).length > 0
     if (!overrideId) {
       if (!changed) { closeEntryDialog(); return }
-      void run(() => addOverride(tt.id, { date, kind: 'replace', entry_id: regular.id, ...diff },
+      void run(() => store.addOverride(tt.id, { date, kind: 'replace', entry_id: regular.id, ...diff },
         { ...opts, undo: undo(t('timetable.week.changed_toast', { date: day })) }))
       return
     }
@@ -638,7 +639,7 @@ function WeekEntryForm({ tt: live, target, prefill }: {
       else closeEntryDialog()
       return
     }
-    void run(() => patchOverride(tt.id, overrideId, { kind: 'replace', ...allNull, ...diff },
+    void run(() => store.patchOverride(tt.id, overrideId, { kind: 'replace', ...allNull, ...diff },
       { ...opts, undo: undo(t('timetable.week.changed_toast', { date: day })) }))
   }
 
@@ -653,13 +654,13 @@ function WeekEntryForm({ tt: live, target, prefill }: {
           ? { op: 'patch', overrideId: l.override_id, fields: { kind: 'cancel', ...allNull, label: null } }
           : { op: 'add', fields: { date, kind: 'cancel', entry_id: reg.id } }]
       })
-      void run(() => applyOverrides(tt.id, ops, { ...opts, undo: undo(message) }))
+      void run(() => store.applyOverrides(tt.id, ops, { ...opts, undo: undo(message) }))
       return
     }
     void run(() => overrideId
-      ? patchOverride(tt.id, overrideId, { kind: 'cancel', ...allNull, label: null },
+      ? store.patchOverride(tt.id, overrideId, { kind: 'cancel', ...allNull, label: null },
           { ...opts, undo: undo(message) })
-      : addOverride(tt.id, { date, kind: 'cancel', entry_id: regular.id },
+      : store.addOverride(tt.id, { date, kind: 'cancel', entry_id: regular.id },
           { ...opts, undo: undo(message) }))
   }
 
@@ -671,10 +672,10 @@ function WeekEntryForm({ tt: live, target, prefill }: {
     if (runLessons) {
       const ops = runLessons.flatMap((l): OverrideStep[] =>
         l.override_id ? [{ op: 'delete', overrideId: l.override_id }] : [])
-      void run(() => applyOverrides(tt.id, ops, { ...opts, undo: undo(message) }))
+      void run(() => store.applyOverrides(tt.id, ops, { ...opts, undo: undo(message) }))
       return
     }
-    void run(() => deleteOverride(tt.id, overrideId, { ...opts, undo: undo(message) }))
+    void run(() => store.deleteOverride(tt.id, overrideId, { ...opts, undo: undo(message) }))
   }
 
   const idp = `sh-tt-week-${lesson?.source_id ?? 'new'}-${date}`

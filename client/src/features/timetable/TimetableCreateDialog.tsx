@@ -13,13 +13,13 @@ import { RadioCardGroup } from '@/components/RadioCardGroup'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import { householdUsers } from '@/store/householdUsers'
-import { createTimetable } from '@/store/timetables'
 import type { Timetable } from '@/types'
 import { currentWeekStart, type WeekStart } from '@/utils/week'
 import { AssigneePicker } from './AssigneePicker'
 import { DaysPicker } from './DaysPicker'
 import { WeekStartField } from './WeekStartField'
 import { useAutofocus } from './useAutofocus'
+import { useTimetableScope } from './scope'
 
 type Template = 'school' | 'empty'
 
@@ -59,7 +59,9 @@ export function TimetableCreateDialog({ onCreated }: Props) {
 }
 
 function CreateForm({ initialTemplate, onCreated }: { initialTemplate: Template } & Props) {
-  const me = currentUser.value?.user_id
+  const { store, assignees: withAssignees } = useTimetableScope()
+  // A space timetable belongs to the space, not to household members.
+  const me = withAssignees ? currentUser.value?.user_id : undefined
   const [assignees, setAssignees] = useState<string[]>(me ? [me] : [])
   const [name, setName] = useState(() => defaultName(me ? [me] : []))
   const [nameEdited, setNameEdited] = useState(false)
@@ -89,8 +91,9 @@ function CreateForm({ initialTemplate, onCreated }: { initialTemplate: Template 
     setError(null)
     setSaving(true)
     try {
-      const tt = await createTimetable({
-        name: name.trim(), template, days, week_start: weekStart, assignees,
+      const tt = await store.createTimetable({
+        name: name.trim(), template, days, week_start: weekStart,
+        ...(withAssignees ? { assignees } : {}),
       })
       closeCreateDialog()
       onCreated(tt)
@@ -125,9 +128,11 @@ function CreateForm({ initialTemplate, onCreated }: { initialTemplate: Template 
           }}
         />
       </div>
-      <AssigneePicker value={assignees} onChange={onAssignees}
-                      legend={t('timetable.create.assignees')}
-                      hint={t('timetable.create.assignees_hint')} />
+      {withAssignees && (
+        <AssigneePicker value={assignees} onChange={onAssignees}
+                        legend={t('timetable.create.assignees')}
+                        hint={t('timetable.create.assignees_hint')} />
+      )}
       <RadioCardGroup
         legend={t('timetable.create.template')}
         name="sh-tt-create-template"

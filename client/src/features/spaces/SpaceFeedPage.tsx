@@ -32,6 +32,8 @@ import { Composer } from '@/components/Composer'
 import { openCommentOverlay } from '@/components/CommentOverlay'
 import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
 import { SpaceTasksTab, resetSpaceTasks } from './SpaceTasksTab'
+import { SpaceCalendarHost } from './SpaceCalendarHost'
+import { calendarTabLabel, visibleSpaceTabs } from './spaceTabs'
 import { SpaceBazaarTab } from './SpaceBazaarTab'
 import StickyBoardPage from '@/features/stickies/StickyBoardPage'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
@@ -61,6 +63,9 @@ interface SpaceDetail {
   features?: {
     pages?: boolean
     calendar?: boolean
+    /** A shared weekly timetable (a class schedule) in the Calendar
+     *  tab. Opt-in: absent → off. */
+    timetable?: boolean
     todo?: boolean
     stickies?: boolean
     gallery?: boolean
@@ -319,7 +324,9 @@ export default function SpaceFeedPage() {
         spacePages.value = data
       }).catch(() => { spacePages.value = [] })
     }
-    if (tab === 'calendar') {
+    // The events endpoint refuses while the calendar feature is off
+    // (the tab then holds only the timetable).
+    if (tab === 'calendar' && (spaceDetail.value?.features?.calendar ?? true)) {
       void loadSpaceCalendar(spaceId)
     }
   }
@@ -381,23 +388,14 @@ export default function SpaceFeedPage() {
     && (viewerRole.value === 'owner' || viewerRole.value === 'admin')
   const s = spaceDetail.value
 
-  // Per-space feature toggles (set by an admin in SpaceSettings) hide
-  // their tab when off. Feed + members stay visible always — they
-  // anchor the page. Defaults track the SpaceFeatures dataclass on
-  // the backend: every tab on. Location is the sole opt-in
-  // (privacy contract — §23.8.6).
+  // Per-space feature toggles hide their tab when off (``spaceTabs``).
   const f = s?.features
-  const visibleTabs: readonly SpaceTab[] = [
-    'feed', 'members',
-    ...((f?.pages ?? true) ? (['pages'] as const) : []),
-    ...((f?.calendar ?? true) ? (['calendar'] as const) : []),
-    ...((f?.todo ?? true) ? (['tasks'] as const) : []),
-    ...((f?.stickies ?? true) ? (['stickies'] as const) : []),
-    ...((f?.gallery ?? true) ? (['gallery'] as const) : []),
-    ...((f?.bazaar ?? true) ? (['bazaar'] as const) : []),
-    ...(f?.location ? (['map'] as const) : []),
-    ...(canAdmin ? (['moderation'] as const) : []),
-  ]
+  const visibleTabs: readonly SpaceTab[] = visibleSpaceTabs(f, canAdmin)
+  // Space timetables: owners / admins edit, everyone else reads. The
+  // server's role check is the authority (a remote-hosted space's
+  // admin edits too — the host verifies it); an archive is read-only.
+  const canEditTimetable = !s?.archived
+    && (viewerRole.value === 'owner' || viewerRole.value === 'admin')
 
   return (
     <div class="sh-space-feed sh-space-scope">
@@ -408,6 +406,7 @@ export default function SpaceFeedPage() {
         memberCount={memberCount.value}
         activeTab={activeTab}
         visibleTabs={visibleTabs}
+        tabLabels={{ calendar: calendarTabLabel(f) }}
         onSelectTab={loadTabData}
         actions={
           <>
@@ -611,7 +610,9 @@ export default function SpaceFeedPage() {
         </div>
       )}
 
-      {activeTab.value === 'calendar' && (() => {
+      {activeTab.value === 'calendar' && visibleTabs.includes('calendar') && (
+        <SpaceCalendarHost spaceId={spaceId} features={f} canEdit={canEditTimetable}
+                           events={() => {
         // The visible range clamps the day expansion — the server's
         // range query is overlap-based, so an event that started before
         // the period comes back and would otherwise file an
@@ -764,7 +765,8 @@ export default function SpaceFeedPage() {
             <CalendarEventDialog onCreated={() => loadTabData('calendar')} />
           </div>
         )
-      })()}
+      }} />
+      )}
 
       {activeTab.value === 'tasks' && (
         <SpaceTasksTab spaceId={spaceId} />

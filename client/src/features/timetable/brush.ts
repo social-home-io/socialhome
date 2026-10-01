@@ -16,7 +16,7 @@
 import { signal } from '@preact/signals'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
-import { replaceEntries, timetables, type EntryInput } from '@/store/timetables'
+import { householdTimetableStore, type EntryInput, type TimetableStore } from '@/store/timetables'
 import type { Timetable, TimetableColor, TimetableEntry } from '@/types'
 import { normalizeSubject } from './colors'
 import { focusGrid } from './focus'
@@ -34,6 +34,8 @@ export type Brush = PaintBrush | { kind: 'erase' }
 export interface BrushState {
   timetableId: string
   active: Brush | null
+  /** The scope's store the strokes commit to. */
+  store: TimetableStore
 }
 
 /** ``null`` = brush mode off. */
@@ -45,8 +47,8 @@ export function brushOn(timetableId: string): boolean {
   return brushState.value?.timetableId === timetableId
 }
 
-export function startBrush(tt: Timetable): void {
-  brushState.value = { timetableId: tt.id, active: brushSubjects(tt)[0] ?? null }
+export function startBrush(tt: Timetable, store: TimetableStore = householdTimetableStore): void {
+  brushState.value = { timetableId: tt.id, active: brushSubjects(tt)[0] ?? null, store }
 }
 
 /** "+ New subject" dialog open, and the subjects made there that
@@ -126,10 +128,12 @@ let queue: Promise<unknown> = Promise.resolve()
 
 /** Apply the active brush to ``ids`` as one PUT with one Undo. */
 export function commitBrush(timetableId: string, ids: readonly string[]): Promise<unknown> {
-  const b = brushState.value?.timetableId === timetableId ? brushState.value.active : null
-  if (!b || ids.length === 0) return Promise.resolve()
+  const state = brushState.value?.timetableId === timetableId ? brushState.value : null
+  const b = state?.active ?? null
+  if (!state || !b || ids.length === 0) return Promise.resolve()
+  const { store } = state
   const run = async () => {
-    const tt = timetables.value.find(x => x.id === timetableId)
+    const tt = store.timetables.value.find(x => x.id === timetableId)
     if (!tt) return
     const wanted = new Set(ids)
     let changed = 0
@@ -145,7 +149,7 @@ export function commitBrush(timetableId: string, ids: readonly string[]): Promis
       ? t(changed === 1 ? 'timetable.brush.cleared_one' : 'timetable.brush.cleared', { n: String(changed) })
       : t(changed === 1 ? 'timetable.brush.filled_one' : 'timetable.brush.filled',
           { n: String(changed), title: b.title })
-    await replaceEntries(timetableId, list, {
+    await store.replaceEntries(timetableId, list, {
       undo: { message, onUndone: () => focusGrid(timetableId) },
     })
   }

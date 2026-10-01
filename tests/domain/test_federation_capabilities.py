@@ -6,7 +6,20 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 38
+    assert fc.OURS == 39
+
+
+def test_space_timetable_capability_threshold():
+    """v_39 — space timetables. Space-scoped: a behind member household
+    is skipped by the outbound, so the space banner names the gap."""
+    assert fc.FederationCapability.MIN_FOR_SPACE_TIMETABLE == 39
+    assert fc.FederationCapability.MIN_FOR_SPACE_TIMETABLE <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_SPACE_TIMETABLE in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Space timetables" in fc.features_missing_below(38)
+    assert "Space timetables" in fc.space_features_missing_below(38)
+    assert "Space timetables" not in fc.features_missing_below(39)
 
 
 def test_moment_no_relay_capability_threshold():
@@ -43,7 +56,10 @@ def test_owner_bound_content_id_capability_threshold():
     )
     assert "Creator-bound content ids" in fc.features_missing_below(35)
     assert "Creator-bound content ids" not in fc.features_missing_below(36)
-    assert fc.space_features_missing_below(35) == ["Creator-bound content ids"]
+    assert fc.space_features_missing_below(35) == [
+        "Creator-bound content ids",
+        "Space timetables",
+    ]
 
 
 def test_moment_origin_signature_capability_threshold():
@@ -56,7 +72,10 @@ def test_moment_origin_signature_capability_threshold():
     )
     assert "Signed relayed moments" in fc.features_missing_below(34)
     assert "Signed relayed moments" not in fc.features_missing_below(35)
-    assert fc.space_features_missing_below(34) == ["Creator-bound content ids"]
+    assert fc.space_features_missing_below(34) == [
+        "Creator-bound content ids",
+        "Space timetables",
+    ]
 
 
 def test_remote_subscriber_role_capability_threshold():

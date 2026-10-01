@@ -12,13 +12,17 @@
  * this week*. The week is refetched whenever the timetable's version
  * moves — our own override edits and the ``timetable.changed`` WS
  * frames of other household members alike.
+ *
+ * A view-only scope (a space member) keeps the views, the week
+ * navigation and Print, and loses every edit: no brush, no day tools,
+ * no adding, no week actions; a lesson opens its read-only details.
  */
+import type { ComponentChildren } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
-import { clearWeek, fetchWeek, setValidity } from '@/store/timetables'
 import type { ResolvedWeek, Timetable, TimetableEntry } from '@/types'
 import { BrushBar } from './BrushBar'
 import { brushOn, startBrush, stopBrush } from './brush'
@@ -28,6 +32,7 @@ import {
 } from './dates'
 import { openDayBuilder } from './DayBuilder'
 import { openEntryDialog } from './EntryDialog'
+import { openLessonInfo } from './LessonInfoDialog'
 import { focusGrid } from './focus'
 import type { EntryPrefill } from './layout'
 import { TimetableGrid } from './TimetableGrid'
@@ -38,6 +43,7 @@ import { useViewPrefs } from './viewPrefs'
 import { WeekBar } from './WeekBar'
 import { openWeeksDialog } from './WeekValidityPicker'
 import { WeekContext, buildWeekView, isLocked } from './weekView'
+import { useTimetableScope } from './scope'
 
 interface Props {
   tt: Timetable
@@ -48,6 +54,9 @@ interface Props {
   onDuplicate: () => void
   onNew: () => void
   onDelete: () => void
+  /** Passed to the header: extra toggles, and a caption under the name. */
+  headerExtra?: ComponentChildren
+  headerCaption?: string
   now?: Date
 }
 
@@ -70,6 +79,7 @@ function dismissHint(id: string): void {
 /** The resolved week, refetched when the week or the timetable
  *  version changes. */
 function useResolvedWeek(tt: Timetable, anchor: string | null) {
+  const { store } = useTimetableScope()
   const [week, setWeek] = useState<ResolvedWeek | null>(null)
   const [failed, setFailed] = useState(false)
   const [nonce, setNonce] = useState(0)
@@ -77,18 +87,19 @@ function useResolvedWeek(tt: Timetable, anchor: string | null) {
     if (!anchor) { setWeek(null); return }
     let live = true
     setFailed(false)
-    fetchWeek(tt.id, anchor)
+    store.fetchWeek(tt.id, anchor)
       .then(w => { if (live) setWeek(w) })
       .catch(() => { if (live) setFailed(true) })
     return () => { live = false }
-  }, [tt.id, anchor, tt.version, nonce])
+  }, [store, tt.id, anchor, tt.version, nonce])
   const current = week && week.anchor === anchor ? week : null
   return { week: current, failed, retry: () => setNonce(n => n + 1) }
 }
 
 export function SelectedTimetable({
-  tt, narrow, week: weekDate, onWeek, onDuplicate, onNew, onDelete, now,
+  tt, narrow, week: weekDate, onWeek, onDuplicate, onNew, onDelete, headerExtra, headerCaption, now,
 }: Props) {
+  const { store, editable } = useTimetableScope()
   const [prefs, setPrefs] = useViewPrefs(tt.id)
   const anchor = weekDate ? weekAnchor(weekDate, tt.week_start) : null
   const { week, failed, retry } = useResolvedWeek(tt, anchor)
@@ -124,17 +135,36 @@ export function SelectedTimetable({
   const onBrush = (on: boolean) => {
     if (!on) { stopBrush(); return }
     if (prefs.list) setPrefs({ list: false })
-    startBrush(tt)
+    startBrush(tt, store)
   }
 
+  // A view-only viewer opens a lesson's details instead of an editor
+  // (a merged double lesson shows its whole span).
+  const spanOf = (entries: readonly TimetableEntry[], runIds?: string[]) => {
+    const last = runIds && runIds.length > 1 ? runIds[runIds.length - 1] : null
+    return last ? entries.find(e => e.id === last)?.end : undefined
+  }
+  const noAdd = () => { /* view only */ }
   // Regular mode edits the plan…
-  const onEditRegular = (entry: TimetableEntry, group?: string[]) =>
+  const onEditRegular = (entry: TimetableEntry, group?: string[], runIds?: string[]) => {
+    if (!editable) {
+      openLessonInfo({ timetableId: tt.id, entry, spanEnd: spanOf(tt.entries, runIds) })
+      return
+    }
     openEntryDialog({ timetableId: tt.id, entry, group })
+  }
   const onAddRegular = (prefill: EntryPrefill) =>
     openEntryDialog({ timetableId: tt.id, entry: null, prefill })
   // …week mode one date of it.
   const onEditWeek = (entry: TimetableEntry, _group?: string[], runIds?: string[]) => {
     if (!built) return
+    if (!editable) {
+      openLessonInfo({
+        timetableId: tt.id, entry, spanEnd: spanOf(built.view.entries, runIds),
+        date: built.info.dates[entry.weekday], lesson: built.info.lessons.get(entry.id),
+      })
+      return
+    }
     const lesson = built.info.lessons.get(entry.id)
     const date = built.info.dates[entry.weekday]
     if (!lesson || !date || isLocked(built.info, entry.weekday)) return
@@ -164,14 +194,16 @@ export function SelectedTimetable({
       onWeeks={() => openWeeksDialog(tt.id)}
       onPrint={printTimetable}
       brush={brushing}
-      onBrush={anchor ? undefined : onBrush}
+      onBrush={anchor || !editable ? undefined : onBrush}
+      extra={headerExtra}
+      caption={headerCaption}
     />
   )
   const bar = <WeekBar tt={tt} anchor={anchor} onWeek={onWeek} pending={pending} now={now} />
 
   if (!anchor) {
     const v = tt.validity
-    const showHint = hint && tt.entries.length > 0 && !v.valid_from && !v.valid_until
+    const showHint = editable && hint && tt.entries.length > 0 && !v.valid_from && !v.valid_until
       && v.excluded_weeks.length === 0
     return (
       <article class="sh-timetable-selected">
@@ -193,9 +225,11 @@ export function SelectedTimetable({
         {bar}
         {brushing && <BrushBar tt={tt} narrow={narrow} />}
         <TimetableGrid tt={tt} prefs={prefs} onPrefs={setPrefs} onEdit={onEditRegular}
-                       onAdd={onAddRegular} narrow={narrow} now={now}
-                       onSetupDay={(weekday) => openDayBuilder({ timetableId: tt.id, weekday })}
-                       onCopyDay={(weekday) => openCopyDay({ timetableId: tt.id, weekday })} />
+                       onAdd={editable ? onAddRegular : noAdd} narrow={narrow} now={now}
+                       onSetupDay={editable
+                         ? (weekday) => openDayBuilder({ timetableId: tt.id, weekday }) : undefined}
+                       onCopyDay={editable
+                         ? (weekday) => openCopyDay({ timetableId: tt.id, weekday }) : undefined} />
       </article>
     )
   }
@@ -216,7 +250,7 @@ export function SelectedTimetable({
         <div class="sh-timetable-loading"><Spinner /></div>
       ) : (
         <WeekMode tt={tt} week={week!} built={built} anchor={anchor} prefs={prefs} setPrefs={setPrefs}
-                  narrow={narrow} now={now} onEdit={onEditWeek} onAdd={onAddWeek} />
+                  narrow={narrow} now={now} onEdit={onEditWeek} onAdd={editable ? onAddWeek : noAdd} />
       )}
     </article>
   )
@@ -239,6 +273,7 @@ function WeekMode({ tt, week, built, anchor, prefs, setPrefs, narrow, now, onEdi
   onEdit: (entry: TimetableEntry, group?: string[], run?: string[]) => void
   onAdd: (prefill: EntryPrefill) => void
 }) {
+  const { store, editable } = useTimetableScope()
   const [busy, setBusy] = useState(false)
   // What the week shows as changed — the resolved lessons, not the raw
   // override list, so the count always matches the badges on screen.
@@ -257,11 +292,11 @@ function WeekMode({ tt, week, built, anchor, prefs, setPrefs, narrow, now, onEdi
       setBusy(false)
     }
   }
-  const onClearAll = () => void act(() => clearWeek(tt.id, anchor, {
+  const onClearAll = () => void act(() => store.clearWeek(tt.id, anchor, {
     undo: { message: t('timetable.week.cleared', { week: label }), onUndone: () => focusGrid(tt.id) },
   }))
   const onActivate = () => void act(async () => {
-    const out = await setValidity(tt.id, {
+    const out = await store.setValidity(tt.id, {
       ...tt.validity,
       excluded_weeks: tt.validity.excluded_weeks.filter(w => w !== anchor),
     })
@@ -283,7 +318,7 @@ function WeekMode({ tt, week, built, anchor, prefs, setPrefs, narrow, now, onEdi
             </span>
           )}
         </span>
-        <span class="sh-timetable-banner__actions">
+        {editable && <span class="sh-timetable-banner__actions">
           {holiday ? (
             <Button onClick={onActivate} loading={busy}>{t('timetable.week.activate')}</Button>
           ) : (
@@ -291,7 +326,7 @@ function WeekMode({ tt, week, built, anchor, prefs, setPrefs, narrow, now, onEdi
               {t('timetable.week.change_dates')}
             </Button>
           )}
-        </span>
+        </span>}
       </div>
     )
   }
@@ -304,17 +339,19 @@ function WeekMode({ tt, week, built, anchor, prefs, setPrefs, narrow, now, onEdi
           <span class="sh-timetable-banner__text">
             {t(count === 1 ? 'timetable.week.changes_one' : 'timetable.week.changes', { n: String(count) })}
           </span>
-          <span class="sh-timetable-banner__actions">
+          {editable && <span class="sh-timetable-banner__actions">
             <Button variant="secondary" onClick={onClearAll} loading={busy} disabled={locked}
                     title={locked ? t('timetable.week.locked') : undefined}>
               {t('timetable.week.clear_all')}
             </Button>
-          </span>
+          </span>}
         </div>
-      ) : (
+      ) : editable ? (
         <p class="sh-timetable-weekhint">
           {t(locked ? 'timetable.week.locked' : 'timetable.week.hint')}
         </p>
+      ) : (
+        <p class="sh-timetable-weekhint">{t('timetable.week.no_changes')}</p>
       )}
       <WeekContext.Provider value={built.info}>
         <TimetableGrid tt={built.view} prefs={prefs} onPrefs={setPrefs} onEdit={onEdit}

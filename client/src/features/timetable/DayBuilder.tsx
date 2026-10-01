@@ -26,7 +26,6 @@ import { showToast } from '@/components/Toast'
 import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { t } from '@/i18n/i18n'
-import { copyDay, generateDay, offerEntriesUndo, timetables } from '@/store/timetables'
 import type { Timetable, TimetableEntryKind } from '@/types'
 import {
   DEFAULT_BREAK_MINUTES, addBefore, initialState, moveRow, newRow, timeRows, toSlots,
@@ -37,6 +36,7 @@ import { focusGrid } from './focus'
 import { dayEntries } from './layout'
 import { formatRange, fromMinutes, toMinutes, weekdayName } from './time'
 import { useAutofocus } from './useAutofocus'
+import { useTimetableScope } from './scope'
 
 interface BuilderTarget {
   timetableId: string
@@ -54,8 +54,9 @@ export function closeDayBuilder(): void {
 }
 
 export function DayBuilder() {
+  const { store } = useTimetableScope()
   const target = dayBuilder.value
-  const tt = target ? timetables.value.find(x => x.id === target.timetableId) : undefined
+  const tt = target ? store.timetables.value.find(x => x.id === target.timetableId) : undefined
   if (!target || !tt || !tt.days.includes(target.weekday)) return null
   return (
     <Modal open onClose={closeDayBuilder}
@@ -85,6 +86,7 @@ function slotName(r: TimedRow): string {
 }
 
 function BuilderForm({ tt: live, weekday }: { tt: Timetable; weekday: number }) {
+  const { store } = useTimetableScope()
   const [tt, setTt] = useState(live)
   const breakTitle = t('timetable.builder.break_title')
   const [init] = useState(() => initialState(live, weekday, breakTitle))
@@ -171,10 +173,10 @@ function BuilderForm({ tt: live, weekday }: { tt: Timetable; weekday: number }) 
     try {
       const previous = tt.entries
       const slots = toSlots(timed, dayEntries(tt, weekday))
-      const out = await generateDay(tt.id, weekday, slots, { baseVersion: tt.version })
+      const out = await store.generateDay(tt.id, weekday, slots, { baseVersion: tt.version })
       if (!out) {
         // Declined the replace, or a 409 reloaded — rebase and stay open.
-        setTt(timetables.value.find(x => x.id === tt.id) ?? tt)
+        setTt(store.timetables.value.find(x => x.id === tt.id) ?? tt)
         return
       }
       let final = out
@@ -183,7 +185,7 @@ function BuilderForm({ tt: live, weekday }: { tt: Timetable; weekday: number }) 
         // The day is saved already: a failing copy must not strand it
         // without its Undo, nor keep a dialog based on a stale version.
         try {
-          const res = await copyDay(tt.id, weekday, targets, withSubjects, { baseVersion: out.version })
+          const res = await store.copyDay(tt.id, weekday, targets, withSubjects, { baseVersion: out.version })
           if (res) { final = res; copied = targets }
         } catch (e) {
           showToast((e as Error).message, 'error')
@@ -195,7 +197,7 @@ function BuilderForm({ tt: live, weekday }: { tt: Timetable; weekday: number }) 
             days: [weekday, ...copied].map(d => weekdayName(d, 'short')).join(', '),
           })
         : t('timetable.builder.saved', { day })
-      offerEntriesUndo(tt.id, previous, final.version, { message, onUndone: () => focusGrid(tt.id) })
+      store.offerEntriesUndo(tt.id, previous, final.version, { message, onUndone: () => focusGrid(tt.id) })
       closeDayBuilder()
     } catch (e) {
       setError((e as Error).message)

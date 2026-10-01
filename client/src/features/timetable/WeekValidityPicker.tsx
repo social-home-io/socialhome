@@ -34,12 +34,12 @@ import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { confirmDialog } from '@/components/confirm'
 import { t, locale } from '@/i18n/i18n'
-import { setValidity, timetables } from '@/store/timetables'
 import type { Timetable } from '@/types'
 import { daysBetween, isIsoDate, parseIsoDate, todayIn, weekAnchor } from './dates'
 import {
   anchorsOfWindow, chipAria, chipLabel, monthRows, weekInRange, weekWindow, type ChipState,
 } from './yearWeeks'
+import { useTimetableScope } from './scope'
 
 const weeksFor = signal<string | null>(null)
 
@@ -52,7 +52,8 @@ export function closeWeeksDialog(): void {
 }
 
 export function WeekValidityPicker({ now }: { now?: Date }) {
-  const tt = timetables.value.find(x => x.id === weeksFor.value)
+  const { store } = useTimetableScope()
+  const tt = store.timetables.value.find(x => x.id === weeksFor.value)
   const dirty = useRef(false)
   const setDirty = useCallback((d: boolean) => { dirty.current = d }, [])
   if (!tt) return null
@@ -116,6 +117,7 @@ function WeeksForm({ tt: live, now, onDirty, onDone }: {
   onDirty: (dirty: boolean) => void
   onDone: () => void
 }) {
+  const { store } = useTimetableScope()
   const [tt, setTt] = useState(live)
   const ws = tt.week_start
   const today = todayIn(tt.tz, now)
@@ -304,13 +306,13 @@ function WeeksForm({ tt: live, now, onDirty, onDone }: {
     setError(null)
     setSaving(true)
     try {
-      const out = await setValidity(tt.id, {
+      const out = await store.setValidity(tt.id, {
         valid_from: fromVal, valid_until: untilVal,
         // Holidays outside the valid range no longer mean anything.
         excluded_weeks: [...excluded].filter(enabled).sort(),
       }, { baseVersion: tt.version })
       if (out) onDone()
-      else setTt(timetables.value.find(x => x.id === tt.id) ?? tt)
+      else setTt(store.timetables.value.find(x => x.id === tt.id) ?? tt)
     } catch (e) {
       setError((e as Error).message)
     } finally {

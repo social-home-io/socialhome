@@ -143,6 +143,14 @@ That single command runs the full sequence:
      back to Beta as ``SPACE_CALENDAR_RSVP``.
    - Beta's ``GET /api/calendars/events/{id}/rsvps`` is asserted to
      show both Alpha and Carol as ``going``.
+   - **Space timetable (v_39).** Beta — the space owner, so an admin —
+     turns the space's ``timetable`` feature on
+     (``PATCH /api/spaces/{id} {"features": {"timetable": true}}``, which
+     federates in ``space_meta.features``), creates a shared timetable
+     (``POST /api/spaces/{id}/timetables``) and adds a lesson ("Mathe").
+     Both edits fan out to Alpha and Gamma as ``SPACE_TIMETABLE_UPSERTED``
+     (member households only, gated on
+     ``FederationCapability.MIN_FOR_SPACE_TIMETABLE``).
 
 4. ``verify`` — assertions across all three households:
    - Every confirmed peer advertises the build's current ``OURS``
@@ -156,6 +164,12 @@ That single command runs the full sequence:
      attempt on) and the sealed redeem body carries the redeemer's (what
      the issuer stamps on the seat). Both land on the seats, so the seats
      are where the round-trip is provable.
+   - **v_39 space timetable.** Alpha and Gamma (plain members of Beta's
+     space) ``GET /api/spaces/{id}/timetables`` and must see Beta's
+     timetable at its latest version with the "Mathe" lesson — which also
+     proves the ``timetable`` feature toggle reached them — and a member's
+     ``PATCH`` of it must answer 403 (writes are owner / admin only). The
+     ``OURS`` round-trip above covers v_39 itself.
    - **v_31 routed-origin signature (#692).** Every ``SPACE_ROUTED`` leg
      carries ``origin_sig`` inside its sealed blob and the endpoint
      verifies it against the identity key it already holds for ``path[0]``
@@ -362,7 +376,7 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (37).
+   ``OURS`` (39 since the space-timetable bump).
 
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is

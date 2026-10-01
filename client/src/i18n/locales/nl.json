@@ -753,5 +753,25 @@
   "welcome.schedule.view_timetable": "Rooster bekijken",
   "welcome.schedule.until": "{title} tot {time}",
   "welcome.schedule.show_earlier": "{n} eerdere tonen",
-  "welcome.schedule.hide_earlier": "Eerdere verbergen"
+  "welcome.schedule.hide_earlier": "Eerdere verbergen",
+
+  "timetable.space.empty_admin_title": "Maak een rooster voor deze ruimte",
+  "timetable.space.empty_admin_body": "Een gedeeld weekplan dat iedereen in de ruimte kan zien — een klasrooster, een trainingsschema.",
+  "timetable.space.empty_member_title": "Nog geen rooster",
+  "timetable.space.empty_member_body": "Zodra een beheerder er een toevoegt, verschijnt het hier.",
+  "timetable.space.pin": "Tonen op mijn startpagina",
+  "timetable.space.pin_hint": "Voegt de lessen van vandaag toe aan je Vandaag-kaart",
+  "timetable.space.pinned": "Toegevoegd aan je Vandaag-kaart op dagen met lessen",
+  "timetable.space.unpinned": "Verwijderd van je startpagina",
+  "timetable.space.pin_limit": "Je kunt tot {n} roosters op je startpagina tonen",
+  "timetable.space.read_only": "Alleen bekijken — de beheerders van de ruimte bewerken dit rooster",
+  "timetable.space.view_aria": "Kalenderweergave",
+  "timetable.space.events": "Afspraken",
+  "timetable.info.when": "Wanneer",
+  "timetable.info.changed": "Deze week gewijzigd",
+  "timetable.week.no_changes": "Geen wijzigingen deze week.",
+  "space.feature.timetable": "Rooster",
+  "space.feature.timetable_sub": "Een gedeeld weekrooster, bijv. een klasrooster",
+  "timetable.space.pinned_household_off": "Roosters staan uit voor je huishouden, dus vastgezette roosters verschijnen niet op de startpagina",
+  "timetable.space.pin_short": "Start"
 }

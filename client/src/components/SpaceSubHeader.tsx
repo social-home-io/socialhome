@@ -47,6 +47,9 @@ interface SpaceSubHeaderProps {
   activeTab: Signal<SpaceTab>
   visibleTabs: readonly SpaceTab[]
   onSelectTab: (tab: SpaceTab) => void
+  /** Per-tab label overrides (e.g. the Calendar tab reads "Timetable"
+   *  when it holds only the space timetable). */
+  tabLabels?: Partial<Record<SpaceTab, string>>
   /** Optional trailing slot — settings button, notif prefs menu, etc. */
   actions?: preact.ComponentChildren
 }
@@ -57,14 +60,14 @@ function tabLabel(tab: SpaceTab): string {
 
 export function SpaceSubHeader({
   name, emoji, iconUrl, memberCount,
-  activeTab, visibleTabs, onSelectTab, actions,
+  activeTab, visibleTabs, onSelectTab, tabLabels, actions,
 }: SpaceSubHeaderProps) {
   const stripRef = useRef<HTMLElement | null>(null)
   const overflowing = useTabStripOverflow(stripRef, [visibleTabs])
   useScrollActiveTabIntoView(stripRef, activeTab.value)
 
   const labels = Object.fromEntries(
-    visibleTabs.map((t) => [t, tabLabel(t)]),
+    visibleTabs.map((t) => [t, tabLabels?.[t] ?? tabLabel(t)]),
   ) as Record<SpaceTab, string>
 
   return (
@@ -105,7 +108,7 @@ export function SpaceSubHeader({
             }
             onClick={() => onSelectTab(tab)}
           >
-            {tabLabel(tab)}
+            {labels[tab]}
           </button>
         ))}
       </nav>

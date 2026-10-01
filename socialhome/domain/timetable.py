@@ -28,7 +28,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
 from typing import Any, Final
 
@@ -98,7 +98,22 @@ MAX_TZ = 64
 #: Fits SQLite's INTEGER and orjson; stops a peer from pinning LWW forever
 #: with an absurd version.
 MAX_VERSION = 2**31 - 1
-MAX_WIRE_BYTES = 128 * 1024
+#: The furthest a replicated copy may move a timetable's version in one
+#: step, and the head-room kept below :data:`MAX_VERSION`: a hostile
+#: moderator can't jump a timetable out of every later editor's reach.
+MAX_REMOTE_VERSION_JUMP = 10_000
+#: Wire-JSON cap. Sized so a space timetable fits every transport it rides:
+#: a live upsert through the connection-server relay (~232 KiB envelope,
+#: one base64 layer) AND a §25.6 sync chunk over HTTPS through that relay
+#: (the chunk is sealed twice — space key, then the per-peer session key —
+#: so ~1.78× plus signatures) and over the sync DataChannel (256 KiB
+#: SCTP max message size). 128 KiB did not fit the double-sealed relay
+#: path; 96 KiB leaves ~50 KiB head-room there.
+MAX_WIRE_BYTES = 96 * 1024
+#: Timestamps a timetable may carry (``created_at`` / ``updated_at``):
+#: normalised to UTC; outside this range they would overflow or be noise.
+MIN_TIMESTAMP_YEAR: Final = 1970
+MAX_TIMESTAMP_YEAR: Final = 2199
 OVERRIDE_RETENTION_DAYS = 14
 WIRE_SCHEMA = 1
 
@@ -1391,12 +1406,24 @@ def _parse_opt_date(value: Any, what: str) -> date | None:
 
 
 def _parse_datetime(value: Any, what: str) -> datetime:
+    """A tz-aware ISO datetime, normalised to UTC and within
+    :data:`MIN_TIMESTAMP_YEAR` … :data:`MAX_TIMESTAMP_YEAR`. The UTC
+    conversion happens here, inside the guard: an extreme offset on an
+    extreme date (``0001-01-01T00:00+14:00``) raises ``OverflowError`` on
+    ``astimezone`` and must surface as a validation error, never escape."""
     try:
         parsed = datetime.fromisoformat(_as_str(value, what))
-    except ValueError as exc:
+        if parsed.tzinfo is None:
+            raise TimetableValidationError(f"{what} must carry a timezone")
+        parsed = parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError) as exc:
+        if isinstance(exc, TimetableValidationError):
+            raise
         raise TimetableValidationError(f"{what} must be an ISO datetime") from exc
-    if parsed.tzinfo is None:
-        raise TimetableValidationError(f"{what} must carry a timezone")
+    if not MIN_TIMESTAMP_YEAR <= parsed.year <= MAX_TIMESTAMP_YEAR:
+        raise TimetableValidationError(
+            f"{what} must fall in {MIN_TIMESTAMP_YEAR}–{MAX_TIMESTAMP_YEAR}"
+        )
     return parsed
 
 
@@ -1534,6 +1561,24 @@ def from_wire_dict(d: Mapping[str, Any]) -> Timetable:
 def parse_date(value: Any, what: str) -> date:
     """An ISO ``YYYY-MM-DD`` string, else :class:`TimetableValidationError`."""
     return _parse_date(value, what)
+
+
+def parse_datetime(value: Any, what: str) -> datetime:
+    """A tz-aware ISO datetime in range, as UTC — the wire timestamp rule
+    (else :class:`TimetableValidationError`)."""
+    return _parse_datetime(value, what)
+
+
+def remote_version_refusal(new: int, current: int | None) -> str | None:
+    """Why a replicated copy at ``new`` must not replace one at ``current``
+    (``None`` for a row not held) — or ``None`` when it may. Refuses a
+    version within :data:`MAX_REMOTE_VERSION_JUMP` of :data:`MAX_VERSION`
+    and a jump of more than that over the held version."""
+    if new >= MAX_VERSION - MAX_REMOTE_VERSION_JUMP:
+        return f"version {new} is too close to the cap"
+    if current is not None and new > current + MAX_REMOTE_VERSION_JUMP:
+        return f"version {new} jumps more than {MAX_REMOTE_VERSION_JUMP} past {current}"
+    return None
 
 
 def parse_hhmm(value: Any, what: str) -> time:

@@ -374,6 +374,19 @@ from .tasks import (
 )
 from .themes import HouseholdThemeView, SpaceThemeView
 from .timetables import (
+    SpaceTimetableCollectionView,
+    SpaceTimetableDayCopyView,
+    SpaceTimetableDayGenerateView,
+    SpaceTimetableDayShiftView,
+    SpaceTimetableDetailView,
+    SpaceTimetableDuplicateView,
+    SpaceTimetableEntryCollectionView,
+    SpaceTimetableEntryDetailView,
+    SpaceTimetableOverrideCollectionView,
+    SpaceTimetableOverrideDetailView,
+    SpaceTimetableValidityView,
+    SpaceTimetableWeekOverridesView,
+    SpaceTimetableWeekView,
     TimetableCollectionView,
     TimetableDayCopyView,
     TimetableDayGenerateView,
@@ -783,6 +796,37 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view(
         "/api/timetables/{id}/overrides/{override_id}",
         TimetableOverrideDetailView,
+    )
+    # ── Timetables (space-shared) — same surface, no ``/day`` ────────────
+    _tt_space = "/api/spaces/{space_id}/timetables"
+    app.router.add_view(_tt_space, SpaceTimetableCollectionView)
+    app.router.add_view(_tt_space + "/{id}", SpaceTimetableDetailView)
+    app.router.add_view(_tt_space + "/{id}/duplicate", SpaceTimetableDuplicateView)
+    app.router.add_view(
+        _tt_space + "/{id}/days/{weekday:[0-6]}/generate",
+        SpaceTimetableDayGenerateView,
+    )
+    app.router.add_view(
+        _tt_space + "/{id}/days/{weekday:[0-6]}/copy", SpaceTimetableDayCopyView
+    )
+    app.router.add_view(
+        _tt_space + "/{id}/days/{weekday:[0-6]}/shift", SpaceTimetableDayShiftView
+    )
+    app.router.add_view(_tt_space + "/{id}/entries", SpaceTimetableEntryCollectionView)
+    app.router.add_view(
+        _tt_space + "/{id}/entries/{entry_id}", SpaceTimetableEntryDetailView
+    )
+    app.router.add_view(_tt_space + "/{id}/validity", SpaceTimetableValidityView)
+    app.router.add_view(_tt_space + "/{id}/weeks/{date}", SpaceTimetableWeekView)
+    app.router.add_view(
+        _tt_space + "/{id}/weeks/{date}/overrides", SpaceTimetableWeekOverridesView
+    )
+    app.router.add_view(
+        _tt_space + "/{id}/overrides", SpaceTimetableOverrideCollectionView
+    )
+    app.router.add_view(
+        _tt_space + "/{id}/overrides/{override_id}",
+        SpaceTimetableOverrideDetailView,
     )
 
     # ── Tasks ───────────────────────────────────────────────────────────

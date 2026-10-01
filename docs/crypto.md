@@ -516,11 +516,12 @@ signature over `<sdp_type>:<sdp>` so a MITM can't swap DTLS endpoints.
 
 **Owner-bound row ids** (`federation/owner_bound_id.py`, v_34 albums,
 v_36 every other federated row with an owner — space posts, comments,
-gallery items, calendar events, tasks, pages, stickies and moments) — a
+gallery items, calendar events, tasks, pages, stickies and moments; v_39
+space timetables, bound with no legacy window) — a
 new row's id commits to its creator, so no other household can claim it
 first. The kind (`gallery-album`, `space-post`, `space-comment`,
 `gallery-item`, `space-calendar-event`, `space-task`, `space-page`,
-`space-sticky`, `moment`) domain-separates the commitment per table; the
+`space-sticky`, `space-timetable`, `moment`) domain-separates the commitment per table; the
 `moment` kind is unscoped (`UNSCOPED_KINDS`) — its space component is the
 empty string, and a scoped kind with no space (or an unscoped one with a
 space) never verifies. 32 hex characters in the UUIDv8 layout: `id[0:16]` is a random

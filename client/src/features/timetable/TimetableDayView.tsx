@@ -14,10 +14,12 @@ import { t } from '@/i18n/i18n'
 import type { Timetable, TimetableEntry } from '@/types'
 import { isoWeekday } from '@/utils/week'
 import { LessonBlock } from './LessonBlock'
+import { isUntitledLesson } from './labels'
 import { dayEntries, mergeRuns, nextStartFor, prefillAt, type EntryPrefill } from './layout'
 import { dayOfMonth, fullDate, isoDate } from './dates'
 import { nextDayFrom, orderedDays, toMinutes, weekdayName } from './time'
 import { brushOn } from './brush'
+import { useTimetableScope } from './scope'
 import { WeekContext, addBlockedReason, blockedLabel } from './weekView'
 
 const SWIPE_PX = 50
@@ -35,6 +37,7 @@ interface Props {
 
 export function TimetableDayView({ tt, picture, onEdit, onAdd, onSetupDay, onCopyDay, now }: Props) {
   const week = useContext(WeekContext)
+  const { editable } = useTimetableScope()
   const days = orderedDays(tt.days, tt.week_start)
   const todayWd = isoWeekday(now ?? new Date())
   const [picked, setPicked] = useState<number | null>(null)
@@ -110,7 +113,9 @@ export function TimetableDayView({ tt, picture, onEdit, onAdd, onSetupDay, onCop
   }
 
   // Double lessons read as one block, exactly as in the Periods table.
+  // View only: untitled slots are left out.
   const runs = mergeRuns(dayEntries(tt, day), tt.defaults.gap_minutes)
+    .filter(r => editable || !isUntitledLesson(r.entry))
   const panelId = `sh-tt-${tt.id}-day-panel`
   const isToday = (d: number) => week
     ? week.dates[d] === isoDate(now ?? new Date())
@@ -178,6 +183,7 @@ export function TimetableDayView({ tt, picture, onEdit, onAdd, onSetupDay, onCop
             ))}
           </ol>
         )}
+        {editable && (
         <button
           type="button"
           class="sh-btn sh-btn--secondary sh-timetable-day__add"
@@ -188,6 +194,7 @@ export function TimetableDayView({ tt, picture, onEdit, onAdd, onSetupDay, onCop
         >
           + {t(week ? 'timetable.week.add_extra' : 'timetable.grid.add_lesson')}
         </button>
+        )}
         {!week && runs.length > 0 && (onSetupDay || onCopyDay) && (
           <div class="sh-timetable-day__tools">
             {onSetupDay && (

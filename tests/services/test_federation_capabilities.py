@@ -22,7 +22,8 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 38
+    assert OURS == 39
+    assert FederationCapability.MIN_FOR_SPACE_TIMETABLE == 39
     assert FederationCapability.MIN_FOR_MOMENT_NO_RELAY == 38
     assert FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM == 37
     assert FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID == 36
@@ -143,6 +144,7 @@ def test_space_features_missing_below_v13():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
 
 
@@ -163,6 +165,7 @@ def test_space_features_missing_below_v16():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
 
 
@@ -180,6 +183,7 @@ def test_space_features_missing_below_v22():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
 
 
@@ -195,6 +199,7 @@ def test_space_features_missing_below_v23():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
 
 
@@ -211,6 +216,7 @@ def test_space_features_missing_below_v24():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
     assert space_features_missing_below(27) == [
         "Mesh route-stale nack",
@@ -221,11 +227,13 @@ def test_space_features_missing_below_v24():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
 
 
 def test_space_features_missing_below_v32_is_empty():
-    """Nothing space-scoped lives above v32 — a v32 member lacks none. A
+    """Above v32 only the v36 content ids and the v39 space timetables are
+    space-scoped; a v39 member lacks none. A
     v31 member lacks the roster snapshot; a v30 member also the
     authenticated mesh-routed origin; a v29
     one also lacks cross-household Follower seats, a v28 one the
@@ -238,6 +246,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
     assert space_features_missing_below(29) == [
         "Cross-household Follower seats",
@@ -246,6 +255,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
     assert space_features_missing_below(30) == [
         "Authenticated mesh-routed origin",
@@ -253,25 +263,37 @@ def test_space_features_missing_below_v32_is_empty():
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
     assert space_features_missing_below(31) == [
         "Space roster snapshot",
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
     assert space_features_missing_below(32) == [
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
     assert space_features_missing_below(33) == [
         "Creator-bound album ids",
         "Creator-bound content ids",
+        "Space timetables",
     ]
-    assert space_features_missing_below(34) == ["Creator-bound content ids"]
-    assert space_features_missing_below(35) == ["Creator-bound content ids"]
-    assert space_features_missing_below(36) == []
+    assert space_features_missing_below(34) == [
+        "Creator-bound content ids",
+        "Space timetables",
+    ]
+    assert space_features_missing_below(35) == [
+        "Creator-bound content ids",
+        "Space timetables",
+    ]
+    assert space_features_missing_below(36) == ["Space timetables"]
+    assert space_features_missing_below(38) == ["Space timetables"]
+    assert space_features_missing_below(39) == []
 
 
 def test_space_scoped_min_versions_are_capability_constants():

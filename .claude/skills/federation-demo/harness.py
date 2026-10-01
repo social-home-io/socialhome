@@ -4059,6 +4059,51 @@ def cmd_calendar() -> None:
             f"b: missing RSVPs from {sorted(missing)}; got {rows!r}",
         )
     print(f"  b sees {sorted(going.keys())} going ✓")
+
+    # 5. Space timetable (v_39). Beta — the space's owner, so an admin —
+    #    turns the space's ``timetable`` feature on (the toggle federates
+    #    in ``space_meta.features`` via SPACE_CONFIG_CHANGED), creates a
+    #    shared timetable and adds a lesson. Both edits fan out as
+    #    SPACE_TIMETABLE_UPSERTED to Alpha and Gamma; ``verify`` reads it
+    #    back from each member household and checks a member's write is
+    #    refused there.
+    s, _r = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}",
+        token=b["token"],
+        method="PATCH",
+        body={"features": {"timetable": True}},
+    )
+    _must("space features timetable=on(b)", s, _r)
+    s, created = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}/timetables",
+        token=b["token"],
+        method="POST",
+        body={"name": "Klasse 5b", "template": "empty", "tz": "Europe/Berlin"},
+    )
+    _must("space timetable create(b)", s, created, ok=(201,))
+    tt = created["timetable"]
+    s, edited = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}/timetables/"
+        f"{tt['id']}/entries",
+        token=b["token"],
+        method="POST",
+        body={
+            "version": tt["version"],
+            "weekday": 0,
+            "start": "08:00",
+            "end": "08:45",
+            "title": "Mathe",
+        },
+    )
+    _must("space timetable add lesson(b)", s, edited)
+    state["space_timetable_id"] = tt["id"]
+    state["space_timetable_version"] = edited["timetable"]["version"]
+    print(
+        f"  b: space timetable {tt['id'][:8]} created "
+        f"(v{state['space_timetable_version']}, lesson 'Mathe')"
+    )
+    # Let SPACE_CONFIG_CHANGED + SPACE_TIMETABLE_UPSERTED fan out to a + c.
+    time.sleep(4)
     _save(state)
     print("calendar: ok")
 
@@ -4852,6 +4897,66 @@ def cmd_verify() -> None:
                 )
             else:
                 print(f"  {guest_label} sees event tz=Europe/Berlin ✓")
+
+    # 6c. Space timetable (v_39) — Beta's shared timetable reached both
+    #     member households (SPACE_TIMETABLE_UPSERTED, members only) with
+    #     its lesson, the space's timetable feature reached them in the
+    #     federated config, and a plain member's edit is refused locally
+    #     (writes are owner / admin only).
+    if state.get("space_timetable_id"):
+        space_id = state["space_id"]
+        tt_id = state["space_timetable_id"]
+        want_version = state.get("space_timetable_version", 2)
+        for guest_label in ("a", "c"):
+            guest = state["instances"][guest_label]
+            base = f"http://127.0.0.1:{guest['port']}/api/spaces/{space_id}/timetables"
+            got = None
+            for _ in range(10):
+                s, body = _request(base, token=guest["token"])
+                if s == 200:
+                    got = next(
+                        (t for t in body.get("timetables") or [] if t["id"] == tt_id),
+                        None,
+                    )
+                    if got is not None and got.get("version", 0) >= want_version:
+                        break
+                time.sleep(1)
+            if s != 200:
+                failures.append(
+                    f"{guest_label}: GET space timetables -> {s} {body!r} — the "
+                    f"timetable feature did not federate in space_meta.features"
+                )
+                continue
+            if got is None:
+                failures.append(
+                    f"{guest_label}: space timetable {tt_id} missing — "
+                    f"SPACE_TIMETABLE_UPSERTED did not land"
+                )
+                continue
+            titles = [e.get("title") for e in got.get("entries") or []]
+            if got.get("version", 0) < want_version or "Mathe" not in titles:
+                failures.append(
+                    f"{guest_label}: space timetable at v{got.get('version')} "
+                    f"with {titles!r} (expected v{want_version} with 'Mathe')"
+                )
+            else:
+                print(
+                    f"  {guest_label} sees space timetable {tt_id[:8]} "
+                    f"v{got['version']} with 'Mathe' ✓"
+                )
+            s, _r = _request(
+                f"{base}/{tt_id}",
+                token=guest["token"],
+                method="PATCH",
+                body={"version": got["version"], "name": "hijack"},
+            )
+            if s != 403:
+                failures.append(
+                    f"{guest_label}: a plain member's timetable edit -> {s} "
+                    f"(expected 403 — writes are owner / admin only)"
+                )
+            else:
+                print(f"  {guest_label}: member edit refused (403) ✓")
 
     # 7. Capability handshake — every confirmed inner-ring peer should
     #    have announced their proto_version via
@@ -9494,7 +9599,9 @@ def cmd_group_dm() -> None:
     _wait_for("c to drop the group", lambda: gid not in _conv_ids("c", c))
     after = f"[group {tag}] after carol left"
     _send_group("a", a, gid, after)
-    _wait_for("b to get the post-removal message", lambda: after in _message_texts("b", gid))
+    _wait_for(
+        "b to get the post-removal message", lambda: after in _message_texts("b", gid)
+    )
     time.sleep(3)
     if after in _message_texts("c", gid):
         raise SystemExit("group-dm: removed c still received a group message")

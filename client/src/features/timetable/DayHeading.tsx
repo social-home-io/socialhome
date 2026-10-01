@@ -11,6 +11,7 @@ import { useContext } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import { dayOfMonth, fullDate } from './dates'
 import { OverflowMenu, type MenuItem } from './OverflowMenu'
+import { useTimetableScope } from './scope'
 import { weekdayName } from './time'
 import { WeekContext, blockedLabel } from './weekView'
 
@@ -28,6 +29,7 @@ interface Props {
 
 export function DayHeading({ weekday, id, today, onAdd, menu, blocked = null }: Props) {
   const week = useContext(WeekContext)
+  const { editable } = useTimetableScope()
   const date = week?.dates[weekday]
   const long = weekdayName(weekday, 'long')
   return (
@@ -47,6 +49,7 @@ export function DayHeading({ weekday, id, today, onAdd, menu, blocked = null }: 
             <span aria-hidden="true">⋯</span>
           </OverflowMenu>
         )}
+        {editable && (
         <button
           type="button"
           class="sh-timetable-add"
@@ -59,6 +62,7 @@ export function DayHeading({ weekday, id, today, onAdd, menu, blocked = null }: 
         >
           <span aria-hidden="true">+</span>
         </button>
+        )}
       </span>
     </div>
   )

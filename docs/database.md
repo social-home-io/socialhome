@@ -222,8 +222,8 @@ themselves moments and link to the conversation root via
 | Table | Purpose |
 |---|---|
 | `timetables` | Household school timetables (*Stundenplan*): `name`, `color` (theme token), `week_start` (0 Monday / 6 Sunday), `tz`, and the bounded lists as JSON in the domain wire shape — `days_json`, `defaults_json`, `entries_json` (per-weekday lessons / breaks, each with an optional emoji `icon`), `overrides_json` (per-date cancel / replace / add, pruned 14 days after their date), `excluded_weeks_json`, `assignees_json` (user ids). `valid_from` / `valid_until` bound it; `version` is the compare-and-swap counter every edit bumps. |
-| `space_timetables` | The same content for a space (no assignees), keyed by `space_id` (cascade on space delete). `deleted_at` is a tombstone so a replayed federation upsert can't resurrect a deleted timetable; replicas converge last-writer-wins on `(version, updated_at, updated_by)`. |
-| `preferences.feat_timetable` / `spaces.feature_timetable` | The household toggle (default on) and the per-space toggle (default off). |
+| `space_timetables` | The same content for a space (no assignees), keyed by `space_id` (cascade on space delete). `deleted_at` is a tombstone so a replayed federation upsert can't resurrect a deleted timetable; replicas converge last-writer-wins on `(version, updated_at, updated_by)`. In use since v_39: written by `SpaceTimetableScope` (admin edits; ids are owner-bound, 10 per space; a delete tombstones), by the `SPACE_TIMETABLE_*` inbound handlers and the `timetables` space-sync resource (`apply_remote` / `tombstone`); read by the space routes and the Home pins (`users.preferences_json.timetable_home_pins`, no column). |
+| `preferences.feat_timetable` / `spaces.feature_timetable` | The household toggle (default on) and the per-space toggle (default off; `SpaceFeatures.timetable`, saved by `space_repo`, federated in `space_meta.features.timetable`, gates `/api/spaces/{id}/timetables…`). |
 
 ## Calendar (household)
 

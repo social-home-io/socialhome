@@ -1071,5 +1071,25 @@
   "welcome.schedule.view_timetable": "View timetable",
   "welcome.schedule.until": "{title} until {time}",
   "welcome.schedule.show_earlier": "Show {n} earlier",
-  "welcome.schedule.hide_earlier": "Hide earlier"
+  "welcome.schedule.hide_earlier": "Hide earlier",
+
+  "timetable.space.empty_admin_title": "Create a timetable for this space",
+  "timetable.space.empty_admin_body": "A shared weekly plan everyone in the space can see — a class schedule, a training plan.",
+  "timetable.space.empty_member_title": "No timetable yet",
+  "timetable.space.empty_member_body": "When an admin adds one, it shows up here.",
+  "timetable.space.pin": "Show on my Home",
+  "timetable.space.pin_hint": "Adds today's lessons to your Today card",
+  "timetable.space.pinned": "Added to your Today card on days with lessons",
+  "timetable.space.unpinned": "Removed from your Home",
+  "timetable.space.pin_limit": "You can show up to {n} timetables on your Home",
+  "timetable.space.read_only": "View only — the space admins edit this timetable",
+  "timetable.space.view_aria": "Calendar view",
+  "timetable.space.events": "Events",
+  "timetable.info.when": "When",
+  "timetable.info.changed": "Changed this week",
+  "timetable.week.no_changes": "No changes this week.",
+  "space.feature.timetable": "Timetable",
+  "space.feature.timetable_sub": "A shared weekly timetable, e.g. a class schedule",
+  "timetable.space.pinned_household_off": "Timetables are turned off for your household, so pinned timetables won't show on Home",
+  "timetable.space.pin_short": "Home"
 }
