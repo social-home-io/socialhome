@@ -169,3 +169,41 @@ async def test_envelope_signature_is_present(env):
     assert set(sigs) == {"ed25519"}
     # Plain b64 → string of ≥44 chars typically.
     assert len(sigs["ed25519"]) > 40
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            FederationEventType.SPACE_TASK_LIST_CREATED,
+            {"id": "l1", "name": "list-name-very-distinctive", "created_by": "u1"},
+        ),
+        (
+            FederationEventType.SPACE_TASK_LIST_UPDATED,
+            {"id": "l1", "name": "list-name-very-distinctive"},
+        ),
+        (
+            FederationEventType.SPACE_TASK_CREATED,
+            {
+                "id": "t1",
+                "list_id": "l1",
+                "title": "t",
+                "priority": "urgent",
+                "labels": ["list-name-very-distinctive"],
+            },
+        ),
+    ],
+)
+async def test_task_list_name_and_labels_ride_only_sealed(env, event_type, payload):
+    """v_40: a task list's name and a task's labels are space content —
+    inside ``encrypted_payload`` only, never in the routing envelope."""
+    svc, peer, capture = env
+    await svc.send_event(
+        to_instance_id=peer.id,
+        event_type=event_type,
+        payload=payload,
+        space_id="sp-1",
+    )
+    envelope = capture.bodies[0]
+    assert set(envelope) - _ALLOWED_PLAINTEXT_FIELDS == set()
+    assert "list-name-very-distinctive" not in json.dumps(envelope)

@@ -44,7 +44,7 @@ from ....domain.post import (
 from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import SpaceMember, SpaceZone
 from ....domain.sticky import Sticky
-from ....domain.task import RecurrenceRule, Task, TaskStatus
+from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
 from ....domain.events import TimetableSaved
 from ....domain.timetable import (
     Timetable,
@@ -62,9 +62,11 @@ from ...owner_bound_id import (
     SPACE_POST_KIND,
     SPACE_STICKY_KIND,
     SPACE_TASK_KIND,
+    SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
     OwnerBinding,
     check_owner_bound_id,
+    is_owner_bound,
     owner_bound_id_refused,
 )
 from ....services.inbound_media_store import local_media_ref, local_media_refs
@@ -506,9 +508,25 @@ class SpaceSyncReceiver:
                         comment.post_id,
                         space_id,
                     )
+        elif resource == "task_lists":
+            for r in records:
+                lst = task_list_from_wire_dict(r)
+                if lst is None or not lst.created_by:
+                    continue
+                if not await self._space_task_repo.save_list(lst, space_id=space_id):
+                    _log_sync_refusal("task list", lst.id, space_id)
         elif resource in ("tasks", "tasks_archived"):
             for r in records:
-                task = _task_from_record(r)
+                # A member household may only add ids not held here (see
+                # ``_admit``), but the host's chunks are taken whole and
+                # upsert over rows we hold — so merge onto the held row of
+                # THIS space, or a v39 host's chunk (no ``priority``, the
+                # fields its inbound lost sent as null) would wipe the
+                # priority / labels / due date / archive every tick.
+                rid = str(r.get("id") or r.get("task_id") or "")
+                held = await self._space_task_repo.get(rid) if rid else None
+                existing = held[1] if held is not None and held[0] == space_id else None
+                task = task_from_wire_dict(r, existing=existing)
                 if task is not None and not await self._space_task_repo.save(
                     task, space_id=space_id
                 ):
@@ -783,6 +801,18 @@ class SpaceSyncReceiver:
                     str(r.get("author") or ""),
                     subscriber_comment=True,
                 )
+            case "task_lists":
+                # A member household only adds owner-bound lists (minted by
+                # every v_40 sender); a legacy (pre-v_40) list id is taken
+                # from the host alone, whose chunks never reach here — so a
+                # member can't squat a list id another space holds.
+                if not rid or not is_owner_bound(rid):
+                    return False
+                if await self._space_task_repo.get_list(rid) is not None:
+                    return False
+                return await auth.may_author(
+                    event, space_id, str(r.get("created_by") or "")
+                )
             case "tasks" | "tasks_archived":
                 if not rid or await self._space_task_repo.get(rid) is not None:
                     return False
@@ -978,6 +1008,7 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "comments": (SPACE_COMMENT_KIND, ("author",)),
     "gallery": (GALLERY_ITEM_KIND, ("uploaded_by", "uploader")),
     "calendar": (SPACE_CALENDAR_EVENT_KIND, ("created_by",)),
+    "task_lists": (SPACE_TASK_LIST_KIND, ("created_by",)),
     "tasks": (SPACE_TASK_KIND, ("created_by",)),
     "tasks_archived": (SPACE_TASK_KIND, ("created_by",)),
     "pages": (SPACE_PAGE_KIND, ("created_by",)),
@@ -1096,35 +1127,6 @@ def _comment_from_record(r: dict[str, Any]) -> Comment | None:
         parent_id=r.get("parent_id"),
         content=r.get("content"),
         media_url=local_media_ref(r.get("media_url")),
-    )
-
-
-def _task_from_record(r: dict[str, Any]) -> Task | None:
-    if not r.get("id") or not r.get("list_id") or not r.get("title"):
-        return None
-    try:
-        status = TaskStatus(str(r.get("status") or "todo"))
-    except ValueError:
-        status = TaskStatus.TODO
-    rec_dict = r.get("recurrence")
-    recurrence = None
-    if isinstance(rec_dict, dict) and rec_dict.get("rrule"):
-        recurrence = RecurrenceRule(
-            rrule=str(rec_dict["rrule"]),
-            last_spawned_at=rec_dict.get("last_spawned_at"),
-        )
-    return Task(
-        id=str(r["id"]),
-        list_id=str(r["list_id"]),
-        title=str(r["title"]),
-        status=status,
-        position=int(r.get("position") or 0),
-        created_by=str(r.get("created_by") or ""),
-        created_at=_parse_iso(r.get("created_at")),
-        updated_at=_parse_iso(r.get("updated_at")),
-        description=r.get("description"),
-        assignees=tuple(str(a) for a in (r.get("assignees") or ())),
-        recurrence=recurrence,
     )
 
 

@@ -300,14 +300,15 @@ unnecessary.
 |---|---|---|
 | GET / POST | `/api/tasks/lists` | List / create task lists. |
 | GET / PATCH / DELETE | `/api/tasks/lists/{id}` | CRUD. |
-| POST | `/api/tasks/lists/{id}/reorder` | Reorder tasks in a list. |
-| GET / POST | `/api/tasks/lists/{id}/tasks` | List / create tasks. |
+| POST | `/api/tasks/lists/{id}/reorder` | Reorder tasks in a list — `{"order": [task ids], "moved_id": id}`; each id gets its index as `position`. `moved_id` (required, must be in `order`, else 422) is the card the user dragged: only it must be editable by the caller (see below), else 403 and nothing moves — neighbours whose positions shift as a side effect need no rights, **as long as they keep their current relative order**. An `order` that also rearranges the other cards needs edit rights on each of them (an admin, or their creator), else 403. Duplicate ids in `order` are 422. |
+| GET / POST | `/api/tasks/lists/{id}/tasks` | List / create tasks. `POST` takes `title` plus optional `description`, `due_date`, `assignees`, `status` (so a board column's quick-add files it straight into that column; default `todo`), `priority` and `labels`; the new task is appended at the bottom of its list. |
 | GET / PATCH / DELETE | `/api/tasks/{id}` | CRUD for a single task. |
 | GET / POST / PATCH / DELETE | `/api/tasks/{id}/comments[/{cid}]` | Task comments. |
 | GET / POST / DELETE | `/api/tasks/{id}/attachments[/{aid}]` | Task attachments. |
 | GET / POST | `/api/spaces/{id}/tasks/lists` | List / create a space's task lists. |
 | PATCH / DELETE | `/api/spaces/{id}/tasks/lists/{lid}` | Rename / delete a space task list. |
-| GET / POST | `/api/spaces/{id}/tasks/lists/{lid}/tasks` | List / create tasks in a space task list. |
+| GET / POST | `/api/spaces/{id}/tasks/lists/{lid}/tasks` | List / create tasks in a space task list (same create fields as the household route). |
+| POST | `/api/spaces/{id}/tasks/lists/{lid}/reorder` | Reorder a space list's tasks — same body as the household reorder (`moved_id` required; duplicates are 422; a `moved_id` of another list or space is 404; any writable member may rearrange any card). Writable members only; every moved task federates as `SPACE_TASK_UPDATED`. |
 | PATCH / DELETE | `/api/spaces/{id}/tasks/{tid}` | Update / delete a space task. |
 | POST / DELETE | `/api/spaces/{id}/tasks/{tid}/archive` | Archive / unarchive a space task. |
 
@@ -319,6 +320,31 @@ read-only; reads keep working). A `{lid}` / `{tid}` that does not
 belong to the path space `{id}` is 404 — the same as an unknown id,
 so ids of other spaces are neither readable, writable, nor confirmed
 to exist.
+
+A task (household and space alike) serialises `priority` (`low` /
+`medium` / `high` / `urgent`, or `null`) and `labels` (an array of
+strings). On create and `PATCH`, `priority` must be one of those values
+or `null` and `labels` an array of at most 10 strings of at most 32
+characters — anything else is 422; labels are trimmed and de-duplicated
+case-insensitively (the first spelling wins). `PATCH` is partial: an
+omitted key is left alone, and an explicit `null` **clears**
+`description`, `due_date`, `priority` and `labels` (`null` on `title`,
+`status`, `assignees` or `position` is "no change").
+
+Task text is sanitised: control characters and bidi / spoofing marks
+(U+202A–202E, U+2066–2069, U+200E/200F, U+061C, U+2028/2029) are
+removed. A `title` (at most 200 characters) or task-list `name` (at most
+100) that is empty or invisible (whitespace / zero-width only) after
+that is 422, as is a `description` over 5000 characters (a visibly empty
+description is stored as `null`). `position` must be an integer within
+the signed 64-bit range, else 422.
+
+A household task may be changed (`PATCH`, archive, delete, or dragged in a reorder) by its
+creator, one of its assignees, or a household admin — anyone else gets
+403. Household assignees must be active users of the household (422
+otherwise; on `PATCH` only ids being *added* are checked). Space tasks
+are collaborative: any writable member may change any task of the
+space.
 
 `assignees` (household and space tasks alike) must be a JSON array of
 at most 10 non-empty user-id strings — anything else, including a bare

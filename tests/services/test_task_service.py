@@ -9,13 +9,14 @@ import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.task import Task, TaskList, TaskStatus
+from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.federation.owner_bound_id import (
     SPACE_TASK_KIND,
+    SPACE_TASK_LIST_KIND,
     OwnerBinding,
     check_owner_bound_id,
 )
-from socialhome.domain.events import TaskAssigned, TaskCompleted
+from socialhome.domain.events import TaskAssigned, TaskCompleted, TaskUpdated
 from socialhome.domain.space import SpacePermissionError
 from socialhome.domain.user import User
 from socialhome.infrastructure.event_bus import EventBus
@@ -197,8 +198,16 @@ async def test_create_task_nonexistent_list_rejected(env):
         )
 
 
+async def _seed_users(env, *user_ids: str, is_admin: bool = False) -> None:
+    for uid in user_ids:
+        await env.user_repo.save(
+            User(user_id=uid, username=uid, display_name=uid, is_admin=is_admin)
+        )
+
+
 async def test_create_task_with_due_date(env):
     """Task with due_date string is parsed correctly."""
+    await _seed_users(env, "u1", "u2")
     tl = await env.task_svc.create_list(name="L", created_by="u1")
     t = await env.task_svc.create_task(
         list_id=tl.id,
@@ -249,6 +258,7 @@ async def test_update_task_invalid_status_rejected(env):
 
 async def test_update_task_due_date_and_assignees(env):
     """update_task with due_date and assignees."""
+    await _seed_users(env, "u1")
     tl = await env.task_svc.create_list(name="L", created_by="u1")
     t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
     updated = await env.task_svc.update_task(
@@ -745,6 +755,7 @@ async def test_assignees_must_be_a_short_list_of_ids(env, bad):
 
 
 async def test_household_task_accepts_a_list_of_ids(env):
+    await _seed_users(env, *(f"u{i}" for i in range(10)))
     household = await env.task_svc.create_list(name="H", created_by="u1")
     t = await env.task_svc.create_task(
         list_id=household.id,
@@ -785,3 +796,504 @@ async def test_require_writer_on_a_missing_space_is_not_found(env):
     svc = SpaceTaskService(env.space_task_repo, space_repo=env.space_repo)
     with pytest.raises(KeyError):
         await svc.require_writer("nope", "uid-so")
+
+
+# ─── Priority, labels, quick-add status, next position (v_40) ───────────
+
+
+async def test_create_task_with_status_priority_labels(env):
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(
+        list_id=tl.id,
+        title="T",
+        created_by="u1",
+        status="in_progress",
+        priority="urgent",
+        labels=[" Car ", "car", "Bills"],
+    )
+    assert t.status is TaskStatus.IN_PROGRESS
+    assert t.priority is TaskPriority.URGENT
+    assert t.labels == ("Car", "Bills")
+    stored = await env.task_svc.get_task(t.id)
+    assert stored.priority is TaskPriority.URGENT
+    assert stored.labels == ("Car", "Bills")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"priority": "critical"},
+        {"priority": 3},
+        {"status": "blocked"},
+        {"labels": "not-a-list"},
+        {"labels": ["ok", 5]},
+        {"labels": [f"l{i}" for i in range(11)]},
+        {"labels": ["x" * 33]},
+    ],
+)
+async def test_create_task_rejects_bad_priority_status_labels(env, kwargs):
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    with pytest.raises(ValueError):
+        await env.task_svc.create_task(
+            list_id=tl.id, title="T", created_by="u1", **kwargs
+        )
+
+
+async def test_new_tasks_append_at_the_bottom(env):
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    a = await env.task_svc.create_task(list_id=tl.id, title="A", created_by="u1")
+    b = await env.task_svc.create_task(list_id=tl.id, title="B", created_by="u1")
+    c = await env.task_svc.create_task(
+        list_id=tl.id, title="C", created_by="u1", status="done"
+    )
+    assert (a.position, b.position, c.position) == (0, 1, 2)
+
+
+async def test_update_task_null_clears_and_omitted_keeps(env):
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(
+        list_id=tl.id,
+        title="T",
+        created_by="u1",
+        description="desc",
+        due_date="2026-10-03",
+        priority="high",
+        labels=["a"],
+    )
+    # Omitted fields are left alone.
+    same = await env.task_svc.update_task(t.id, actor_user_id="u1", title="T2")
+    assert same.description == "desc"
+    assert same.due_date == date(2026, 10, 3)
+    assert same.priority is TaskPriority.HIGH
+    assert same.labels == ("a",)
+    # Explicit None clears.
+    cleared = await env.task_svc.update_task(
+        t.id,
+        actor_user_id="u1",
+        description=None,
+        due_date=None,
+        priority=None,
+        labels=None,
+    )
+    assert cleared.description is None
+    assert cleared.due_date is None
+    assert cleared.priority is None
+    assert cleared.labels == ()
+    stored = await env.task_svc.get_task(t.id)
+    assert stored.due_date is None and stored.description is None
+    # None on a non-nullable field is still "no change".
+    kept = await env.task_svc.update_task(
+        t.id, actor_user_id="u1", title=None, status=None
+    )
+    assert kept.title == "T2" and kept.status is TaskStatus.TODO
+
+
+async def test_update_task_rejects_bad_position(env):
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
+    with pytest.raises(ValueError, match="invalid position"):
+        await env.task_svc.update_task(t.id, actor_user_id="u1", position="top")
+
+
+# ─── Household edit rights: creator, assignee or admin ──────────────────
+
+
+async def test_update_task_allowed_for_an_assignee(env):
+    await _seed_users(env, "u1", "u2")
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(
+        list_id=tl.id, title="T", created_by="u1", assignees=["u2"]
+    )
+    updated = await env.task_svc.update_task(t.id, actor_user_id="u2", status="done")
+    assert updated.status is TaskStatus.DONE
+    archived = await env.task_svc.archive_task(t.id, actor_user_id="u2")
+    assert archived.archived_at is not None
+
+
+async def test_update_task_refused_for_a_non_assignee(env):
+    await _seed_users(env, "u1", "u2", "u3")
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(
+        list_id=tl.id, title="T", created_by="u1", assignees=["u2"]
+    )
+    with pytest.raises(PermissionError):
+        await env.task_svc.update_task(t.id, actor_user_id="u3", title="x")
+
+
+# ─── Household assignees must be active local users ─────────────────────
+
+
+async def test_create_task_rejects_unknown_assignee(env):
+    await _seed_users(env, "u1")
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    with pytest.raises(ValueError, match="active member"):
+        await env.task_svc.create_task(
+            list_id=tl.id, title="T", created_by="u1", assignees=["ghost"]
+        )
+
+
+async def test_create_task_rejects_inactive_assignee(env):
+    await _seed_users(env, "u1")
+    await env.user_repo.save(
+        User(user_id="gone", username="gone", display_name="G", state="inactive")
+    )
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    with pytest.raises(ValueError, match="active member"):
+        await env.task_svc.create_task(
+            list_id=tl.id, title="T", created_by="u1", assignees=["gone"]
+        )
+
+
+async def test_update_task_checks_only_added_assignees(env):
+    """An assignee who has since been deactivated must not block an
+    unrelated edit; a newly added unknown id is refused."""
+    await _seed_users(env, "u1", "u2")
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(
+        list_id=tl.id, title="T", created_by="u1", assignees=["u2"]
+    )
+    await env.user_repo.save(
+        User(user_id="u2", username="u2", display_name="u2", state="inactive")
+    )
+    kept = await env.task_svc.update_task(
+        t.id, actor_user_id="u1", assignees=["u2", "u1"]
+    )
+    assert kept.assignees == ("u2", "u1")
+    with pytest.raises(ValueError, match="active member"):
+        await env.task_svc.update_task(
+            t.id, actor_user_id="u1", assignees=["u2", "ghost"]
+        )
+
+
+# ─── Household reorder: same edit rights per moved task ─────────────────
+
+
+async def test_reorder_refused_when_the_dragged_task_is_not_editable(env):
+    await _seed_users(env, "u1", "u2")
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    a = await env.task_svc.create_task(list_id=tl.id, title="A", created_by="u1")
+    b = await env.task_svc.create_task(list_id=tl.id, title="B", created_by="u2")
+    # u2 drags u1's card → refused, nothing moves.
+    with pytest.raises(PermissionError):
+        await env.task_svc.reorder_tasks(
+            tl.id, ordered_ids=[b.id, a.id], moved_id=a.id, actor_user_id="u2"
+        )
+    rows = {t.id: t.position for t in await env.task_svc.list_tasks(tl.id)}
+    assert rows == {a.id: 0, b.id: 1}
+
+
+async def test_reorder_own_card_among_others_needs_no_rights_on_them(env):
+    """Dragging your own card shifts the neighbours' positions as a side
+    effect; that needs no rights on them."""
+    await _seed_users(env, "u1", "u2")
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    a = await env.task_svc.create_task(list_id=tl.id, title="A", created_by="u1")
+    b = await env.task_svc.create_task(list_id=tl.id, title="B", created_by="u1")
+    mine = await env.task_svc.create_task(list_id=tl.id, title="M", created_by="u2")
+    moved = await env.task_svc.reorder_tasks(
+        tl.id,
+        ordered_ids=[mine.id, a.id, b.id],
+        moved_id=mine.id,
+        actor_user_id="u2",
+    )
+    assert {t.id for t in moved} == {mine.id, a.id, b.id}
+    rows = {t.id: t.position for t in await env.task_svc.list_tasks(tl.id)}
+    assert rows == {mine.id: 0, a.id: 1, b.id: 2}
+
+
+@pytest.mark.parametrize("moved_id", ["", "not-in-order"])
+async def test_reorder_needs_a_moved_id_from_the_order(env, moved_id):
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    a = await env.task_svc.create_task(list_id=tl.id, title="A", created_by="u1")
+    with pytest.raises(ValueError, match="moved_id"):
+        await env.task_svc.reorder_tasks(
+            tl.id, ordered_ids=[a.id], moved_id=moved_id, actor_user_id="u1"
+        )
+
+
+async def test_reorder_moved_id_from_another_list_is_404(env):
+    l1 = await env.task_svc.create_list(name="L1", created_by="u1")
+    l2 = await env.task_svc.create_list(name="L2", created_by="u1")
+    other = await env.task_svc.create_task(list_id=l2.id, title="O", created_by="u1")
+    with pytest.raises(KeyError):
+        await env.task_svc.reorder_tasks(
+            l1.id, ordered_ids=[other.id], moved_id=other.id, actor_user_id="u1"
+        )
+
+
+async def test_delete_task_needs_edit_rights(env):
+    await _seed_users(env, "u1", "u2", "u3")
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(
+        list_id=tl.id, title="T", created_by="u1", assignees=["u2"]
+    )
+    with pytest.raises(PermissionError):
+        await env.task_svc.delete_task(t.id, actor_user_id="u3")
+    await env.task_svc.delete_task(t.id, actor_user_id="u2")  # an assignee
+    with pytest.raises(KeyError):
+        await env.task_svc.get_task(t.id)
+
+
+async def test_reorder_allowed_for_admin(env):
+    await _seed_users(env, "u1", "u2")
+    await _seed_users(env, "boss", is_admin=True)
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    a = await env.task_svc.create_task(list_id=tl.id, title="A", created_by="u1")
+    b = await env.task_svc.create_task(list_id=tl.id, title="B", created_by="u2")
+    moved = await env.task_svc.reorder_tasks(
+        tl.id, ordered_ids=[b.id, a.id], moved_id=a.id, actor_user_id="boss"
+    )
+    assert {t.id for t in moved} == {a.id, b.id}
+
+
+# ─── Space: create fields, UNSET, reorder ───────────────────────────────
+
+
+async def test_space_create_task_with_status_priority_labels(env):
+    svc, _, lst = await _space_with_members(env)
+    a = await svc.create_task(
+        space_id="sp-m", list_id=lst.id, title="A", created_by="uid-m"
+    )
+    b = await svc.create_task(
+        space_id="sp-m",
+        list_id=lst.id,
+        title="B",
+        created_by="uid-m",
+        status="done",
+        priority="low",
+        labels=["Trip"],
+    )
+    assert (a.position, b.position) == (0, 1)
+    assert b.status is TaskStatus.DONE
+    held = await env.space_task_repo.get(b.id)
+    assert held is not None
+    assert held[1].priority is TaskPriority.LOW
+    assert held[1].labels == ("Trip",)
+
+
+async def test_space_update_task_null_clears(env):
+    svc, _, lst = await _space_with_members(env)
+    t = await svc.create_task(
+        space_id="sp-m",
+        list_id=lst.id,
+        title="A",
+        created_by="uid-m",
+        description="d",
+        due_date="2026-10-03",
+        priority="high",
+    )
+    kept = await svc.update_task(
+        t.id, space_id="sp-m", actor_user_id="uid-m", title="A2"
+    )
+    assert kept.due_date == date(2026, 10, 3)
+    assert kept.priority is TaskPriority.HIGH
+    cleared = await svc.update_task(
+        t.id,
+        space_id="sp-m",
+        actor_user_id="uid-m",
+        description=None,
+        due_date=None,
+        priority=None,
+    )
+    assert cleared.description is None
+    assert cleared.due_date is None
+    assert cleared.priority is None
+
+
+async def test_space_reorder_tasks(env):
+    svc, _, lst = await _space_with_members(env)
+    bus_events: list = []
+
+    async def _cap(ev):
+        bus_events.append(ev)
+
+    svc._bus.subscribe(TaskUpdated, _cap)
+    a = await svc.create_task(
+        space_id="sp-m", list_id=lst.id, title="A", created_by="uid-m"
+    )
+    b = await svc.create_task(
+        space_id="sp-m", list_id=lst.id, title="B", created_by="uid-so"
+    )
+    moved = await svc.reorder_tasks(
+        "sp-m", lst.id, ordered_ids=[b.id, a.id, "unknown"], moved_id=b.id
+    )
+    assert {t.id for t in moved} == {a.id, b.id}
+    rows = {t.id: t.position for t in await svc.list_tasks("sp-m")}
+    assert rows == {b.id: 0, a.id: 1}
+    assert all(e.space_id == "sp-m" for e in bus_events)
+    assert len(bus_events) == 2
+
+
+async def test_space_reorder_refuses_another_spaces_list(env):
+    svc, _, lst = await _space_with_members(env)
+    with pytest.raises(KeyError):
+        await svc.reorder_tasks("sp-other", lst.id, ordered_ids=["x"], moved_id="x")
+
+
+async def test_space_reorder_skips_a_task_of_another_space(env):
+    svc, _, lst = await _space_with_members(env)
+    await env.db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+           identity_public_key, config_sequence, space_type, join_mode)
+           VALUES(?,?,?,?,?,0,'private','invite_only')""",
+        ("sp-x", "X", env.iid, "sowner", generate_identity_keypair().public_key.hex()),
+    )
+    await env.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,?)",
+        ("sp-x", "uid-m", "member"),
+    )
+    other_list = await svc.create_list(space_id="sp-x", name="X", created_by="uid-m")
+    foreign = await svc.create_task(
+        space_id="sp-x", list_id=other_list.id, title="F", created_by="uid-m"
+    )
+    mine = await svc.create_task(
+        space_id="sp-m", list_id=lst.id, title="M", created_by="uid-m"
+    )
+    moved = await svc.reorder_tasks(
+        "sp-m", lst.id, ordered_ids=[foreign.id, mine.id], moved_id=mine.id
+    )
+    assert [t.id for t in moved] == [mine.id]
+    held = await env.space_task_repo.get(foreign.id)
+    assert held is not None and held[0] == "sp-x" and held[1].position == 0
+
+
+async def test_space_reorder_moved_id_of_another_space_is_404(env):
+    svc, _, lst = await _space_with_members(env)
+    await env.db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+           identity_public_key, config_sequence, space_type, join_mode)
+           VALUES(?,?,?,?,?,0,'private','invite_only')""",
+        ("sp-y", "Y", env.iid, "sowner", generate_identity_keypair().public_key.hex()),
+    )
+    other_list = await svc.create_list(space_id="sp-y", name="Y", created_by="uid-m")
+    foreign = await svc.create_task(
+        space_id="sp-y", list_id=other_list.id, title="F", created_by="uid-m"
+    )
+    with pytest.raises(KeyError):
+        await svc.reorder_tasks(
+            "sp-m", lst.id, ordered_ids=[foreign.id], moved_id=foreign.id
+        )
+    with pytest.raises(ValueError, match="moved_id"):
+        await svc.reorder_tasks("sp-m", lst.id, ordered_ids=[], moved_id="")
+
+
+async def test_space_task_list_ids_are_owner_bound(env):
+    svc, _, lst = await _space_with_members(env)
+    assert (
+        check_owner_bound_id(
+            SPACE_TASK_LIST_KIND, lst.id, space_id="sp-m", owner_user_id="uid-so"
+        )
+        is OwnerBinding.VALID
+    )
+
+
+# ─── Adversarial-review regressions (service) ───────────────────────────
+
+
+async def test_reorder_cannot_rearrange_others_cards_through_own_moved_id(env):
+    """I3: Bob names his own card as ``moved_id`` but also swaps Alice's two
+    cards — refused (403) and nothing moves."""
+    await _seed_users(env, "alice", "bob")
+    tl = await env.task_svc.create_list(name="L", created_by="alice")
+    a1 = await env.task_svc.create_task(list_id=tl.id, title="A1", created_by="alice")
+    a2 = await env.task_svc.create_task(list_id=tl.id, title="A2", created_by="alice")
+    b = await env.task_svc.create_task(list_id=tl.id, title="B", created_by="bob")
+    with pytest.raises(PermissionError):
+        await env.task_svc.reorder_tasks(
+            tl.id,
+            ordered_ids=[b.id, a2.id, a1.id],
+            moved_id=b.id,
+            actor_user_id="bob",
+        )
+    rows = {t.id: t.position for t in await env.task_svc.list_tasks(tl.id)}
+    assert rows == {a1.id: 0, a2.id: 1, b.id: 2}
+    # A legit move — only his own card changes relative order.
+    await env.task_svc.reorder_tasks(
+        tl.id, ordered_ids=[a1.id, b.id, a2.id], moved_id=b.id, actor_user_id="bob"
+    )
+    rows = {t.id: t.position for t in await env.task_svc.list_tasks(tl.id)}
+    assert rows == {a1.id: 0, b.id: 1, a2.id: 2}
+
+
+async def test_reorder_admin_may_rearrange_everything(env):
+    await _seed_users(env, "alice")
+    await _seed_users(env, "boss", is_admin=True)
+    tl = await env.task_svc.create_list(name="L", created_by="alice")
+    a1 = await env.task_svc.create_task(list_id=tl.id, title="A1", created_by="alice")
+    a2 = await env.task_svc.create_task(list_id=tl.id, title="A2", created_by="alice")
+    await env.task_svc.reorder_tasks(
+        tl.id, ordered_ids=[a2.id, a1.id], moved_id=a2.id, actor_user_id="boss"
+    )
+    rows = {t.id: t.position for t in await env.task_svc.list_tasks(tl.id)}
+    assert rows == {a2.id: 0, a1.id: 1}
+
+
+async def test_reorder_duplicate_ids_are_422(env):
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    a = await env.task_svc.create_task(list_id=tl.id, title="A", created_by="u1")
+    with pytest.raises(ValueError, match="duplicate"):
+        await env.task_svc.reorder_tasks(
+            tl.id, ordered_ids=[a.id, a.id], moved_id=a.id, actor_user_id="u1"
+        )
+
+
+async def test_space_reorder_duplicate_ids_are_422(env):
+    svc, _, lst = await _space_with_members(env)
+    a = await svc.create_task(
+        space_id="sp-m", list_id=lst.id, title="A", created_by="uid-m"
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        await svc.reorder_tasks("sp-m", lst.id, ordered_ids=[a.id, a.id], moved_id=a.id)
+
+
+@pytest.mark.parametrize("position", [float("inf"), 1e30, 1.5, "x", 2**63, True])
+async def test_update_task_bad_position_is_422(env, position):
+    """M3: a non-integer or out-of-range position is a 422, never a 500."""
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    t = await env.task_svc.create_task(list_id=tl.id, title="T", created_by="u1")
+    with pytest.raises(ValueError, match="invalid position"):
+        await env.task_svc.update_task(t.id, actor_user_id="u1", position=position)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"title": "T" * 201},
+        {"title": "​‮  "},
+        {"title": "ok", "description": "d" * 5001},
+    ],
+)
+async def test_create_task_rejects_overlong_or_invisible_text(env, kwargs):
+    """M4: REST text caps + visibly-empty titles are 422."""
+    tl = await env.task_svc.create_list(name="L", created_by="u1")
+    with pytest.raises(ValueError):
+        await env.task_svc.create_task(list_id=tl.id, created_by="u1", **kwargs)
+
+
+async def test_task_text_is_sanitised(env):
+    tl = await env.task_svc.create_list(name="‮Chores‎", created_by="u1")
+    assert tl.name == "Chores"
+    t = await env.task_svc.create_task(
+        list_id=tl.id,
+        title="‮Buy⁦ milk",
+        description="line1\n‮line2",
+        created_by="u1",
+    )
+    assert t.title == "Buy milk"
+    assert t.description == "line1\nline2"
+    t2 = await env.task_svc.update_task(
+        t.id, actor_user_id="u1", title="⁧New", description="​"
+    )
+    assert t2.title == "New"
+    assert t2.description is None
+
+
+@pytest.mark.parametrize("name", ["N" * 101, "​⁦"])
+async def test_list_names_are_capped_and_visible(env, name):
+    with pytest.raises(ValueError):
+        await env.task_svc.create_list(name=name, created_by="u1")
+    svc, _, lst = await _space_with_members(env)
+    with pytest.raises(ValueError):
+        await svc.create_list(space_id="sp-m", name=name, created_by="uid-m")
+    with pytest.raises(ValueError):
+        await svc.rename_list(lst.id, space_id="sp-m", name=name)

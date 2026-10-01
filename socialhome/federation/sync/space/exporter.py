@@ -47,6 +47,9 @@ RESOURCE_ORDER: tuple[str, ...] = (
     "member_pictures",
     "posts",
     "comments",
+    # Task lists (v_40) ship BEFORE tasks: a space task is only filed under
+    # a list the receiver already holds in that space.
+    "task_lists",
     "tasks",
     "tasks_archived",
     "pages",

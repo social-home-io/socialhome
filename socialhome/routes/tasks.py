@@ -6,6 +6,7 @@ from aiohttp import web
 
 from .. import app_keys as K
 from ..app_keys import media_signer_key, task_service_key
+from ..domain.task import UNSET
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
 from .base import BaseView
@@ -25,6 +26,40 @@ def _task_dict(task) -> dict:
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "updated_at": task.updated_at.isoformat() if task.updated_at else None,
         "archived_at": task.archived_at.isoformat() if task.archived_at else None,
+        "priority": task.priority.value if task.priority is not None else None,
+        "labels": list(task.labels),
+    }
+
+
+#: Fields a task ``PATCH`` may carry. An absent key is passed as
+#: :data:`UNSET` ("leave alone") so an explicit ``null`` can clear
+#: ``description`` / ``due_date`` / ``priority`` / ``labels``.
+_PATCH_FIELDS = (
+    "title",
+    "description",
+    "status",
+    "due_date",
+    "assignees",
+    "position",
+    "priority",
+    "labels",
+)
+
+
+def _patch_kwargs(body: dict) -> dict:
+    return {k: body.get(k, UNSET) for k in _PATCH_FIELDS}
+
+
+def _create_kwargs(body: dict) -> dict:
+    """Optional create fields — ``status`` lets a board column's quick-add
+    file the task straight into that column."""
+    return {
+        "description": body.get("description"),
+        "due_date": body.get("due_date"),
+        "assignees": body.get("assignees"),
+        "status": body.get("status"),
+        "priority": body.get("priority"),
+        "labels": body.get("labels"),
     }
 
 
@@ -142,20 +177,24 @@ class TaskListTasksView(BaseView):
         svc = self.svc(task_service_key)
         task = await svc.create_task(
             list_id=list_id,
-            title=body.get("title", ""),
+            title=str(body.get("title") or ""),
             created_by=ctx.user_id,
-            description=body.get("description"),
-            due_date=body.get("due_date"),
-            assignees=body.get("assignees"),
+            **_create_kwargs(body),
         )
         return web.json_response(_task_dict(task), status=201)
 
 
 class TaskListReorderView(BaseView):
-    """``POST /api/tasks/lists/{id}/reorder`` — bulk position update."""
+    """``POST /api/tasks/lists/{id}/reorder`` — bulk position update.
+
+    Body ``{"order": [ids], "moved_id": id}``: ``moved_id`` is the task the
+    user dragged and must be editable by the caller (creator, assignee or
+    admin) — otherwise 403 and nothing moves. Neighbours whose positions
+    shift as a side effect need no rights.
+    """
 
     async def post(self) -> web.Response:
-        self.user
+        ctx = self.user
         list_id = self.match("id")
         body = await self.body()
         ordered = body.get("order") or body.get("ordered_ids") or []
@@ -170,6 +209,8 @@ class TaskListReorderView(BaseView):
             updated = await svc.reorder_tasks(
                 list_id,
                 ordered_ids=[str(x) for x in ordered],
+                moved_id=str(body.get("moved_id") or ""),
+                actor_user_id=ctx.user_id,
             )
         except KeyError:
             return error_response(404, "NOT_FOUND", "Task list not found.")
@@ -195,12 +236,7 @@ class TaskDetailView(BaseView):
         task = await svc.update_task(
             task_id,
             actor_user_id=ctx.user_id,
-            title=body.get("title"),
-            description=body.get("description"),
-            status=body.get("status"),
-            due_date=body.get("due_date"),
-            assignees=body.get("assignees"),
-            position=body.get("position"),
+            **_patch_kwargs(body),
         )
         return web.json_response(_task_dict(task))
 
@@ -474,11 +510,37 @@ class SpaceTaskListTasksView(_SpaceTasksBase):
             list_id=self.match("lid"),
             title=str(body.get("title") or ""),
             created_by=ctx.user_id,
-            description=body.get("description"),
-            due_date=body.get("due_date"),
-            assignees=body.get("assignees"),
+            **_create_kwargs(body),
         )
         return web.json_response(_task_dict(task), status=201)
+
+
+class SpaceTaskListReorderView(_SpaceTasksBase):
+    """``POST /api/spaces/{id}/tasks/lists/{lid}/reorder`` — bulk position
+    update for one space list (writable members; ``lid`` must belong to
+    the path space → 404 otherwise)."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        if not await self._require_member(space_id, ctx.user_id, write=True):
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        body = await self.body()
+        ordered = body.get("order") or body.get("ordered_ids") or []
+        if not isinstance(ordered, list):
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "'order' must be an array of task ids.",
+            )
+        svc = self.svc(K.space_task_service_key)
+        updated = await svc.reorder_tasks(
+            space_id,
+            self.match("lid"),
+            ordered_ids=[str(x) for x in ordered],
+            moved_id=str(body.get("moved_id") or ""),
+        )
+        return web.json_response({"ok": True, "count": len(updated)})
 
 
 class SpaceTaskDetailView(_SpaceTasksBase):
@@ -495,12 +557,7 @@ class SpaceTaskDetailView(_SpaceTasksBase):
             self.match("tid"),
             space_id=space_id,
             actor_user_id=ctx.user_id,
-            title=body.get("title"),
-            description=body.get("description"),
-            status=body.get("status"),
-            due_date=body.get("due_date"),
-            assignees=body.get("assignees"),
-            position=body.get("position"),
+            **_patch_kwargs(body),
         )
         return web.json_response(_task_dict(task))
 

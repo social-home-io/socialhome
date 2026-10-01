@@ -201,6 +201,11 @@ class FederationEventType(str, enum.Enum):
     SPACE_TASK_CREATED = "space_task_created"
     SPACE_TASK_UPDATED = "space_task_updated"
     SPACE_TASK_DELETED = "space_task_deleted"
+    #: v_40 — a space task list's lifecycle (create / rename / delete), so a
+    #: member household holds the list its tasks are filed under.
+    SPACE_TASK_LIST_CREATED = "space_task_list_created"
+    SPACE_TASK_LIST_UPDATED = "space_task_list_updated"
+    SPACE_TASK_LIST_DELETED = "space_task_list_deleted"
     SPACE_POLL_CREATED = "space_poll_created"
     SPACE_POLL_VOTE_CAST = "space_poll_vote_cast"
     SPACE_POLL_CLOSED = "space_poll_closed"
@@ -574,6 +579,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_TASK_CREATED,
         FederationEventType.SPACE_TASK_UPDATED,
         FederationEventType.SPACE_TASK_DELETED,
+        FederationEventType.SPACE_TASK_LIST_CREATED,
+        FederationEventType.SPACE_TASK_LIST_UPDATED,
+        FederationEventType.SPACE_TASK_LIST_DELETED,
         FederationEventType.SPACE_POLL_CREATED,
         FederationEventType.SPACE_POLL_VOTE_CAST,
         FederationEventType.SPACE_POLL_CLOSED,
@@ -716,6 +724,9 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_TASK_CREATED,
         FederationEventType.SPACE_TASK_UPDATED,
         FederationEventType.SPACE_TASK_DELETED,
+        FederationEventType.SPACE_TASK_LIST_CREATED,
+        FederationEventType.SPACE_TASK_LIST_UPDATED,
+        FederationEventType.SPACE_TASK_LIST_DELETED,
         FederationEventType.SPACE_POLL_CREATED,
         FederationEventType.SPACE_POLL_VOTE_CAST,
         FederationEventType.SPACE_POLL_CLOSED,

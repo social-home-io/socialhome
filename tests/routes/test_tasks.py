@@ -321,3 +321,351 @@ async def test_space_task_writes_in_an_archived_space_are_403(client):
     assert (await client.get(f"{base}/lists/{lid}/tasks", headers=h)).status == 200
     row = await client._db.fetchone("SELECT title FROM space_tasks WHERE id=?", (tid,))
     assert row["title"] == "T"
+
+
+# ─── Priority, labels, null-clears, edit rights, reorder (v_40) ─────────
+
+
+async def _household_list(client) -> str:
+    r = await client.post(
+        "/api/tasks/lists", json={"name": "L"}, headers=_auth(client._tok)
+    )
+    return (await r.json())["id"]
+
+
+async def test_create_task_with_status_priority_labels(client):
+    lid = await _household_list(client)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks",
+        json={
+            "title": "Quick add",
+            "status": "in_progress",
+            "priority": "high",
+            "labels": ["Car", "car", " Bills "],
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    body = await r.json()
+    assert body["status"] == "in_progress"
+    assert body["priority"] == "high"
+    assert body["labels"] == ["Car", "Bills"]
+    r = await client.get(f"/api/tasks/lists/{lid}/tasks", headers=_auth(client._tok))
+    (row,) = await r.json()
+    assert row["priority"] == "high" and row["labels"] == ["Car", "Bills"]
+
+
+async def test_task_without_priority_serialises_null_and_empty_labels(client):
+    lid = await _household_list(client)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks",
+        json={"title": "Plain"},
+        headers=_auth(client._tok),
+    )
+    body = await r.json()
+    assert body["priority"] is None
+    assert body["labels"] == []
+
+
+async def test_patch_null_clears_due_date_description_priority(client):
+    lid = await _household_list(client)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks",
+        json={
+            "title": "T",
+            "description": "d",
+            "due_date": "2026-10-03",
+            "priority": "low",
+            "labels": ["x"],
+        },
+        headers=_auth(client._tok),
+    )
+    tid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/tasks/{tid}", json={"title": "T2"}, headers=_auth(client._tok)
+    )
+    body = await r.json()
+    assert body["due_date"] == "2026-10-03" and body["priority"] == "low"
+    r = await client.patch(
+        f"/api/tasks/{tid}",
+        json={"due_date": None, "description": None, "priority": None, "labels": []},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["due_date"] is None
+    assert body["description"] is None
+    assert body["priority"] is None
+    assert body["labels"] == []
+
+
+async def test_bad_priority_or_labels_is_422(client):
+    lid = await _household_list(client)
+    for payload in (
+        {"title": "T", "priority": "critical"},
+        {"title": "T", "labels": "x"},
+        {"title": "T", "labels": [1]},
+        {"title": "T", "status": "blocked"},
+    ):
+        r = await client.post(
+            f"/api/tasks/lists/{lid}/tasks", json=payload, headers=_auth(client._tok)
+        )
+        assert r.status == 422, payload
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks", json={"title": "T"}, headers=_auth(client._tok)
+    )
+    tid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/tasks/{tid}", json={"priority": 7}, headers=_auth(client._tok)
+    )
+    assert r.status == 422
+
+
+async def test_household_edit_rights_creator_assignee_admin(client):
+    """The admin creates a task assigned to bob: bob (assignee) may edit
+    it, carol (neither creator nor assignee nor admin) may not."""
+    bob = await _add_user(client, "bob", "bob-id", "bob-tok")
+    carol = await _add_user(client, "carol", "carol-id", "carol-tok")
+    lid = await _household_list(client)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks",
+        json={"title": "T", "assignees": ["bob-id"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    tid = (await r.json())["id"]
+    r = await client.patch(f"/api/tasks/{tid}", json={"status": "done"}, headers=bob)
+    assert r.status == 200
+    r = await client.patch(f"/api/tasks/{tid}", json={"title": "x"}, headers=carol)
+    assert r.status == 403
+    # carol's own task: the admin may still edit it.
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks", json={"title": "C"}, headers=carol
+    )
+    cid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/tasks/{cid}", json={"title": "C2"}, headers=_auth(client._tok)
+    )
+    assert r.status == 200
+
+
+async def test_household_unknown_assignee_is_422(client):
+    lid = await _household_list(client)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks",
+        json={"title": "T", "assignees": ["nobody"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+
+
+async def test_household_reorder_checks_rights_on_the_dragged_card(client):
+    """bob may drag his own card among the admin's (200), not the admin's
+    card (403); a reorder without a ``moved_id`` from the order is 422."""
+    bob = await _add_user(client, "bob", "bob-id", "bob-tok")
+    lid = await _household_list(client)
+    ids = []
+    for title in ("A", "B"):
+        r = await client.post(
+            f"/api/tasks/lists/{lid}/tasks",
+            json={"title": title},
+            headers=_auth(client._tok),
+        )
+        ids.append((await r.json())["id"])
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks", json={"title": "Bob's"}, headers=bob
+    )
+    mine = (await r.json())["id"]
+    order = [mine, *ids]
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/reorder",
+        json={"order": order, "moved_id": ids[0]},
+        headers=bob,
+    )
+    assert r.status == 403
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/reorder",
+        json={"order": order, "moved_id": mine},
+        headers=bob,
+    )
+    assert r.status == 200
+    assert (await r.json())["count"] == 3
+    r = await client.get(f"/api/tasks/lists/{lid}/tasks", headers=bob)
+    assert [t["id"] for t in await r.json()] == order
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/reorder", json={"order": order}, headers=bob
+    )
+    assert r.status == 422
+
+
+async def test_household_delete_needs_edit_rights(client):
+    bob = await _add_user(client, "bob", "bob-id", "bob-tok")
+    lid = await _household_list(client)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks",
+        json={"title": "T"},
+        headers=_auth(client._tok),
+    )
+    tid = (await r.json())["id"]
+    assert (await client.delete(f"/api/tasks/{tid}", headers=bob)).status == 403
+    r = await client.delete(f"/api/tasks/{tid}", headers=_auth(client._tok))
+    assert r.status == 200
+
+
+async def test_space_reorder_moves_positions(client):
+    await _seed_space_with_member(client, "sp-r", client._uid, "owner")
+    admin = _auth(client._tok)
+    base = "/api/spaces/sp-r/tasks"
+    r = await client.post(f"{base}/lists", json={"name": "L"}, headers=admin)
+    lid = (await r.json())["id"]
+    ids = []
+    for title in ("A", "B", "C"):
+        r = await client.post(
+            f"{base}/lists/{lid}/tasks",
+            json={"title": title, "priority": "medium", "labels": ["x"]},
+            headers=admin,
+        )
+        body = await r.json()
+        assert body["priority"] == "medium" and body["labels"] == ["x"]
+        ids.append(body["id"])
+    r = await client.post(
+        f"{base}/lists/{lid}/reorder",
+        json={"order": ids[::-1], "moved_id": ids[2]},
+        headers=admin,
+    )
+    assert r.status == 200
+    assert (await r.json())["count"] == 2  # B keeps position 1
+    r = await client.get(f"{base}/lists/{lid}/tasks", headers=admin)
+    assert [t["id"] for t in await r.json()] == ids[::-1]
+    r = await client.post(
+        f"{base}/lists/{lid}/reorder", json={"order": "nope"}, headers=admin
+    )
+    assert r.status == 422
+
+
+async def test_space_reorder_subscriber_is_403(client):
+    bob, lid, tid = await _subscriber_env(client)
+    r = await client.post(
+        f"/api/spaces/sp-s/tasks/lists/{lid}/reorder",
+        json={"order": [tid], "moved_id": tid},
+        headers=bob,
+    )
+    assert r.status == 403
+
+
+async def test_space_reorder_list_from_another_space_is_404(client):
+    bob, lid, tid = await _cross_space_env(client)
+    before = await _space_b_state(client)
+    r = await client.post(
+        f"/api/spaces/sp-a/tasks/lists/{lid}/reorder",
+        json={"order": [tid], "moved_id": tid},
+        headers=bob,
+    )
+    assert r.status == 404
+    assert await _space_b_state(client) == before
+
+
+async def test_space_patch_null_clears_due_date(client):
+    await _seed_space_with_member(client, "sp-n", client._uid, "owner")
+    admin = _auth(client._tok)
+    base = "/api/spaces/sp-n/tasks"
+    r = await client.post(f"{base}/lists", json={"name": "L"}, headers=admin)
+    lid = (await r.json())["id"]
+    r = await client.post(
+        f"{base}/lists/{lid}/tasks",
+        json={"title": "T", "due_date": "2026-10-03", "status": "done"},
+        headers=admin,
+    )
+    body = await r.json()
+    assert body["status"] == "done" and body["due_date"] == "2026-10-03"
+    r = await client.patch(
+        f"{base}/{body['id']}", json={"due_date": None}, headers=admin
+    )
+    assert r.status == 200
+    assert (await r.json())["due_date"] is None
+
+
+# ─── Adversarial-review regressions (routes) ────────────────────────────
+
+
+async def test_reorder_cannot_swap_others_cards_via_own_moved_id(client):
+    """I3: a non-editor naming his own card as ``moved_id`` while swapping
+    the admin's cards is 403; duplicates are 422 (both scopes)."""
+    bob = await _add_user(client, "bob", "bob-id", "bob-tok")
+    lid = await _household_list(client)
+    ids = []
+    for title in ("A1", "A2"):
+        r = await client.post(
+            f"/api/tasks/lists/{lid}/tasks",
+            json={"title": title},
+            headers=_auth(client._tok),
+        )
+        ids.append((await r.json())["id"])
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks", json={"title": "B"}, headers=bob
+    )
+    mine = (await r.json())["id"]
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/reorder",
+        json={"order": [mine, ids[1], ids[0]], "moved_id": mine},
+        headers=bob,
+    )
+    assert r.status == 403
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/reorder",
+        json={"order": [mine, mine], "moved_id": mine},
+        headers=bob,
+    )
+    assert r.status == 422
+
+
+async def test_space_reorder_duplicates_are_422(client):
+    await _seed_space_with_member(client, "sp-d", client._uid, "owner")
+    admin = _auth(client._tok)
+    base = "/api/spaces/sp-d/tasks"
+    r = await client.post(f"{base}/lists", json={"name": "L"}, headers=admin)
+    lid = (await r.json())["id"]
+    r = await client.post(
+        f"{base}/lists/{lid}/tasks", json={"title": "A"}, headers=admin
+    )
+    tid = (await r.json())["id"]
+    r = await client.post(
+        f"{base}/lists/{lid}/reorder",
+        json={"order": [tid, tid], "moved_id": tid},
+        headers=admin,
+    )
+    assert r.status == 422
+
+
+async def test_patch_position_infinity_or_huge_is_422(client):
+    """M3: used to raise OverflowError (500)."""
+    lid = await _household_list(client)
+    r = await client.post(
+        f"/api/tasks/lists/{lid}/tasks", json={"title": "T"}, headers=_auth(client._tok)
+    )
+    tid = (await r.json())["id"]
+    for raw in ('{"position": Infinity}', '{"position": 1e30}'):
+        r = await client.patch(
+            f"/api/tasks/{tid}",
+            data=raw,
+            headers={**_auth(client._tok), "Content-Type": "application/json"},
+        )
+        assert r.status == 422, raw
+
+
+async def test_overlong_or_invisible_text_is_422(client):
+    """M4: REST text caps."""
+    lid = await _household_list(client)
+    for body in (
+        {"title": "T" * 201},
+        {"title": "​‮"},
+        {"title": "T", "description": "d" * 5001},
+    ):
+        r = await client.post(
+            f"/api/tasks/lists/{lid}/tasks", json=body, headers=_auth(client._tok)
+        )
+        assert r.status == 422, body
+    r = await client.post(
+        "/api/tasks/lists", json={"name": "N" * 101}, headers=_auth(client._tok)
+    )
+    assert r.status == 422

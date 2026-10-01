@@ -381,30 +381,38 @@ class TaskDeadlineDue(DomainEvent):
 class TaskCreated(DomainEvent):
     """Any new task is created. :class:`RealtimeService` broadcasts
     this as ``task.created`` so co-members see the row appear live
-    (household scope — space scope fan-out is tighter)."""
+    (household scope — space scope fan-out is tighter).
+
+    ``origin_instance_id`` is set by federation inbound so the outbound
+    bridge can skip echoing a peer's own edit back to it."""
 
     task: "Task"
     space_id: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class TaskUpdated(DomainEvent):
     """Title / description / due / status / position / assignees
-    change. Broadcast as ``task.updated``."""
+    / priority / labels change. Broadcast as ``task.updated``.
+    ``origin_instance_id`` as on :class:`TaskCreated`."""
 
     task: "Task"
     space_id: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class TaskDeleted(DomainEvent):
-    """Task row removed. Broadcast as ``task.deleted``."""
+    """Task row removed. Broadcast as ``task.deleted``.
+    ``origin_instance_id`` as on :class:`TaskCreated`."""
 
     task_id: str
     list_id: str
     space_id: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -445,30 +453,40 @@ class TimetableDeleted(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class TaskListCreated(DomainEvent):
     """New task list. Broadcast as ``task_list.created`` so sidebars
-    refresh live when another tab adds a list."""
+    refresh live when another tab adds a list.
+
+    ``created_by`` names the creator (a space list's id is owner-bound to
+    it); ``origin_instance_id`` is set by federation inbound so the
+    outbound bridge skips echoing a peer's own change back."""
 
     list_id: str
     name: str
     space_id: str | None = None
+    created_by: str = ""
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class TaskListUpdated(DomainEvent):
-    """Task-list rename / colour / emoji."""
+    """Task-list rename / colour / emoji. ``origin_instance_id`` as on
+    :class:`TaskListCreated`."""
 
     list_id: str
     name: str
     space_id: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class TaskListDeleted(DomainEvent):
-    """Task-list removed (cascades to tasks via DB FK)."""
+    """Task-list removed (cascades to tasks via DB FK).
+    ``origin_instance_id`` as on :class:`TaskListCreated`."""
 
     list_id: str
     space_id: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

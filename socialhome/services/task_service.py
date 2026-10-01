@@ -30,23 +30,38 @@ from ..domain.events import (
     TaskUpdated,
 )
 from ..domain.task import (
+    MAX_TASK_ASSIGNEES,
+    MAX_TASK_DESCRIPTION_LENGTH,
+    MAX_TASK_LABEL_LENGTH,
+    MAX_TASK_LABELS,
+    MAX_TASK_LIST_NAME_LENGTH,
+    MAX_TASK_TITLE_LENGTH,
+    POSITION_MAX,
+    POSITION_MIN,
+    UNSET,
     Task,
     TaskAttachment,
     TaskComment,
     TaskList,
+    TaskPriority,
     TaskStatus,
+    Unset,
+    normalize_labels,
+    sanitize_block,
+    sanitize_line,
 )
 from ..domain.space import SpacePermissionError
-from ..federation.owner_bound_id import SPACE_TASK_KIND, mint_owner_bound_id
+from ..federation.owner_bound_id import (
+    SPACE_TASK_KIND,
+    SPACE_TASK_LIST_KIND,
+    mint_owner_bound_id,
+)
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.task_repo import AbstractTaskRepo, AbstractSpaceTaskRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
 from .space_service import SpaceService
-
-#: Upper bound on assignees per task (household and space alike).
-MAX_TASK_ASSIGNEES = 10
 
 
 def parse_assignees(value: object) -> tuple[str, ...] | None:
@@ -72,6 +87,163 @@ def parse_assignees(value: object) -> tuple[str, ...] | None:
         if uid not in out:
             out.append(uid)
     return tuple(out)
+
+
+def _parse_line(value: object, *, what: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{what} must be a string")
+    text = sanitize_line(value)
+    if not text:
+        raise ValueError(f"{what} must not be empty")
+    if len(text) > limit:
+        raise ValueError(f"{what} is at most {limit} characters long")
+    return text
+
+
+def parse_title(value: object) -> str:
+    """A client-supplied task title: sanitised (:func:`sanitize_line`),
+    visible and at most :data:`MAX_TASK_TITLE_LENGTH` characters (→ 422)."""
+    return _parse_line(value, what="task title", limit=MAX_TASK_TITLE_LENGTH)
+
+
+def parse_list_name(value: object) -> str:
+    """A client-supplied task-list name (at most
+    :data:`MAX_TASK_LIST_NAME_LENGTH` characters, → 422 otherwise)."""
+    return _parse_line(value, what="task list name", limit=MAX_TASK_LIST_NAME_LENGTH)
+
+
+def parse_description(value: object) -> str | None:
+    """A client-supplied description; ``None`` or visibly empty → ``None``.
+    At most :data:`MAX_TASK_DESCRIPTION_LENGTH` characters (→ 422)."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("description must be a string")
+    text = sanitize_block(value)
+    if len(text) > MAX_TASK_DESCRIPTION_LENGTH:
+        raise ValueError(
+            f"description is at most {MAX_TASK_DESCRIPTION_LENGTH} characters long"
+        )
+    return text or None
+
+
+def parse_position(value: object) -> int:
+    """A client-supplied position: an integer (or integer string) within
+    SQLite's signed 64-bit range. Anything else → :class:`ValueError`."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"invalid position: {value!r}")
+    try:
+        position = int(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid position: {value!r}") from exc
+    if not POSITION_MIN <= position <= POSITION_MAX:
+        raise ValueError(f"invalid position: {value!r}")
+    return position
+
+
+def parse_status(value: object) -> TaskStatus:
+    """A client-supplied status. Raises :class:`ValueError` (→ 422)."""
+    try:
+        return TaskStatus(str(value))
+    except ValueError as exc:
+        raise ValueError(f"invalid status: {value!r}") from exc
+
+
+def parse_priority(value: object) -> TaskPriority | None:
+    """A client-supplied priority; ``None`` / ``""`` mean "no priority".
+
+    Raises :class:`ValueError` (→ 422) for anything but a known value.
+    """
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"invalid priority: {value!r}")
+    try:
+        return TaskPriority(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid priority: {value!r}") from exc
+
+
+def parse_labels(value: object) -> tuple[str, ...]:
+    """Validate a client-supplied ``labels`` value; ``None`` clears.
+
+    Must be a list of at most :data:`MAX_TASK_LABELS` strings of at most
+    :data:`MAX_TASK_LABEL_LENGTH` characters — refused (→ 422) rather than
+    silently cut, so the user sees why. Then normalised with
+    :func:`normalize_labels` (trimmed, case-insensitive de-duplication).
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("labels must be a list of strings")
+    if len(value) > MAX_TASK_LABELS:
+        raise ValueError(f"at most {MAX_TASK_LABELS} labels per task")
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("labels must be a list of strings")
+        if len(item.strip()) > MAX_TASK_LABEL_LENGTH:
+            raise ValueError(
+                f"a label is at most {MAX_TASK_LABEL_LENGTH} characters long"
+            )
+    return normalize_labels(value)
+
+
+def parse_due_date(value: object) -> date | None:
+    """A client-supplied due date; ``None`` / ``""`` clear it."""
+    if value is None or value == "":
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError as exc:
+        raise ValueError(f"invalid due_date: {value!r}") from exc
+
+
+def _require_moved_id(moved_id: str, ordered_ids: list[str]) -> None:
+    """A reorder lists each id once and names the one task the user
+    dragged, which must be in the new order (→ 422 otherwise)."""
+    if len(set(ordered_ids)) != len(ordered_ids):
+        raise ValueError("order must not contain duplicate task ids")
+    if not moved_id or moved_id not in ordered_ids:
+        raise ValueError("moved_id must be one of the reordered task ids")
+
+
+def _apply_edits(
+    task: Task,
+    *,
+    title: object,
+    description: object,
+    status: object,
+    due_date: object,
+    assignees: tuple[str, ...] | None,
+    position: object,
+    priority: object,
+    labels: object,
+) -> Task:
+    """``task`` with every supplied field applied (both scopes).
+
+    :data:`UNSET` leaves a field alone. For the nullable fields
+    (``description``, ``due_date``, ``priority``) ``None`` clears; for the
+    others ``None`` means "no change", as it always has; ``labels: None``
+    clears the labels.
+    """
+    kwargs: dict = {"updated_at": datetime.now(timezone.utc)}
+    if not isinstance(title, Unset) and title is not None:
+        kwargs["title"] = parse_title(title)
+    if not isinstance(description, Unset):
+        kwargs["description"] = parse_description(description)
+    if not isinstance(status, Unset) and status is not None:
+        kwargs["status"] = parse_status(status)
+    if not isinstance(due_date, Unset):
+        kwargs["due_date"] = parse_due_date(due_date)
+    if assignees is not None:
+        kwargs["assignees"] = assignees
+    if not isinstance(position, Unset) and position is not None:
+        kwargs["position"] = parse_position(position)
+    if not isinstance(priority, Unset):
+        kwargs["priority"] = parse_priority(priority)
+    if not isinstance(labels, Unset):
+        kwargs["labels"] = parse_labels(labels)
+    return replace(task, **kwargs)
 
 
 class TaskService(BusPublisherMixin):
@@ -110,9 +282,7 @@ class TaskService(BusPublisherMixin):
         created_by: str,
     ) -> TaskList:
         await self._require_tasks_enabled()
-        name = name.strip()
-        if not name:
-            raise ValueError("task list name must not be empty")
+        name = parse_list_name(name)
         task_list = TaskList(
             id=uuid.uuid4().hex,
             name=name,
@@ -123,6 +293,7 @@ class TaskService(BusPublisherMixin):
             TaskListCreated(
                 list_id=saved.id,
                 name=saved.name,
+                created_by=saved.created_by,
             )
         )
         return saved
@@ -130,9 +301,7 @@ class TaskService(BusPublisherMixin):
     async def rename_list(self, list_id: str, *, name: str) -> TaskList:
         """Rename a task list. Raises KeyError if missing."""
         await self._require_tasks_enabled()
-        name = name.strip()
-        if not name:
-            raise ValueError("task list name must not be empty")
+        name = parse_list_name(name)
         current = await self._repo.get_list(list_id)
         if current is None:
             raise KeyError(f"task list {list_id!r} not found")
@@ -173,37 +342,44 @@ class TaskService(BusPublisherMixin):
         description: str | None = None,
         due_date: str | None = None,
         assignees: list[str] | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        labels: list[str] | None = None,
     ) -> Task:
+        """Create a task at the bottom of its status column.
+
+        ``status`` lets a board column's quick-add file the task straight
+        into that column (default ``todo``).
+        """
         await self._require_tasks_enabled()
-        title = title.strip()
-        if not title:
-            raise ValueError("task title must not be empty")
+        title = parse_title(title)
+        description = parse_description(description)
         parsed_assignees = parse_assignees(assignees) or ()
+        task_status = parse_status(status) if status is not None else TaskStatus.TODO
+        task_priority = parse_priority(priority)
+        task_labels = parse_labels(labels)
+        due = parse_due_date(due_date)
         # Ensure list exists
         task_list = await self._repo.get_list(list_id)
         if task_list is None:
             raise KeyError(f"task list {list_id!r} not found")
-
-        due = None
-        if due_date:
-            try:
-                due = date.fromisoformat(due_date[:10])
-            except ValueError as exc:
-                raise ValueError(f"invalid due_date: {due_date!r}") from exc
+        await self._require_local_assignees(parsed_assignees)
 
         now = datetime.now(timezone.utc)
         task = Task(
             id=uuid.uuid4().hex,
             list_id=list_id,
             title=title,
-            status=TaskStatus.TODO,
-            position=0,
+            status=task_status,
+            position=await self._repo.next_position(list_id),
             created_by=created_by,
             created_at=now,
             updated_at=now,
             description=description,
             due_date=due,
             assignees=parsed_assignees,
+            priority=task_priority,
+            labels=task_labels,
         )
         saved = await self._repo.save(task)
         if self._bus is not None:
@@ -219,6 +395,36 @@ class TaskService(BusPublisherMixin):
                     )
                 )
         return saved
+
+    # ── Edit rights + assignees ──────────────────────────────────────────
+
+    async def _require_editor(self, task: Task, actor_user_id: str) -> None:
+        """The task's creator, one of its assignees, or a household admin
+        may change it; anyone else → :class:`PermissionError` (403).
+
+        Without a user repo (bare unit wiring) every actor may edit.
+        """
+        if self._users is None:
+            return
+        if actor_user_id == task.created_by or actor_user_id in task.assignees:
+            return
+        actor = await self._users.get_by_user_id(actor_user_id)
+        if actor is None or not actor.is_admin:
+            raise PermissionError(
+                "only the task's creator, an assignee or an admin can change it"
+            )
+
+    async def _require_local_assignees(self, user_ids: tuple[str, ...]) -> None:
+        """Every id must be an active user of this household — assigning
+        anyone else would hand them the task through ``TaskAssigned``."""
+        if self._users is None:
+            return
+        for uid in user_ids:
+            user = await self._users.get_by_user_id(uid)
+            if user is None or not user.is_active():
+                raise ValueError(
+                    "every assignee must be an active member of this household"
+                )
 
     async def get_task(self, task_id: str) -> Task:
         result = await self._repo.get(task_id)
@@ -261,47 +467,42 @@ class TaskService(BusPublisherMixin):
         task_id: str,
         *,
         actor_user_id: str,
-        title: str | None = None,
-        description: str | None = None,
-        status: str | None = None,
-        due_date: str | None = None,
-        assignees: list[str] | None = None,
-        position: int | None = None,
+        title: str | None | Unset = UNSET,
+        description: str | None | Unset = UNSET,
+        status: str | None | Unset = UNSET,
+        due_date: str | None | Unset = UNSET,
+        assignees: list[str] | None | Unset = UNSET,
+        position: int | None | Unset = UNSET,
+        priority: str | None | Unset = UNSET,
+        labels: list[str] | None | Unset = UNSET,
     ) -> Task:
+        """Apply a partial edit. :data:`UNSET` = leave alone; ``None``
+        clears ``description`` / ``due_date`` / ``priority`` / ``labels``.
+        """
         task = await self.get_task(task_id)
+        await self._require_editor(task, actor_user_id)
 
-        if task.created_by != actor_user_id and self._users is not None:
-            actor = await self._users.get_by_user_id(actor_user_id)
-            if actor is None or not actor.is_admin:
-                raise PermissionError(
-                    "only the task creator or an admin can update this task"
-                )
-
-        kwargs: dict = {"updated_at": datetime.now(timezone.utc)}
-        if position is not None:
-            kwargs["position"] = int(position)
-        if title is not None:
-            title = title.strip()
-            if not title:
-                raise ValueError("task title must not be empty")
-            kwargs["title"] = title
-        if description is not None:
-            kwargs["description"] = description
-        if status is not None:
-            try:
-                kwargs["status"] = TaskStatus(status)
-            except ValueError as exc:
-                raise ValueError(f"invalid status: {status!r}") from exc
-        if due_date is not None:
-            try:
-                kwargs["due_date"] = date.fromisoformat(due_date[:10])
-            except ValueError as exc:
-                raise ValueError(f"invalid due_date: {due_date!r}") from exc
-        parsed_assignees = parse_assignees(assignees)
+        parsed_assignees = (
+            None if isinstance(assignees, Unset) else parse_assignees(assignees)
+        )
         if parsed_assignees is not None:
-            kwargs["assignees"] = parsed_assignees
-
-        updated = replace(task, **kwargs)
+            # Only ids being ADDED are checked: an assignee who has since
+            # left must not block an unrelated edit.
+            previous_ids = set(task.assignees or ())
+            await self._require_local_assignees(
+                tuple(u for u in parsed_assignees if u not in previous_ids)
+            )
+        updated = _apply_edits(
+            task,
+            title=title,
+            description=description,
+            status=status,
+            due_date=due_date,
+            assignees=parsed_assignees,
+            position=position,
+            priority=priority,
+            labels=labels,
+        )
         saved = await self._repo.save(updated)
 
         if self._bus is not None:
@@ -338,6 +539,7 @@ class TaskService(BusPublisherMixin):
 
     async def delete_task(self, task_id: str, *, actor_user_id: str) -> None:
         task = await self.get_task(task_id)  # raises KeyError if not found
+        await self._require_editor(task, actor_user_id)
         await self._repo.delete(task_id)
         await self._emit(
             TaskDeleted(
@@ -360,12 +562,7 @@ class TaskService(BusPublisherMixin):
         archived: bool,
     ) -> Task:
         task = await self.get_task(task_id)
-        if task.created_by != actor_user_id and self._users is not None:
-            actor = await self._users.get_by_user_id(actor_user_id)
-            if actor is None or not actor.is_admin:
-                raise PermissionError(
-                    "only the task creator or an admin can archive this task"
-                )
+        await self._require_editor(task, actor_user_id)
         now = datetime.now(timezone.utc)
         updated = replace(
             task,
@@ -381,24 +578,49 @@ class TaskService(BusPublisherMixin):
         list_id: str,
         *,
         ordered_ids: list[str],
+        moved_id: str,
+        actor_user_id: str,
     ) -> list[Task]:
         """Persist a new task order within a list.
 
-        ``ordered_ids`` is the desired sequence. Each id gets its
-        index as its ``position``; ids in the list that don't belong
-        to ``list_id`` are silently skipped (defensive — protects
-        against stale UIs). Emits one TaskUpdated per moved row.
+        ``ordered_ids`` is the desired sequence (typically one status
+        column of the board); each id gets its index as its ``position``,
+        and ids that don't belong to ``list_id`` are silently skipped
+        (defensive — protects against stale UIs). ``moved_id`` is the task
+        the user actually dragged: only it needs the actor's edit rights
+        (:meth:`_require_editor`) — its neighbours' positions shift as a
+        side effect and need none, as long as they keep their relative
+        order; changing that too needs edit rights on each of them
+        (→ :class:`PermissionError`, 403). Duplicate ids → 422. Emits one
+        TaskUpdated per moved row.
         """
-        if self._repo.get_list is None:
-            raise RuntimeError("task repo missing")
+        _require_moved_id(moved_id, ordered_ids)
         if await self._repo.get_list(list_id) is None:
             raise KeyError(f"task list {list_id!r} not found")
+        moved = await self._repo.get(moved_id)
+        if moved is None or moved.list_id != list_id:
+            raise KeyError(f"task {moved_id!r} not found in this list")
+        await self._require_editor(moved, actor_user_id)
+        held: dict[str, Task] = {}
+        for tid in ordered_ids:
+            task = await self._repo.get(tid)
+            if task is not None and task.list_id == list_id:
+                held[tid] = task
+        # Only the dragged card may change its place relative to the rest:
+        # the others must keep their current order (position, then age —
+        # the order the list is shown in). Rearranging them as well needs
+        # edit rights on each of them (an admin, or their creator).
+        others = [tid for tid in ordered_ids if tid in held and tid != moved_id]
+        current = sorted(
+            others, key=lambda tid: (held[tid].position, held[tid].created_at)
+        )
+        if others != current:
+            for tid in others:
+                await self._require_editor(held[tid], actor_user_id)
         updated: list[Task] = []
         for idx, tid in enumerate(ordered_ids):
-            task = await self._repo.get(tid)
-            if task is None or task.list_id != list_id:
-                continue
-            if task.position == idx:
+            task = held.get(tid)
+            if task is None or task.position == idx:
                 continue
             new_task = replace(
                 task,
@@ -692,11 +914,13 @@ class SpaceTaskService(BusPublisherMixin):
         name: str,
         created_by: str,
     ) -> TaskList:
-        name = name.strip()
-        if not name:
-            raise ValueError("task list name must not be empty")
+        name = parse_list_name(name)
         lst = TaskList(
-            id=uuid.uuid4().hex,
+            # Owner-bound (v_40): only the creator's household can
+            # announce this list id.
+            id=mint_owner_bound_id(
+                SPACE_TASK_LIST_KIND, space_id=space_id, owner_user_id=created_by
+            ),
             name=name,
             created_by=created_by,
         )
@@ -707,6 +931,7 @@ class SpaceTaskService(BusPublisherMixin):
                 list_id=saved.id,
                 name=saved.name,
                 space_id=space_id,
+                created_by=saved.created_by,
             )
         )
         return saved
@@ -718,9 +943,7 @@ class SpaceTaskService(BusPublisherMixin):
         space_id: str,
         name: str,
     ) -> TaskList:
-        name = name.strip()
-        if not name:
-            raise ValueError("task list name must not be empty")
+        name = parse_list_name(name)
         current = await self._list_in_space(list_id, space_id)
         updated = replace(current, name=name)
         if not await self._repo.save_list(updated, space_id=space_id):
@@ -767,18 +990,19 @@ class SpaceTaskService(BusPublisherMixin):
         description: str | None = None,
         due_date: str | None = None,
         assignees: list[str] | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        labels: list[str] | None = None,
     ) -> Task:
-        title = title.strip()
-        if not title:
-            raise ValueError("task title must not be empty")
+        """Create a space task at the bottom of its status column."""
+        title = parse_title(title)
+        description = parse_description(description)
         parsed_assignees = parse_assignees(assignees) or ()
+        task_status = parse_status(status) if status is not None else TaskStatus.TODO
+        task_priority = parse_priority(priority)
+        task_labels = parse_labels(labels)
+        due = parse_due_date(due_date)
         await self._require_member_assignees(space_id, parsed_assignees)
-        due: date | None = None
-        if due_date:
-            try:
-                due = date.fromisoformat(due_date[:10])
-            except ValueError as exc:
-                raise ValueError(f"invalid due_date: {due_date!r}") from exc
         now = datetime.now(timezone.utc)
         task = Task(
             # Owner-bound (v_36): only the creator's household can
@@ -788,14 +1012,16 @@ class SpaceTaskService(BusPublisherMixin):
             ),
             list_id=list_id,
             title=title,
-            status=TaskStatus.TODO,
-            position=0,
+            status=task_status,
+            position=await self._repo.next_position(list_id, space_id=space_id),
             created_by=created_by,
             created_at=now,
             updated_at=now,
             description=description,
             due_date=due,
             assignees=parsed_assignees,
+            priority=task_priority,
+            labels=task_labels,
         )
         if not await self._repo.save(task, space_id=space_id):
             raise KeyError(f"task list {list_id!r} not found in this space")
@@ -820,36 +1046,25 @@ class SpaceTaskService(BusPublisherMixin):
         *,
         space_id: str,
         actor_user_id: str,
-        title: str | None = None,
-        description: str | None = None,
-        status: str | None = None,
-        due_date: str | None = None,
-        assignees: list[str] | None = None,
-        position: int | None = None,
+        title: str | None | Unset = UNSET,
+        description: str | None | Unset = UNSET,
+        status: str | None | Unset = UNSET,
+        due_date: str | None | Unset = UNSET,
+        assignees: list[str] | None | Unset = UNSET,
+        position: int | None | Unset = UNSET,
+        priority: str | None | Unset = UNSET,
+        labels: list[str] | None | Unset = UNSET,
     ) -> Task:
+        """Partial edit, same field rules as :meth:`TaskService.update_task`.
+
+        Collaborative: any writable member may edit any task of the space
+        (the route's writer gate already ran).
+        """
         task = await self._task_in_space(task_id, space_id)
 
-        kwargs: dict = {"updated_at": datetime.now(timezone.utc)}
-        if title is not None:
-            title = title.strip()
-            if not title:
-                raise ValueError("task title must not be empty")
-            kwargs["title"] = title
-        if description is not None:
-            kwargs["description"] = description
-        if status is not None:
-            try:
-                kwargs["status"] = TaskStatus(status)
-            except ValueError as exc:
-                raise ValueError(f"invalid status: {status!r}") from exc
-        if due_date is not None:
-            try:
-                kwargs["due_date"] = (
-                    date.fromisoformat(due_date[:10]) if due_date else None
-                )
-            except ValueError as exc:
-                raise ValueError(f"invalid due_date: {due_date!r}") from exc
-        parsed_assignees = parse_assignees(assignees)
+        parsed_assignees = (
+            None if isinstance(assignees, Unset) else parse_assignees(assignees)
+        )
         if parsed_assignees is not None:
             # Only ids being ADDED are checked: an existing assignee who
             # has since left must not block an unrelated edit.
@@ -858,11 +1073,17 @@ class SpaceTaskService(BusPublisherMixin):
                 space_id,
                 tuple(u for u in parsed_assignees if u not in previous_ids),
             )
-            kwargs["assignees"] = parsed_assignees
-        if position is not None:
-            kwargs["position"] = int(position)
-
-        updated = replace(task, **kwargs)
+        updated = _apply_edits(
+            task,
+            title=title,
+            description=description,
+            status=status,
+            due_date=due_date,
+            assignees=parsed_assignees,
+            position=position,
+            priority=priority,
+            labels=labels,
+        )
         if not await self._repo.save(updated, space_id=space_id):
             raise KeyError(f"space task {updated.id!r} not found in this space")
         saved = updated
@@ -888,6 +1109,48 @@ class SpaceTaskService(BusPublisherMixin):
                     )
                 )
         return saved
+
+    async def reorder_tasks(
+        self,
+        space_id: str,
+        list_id: str,
+        *,
+        ordered_ids: list[str],
+        moved_id: str,
+    ) -> list[Task]:
+        """Persist a new task order within a space list.
+
+        Mirrors :meth:`TaskService.reorder_tasks`: each id gets its index
+        as its ``position``; an id that is not a task of ``list_id`` in
+        ``space_id`` is skipped. The list itself must live in
+        ``space_id`` (→ 404 otherwise). Every moved row emits
+        :class:`TaskUpdated`, so it federates to the space's member
+        households like any other edit. ``moved_id`` is the dragged task
+        (it must be in the order and in this list); space tasks are
+        collaborative, so the route's writer gate is the only rights
+        check.
+        """
+        _require_moved_id(moved_id, ordered_ids)
+        await self._list_in_space(list_id, space_id)
+        moved = await self._task_in_space(moved_id, space_id)
+        if moved.list_id != list_id:
+            raise KeyError(f"space task {moved_id!r} not found in this list")
+        updated: list[Task] = []
+        for idx, tid in enumerate(ordered_ids):
+            held = await self._repo.get(tid)
+            if held is None or held[0] != space_id:
+                continue
+            task = held[1]
+            if task.list_id != list_id or task.position == idx:
+                continue
+            new_task = replace(
+                task, position=idx, updated_at=datetime.now(timezone.utc)
+            )
+            if not await self._repo.save(new_task, space_id=space_id):
+                continue
+            updated.append(new_task)
+            await self._emit(TaskUpdated(task=new_task, space_id=space_id))
+        return updated
 
     async def delete_task(self, task_id: str, *, space_id: str) -> None:
         task = await self._task_in_space(task_id, space_id)

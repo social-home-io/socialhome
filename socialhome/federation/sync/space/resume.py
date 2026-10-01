@@ -13,7 +13,9 @@ Resource types replayed today:
 * ``SPACE_POST_CREATED``         — posts in the space.
 * ``SPACE_COMMENT_CREATED``      — comments on those posts (joined
   via ``space_post_comments.post_id`` → ``space_posts.space_id``).
-* ``SPACE_TASK_CREATED``         — task list rows.
+* ``SPACE_TASK_LIST_CREATED``    — the space's task lists created since
+  ``since`` (v_40), sent before the tasks filed under them.
+* ``SPACE_TASK_CREATED``         — task rows.
 * ``SPACE_PAGE_CREATED``         — wiki-style pages.
 * ``SPACE_STICKY_CREATED``       — corkboard notes.
 * ``SPACE_CALENDAR_EVENT_CREATED`` — calendar events (RRULEs included).
@@ -37,6 +39,7 @@ from typing import TYPE_CHECKING
 
 from ....domain.federation import FederationEventType
 from ....domain.link_preview import link_preview_to_dict
+from ....domain.task import task_list_to_wire_dict, task_to_wire_dict
 
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
@@ -45,7 +48,6 @@ if TYPE_CHECKING:
     from ....domain.page import Page
     from ....domain.post import Comment, Post
     from ....domain.sticky import Sticky
-    from ....domain.task import Task
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
     from ....services.gallery_tombstones import GalleryAlbumTombstones
@@ -210,6 +212,8 @@ class SpaceSyncResumeProvider:
         sent = 0
         sent += await self._replay_posts(space_id, since, to=instance_id)
         sent += await self._replay_comments(space_id, since, to=instance_id)
+        # Lists before tasks: a task is only filed under a list held here.
+        sent += await self._replay_task_lists(space_id, since, to=instance_id)
         sent += await self._replay_tasks(space_id, since, to=instance_id)
         sent += await self._replay_pages(space_id, since, to=instance_id)
         sent += await self._replay_stickies(space_id, since, to=instance_id)
@@ -280,6 +284,28 @@ class SpaceSyncResumeProvider:
                 )
         return sent
 
+    async def _replay_task_lists(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        to: str,
+    ) -> int:
+        if self._space_task_repo is None:
+            return 0
+        lists = await self._space_task_repo.list_lists_since(
+            space_id,
+            since,
+            limit=MAX_PER_RESOURCE,
+        )
+        return await self._send_each(
+            lists,
+            FederationEventType.SPACE_TASK_LIST_CREATED,
+            lambda task_list: task_list_to_wire_dict(task_list, space_id),
+            space_id=space_id,
+            to=to,
+        )
+
     async def _replay_tasks(
         self,
         space_id: str,
@@ -297,7 +323,7 @@ class SpaceSyncResumeProvider:
         return await self._send_each(
             tasks,
             FederationEventType.SPACE_TASK_CREATED,
-            _task_to_payload,
+            lambda task: task_to_wire_dict(task, space_id),
             space_id=space_id,
             to=to,
         )
@@ -508,21 +534,6 @@ def _comment_to_payload(post_id: str, comment: "Comment") -> dict:
         "media_url": comment.media_url,
         "parent_id": comment.parent_id,
         "occurred_at": _iso(comment.created_at),
-    }
-
-
-def _task_to_payload(task: "Task") -> dict:
-    return {
-        "id": task.id,
-        "list_id": task.list_id,
-        "title": task.title,
-        "status": task.status.value,
-        "position": task.position,
-        "created_by": task.created_by,
-        "description": task.description,
-        "assignees": list(task.assignees),
-        "created_at": _iso(task.created_at),
-        "updated_at": _iso(task.updated_at),
     }
 
 

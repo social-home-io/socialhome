@@ -899,7 +899,7 @@ async def test_task_reorder_bad_payload_422(client):
 async def test_task_reorder_unknown_list_404(client):
     r = await client.post(
         "/api/tasks/lists/does-not-exist/reorder",
-        json={"order": []},
+        json={"order": ["x"], "moved_id": "x"},
         headers=_auth(client._tok),
     )
     assert r.status == 404

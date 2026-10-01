@@ -151,6 +151,13 @@ That single command runs the full sequence:
      Both edits fan out to Alpha and Gamma as ``SPACE_TIMETABLE_UPSERTED``
      (member households only, gated on
      ``FederationCapability.MIN_FOR_SPACE_TIMETABLE``).
+   - **Space task list + task (v_40).** Beta creates a task list
+     ("Umzug") and a task with ``priority``, ``labels`` and a ``due_date``;
+     they fan out as ``SPACE_TASK_LIST_CREATED`` then
+     ``SPACE_TASK_CREATED`` (member households only). The step asserts
+     Alpha and Gamma hold the list and the task with every field, then
+     Beta lowers the priority and clears the due date
+     (``SPACE_TASK_UPDATED``) for ``verify`` to check.
 
 4. ``verify`` — assertions across all three households:
    - Every confirmed peer advertises the build's current ``OURS``
@@ -170,6 +177,9 @@ That single command runs the full sequence:
      proves the ``timetable`` feature toggle reached them — and a member's
      ``PATCH`` of it must answer 403 (writes are owner / admin only). The
      ``OURS`` round-trip above covers v_39 itself.
+   - **v_40 space task + list.** Beta's edit of the task ``calendar``
+     created (priority ``high`` → ``low``, due date cleared with an explicit
+     ``null``) reached Alpha and Gamma, and the labels survived it.
    - **v_31 routed-origin signature (#692).** Every ``SPACE_ROUTED`` leg
      carries ``origin_sig`` inside its sealed blob and the endpoint
      verifies it against the identity key it already holds for ``path[0]``
@@ -376,7 +386,7 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (39 since the space-timetable bump).
+   ``OURS`` (40 since the task priority / labels bump).
 
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is

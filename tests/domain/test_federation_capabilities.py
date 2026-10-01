@@ -6,7 +6,20 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 39
+    assert fc.OURS == 40
+
+
+def test_task_priority_labels_capability_threshold():
+    """v_40 — task priority + labels and the shared task wire codec.
+    Space-scoped: a behind member household's people don't see them."""
+    assert fc.FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS == 40
+    assert fc.FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert "Task priority and labels" in fc.features_missing_below(39)
+    assert fc.space_features_missing_below(39) == ["Task priority and labels"]
+    assert fc.features_missing_below(40) == []
 
 
 def test_space_timetable_capability_threshold():
@@ -59,6 +72,7 @@ def test_owner_bound_content_id_capability_threshold():
     assert fc.space_features_missing_below(35) == [
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
 
 
@@ -75,6 +89,7 @@ def test_moment_origin_signature_capability_threshold():
     assert fc.space_features_missing_below(34) == [
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
 
 

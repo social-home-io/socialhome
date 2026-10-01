@@ -6,7 +6,9 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from socialhome.domain.task import Task, TaskList, TaskStatus
+import copy
+
+from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
 
 
@@ -399,3 +401,81 @@ async def test_space_task_list_delete_refuses_foreign_space(two_spaces):
     assert await two_spaces.space_repo.get_list("l-2") is not None
     assert await two_spaces.space_repo.delete_list("l-2", space_id="sp-2") is True
     assert await two_spaces.space_repo.get_list("l-2") is None
+
+
+# ── Priority, labels, next_position (0064) ────────────────────────────────
+
+
+async def test_household_priority_and_labels_round_trip(env):
+    await env.repo.save_list(_list_())
+    t = copy.replace(
+        _task("t-pl"), priority=TaskPriority.URGENT, labels=("Home", "Car")
+    )
+    await env.repo.save(t)
+    got = await env.repo.get("t-pl")
+    assert got is not None
+    assert got.priority is TaskPriority.URGENT
+    assert got.labels == ("Home", "Car")
+    # Upsert clears both.
+    await env.repo.save(copy.replace(t, priority=None, labels=()))
+    got = await env.repo.get("t-pl")
+    assert got is not None and got.priority is None and got.labels == ()
+
+
+async def test_household_unknown_stored_priority_reads_as_none(env):
+    await env.repo.save_list(_list_())
+    await env.repo.save(_task("t-raw"))
+    row = await env.db.fetchone("SELECT priority, labels_json FROM tasks")
+    assert row["priority"] is None and row["labels_json"] == "[]"
+
+
+async def test_household_next_position(env):
+    await env.repo.save_list(_list_())
+    await env.repo.save_list(_list_("lst-2", "Other"))
+    assert await env.repo.next_position("lst-1") == 0
+    await env.repo.save(copy.replace(_task("a"), position=4))
+    await env.repo.save(copy.replace(_task("b"), position=1))
+    await env.repo.save(copy.replace(_task("c", list_id="lst-2"), position=9))
+    assert await env.repo.next_position("lst-1") == 5
+    assert await env.repo.next_position("lst-2") == 10
+
+
+async def test_space_priority_labels_and_next_position(env):
+    await env.space_repo.save_list(_list_("sl-1"), space_id="sp-1")
+    assert await env.space_repo.next_position("sl-1", space_id="sp-1") == 0
+    t = copy.replace(
+        _task("st-pl", list_id="sl-1"),
+        position=2,
+        priority=TaskPriority.LOW,
+        labels=("School",),
+    )
+    assert await env.space_repo.save(t, space_id="sp-1")
+    held = await env.space_repo.get("st-pl")
+    assert held is not None
+    assert held[1].priority is TaskPriority.LOW
+    assert held[1].labels == ("School",)
+    assert await env.space_repo.next_position("sl-1", space_id="sp-1") == 3
+    # Another space's view of the same list id sees nothing.
+    assert await env.space_repo.next_position("sl-1", space_id="sp-other") == 0
+
+
+async def test_space_list_lists_since(env):
+    await env.space_repo.save_list(_list_("sl-old"), space_id="sp-1")
+    await env.db.enqueue(
+        "UPDATE space_task_lists SET created_at='2026-01-01 00:00:00' WHERE id='sl-old'"
+    )
+    await env.space_repo.save_list(_list_("sl-new"), space_id="sp-1")
+    got = await env.space_repo.list_lists_since("sp-1", "2026-06-01T00:00:00+00:00")
+    assert [lst.id for lst in got] == ["sl-new"]
+    assert await env.space_repo.list_lists_since("sp-other", "2000-01-01") == []
+
+
+async def test_space_list_lists_since_includes_the_same_second(env):
+    """M6: ``created_at`` has second precision, so a list created in the
+    same second as ``since`` must still be replayed (``>=``)."""
+    await env.space_repo.save_list(_list_("sl-same"), space_id="sp-1")
+    await env.db.enqueue(
+        "UPDATE space_task_lists SET created_at='2026-06-01 10:00:00' WHERE id='sl-same'"
+    )
+    got = await env.space_repo.list_lists_since("sp-1", "2026-06-01T10:00:00.400+00:00")
+    assert [lst.id for lst in got] == ["sl-same"]

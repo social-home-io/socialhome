@@ -986,3 +986,51 @@ async def test_0063_timetable_tables_and_feature_columns(tmp_path):
         assert await db.fetchall("SELECT 1 FROM space_timetables") == []
     finally:
         await db.shutdown()
+
+
+async def test_0064_task_priority_and_labels_columns(tmp_path):
+    """0064 adds ``priority`` (nullable, CHECK-constrained) and
+    ``labels_json`` (NOT NULL, default ``'[]'``) to both task tables, so
+    every existing row reads as "no priority, no labels"."""
+    db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        for table in ("tasks", "space_tasks"):
+            cols = {
+                r["name"]: r for r in await db.fetchall(f"PRAGMA table_info({table})")
+            }
+            assert cols["priority"]["notnull"] == 0, table
+            assert cols["priority"]["dflt_value"] is None, table
+            assert cols["labels_json"]["notnull"] == 1, table
+            assert cols["labels_json"]["dflt_value"] == "'[]'", table
+
+        await db.enqueue(
+            "INSERT INTO task_lists(id, name, created_by) VALUES('l', 'L', 'u')"
+        )
+        await db.enqueue(
+            "INSERT INTO tasks(id, list_id, title, created_by)"
+            " VALUES('t', 'l', 'T', 'u')"
+        )
+        row = await db.fetchone("SELECT priority, labels_json FROM tasks")
+        assert row["priority"] is None
+        assert row["labels_json"] == "[]"
+        await db.enqueue("UPDATE tasks SET priority='urgent' WHERE id='t'")
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.enqueue("UPDATE tasks SET priority='critical' WHERE id='t'")
+
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES(?,?,?,?,?)",
+            ("sp-tk", "S", "inst-x", "alice", "aabb" * 16),
+        )
+        await db.enqueue(
+            "INSERT INTO space_task_lists(id, space_id, name, created_by)"
+            " VALUES('sl', 'sp-tk', 'L', 'u')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.enqueue(
+                "INSERT INTO space_tasks(id, list_id, space_id, title,"
+                " created_by, priority) VALUES('st', 'sl', 'sp-tk', 'T', 'u', 'x')"
+            )
+    finally:
+        await db.shutdown()

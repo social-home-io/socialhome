@@ -22,7 +22,8 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 39
+    assert OURS == 40
+    assert FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS == 40
     assert FederationCapability.MIN_FOR_SPACE_TIMETABLE == 39
     assert FederationCapability.MIN_FOR_MOMENT_NO_RELAY == 38
     assert FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM == 37
@@ -145,6 +146,7 @@ def test_space_features_missing_below_v13():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
 
 
@@ -166,6 +168,7 @@ def test_space_features_missing_below_v16():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
 
 
@@ -184,6 +187,7 @@ def test_space_features_missing_below_v22():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
 
 
@@ -200,6 +204,7 @@ def test_space_features_missing_below_v23():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
 
 
@@ -217,6 +222,7 @@ def test_space_features_missing_below_v24():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
     assert space_features_missing_below(27) == [
         "Mesh route-stale nack",
@@ -228,12 +234,13 @@ def test_space_features_missing_below_v24():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
 
 
 def test_space_features_missing_below_v32_is_empty():
-    """Above v32 only the v36 content ids and the v39 space timetables are
-    space-scoped; a v39 member lacks none. A
+    """Above v32 only the v36 content ids, the v39 space timetables and the
+    v40 task priority / labels are space-scoped; a v40 member lacks none. A
     v31 member lacks the roster snapshot; a v30 member also the
     authenticated mesh-routed origin; a v29
     one also lacks cross-household Follower seats, a v28 one the
@@ -247,6 +254,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
     assert space_features_missing_below(29) == [
         "Cross-household Follower seats",
@@ -256,6 +264,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
     assert space_features_missing_below(30) == [
         "Authenticated mesh-routed origin",
@@ -264,6 +273,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
     assert space_features_missing_below(31) == [
         "Space roster snapshot",
@@ -271,29 +281,41 @@ def test_space_features_missing_below_v32_is_empty():
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
     assert space_features_missing_below(32) == [
         "Shared gallery albums",
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
     assert space_features_missing_below(33) == [
         "Creator-bound album ids",
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
     assert space_features_missing_below(34) == [
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
     assert space_features_missing_below(35) == [
         "Creator-bound content ids",
         "Space timetables",
+        "Task priority and labels",
     ]
-    assert space_features_missing_below(36) == ["Space timetables"]
-    assert space_features_missing_below(38) == ["Space timetables"]
-    assert space_features_missing_below(39) == []
+    assert space_features_missing_below(36) == [
+        "Space timetables",
+        "Task priority and labels",
+    ]
+    assert space_features_missing_below(38) == [
+        "Space timetables",
+        "Task priority and labels",
+    ]
+    assert space_features_missing_below(39) == ["Task priority and labels"]
+    assert space_features_missing_below(40) == []
 
 
 def test_space_scoped_min_versions_are_capability_constants():

@@ -137,6 +137,8 @@ async def test_reorder_moves_positions(env):
     await env.task_svc.reorder_tasks(
         lst.id,
         ordered_ids=[c.id, b.id, a.id],
+        moved_id=c.id,
+        actor_user_id="u1",
     )
     rows = sorted(
         await env.task_svc.list_tasks(lst.id),
@@ -147,7 +149,9 @@ async def test_reorder_moves_positions(env):
 
 async def test_reorder_unknown_list_raises(env):
     with pytest.raises(KeyError):
-        await env.task_svc.reorder_tasks("nope", ordered_ids=[])
+        await env.task_svc.reorder_tasks(
+            "nope", ordered_ids=["x"], moved_id="x", actor_user_id="u1"
+        )
 
 
 async def test_reorder_skips_foreign_task_id(env):
@@ -167,6 +171,8 @@ async def test_reorder_skips_foreign_task_id(env):
     updated = await env.task_svc.reorder_tasks(
         l1.id,
         ordered_ids=[t_in_l2.id, t_in_l1.id],
+        moved_id=t_in_l1.id,
+        actor_user_id="u1",
     )
     # t_in_l2 was skipped; t_in_l1 was unchanged (already at position 0 → 1).
     ids = {u.id for u in updated}

@@ -52,6 +52,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
     mint_owner_bound_id,
 )
@@ -94,6 +95,10 @@ _TS = "2026-06-01T10:00:00.000000+00:00"
 #: else, and of the legacy (unbound) shape no timetable ever had.
 _TT_A = mint_owner_bound_id(SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-adm")
 _TT_NEW = mint_owner_bound_id(SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-adm")
+#: Fresh task-list ids bound to u-a in SP (task-list creates are v_40, so
+#: every sender mints bound ids — a legacy id is refused off the host).
+_LIST_A = mint_owner_bound_id(SPACE_TASK_LIST_KIND, space_id=SP, owner_user_id="u-a")
+_LIST_SYNC = mint_owner_bound_id(SPACE_TASK_LIST_KIND, space_id=SP, owner_user_id="u-a")
 _TT_FOR_U_A = mint_owner_bound_id(
     SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-a"
 )
@@ -408,6 +413,13 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         FET.SPACE_TASK_CREATED,
         "task by u-a",
         {"id": "task-new", "list_id": "list-a", "title": "x", "created_by": "u-a"},
+        (AUTHOR, HOST),
+        (OTHER, ADMIN),
+    ),
+    (
+        FET.SPACE_TASK_LIST_CREATED,
+        "task list by u-a",
+        {"id": _LIST_A, "name": "N", "created_by": "u-a"},
         (AUTHOR, HOST),
         (OTHER, ADMIN),
     ),
@@ -727,6 +739,20 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         FET.SPACE_TASK_DELETED,
         "delete u-a's task",
         {"id": "task-a"},
+        (AUTHOR, OTHER, ADMIN, HOST),
+        (STRANGER,),
+    ),
+    (
+        FET.SPACE_TASK_LIST_UPDATED,
+        "rename u-a's task list",
+        {"id": "list-a", "name": "Renamed"},
+        (AUTHOR, OTHER, ADMIN, HOST),
+        (STRANGER,),
+    ),
+    (
+        FET.SPACE_TASK_LIST_DELETED,
+        "delete u-a's task list",
+        {"id": "list-a"},
         (AUTHOR, OTHER, ADMIN, HOST),
         (STRANGER,),
     ),
@@ -1666,6 +1692,27 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         ],
         (AUTHOR, HOST),
         (OTHER,),
+    ),
+    (
+        "task_lists",
+        "a new task list by u-a",
+        [{"id": _LIST_SYNC, "name": "x", "created_by": "u-a"}],
+        (AUTHOR, HOST),
+        (OTHER,),
+    ),
+    (
+        "task_lists",
+        "a pre-v40 (legacy id) task list",
+        [{"id": "l-legacy-sync", "name": "x", "created_by": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "task_lists",
+        "rename u-a's task list",
+        [{"id": "list-a", "name": "rw", "created_by": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER),
     ),
     (
         "tasks",

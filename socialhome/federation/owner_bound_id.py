@@ -69,6 +69,8 @@ SPACE_POST_KIND: str = "space-post"
 SPACE_COMMENT_KIND: str = "space-comment"
 SPACE_CALENDAR_EVENT_KIND: str = "space-calendar-event"
 SPACE_TASK_KIND: str = "space-task"
+#: A space task list (v_40). Its owner is the member who created it.
+SPACE_TASK_LIST_KIND: str = "space-task-list"
 SPACE_PAGE_KIND: str = "space-page"
 SPACE_STICKY_KIND: str = "space-sticky"
 #: A space timetable (v_39). Its owner is the admin who created it.

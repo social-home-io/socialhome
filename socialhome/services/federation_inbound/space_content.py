@@ -45,6 +45,12 @@ from ...domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    TaskCreated,
+    TaskDeleted,
+    TaskListCreated,
+    TaskListDeleted,
+    TaskListUpdated,
+    TaskUpdated,
     TimetableDeleted,
     TimetableSaved,
 )
@@ -56,9 +62,11 @@ from ...federation.owner_bound_id import (
     SPACE_PAGE_KIND,
     SPACE_STICKY_KIND,
     SPACE_TASK_KIND,
+    SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
     OwnerBinding,
     check_owner_bound_id,
+    is_owner_bound,
     owner_bound_id_refused,
 )
 from ...federation.space_scope import (
@@ -78,7 +86,7 @@ from ...domain.post import (
 )
 from ...domain.space import SpaceZone
 from ...domain.sticky import Sticky
-from ...domain.task import Task, TaskStatus
+from ...domain.task import TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
     Timetable,
     TimetableValidationError,
@@ -90,7 +98,7 @@ from ...domain.timetable import parse_datetime as parse_timetable_datetime
 from ...domain.user import SYSTEM_AUTHOR
 from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
-from ...utils.datetime import parse_iso8601_lenient, parse_iso8601_optional
+from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
 from ..inbound_media_store import local_media_ref, local_media_refs
@@ -194,6 +202,16 @@ class SpaceContentInboundHandlers:
         registry.register(FederationEventType.SPACE_TASK_CREATED, self._on_task_saved)
         registry.register(FederationEventType.SPACE_TASK_UPDATED, self._on_task_saved)
         registry.register(FederationEventType.SPACE_TASK_DELETED, self._on_task_deleted)
+        # Task lists (v_40)
+        registry.register(
+            FederationEventType.SPACE_TASK_LIST_CREATED, self._on_task_list_created
+        )
+        registry.register(
+            FederationEventType.SPACE_TASK_LIST_UPDATED, self._on_task_list_updated
+        )
+        registry.register(
+            FederationEventType.SPACE_TASK_LIST_DELETED, self._on_task_list_deleted
+        )
 
         # Pages
         registry.register(FederationEventType.SPACE_PAGE_CREATED, self._on_page_saved)
@@ -347,56 +365,80 @@ class SpaceContentInboundHandlers:
             return
         p = event.payload
         task_id = str(p.get("id") or p.get("task_id") or "")
-        list_id = str(p.get("list_id") or "")
-        title = str(p.get("title") or "")
-        if not task_id or not list_id or not title:
-            log.debug("SPACE_TASK_* missing required field")
-            return
-        try:
-            status = TaskStatus(str(p.get("status") or "todo"))
-        except ValueError:
-            status = TaskStatus.TODO
-        assignees = p.get("assignees") or ()
-        task = Task(
-            id=task_id,
-            list_id=list_id,
-            title=title,
-            status=status,
-            position=int(p.get("position") or 0),
-            created_by=str(p.get("created_by") or ""),
-            created_at=parse_iso8601_lenient(p.get("created_at")),
-            updated_at=parse_iso8601_lenient(
-                p.get("updated_at") or p.get("occurred_at")
-            ),
-            description=p.get("description"),
-            due_date=None,  # due_date is a ``date`` — parsing lives in the service
-            assignees=tuple(str(a) for a in assignees),
-        )
         # Collaborative, like the local rule (``SpaceTaskService`` lets any
         # space member update, archive or delete any task): an edit needs a
         # writer household, and the upsert keeps the row's own
         # ``created_by``, so the claim is only bound for a new task.
-        existing = await self._task_repo.get(task_id)
-        if existing is not None and existing[0] != space_id:
+        held = await self._task_repo.get(task_id) if task_id else None
+        if held is not None and held[0] != space_id:
             log_cross_space_refusal(
                 event, space_id=space_id, what="task", row_id=task_id
             )
             return
+        existing = held[1] if held is not None else None
+        # The shared wire codec merges onto the held row: an absent key
+        # keeps our value, and a v39 sender's lossy fields never wipe it.
+        task = task_from_wire_dict(p, existing=existing)
+        if task is None:
+            log.warning(
+                "%s from %s: task without an id, list id or visible title — dropping",
+                event.event_type,
+                event.from_instance,
+            )
+            return
         if existing is None and self._bound_id_refused(
-            event, SPACE_TASK_KIND, task_id, space_id, task.created_by
+            event, SPACE_TASK_KIND, task.id, space_id, task.created_by
         ):
             return
         if not await self._collaborative_write_allowed(
             event,
             space_id,
             what="task",
-            row_id=task_id,
+            row_id=task.id,
             claimed_author=task.created_by if existing is None else "",
         ):
             return
         if not await self._task_repo.save(task, space_id=space_id):
-            log_cross_space_refusal(
-                event, space_id=space_id, what="task", row_id=task_id
+            if existing is None:
+                # Most often a task that overtook its list's create. The
+                # list's own event or the ``task_lists`` sync heals it — a
+                # task never creates its list.
+                log.warning(
+                    "%s from %s: task %s names list %s, which is not held in "
+                    "space %s — refusing the write",
+                    event.event_type,
+                    event.from_instance,
+                    task.id,
+                    task.list_id,
+                    space_id,
+                )
+            else:
+                log_cross_space_refusal(
+                    event, space_id=space_id, what="task", row_id=task.id
+                )
+            return
+        # Live refresh for local members, with the row as STORED (the
+        # upsert keeps columns a payload can't change, like ``created_by``);
+        # ``origin_instance_id`` stops the outbound bridge from echoing the
+        # peer's own edit back.
+        stored = await self._task_repo.get(task.id)
+        if stored is not None:
+            task = stored[1]
+        if existing is None:
+            await self._bus.publish(
+                TaskCreated(
+                    task=task,
+                    space_id=space_id,
+                    origin_instance_id=event.from_instance,
+                )
+            )
+        else:
+            await self._bus.publish(
+                TaskUpdated(
+                    task=task,
+                    space_id=space_id,
+                    origin_instance_id=event.from_instance,
+                )
             )
 
     async def _on_task_deleted(self, event: "FederationEvent") -> None:
@@ -425,6 +467,186 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(
                 event, space_id=space_id, what="task", row_id=task_id
             )
+            return
+        await self._bus.publish(
+            TaskDeleted(
+                task_id=task_id,
+                list_id=existing[1].list_id,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    # ─── Task lists (v_40) ───────────────────────────────────────────────
+    #
+    # Collaborative like the local rule (any writable member may create,
+    # rename or delete a space list): a write needs a writer household; a
+    # new list's id is owner-bound to its ``created_by``.
+
+    async def _on_task_list_created(self, event: "FederationEvent") -> None:
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        lst = task_list_from_wire_dict(event.payload)
+        if lst is None:
+            log.warning(
+                "%s from %s: task list without an id or visible name — dropping",
+                event.event_type,
+                event.from_instance,
+            )
+            return
+        held = await self._task_repo.get_list(lst.id)
+        if held is not None and held[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task list", row_id=lst.id
+            )
+            return
+        if held is None and not lst.created_by:
+            log.warning(
+                "%s from %s: new task list %s names no created_by — dropping",
+                event.event_type,
+                event.from_instance,
+                lst.id,
+            )
+            return
+        if held is None and self._bound_id_refused(
+            event, SPACE_TASK_LIST_KIND, lst.id, space_id, lst.created_by
+        ):
+            return
+        if held is None and not is_owner_bound(lst.id):
+            # Every v_40 sender mints owner-bound list ids, and this event
+            # is new in v_40 — a legacy (uuid4) id here can only be a squat
+            # on a pre-v_40 list another space holds. Such lists reach us
+            # through their host's sync stream instead.
+            log.warning(
+                "%s from %s: task list %s for space %s has a legacy (unbound) "
+                "id — refusing; pre-v40 lists arrive through the host's sync",
+                event.event_type,
+                event.from_instance,
+                lst.id,
+                space_id,
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event,
+            space_id,
+            what="task list",
+            row_id=lst.id,
+            claimed_author=lst.created_by if held is None else "",
+        ):
+            return
+        if not await self._task_repo.save_list(lst, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task list", row_id=lst.id
+            )
+            return
+        lst = await self._stored_list(lst)
+        if held is None:
+            await self._bus.publish(
+                TaskListCreated(
+                    list_id=lst.id,
+                    name=lst.name,
+                    space_id=space_id,
+                    created_by=lst.created_by,
+                    origin_instance_id=event.from_instance,
+                )
+            )
+        else:
+            await self._bus.publish(
+                TaskListUpdated(
+                    list_id=lst.id,
+                    name=lst.name,
+                    space_id=space_id,
+                    origin_instance_id=event.from_instance,
+                )
+            )
+
+    async def _on_task_list_updated(self, event: "FederationEvent") -> None:
+        """A rename. Only a list already held here is renamed — an unseen
+        list arrives through its create or the ``task_lists`` sync."""
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        lst = task_list_from_wire_dict(event.payload)
+        if lst is None:
+            log.warning(
+                "%s from %s: task list without an id or visible name — dropping",
+                event.event_type,
+                event.from_instance,
+            )
+            return
+        held = await self._task_repo.get_list(lst.id)
+        if held is None:
+            log_not_applied(
+                event, what="task list", row_id=lst.id, reason="no such list here"
+            )
+            return
+        if held[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task list", row_id=lst.id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event, space_id, what="task list", row_id=lst.id
+        ):
+            return
+        renamed = TaskList(id=lst.id, name=lst.name, created_by=held[1].created_by)
+        if not await self._task_repo.save_list(renamed, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task list", row_id=lst.id
+            )
+            return
+        renamed = await self._stored_list(renamed)
+        await self._bus.publish(
+            TaskListUpdated(
+                list_id=renamed.id,
+                name=renamed.name,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _stored_list(self, fallback: TaskList) -> TaskList:
+        """The list as the repo now holds it (for the live event)."""
+        stored = await self._task_repo.get_list(fallback.id)
+        return stored[1] if stored is not None else fallback
+
+    async def _on_task_list_deleted(self, event: "FederationEvent") -> None:
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        p = event.payload
+        list_id = str(p.get("id") or p.get("list_id") or "")
+        if not list_id:
+            return
+        held = await self._task_repo.get_list(list_id)
+        if held is None:
+            log_not_applied(
+                event, what="task list", row_id=list_id, reason="no such list here"
+            )
+            return
+        if held[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task list", row_id=list_id
+            )
+            return
+        if not await self._collaborative_write_allowed(
+            event, space_id, what="task list", row_id=list_id
+        ):
+            return
+        # The FK cascade drops the list's tasks with it.
+        if not await self._task_repo.delete_list(list_id, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="task list", row_id=list_id
+            )
+            return
+        await self._bus.publish(
+            TaskListDeleted(
+                list_id=list_id,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     # ─── Pages ───────────────────────────────────────────────────────────
 

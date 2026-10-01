@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
-from .tasks import _task_to_dict
+from .....domain.task import task_to_wire_dict
 
 if TYPE_CHECKING:
     from .....repositories.task_repo import AbstractSpaceTaskRepo
@@ -24,4 +24,6 @@ class TasksArchivedExporter:
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
         tasks = await self._repo.list_by_space(space_id)
-        return [_task_to_dict(t) for t in tasks if t.archived_at is not None]
+        return [
+            task_to_wire_dict(t, space_id) for t in tasks if t.archived_at is not None
+        ]

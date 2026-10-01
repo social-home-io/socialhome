@@ -601,7 +601,30 @@ from __future__ import annotations
 #:   **Gated, no fallback**: a household below v_39 is simply not sent
 #:   them — the Timetable tab is absent for its members. An older peer
 #:   drops the unknown ``timetables`` sync resource on its own.
-OURS: int = 39
+#: * **v_40** (2026-10-01) — task priority + labels, and one task wire
+#:   codec. ``SPACE_TASK_CREATED`` / ``SPACE_TASK_UPDATED``, the ``tasks``
+#:   / ``tasks_archived`` sync records and the resume replay all carry the
+#:   same shape (:func:`socialhome.domain.task.task_to_wire_dict`), now with
+#:   ``priority`` (always present, ``null`` = none) and ``labels``, and the
+#:   receivers stop dropping ``due_date`` / ``archived_at``. Merge rule: an
+#:   absent key keeps the held value, a present key is authoritative. A
+#:   payload without ``priority`` is from a v_39 household, whose inbound
+#:   lost the due date / archive / recurrence of every remote task — for a
+#:   row already held those fields (and priority / labels) count as absent,
+#:   so its edits never wipe them. **Ungated, fallback**: the new fields
+#:   ride inside the sealed payload to every member household; a v_39
+#:   receiver ignores the unknown keys (its members just don't see
+#:   priority or labels). Space-scoped for the compatibility banner.
+#:   v_40 also federates space task **lists**: new event types
+#:   :data:`FederationEventType.SPACE_TASK_LIST_CREATED` / ``_UPDATED``
+#:   (rename) / ``_DELETED``, to member households only, plus the
+#:   ``task_lists`` sync resource (streamed before ``tasks``) and the
+#:   resume replay. Until now no list ever left its household, so every
+#:   remote ``SPACE_TASK_*`` was refused for naming a list the receiver did
+#:   not hold. New list ids are owner-bound (kind ``space-task-list``). A
+#:   v_39 receiver drops the unknown list events and sync resource — its
+#:   tasks keep failing as they always did, nothing regresses.
+OURS: int = 40
 
 
 class FederationCapability:
@@ -954,6 +977,15 @@ class FederationCapability:
     #: below it — its members just don't see the Timetable tab.
     MIN_FOR_SPACE_TIMETABLE = 39
 
+    #: Minimum proto_version that knows task ``priority`` / ``labels`` and
+    #: the shared task wire codec (v_40). Informational — senders never
+    #: gate on it: the fields always ride inside the sealed payload and a
+    #: v_39 receiver ignores them. Receivers read its absence (no
+    #: ``priority`` key) as "v_39 sender" and keep the fields it lost.
+    #: The same version federates space task lists (``SPACE_TASK_LIST_*``,
+    #: ungated: a v_39 receiver drops the unknown events).
+    MIN_FOR_TASK_PRIORITY_LABELS = 40
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1066,6 +1098,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_TIMETABLE,
         "Space timetables",
     ),
+    (
+        FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS,
+        "Task priority and labels",
+    ),
 ]
 
 
@@ -1130,6 +1166,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID,
         FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID,
         FederationCapability.MIN_FOR_SPACE_TIMETABLE,
+        FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS,
     }
 )
 
