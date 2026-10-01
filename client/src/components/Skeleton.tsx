@@ -464,36 +464,6 @@ export function MomentumArchiveSkeleton() {
 }
 
 
-/** Stand-in for ``TaskPage``: sidebar list + main column with task rows. */
-export function TasksSkeleton() {
-  return (
-    <div class="sh-tasks sh-tasks--skeleton" aria-busy="true">
-      <aside class="sh-tasks-sidebar">
-        <Skeleton shape="line" width="60%" height={14} />
-        {[0, 1, 2].map(i => (
-          <Skeleton
-            key={i}
-            shape="line"
-            width="80%"
-            height={12}
-            class="sh-skeleton-spaced"
-          />
-        ))}
-      </aside>
-      <main class="sh-tasks-main">
-        <Skeleton shape="line" width="40%" height={20} />
-        {[0, 1, 2, 3, 4].map(i => (
-          <div key={i} class="sh-skeleton-task-row">
-            <Skeleton shape="rect" width={18} height={18} />
-            <Skeleton shape="line" width="65%" height={13} />
-          </div>
-        ))}
-      </main>
-    </div>
-  )
-}
-
-
 /** A decorative shimmer bar — no role, no label. Only for use inside a
  *  container that already announces itself (``ListSkeleton``). */
 function Bone({ class: cls = '', width, height }: {

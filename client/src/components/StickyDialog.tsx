@@ -28,7 +28,7 @@ import { api } from '@/api'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
-import { stickies, type StickyRow } from '@/store/stickies'
+import { stickies, trackHouseholdSticky, type StickyRow } from '@/store/stickies'
 import { confirmDialog } from '@/components/confirm'
 
 /** Sticky-note swatch palette — same six colours the board cycles
@@ -145,6 +145,7 @@ export function StickyDialog() {
         if (!stickies.value.some(s => s.id === row.id)) {
           stickies.value = [...stickies.value, row]
         }
+        if (scopeSpaceId.value === null) trackHouseholdSticky(row.id, true)
         showToast('Sticky added', 'success')
       }
       open.value = false
@@ -166,6 +167,7 @@ export function StickyDialog() {
     try {
       await api.delete(`${endpointBase(scopeSpaceId.value)}/${sid}`)
       stickies.value = stickies.value.filter(s => s.id !== sid)
+      if (scopeSpaceId.value === null) trackHouseholdSticky(sid, false)
       open.value = false
       showToast('Sticky deleted', 'info')
     } catch (err: unknown) {

@@ -10,7 +10,6 @@ import {
   CalendarSkeleton,
   SpaceListSkeleton,
   BazaarSkeleton,
-  TasksSkeleton,
   CommentThreadSkeleton,
   NotificationListSkeleton,
   DmThreadSkeleton,
@@ -102,12 +101,6 @@ describe('Page-shaped skeletons', () => {
     expect(
       container.querySelectorAll('.sh-bazaar-card--skeleton').length,
     ).toBe(3)
-  })
-
-  it('TasksSkeleton renders sidebar + 5 task rows', () => {
-    const { container } = render(<TasksSkeleton />)
-    expect(container.querySelector('.sh-tasks-sidebar')).toBeTruthy()
-    expect(container.querySelectorAll('.sh-skeleton-task-row').length).toBe(5)
   })
 
   it('CommentThreadSkeleton defaults to 3 comment rows', () => {

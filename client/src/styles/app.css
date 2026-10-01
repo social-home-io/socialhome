@@ -1979,16 +1979,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   flex: 1;
   min-width: 0;
 }
-.sh-tasks--skeleton {
-  display: flex;
-  gap: var(--sh-space-md);
-}
-.sh-skeleton-task-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  margin-top: var(--sh-space-sm);
-}
 
 /* ───── 7. Feature surfaces ──────────────────────────────────────────── */
 
@@ -6502,14 +6492,13 @@ body.sh-dm-thread-open .sh-messages {
 .sh-task-group__name {
   flex: 1;
   margin: 0;
-  font-family: 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+  font-family: var(--sh-font-family-display);
   font-size: var(--sh-font-size-md);
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 .sh-task-group__count {
-  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1
-        ui-monospace, Menlo, Consolas, monospace;
+  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1 var(--sh-font-family-mono);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--sh-text-muted);
@@ -6527,16 +6516,6 @@ body.sh-dm-thread-open .sh-messages {
   color: var(--sh-text-muted);
   font-style: italic;
 }
-.sh-task-group__droppad {
-  margin: 0;
-  padding: var(--sh-space-md);
-  border: 2px dashed var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  text-align: center;
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-text-muted);
-}
-.sh-task-group--drop-target .sh-task-group__droppad,
 .sh-task-group--drop-target > .sh-list-card,
 .sh-task-group--drop-target > .sh-task-group__header {
   outline: 2px dashed currentColor;
@@ -6575,30 +6554,10 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-task-group--done.sh-task-group--drop-target { color: var(--sh-success); }
 
-/* Done as an "archive trailer" — the divider + section is
- * deliberately quieter than the open sections so the page reads
- * top-to-bottom as "what's next → in flight → archive of what's
- * off my plate." Mirrors the shopping list's "Already bought"
- * trailer. The bare section header is HIDDEN here (the
- * "n done · Clear all" divider takes its place) — we don't want
- * both a divider AND a header repeating the count. */
-.sh-tasks-done-divider {
-  margin-top: var(--sh-space-md);
-  font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-muted);
-}
-.sh-task-group--archive {
-  margin-top: var(--sh-space-xs);
-  opacity: 0.78;
-}
-.sh-task-group--archive .sh-task-group__header {
-  display: none;
-}
-.sh-task-group--archive .sh-task-row {
-  /* Cumulative with .sh-task--done (0.65 opacity on title). The
-   * section ``opacity: 0.78`` above gives the whole archive a
-   * trailing-quieter feel without making the text unreadable. */
-}
+/* Done as an "archive trailer" under the open sections: the
+ * ArchiveDivider ("Done (3) · Clear all") stands in for a header, the
+ * rows grey out and strike through (``.sh-task-item--done``). */
+.sh-task-group--archive { margin-top: var(--sh-space-xs); }
 
 /* Row state while it's being dragged — a quiet ghost so the user
  * doesn't lose track of the source position while the cursor
@@ -14706,7 +14665,9 @@ a.sh-link-preview-link:focus-visible {
 /* Tasks */
 .sh-tasks {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  /* ``minmax(0, …)``: a long nowrap title must ellipsize, not widen the
+   * column past the viewport. */
+  grid-template-columns: 240px minmax(0, 1fr);
   gap: var(--sh-space-lg);
 }
 .sh-tasks-sidebar {
@@ -14742,7 +14703,8 @@ a.sh-link-preview-link:focus-visible {
   border-bottom: 1px dashed var(--sh-border);
   margin-bottom: var(--sh-space-xs);
 }
-.sh-tasks-sidebar-header > .sh-muted {
+.sh-tasks-sidebar-header__count {
+  color: var(--sh-text-muted);
   font-size: var(--sh-font-size-xs);
   letter-spacing: 0;
   text-transform: none;
@@ -14755,15 +14717,8 @@ a.sh-link-preview-link:focus-visible {
   gap: 2px;
   border-radius: var(--sh-radius-md);
 }
-.sh-task-list-row .sh-icon-btn {
-  opacity: 0;
-  transition: opacity var(--sh-transition-fast), background var(--sh-transition-fast);
-  width: 28px;
-  height: 28px;
-  flex-shrink: 0;
-}
-.sh-task-list-row:hover .sh-icon-btn,
-.sh-task-list-row:focus-within .sh-icon-btn { opacity: 1; }
+/* The ⋯ trigger is a ``.sh-row-action--reveal`` (hover / focus to
+ * show; always visible without hover). */
 .sh-task-list-btn {
   background: transparent;
   border: none;
@@ -14791,94 +14746,10 @@ a.sh-link-preview-link:focus-visible {
   box-shadow: inset 3px 0 0 var(--sh-primary);
 }
 .sh-task-list-btn--active:hover { background: var(--sh-primary-soft); }
-.sh-task-status-picker {
-  display: flex;
-  gap: 0;
-  margin-top: 6px;
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  overflow: hidden;
-  background: var(--sh-bg-secondary);
-  padding: 3px;
-  width: fit-content;
+.sh-tasks-content { display: flex; flex-direction: column; gap: var(--sh-space-sm); min-width: 0; }
+@media (max-width: 639px) {
+  .sh-tasks { grid-template-columns: minmax(0, 1fr); }
 }
-.sh-task-status-picker button {
-  cursor: pointer;
-  border: 1px solid transparent;
-  background: transparent;
-  padding: 5px 12px;
-  border-radius: calc(var(--sh-radius-md) - 3px);
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 600;
-  color: var(--sh-text-muted);
-  transition:
-    background var(--sh-transition-fast),
-    color var(--sh-transition-fast),
-    box-shadow var(--sh-transition-fast);
-}
-.sh-task-status-picker button:hover:not(.sh-task-status--active) {
-  color: var(--sh-text);
-}
-.sh-task-status-picker button.sh-task-status--active {
-  background: var(--sh-bg);
-  color: var(--sh-text);
-  box-shadow: var(--sh-shadow-sm);
-  border-color: var(--sh-border);
-}
-.sh-task-status-picker button.sh-task-status--active.sh-task-status--done {
-  color: var(--sh-success);
-  box-shadow:
-    var(--sh-shadow-sm),
-    0 0 0 2px color-mix(in srgb, var(--sh-success) 30%, transparent);
-}
-.sh-task-status-picker button.sh-task-status--active.sh-task-status--in_progress {
-  color: var(--sh-warning);
-  box-shadow:
-    var(--sh-shadow-sm),
-    0 0 0 2px color-mix(in srgb, var(--sh-warning) 30%, transparent);
-}
-.sh-task-status-picker button.sh-task-status--active.sh-task-status--todo {
-  color: var(--sh-primary-text);
-  box-shadow:
-    var(--sh-shadow-sm),
-    0 0 0 2px color-mix(in srgb, var(--sh-primary) 30%, transparent);
-}
-.sh-tasks-content { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
-@media (max-width: 768px) {
-  .sh-tasks { grid-template-columns: 1fr; }
-}
-
-/* Tasks page header — active-list name as a Fraunces title with the
- * open/done count line trailing in mono. Mirrors the calendar day
- * heading shape so the two surfaces feel like cousins.
- *
- * The header sits above the quick-add input, so a tight bottom margin
- * keeps the input within thumb-reach instead of pushed below the fold. */
-.sh-tasks-page-header {
-  margin-bottom: var(--sh-space-sm);
-  align-items: baseline;
-}
-.sh-tasks-page-title {
-  font: 600 var(--sh-font-size-2xl) / 1.05 var(--sh-font-family-display);
-  font-feature-settings: var(--sh-display-feat, "ss01", "case");
-  font-variation-settings: var(--sh-display-axes, "opsz" 32);
-  letter-spacing: -0.005em;
-  margin: 0;
-}
-.sh-tasks-page-counts {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1
-        ui-monospace, Menlo, Consolas, monospace;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--sh-text-muted);
-}
-.sh-tasks-page-counts__open { color: var(--sh-primary-text); font-weight: 600; }
-.sh-tasks-page-counts__done { color: var(--sh-success); }
-.sh-tasks-page-counts__sep { color: var(--sh-border-strong); }
 
 /* Inline-rename input — replaces the disruptive ``window.prompt`` so
  * renaming a list happens in place. Echoes the active-row treatment
@@ -21282,6 +21153,7 @@ a.sh-btn--ghost:hover {
   color: var(--sh-bg);
 }
 .sh-check-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
+.sh-check-toggle--inert { cursor: not-allowed; opacity: 0.55; }
 .sh-check-toggle:focus-visible {
   outline: 2px solid var(--sh-primary);
   outline-offset: -4px;
@@ -21301,7 +21173,7 @@ a.sh-btn--ghost:hover {
   transition: background-color var(--sh-transition-fast),
               border-color var(--sh-transition-fast);
 }
-.sh-check-toggle:hover:not(:disabled) .sh-check-toggle__dot {
+.sh-check-toggle:hover:not(:disabled):not(.sh-check-toggle--inert) .sh-check-toggle__dot {
   border-color: var(--sh-primary);
   background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg));
 }
@@ -21561,4 +21433,250 @@ a.sh-btn--ghost:hover {
   /* The store header's ▲▼ hit boxes reach past the header's edge —
    * lift them over the card that follows. */
   .sh-shopping-group__nudge-btn { z-index: 2; }
+}
+
+/* ─── Tasks list view (household Organize tab) ───────────────────────
+ * Rows read like Shopping's: [tick] [title / byline] [due chip] [✕].
+ * The space tab still uses the older ``.sh-task-row`` grid until the
+ * board replaces it. */
+/* Same breathing room under the tab strip as Shopping's header, and
+ * the list title's top lines up with the lists card's top. */
+.sh-tasks { margin-top: var(--sh-space-sm); }
+.sh-tasks-content > .sh-organize-header { margin-top: 0; }
+.sh-tasks-content > .sh-organize-header .sh-organize-header__title { line-height: 1; }
+/* Phone list picker: the current list as one tappable row; the menu
+ * becomes a bottom sheet over a dimmed page. */
+.sh-tasks-picker { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-tasks-picker__wrap { position: static; display: block; width: 100%; }
+.sh-tasks-picker__trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--sh-space-xs) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg);
+  box-shadow: var(--sh-shadow-xs);
+  color: var(--sh-text);
+  font: 600 var(--sh-font-size-md) / 1.2 var(--sh-font-family-display);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--sh-transition-fast);
+}
+.sh-tasks-picker__trigger:hover { border-color: var(--sh-text-muted); }
+.sh-tasks-picker__trigger:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-tasks-picker__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-tasks-picker__caret { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+.sh-tasks-picker__rename { min-height: 44px; font-weight: 600; }
+.sh-tasks-picker .sh-tasks-new-list { margin-top: 0; }
+.sh-post-menu.sh-tasks-picker__menu {
+  position: fixed;
+  top: auto;
+  left: var(--sh-space-sm);
+  right: var(--sh-space-sm);
+  bottom: calc(var(--sh-space-sm) + env(safe-area-inset-bottom, 0px));
+  width: auto;
+  max-height: 70vh;
+  overflow-y: auto;
+  z-index: var(--sh-z-modal);
+  padding: var(--sh-space-xs);
+  border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-lg);
+}
+/* A real element behind the sheet: it takes the tap that closes the
+ * sheet, so the tap never reaches the row underneath. */
+.sh-tasks-picker__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--sh-z-modal) - 1);
+  background: var(--sh-scrim);
+}
+.sh-tasks-picker__menu button { min-height: 44px; font-size: var(--sh-font-size-base); }
+.sh-tasks-picker__menu .sh-tasks-picker__first-action {
+  border-top: 1px dashed var(--sh-border);
+  margin-top: var(--sh-space-xs);
+}
+.sh-tasks-stale {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+.sh-tasks-new-list { margin-top: var(--sh-space-sm); }
+.sh-tasks-new-list input { font-size: var(--sh-font-size-sm); }
+.sh-task-items {
+  list-style: none;
+  margin: 0;
+  padding: var(--sh-space-xs) var(--sh-space-sm) var(--sh-space-xs) var(--sh-space-xs);
+}
+.sh-task-group .sh-task-items { margin-top: 0; }
+/* No washi tape on the status cards: it would sit on the header above. */
+.sh-task-group .sh-task-items::before { display: none; }
+.sh-task-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 44px;
+  padding: 0;
+  border-bottom: 1px dashed var(--sh-border);
+  transition: background-color var(--sh-transition-fast),
+              opacity var(--sh-transition-fast);
+}
+.sh-task-item:last-child { border-bottom: none; }
+.sh-task-item[draggable="true"] { cursor: grab; }
+.sh-task-item[draggable="true"]:active { cursor: grabbing; }
+.sh-task-item--dragging { opacity: 0.4; }
+.sh-task-item__body {
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 1px;
+  background: none;
+  border: 0;
+  margin: 0;
+  padding: 2px;
+  font: inherit;
+  color: var(--sh-text);
+  text-align: left;
+  border-radius: var(--sh-radius-sm);
+  cursor: pointer;
+}
+.sh-task-item__body:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 1px;
+}
+.sh-task-item__title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sh-font-size-base);
+  line-height: 1.25;
+  transition: color var(--sh-transition-fast);
+}
+.sh-task-item__body:hover .sh-task-item__title { color: var(--sh-primary-text); }
+.sh-task-item__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 0 2px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: var(--sh-font-size-xs);
+  line-height: 1.3;
+  color: var(--sh-text-muted);
+}
+.sh-task-item__icon { font-size: 0.85em; flex-shrink: 0; }
+.sh-task-item__people { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sh-task-item__notes { flex-shrink: 0; font-weight: 600; }
+.sh-task-item__lock { flex-shrink: 0; font-size: 0.85em; }
+/* Stands in for the ✕ on a row the user can't change. */
+.sh-task-item__delete-spacer { width: 32px; flex-shrink: 0; }
+.sh-task-edit__readonly {
+  margin: 0 0 var(--sh-space-xs);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-task-edit__status-text {
+  align-self: flex-start;
+  padding: 4px 12px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg-secondary);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+}
+/* Read-only task view: labelled plain text. */
+.sh-task-view { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.sh-task-view dt {
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  margin-top: var(--sh-space-sm);
+}
+.sh-task-view dt:first-child { margin-top: 0; }
+.sh-task-view dd { margin: 0; overflow-wrap: anywhere; }
+.sh-task-view__name { font-size: var(--sh-font-size-md); }
+.sh-task-edit__notes { white-space: pre-line; }
+.sh-task-edit__empty { color: var(--sh-text-muted); font-style: italic; }
+.sh-task-item__icon + .sh-task-item__people + .sh-task-item__notes { margin-left: 2px; }
+.sh-task-edit__added {
+  margin: 0;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+}
+.sh-task-item--done .sh-task-item__title {
+  text-decoration: line-through;
+  color: var(--sh-text-muted);
+}
+/* The one due chip. Text is the tone mixed toward the ink, so it holds
+ * contrast on both themes (darker red on light, lighter on dark). */
+.sh-task-due {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+  font: 600 calc(var(--sh-font-size-xs) - 1px) / 1 var(--sh-font-family-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.sh-task-due--today {
+  background: color-mix(in srgb, var(--sh-warning) 28%, transparent);
+  color: var(--sh-text);
+}
+.sh-task-due--overdue {
+  background: color-mix(in srgb, var(--sh-danger) 14%, transparent);
+  color: color-mix(in srgb, var(--sh-danger) 72%, var(--sh-text));
+}
+.sh-task-due__short { display: none; }
+@media (max-width: 639px) {
+  .sh-task-due__short { display: inline; }
+  .sh-task-due__full {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+/* The list ⋯ menu opens over the rows / new-list bar below it. */
+.sh-tasks-sidebar .sh-post-menu { z-index: 20; }
+/* Edit dialog */
+.sh-task-edit { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-task-edit label { display: flex; flex-direction: column; gap: 4px; }
+.sh-task-edit .sh-form-label,
+.sh-task-edit label,
+.sh-task-edit label[for] { font-size: var(--sh-font-size-sm); font-weight: 600; }
+.sh-task-edit label input,
+.sh-task-edit label textarea { font-weight: 400; font-size: var(--sh-font-size-base); }
+.sh-task-edit__status { align-self: flex-start; margin-bottom: var(--sh-space-xs); }
+.sh-task-edit__due { display: flex; align-items: center; gap: var(--sh-space-sm); }
+.sh-task-edit__due input { flex: 1; min-width: 0; }
+.sh-task-edit .sh-form-error { margin-top: -4px; }
+@media (pointer: coarse) {
+  /* 44 px of body above the 1 px dashed divider. */
+  .sh-task-item { gap: 14px; min-height: 45px; }
+  .sh-task-edit__due .sh-link,
+  .sh-tasks-stale .sh-link { position: relative; }
+  .sh-task-edit__due .sh-link::after,
+  .sh-tasks-stale .sh-link::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+  .sh-task-list-btn { min-height: 44px; }
 }

@@ -19,13 +19,18 @@ interface CheckToggleProps {
   /** Receives the requested next state. */
   onChange: (next: boolean) => void
   disabled?: boolean
+  /** Not allowed for this user: stays focusable (so the reason can be
+   *  read) but inert, ``aria-disabled`` with the reason as its title. */
+  disabledReason?: string
   class?: string
 }
 
 export function CheckToggle({
-  checked, label, onChange, disabled, class: extra,
+  checked, label, onChange, disabled, disabledReason, class: extra,
 }: CheckToggleProps) {
-  const cls = ['sh-check-toggle', checked ? 'sh-check-toggle--checked' : '', extra ?? '']
+  const inert = !!disabledReason
+  const cls = ['sh-check-toggle', checked ? 'sh-check-toggle--checked' : '',
+    inert ? 'sh-check-toggle--inert' : '', extra ?? '']
     .filter(Boolean).join(' ')
   return (
     <button
@@ -35,7 +40,9 @@ export function CheckToggle({
       aria-label={label}
       class={cls}
       disabled={disabled}
-      onClick={() => onChange(!checked)}
+      aria-disabled={inert ? 'true' : undefined}
+      title={disabledReason}
+      onClick={() => { if (!inert) onChange(!checked) }}
     >
       <span class="sh-check-toggle__dot" aria-hidden="true">
         {checked ? '✓' : ''}

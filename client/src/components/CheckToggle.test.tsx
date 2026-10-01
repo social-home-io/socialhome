@@ -49,4 +49,17 @@ describe('CheckToggle', () => {
     expect(box.className).toContain('extra')
     expect(box.disabled).toBe(true)
   })
+
+  it('a disabledReason keeps it focusable but inert, and says why', () => {
+    const onChange = vi.fn()
+    const { getByRole } = render(
+      <CheckToggle checked={false} label="Done: Tap" onChange={onChange} disabledReason="Read only" />,
+    )
+    const box = getByRole('checkbox', { name: 'Done: Tap' })
+    expect(box.getAttribute('aria-disabled')).toBe('true')
+    expect(box.hasAttribute('disabled')).toBe(false)
+    expect(box.getAttribute('title')).toBe('Read only')
+    fireEvent.click(box)
+    expect(onChange).not.toHaveBeenCalled()
+  })
 })

@@ -14,10 +14,10 @@ import './store/theme'
 import { wireFeedWs } from './store/feed'
 import { wireShoppingWs, resetShopping } from './store/shopping'
 import { wireCalendarWs } from './store/calendar'
-import { wireTasksWs } from './store/tasks'
+import { wireTasksWs, resetTasks } from './store/tasks'
 import { wireNotificationsWs } from './store/notifications'
 import { wirePresenceWs, loadPresence } from './store/presence'
-import { wireStickiesWs } from './store/stickies'
+import { wireStickiesWs, resetHouseholdStickies } from './store/stickies'
 import { wireDmWs } from './store/dms'
 import { wireCallsWs } from './store/calls'
 import { wireConnectionsWs } from './store/connections'
@@ -56,8 +56,11 @@ wireProtectionWs()
 // store/auth — that's what keeps the api↔auth dependency graph acyclic.
 setUnauthorizedHandler(logout)
 // Signing out forgets the household's shopping list (items, stores,
-// pending Undo deletes) so the next account never sees it.
+// pending Undo deletes), task lists and sticky count so the next
+// account never sees them.
 onLogout(resetShopping)
+onLogout(resetTasks)
+onLogout(resetHouseholdStickies)
 
 ws.connect()
 
