@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import copy
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -15,8 +16,19 @@ from socialhome.domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    TaskCreated,
+    TaskDeleted,
+    TaskListCreated,
+    TaskListDeleted,
+    TaskListUpdated,
+    TaskUpdated,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.federation.owner_bound_id import (
+    SPACE_TASK_LIST_KIND,
+    mint_owner_bound_id,
+)
+from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.domain.post import BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
@@ -178,26 +190,76 @@ class _FakeStickyRepo:
         return True
 
 
+def _held_task(task_id: str, **kw) -> Task:
+    """A task row as the repo would hand it back (``created_by`` matches
+    :class:`_ScopedRows`)."""
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    base = dict(
+        id=task_id,
+        list_id="list-1",
+        title="held",
+        status=TaskStatus.TODO,
+        position=0,
+        created_by="u-author",
+        created_at=now,
+        updated_at=now,
+    )
+    base.update(kw)
+    return Task(**base)
+
+
 class _FakeSpaceTaskRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
         self.rows = _ScopedRows()
+        self.tasks: dict[str, Task] = {}
+        self.lists: dict[str, tuple[str, TaskList]] = {}
+        self.saved_lists: list = []
+        self.deleted_lists: list = []
+
+    def hold(self, task: Task, space_id: str) -> None:
+        self.rows.claim(task.id, space_id)
+        self.tasks[task.id] = task
 
     async def get(self, task_id):
         row = self.rows.row(task_id)
-        return None if row is None else (row.space_id, row)
+        if row is None:
+            return None
+        return row.space_id, self.tasks.get(task_id) or _held_task(task_id)
 
     async def save(self, task, *, space_id):
         if not self.rows.claim(task.id, space_id):
             return False
         self.saved.append((space_id, task))
+        self.tasks[task.id] = task
         return True
 
     async def delete(self, task_id, *, space_id):
         if not self.rows.drop(task_id, space_id):
             return False
         self.deleted.append(task_id)
+        return True
+
+    # ── Lists (v_40) ──
+    async def get_list(self, list_id):
+        held = self.lists.get(list_id)
+        return None if held is None else held
+
+    async def save_list(self, lst, *, space_id):
+        held = self.lists.get(lst.id)
+        if held is not None and held[0] != space_id:
+            return False
+        self.lists[lst.id] = (space_id, lst)
+        self.saved_lists.append((space_id, lst))
+        return True
+
+    async def delete_list(self, list_id, *, space_id):
+        held = self.lists.get(list_id)
+        if held is None or held[0] != space_id:
+            return False
+        del self.lists[list_id]
+        self.deleted_lists.append(list_id)
         return True
 
 
@@ -502,6 +564,271 @@ async def test_task_deleted(repos, handlers):
         )
     )
     assert repos["task"].deleted == ["t-1"]
+
+
+def _record(bus, *types):
+    seen: list = []
+
+    async def _on(ev):
+        seen.append(ev)
+
+    for t in types:
+        bus.subscribe(t, _on)
+    return seen
+
+
+async def test_task_saved_keeps_due_date_priority_labels(repos, handlers):
+    """The handler used to hard-code ``due_date=None``."""
+    await handlers._on_task_saved(
+        _event(
+            FederationEventType.SPACE_TASK_CREATED,
+            {
+                "id": "t-1",
+                "list_id": "list-1",
+                "title": "Pay rent",
+                "created_by": "u-1",
+                "due_date": "2026-10-03",
+                "archived_at": None,
+                "priority": "high",
+                "labels": ["Bills"],
+            },
+            space_id="sp-1",
+        )
+    )
+    _, task = repos["task"].saved[0]
+    assert task.due_date == date(2026, 10, 3)
+    assert task.priority is TaskPriority.HIGH
+    assert task.labels == ("Bills",)
+
+
+async def test_task_update_from_v39_peer_does_not_wipe(repos, handlers):
+    """A v39 payload (no ``priority`` key) sends ``due_date: null`` because
+    its own inbound dropped the date — that null must not wipe ours."""
+    repos["task"].hold(
+        _held_task(
+            "t-1",
+            due_date=date(2026, 10, 3),
+            priority=TaskPriority.URGENT,
+            labels=("Bills",),
+        ),
+        "sp-1",
+    )
+    await handlers._on_task_saved(
+        _event(
+            FederationEventType.SPACE_TASK_UPDATED,
+            {
+                "id": "t-1",
+                "list_id": "list-1",
+                "title": "Renamed on v39",
+                "status": "done",
+                "created_by": "u-author",
+                "due_date": None,
+            },
+            space_id="sp-1",
+        )
+    )
+    _, task = repos["task"].saved[-1]
+    assert task.title == "Renamed on v39"
+    assert task.status is TaskStatus.DONE
+    assert task.due_date == date(2026, 10, 3)
+    assert task.priority is TaskPriority.URGENT
+    assert task.labels == ("Bills",)
+
+
+async def test_task_update_from_current_peer_clears_with_null(repos, handlers):
+    repos["task"].hold(
+        _held_task("t-1", due_date=date(2026, 10, 3), priority=TaskPriority.LOW),
+        "sp-1",
+    )
+    await handlers._on_task_saved(
+        _event(
+            FederationEventType.SPACE_TASK_UPDATED,
+            {
+                "id": "t-1",
+                "list_id": "list-1",
+                "title": "held",
+                "due_date": None,
+                "priority": None,
+                "labels": [],
+            },
+            space_id="sp-1",
+        )
+    )
+    _, task = repos["task"].saved[-1]
+    assert task.due_date is None
+    assert task.priority is None
+
+
+async def test_task_saved_publishes_with_origin(bus, repos, handlers):
+    seen = _record(bus, TaskCreated, TaskUpdated)
+    payload = {"id": "t-1", "list_id": "list-1", "title": "x", "priority": None}
+    await handlers._on_task_saved(
+        _event(FederationEventType.SPACE_TASK_CREATED, payload, space_id="sp-1")
+    )
+    await handlers._on_task_saved(
+        _event(FederationEventType.SPACE_TASK_UPDATED, payload, space_id="sp-1")
+    )
+    assert [type(e) for e in seen] == [TaskCreated, TaskUpdated]
+    assert all(e.origin_instance_id == "peer-a" for e in seen)
+    assert all(e.space_id == "sp-1" for e in seen)
+
+
+async def test_task_deleted_publishes_with_origin(bus, repos, handlers):
+    seen = _record(bus, TaskDeleted)
+    repos["task"].hold(_held_task("t-1", list_id="list-7"), "sp-1")
+    await handlers._on_task_deleted(
+        _event(FederationEventType.SPACE_TASK_DELETED, {"id": "t-1"}, space_id="sp-1")
+    )
+    assert len(seen) == 1
+    assert seen[0].list_id == "list-7"
+    assert seen[0].origin_instance_id == "peer-a"
+
+
+# ─── Task lists (v_40) ──────────────────────────────────────────────
+
+
+async def test_attach_registers_the_task_list_events(bus, repos):
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+    )
+    fed = _FakeFederationService()
+    h.attach_to(fed)
+    types = {t for t, _ in fed._event_registry.registered}
+    assert {
+        FederationEventType.SPACE_TASK_LIST_CREATED,
+        FederationEventType.SPACE_TASK_LIST_UPDATED,
+        FederationEventType.SPACE_TASK_LIST_DELETED,
+    } <= types
+
+
+async def test_task_list_created_lands_and_publishes(bus, repos, handlers):
+    seen = _record(bus, TaskListCreated, TaskListUpdated)
+    lid = mint_owner_bound_id(
+        SPACE_TASK_LIST_KIND, space_id="sp-1", owner_user_id="u-1"
+    )
+    ev = _event(
+        FederationEventType.SPACE_TASK_LIST_CREATED,
+        {"id": lid, "name": " Chores ", "created_by": "u-1"},
+        space_id="sp-1",
+    )
+    await handlers._on_task_list_created(ev)
+    assert repos["task"].lists[lid][0] == "sp-1"
+    assert repos["task"].lists[lid][1].name == "Chores"
+    # A redelivery is a rename-in-place, published as an update.
+    await handlers._on_task_list_created(ev)
+    assert [type(e) for e in seen] == [TaskListCreated, TaskListUpdated]
+    assert seen[0].created_by == "u-1"
+    assert all(e.origin_instance_id == "peer-a" for e in seen)
+
+
+async def test_task_list_created_with_a_bound_id_for_another_owner_is_refused(
+    repos, handlers
+):
+    lid = mint_owner_bound_id(
+        SPACE_TASK_LIST_KIND, space_id="sp-1", owner_user_id="u-x"
+    )
+    await handlers._on_task_list_created(
+        _event(
+            FederationEventType.SPACE_TASK_LIST_CREATED,
+            {"id": lid, "name": "L", "created_by": "u-1"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["task"].lists == {}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"id": "l-1", "name": "L"}, {"id": "l-1", "name": "  "}, {"name": "L"}],
+)
+async def test_task_list_created_malformed_is_dropped(repos, handlers, payload):
+    await handlers._on_task_list_created(
+        _event(FederationEventType.SPACE_TASK_LIST_CREATED, payload, space_id="sp-1")
+    )
+    assert repos["task"].lists == {}
+
+
+async def test_task_list_created_cross_space_is_refused(repos, handlers):
+    repos["task"].lists["l-b"] = ("sp-b", TaskList(id="l-b", name="B", created_by="u"))
+    await handlers._on_task_list_created(
+        _event(
+            FederationEventType.SPACE_TASK_LIST_CREATED,
+            {"id": "l-b", "name": "pwned", "created_by": "u"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["task"].lists["l-b"][1].name == "B"
+
+
+async def test_task_list_renamed_keeps_its_creator(bus, repos, handlers):
+    seen = _record(bus, TaskListUpdated)
+    repos["task"].lists["l-1"] = ("sp-1", TaskList(id="l-1", name="A", created_by="u"))
+    await handlers._on_task_list_updated(
+        _event(
+            FederationEventType.SPACE_TASK_LIST_UPDATED,
+            {"id": "l-1", "name": "Renamed", "created_by": "u-evil"},
+            space_id="sp-1",
+        )
+    )
+    held = repos["task"].lists["l-1"][1]
+    assert (held.name, held.created_by) == ("Renamed", "u")
+    assert seen[0].origin_instance_id == "peer-a"
+
+
+async def test_task_list_rename_of_an_unknown_or_foreign_list_is_ignored(
+    repos, handlers
+):
+    repos["task"].lists["l-b"] = ("sp-b", TaskList(id="l-b", name="B", created_by="u"))
+    for lid in ("l-none", "l-b"):
+        await handlers._on_task_list_updated(
+            _event(
+                FederationEventType.SPACE_TASK_LIST_UPDATED,
+                {"id": lid, "name": "x"},
+                space_id="sp-1",
+            )
+        )
+    await handlers._on_task_list_updated(
+        _event(
+            FederationEventType.SPACE_TASK_LIST_UPDATED, {"id": "l-b"}, space_id="sp-1"
+        )
+    )
+    assert repos["task"].saved_lists == []
+
+
+async def test_task_list_deleted_publishes(bus, repos, handlers):
+    seen = _record(bus, TaskListDeleted)
+    repos["task"].lists["l-1"] = ("sp-1", TaskList(id="l-1", name="A", created_by="u"))
+    repos["task"].lists["l-b"] = ("sp-b", TaskList(id="l-b", name="B", created_by="u"))
+    for lid in ("l-1", "l-b", "l-none", ""):
+        await handlers._on_task_list_deleted(
+            _event(
+                FederationEventType.SPACE_TASK_LIST_DELETED,
+                {"id": lid},
+                space_id="sp-1",
+            )
+        )
+    assert repos["task"].deleted_lists == ["l-1"]
+    assert "l-b" in repos["task"].lists
+    assert len(seen) == 1 and seen[0].origin_instance_id == "peer-a"
+
+
+async def test_refused_task_save_publishes_nothing(bus, repos, handlers):
+    seen = _record(bus, TaskCreated, TaskUpdated)
+    repos["task"].rows.claim("t-1", "sp-other")
+    await handlers._on_task_saved(
+        _event(
+            FederationEventType.SPACE_TASK_UPDATED,
+            {"id": "t-1", "list_id": "list-1", "title": "x"},
+            space_id="sp-1",
+        )
+    )
+    assert seen == []
 
 
 # ─── Pages ──────────────────────────────────────────────────────────
@@ -3581,3 +3908,118 @@ async def test_timetable_payload_without_a_space_or_timetable_is_dropped(bus, re
     await none._on_timetable_deleted(
         ev(FederationEventType.SPACE_TIMETABLE_DELETED, {}, "sp-1")
     )
+
+
+async def test_task_before_its_list_is_refused_with_a_warning(handlers, caplog):
+    """The repo refuses a task whose list isn't held in the space; the
+    handler names the list at WARNING and never invents it."""
+
+    class _NoListRepo(_FakeSpaceTaskRepo):
+        async def save(self, task, *, space_id):
+            return False
+
+    handlers._task_repo = _NoListRepo()
+    with caplog.at_level("WARNING"):
+        await handlers._on_task_saved(
+            _event(
+                FederationEventType.SPACE_TASK_CREATED,
+                {"id": "t-9", "list_id": "l-missing", "title": "x", "priority": None},
+                space_id="sp-1",
+            )
+        )
+    assert "names list l-missing" in caplog.text
+    assert handlers._task_repo.lists == {}
+
+
+async def test_inbound_publishes_the_stored_task_row(bus, handlers):
+    """M2: the upsert keeps columns the payload can't change (the row's own
+    ``created_by``), so the live event carries the row as stored, not the
+    payload as parsed."""
+
+    class _KeepsCreator(_FakeSpaceTaskRepo):
+        async def save(self, task, *, space_id):
+            held = self.tasks.get(task.id)
+            stored = (
+                task if held is None else copy.replace(task, created_by=held.created_by)
+            )
+            return await super().save(stored, space_id=space_id)
+
+    repo = _KeepsCreator()
+    repo.hold(_held_task("t-1", created_by="u-original"), "sp-1")
+    handlers._task_repo = repo
+    seen = _record(bus, TaskUpdated)
+    await handlers._on_task_saved(
+        _event(
+            FederationEventType.SPACE_TASK_UPDATED,
+            {
+                "id": "t-1",
+                "list_id": "list-1",
+                "title": "x",
+                "created_by": "u-forged",
+                "priority": None,
+            },
+            space_id="sp-1",
+        )
+    )
+    assert seen[0].task.created_by == "u-original"
+
+
+async def test_inbound_publishes_the_stored_list_row(bus, repos, handlers):
+    """M2 for lists: a re-sent create renames in place; the event carries
+    the stored row's name as the repo holds it."""
+
+    class _Trims(_FakeSpaceTaskRepo):
+        async def save_list(self, lst, *, space_id):
+            return await super().save_list(
+                TaskList(id=lst.id, name=lst.name.upper(), created_by=lst.created_by),
+                space_id=space_id,
+            )
+
+    handlers._task_repo = _Trims()
+    seen = _record(bus, TaskListCreated)
+    lid = mint_owner_bound_id(
+        SPACE_TASK_LIST_KIND, space_id="sp-1", owner_user_id="u-1"
+    )
+    await handlers._on_task_list_created(
+        _event(
+            FederationEventType.SPACE_TASK_LIST_CREATED,
+            {"id": lid, "name": "chores", "created_by": "u-1"},
+            space_id="sp-1",
+        )
+    )
+    assert seen[0].name == "CHORES"
+
+
+async def test_live_legacy_list_id_is_refused(repos, handlers, caplog):
+    """I2 (unit): a live create of a legacy (unbound) list id is refused."""
+    with caplog.at_level("WARNING"):
+        await handlers._on_task_list_created(
+            _event(
+                FederationEventType.SPACE_TASK_LIST_CREATED,
+                {
+                    "id": "0f2c3d4e5f60718293a4b5c6d7e8f901",
+                    "name": "L",
+                    "created_by": "u-1",
+                },
+                space_id="sp-1",
+            )
+        )
+    assert repos["task"].lists == {}
+    assert "legacy" in caplog.text
+
+
+async def test_task_with_an_invisible_title_is_dropped_with_a_warning(
+    repos, handlers, caplog
+):
+    """M4: a peer's title that is only bidi / zero-width characters is
+    refused (at WARNING), never stored as a blank row."""
+    with caplog.at_level("WARNING"):
+        await handlers._on_task_saved(
+            _event(
+                FederationEventType.SPACE_TASK_CREATED,
+                {"id": "t-1", "list_id": "list-1", "title": "‮​"},
+                space_id="sp-1",
+            )
+        )
+    assert repos["task"].saved == []
+    assert "visible title" in caplog.text

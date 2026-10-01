@@ -16,7 +16,7 @@ from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceMember
 from socialhome.domain.sticky import Sticky
-from socialhome.domain.task import RecurrenceRule, Task, TaskStatus
+from socialhome.domain.task import RecurrenceRule, Task, TaskPriority, TaskStatus
 
 
 class _FakeSpacePostRepo:
@@ -177,6 +177,38 @@ async def test_tasks_exporter_normalises_status_and_assignees():
     assert recs[0]["due_date"] == "2026-04-30"
     assert isinstance(recs[0]["recurrence"], dict)
     assert recs[0]["recurrence"]["rrule"] == "FREQ=DAILY"
+    # v_40: the shared wire codec — priority key always present.
+    assert recs[0]["priority"] is None
+    assert recs[0]["labels"] == []
+    assert recs[0]["space_id"] == "sp-1"
+
+
+async def test_tasks_exporters_carry_priority_labels_and_archived_at():
+    from socialhome.federation.sync.space.exporters import TasksArchivedExporter
+
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    task = Task(
+        id="t-9",
+        list_id="l",
+        title="Archived",
+        status=TaskStatus.DONE,
+        position=0,
+        created_by="u-1",
+        created_at=now,
+        updated_at=now,
+        archived_at=now,
+        priority=TaskPriority.URGENT,
+        labels=("Bills",),
+    )
+
+    class _Repo:
+        async def list_by_space(self, space_id):
+            return [task]
+
+    recs = await TasksArchivedExporter(_Repo()).list_records("sp-1")
+    assert recs[0]["priority"] == "urgent"
+    assert recs[0]["labels"] == ["Bills"]
+    assert recs[0]["archived_at"] == now.isoformat()
 
 
 async def test_tasks_archived_filters_to_archived_at():

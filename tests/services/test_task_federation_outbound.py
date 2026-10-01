@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import copy
+from datetime import date, datetime, timezone
 
 import pytest
 
-from socialhome.domain.events import TaskCreated, TaskDeleted, TaskUpdated
+from socialhome.domain.events import (
+    TaskCreated,
+    TaskDeleted,
+    TaskListCreated,
+    TaskListDeleted,
+    TaskListUpdated,
+    TaskUpdated,
+)
 from socialhome.domain.federation import FederationEventType
-from socialhome.domain.task import Task, TaskStatus
+from socialhome.domain.task import Task, TaskPriority, TaskStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.task_federation_outbound import (
     TaskFederationOutbound,
@@ -97,3 +105,90 @@ async def test_space_task_updated_event_type(env):
     space_id, event_type, _payload = fed.broadcasts[0]
     assert space_id == "sp-B"
     assert event_type is FederationEventType.SPACE_TASK_UPDATED
+
+
+async def test_payload_carries_priority_labels_and_due_date(env):
+    bus, fed = env
+    t = copy.replace(
+        _task("t1"),
+        priority=TaskPriority.HIGH,
+        labels=("Garden",),
+        due_date=date(2026, 10, 3),
+        archived_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    await bus.publish(TaskUpdated(task=t, space_id="sp-A"))
+    payload = fed.broadcasts[0][2]
+    assert payload["priority"] == "high"
+    assert payload["labels"] == ["Garden"]
+    assert payload["due_date"] == "2026-10-03"
+    assert payload["archived_at"] == "2026-09-01T00:00:00+00:00"
+
+
+async def test_payload_always_has_priority_key(env):
+    bus, fed = env
+    await bus.publish(TaskCreated(task=_task("t1"), space_id="sp-A"))
+    payload = fed.broadcasts[0][2]
+    assert "priority" in payload and payload["priority"] is None
+    assert payload["labels"] == []
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        TaskCreated(task=_task("t1"), space_id="sp-A", origin_instance_id="peer"),
+        TaskUpdated(task=_task("t1"), space_id="sp-A", origin_instance_id="peer"),
+        TaskDeleted(
+            task_id="t1", list_id="L", space_id="sp-A", origin_instance_id="peer"
+        ),
+    ],
+)
+async def test_events_applied_from_a_peer_are_not_echoed(env, event):
+    bus, fed = env
+    await bus.publish(event)
+    assert fed.broadcasts == []
+
+
+# ─── Task lists (v_40) ───────────────────────────────────────────────────
+
+
+async def test_space_list_events_broadcast_sealed_payloads(env):
+    bus, fed = env
+    await bus.publish(
+        TaskListCreated(list_id="L1", name="Chores", space_id="sp-A", created_by="u")
+    )
+    await bus.publish(TaskListUpdated(list_id="L1", name="Jobs", space_id="sp-A"))
+    await bus.publish(TaskListDeleted(list_id="L1", space_id="sp-A"))
+    assert [(s, t) for s, t, _ in fed.broadcasts] == [
+        ("sp-A", FederationEventType.SPACE_TASK_LIST_CREATED),
+        ("sp-A", FederationEventType.SPACE_TASK_LIST_UPDATED),
+        ("sp-A", FederationEventType.SPACE_TASK_LIST_DELETED),
+    ]
+    assert fed.broadcasts[0][2] == {
+        "id": "L1",
+        "space_id": "sp-A",
+        "name": "Chores",
+        "created_by": "u",
+    }
+    assert fed.broadcasts[1][2] == {"id": "L1", "space_id": "sp-A", "name": "Jobs"}
+    assert fed.broadcasts[2][2] == {"id": "L1", "space_id": "sp-A"}
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        TaskListCreated(list_id="L1", name="x"),
+        TaskListUpdated(list_id="L1", name="x"),
+        TaskListDeleted(list_id="L1"),
+        TaskListCreated(
+            list_id="L1", name="x", space_id="sp-A", origin_instance_id="peer"
+        ),
+        TaskListUpdated(
+            list_id="L1", name="x", space_id="sp-A", origin_instance_id="peer"
+        ),
+        TaskListDeleted(list_id="L1", space_id="sp-A", origin_instance_id="peer"),
+    ],
+)
+async def test_household_or_peer_applied_list_events_stay_local(env, event):
+    bus, fed = env
+    await bus.publish(event)
+    assert fed.broadcasts == []

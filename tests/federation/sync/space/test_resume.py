@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import copy
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +14,7 @@ from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
 from socialhome.domain.sticky import Sticky
-from socialhome.domain.task import Task, TaskStatus
+from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.services.gallery_tombstones import GalleryAlbumTombstones
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
@@ -86,11 +87,20 @@ class _FakePostRepo:
 class _FakeListSinceRepo:
     """Generic stub for repos whose since-method is just ``list_since``."""
 
-    def __init__(self, rows: list, *, method: str = "list_since") -> None:
+    def __init__(
+        self, rows: list, *, method: str = "list_since", lists: list | None = None
+    ) -> None:
         self._rows = rows
         self._method = method
+        self._lists = lists or []
 
     def __getattr__(self, name):  # type: ignore[no-redef]
+        if name == "list_lists_since":
+
+            async def _lists(space_id, since, *, limit=500):
+                return self._lists[:limit]
+
+            return _lists
         if name in ("list_since", "list_events_since", "list_items_since"):
 
             async def _impl(space_id, since, *, limit=500):
@@ -430,6 +440,59 @@ async def test_handle_request_replays_tasks(provider_factory):
     payload = fed.sent[0]["payload"]
     # Match the keys SPACE_TASK_* inbound reads.
     assert {"id", "list_id", "title", "status", "created_by"} <= set(payload)
+    # The shared wire codec — the replay used to drop the due date.
+    assert {"due_date", "archived_at", "priority", "labels"} <= set(payload)
+    assert payload["space_id"] == "sp-1"
+
+
+async def test_handle_request_replays_task_lists_before_tasks():
+    """v_40: the lists a peer missed go out (as SPACE_TASK_LIST_CREATED)
+    before the tasks filed under them."""
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    fed = _FakeFederation()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(),
+        space_task_repo=_FakeListSinceRepo(
+            [_task(0, base + timedelta(minutes=1))],
+            lists=[TaskList(id="l-1", name="Chores", created_by="u-1")],
+        ),
+    )
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert sent == 2
+    assert [s["type"] for s in fed.sent] == [
+        FederationEventType.SPACE_TASK_LIST_CREATED,
+        FederationEventType.SPACE_TASK_CREATED,
+    ]
+    assert fed.sent[0]["payload"] == {
+        "id": "l-1",
+        "space_id": "sp-1",
+        "name": "Chores",
+        "created_by": "u-1",
+    }
+
+
+async def test_handle_request_replays_task_due_date_priority_labels(
+    provider_factory,
+):
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    task = copy.replace(
+        _task(0, base + timedelta(minutes=1)),
+        due_date=date(2026, 5, 2),
+        priority=TaskPriority.HIGH,
+        labels=("Trip",),
+    )
+    provider, fed, _ = provider_factory(tasks=[task], members=["peer-a"])
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    payload = fed.sent[0]["payload"]
+    assert payload["due_date"] == "2026-05-02"
+    assert payload["priority"] == "high"
+    assert payload["labels"] == ["Trip"]
 
 
 async def test_handle_request_replays_pages(provider_factory):

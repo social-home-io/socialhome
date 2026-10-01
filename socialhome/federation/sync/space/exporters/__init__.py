@@ -22,6 +22,7 @@ from .polls import PollsExporter
 from .posts import PostsExporter
 from .schedules import SchedulesExporter
 from .stickies import StickiesExporter
+from .task_lists import TaskListsExporter
 from .tasks import TasksExporter
 from .tasks_archived import TasksArchivedExporter
 from .timetables import TimetablesExporter
@@ -40,6 +41,7 @@ __all__ = [
     "PostsExporter",
     "SchedulesExporter",
     "StickiesExporter",
+    "TaskListsExporter",
     "TasksExporter",
     "TasksArchivedExporter",
     "TimetablesExporter",

@@ -360,6 +360,7 @@ from .tasks import (
     SpaceTaskDetailView,
     SpaceTaskListCollectionView,
     SpaceTaskListDetailView,
+    SpaceTaskListReorderView,
     SpaceTaskListTasksView,
     TaskArchiveView,
     TaskAttachmentCollectionView,
@@ -866,6 +867,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view(
         "/api/spaces/{id}/tasks/lists/{lid}/tasks",
         SpaceTaskListTasksView,
+    )
+    app.router.add_view(
+        "/api/spaces/{id}/tasks/lists/{lid}/reorder",
+        SpaceTaskListReorderView,
     )
     app.router.add_view(
         "/api/spaces/{id}/tasks/{tid}",

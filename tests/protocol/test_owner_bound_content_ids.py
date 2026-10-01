@@ -44,6 +44,7 @@ from socialhome.federation.owner_bound_id import (
     SPACE_POST_KIND,
     SPACE_STICKY_KIND,
     SPACE_TASK_KIND,
+    SPACE_TASK_LIST_KIND,
     mint_owner_bound_id,
 )
 
@@ -175,6 +176,16 @@ KINDS: list[Kind] = [
         },
     ),
     Kind(
+        "task list",
+        SPACE_TASK_LIST_KIND,
+        FET.SPACE_TASK_LIST_CREATED,
+        lambda rid, who: {"id": rid, "name": "x", "created_by": who},
+        "space_task_lists",
+        "created_by",
+        "task_lists",
+        lambda rid, who: {"id": rid, "name": "x", "created_by": who},
+    ),
+    Kind(
         "page",
         SPACE_PAGE_KIND,
         FET.SPACE_PAGE_CREATED,
@@ -247,7 +258,15 @@ async def test_a_bound_id_with_an_unknown_suite_is_refused(env, k):
     assert await _owner(db, k, unknown) is None
 
 
-@pytest.mark.parametrize("k", KINDS, ids=_IDS)
+#: Kinds whose create event predates owner binding, so a legacy id is
+#: still a valid (first-come) claim on the live path. A task list's create
+#: is new in v_40 and always carries a bound id — see the test below.
+_LEGACY_LIVE_KINDS = [k for k in KINDS if k.kind != SPACE_TASK_LIST_KIND]
+
+
+@pytest.mark.parametrize(
+    "k", _LEGACY_LIVE_KINDS, ids=[k.label for k in _LEGACY_LIVE_KINDS]
+)
 async def test_a_legacy_id_keeps_todays_first_come_rule(env, k):
     app, db = env
     await _deliver(app, k.create, k.payload(LEGACY_ID, CLAIMANT), sender=OTHER)
@@ -256,6 +275,27 @@ async def test_a_legacy_id_keeps_todays_first_come_rule(env, k):
     with contextlib.suppress(sqlite3.IntegrityError):
         await _deliver(app, k.create, k.payload(LEGACY_ID, CREATOR), sender=AUTHOR)
     assert await _owner(db, k, LEGACY_ID) == CLAIMANT
+
+
+async def test_a_legacy_task_list_id_lands_only_from_the_hosts_sync(env):
+    """I2: ``SPACE_TASK_LIST_CREATED`` is new in v_40 and every v_40 sender
+    mints bound list ids, so a legacy id is refused live and from a member
+    household's sync stream — first come would let a household seated in
+    two spaces squat the other space's pre-v_40 list. The host's stream
+    (taken whole) still carries pre-v_40 lists."""
+    app, db = env
+    k = next(k for k in KINDS if k.kind == SPACE_TASK_LIST_KIND)
+    await _deliver(app, k.create, k.payload(LEGACY_ID, CREATOR), sender=AUTHOR)
+    assert await _owner(db, k, LEGACY_ID) is None
+    receiver = app[space_sync_receiver_key]
+    await receiver._dispatch(
+        k.sync_resource, SP, [k.record(LEGACY_ID, CREATOR)], provider=AUTHOR
+    )
+    assert await _owner(db, k, LEGACY_ID) is None
+    await receiver._dispatch(
+        k.sync_resource, SP, [k.record(LEGACY_ID, CREATOR)], provider=HOST
+    )
+    assert await _owner(db, k, LEGACY_ID) == CREATOR
 
 
 @pytest.mark.parametrize("provider", [HOST, AUTHOR])
@@ -286,6 +326,7 @@ async def test_every_kind_is_covered():
         GALLERY_ITEM_KIND,
         SPACE_CALENDAR_EVENT_KIND,
         SPACE_TASK_KIND,
+        SPACE_TASK_LIST_KIND,
         SPACE_PAGE_KIND,
         SPACE_STICKY_KIND,
     }

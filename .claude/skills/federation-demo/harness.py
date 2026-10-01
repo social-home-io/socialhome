@@ -4104,8 +4104,77 @@ def cmd_calendar() -> None:
     )
     # Let SPACE_CONFIG_CHANGED + SPACE_TIMETABLE_UPSERTED fan out to a + c.
     time.sleep(4)
+
+    # 6. Space task list + task (v_40). Beta creates a list and a task with
+    #    priority, labels and a due date; both fan out (SPACE_TASK_LIST_
+    #    CREATED, then SPACE_TASK_CREATED) to Alpha and Gamma, which must
+    #    hold the list and the task with every field. Beta then lowers the
+    #    priority and clears the due date — ``verify`` asserts a and c
+    #    reflect that edit (an explicit null clears; labels stay).
+    base = f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}/tasks"
+    s, lst = _request(
+        f"{base}/lists", token=b["token"], method="POST", body={"name": "Umzug"}
+    )
+    _must("space task list create(b)", s, lst, ok=(201,))
+    s, task = _request(
+        f"{base}/lists/{lst['id']}/tasks",
+        token=b["token"],
+        method="POST",
+        body={
+            "title": "Pack the van",
+            "priority": "high",
+            "labels": ["Move", "Van"],
+            "due_date": "2026-12-24",
+        },
+    )
+    _must("space task create(b)", s, task, ok=(201,))
+    state["space_task_list_id"] = lst["id"]
+    state["space_task_id"] = task["id"]
+    for guest_label in ("a", "c"):
+        got = _space_task_on(state, guest_label, lst["id"], task["id"])
+        want = {"priority": "high", "labels": ["Move", "Van"], "due_date": "2026-12-24"}
+        if got is None or {k: got.get(k) for k in want} != want:
+            raise SystemExit(
+                f"{guest_label}: space task {task['id'][:8]} -> {got!r} "
+                f"(expected list 'Umzug' + {want!r}) — SPACE_TASK_LIST_CREATED / "
+                f"SPACE_TASK_CREATED did not round-trip"
+            )
+        print(f"  {guest_label} sees list 'Umzug' + task with priority/labels/due ✓")
+    s, edited = _request(
+        f"{base}/{task['id']}",
+        token=b["token"],
+        method="PATCH",
+        body={"priority": "low", "due_date": None},
+    )
+    _must("space task edit(b)", s, edited)
+    print(f"  b: space task {task['id'][:8]} -> priority=low, due_date cleared")
+    time.sleep(3)
     _save(state)
     print("calendar: ok")
+
+
+def _space_task_on(
+    state: dict, viewer: str, list_id: str, task_id: str, *, tries: int = 10
+) -> dict | None:
+    """The space task as ``viewer`` holds it — ``None`` when its list or the
+    task never arrived. Polls briefly for federation to settle."""
+    info = state["instances"][viewer]
+    base = f"http://127.0.0.1:{info['port']}/api/spaces/{state['space_id']}/tasks"
+    for _ in range(tries):
+        s, lists = _request(f"{base}/lists", token=info["token"])
+        if s == 200 and any(
+            row.get("id") == list_id and row.get("name") == "Umzug" for row in lists
+        ):
+            s, rows = _request(f"{base}/lists/{list_id}/tasks", token=info["token"])
+            hit = (
+                next((t for t in rows if t["id"] == task_id), None)
+                if s == 200
+                else None
+            )
+            if hit is not None:
+                return hit
+        time.sleep(1)
+    return None
 
     _save(state)
     print("traffic: ok")
@@ -4957,6 +5026,35 @@ def cmd_verify() -> None:
                 )
             else:
                 print(f"  {guest_label}: member edit refused (403) ✓")
+
+    # 6d. Space task (v_40) — Beta's edit (priority high → low, due date
+    #     cleared with an explicit null) reached both member households,
+    #     and the labels survived it.
+    if state.get("space_task_id"):
+        want = {"priority": "low", "labels": ["Move", "Van"], "due_date": None}
+        for guest_label in ("a", "c"):
+            got = None
+            for _ in range(10):
+                got = _space_task_on(
+                    state,
+                    guest_label,
+                    state["space_task_list_id"],
+                    state["space_task_id"],
+                    tries=1,
+                )
+                if got is not None and {k: got.get(k) for k in want} == want:
+                    break
+                time.sleep(1)
+            if got is None or {k: got.get(k) for k in want} != want:
+                failures.append(
+                    f"{guest_label}: space task -> {got!r} (expected {want!r}) — "
+                    f"SPACE_TASK_UPDATED priority / null due_date did not round-trip"
+                )
+            else:
+                print(
+                    f"  {guest_label} sees space task edit: priority=low, "
+                    f"due_date cleared, labels kept ✓"
+                )
 
     # 7. Capability handshake — every confirmed inner-ring peer should
     #    have announced their proto_version via

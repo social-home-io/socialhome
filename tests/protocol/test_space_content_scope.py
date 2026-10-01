@@ -48,6 +48,10 @@ from socialhome.domain.federation import (
     FederationEventType,
 )
 from socialhome.domain.timetable import Timetable, to_wire_dict
+from socialhome.federation.owner_bound_id import (
+    SPACE_TASK_LIST_KIND,
+    mint_owner_bound_id,
+)
 
 pytestmark = pytest.mark.security
 
@@ -176,6 +180,19 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
         ),
     ],
     FET.SPACE_TASK_DELETED: [("delete B's task", {"id": "task-b"})],
+    # ── Task lists (v_40) ──
+    FET.SPACE_TASK_LIST_CREATED: [
+        (
+            "re-create (rename) B's list",
+            {"id": "list-b", "name": "pwned", "created_by": "u-evil"},
+        ),
+    ],
+    FET.SPACE_TASK_LIST_UPDATED: [
+        ("rename B's list", {"id": "list-b", "name": "pwned"}),
+    ],
+    FET.SPACE_TASK_LIST_DELETED: [
+        ("delete B's list (and its tasks)", {"id": "list-b"}),
+    ],
     # ── Pages ──
     FET.SPACE_PAGE_CREATED: [("re-create B's page", {"id": "page-b", "title": "x"})],
     FET.SPACE_PAGE_UPDATED: [("rewrite B's page", {"id": "page-b", "title": "x"})],
@@ -842,6 +859,7 @@ _SYNC_ATTACKS = [
             }
         ],
     ),
+    ("task_lists", [{"id": "list-b", "name": "pwned", "created_by": "u"}]),
     (
         "tasks",
         [
@@ -988,3 +1006,79 @@ async def test_every_attacked_type_is_really_handled(env):
     unhandled = [t.value for t in ATTACKS if not registry.handlers_for(t)]
     assert not unhandled
     assert not registry.handlers_for(FET.SPACE_POLL_CREATED)
+
+
+# ── Task lists (v_40): no squatting on a legacy list id ─────────────
+
+
+async def test_a_legacy_list_id_cannot_be_squatted_into_another_space(env, caplog):
+    """I2: household M is seated in both A and B. It announces B's legacy
+    (uuid4, pre-v_40) list id L under A before B's real L reaches us — a
+    first-come squat that would make B's real list (and every task filed
+    under it) refuse here forever. Every v_40 sender mints owner-bound list
+    ids, so a LIVE create of a legacy id is refused outright; B's real L
+    still lands through B's host sync, the only path for a pre-v_40 list."""
+    app, db = env
+    both = "peer-in-both"
+    for sid in (GATED, VICTIM):
+        await db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?,?,?,?)",
+            (sid, both, "u-m", "member"),
+        )
+    registry = app[federation_service_key]._event_registry
+    legacy = "0f2c3d4e5f60718293a4b5c6d7e8f901"
+    with caplog.at_level("WARNING"):
+        for handler in registry.handlers_for(FET.SPACE_TASK_LIST_CREATED):
+            await handler(
+                _event(
+                    FET.SPACE_TASK_LIST_CREATED,
+                    {"id": legacy, "name": "Squat", "created_by": "u-m"},
+                    sender=both,
+                )
+            )
+    assert (
+        await db.fetchone("SELECT 1 FROM space_task_lists WHERE id=?", (legacy,))
+        is None
+    )
+    assert "legacy" in caplog.text
+    await app[space_sync_receiver_key]._dispatch(
+        "task_lists",
+        VICTIM,
+        [{"id": legacy, "name": "Real", "created_by": "u-b"}],
+        provider="the-host",
+    )
+    row = await db.fetchone(
+        "SELECT space_id, name FROM space_task_lists WHERE id=?", (legacy,)
+    )
+    assert (row["space_id"], row["name"]) == (VICTIM, "Real")
+
+
+async def test_a_bound_list_id_cannot_be_claimed_for_another_creator(env):
+    """I2: the same-space ``created_by`` hijack — a list id bound to u-b,
+    announced claiming u-evil — is refused."""
+    app, db = env
+    lid = mint_owner_bound_id(SPACE_TASK_LIST_KIND, space_id=GATED, owner_user_id="u-b")
+    registry = app[federation_service_key]._event_registry
+    for handler in registry.handlers_for(FET.SPACE_TASK_LIST_CREATED):
+        await handler(
+            _event(
+                FET.SPACE_TASK_LIST_CREATED,
+                {"id": lid, "name": "Hijack", "created_by": "u-evil"},
+            )
+        )
+    assert (
+        await db.fetchone("SELECT 1 FROM space_task_lists WHERE id=?", (lid,)) is None
+    )
+    # The rightful creator's own bound id lands.
+    own = mint_owner_bound_id(
+        SPACE_TASK_LIST_KIND, space_id=GATED, owner_user_id="u-evil"
+    )
+    for handler in registry.handlers_for(FET.SPACE_TASK_LIST_CREATED):
+        await handler(
+            _event(
+                FET.SPACE_TASK_LIST_CREATED,
+                {"id": own, "name": "Mine", "created_by": "u-evil"},
+            )
+        )
+    assert await db.fetchone("SELECT 1 FROM space_task_lists WHERE id=?", (own,))

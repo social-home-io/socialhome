@@ -24,7 +24,9 @@ from ..domain.task import (
     TaskAttachment,
     TaskComment,
     TaskList,
+    TaskPriority,
     TaskStatus,
+    normalize_labels,
 )
 from .base import dump_json, load_json, row_to_dict, rows_to_dicts
 
@@ -58,6 +60,15 @@ def _parse_date(value: str | None) -> date | None:
         return None
 
 
+def _parse_priority(value: str | None) -> TaskPriority | None:
+    if not value:
+        return None
+    try:
+        return TaskPriority(value)
+    except ValueError:
+        return None
+
+
 def _row_to_task(row: dict) -> Task:
     recurrence: RecurrenceRule | None = None
     if row.get("rrule"):
@@ -80,7 +91,13 @@ def _row_to_task(row: dict) -> Task:
         recurrence=recurrence,
         recurrence_parent_id=row.get("recurrence_parent_id"),
         archived_at=_parse_dt(row.get("archived_at")),
+        priority=_parse_priority(row.get("priority")),
+        labels=normalize_labels(load_json(row.get("labels_json"), [])),
     )
+
+
+def _priority_value(task: Task) -> str | None:
+    return task.priority.value if task.priority is not None else None
 
 
 def _row_to_list(row: dict) -> TaskList:
@@ -103,6 +120,7 @@ class AbstractTaskRepo(Protocol):
 
     async def save(self, task: Task) -> Task: ...
     async def get(self, task_id: str) -> Task | None: ...
+    async def next_position(self, list_id: str) -> int: ...
     async def list_by_list(
         self,
         list_id: str,
@@ -190,8 +208,9 @@ class SqliteTaskRepo:
             INSERT INTO tasks(
                 id, list_id, title, description, due_date, assignees_json,
                 status, position, created_by, rrule, last_spawned_at,
-                recurrence_parent_id, archived_at, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,
+                recurrence_parent_id, archived_at, priority, labels_json,
+                created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                      COALESCE(?, datetime('now')),
                      COALESCE(?, datetime('now')))
             ON CONFLICT(id) DO UPDATE SET
@@ -205,6 +224,8 @@ class SqliteTaskRepo:
                 last_spawned_at=excluded.last_spawned_at,
                 recurrence_parent_id=excluded.recurrence_parent_id,
                 archived_at=excluded.archived_at,
+                priority=excluded.priority,
+                labels_json=excluded.labels_json,
                 updated_at=excluded.updated_at
             """,
             (
@@ -221,6 +242,8 @@ class SqliteTaskRepo:
                 _iso(task.recurrence.last_spawned_at) if task.recurrence else None,
                 task.recurrence_parent_id,
                 _iso(task.archived_at),
+                _priority_value(task),
+                dump_json(list(task.labels)),
                 _iso(task.created_at),
                 _iso(task.updated_at),
             ),
@@ -234,6 +257,19 @@ class SqliteTaskRepo:
         )
         d = row_to_dict(row)
         return _row_to_task(d) if d else None
+
+    async def next_position(self, list_id: str) -> int:
+        """One past the highest ``position`` in ``list_id`` (0 when empty).
+
+        ``position`` is an ordering key per list; a status column shows
+        its tasks in ``position`` order, so a new task given this value
+        lands at the bottom of whichever column it is filed in.
+        """
+        row = await self._db.fetchone(
+            "SELECT COALESCE(MAX(position) + 1, 0) AS n FROM tasks WHERE list_id=?",
+            (list_id,),
+        )
+        return int(row["n"]) if row is not None else 0
 
     async def list_by_list(
         self,
@@ -413,10 +449,14 @@ class AbstractSpaceTaskRepo(Protocol):
     async def save_list(self, list_: TaskList, *, space_id: str) -> bool: ...
     async def get_list(self, list_id: str) -> tuple[str, TaskList] | None: ...
     async def list_lists(self, space_id: str) -> list[TaskList]: ...
+    async def list_lists_since(
+        self, space_id: str, since: str, *, limit: int = 500
+    ) -> list[TaskList]: ...
     async def delete_list(self, list_id: str, *, space_id: str) -> bool: ...
 
     async def save(self, task: Task, *, space_id: str) -> bool: ...
     async def get(self, task_id: str) -> tuple[str, Task] | None: ...
+    async def next_position(self, list_id: str, *, space_id: str) -> int: ...
     async def list_by_list(
         self,
         list_id: str,
@@ -481,6 +521,27 @@ class SqliteSpaceTaskRepo:
         )
         return [_row_to_list(d) for d in rows_to_dicts(rows)]
 
+    async def list_lists_since(
+        self, space_id: str, since: str, *, limit: int = 500
+    ) -> list[TaskList]:
+        """Lists created at or after ``since``, oldest first (resume
+        catch-up).
+
+        ``created_at`` is SQLite's naive UTC ``datetime('now')`` while
+        ``since`` is an ISO 8601 string, so both go through ``datetime()``
+        rather than a string compare. That is second precision, so the
+        compare is ``>=``: a list made in the same second as ``since`` is
+        replayed (a duplicate create is an idempotent upsert) rather than
+        skipped.
+        """
+        rows = await self._db.fetchall(
+            "SELECT * FROM space_task_lists"
+            " WHERE space_id=? AND datetime(created_at) >= datetime(?)"
+            " ORDER BY created_at ASC LIMIT ?",
+            (space_id, since, int(limit)),
+        )
+        return [_row_to_list(d) for d in rows_to_dicts(rows)]
+
     async def delete_list(self, list_id: str, *, space_id: str) -> bool:
         n = await self._db.enqueue_rowcount(
             "DELETE FROM space_task_lists WHERE id=? AND space_id=?",
@@ -506,8 +567,8 @@ class SqliteSpaceTaskRepo:
                 id, list_id, space_id, title, description, due_date,
                 assignees_json, status, position, created_by,
                 rrule, last_spawned_at, recurrence_parent_id,
-                archived_at, created_at, updated_at
-            ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                archived_at, priority, labels_json, created_at, updated_at
+            ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                      COALESCE(?, datetime('now')),
                      COALESCE(?, datetime('now'))
                WHERE EXISTS (
@@ -524,6 +585,8 @@ class SqliteSpaceTaskRepo:
                 last_spawned_at=excluded.last_spawned_at,
                 recurrence_parent_id=excluded.recurrence_parent_id,
                 archived_at=excluded.archived_at,
+                priority=excluded.priority,
+                labels_json=excluded.labels_json,
                 updated_at=excluded.updated_at
             WHERE space_tasks.space_id = excluded.space_id
             """,
@@ -542,6 +605,8 @@ class SqliteSpaceTaskRepo:
                 _iso(task.recurrence.last_spawned_at) if task.recurrence else None,
                 task.recurrence_parent_id,
                 _iso(task.archived_at),
+                _priority_value(task),
+                dump_json(list(task.labels)),
                 _iso(task.created_at),
                 _iso(task.updated_at),
                 task.list_id,
@@ -559,6 +624,15 @@ class SqliteSpaceTaskRepo:
         if d is None:
             return None
         return d["space_id"], _row_to_task(d)
+
+    async def next_position(self, list_id: str, *, space_id: str) -> int:
+        """Like :meth:`SqliteTaskRepo.next_position`, within ``space_id``."""
+        row = await self._db.fetchone(
+            "SELECT COALESCE(MAX(position) + 1, 0) AS n FROM space_tasks"
+            " WHERE list_id=? AND space_id=?",
+            (list_id, space_id),
+        )
+        return int(row["n"]) if row is not None else 0
 
     async def list_by_list(
         self,
