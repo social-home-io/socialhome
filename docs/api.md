@@ -483,6 +483,32 @@ Same CRUD shape:
 /api/gallery/albums[/{id}]    /{id}/items[/{iid}]
 ```
 
+`/api/stickies[/{id}]` is the **household** board only: `PATCH` /
+`DELETE` on the id of a space sticky is 404, exactly like an unknown
+id. Every household route (`GET` included) requires the household
+`stickies` feature (403 `FEATURE_DISABLED`). The space board lives at
+`/api/spaces/{id}/stickies` (`GET` / `POST`) and
+`/api/spaces/{id}/stickies/{sid}` (`PATCH` / `DELETE`): every handler
+requires space membership (403) and the space's `stickies` feature (403
+`FEATURE_DISABLED`) — only that one, the household toggle does not gate
+space boards; writes are refused with 403 for read-only subscribers and
+while the space is **archived** (reads keep working); an `{sid}` that
+does not belong to the path space `{id}` — another space's note or a
+household note — is 404.
+
+Sticky fields (both boards; `socialhome/domain/sticky.py`), else 422 and
+nothing is written: the body must be a JSON object; `color` must be a
+hex colour `#RGB` / `#RRGGBB` (case-insensitive) and is stored and
+returned as upper-case `#RRGGBB` — named colours, `url(...)` and any
+other CSS are refused, since the SPA renders it as a `background`;
+`position_x` / `position_y` must be finite numbers and are clamped into
+the board's `0–1000 × 0–700` coordinate space; `content` has control
+and bidi-override characters stripped, must not be empty after that and
+is at most 2000 characters. Federated / synced stickies follow the same
+rules leniently: a non-hex colour becomes the default `#FFF9B1`, a bad
+coordinate `0`, over-long content is truncated (WARNING) — the raw value
+is never stored.
+
 `/api/shopping`: items optionally carry a free-form `store` name; the
 server auto-upserts a `shopping_stores` row on first sighting so the
 SPA can render the list grouped by store in the household's

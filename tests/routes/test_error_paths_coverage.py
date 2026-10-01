@@ -551,7 +551,7 @@ async def test_sticky_patch_updates_content_and_position_and_color(client):
     body = await r2.json()
     assert body["content"] == "new"
     assert body["position_x"] == 5
-    assert body["color"] == "#abc"
+    assert body["color"] == "#AABBCC"  # canonical #RRGGBB
 
 
 async def test_sticky_delete_not_found_404(client):

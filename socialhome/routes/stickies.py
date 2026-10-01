@@ -7,6 +7,14 @@ Two surfaces:
 * ``/api/spaces/{id}/stickies`` — per-space sticky board, scoped to
   members. Federates via ``SPACE_STICKY_*`` events.
 
+Scope (§24.11): the household routes only ever touch household stickies
+(``space_id IS NULL``) and the space routes only that space's stickies —
+an id from any other scope is 404. Space writes additionally require a
+writable seat (subscribers → 403) in a non-archived space (→ 403), and
+every space handler honours the per-space ``stickies`` feature toggle
+(only that one — the household toggle gates the household board).
+The rules live in :class:`StickyService`; handlers stay thin.
+
 Both surfaces publish :class:`StickyCreated` / :class:`StickyUpdated` /
 :class:`StickyDeleted` so :class:`RealtimeService` can fan out WS frames
 (``sticky.created`` / ``sticky.updated`` / ``sticky.deleted``) to other
@@ -17,17 +25,13 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..app_keys import (
-    event_bus_key,
-    space_repo_key,
-    sticky_repo_key,
-)
-from ..domain.events import StickyCreated, StickyDeleted, StickyUpdated
+from ..app_keys import space_repo_key, sticky_service_key
+from ..domain.sticky import DEFAULT_STICKY_COLOR, Sticky
 from ..security import error_response
 from .base import BaseView
 
 
-def _sticky_dict(s) -> dict:
+def _sticky_dict(s: Sticky) -> dict:
     return {
         "id": s.id,
         "author": s.author,
@@ -41,221 +45,132 @@ def _sticky_dict(s) -> dict:
     }
 
 
+def _create_kwargs(body: object) -> dict:
+    if not isinstance(body, dict):
+        raise ValueError("sticky body must be a JSON object")
+    return {
+        "content": body.get("content", ""),
+        "color": body.get("color", DEFAULT_STICKY_COLOR),
+        "position_x": body.get("position_x", 0.0),
+        "position_y": body.get("position_y", 0.0),
+    }
+
+
+def _update_kwargs(body: object) -> dict:
+    if not isinstance(body, dict):
+        raise ValueError("sticky body must be a JSON object")
+    return {
+        "content": body.get("content"),
+        "color": body.get("color"),
+        "position_x": body.get("position_x"),
+        "position_y": body.get("position_y"),
+    }
+
+
 class StickyCollectionView(BaseView):
     """``GET /api/stickies`` + ``POST /api/stickies`` — household scope."""
 
     async def get(self) -> web.Response:
         self.user
-        repo = self.svc(sticky_repo_key)
-        stickies = await repo.list(space_id=None)
+        await self.require_household_feature("stickies")
+        stickies = await self.svc(sticky_service_key).list(space_id=None)
         return self._json([_sticky_dict(s) for s in stickies])
 
     async def post(self) -> web.Response:
         ctx = self.user
         await self.require_household_feature("stickies")
         body = await self.body()
-        bus = self.svc(event_bus_key)
-        sticky = await self.svc(sticky_repo_key).add(
-            author=ctx.user_id,
-            content=body.get("content", ""),
-            color=body.get("color", "#FFF9B1"),
-            position_x=float(body.get("position_x", 0.0)),
-            position_y=float(body.get("position_y", 0.0)),
-            space_id=None,
-        )
-        await bus.publish(
-            StickyCreated(
-                sticky_id=sticky.id,
-                space_id=None,
-                author=sticky.author,
-                content=sticky.content,
-                color=sticky.color,
-                position_x=sticky.position_x,
-                position_y=sticky.position_y,
-            )
+        sticky = await self.svc(sticky_service_key).create(
+            author=ctx.user_id, space_id=None, **_create_kwargs(body)
         )
         return self._json(_sticky_dict(sticky), status=201)
 
 
 class StickyDetailView(BaseView):
-    """``PATCH /api/stickies/{id}`` + ``DELETE /api/stickies/{id}``."""
+    """``PATCH /api/stickies/{id}`` + ``DELETE /api/stickies/{id}``.
+
+    Household board only — a space sticky id here is 404 (the service
+    looks the id up with ``space_id IS NULL``).
+    """
 
     async def patch(self) -> web.Response:
         self.user
-        sticky_id = self.match("id")
+        await self.require_household_feature("stickies")
         body = await self.body()
-        repo = self.svc(sticky_repo_key)
-        bus = self.svc(event_bus_key)
-
-        sticky = await repo.get(sticky_id)
-        if sticky is None:
-            return error_response(404, "NOT_FOUND", "Sticky not found.")
-
-        # The sticky was loaded above, so its own scope is the one to
-        # write under — the repo mutators are space-scoped (§24.11).
-        scope = sticky.space_id
-        if "content" in body:
-            await repo.update_content(sticky_id, body["content"], space_id=scope)
-        if "position_x" in body or "position_y" in body:
-            x = float(body.get("position_x", sticky.position_x))
-            y = float(body.get("position_y", sticky.position_y))
-            await repo.update_position(sticky_id, x, y, space_id=scope)
-        if "color" in body:
-            await repo.update_color(sticky_id, body["color"], space_id=scope)
-
-        updated = await repo.get(sticky_id)
-        if updated is None:
-            return error_response(404, "NOT_FOUND", "Sticky not found.")
-        await bus.publish(
-            StickyUpdated(
-                sticky_id=updated.id,
-                space_id=updated.space_id,
-                content=updated.content,
-                color=updated.color,
-                position_x=updated.position_x,
-                position_y=updated.position_y,
-            )
+        sticky = await self.svc(sticky_service_key).update(
+            self.match("id"), space_id=None, **_update_kwargs(body)
         )
-        return self._json(_sticky_dict(updated))
+        return self._json(_sticky_dict(sticky))
 
     async def delete(self) -> web.Response:
         self.user
-        sticky_id = self.match("id")
-        repo = self.svc(sticky_repo_key)
-        bus = self.svc(event_bus_key)
-        sticky = await repo.get(sticky_id)
-        if sticky is None:
-            return error_response(404, "NOT_FOUND", "Sticky not found.")
-        await repo.delete(sticky_id, space_id=sticky.space_id)
-        await bus.publish(
-            StickyDeleted(
-                sticky_id=sticky_id,
-                space_id=sticky.space_id,
-            )
-        )
+        await self.require_household_feature("stickies")
+        await self.svc(sticky_service_key).delete(self.match("id"), space_id=None)
         return self._json({"ok": True})
 
 
 # ─── Space-scoped board ─────────────────────────────────────────────────
+#
+# Every handler passes the PATH ``space_id`` into the service, which
+# answers 404 (KeyError) for a sticky id living in another space or on
+# the household board. Write handlers additionally reject read-only
+# subscribers and archived spaces (403) via ``require_writer``.
 
 
-class SpaceStickyCollectionView(BaseView):
-    """``GET /api/spaces/{id}/stickies`` + ``POST``."""
-
-    async def _require_member(self, space_id: str, user_id: str) -> bool:
+class _SpaceStickiesBase(BaseView):
+    async def _require_member(
+        self, space_id: str, user_id: str, *, write: bool = False
+    ) -> bool:
         space_repo = self.svc(space_repo_key)
         if await space_repo.get_member(space_id, user_id) is None:
             return False
         await self.require_space_feature(space_id, "stickies")
+        if write:
+            await self.svc(sticky_service_key).require_writer(space_id, user_id)
         return True
+
+
+class SpaceStickyCollectionView(_SpaceStickiesBase):
+    """``GET /api/spaces/{id}/stickies`` + ``POST``."""
 
     async def get(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
         if not await self._require_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        repo = self.svc(sticky_repo_key)
-        stickies = await repo.list(space_id=space_id)
+        stickies = await self.svc(sticky_service_key).list(space_id=space_id)
         return self._json([_sticky_dict(s) for s in stickies])
 
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        await self.require_household_feature("stickies")
         body = await self.body()
-        bus = self.svc(event_bus_key)
-        sticky = await self.svc(sticky_repo_key).add(
-            author=ctx.user_id,
-            content=body.get("content", ""),
-            color=body.get("color", "#FFF9B1"),
-            position_x=float(body.get("position_x", 0.0)),
-            position_y=float(body.get("position_y", 0.0)),
-            space_id=space_id,
-        )
-        await bus.publish(
-            StickyCreated(
-                sticky_id=sticky.id,
-                space_id=space_id,
-                author=sticky.author,
-                content=sticky.content,
-                color=sticky.color,
-                position_x=sticky.position_x,
-                position_y=sticky.position_y,
-            )
+        sticky = await self.svc(sticky_service_key).create(
+            author=ctx.user_id, space_id=space_id, **_create_kwargs(body)
         )
         return self._json(_sticky_dict(sticky), status=201)
 
 
-class SpaceStickyDetailView(BaseView):
+class SpaceStickyDetailView(_SpaceStickiesBase):
     """``PATCH/DELETE /api/spaces/{id}/stickies/{sid}``."""
-
-    async def _require_member(self, space_id: str, user_id: str) -> bool:
-        space_repo = self.svc(space_repo_key)
-        if await space_repo.get_member(space_id, user_id) is None:
-            return False
-        await self.require_space_feature(space_id, "stickies")
-        return True
-
-    async def _load(self, space_id: str, sticky_id: str):
-        repo = self.svc(sticky_repo_key)
-        sticky = await repo.get(sticky_id)
-        if sticky is None or sticky.space_id != space_id:
-            return None
-        return sticky
 
     async def patch(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        repo = self.svc(sticky_repo_key)
-        bus = self.svc(event_bus_key)
-        sticky = await self._load(space_id, self.match("sid"))
-        if sticky is None:
-            return error_response(404, "NOT_FOUND", "Sticky not found.")
-
         body = await self.body()
-        if "content" in body:
-            await repo.update_content(sticky.id, body["content"], space_id=space_id)
-        if "position_x" in body or "position_y" in body:
-            x = float(body.get("position_x", sticky.position_x))
-            y = float(body.get("position_y", sticky.position_y))
-            await repo.update_position(sticky.id, x, y, space_id=space_id)
-        if "color" in body:
-            await repo.update_color(sticky.id, body["color"], space_id=space_id)
-
-        updated = await repo.get(sticky.id)
-        if updated is None:
-            return error_response(404, "NOT_FOUND", "Sticky not found.")
-        await bus.publish(
-            StickyUpdated(
-                sticky_id=updated.id,
-                space_id=updated.space_id,
-                content=updated.content,
-                color=updated.color,
-                position_x=updated.position_x,
-                position_y=updated.position_y,
-            )
+        sticky = await self.svc(sticky_service_key).update(
+            self.match("sid"), space_id=space_id, **_update_kwargs(body)
         )
-        return self._json(_sticky_dict(updated))
+        return self._json(_sticky_dict(sticky))
 
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        repo = self.svc(sticky_repo_key)
-        bus = self.svc(event_bus_key)
-        sticky = await self._load(space_id, self.match("sid"))
-        if sticky is None:
-            return error_response(404, "NOT_FOUND", "Sticky not found.")
-        await repo.delete(sticky.id, space_id=space_id)
-        await bus.publish(
-            StickyDeleted(
-                sticky_id=sticky.id,
-                space_id=space_id,
-            )
-        )
+        await self.svc(sticky_service_key).delete(self.match("sid"), space_id=space_id)
         return self._json({"ok": True})
