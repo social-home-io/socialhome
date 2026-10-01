@@ -414,7 +414,10 @@ def _clean_text(value: str | None) -> str | None:
 
 
 def _clean_fields[T: (TimetableEntry, TimetableOverride)](obj: T) -> T:
-    changes = {
+    # ``dict[str, Any]``: every key is one of the object's optional text
+    # fields; mypy can't see that, so it would check each value against
+    # every field of the dataclass.
+    changes: dict[str, Any] = {
         name: _clean_text(getattr(obj, name)) for name in _TEXT_FIELDS if name != "icon"
     }
     # An icon is not stripped (whitespace is invalid, not decoration);
@@ -1080,7 +1083,8 @@ def copy_day(
         for e in source:
             clone = copy.replace(e, id=id_factory(), weekday=t)
             if not with_subjects and e.kind is EntryKind.LESSON:
-                clone = copy.replace(clone, **dict.fromkeys(_SUBJECT_FIELDS))
+                blank: dict[str, Any] = dict.fromkeys(_SUBJECT_FIELDS)
+                clone = copy.replace(clone, **blank)
             entries.append(clone)
     return _with_entry_set(tt, entries, now=now, by=by)
 
