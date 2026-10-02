@@ -334,6 +334,112 @@ async def test_space_report_with_service(svc):
     svc.report_svc.create_report_from_remote.assert_awaited_once()
 
 
+async def test_space_report_passes_the_routing_space(svc):
+    await svc.svc._on_space_report(
+        _evt(
+            "SPACE_REPORT",
+            {
+                "reporter_user_id": "r",
+                "target_type": "post",
+                "target_id": "p",
+                "category": "spam",
+                "notes": 5,  # not a string → dropped
+                "space_id": "sp1",
+                "reporter_instance_id": "",
+            },
+            space_id="sp1",
+        ),
+    )
+    kw = svc.report_svc.create_report_from_remote.await_args.kwargs
+    assert kw["space_id"] == "sp1"
+    assert kw["notes"] is None
+    assert kw["origin_instance_id"] is None
+
+
+async def test_space_report_routing_payload_space_mismatch_dropped(svc):
+    await svc.svc._on_space_report(
+        _evt(
+            "SPACE_REPORT",
+            {
+                "reporter_user_id": "r",
+                "target_type": "post",
+                "target_id": "p",
+                "category": "spam",
+                "space_id": "sp-other",
+            },
+            space_id="sp1",
+        ),
+    )
+    svc.report_svc.create_report_from_remote.assert_not_awaited()
+
+
+def _decided(**over):
+    p = {
+        "space_id": "sp1",
+        "target_type": "post",
+        "target_id": "p",
+        "reporter_user_id": "r",
+        "decision": "resolved",
+        "decided_by": "mod",
+    }
+    p.update(over)
+    return _evt("SPACE_REPORT_DECIDED", p, space_id="sp1")
+
+
+async def test_report_decided_from_content_authority_is_applied(svc, monkeypatch):
+    a = svc.svc._authorship
+    monkeypatch.setattr(type(a), "has_content_authority", AsyncMock(return_value=True))
+    monkeypatch.setattr(type(a), "moderates_as", AsyncMock(return_value=True))
+    await svc.svc._on_space_report_decided(_decided())
+    kw = svc.report_svc.apply_remote_decision.await_args.kwargs
+    assert kw == {
+        "space_id": "sp1",
+        "target_type": "post",
+        "target_id": "p",
+        "reporter_user_id": "r",
+        "decision": "resolved",
+        "decided_by": "mod",
+    }
+
+
+async def test_report_decided_without_authority_is_refused(svc, monkeypatch):
+    a = svc.svc._authorship
+    monkeypatch.setattr(type(a), "has_content_authority", AsyncMock(return_value=True))
+    monkeypatch.setattr(type(a), "moderates_as", AsyncMock(return_value=False))
+    await svc.svc._on_space_report_decided(_decided())
+    monkeypatch.setattr(type(a), "has_content_authority", AsyncMock(return_value=False))
+    await svc.svc._on_space_report_decided(_decided())
+    # No decider / no space: dropped before any lookup.
+    await svc.svc._on_space_report_decided(_decided(decided_by=""))
+    await svc.svc._on_space_report_decided(
+        _evt("SPACE_REPORT_DECIDED", {"decided_by": "m"})
+    )
+    svc.report_svc.apply_remote_decision.assert_not_awaited()
+
+
+async def test_report_decided_without_report_service_or_roster_noops():
+    s = FederationInboundService(
+        bus=_RecordingBus(),  # type: ignore[arg-type]
+        conversation_repo=AsyncMock(),
+        space_post_repo=AsyncMock(),
+        space_repo=AsyncMock(),
+        user_repo=AsyncMock(),
+        report_service=None,
+    )
+    await s._on_space_report_decided(_decided())
+    report_svc = AsyncMock()
+    s2 = FederationInboundService(
+        bus=_RecordingBus(),  # type: ignore[arg-type]
+        conversation_repo=AsyncMock(),
+        space_post_repo=AsyncMock(),
+        space_repo=AsyncMock(),
+        user_repo=AsyncMock(),
+        report_service=report_svc,
+    )
+    await s2._on_space_report_decided(_decided())  # no roster mirror: fail closed
+    report_svc.apply_remote_decision.assert_not_awaited()
+
+
 # ── Space membership ────────────────────────────────────────────────
 
 

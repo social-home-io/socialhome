@@ -67,8 +67,8 @@ async def test_create_report_publishes_event(stack):
     stack.svc._bus.subscribe(ReportFiled, _on)
     report, federated = await stack.svc.create_report(
         reporter_user_id=reporter.user_id,
-        target_type="post",
-        target_id="p-1",
+        target_type="moment",
+        target_id="m-1",
         category="spam",
     )
     assert report.category.value == "spam"
@@ -80,15 +80,15 @@ async def test_duplicate_report_raises(stack):
     reporter = await stack.provision("anna")
     await stack.svc.create_report(
         reporter_user_id=reporter.user_id,
-        target_type="post",
-        target_id="p-1",
+        target_type="moment",
+        target_id="m-1",
         category="spam",
     )
     with pytest.raises(DuplicateReportError):
         await stack.svc.create_report(
             reporter_user_id=reporter.user_id,
-            target_type="post",
-            target_id="p-1",
+            target_type="moment",
+            target_id="m-1",
             category="harassment",
         )
 
@@ -108,15 +108,15 @@ async def test_rate_limit_caps_reports_per_day(stack, monkeypatch):
     for i in range(3):
         await stack.svc.create_report(
             reporter_user_id=reporter.user_id,
-            target_type="post",
-            target_id=f"p-{i}",
+            target_type="moment",
+            target_id=f"m-{i}",
             category="spam",
         )
     with pytest.raises(ReportRateLimitedError):
         await stack.svc.create_report(
             reporter_user_id=reporter.user_id,
-            target_type="post",
-            target_id="p-last",
+            target_type="moment",
+            target_id="m-last",
             category="spam",
         )
 
@@ -126,8 +126,8 @@ async def test_list_pending_requires_admin(stack):
     non_admin = await stack.provision("bob")
     await stack.svc.create_report(
         reporter_user_id=non_admin.user_id,
-        target_type="comment",
-        target_id="c-1",
+        target_type="moment",
+        target_id="m-1",
         category="other",
     )
     items = await stack.svc.list_pending(actor_username="pascal")
@@ -143,8 +143,8 @@ async def test_resolve_marks_resolved_and_double_resolve_raises(stack):
     reporter = await stack.provision("bob")
     report, _ = await stack.svc.create_report(
         reporter_user_id=reporter.user_id,
-        target_type="post",
-        target_id="p-1",
+        target_type="moment",
+        target_id="m-1",
         category="spam",
     )
     await stack.svc.resolve(report.id, actor_username="pascal")
@@ -159,8 +159,8 @@ async def test_invalid_category_raises_value_error(stack):
     with pytest.raises(ValueError):
         await stack.svc.create_report(
             reporter_user_id=reporter.user_id,
-            target_type="post",
-            target_id="p-1",
+            target_type="moment",
+            target_id="m-1",
             category="bogus",
         )
 
@@ -251,11 +251,14 @@ async def test_create_report_from_remote_persists_and_publishes(stack):
         fired.append(event)
 
     stack.svc._bus.subscribe(ReportFiled, _on)
+    stack.svc._users = _StubUserRepoWithInstance(
+        stack.svc._users, {"remote-uid": "peer-a"}
+    )
     result = await stack.svc.create_report_from_remote(
         reporter_user_id="remote-uid",
         reporter_instance_id="peer-a",
-        target_type="post",
-        target_id="p-local",
+        target_type="moment",
+        target_id="m-local",
         category="spam",
         notes="looks like spam",
     )
@@ -265,19 +268,22 @@ async def test_create_report_from_remote_persists_and_publishes(stack):
 
 
 async def test_create_report_from_remote_dedup_on_replay(stack):
+    stack.svc._users = _StubUserRepoWithInstance(
+        stack.svc._users, {"remote-uid": "peer-a"}
+    )
     first = await stack.svc.create_report_from_remote(
         reporter_user_id="remote-uid",
         reporter_instance_id="peer-a",
-        target_type="post",
-        target_id="p-1",
+        target_type="moment",
+        target_id="m-1",
         category="spam",
     )
     assert first is not None
     second = await stack.svc.create_report_from_remote(
         reporter_user_id="remote-uid",
         reporter_instance_id="peer-a",
-        target_type="post",
-        target_id="p-1",
+        target_type="moment",
+        target_id="m-1",
         category="spam",
     )
     # Second call is a replay — must not raise; returns None for the dup.
@@ -347,46 +353,6 @@ async def test_auto_forward_resolves_space_target_unchanged(stack):
     assert forwarded[0]["target_id"] == "sp-1"
 
 
-async def test_auto_forward_resolves_post_target_to_space(stack):
-    """A report on a post forwards as 'space' with the owning space_id."""
-    import asyncio
-    from types import SimpleNamespace
-
-    reporter = await stack.provision("anna")
-    forwarded: list[dict] = []
-
-    class _FakePostRepo:
-        async def get(self, post_id):
-            return ("sp-owner", SimpleNamespace(author="remote-uid"))
-
-        async def get_comment(self, comment_id):
-            return None
-
-    class _FakeGfs:
-        async def list_connections(self):
-            return [SimpleNamespace(id="g", inbox_url="", status="active")]
-
-        async def report_fraud(self, gfs_id, **kwargs):
-            forwarded.append(kwargs)
-
-    stack.svc._space_post_repo = _FakePostRepo()
-    stack.svc._users = _StubUserRepoWithInstance(
-        stack.svc._users,
-        {"remote-uid": "peer-a"},
-    )
-    stack.svc.attach_gfs(_FakeGfs(), signing_key=b"\x00" * 32)
-    await stack.svc.create_report(
-        reporter_user_id=reporter.user_id,
-        target_type="post",
-        target_id="post-xyz",
-        category="spam",
-    )
-    await asyncio.sleep(0.05)
-    assert len(forwarded) == 1
-    assert forwarded[0]["target_type"] == "space"
-    assert forwarded[0]["target_id"] == "sp-owner"
-
-
 async def test_create_report_forward_gfs_false_skips_background(stack):
     import asyncio
     from types import SimpleNamespace
@@ -423,8 +389,8 @@ async def test_create_report_from_remote_skips_bad_payload(stack):
         await stack.svc.create_report_from_remote(
             reporter_user_id="",
             reporter_instance_id="peer-a",
-            target_type="post",
-            target_id="p-1",
+            target_type="moment",
+            target_id="m-1",
             category="spam",
         )
         is None
@@ -434,8 +400,8 @@ async def test_create_report_from_remote_skips_bad_payload(stack):
         await stack.svc.create_report_from_remote(
             reporter_user_id="uid-x",
             reporter_instance_id="",
-            target_type="post",
-            target_id="p-1",
+            target_type="moment",
+            target_id="m-1",
             category="spam",
         )
         is None
@@ -445,43 +411,21 @@ async def test_create_report_from_remote_skips_bad_payload(stack):
         await stack.svc.create_report_from_remote(
             reporter_user_id="uid-x",
             reporter_instance_id="peer-a",
-            target_type="post",
-            target_id="p-1",
+            target_type="moment",
+            target_id="m-1",
             category="not_a_category",
         )
         is None
     )
 
 
-async def test_resolve_target_instance_returns_none_for_missing_repos(stack):
-    """When space_repo / space_post_repo aren't attached, target resolution
-    falls through to None — no crash.
-    """
+async def test_resolve_target_instances_without_space_repo(stack):
+    """A space target with no space repo wired resolves to nobody."""
     from socialhome.domain.report import ReportTargetType
 
-    # Drop the optional repos to simulate a minimal wiring.
     stack.svc._space_repo = None
-    stack.svc._space_post_repo = None
     assert (
-        await stack.svc._resolve_target_instance(
-            ReportTargetType.POST,
-            "p-1",
-        )
-        is None
-    )
-    assert (
-        await stack.svc._resolve_target_instance(
-            ReportTargetType.COMMENT,
-            "c-1",
-        )
-        is None
-    )
-    assert (
-        await stack.svc._resolve_target_instance(
-            ReportTargetType.SPACE,
-            "s-1",
-        )
-        is None
+        await stack.svc._resolve_target_instances(ReportTargetType.SPACE, "s-1") == []
     )
 
 
@@ -500,3 +444,78 @@ async def test_create_report_without_federation_skips_send(stack):
         category="spam",
     )
     assert federated is False
+
+
+async def test_remote_household_report_needs_a_reporter_of_the_sender(stack):
+    """A household-level report names a user of the SENDING household — a
+    peer cannot file in another household's user's name."""
+    stack.svc._users = _StubUserRepoWithInstance(
+        stack.svc._users, {"remote-uid": "peer-a"}
+    )
+    assert (
+        await stack.svc.create_report_from_remote(
+            reporter_user_id="remote-uid",
+            reporter_instance_id="peer-b",
+            target_type="moment",
+            target_id="m-1",
+            category="spam",
+        )
+        is None
+    )
+
+
+async def test_remote_user_report_must_name_one_of_our_users(stack):
+    stack.svc._users = _StubUserRepoWithInstance(
+        stack.svc._users, {"remote-uid": "peer-a"}
+    )
+    assert (
+        await stack.svc.create_report_from_remote(
+            reporter_user_id="remote-uid",
+            reporter_instance_id="peer-a",
+            target_type="user",
+            target_id="nobody-here",
+            category="spam",
+        )
+        is None
+    )
+    anna = await stack.provision("anna")
+    got = await stack.svc.create_report_from_remote(
+        reporter_user_id="remote-uid",
+        reporter_instance_id="peer-a",
+        target_type="user",
+        target_id=anna.user_id,
+        category="spam",
+        notes="x" * 5000,
+    )
+    assert got is not None
+    assert got.notes is not None and len(got.notes) == 1000
+
+
+async def test_unknown_user_or_content_is_not_found(stack):
+    reporter = await stack.provision("anna")
+    with pytest.raises(KeyError):
+        await stack.svc.create_report(
+            reporter_user_id=reporter.user_id,
+            target_type="user",
+            target_id="ghost",
+            category="spam",
+        )
+    with pytest.raises(KeyError):
+        await stack.svc.create_report(
+            reporter_user_id=reporter.user_id,
+            target_type="post",
+            target_id="no-such-post",
+            category="spam",
+        )
+
+
+async def test_notes_over_the_cap_are_refused(stack):
+    reporter = await stack.provision("anna")
+    with pytest.raises(ValueError):
+        await stack.svc.create_report(
+            reporter_user_id=reporter.user_id,
+            target_type="moment",
+            target_id="m-1",
+            category="spam",
+            notes="x" * 1001,
+        )

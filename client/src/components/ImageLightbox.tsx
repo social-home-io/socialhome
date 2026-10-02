@@ -15,6 +15,7 @@ import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 export interface LightboxItem {
   id?:            string
@@ -25,6 +26,8 @@ export interface LightboxItem {
   taken_at?:      string | null
   width?:         number
   height?:        number
+  /** Offer "Report" (a space gallery item by someone else). */
+  onReport?:      () => void
 }
 
 interface LightboxState {
@@ -216,6 +219,13 @@ export function ImageLightbox() {
             download
             aria-label="Download this item"
           >↓ Download</a>
+          {item.onReport && (
+            <button
+              type="button"
+              class="sh-lightbox-copyref sh-lightbox-report"
+              onClick={() => { const go = item.onReport; closeLightbox(); go?.() }}
+            >🚩 {t('report.action')}</button>
+          )}
         </div>
       </div>
     </div>

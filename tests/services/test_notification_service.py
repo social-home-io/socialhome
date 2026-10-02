@@ -2572,3 +2572,150 @@ async def test_post_restore_rotation_tells_the_owner_to_reconfirm_admins(stack):
         for n in await stack.notif_repo.list(bob.user_id, limit=10)
         if n.type == "space_admins_reconfirm"
     ]
+
+
+async def test_space_report_notifies_content_authority_title_only(stack):
+    """A space-scoped report tells the space's owner / admins / moderators —
+    not plain members, not the reporter — with a title-only push (§25.3)."""
+    from socialhome.domain.events import ReportFiled
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
+
+    anna = await stack.provision_user("anna")
+    mo = await stack.provision_user("mo")
+    b = await stack.provision_user("bob")
+    c = await stack.provision_user("cara")
+    space_svc = SpaceService(
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Club")
+    for u in (mo, b, c):
+        await space_svc.add_member(space.id, actor_username="anna", user_id=u.user_id)
+    await space_svc.set_role(
+        space.id, actor_username="anna", user_id=mo.user_id, role="moderator"
+    )
+    sent = []
+
+    class _Push:
+        async def push_to_user(self, user_id, payload):
+            sent.append((user_id, payload))
+
+    stack.notif_svc.attach_push_service(_Push())
+    await stack.bus.publish(
+        ReportFiled(
+            report_id="r1",
+            target_type="post",
+            target_id="p1",
+            category="harassment",
+            reporter_user_id=b.user_id,
+            space_id=space.id,
+        )
+    )
+    # Household-level reports notify nobody here.
+    await stack.bus.publish(
+        ReportFiled(
+            report_id="r2",
+            target_type="post",
+            target_id="p2",
+            category="spam",
+            reporter_user_id=b.user_id,
+        )
+    )
+    # Unknown space: silent.
+    await stack.bus.publish(
+        ReportFiled(
+            report_id="r3",
+            target_type="post",
+            target_id="p3",
+            category="spam",
+            reporter_user_id=b.user_id,
+            space_id="gone",
+        )
+    )
+    told = {uid for uid, _ in sent}
+    assert told == {anna.user_id, mo.user_id}
+    for _, payload in sent:
+        assert "Club" in payload.title
+        assert "harassment" not in payload.to_json()
+    for u in (b, c):
+        notes = await stack.notif_repo.list(u.user_id, limit=50)
+        assert not any(n.type == "space_report" for n in notes)
+    mo_n = await stack.notif_repo.list(mo.user_id, limit=50)
+    assert [n.link_url for n in mo_n if n.type == "space_report"] == [
+        f"/spaces/{space.id}?tab=moderation"
+    ]
+
+
+async def test_space_report_about_a_moderator_does_not_notify_them(stack):
+    from socialhome.domain.events import ReportFiled
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
+
+    anna = await stack.provision_user("anna")
+    mo = await stack.provision_user("mo")
+    b = await stack.provision_user("bob")
+    space_svc = SpaceService(
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Club")
+    for u in (mo, b):
+        await space_svc.add_member(space.id, actor_username="anna", user_id=u.user_id)
+    await space_svc.set_role(
+        space.id, actor_username="anna", user_id=mo.user_id, role="moderator"
+    )
+    await stack.bus.publish(
+        ReportFiled(
+            report_id="r1",
+            target_type="user",
+            target_id=mo.user_id,
+            category="harassment",
+            reporter_user_id=b.user_id,
+            space_id=space.id,
+            subject_user_id=mo.user_id,
+        )
+    )
+    mo_n = await stack.notif_repo.list(mo.user_id, limit=50)
+    anna_n = await stack.notif_repo.list(anna.user_id, limit=50)
+    assert not any(n.type == "space_report" for n in mo_n)
+    assert any(n.type == "space_report" for n in anna_n)
+
+
+async def test_space_report_about_the_sole_owner_still_tells_them(stack):
+    """The owner is the space's only content authority: they are the one
+    who can dismiss it, so they are told (title only)."""
+    from socialhome.domain.events import ReportFiled
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
+
+    anna = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space_svc = SpaceService(
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Club")
+    await space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
+    await stack.bus.publish(
+        ReportFiled(
+            report_id="r1",
+            target_type="user",
+            target_id=anna.user_id,
+            category="harassment",
+            reporter_user_id=b.user_id,
+            space_id=space.id,
+            subject_user_id=anna.user_id,
+        )
+    )
+    anna_n = await stack.notif_repo.list(anna.user_id, limit=50)
+    assert any(n.type == "space_report" for n in anna_n)

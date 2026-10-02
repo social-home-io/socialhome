@@ -28,6 +28,8 @@ import { ChipRadioGroup, type ChipRadioOption } from './ChipRadioGroup'
 import { stickyStoreFor, type StickyRow } from '@/store/stickies'
 import { isOne } from '@/store/tasks'
 import { t } from '@/i18n/i18n'
+import { currentUser } from '@/store/auth'
+import { openReport } from './ReportDialog'
 import { inkClass, stickyBackground } from '@/features/stickies/ink'
 
 export interface StickyColor {
@@ -58,6 +60,9 @@ const CONTENT_MAX = 500
 const open = signal(false)
 const editingId = signal<string | null>(null)
 const scopeSpaceId = signal<string | null>(null)
+/** Who wrote the note being edited (a space note by someone else can be
+ *  reported to the space's moderators). */
+const editingAuthor = signal<string | null>(null)
 /** Where a new note lands — the board spreads new notes out. */
 const newPosition = signal<{ x: number; y: number }>({ x: 0, y: 0 })
 
@@ -70,6 +75,7 @@ const submitting = signal(false)
 
 function reset(): void {
   editingId.value = null
+  editingAuthor.value = null
   content.value = ''
   color.value = STICKY_COLORS[0].hex
   originalColor.value = STICKY_COLORS[0].hex
@@ -96,6 +102,7 @@ export function openCreateStickyDialog(
 export function openEditStickyDialog(sticky: StickyRow, spaceId: string | null): void {
   reset()
   editingId.value = sticky.id
+  editingAuthor.value = sticky.author
   scopeSpaceId.value = spaceId
   content.value = sticky.content
   color.value = sticky.color
@@ -252,6 +259,21 @@ export function StickyDialog() {
               disabled={submitting.value}
             >
               {t('common.delete')}
+            </Button>
+          )}
+          {isEdit && scopeSpaceId.value && editingAuthor.value
+            && editingAuthor.value !== currentUser.value?.user_id && (
+            <Button
+              variant="ghost"
+              type="button"
+              onClick={() => {
+                const id = editingId.value
+                const sid = scopeSpaceId.value
+                open.value = false
+                if (id) openReport('sticky', id, sid)
+              }}
+            >
+              {t('report.action')}
             </Button>
           )}
           <span class="sh-sticky-dialog-actions__spacer" />

@@ -13,6 +13,8 @@ import { ws } from '@/ws'
 import { Avatar } from './Avatar'
 import { Spinner } from './Spinner'
 import { Button } from './Button'
+import { t } from '@/i18n/i18n'
+import { openReport } from './ReportDialog'
 import { showToast } from './Toast'
 import { AliasDialog, openAliasDialog } from './AliasDialog'
 import { openMemberActions, MemberActionSheet, roleLabel } from './MemberActionSheet'
@@ -342,6 +344,17 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                   }
                 >
                   ✏
+                </button>
+              )}
+              {!isMe && (
+                <button
+                  class="sh-member-rename-btn sh-member-report-btn"
+                  type="button"
+                  aria-label={t('report.member_aria', { name: r.name })}
+                  title={t('report.member_title')}
+                  onClick={() => openReport('user', m.user_id, spaceId)}
+                >
+                  🚩
                 </button>
               )}
               {canManage.value && !isMe && (

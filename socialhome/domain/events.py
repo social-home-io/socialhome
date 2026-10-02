@@ -215,13 +215,21 @@ class SpaceModerationExpired(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class ReportFiled(DomainEvent):
-    """A user filed a report on a post / comment / user / space."""
+    """A user filed a report (``ReportTargetType`` value as ``target_type``).
+
+    ``space_id`` is set for a space-scoped report — its content authority
+    triages it — and ``None`` for a household-level one.
+    """
 
     report_id: str
-    target_type: str  # 'post' | 'comment' | 'user' | 'space'
+    target_type: str
     target_id: str
     category: str
     reporter_user_id: str
+    space_id: str | None = None
+    #: Whom the report is about — the reported member, or the item's
+    #: author — so they are never asked to triage it (``None``: unknown).
+    subject_user_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -229,6 +237,7 @@ class ReportFiled(DomainEvent):
 class ReportResolved(DomainEvent):
     report_id: str
     resolved_by: str
+    space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

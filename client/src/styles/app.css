@@ -15153,6 +15153,22 @@ a.sh-link-preview-link:focus-visible {
 .sh-report-row { display: flex; gap: var(--sh-space-sm); padding: var(--sh-space-xs) 0; border-bottom: 1px solid var(--sh-border); }
 .sh-reports { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
 .sh-report-meta { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
+/* A space's reports, under its Moderation tab (content authority). */
+.sh-space-reports { display: flex; flex-direction: column; gap: var(--sh-space-sm); margin-top: var(--sh-space-lg); scroll-margin-top: 140px; }
+.sh-space-reports > h3 { margin: 0; }
+.sh-space-reports__hint { margin: 0; }
+.sh-space-reports__error { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sh-space-xs); }
+.sh-space-report__notes { margin: 0; overflow-wrap: anywhere; }
+.sh-member-report-btn {
+  opacity: 0.7;
+  /* A ≥ 36 px tap target (it sits beside the smaller nickname pencil). */
+  min-width: 36px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.sh-member-report-btn:hover, .sh-member-report-btn:focus-visible { opacity: 1; }
 
 /* Moderation */
 .sh-moderation { display: flex; flex-direction: column; gap: var(--sh-space-sm); }

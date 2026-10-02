@@ -485,6 +485,7 @@ export function TasksView() {
           people={people}
           nameOf={userName}
           labelSuggestions={collectLabels(visibleTasks, locale.value)}
+          spaceId={scope.spaceId ?? null}
           onClose={() => setEditing(null)}
           onSave={async (patch) => {
             if (!store.findTask(editing.id)) {

@@ -215,10 +215,10 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
                     closeMenu()
-                    openReport('post', post.id)
+                    openReport('post', post.id, spaceId)
                   }}
                 >
-                  Report
+                  {t('report.action')}
                 </button>
               </div>
             )}

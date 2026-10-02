@@ -695,7 +695,16 @@ from __future__ import annotations
 #:   owner keeps reaching it with UNSIGNED config and rekeys over the
 #:   owner-from-instance path, its roster mirror freezes, and the banner
 #:   names the gap.
-OURS: int = 44
+#: * **v_45** (2026-10-02) — space-scoped reports. ``SPACE_REPORT`` carries
+#:   the space (routing field + sealed copy) and goes only to the host and
+#:   the admin / moderator households; the receiver triages it as the
+#:   space's (content authority), never as a household-admin report. New
+#:   :data:`FederationEventType.SPACE_REPORT_DECIDED` syncs a resolve /
+#:   dismiss across those households (first decision wins). **Gated, no
+#:   fallback**: a reviewer household below v_45 is sent neither event — it
+#:   would file the report for its HOUSEHOLD admins, who must not see a
+#:   space's reports.
+OURS: int = 45
 
 
 class FederationCapability:
@@ -1087,6 +1096,11 @@ class FederationCapability:
     #: the owner's config and rekeys unsigned.
     MIN_FOR_SPACE_AUTHORITY_ROTATION = 44
 
+    #: Minimum proto_version that triages a space's reports as the space's
+    #: (v_45): ``SPACE_REPORT`` with ``space_id`` and
+    #: ``SPACE_REPORT_DECIDED``. Neither is sent to a household below it.
+    MIN_FOR_SPACE_REPORT_SCOPE = 45
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1219,6 +1233,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
         "Space key rotation on revoke",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE,
+        "Space reports for moderators",
+    ),
 ]
 
 
@@ -1288,6 +1306,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT,
         FederationCapability.MIN_FOR_FEDERATED_MODERATION,
         FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
+        FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE,
     }
 )
 

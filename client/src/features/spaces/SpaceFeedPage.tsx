@@ -20,6 +20,8 @@ import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { JoinRequestList } from '@/components/JoinRequestList'
 import { ModerationQueue } from '@/components/ModerationQueue'
+import { SpaceReports } from '@/components/SpaceReports'
+import { openReport } from '@/components/ReportDialog'
 import { SpaceLocationCard } from '@/components/SpaceLocationCard'
 import { SpaceMemberList } from '@/components/SpaceMemberList'
 import GalleryPage from '@/features/gallery/GalleryPage'
@@ -279,6 +281,9 @@ export default function SpaceFeedPage() {
   const spaceId = params.id
   // ``?tab=tasks`` (e.g. from a task notification) opens that tab.
   const linkedTab = parseSpaceTab(query?.tab)
+  // ``?tab=moderation`` (the review / report notifications) waits for the
+  // viewer's role: only content authority has the tab.
+  const wantsModeration = query?.tab === 'moderation'
 
   // Apply the space's custom theme (§23 customization). The hook
   // fetches /api/spaces/{id}/theme, sets CSS vars, and cleans up on
@@ -374,6 +379,11 @@ export default function SpaceFeedPage() {
   useEffect(() => {
     if (linkedTab && linkedTab !== activeTab.value) loadTabData(linkedTab)
   }, [spaceId, linkedTab]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (wantsModeration && roleKnown.value && roleCanModerate(viewerRole.value)) {
+      activeTab.value = 'moderation'
+    }
+  }, [spaceId, wantsModeration, roleKnown.value, viewerRole.value])
   // …and falls back to the feed if the space turns out not to have it
   // (feature off), or turns it off while it's open.
   const features = spaceDetail.value?.features
@@ -876,12 +886,21 @@ export default function SpaceFeedPage() {
                         {/* ``can_edit``: the calendar's access level lets
                          *  the viewer change this event (§4.3) — absent
                          *  from an older host: no control offered. */}
-                        {e.can_edit === true && !s?.archived && (
+                        {((e.can_edit === true && !s?.archived)
+                          || e.created_by !== currentUser.value?.user_id) && (
                           <div class="sh-event-admin sh-row">
-                            <Button variant="danger"
-                                    onClick={() => deleteSpaceEvent(spaceId, e)}>
-                              {t('event.delete')}
-                            </Button>
+                            {e.can_edit === true && !s?.archived && (
+                              <Button variant="danger"
+                                      onClick={() => deleteSpaceEvent(spaceId, e)}>
+                                {t('event.delete')}
+                              </Button>
+                            )}
+                            {e.created_by !== currentUser.value?.user_id && (
+                              <Button variant="ghost"
+                                      onClick={() => openReport('calendar_event', e.id, spaceId)}>
+                                {t('report.action')}
+                              </Button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -953,6 +972,9 @@ export default function SpaceFeedPage() {
           spaceId={spaceId}
           canApprove={(feature) => !adminOnly(feature as AccessFeature)}
         />
+      )}
+      {activeTab.value === 'moderation' && canModerateQueue && (
+        <SpaceReports spaceId={spaceId} onOpenTab={loadTabData} />
       )}
     </div>
   )

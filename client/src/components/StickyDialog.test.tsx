@@ -193,4 +193,21 @@ describe('StickyDialog', () => {
     await waitFor(() => expect(container.querySelector('.sh-sticky-dialog')).not.toBeNull())
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
   })
+
+  it('a space note by someone else offers Report (to the space\'s moderators)', async () => {
+    const mod = await import('./ReportDialog')
+    const spy = vi.spyOn(mod, 'openReport').mockImplementation(() => {})
+    render(<StickyDialog />)
+    openEditStickyDialog(fakeSticky({ space_id: 'sp-1' }), 'sp-1')
+    fireEvent.click(await screen.findByRole('button', { name: 'Report' }))
+    expect(spy).toHaveBeenCalledWith('sticky', 's-1', 'sp-1')
+    spy.mockRestore()
+  })
+
+  it('a household note offers no Report', async () => {
+    render(<StickyDialog />)
+    openEditStickyDialog(fakeSticky(), null)
+    await screen.findByRole('button', { name: 'Save' })
+    expect(screen.queryByRole('button', { name: 'Report' })).toBeNull()
+  })
 })
