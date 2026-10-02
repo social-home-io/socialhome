@@ -17,7 +17,13 @@ from socialhome.federation.owner_bound_id import (
     check_owner_bound_id,
 )
 from socialhome.domain.events import TaskAssigned, TaskCompleted, TaskUpdated
-from socialhome.domain.space import SpacePermissionError
+from socialhome.domain.space import (
+    ContentAction,
+    ContentQueuedForReview,
+    ModerationStatus,
+    ModerationTargetGoneError,
+    SpacePermissionError,
+)
 from socialhome.domain.user import User
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_remote_member_repo import (
@@ -26,7 +32,12 @@ from socialhome.repositories.space_remote_member_repo import (
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo, SqliteTaskRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.services.task_service import SpaceTaskService, TaskService
+from socialhome.services.space_moderation_service import SpaceModerationService
+from socialhome.services.task_service import (
+    SpaceTaskService,
+    TaskModerationHandler,
+    TaskService,
+)
 
 
 @pytest.fixture
@@ -1495,3 +1506,186 @@ async def test_space_task_events_name_their_actor(env):
         ("TaskDeleted", "u-member"),
         ("TaskListDeleted", "u-owner"),
     ]
+
+
+# ─── MODERATED tasks (§4.3 review queue) ────────────────────────────────
+
+
+async def _moderated_tasks(env):
+    """``sp-mo`` (hosted here): owner, moderator, two members, an assignee;
+    a list + a task by the owner, ``tasks_access`` MODERATED."""
+    svc = SpaceTaskService(env.space_task_repo, space_repo=env.space_repo)
+    await env.db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+           identity_public_key, config_sequence, space_type, join_mode)
+           VALUES(?,?,?,?,?,0,'private','invite_only')""",
+        ("sp-mo", "MO", env.iid, "o", generate_identity_keypair().public_key.hex()),
+    )
+    for uid, role in (
+        ("u-owner", "owner"),
+        ("u-mod", "moderator"),
+        ("u-member", "member"),
+        ("u-assignee", "member"),
+    ):
+        await env.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,?)",
+            ("sp-mo", uid, role),
+        )
+    lst = await svc.create_list(space_id="sp-mo", name="L", created_by="u-owner")
+    task = await svc.create_task(
+        space_id="sp-mo",
+        list_id=lst.id,
+        title="T",
+        created_by="u-owner",
+        assignees=["u-assignee"],
+        description="keep me",
+    )
+    await env.db.enqueue(
+        "UPDATE spaces SET tasks_access='moderated', feature_todo=1 WHERE id='sp-mo'"
+    )
+    mod = SpaceModerationService(
+        env.space_repo, user_repo=env.user_repo, own_instance_id=env.iid
+    )
+    svc.attach_moderation(mod)
+    handler = TaskModerationHandler(svc)
+    for action in (ContentAction.CREATE, ContentAction.EDIT, ContentAction.DELETE):
+        mod.register("tasks", action, handler)
+    return svc, mod, lst, task
+
+
+async def test_moderated_member_task_create_queues_then_approves(env):
+    svc, mod, lst, _task = await _moderated_tasks(env)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.create_task(
+            space_id="sp-mo", list_id=lst.id, title="New", created_by="u-member"
+        )
+    item = exc.value.item
+    assert [t.title for t in await svc.list_tasks("sp-mo")] == ["T"]
+    await mod.approve("sp-mo", item.id, actor_user_id="u-mod")
+    created = await svc.get_task_in_space(item.payload["target_id"], "sp-mo")
+    assert (created.title, created.created_by) == ("New", "u-member")
+
+
+async def test_moderated_list_create_rename_delete_queue(env):
+    svc, mod, lst, _task = await _moderated_tasks(env)
+    with pytest.raises(ContentQueuedForReview) as c:
+        await svc.create_list(space_id="sp-mo", name="Mine", created_by="u-member")
+    with pytest.raises(ContentQueuedForReview) as r:
+        await svc.rename_list(
+            lst.id, space_id="sp-mo", name="Renamed", actor_user_id="u-member"
+        )
+    with pytest.raises(ContentQueuedForReview) as d:
+        await svc.delete_list(lst.id, space_id="sp-mo", actor_user_id="u-member")
+    assert [x.name for x in await svc.list_lists("sp-mo")] == ["L"]
+    await mod.approve("sp-mo", c.value.item.id, actor_user_id="u-mod")
+    await mod.approve("sp-mo", r.value.item.id, actor_user_id="u-mod")
+    assert sorted(x.name for x in await svc.list_lists("sp-mo")) == ["Mine", "Renamed"]
+    await mod.approve("sp-mo", d.value.item.id, actor_user_id="u-mod")
+    assert [x.name for x in await svc.list_lists("sp-mo")] == ["Mine"]
+
+
+async def test_moderated_others_task_edit_queues_field_patch(env):
+    svc, mod, _lst, task = await _moderated_tasks(env)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.update_task(
+            task.id, space_id="sp-mo", actor_user_id="u-member", title="Changed"
+        )
+    item = exc.value.item
+    assert item.payload["patch"] == {"title": "Changed"}
+    # Meanwhile the owner edits the description — must survive the approve.
+    await svc.update_task(
+        task.id, space_id="sp-mo", actor_user_id="u-owner", description="newer"
+    )
+    await mod.approve("sp-mo", item.id, actor_user_id="u-mod")
+    got = await svc.get_task_in_space(task.id, "sp-mo")
+    assert (got.title, got.description, got.created_by) == (
+        "Changed",
+        "newer",
+        "u-owner",
+    )
+
+
+async def test_moderated_status_change_of_others_task_queues(env):
+    svc, _mod, _lst, task = await _moderated_tasks(env)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.update_task(
+            task.id, space_id="sp-mo", actor_user_id="u-member", status="done"
+        )
+    assert exc.value.item.payload["patch"] == {"status": "done"}
+    assert (await svc.get_task_in_space(task.id, "sp-mo")).status is TaskStatus.TODO
+
+
+async def test_moderated_assignee_owns_status_but_not_title(env):
+    svc, _mod, _lst, task = await _moderated_tasks(env)
+    moved = await svc.update_task(
+        task.id,
+        space_id="sp-mo",
+        actor_user_id="u-assignee",
+        status="in_progress",
+        position=0,
+    )
+    assert moved.status is TaskStatus.IN_PROGRESS
+    with pytest.raises(ContentQueuedForReview):
+        await svc.update_task(
+            task.id, space_id="sp-mo", actor_user_id="u-assignee", title="Mine now"
+        )
+
+
+async def test_moderated_same_column_reorder_never_queues(env):
+    svc, _mod, lst, task = await _moderated_tasks(env)
+    await svc.reorder_tasks(
+        "sp-mo",
+        lst.id,
+        ordered_ids=[task.id],
+        moved_id=task.id,
+        actor_user_id="u-member",
+    )
+    await svc.update_task(
+        task.id, space_id="sp-mo", actor_user_id="u-member", position=3
+    )
+
+
+async def test_moderated_archive_and_delete_of_others_task_queue(env):
+    svc, mod, _lst, task = await _moderated_tasks(env)
+    with pytest.raises(ContentQueuedForReview) as a:
+        await svc.archive_task(task.id, space_id="sp-mo", actor_user_id="u-member")
+    assert a.value.item.payload["op"] == "archive"
+    assert (await svc.get_task_in_space(task.id, "sp-mo")).archived_at is None
+    await mod.approve("sp-mo", a.value.item.id, actor_user_id="u-mod")
+    assert (await svc.get_task_in_space(task.id, "sp-mo")).archived_at is not None
+    with pytest.raises(ContentQueuedForReview) as d:
+        await svc.delete_task(task.id, space_id="sp-mo", actor_user_id="u-member")
+    await mod.approve("sp-mo", d.value.item.id, actor_user_id="u-mod")
+    assert [t.id for t in await svc.list_tasks("sp-mo")] == []
+
+
+async def test_moderated_task_edit_of_deleted_task_410(env):
+    svc, mod, _lst, task = await _moderated_tasks(env)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.update_task(
+            task.id, space_id="sp-mo", actor_user_id="u-member", title="x"
+        )
+    await svc.delete_task(task.id, space_id="sp-mo", actor_user_id="u-owner")
+    with pytest.raises(ModerationTargetGoneError):
+        await mod.approve("sp-mo", exc.value.item.id, actor_user_id="u-mod")
+    assert (
+        await mod.get_item("sp-mo", exc.value.item.id)
+    ).status is ModerationStatus.EXPIRED
+
+
+async def test_moderated_task_create_reject_persists_nothing(env):
+    svc, mod, lst, _task = await _moderated_tasks(env)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.create_task(
+            space_id="sp-mo", list_id=lst.id, title="Nope", created_by="u-member"
+        )
+    await mod.reject("sp-mo", exc.value.item.id, actor_user_id="u-mod")
+    assert [t.title for t in await svc.list_tasks("sp-mo")] == ["T"]
+
+
+async def test_moderated_moderator_writes_directly(env):
+    svc, _mod, lst, task = await _moderated_tasks(env)
+    await svc.create_task(
+        space_id="sp-mo", list_id=lst.id, title="M", created_by="u-mod"
+    )
+    await svc.update_task(task.id, space_id="sp-mo", actor_user_id="u-mod", title="M2")

@@ -297,6 +297,42 @@ describe('delete with Undo', () => {
   })
 })
 
+describe('held for review (202 {queued: true}, §4.3)', () => {
+  const QUEUED = { queued: true, item_id: 'q1', feature: 'stickies', action: 'edit', entity: 'sticky', target_id: 's' }
+
+  it('a queued create adds nothing and resolves null, with the review toast', async () => {
+    const sp = spaceStickyStore('sp')
+    apiGet.mockResolvedValueOnce([])
+    await sp.load()
+    apiPost.mockResolvedValueOnce({ ...QUEUED, action: 'create' })
+    const res = await sp.create({ content: 'x', color: '#FFF9B1', position_x: 1, position_y: 2 })
+    expect(res).toBeNull()
+    expect(sp.rows.value).toEqual([])
+    expect(toasts.map(t => t.msg)).toContain('Submitted for review — a moderator will look at it')
+  })
+
+  it('a queued edit puts the note back', async () => {
+    const sp = spaceStickyStore('sp')
+    apiGet.mockResolvedValueOnce([row('s', { space_id: 'sp' })])
+    await sp.load()
+    apiPatch.mockResolvedValueOnce(QUEUED)
+    const res = await sp.patch('s', { content: 'changed' })
+    expect(res).toBeNull()
+    expect(sp.find('s')?.content).toBe('note s')
+  })
+
+  it('a queued delete leaves the note on the board', async () => {
+    const sp = spaceStickyStore('sp')
+    apiGet.mockResolvedValueOnce([row('s', { space_id: 'sp' })])
+    await sp.load()
+    apiDelete.mockResolvedValueOnce({ ...QUEUED, action: 'delete' })
+    sp.remove(sp.find('s')!)
+    toasts[0].opts!.onExpire!()
+    await flush()
+    expect(sp.visible.value.map(r => r.id)).toEqual(['s'])
+  })
+})
+
 describe('reset', () => {
   it('logout forgets every scope', async () => {
     apiGet.mockResolvedValue([row('a')])

@@ -29,10 +29,21 @@ from ..domain.preferences import FeatureDisabledError
 from ..services.preferences_service import ScopeMismatchError
 from ..domain.space import (
     AccessAdminOnlyError,
+    ContentQueuedForReview,
     HouseholdUpgradeRequiredError,
     ModerationAlreadyDecidedError,
+    ModerationExpiredError,
+    ModerationInProgressError,
+    ModerationNotFederatedError,
+    ModerationNotHostError,
+    ModerationPayloadTooLargeError,
+    ModerationQueueFullError,
+    ModerationStaleError,
+    ModerationTargetGoneError,
+    ModerationUnavailableError,
     PeersTooOldError,
     PublicSpaceLimitError,
+    SpaceModerationItem,
     SpacePermissionError,
 )
 from ..domain.timetable import (
@@ -42,6 +53,7 @@ from ..domain.timetable import (
     TimetableValidationError,
 )
 from ..domain.space_bot import (
+    BotPostsReviewedError,
     SpaceBotDisabledError,
     SpaceBotError,
     SpaceBotSlugTakenError,
@@ -174,6 +186,23 @@ class BaseView(web.View):
             sanitised = data
         return web.json_response(sanitised, status=status)
 
+    def _queued(self, item: SpaceModerationItem) -> web.Response:
+        """202 for a write that went to the space moderation queue (§4.3
+        ``MODERATED``): nothing was persisted, so the body is the queue
+        receipt — never the object the client asked to create."""
+        payload = item.payload or {}
+        return web.json_response(
+            {
+                "queued": True,
+                "item_id": item.id,
+                "feature": item.feature,
+                "action": item.action,
+                "entity": payload.get("entity"),
+                "target_id": payload.get("target_id"),
+            },
+            status=202,
+        )
+
     # ── Dispatch with centralised error mapping ──────────────────────────
 
     async def _iter(self) -> web.StreamResponse:
@@ -187,6 +216,57 @@ class BaseView(web.View):
             return await super()._iter()
         except web.HTTPException:
             raise  # aiohttp errors pass through
+        except ContentQueuedForReview as queued:
+            # Not an error: the write waits for a moderator (202).
+            return self._queued(queued.item)
+        except ModerationQueueFullError:
+            return error_response(
+                429, "QUEUE_FULL", "Too many submissions are waiting for review."
+            )
+        except ModerationPayloadTooLargeError:
+            # A ValueError subclass — must precede the generic clause.
+            return error_response(
+                413, "PAYLOAD_TOO_LARGE", "This is too large to submit for review."
+            )
+        except ModerationStaleError as exc:
+            return error_response(
+                409,
+                "STALE",
+                "This changed since it was submitted.",
+                extra={
+                    "current": exc.current,
+                    "proposed": exc.proposed,
+                    "base": exc.base,
+                },
+            )
+        except ModerationExpiredError:
+            # A ModerationTargetGoneError subclass — must precede it.
+            return error_response(410, "EXPIRED", "This submission has expired.")
+        except ModerationTargetGoneError:
+            return error_response(410, "TARGET_GONE", "This no longer exists.")
+        except ModerationInProgressError:
+            return error_response(
+                409, "IN_PROGRESS", "This submission is being approved right now."
+            )
+        except ModerationNotHostError:
+            return error_response(
+                409, "NOT_HOST", "Only the space's host household reviews submissions."
+            )
+        except ModerationUnavailableError:
+            return error_response(
+                409,
+                "FEATURE_UNAVAILABLE",
+                "This feature is off or the space is archived.",
+            )
+        except ModerationNotFederatedError as exc:
+            # A SpacePermissionError subclass — must precede it.
+            return error_response(
+                exc.http_status,
+                "MODERATION_NOT_FEDERATED",
+                "Review is not available here for spaces shared with other "
+                "households yet.",
+                extra={"feature": exc.feature},
+            )
         except (
             PageNotFoundError,
             PollNotFoundError,
@@ -289,6 +369,12 @@ class BaseView(web.View):
             return error_response(409, "SLUG_TAKEN", str(exc))
         except SpaceBotDisabledError as exc:
             return error_response(403, "BOT_DISABLED", str(exc))
+        except BotPostsReviewedError:
+            return error_response(
+                403,
+                "BOT_POSTS_REVIEWED",
+                "Posts here are reviewed — a personal bot can't post in this space.",
+            )
         except SpaceBotError as exc:
             # Generic validation error from the bot-bridge domain.
             return error_response(422, "UNPROCESSABLE", str(exc))

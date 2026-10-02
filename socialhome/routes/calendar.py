@@ -629,12 +629,25 @@ class SpaceCalendarEventsView(_SpaceCalendarBase):
         # double-firing HA bridge + WS).
         payload = _event_dict(event)
         if bool(body.get("announce_in_feed", False)) and not event.announce_in_feed:
-            # Saved, but the feed card was dropped (§4.3 posts level): tell
-            # the creator why, so the SPA can say so.
-            payload["announce_suppressed"] = True
-            payload[
-                "announce_suppressed_reason"
-            ] = await space_cal_svc.announce_refusal(space_id, ctx.user_id)
+            # Saved, but the feed card did not go out (§4.3 posts level).
+            # Under MODERATED it waits in the review queue; otherwise it was
+            # dropped. Tell the creator which, so the SPA can say so.
+            moderation = self.request.app.get(K.space_moderation_service_key)
+            card = (
+                await moderation.find_pending(
+                    space_id, ctx.user_id, linked_event_id=event.id
+                )
+                if moderation is not None
+                else None
+            )
+            if card is not None:
+                payload["announce_queued"] = True
+                payload["announce_item_id"] = card.id
+            else:
+                payload["announce_suppressed"] = True
+                payload[
+                    "announce_suppressed_reason"
+                ] = await space_cal_svc.announce_refusal(space_id, ctx.user_id)
         return web.json_response(_sign_payload(self.request, payload), status=201)
 
 

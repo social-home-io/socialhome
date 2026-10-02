@@ -46,8 +46,11 @@ vi.mock('./SpaceBazaarTab', () => ({
   ),
 }))
 vi.mock('@/components/ModerationQueue', () => ({
-  ModerationQueue: (p: { canApprove?: boolean }) => (
-    <div data-testid="moderation">{String(p.canApprove ?? true)}</div>
+  // ``canApprove`` is per feature: report it for posts.
+  ModerationQueue: (p: { canApprove?: boolean | ((feature: string) => boolean) }) => (
+    <div data-testid="moderation">
+      {String(typeof p.canApprove === 'function' ? p.canApprove('posts') : (p.canApprove ?? true))}
+    </div>
   ),
 }))
 vi.mock('@/components/Composer', () => ({

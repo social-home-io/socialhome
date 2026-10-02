@@ -1286,3 +1286,165 @@ async def test_feature_timetable_round_trips(env):
     await env.repo.save(_space("sp-tt-off"))
     off = await env.repo.get("sp-tt-off")
     assert off is not None and off.features.timetable is False
+
+
+# ── Moderation queue ───────────────────────────────────────────────────────
+
+
+def _mod_item(
+    item_id: str,
+    *,
+    space_id: str = "sp-1",
+    submitted_by: str = "uid-bob",
+    feature: str = "tasks",
+    target_id: str = "t-1",
+    submitted_at: datetime | None = None,
+    status=None,
+):
+    from socialhome.domain.space import ModerationStatus, SpaceModerationItem
+
+    now = submitted_at or datetime.now(timezone.utc)
+    return SpaceModerationItem(
+        id=item_id,
+        space_id=space_id,
+        feature=feature,
+        action="edit",
+        submitted_by=submitted_by,
+        payload={"target_id": target_id, "patch": {"title": "New"}},
+        current_snapshot='{"title": "Old"}',
+        submitted_at=now,
+        expires_at=now + timedelta(days=7),
+        status=status or ModerationStatus.PENDING,
+    )
+
+
+async def test_moderation_insert_get_round_trips(env):
+    await env.repo.save(_space())
+    await env.repo.insert_moderation_item(_mod_item("m1"))
+    got = await env.repo.get_moderation_item("m1")
+    assert got is not None
+    assert got.payload == {"target_id": "t-1", "patch": {"title": "New"}}
+    assert got.current_snapshot == '{"title": "Old"}'
+    assert got.status.value == "pending"
+
+
+async def test_claim_moderation_item_only_once(env):
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    await env.repo.insert_moderation_item(_mod_item("m1"))
+    first, second = await asyncio.gather(
+        env.repo.claim_moderation_item(
+            "m1", status=ModerationStatus.APPROVED, reviewed_by="uid-alice"
+        ),
+        env.repo.claim_moderation_item(
+            "m1", status=ModerationStatus.REJECTED, reviewed_by="uid-alice"
+        ),
+    )
+    assert sorted([first, second]) == [False, True]
+    got = await env.repo.get_moderation_item("m1")
+    assert got.status in (ModerationStatus.APPROVED, ModerationStatus.REJECTED)
+    assert got.reviewed_by == "uid-alice"
+    assert got.reviewed_at is not None
+
+
+async def test_claim_records_reason_and_release_reopens(env):
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    await env.repo.insert_moderation_item(_mod_item("m1"))
+    assert await env.repo.claim_moderation_item(
+        "m1", status=ModerationStatus.REJECTED, reviewed_by="uid-alice", reason="no"
+    )
+    got = await env.repo.get_moderation_item("m1")
+    assert got.rejection_reason == "no"
+    # Releasing a claim of another status never touches the row.
+    assert not await env.repo.release_moderation_item(
+        "m1", claimed_status=ModerationStatus.APPROVED
+    )
+    assert (
+        await env.repo.get_moderation_item("m1")
+    ).status is ModerationStatus.REJECTED
+    assert await env.repo.release_moderation_item(
+        "m1", claimed_status=ModerationStatus.REJECTED
+    )
+    got = await env.repo.get_moderation_item("m1")
+    assert got.status is ModerationStatus.PENDING
+    assert got.reviewed_by is None
+    assert got.rejection_reason is None
+
+
+async def test_count_pending_space_and_submitter(env):
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    await env.repo.insert_moderation_item(_mod_item("m1"))
+    await env.repo.insert_moderation_item(_mod_item("m2"))
+    await env.repo.insert_moderation_item(_mod_item("m3", submitted_by="uid-alice"))
+    await env.repo.insert_moderation_item(
+        _mod_item("m4", status=ModerationStatus.REJECTED)
+    )
+    assert await env.repo.count_pending("sp-1") == 3
+    assert await env.repo.count_pending("sp-1", submitted_by="uid-bob") == 2
+    assert await env.repo.count_pending("sp-1", submitted_by="uid-carol") == 0
+
+
+async def test_list_moderation_for_submitter_is_own_only(env):
+    await env.repo.save(_space())
+    await env.repo.insert_moderation_item(_mod_item("m1"))
+    await env.repo.insert_moderation_item(_mod_item("m2", submitted_by="uid-alice"))
+    mine = await env.repo.list_moderation_for_submitter("sp-1", "uid-bob")
+    assert [i.id for i in mine] == ["m1"]
+
+
+async def test_list_pending_for_target(env):
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    await env.repo.insert_moderation_item(_mod_item("m1", target_id="t-1"))
+    await env.repo.insert_moderation_item(_mod_item("m2", target_id="t-2"))
+    await env.repo.insert_moderation_item(
+        _mod_item("m3", target_id="t-1", status=ModerationStatus.APPROVED)
+    )
+    got = await env.repo.list_pending_for_target("sp-1", "tasks", "t-1")
+    assert [i.id for i in got] == ["m1"]
+
+
+async def test_expire_due_marks_and_returns_only_overdue_pending(env):
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    old = datetime.now(timezone.utc) - timedelta(days=8)
+    await env.repo.insert_moderation_item(_mod_item("old", submitted_at=old))
+    await env.repo.insert_moderation_item(_mod_item("fresh"))
+    expired = await env.repo.expire_due(datetime.now(timezone.utc))
+    assert [i.id for i in expired] == ["old"]
+    assert expired[0].status is ModerationStatus.EXPIRED
+    assert (
+        await env.repo.get_moderation_item("old")
+    ).status is ModerationStatus.EXPIRED
+    assert (
+        await env.repo.get_moderation_item("fresh")
+    ).status is ModerationStatus.PENDING
+    # A second sweep finds nothing new.
+    assert await env.repo.expire_due(datetime.now(timezone.utc)) == []
+
+
+async def test_purge_payloads_nulls_decided_rows_only(env):
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    old = datetime.now(timezone.utc) - timedelta(days=10)
+    await env.repo.insert_moderation_item(
+        _mod_item("done", submitted_at=old, status=ModerationStatus.REJECTED)
+    )
+    await env.repo.insert_moderation_item(_mod_item("pending", submitted_at=old))
+    await env.repo.insert_moderation_item(
+        _mod_item("recent", status=ModerationStatus.APPROVED)
+    )
+    n = await env.repo.purge_payloads(datetime.now(timezone.utc) - timedelta(days=7))
+    assert n == 1
+    done = await env.repo.get_moderation_item("done")
+    assert done.payload == {} and done.current_snapshot is None
+    assert (await env.repo.get_moderation_item("pending")).payload
+    assert (await env.repo.get_moderation_item("recent")).payload

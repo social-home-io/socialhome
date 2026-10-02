@@ -94,13 +94,16 @@ async def _seed_moderated_space(client):
         actor_username="pascal",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
-    # Bob submits a post → lands in queue.
-    await app[space_service_key].create_post(
-        sid,
-        author_user_id=client._bob_uid,
-        type="text",
-        content="please review",
+    # Bob submits a post → lands in queue (202, nothing published).
+    r3 = await client.post(
+        f"/api/spaces/{sid}/posts",
+        json={"type": "text", "content": "please review"},
+        headers=_auth(client._bob_token),
     )
+    assert r3.status == 202, await r3.text()
+    body = await r3.json()
+    assert body["queued"] is True and body["feature"] == "posts"
+    assert body["action"] == "create" and body["item_id"]
     return sid
 
 

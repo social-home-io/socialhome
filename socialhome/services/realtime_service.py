@@ -108,6 +108,7 @@ from ..domain.events import (
     SpaceMemberJoined,
     SpaceMemberLeft,
     SpaceModerationApproved,
+    SpaceModerationExpired,
     SpaceModerationQueued,
     SpaceModerationRejected,
     SpacePostCreated,
@@ -133,7 +134,11 @@ from ..domain.events import (
     UserPreferencesChanged,
     UserStatusChanged,
 )
-from ..domain.space import CONTENT_AUTHORITY_ROLES, SETTINGS_AUTHORITY_ROLES
+from ..domain.space import (
+    CONTENT_AUTHORITY_ROLES,
+    SETTINGS_AUTHORITY_ROLES,
+    SpaceModerationItem,
+)
 from ..domain.timetable import to_wire_dict as timetable_to_wire_dict
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
@@ -292,6 +297,7 @@ class RealtimeService:
         self._bus.subscribe(SpaceModerationQueued, self._on_space_mod_queued)
         self._bus.subscribe(SpaceModerationApproved, self._on_space_mod_approved)
         self._bus.subscribe(SpaceModerationRejected, self._on_space_mod_rejected)
+        self._bus.subscribe(SpaceModerationExpired, self._on_space_mod_expired)
         self._bus.subscribe(SpaceConfigChanged, self._on_space_config_changed)
         self._bus.subscribe(SpaceProposalUpdated, self._on_space_proposal_updated)
         self._bus.subscribe(RemoteSpaceDissolved, self._on_remote_space_dissolved)
@@ -789,6 +795,26 @@ class RealtimeService:
                 "item": _safe(item),
             },
         )
+        await self._notify_submitter(item)
+
+    async def _notify_submitter(self, item: SpaceModerationItem) -> None:
+        """``space.moderation.mine`` — only to the submitter while they are
+        still a member, only the receipt (no content): their pending strip
+        refetches ``…/mine``."""
+        members = await self._space_repo.list_members(item.space_id)
+        if not any(m.user_id == item.submitted_by for m in members):
+            return
+        await self._ws.broadcast_to_users(
+            [item.submitted_by],
+            {
+                "type": "space.moderation.mine",
+                "space_id": item.space_id,
+                "item_id": item.id,
+                "feature": item.feature,
+                "action": item.action,
+                "status": item.status.value,
+            },
+        )
 
     async def _on_space_mod_approved(self, event: SpaceModerationApproved) -> None:
         item = event.item
@@ -801,6 +827,7 @@ class RealtimeService:
             },
             also=item.submitted_by,
         )
+        await self._notify_submitter(item)
 
     async def _on_space_mod_rejected(self, event: SpaceModerationRejected) -> None:
         item = event.item
@@ -813,6 +840,20 @@ class RealtimeService:
             },
             also=item.submitted_by,
         )
+        await self._notify_submitter(item)
+
+    async def _on_space_mod_expired(self, event: SpaceModerationExpired) -> None:
+        item = event.item
+        await self._broadcast_space_moderators(
+            item.space_id,
+            {
+                "type": "space.moderation.expired",
+                "space_id": item.space_id,
+                "item": _safe(item),
+            },
+            also=item.submitted_by,
+        )
+        await self._notify_submitter(item)
 
     async def _on_space_config_changed(self, event: SpaceConfigChanged) -> None:
         await self._broadcast_space(

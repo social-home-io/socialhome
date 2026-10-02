@@ -22,6 +22,8 @@ import {
   featureLabel,
   levelLabel,
   levelOptions,
+  isModerationNotFederated,
+  moderatedBlocked,
   peersTooOldHouseholds,
   type AccessFeature,
   type BehindHousehold,
@@ -452,9 +454,28 @@ export function SpaceSettings({
         peersTooOld.value = { body, households }
         return
       }
+      if (isModerationNotFederated(e)) {
+        // The host can't hold this feature for review while other
+        // households are members (§4.3, until federated moderation).
+        showToast(t('space.access.moderated_not_federated'), 'error')
+        return
+      }
       showToast(e.message || 'Failed to update', 'error')
     }
   }
+
+  /** The features whose access row shows (a disabled feature has none). */
+  const shownAccessFeatures = ACCESS_FEATURES.filter(feature => ({
+    posts: true,
+    pages: featurePages.value,
+    tasks: featureTodo.value,
+    stickies: featureStickies.value,
+    calendar: featureCalendar.value,
+  })[feature])
+  const reviewBlocked = (feature: AccessFeature) => moderatedBlocked(feature, {
+    hasRemoteHouseholds: space.has_remote_households,
+    isRemoteSpace,
+  })
 
   const dissolve = async () => {
     // A sole admin's dissolve executes inside this request, so the
@@ -675,15 +696,13 @@ export function SpaceSettings({
         <fieldset class="sh-form-fieldset" data-testid="space-access">
           <legend>🔐 {t('space.access.heading')}</legend>
           <p class="sh-muted" style={{ marginTop: 0 }}>{t('space.access.intro')}</p>
-          {ACCESS_FEATURES.filter(feature => ({
-            posts: true,
-            pages: featurePages.value,
-            tasks: featureTodo.value,
-            stickies: featureStickies.value,
-            calendar: featureCalendar.value,
-          })[feature]).map(feature => {
+          {shownAccessFeatures.map(feature => {
             const current = accessLevels.value[feature]
             const id = `sh-access-${space.id}-${feature}`
+            // Reviewed for a non-post feature needs every member household
+            // to take part in the queue (federated moderation, coming) —
+            // disabled here unless it's already the level in force.
+            const blocked = reviewBlocked(feature)
             return (
               <div key={feature} class="sh-access-row">
                 <label for={id} class="sh-access-row__label">{featureLabel(feature)}</label>
@@ -699,14 +718,43 @@ export function SpaceSettings({
                     }
                   }}
                 >
-                  {levelOptions(feature, current).map(level => (
-                    <option key={level} value={level}>{levelLabel(level)}</option>
-                  ))}
+                  {levelOptions().map(level => {
+                    const off = level === 'moderated' && blocked && current !== 'moderated'
+                    return (
+                      <option
+                        key={level}
+                        value={level}
+                        disabled={off}
+                        title={off ? t('space.access.moderated_unavailable') : undefined}
+                      >
+                        {levelLabel(level)}
+                        {off ? ` — ${t('space.access.moderated_soon')}` : ''}
+                      </option>
+                    )
+                  })}
                 </select>
+                {blocked && current === 'moderated' && (
+                  // Already Reviewed, but the space now has members from
+                  // other households: the host refuses those members'
+                  // changes (403 MODERATION_NOT_FEDERATED) until the admin
+                  // picks another level — say so where it can be fixed.
+                  <p
+                    class="sh-access-row__warning"
+                    role="status"
+                    data-testid={`space-access-stale-${feature}`}
+                  >
+                    ⚠️ {t('space.access.moderated_stale')}
+                  </p>
+                )}
               </div>
             )
           })}
           <p class="sh-muted sh-access-explain">{t('space.access.explain')}</p>
+          {shownAccessFeatures.some(reviewBlocked) && (
+            <p class="sh-muted sh-access-explain" data-testid="space-access-review-hint">
+              {t('space.access.moderated_unavailable')}
+            </p>
+          )}
         </fieldset>
         <fieldset class="sh-form-fieldset" data-testid="space-post-types">
           <legend>📮 Post types</legend>

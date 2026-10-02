@@ -519,7 +519,10 @@ GC, auth-audit-log pruning (`auth_audit_cleanup_scheduler.py` drops
 `auth_audit_log` rows older than 90 days hourly, so the append-only trail
 can't be grown without bound by repeated failed logins), and
 notification-feed GC (`notification_cleanup_scheduler.py` drops
-`notifications` rows older than 90 days hourly).
+`notifications` rows older than 90 days hourly), and the space moderation
+queue sweep (`moderation_expiry_scheduler.py`, hourly: pending items past
+their 7-day window expire, and decided / expired items lose their content
+7 days later).
 
 The GFS runs its own periodic maintenance sweep
 (`global_server/maintenance.py`, same `_stop: asyncio.Event` lifecycle as
@@ -528,6 +531,27 @@ expired `gfs_highlight_publications`, and aged `gfs_pair_tokens`, each
 prune best-effort and independently guarded. Before this loop the GFS had
 no recurring cleanup — only a boot-time session purge and the cluster
 heartbeat — so those tables grew unbounded on a long-running process.
+
+### Space moderation queue (§4.3 `moderated`)
+
+`services/space_moderation_service.py` — `SpaceModerationService` owns the
+host-local review queue for every access-levelled feature: submit, list,
+the submitter's own items, approve, reject, expire. It is a **registry**:
+each content service registers a `ModerationHandler` per
+`(feature, action)` in `app._build_space_moderation` (`validate` the
+payload with the live path's codecs, `snapshot` the live row, `apply` the
+write, `preview` it for the SPA). Content services stay decoupled from it:
+they hold only the narrow `ModerationSubmitter` protocol, and
+`ContentAccessMixin._submit_for_review` turns a QUEUE decision into a
+stored item plus `ContentQueuedForReview`, which `BaseView` answers 202 —
+so no caller can mistake a queued write for a persisted one, and without
+an attached queue the write fails closed. Approval replays the write
+through the content service's normal persist path with `approved_by` (the
+gate then judges the approver), after a conditional claim of the row so
+it is applied once. Posts carry their attachments (poll, schedule poll,
+Bazaar listing) through the queue (`space_post_moderation.py`) so they are
+created with the post. Until federated moderation, features other than
+posts queue only on a host with no remote member households.
 
 ### Database writer (write coalescing)
 

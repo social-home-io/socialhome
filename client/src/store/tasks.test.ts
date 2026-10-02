@@ -745,3 +745,55 @@ describe('board moves', () => {
     expect(store.findTask('c')?.position).toBe(0)
   })
 })
+
+describe('held for review (202 {queued: true}, §4.3)', () => {
+  const QUEUED = { queued: true, item_id: 'q1', feature: 'tasks', action: 'edit', entity: 'task', target_id: 'a' }
+  let sp: TaskStore
+
+  beforeEach(async () => {
+    sp = createTaskStore('sp')
+    apiGet.mockResolvedValueOnce([task('a', 'l1', 'todo', { position: 0 }), task('c', 'l1', 'in_progress', { position: 0 })])
+    await sp.loadList('l1', { force: true })
+  })
+
+  it('a queued cross-column move puts the card back and skips the reorder', async () => {
+    apiPatch.mockResolvedValueOnce(QUEUED)
+    const p = sp.moveTask('a', 'in_progress', ['c', 'a'])
+    expect(sp.findTask('a')?.status).toBe('in_progress')
+    await expect(p).resolves.toBe('queued')
+    expect(sp.findTask('a')).toMatchObject({ status: 'todo', position: 0 })
+    expect(sp.findTask('c')?.position).toBe(0)
+    expect(apiPost).not.toHaveBeenCalledWith(expect.stringContaining('/reorder'), expect.anything())
+    expect(toasts.value.some(x => x.message === 'Submitted for review — a moderator will look at it')).toBe(true)
+  })
+
+  it('an applied move resolves "applied"', async () => {
+    apiPatch.mockImplementation(async (_u: string, body: object) => ({ ...task('a', 'l1'), ...body }))
+    apiPost.mockResolvedValue({ ok: true })
+    await expect(sp.moveTask('a', 'in_progress', ['c', 'a'])).resolves.toBe('applied')
+  })
+
+  it('a queued create adds no row and resolves null', async () => {
+    apiPost.mockResolvedValueOnce({ ...QUEUED, action: 'create', target_id: 'new' })
+    await expect(sp.createTask('l1', 'New one')).resolves.toBeNull()
+    expect(sp.tasksByList.value.l1.map(x => x.id)).toEqual(['a', 'c'])
+  })
+
+  it('a queued edit rolls the fields back', async () => {
+    apiPatch.mockResolvedValueOnce(QUEUED)
+    await expect(sp.patchTask('a', { title: 'Renamed' })).resolves.toBeNull()
+    expect(sp.findTask('a')?.title).toBe('a')
+  })
+
+  it('a queued delete keeps the task', async () => {
+    apiDelete.mockResolvedValueOnce({ ...QUEUED, action: 'delete' })
+    await sp.deleteTasks(['a'])
+    expect(sp.findTask('a')).toBeTruthy()
+  })
+
+  it('a queued list create resolves null and adds no list', async () => {
+    apiPost.mockResolvedValueOnce({ ...QUEUED, entity: 'list', action: 'create' })
+    await expect(sp.createList('Groceries')).resolves.toBeNull()
+    expect(sp.lists.value).toEqual([])
+  })
+})

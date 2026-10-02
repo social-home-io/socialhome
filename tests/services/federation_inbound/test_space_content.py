@@ -145,6 +145,10 @@ class _ScopedRows:
             space_id=self.space_of[row_id],
             created_by="u-author",
             author="u-author",
+            # A sticky's stored words: an inbound edit that changes them is
+            # an EDIT, one that leaves them is a LAYOUT move.
+            content="stored content",
+            color="#FFFFFF",
         )
 
     def claim(self, row_id, space_id) -> bool:

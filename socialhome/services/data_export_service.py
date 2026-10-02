@@ -46,8 +46,18 @@ _SCRUB_FIELDS: frozenset[str] = frozenset(
 )
 
 
-def _scrub(row: dict) -> dict:
-    return {k: v for k, v in row.items() if k not in _SCRUB_FIELDS}
+#: Per-table extra scrubs: fields of the subject's own row that are about
+#: somebody else. A moderation item's ``current_snapshot`` holds the OTHER
+#: author's item the subject edited / deleted; ``reviewed_by`` names the
+#: moderator. The subject keeps their own ``payload_json``.
+_TABLE_SCRUB_FIELDS: dict[str, frozenset[str]] = {
+    "space_moderation_queue": frozenset({"current_snapshot", "reviewed_by"}),
+}
+
+
+def _scrub(row: dict, table: str = "") -> dict:
+    drop = _SCRUB_FIELDS | _TABLE_SCRUB_FIELDS.get(table, frozenset())
+    return {k: v for k, v in row.items() if k not in drop}
 
 
 EXPORTABLE_QUERIES: tuple[tuple[str, str], ...] = (
@@ -56,6 +66,9 @@ EXPORTABLE_QUERIES: tuple[tuple[str, str], ...] = (
     ("feed_comments", "WHERE author = ?"),
     ("saved_posts", "WHERE user_id = ?"),
     ("space_post_comments", "WHERE author = ?"),
+    # The subject's own submissions to space moderation queues (§4.3) —
+    # pending, decided or expired; content NULLed by the 7-day purge.
+    ("space_moderation_queue", "WHERE submitted_by = ?"),
     ("space_posts", "WHERE author = ?"),
     ("conversation_messages", "WHERE sender_user_id = ?"),
     ("message_reactions", "WHERE user_id = ?"),
@@ -129,7 +142,7 @@ class DataExportService:
                 continue
             if not rows:
                 continue
-            tables[table] = [_scrub(dict(r)) for r in rows]
+            tables[table] = [_scrub(dict(r), table) for r in rows]
         return DataExport(
             user_id=user_id,
             exported_at=datetime.now(timezone.utc).isoformat(),

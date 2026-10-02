@@ -11,6 +11,7 @@
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { contentWrite } from '@/utils/contentWrite'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
@@ -74,15 +75,16 @@ export function HighlightPickerDialog() {
         body.space_id = spaceId.value
       }
       if (note.value.trim()) body.note = note.value.trim()
-      const r = await api.post(`/api/highlights/${highlightId}/share`, body) as
-        { post_id?: string; queued?: boolean }
-      if (r.queued) {
-        showToast('Queued for moderator review', 'info')
-      } else {
-        showToast('Highlight shared', 'success')
-      }
+      // Into a space whose posts are "Reviewed" (§4.3) the share is held
+      // for a moderator — ``contentWrite`` toasts it; no post exists yet.
+      const res = await contentWrite<{ post_id?: string }>(
+        api.post(`/api/highlights/${highlightId}/share`, body),
+        { spaceId: scope.value === 'space' ? spaceId.value : null },
+      )
       open.value = false
-      if (r.post_id && onSharedCb) onSharedCb(r.post_id)
+      if (res.queued) return
+      showToast('Highlight shared', 'success')
+      if (res.data?.post_id && onSharedCb) onSharedCb(res.data.post_id)
     } catch (err: unknown) {
       showToast(`Share failed: ${(err as Error)?.message ?? err}`, 'error')
     } finally {

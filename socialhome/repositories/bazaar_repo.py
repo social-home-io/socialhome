@@ -59,6 +59,12 @@ class AbstractBazaarRepo(Protocol):
         *,
         space_id: str,
     ) -> bool: ...
+    async def insert_listing_once(
+        self,
+        listing: BazaarListing,
+        *,
+        space_id: str,
+    ) -> bool: ...
     async def get_listing(self, post_id: str) -> BazaarListing | None: ...
     async def list_active(self) -> list[BazaarListing]: ...
     async def list_active_in_spaces(
@@ -218,6 +224,51 @@ class SqliteBazaarRepo:
                 listing.winner_user_id,
                 listing.winning_price,
                 listing.sold_at,
+                listing.created_at,
+                listing.post_id,
+                space_id,
+            ),
+        )
+        return n > 0
+
+    async def insert_listing_once(
+        self,
+        listing: BazaarListing,
+        *,
+        space_id: str,
+    ) -> bool:
+        """Insert the listing of a wrapper post in ``space_id`` unless one
+        exists — never an update, so racing callers (a moderation approve
+        resumed twice) create it exactly once. True when this call did."""
+        if listing.currency not in BAZAAR_CURRENCIES:
+            raise ValueError(f"unsupported currency {listing.currency!r}")
+        n = await self._db.enqueue_rowcount(
+            """
+            INSERT INTO bazaar_listings(
+                post_id, space_id, seller_user_id, mode, title, description,
+                image_urls_json, end_time, currency, status,
+                price, start_price, step_price, created_at
+            )
+            SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now'))
+             WHERE EXISTS (
+                 SELECT 1 FROM space_posts WHERE id=? AND space_id=?
+             )
+            ON CONFLICT(post_id) DO NOTHING
+            """,
+            (
+                listing.post_id,
+                space_id,
+                listing.seller_user_id,
+                listing.mode.value,
+                listing.title,
+                listing.description,
+                dump_json(list(listing.image_urls)),
+                listing.end_time,
+                listing.currency,
+                listing.status.value,
+                listing.price,
+                listing.start_price,
+                listing.step_price,
                 listing.created_at,
                 listing.post_id,
                 space_id,

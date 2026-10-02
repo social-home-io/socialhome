@@ -39,7 +39,7 @@ from ..domain.post import (
     BazaarStatus,
 )
 from ..infrastructure.event_bus import EventBus
-from ..domain.post import BazaarOffer
+from ..domain.post import BazaarOffer, Post
 from ..domain.space import ContentAction, SpacePermissionError
 from ..repositories.bazaar_repo import (
     AbstractBazaarRepo,
@@ -106,6 +106,10 @@ class BazaarService(ProtectionGateMixin):
         self._spaces = space_service
 
     # ─── Listings ────────────────────────────────────────────────────────
+
+    async def has_listing(self, post_id: str) -> bool:
+        """Does a listing ride on the wrapper post ``post_id``?"""
+        return await self._repo.get_listing(post_id) is not None
 
     async def get_listing(self, post_id: str) -> BazaarListing:
         listing = await self._repo.get_listing(post_id)
@@ -198,60 +202,96 @@ class BazaarService(ProtectionGateMixin):
             )
         _validate_price_fields(mode_val, price, start_price, step_price)
 
-        now = datetime.now(timezone.utc)
-        end_time = (now + timedelta(days=duration_days)).isoformat()
-
         caption = f"🛍 {title_clean}" + (
             f" — {description.strip()}" if description else ""
         )
-        # Mint the wrapper post inside the listing's space. SpaceService
-        # validates membership + writability + per-feature access; we
-        # don't duplicate those checks here.
+        fields = {
+            "mode": mode_val.value,
+            "title": title_clean,
+            "currency": currency,
+            "duration_days": duration_days,
+            "description": description.strip() if description else None,
+            "image_urls": list(image_urls),
+            "price": price,
+            "start_price": start_price,
+            "step_price": step_price,
+        }
+        # Mint the wrapper post inside the listing's space, carrying the
+        # listing as its attachment. SpaceService validates membership +
+        # writability + per-feature access; we don't duplicate those
+        # checks here. Under a MODERATED posts level the post — listing
+        # and all — goes to the review queue (ContentQueuedForReview → 202)
+        # and the listing is created only when the post is approved, so a
+        # pending listing never exists without its post.
         post = await self._spaces.create_post(
             space_id,
             author_user_id=seller_user_id,
             type="bazaar",
             content=caption,
             hidden_from_feed=not announce_in_feed,
+            attachments={"bazaar": fields},
         )
-        if post is None:
-            # Post entered the moderation queue (space's posts feature
-            # has access_level=moderated and the seller isn't an admin).
-            # Treat as "we cannot accept this listing right now" rather
-            # than partially persisting. SpaceService publishes its own
-            # SpaceModerationQueued event so the operator sees the item
-            # in the moderation tray.
-            raise BazaarServiceError(
-                "listing requires moderator approval — submitted for review",
-            )
+        return await self.get_listing(post.id)
 
+    async def create_listing_for_post(
+        self, *, space_id: str, post: Post, fields: dict
+    ) -> BazaarListing:
+        """The listing riding with ``post`` — created now unless it exists
+        (see :meth:`create_listing_once`)."""
+        await self.create_listing_once(space_id=space_id, post=post, fields=fields)
+        held = await self._repo.get_listing(post.id)
+        if held is None:
+            raise BazaarServiceError("the listing's post is not in this space")
+        return held
+
+    async def create_listing_once(
+        self, *, space_id: str, post: Post, fields: dict
+    ) -> bool:
+        """Persist the listing that rides with a just-persisted wrapper
+        ``post`` (a direct create, or its approval from the moderation
+        queue). The listing runs ``duration_days`` from now. Create-once:
+        a repeat returns the listing already held, announcing nothing."""
+        mode_val = _coerce_mode(str(fields.get("mode") or ""))
+        currency = str(fields.get("currency") or "")
+        if currency not in BAZAAR_CURRENCIES:
+            raise ValueError(f"unsupported currency {currency!r}")
+        price = fields.get("price")
+        start_price = fields.get("start_price")
+        step_price = fields.get("step_price")
+        _validate_price_fields(mode_val, price, start_price, step_price)
+        duration_days = max(
+            1, min(int(fields.get("duration_days") or 7), BAZAAR_MAX_DURATION_DAYS)
+        )
+        now = datetime.now(timezone.utc)
         listing = BazaarListing(
             post_id=post.id,
             space_id=space_id,
-            seller_user_id=seller_user_id,
+            seller_user_id=post.author,
             mode=mode_val,
-            title=title_clean,
-            end_time=end_time,
+            title=str(fields.get("title") or ""),
+            end_time=(now + timedelta(days=duration_days)).isoformat(),
             currency=currency,
             status=BazaarStatus.ACTIVE,
             created_at=now.isoformat(),
-            description=description.strip() if description else None,
-            image_urls=tuple(image_urls),
+            description=fields.get("description"),
+            image_urls=tuple(str(u) for u in (fields.get("image_urls") or ())),
             price=price,
             start_price=start_price,
             step_price=step_price,
         )
-        await self._repo.save_listing(listing, space_id=space_id)
+        if not await self._repo.insert_listing_once(listing, space_id=space_id):
+            # Already there (a racing / repeated approve) — never twice.
+            return False
         await self._bus.publish(
             BazaarListingCreated(
                 listing_post_id=listing.post_id,
                 space_id=space_id,
-                seller_user_id=seller_user_id,
+                seller_user_id=post.author,
                 mode=mode_val.value,
                 title=listing.title,
             )
         )
-        return listing
+        return True
 
     async def list_space_listings(self, space_id: str) -> list[BazaarListing]:
         """Every listing in a space (any status), newest-first — backs the

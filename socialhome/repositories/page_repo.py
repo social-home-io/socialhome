@@ -726,6 +726,17 @@ def _row_to_version(row: dict) -> PageVersion:
     )
 
 
+def mint_page_id(*, space_id: str | None, created_by: str) -> str:
+    """A page id. A space page federates, so its id is owner-bound (v_36):
+    only the creator's household can announce it. A household page never
+    leaves the household."""
+    if space_id is None:
+        return uuid.uuid4().hex
+    return mint_owner_bound_id(
+        SPACE_PAGE_KIND, space_id=space_id, owner_user_id=created_by
+    )
+
+
 def new_page(
     *,
     title: str,
@@ -733,19 +744,13 @@ def new_page(
     created_by: str,
     space_id: str | None = None,
     cover_image_url: str | None = None,
+    page_id: str | None = None,
 ) -> Page:
+    """A fresh page row. ``page_id`` is the id a moderation-queue item
+    minted at submit time (owner-bound to the same creator)."""
     now = datetime.now(timezone.utc).isoformat()
     return Page(
-        # A space page federates, so its id is owner-bound (v_36): only
-        # the creator's household can announce it. A household page never
-        # leaves the household.
-        id=(
-            uuid.uuid4().hex
-            if space_id is None
-            else mint_owner_bound_id(
-                SPACE_PAGE_KIND, space_id=space_id, owner_user_id=created_by
-            )
-        ),
+        id=page_id or mint_page_id(space_id=space_id, created_by=created_by),
         title=title,
         content=content,
         created_by=created_by,

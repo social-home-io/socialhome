@@ -24,6 +24,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | DmMessageCreated     | Other members (group level all / mentions, not muted) | "{sender} messaged you" / "{sender} mentioned you in {chat}" |
 | DmMessageUpdated     | Only members the edit newly mentions (groups) | "{sender} mentioned you in {chat}"   |
 | SpaceModerationQueued| Space admins                          | "New content pending review in {space}"        |
+| SpaceModeration{Approved,Rejected,Expired} | The submitter     | "Your submission in {space} was approved"…      |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -66,7 +67,11 @@ from ..domain.events import (
     SpaceJoinRequested,
     SpaceLocationFeatureEnabled,
     SpaceMemberJoined,
+    SpaceModerationApproved,
+    SpaceModerationExpired,
     SpaceModerationQueued,
+    SpaceModerationRejected,
+    SpaceRemoteSeatLive,
     SpacePostCreated,
     SpacePostModerated,
     TaskAssigned,
@@ -75,7 +80,12 @@ from ..domain.events import (
     UserFollowed,
 )
 from ..domain.mention import Mention, MentionType
-from ..domain.space import CONTENT_AUTHORITY_ROLES, SETTINGS_AUTHORITY_ROLES
+from ..repositories._spec import Spec
+from ..domain.space import (
+    CONTENT_AUTHORITY_ROLES,
+    SETTINGS_AUTHORITY_ROLES,
+    SpaceFeatureAccess,
+)
 from ..i18n import Catalog
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
@@ -107,6 +117,15 @@ class _SeatPrefs:
     name: str | None = None
 
 
+#: English names of the access-levelled features (catalog fallback).
+_FEATURE_FALLBACK: dict[str, str] = {
+    "pages": "Pages",
+    "tasks": "Tasks",
+    "stickies": "Sticky notes",
+    "calendar": "Calendar events",
+}
+
+
 class NotificationService(ProtectionGateMixin):
     """Creates notification-centre entries in response to domain events.
 
@@ -135,6 +154,7 @@ class NotificationService(ProtectionGateMixin):
         "_clock",
         "_here_last",
         "_convos",
+        "_remote_members",
     )
 
     def __init__(
@@ -177,6 +197,13 @@ class NotificationService(ProtectionGateMixin):
         # thread open in any of their tabs. Without it the service
         # degrades to the pre-fix behaviour (always notify).
         self._ws_manager = None
+        # Remote seats per household — optional; without it the
+        # "Reviewed isn't available here any more" warning is skipped.
+        self._remote_members = None
+
+    def attach_remote_member_repo(self, remote_member_repo) -> None:
+        """Wire the remote-seat mirror (``on_remote_seat_live``)."""
+        self._remote_members = remote_member_repo
 
     def attach_push_service(self, push_service) -> None:
         """Attach a :class:`PushService` to fan out Web Push alongside the
@@ -216,7 +243,9 @@ class NotificationService(ProtectionGateMixin):
         """
         self._ws_manager = ws_manager
 
-    async def _save_notif(self, note, *, dedupe_by_link: bool = False):
+    async def _save_notif(
+        self, note, *, dedupe_by_link: bool = False, push: bool = True
+    ):
         """Persist + publish ``NotificationCreated`` + fire title-only
         pushes to every registered surface (Web Push + HA mobile app).
 
@@ -242,6 +271,8 @@ class NotificationService(ProtectionGateMixin):
                 link_url=saved.link_url,
             )
         )
+        if not push:
+            return saved  # in-app only (a repeat the user was already told)
         # Web Push (browsers that registered via pywebpush).
         if self._push is not None:
             try:
@@ -331,6 +362,10 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(TaskDeadlineDue, self.on_task_deadline_due)
         self._bus.subscribe(SpacePostCreated, self.on_space_post_created)
         self._bus.subscribe(SpaceModerationQueued, self.on_moderation_queued)
+        self._bus.subscribe(SpaceModerationApproved, self.on_moderation_decided)
+        self._bus.subscribe(SpaceModerationRejected, self.on_moderation_decided)
+        self._bus.subscribe(SpaceModerationExpired, self.on_moderation_decided)
+        self._bus.subscribe(SpaceRemoteSeatLive, self.on_remote_seat_live)
         self._bus.subscribe(DmMessageCreated, self.on_dm_message_created)
         self._bus.subscribe(DmMessageUpdated, self.on_dm_message_updated)
         self._bus.subscribe(PostEdited, self.on_post_edited)
@@ -1062,6 +1097,115 @@ class NotificationService(ProtectionGateMixin):
                         link_url=f"/spaces/{event.item.space_id}/moderation",
                     )
                 )
+
+    async def on_remote_seat_live(self, event: SpaceRemoteSeatLive) -> None:
+        """A household's FIRST member just took a seat in a space that keeps
+        a feature other than posts "Reviewed": that level can't be held with
+        members from other households (§4.3, until federated moderation) and
+        the host now refuses members' changes there. Tell the space's local
+        owner / admins once, so they pick another level."""
+        if self._remote_members is None:
+            return
+        space = await self._spaces.get(event.space_id)
+        if space is None or space.dissolved:
+            return
+        reviewed = [
+            f
+            for f in ("pages", "tasks", "stickies", "calendar")
+            if space.features.access_level(f) is SpaceFeatureAccess.MODERATED
+        ]
+        if not reviewed:
+            return
+        seats = await self._remote_members.list_for_instance(
+            event.space_id, event.instance_id, include_tombstoned=False
+        )
+        if len(seats) > 1:
+            return  # not the household's first member — already told
+        for member in await self._spaces.list_members(event.space_id):
+            if member.role not in SETTINGS_AUTHORITY_ROLES:
+                continue
+            recipient = await self._users.get_by_user_id(member.user_id)
+            locale = self._locale(recipient)
+            names = ", ".join(
+                self._t(
+                    f"notification.space.feature.{f}",
+                    locale=locale,
+                    fallback=_FEATURE_FALLBACK[f],
+                )
+                for f in reviewed
+            )
+            # One push per (space, household): the link names the household,
+            # so its rejoin bumps the existing bell in-app (read or not) and
+            # only a household that is new here pushes again.
+            link = f"/spaces/{event.space_id}/settings?household={event.instance_id}"
+            told = await self._notifs.find(
+                Spec(
+                    where=[
+                        ("user_id", "=", member.user_id),
+                        ("type", "=", "moderation_unavailable"),
+                        ("link_url", "=", link),
+                    ],
+                    limit=1,
+                )
+            )
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="moderation_unavailable",
+                    title=self._t(
+                        "notification.space.moderation.unavailable",
+                        locale=locale,
+                        fallback=(
+                            "Reviewed isn't available for {features} in "
+                            "{space_name} while members from other households "
+                            "are in this space — member changes are refused "
+                            "until you choose another level"
+                        ),
+                        features=names,
+                        space_name=space.name,
+                    ),
+                    link_url=link,
+                ),
+                dedupe_by_link=True,
+                push=not told,
+            )
+
+    async def on_moderation_decided(
+        self,
+        event: SpaceModerationApproved
+        | SpaceModerationRejected
+        | SpaceModerationExpired,
+    ) -> None:
+        """Tell the submitter what became of their queued item
+        (``moderation_decided``). Title only — never the content, never a
+        moderator's rejection reason (§25.3); the app shows those."""
+        item = event.item
+        space = await self._spaces.get(item.space_id)
+        if space is None:
+            return
+        if await self._spaces.get_member(item.space_id, item.submitted_by) is None:
+            return  # they left: nothing of theirs to come back to
+        recipient = await self._users.get_by_user_id(item.submitted_by)
+        if recipient is None:
+            return
+        outcome = item.status.value  # approved | rejected | expired
+        fallback = {
+            "approved": "Your submission in {space_name} was approved",
+            "rejected": "Your submission in {space_name} was not approved",
+        }.get(outcome, "Your submission in {space_name} expired without a review")
+        await self._save_notif(
+            new_notification(
+                user_id=item.submitted_by,
+                type="moderation_decided",
+                title=self._t(
+                    f"notification.space.moderation.{outcome}",
+                    locale=self._locale(recipient),
+                    fallback=fallback,
+                    space_name=space.name,
+                ),
+                link_url=f"/spaces/{item.space_id}",
+            )
+        )
 
     async def on_calendar_event_created(
         self,

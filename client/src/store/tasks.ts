@@ -30,6 +30,11 @@
  *   space id → that space's store if one was made. A reconnect
  *   revalidates everything a store had loaded (frames sent while the
  *   socket was down are lost).
+ * - **Held for review** (a space's tasks are "Reviewed", §4.3): a write
+ *   answered ``202 {queued: true}`` saved nothing — the optimistic change
+ *   is rolled back, the "Submitted for review" toast shows and the
+ *   author's pending items refresh (``utils/contentWrite``). Creates
+ *   resolve ``null``, moves ``'queued'``.
  */
 import { computed, signal, type ReadonlySignal, type Signal } from '@preact/signals'
 import { api } from '@/api'
@@ -38,8 +43,14 @@ import { locale, t } from '@/i18n/i18n'
 import { pendingDeletes, undoableDelete, type CommitOptions } from '@/utils/undoableDelete'
 import type { TaskItem, TaskListEntry, TaskPriority } from '@/types'
 import { resetFilters } from '@/features/tasks/board/filters'
+import { announceQueued, isQueuedWrite } from '@/utils/contentWrite'
 
 export type TaskStatus = TaskItem['status']
+
+/** How a write ended: saved, or held for a moderator's review (a space
+ *  whose tasks are "Reviewed", §4.3 — the change was rolled back here
+ *  and waits in the queue). */
+export type WriteOutcome = 'applied' | 'queued'
 
 /** Fields a PATCH may change. ``null`` clears a nullable field. */
 export type TaskPatch = Partial<Pick<TaskItem,
@@ -118,17 +129,20 @@ export interface TaskStore {
   revalidate(): Promise<void>
 
   findTask(id: string): TaskItem | undefined
-  createList(name: string): Promise<TaskListEntry>
+  /** ``null`` when the new list is held for review. */
+  createList(name: string): Promise<TaskListEntry | null>
   renameList(listId: string, name: string): Promise<void>
   removeList(list: TaskListEntry, cb?: UndoCallbacks): void
-  createTask(listId: string, title: string, fields?: NewTaskFields): Promise<TaskItem>
+  /** ``null`` when the new task is held for review. */
+  createTask(listId: string, title: string, fields?: NewTaskFields): Promise<TaskItem | null>
   /** A board drop: ``id`` goes to ``status`` and ``order`` (that column's
    *  ids, top to bottom) becomes the column's order — at once, then a
    *  status PATCH (when it changed) and a reorder ``{order, moved_id}``.
    *  A failure rolls back what the server didn't take and rethrows; when
    *  the status was saved but the reorder failed, the error carries
-   *  ``partial: true`` (the card did change column). */
-  moveTask(id: string, status: TaskStatus, order: readonly string[]): Promise<void>
+   *  ``partial: true`` (the card did change column). Resolves ``'queued'``
+   *  when the status change is held for review (rolled back here). */
+  moveTask(id: string, status: TaskStatus, order: readonly string[]): Promise<WriteOutcome>
   /** Run ``job`` after every move queued before it on ``listId`` — so a
    *  move is planned from the state the previous one left. */
   serial<T>(listId: string, job: () => Promise<T>): Promise<T>
@@ -410,8 +424,18 @@ export function createTaskStore(spaceId: string | null): TaskStore {
     if (activeListId.value === listId) activeListId.value = null
   }
 
-  async function createList(name: string): Promise<TaskListEntry> {
-    const list = await api.post(listsPath, { name }) as TaskListEntry
+  /** A 202 "held for review": toast + refresh the author's pending items. */
+  function queued(): void {
+    announceQueued({ spaceId })
+  }
+
+  async function createList(name: string): Promise<TaskListEntry | null> {
+    const res = await api.post(listsPath, { name }) as unknown
+    if (isQueuedWrite(res)) {
+      queued()
+      return null
+    }
+    const list = res as TaskListEntry
     if (!lists.value.some(l => l.id === list.id)) lists.value = [...lists.value, list]
     // A brand-new list has no tasks — nothing to fetch.
     if (!(list.id in tasksByList.value)) setList(list.id, [])
@@ -425,8 +449,15 @@ export function createTaskStore(spaceId: string | null): TaskStore {
     if (!before) return
     lists.value = lists.value.map(l => l.id === listId ? { ...l, name } : l)
     try {
-      const fresh = await api.patch(listPath(listId), { name }) as TaskListEntry
-      lists.value = lists.value.map(l => l.id === listId ? { ...l, ...fresh } : l)
+      const fresh = await api.patch(listPath(listId), { name }) as unknown
+      if (isQueuedWrite(fresh)) {
+        lists.value = lists.value.map(l =>
+          l.id === listId && l.name === name ? { ...l, name: before.name } : l)
+        queued()
+        return
+      }
+      lists.value = lists.value.map(l =>
+        l.id === listId ? { ...l, ...(fresh as TaskListEntry) } : l)
     } catch (err) {
       lists.value = lists.value.map(l =>
         l.id === listId && l.name === name ? { ...l, name: before.name } : l)
@@ -441,9 +472,15 @@ export function createTaskStore(spaceId: string | null): TaskStore {
       message: t('tasks.list_deleted', { name: list.name }),
       commit: async ({ keepalive }) => {
         try {
-          await (keepalive
-            ? api.delete(listPath(list.id), { keepalive: true })
-            : api.delete(listPath(list.id)))
+          const res = await (keepalive
+            ? api.delete<unknown>(listPath(list.id), { keepalive: true })
+            : api.delete<unknown>(listPath(list.id)))
+          // Held for review: the list stays (it reappears as the Undo
+          // window closes) until a moderator approves.
+          if (isQueuedWrite(res)) {
+            queued()
+            return
+          }
         } catch (err) {
           if (!isNotFound(err)) throw err
         }
@@ -460,15 +497,22 @@ export function createTaskStore(spaceId: string | null): TaskStore {
 
   async function createTask(
     listId: string, title: string, fields: NewTaskFields = {},
-  ): Promise<TaskItem> {
-    const task = await api.post(listTasksPath(listId), { title, ...fields }) as TaskItem
+  ): Promise<TaskItem | null> {
+    const res = await api.post(listTasksPath(listId), { title, ...fields }) as unknown
+    if (isQueuedWrite(res)) {
+      queued()
+      return null
+    }
+    const task = res as TaskItem
     upsert(task)
     return task
   }
 
-  async function moveTask(id: string, status: TaskStatus, order: readonly string[]): Promise<void> {
+  async function moveTask(
+    id: string, status: TaskStatus, order: readonly string[],
+  ): Promise<WriteOutcome> {
     const row = findTask(id)
-    if (!row) return
+    if (!row) return 'applied'
     const listId = row.list_id
     const statusChanged = row.status !== status
     const beforeStatus = row.status
@@ -504,21 +548,39 @@ export function createTaskStore(spaceId: string | null): TaskStore {
         return was !== undefined && x.position === wanted.get(x.id) ? { ...x, position: was } : x
       }))
     }
+    const undoStatus = () =>
+      mapTask(id, x => x.status === status ? { ...x, status: beforeStatus } : x)
     if (statusChanged) {
       try {
-        const fresh = await api.patch(taskPath(id), { status }) as TaskItem
+        const fresh = await api.patch(taskPath(id), { status }) as unknown
+        if (isQueuedWrite(fresh)) {
+          // Someone else's task in a "Reviewed" space: the move waits
+          // for a moderator — put the card back where it was.
+          unpin()
+          undoPositions()
+          undoStatus()
+          queued()
+          return 'queued'
+        }
         // (``upsert`` keeps the pinned position until the reorder answers.)
-        if (fresh?.id && patchSeq.get(id) === seq) upsert(fresh)
+        if ((fresh as TaskItem)?.id && patchSeq.get(id) === seq) upsert(fresh as TaskItem)
       } catch (err) {
         unpin()
         undoPositions()
-        mapTask(id, x => x.status === status ? { ...x, status: beforeStatus } : x)
+        undoStatus()
         throw translateTaskError(err)
       }
     }
     try {
-      await api.post(reorderPath(listId), { order: [...order], moved_id: id })
+      const res = await api.post(reorderPath(listId), { order: [...order], moved_id: id })
       unpin()
+      // A reorder alone never queues; be safe if a host says otherwise.
+      if (isQueuedWrite(res)) {
+        undoPositions()
+        queued()
+        return 'queued'
+      }
+      return 'applied'
     } catch (err) {
       unpin()
       undoPositions()
@@ -560,7 +622,13 @@ export function createTaskStore(spaceId: string | null): TaskStore {
     const seq = (patchSeq.get(id) ?? 0) + 1
     patchSeq.set(id, seq)
     try {
-      const fresh = await api.patch(taskPath(id), patch) as TaskItem
+      const res = await api.patch(taskPath(id), patch) as unknown
+      if (isQueuedWrite(res)) {
+        rollback(id, before, patch)
+        queued()
+        return null
+      }
+      const fresh = res as TaskItem
       // An older request answering late must not undo a newer one.
       if (fresh?.id && patchSeq.get(id) === seq) upsert(fresh)
       return fresh
@@ -590,10 +658,14 @@ export function createTaskStore(spaceId: string | null): TaskStore {
       : api.delete(taskPath(id))))
     const gone = new Set<string>()
     let firstError: unknown = null
+    let held = 0
     results.forEach((r, i) => {
-      if (r.status === 'fulfilled' || isNotFound(r.reason)) gone.add(ids[i])
+      // Held for review: the task stays until a moderator approves.
+      if (r.status === 'fulfilled' && isQueuedWrite(r.value)) held++
+      else if (r.status === 'fulfilled' || isNotFound(r.reason)) gone.add(ids[i])
       else if (firstError === null) firstError = translateTaskError(r.reason)
     })
+    if (held > 0) queued()
     markGone(gone)
     dropTasks(gone)
     if (firstError !== null) throw firstError

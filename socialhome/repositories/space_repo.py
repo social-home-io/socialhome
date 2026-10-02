@@ -25,6 +25,7 @@ this module from becoming another 1000-line dumping ground.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
@@ -136,7 +137,7 @@ class AbstractSpaceRepo(Protocol):
     async def list_bans(self, space_id: str) -> list[dict]: ...
 
     # ── Moderation queue ──────────────────────────────────────────────
-    async def save_moderation_item(self, item: SpaceModerationItem) -> None: ...
+    async def insert_moderation_item(self, item: SpaceModerationItem) -> None: ...
     async def list_moderation_queue(
         self,
         space_id: str,
@@ -148,14 +149,33 @@ class AbstractSpaceRepo(Protocol):
         self,
         item_id: str,
     ) -> SpaceModerationItem | None: ...
-    async def update_moderation_item_status(
+    async def claim_moderation_item(
         self,
         item_id: str,
         *,
         status: ModerationStatus,
-        reviewed_by: str,
-        rejection_reason: str | None = None,
-    ) -> None: ...
+        reviewed_by: str | None,
+        reason: str | None = None,
+    ) -> bool: ...
+    async def release_moderation_item(
+        self, item_id: str, *, claimed_status: ModerationStatus
+    ) -> bool: ...
+    async def count_pending(
+        self, space_id: str, *, submitted_by: str | None = None
+    ) -> int: ...
+    async def list_moderation_for_submitter(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        status: ModerationStatus | None = None,
+        limit: int = 100,
+    ) -> list[SpaceModerationItem]: ...
+    async def list_pending_for_target(
+        self, space_id: str, feature: str, target_id: str
+    ) -> list[SpaceModerationItem]: ...
+    async def expire_due(self, now: datetime) -> list[SpaceModerationItem]: ...
+    async def purge_payloads(self, before: datetime) -> int: ...
 
     # ── Invite tokens ──────────────────────────────────────────────────
     async def create_invite_token(
@@ -1122,7 +1142,7 @@ class SqliteSpaceRepo:
 
     # ── Moderation queue ──────────────────────────────────────────────
 
-    async def save_moderation_item(
+    async def insert_moderation_item(
         self,
         item: SpaceModerationItem,
     ) -> None:
@@ -1172,11 +1192,7 @@ class SqliteSpaceRepo:
                 "ORDER BY submitted_at DESC LIMIT ?",
                 (space_id, status.value, int(limit)),
             )
-        return [
-            item
-            for item in (_row_to_moderation_item(d) for d in rows_to_dicts(rows))
-            if item
-        ]
+        return _moderation_items(rows)
 
     async def get_moderation_item(
         self,
@@ -1188,22 +1204,136 @@ class SqliteSpaceRepo:
         )
         return _row_to_moderation_item(row_to_dict(row))
 
-    async def update_moderation_item_status(
+    async def claim_moderation_item(
         self,
         item_id: str,
         *,
         status: ModerationStatus,
-        reviewed_by: str,
-        rejection_reason: str | None = None,
-    ) -> None:
-        await self._db.enqueue(
+        reviewed_by: str | None,
+        reason: str | None = None,
+    ) -> bool:
+        """Move a PENDING item to ``status`` — True only for the one caller
+        whose conditional UPDATE won. Two moderators approving at once
+        (or an approve racing the expiry sweep) leave exactly one winner,
+        so the content is persisted once."""
+        changed = await self._db.enqueue_rowcount(
             """
             UPDATE space_moderation_queue
-               SET status=?, reviewed_by=?, reviewed_at=datetime('now'),
-                   rejection_reason=COALESCE(?, rejection_reason)
-             WHERE id=?
+               SET status=?, reviewed_by=?, reviewed_at=?, rejection_reason=?
+             WHERE id=? AND status='pending'
             """,
-            (status.value, reviewed_by, rejection_reason, item_id),
+            (
+                status.value,
+                reviewed_by,
+                datetime.now(timezone.utc).isoformat(),
+                reason,
+                item_id,
+            ),
+        )
+        return changed > 0
+
+    async def release_moderation_item(
+        self, item_id: str, *, claimed_status: ModerationStatus
+    ) -> bool:
+        """Undo a claim whose apply persisted nothing, so the item can be
+        retried. Conditional on the status the caller claimed: it never
+        reopens an item somebody else decided (or the expiry sweep moved)
+        in between. True when the item is pending again."""
+        changed = await self._db.enqueue_rowcount(
+            """
+            UPDATE space_moderation_queue
+               SET status='pending', reviewed_by=NULL, reviewed_at=NULL,
+                   rejection_reason=NULL
+             WHERE id=? AND status=?
+            """,
+            (item_id, claimed_status.value),
+        )
+        return changed > 0
+
+    async def count_pending(
+        self, space_id: str, *, submitted_by: str | None = None
+    ) -> int:
+        if submitted_by is None:
+            row = await self._db.fetchone(
+                "SELECT COUNT(*) AS n FROM space_moderation_queue "
+                "WHERE space_id=? AND status='pending'",
+                (space_id,),
+            )
+        else:
+            row = await self._db.fetchone(
+                "SELECT COUNT(*) AS n FROM space_moderation_queue "
+                "WHERE space_id=? AND status='pending' AND submitted_by=?",
+                (space_id, submitted_by),
+            )
+        return int(row["n"]) if row is not None else 0
+
+    async def list_moderation_for_submitter(
+        self,
+        space_id: str,
+        user_id: str,
+        *,
+        status: ModerationStatus | None = None,
+        limit: int = 100,
+    ) -> list[SpaceModerationItem]:
+        if status is None:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_moderation_queue "
+                "WHERE space_id=? AND submitted_by=? "
+                "ORDER BY submitted_at DESC LIMIT ?",
+                (space_id, user_id, int(limit)),
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_moderation_queue "
+                "WHERE space_id=? AND submitted_by=? AND status=? "
+                "ORDER BY submitted_at DESC LIMIT ?",
+                (space_id, user_id, status.value, int(limit)),
+            )
+        return _moderation_items(rows)
+
+    async def list_pending_for_target(
+        self, space_id: str, feature: str, target_id: str
+    ) -> list[SpaceModerationItem]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM space_moderation_queue "
+            "WHERE space_id=? AND feature=? AND status='pending' "
+            "AND json_extract(payload_json, '$.target_id')=? "
+            "ORDER BY submitted_at",
+            (space_id, feature, target_id),
+        )
+        return _moderation_items(rows)
+
+    async def expire_due(self, now: datetime) -> list[SpaceModerationItem]:
+        """Mark every PENDING item past ``expires_at`` EXPIRED and return
+        the ones this sweep moved (claimed one by one, so an approve racing
+        the sweep keeps its own outcome)."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM space_moderation_queue "
+            "WHERE status='pending' AND expires_at<=?",
+            (now.isoformat(),),
+        )
+        moved: list[SpaceModerationItem] = []
+        for item in _moderation_items(rows):
+            if await self.claim_moderation_item(
+                item.id, status=ModerationStatus.EXPIRED, reviewed_by=None
+            ):
+                moved.append(
+                    replace(item, status=ModerationStatus.EXPIRED, reviewed_at=now)
+                )
+        return moved
+
+    async def purge_payloads(self, before: datetime) -> int:
+        """NULL the content of decided / expired items older than
+        ``before``. The row stays for audit; the words do not."""
+        return await self._db.enqueue_rowcount(
+            """
+            UPDATE space_moderation_queue
+               SET payload_json=NULL, current_snapshot=NULL
+             WHERE status != 'pending'
+               AND (payload_json IS NOT NULL OR current_snapshot IS NOT NULL)
+               AND COALESCE(reviewed_at, submitted_at) < ?
+            """,
+            (before.isoformat(),),
         )
 
     # ── Invite tokens ──────────────────────────────────────────────────
@@ -1953,6 +2083,14 @@ def _parse_ts(value) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _moderation_items(rows) -> list[SpaceModerationItem]:
+    return [
+        item
+        for item in (_row_to_moderation_item(d) for d in rows_to_dicts(rows))
+        if item
+    ]
 
 
 def _row_to_moderation_item(row: dict | None) -> SpaceModerationItem | None:

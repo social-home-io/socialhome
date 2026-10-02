@@ -28,6 +28,7 @@ function makeSpace(overrides: Partial<{
   features: object
   archived: boolean
   archived_reason: 'dissolved' | 'removed' | null
+  has_remote_households: boolean
 }> = {}) {
   return {
     id: 's-1',
@@ -47,6 +48,7 @@ function makeSpace(overrides: Partial<{
     retention_days: overrides.retention_days ?? null,
     archived: overrides.archived ?? false,
     archived_reason: overrides.archived_reason ?? null,
+    has_remote_households: overrides.has_remote_households ?? false,
   } as never
 }
 
@@ -909,17 +911,113 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
     )
   }
 
-  it('offers one select per enabled feature, Reviewed for posts only', () => {
+  const values = (sel: HTMLSelectElement) => Array.from(sel.options).map(o => o.value)
+  const reviewed = (sel: HTMLSelectElement) =>
+    Array.from(sel.options).find(o => o.value === 'moderated')!
+
+  it('offers one select per enabled feature, Reviewed for every feature', () => {
     // stickies is off in the default fixture → no stickies select.
-    const { container } = render(<SpaceSettings space={makeSpace()} onUpdate={() => {}} />)
+    const { container, queryByTestId } = render(<SpaceSettings space={makeSpace()} onUpdate={() => {}} />)
     const s = selects(container)
     expect(Object.keys(s)).toEqual(['posts', 'pages', 'tasks', 'calendar'])
-    const values = (sel: HTMLSelectElement) =>
-      Array.from(sel.options).map(o => o.value)
-    expect(values(s.posts)).toEqual(['open', 'moderated', 'admin_only'])
-    expect(values(s.pages)).toEqual(['open', 'admin_only'])
-    expect(values(s.tasks)).toEqual(['open', 'admin_only'])
+    for (const f of ['posts', 'pages', 'tasks', 'calendar']) {
+      expect(values(s[f])).toEqual(['open', 'moderated', 'admin_only'])
+      expect(reviewed(s[f]).disabled).toBe(false)
+    }
     expect(s.posts.value).toBe('open')
+    expect(queryByTestId('space-access-review-hint')).toBeNull()
+  })
+
+  it('with members from other households, Reviewed is posts-only (disabled + hint)', () => {
+    const { container, getByTestId } = render(
+      <SpaceSettings space={makeSpace({ has_remote_households: true })} onUpdate={() => {}} />,
+    )
+    const s = selects(container)
+    expect(reviewed(s.posts).disabled).toBe(false)
+    for (const f of ['pages', 'tasks', 'calendar']) {
+      expect(reviewed(s[f]).disabled).toBe(true)
+      expect(reviewed(s[f]).title).toBe('space.access.moderated_unavailable')
+    }
+    expect(getByTestId('space-access-review-hint').textContent)
+      .toBe('space.access.moderated_unavailable')
+  })
+
+  it('on a remote-hosted space, Reviewed is posts-only too', () => {
+    const { container } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} isRemoteSpace />,
+    )
+    const s = selects(container)
+    expect(reviewed(s.posts).disabled).toBe(false)
+    expect(reviewed(s.tasks).disabled).toBe(true)
+  })
+
+  it('keeps a Reviewed level already in force selectable', () => {
+    const space = makeSpace({
+      has_remote_households: true,
+      features: {
+        calendar: true, todo: true, location: false, stickies: false, pages: true,
+        gallery: true, posts_access: 'open', pages_access: 'moderated',
+        tasks_access: 'open', stickies_access: 'open', calendar_access: 'open',
+        allowed_post_types: ['text'],
+      },
+    })
+    const { container } = render(<SpaceSettings space={space} onUpdate={() => {}} />)
+    const s = selects(container)
+    expect(s.pages.value).toBe('moderated')
+    expect(reviewed(s.pages).disabled).toBe(false)
+  })
+
+  it('warns on a Reviewed level the space can no longer hold, until another is picked', () => {
+    const space = makeSpace({
+      has_remote_households: true,
+      features: {
+        calendar: true, todo: true, location: false, stickies: false, pages: true,
+        gallery: true, posts_access: 'moderated', pages_access: 'moderated',
+        tasks_access: 'open', stickies_access: 'open', calendar_access: 'open',
+        allowed_post_types: ['text'],
+      },
+    })
+    const { container, queryByTestId, getByTestId } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    const warning = getByTestId('space-access-stale-pages')
+    expect(warning.textContent).toContain('space.access.moderated_stale')
+    expect(warning.getAttribute('role')).toBe('status')
+    // Posts keep Reviewed across households; an open feature has nothing to warn.
+    expect(queryByTestId('space-access-stale-posts')).toBeNull()
+    expect(queryByTestId('space-access-stale-tasks')).toBeNull()
+    const s = selects(container)
+    fireEvent.change(s.pages, { target: { value: 'open' } })
+    expect(queryByTestId('space-access-stale-pages')).toBeNull()
+  })
+
+  it('no stale warning for a Reviewed feature on a host-only space', () => {
+    const space = makeSpace({
+      has_remote_households: false,
+      features: {
+        calendar: true, todo: true, location: false, stickies: false, pages: true,
+        gallery: true, posts_access: 'open', pages_access: 'moderated',
+        tasks_access: 'open', stickies_access: 'open', calendar_access: 'open',
+        allowed_post_types: ['text'],
+      },
+    })
+    const { queryByTestId } = render(<SpaceSettings space={space} onUpdate={() => {}} />)
+    expect(queryByTestId('space-access-stale-pages')).toBeNull()
+  })
+
+  it('a 422 MODERATION_NOT_FEDERATED shows the translated toast', async () => {
+    const refused = Object.assign(new Error('not federated'), {
+      status: 422, code: 'MODERATION_NOT_FEDERATED', extra: {},
+    })
+    apiMock.patch.mockRejectedValueOnce(refused)
+    const { container, getByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    )
+    fireEvent.change(selects(container).tasks, { target: { value: 'moderated' } })
+    fireEvent.click(getByText('Save changes'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({ features: { tasks_access: 'moderated' } })
+    expect(showToast).toHaveBeenCalledWith('space.access.moderated_not_federated', 'error')
   })
 
   it('mirrors the stored levels', () => {

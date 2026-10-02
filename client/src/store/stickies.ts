@@ -27,12 +27,17 @@
  * - **WS frames** route by ``space_id``: none → the household store, a
  *   space id → that space's store if one was made. A reconnect
  *   revalidates every store that had loaded.
+ * - **Held for review** (a space's stickies are "Reviewed", §4.3): a
+ *   ``202 {queued: true}`` saved nothing — an edit is rolled back, a
+ *   delete leaves the note on the board, a create resolves ``null``; the
+ *   "Submitted for review" toast shows (``utils/contentWrite``).
  */
 import { computed, signal, type ReadonlySignal, type Signal } from '@preact/signals'
 import { api } from '@/api'
 import { connectionState, ws } from '@/ws'
 import { t } from '@/i18n/i18n'
 import { pendingDeletes, undoableDelete } from '@/utils/undoableDelete'
+import { announceQueued, isQueuedWrite } from '@/utils/contentWrite'
 
 export interface StickyRow {
   id:         string
@@ -76,7 +81,8 @@ export interface StickyStore {
   revalidate(): Promise<void>
 
   find(id: string): StickyRow | undefined
-  create(draft: StickyDraft): Promise<StickyRow>
+  /** ``null`` when the new note is held for review. */
+  create(draft: StickyDraft): Promise<StickyRow | null>
   /** Optimistic PATCH. ``before`` overrides the rollback values (a
    *  drag already moved the row locally). */
   patch(id: string, patch: StickyPatch, before?: StickyPatch): Promise<StickyRow | null>
@@ -217,8 +223,13 @@ export function createStickyStore(spaceId: string | null): StickyStore {
     await load({ force: true }).catch(() => { /* the board keeps what it has */ })
   }
 
-  async function create(draft: StickyDraft): Promise<StickyRow> {
-    const row = await api.post(base, draft) as StickyRow
+  async function create(draft: StickyDraft): Promise<StickyRow | null> {
+    const res = await api.post(base, draft) as unknown
+    if (isQueuedWrite(res)) {
+      announceQueued({ spaceId })
+      return null
+    }
+    const row = res as StickyRow
     upsert(row, true)
     return row
   }
@@ -250,7 +261,14 @@ export function createStickyStore(spaceId: string | null): StickyStore {
     const seq = (patchSeq.get(id) ?? 0) + 1
     patchSeq.set(id, seq)
     try {
-      const fresh = await api.patch(itemPath(id), change) as StickyRow
+      const res = await api.patch(itemPath(id), change) as unknown
+      if (isQueuedWrite(res)) {
+        // Someone else's note in a "Reviewed" space: put it back.
+        rollback(id, before, change)
+        announceQueued({ spaceId })
+        return null
+      }
+      const fresh = res as StickyRow
       if (fresh?.id && patchSeq.get(id) === seq) upsert(fresh, false)
       return fresh
     } catch (err) {
@@ -300,9 +318,14 @@ export function createStickyStore(spaceId: string | null): StickyStore {
       }),
       commit: async ({ keepalive }) => {
         try {
-          await (keepalive
-            ? api.delete(itemPath(sticky.id), { keepalive: true })
-            : api.delete(itemPath(sticky.id)))
+          const res = await (keepalive
+            ? api.delete<unknown>(itemPath(sticky.id), { keepalive: true })
+            : api.delete<unknown>(itemPath(sticky.id)))
+          // Held for review: the note stays until a moderator approves.
+          if (isQueuedWrite(res)) {
+            announceQueued({ spaceId })
+            return
+          }
         } catch (err) {
           if (!isNotFound(err)) throw err
         }

@@ -32,6 +32,7 @@ from ..app_keys import (
     space_approval_service_key,
     space_remote_member_repo_key,
     space_repo_key,
+    space_moderation_service_key,
     space_service_key,
     space_sync_scheduler_key,
     space_zone_repo_key,
@@ -271,12 +272,22 @@ class SpaceDetailView(BaseView):
                 # to suppress local-only admin gestures on a remote
                 # stub.
                 "owner_instance_id": space.owner_instance_id,
+                # Does another household hold a seat here? Review for
+                # features other than posts is host-only until federated
+                # moderation: the settings disable it while this is true.
+                "has_remote_households": await self._has_remote_households(space.id),
             }
         )
         signer = self.request.app.get(media_signer_key)
         if signer is not None:
             sign_media_urls_in(payload, signer)
         return web.json_response(payload)
+
+    async def _has_remote_households(self, space_id: str) -> bool:
+        moderation = self.request.app.get(space_moderation_service_key)
+        if moderation is None:
+            return False
+        return bool(await moderation.has_remote_households(space_id))
 
     async def patch(self) -> web.Response:
         ctx = self.user
@@ -1728,57 +1739,89 @@ class SpaceJoinView(BaseView):
         return web.json_response(result)
 
 
-class SpaceModerationQueueView(BaseView):
-    """GET /api/spaces/{id}/moderation — list pending queue items (admin)."""
+class _SpaceModerationBase(BaseView):
+    """Shared serialisation for the moderation-queue views: the API item
+    shape (``SpaceModerationService.describe``) with media URLs signed."""
+
+    async def _items(self, items, *, with_current: bool) -> web.Response:
+        svc = self.svc(space_moderation_service_key)
+        payload = [await svc.describe(i, with_current=with_current) for i in items]
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(payload, signer)
+        return web.json_response(payload)
+
+
+class SpaceModerationQueueView(_SpaceModerationBase):
+    """``GET /api/spaces/{id}/moderation?status=pending|all`` — the queue
+    (owner / admin / moderator). Pending by default."""
 
     async def get(self) -> web.Response:
-        ctx = self.user
-        svc = self.svc(space_service_key)
-        space_id = self.match("id")
-        items = await svc.list_pending_moderation(
-            space_id,
-            actor_username=ctx.username,
+        status = self.request.query.get("status", "pending")
+        if status not in ("pending", "all"):
+            return error_response(
+                422, "UNPROCESSABLE", "status must be 'pending' or 'all'."
+            )
+        items = await self.svc(space_moderation_service_key).list_items(
+            self.match("id"),
+            actor_user_id=self.user.user_id,
+            include_decided=status == "all",
         )
-        return web.json_response([_moderation_item_dict(i) for i in items])
+        return await self._items(items, with_current=True)
+
+
+class SpaceModerationMineView(_SpaceModerationBase):
+    """``GET /api/spaces/{id}/moderation/mine`` — the caller's own
+    submissions, any status (any member). Nobody else's."""
+
+    async def get(self) -> web.Response:
+        items = await self.svc(space_moderation_service_key).list_mine(
+            self.match("id"), user_id=self.user.user_id
+        )
+        return await self._items(items, with_current=False)
 
 
 class SpaceModerationApproveView(BaseView):
-    """POST /api/spaces/{id}/moderation/{item_id}/approve."""
+    """``POST /api/spaces/{id}/moderation/{item_id}/approve`` ``{force?}``."""
 
     async def post(self) -> web.Response:
-        ctx = self.user
-        svc = self.svc(space_service_key)
-        space_id = self.match("id")
         item_id = self.match("item_id")
-        post = await svc.approve_moderation_item(
-            space_id,
+        body = await self.body() if self.request.can_read_body else {}
+        force = bool(body.get("force", False)) if isinstance(body, dict) else False
+        result = await self.svc(space_moderation_service_key).approve(
+            self.match("id"),
             item_id,
-            actor_username=ctx.username,
+            actor_user_id=self.user.user_id,
+            force=force,
         )
         return web.json_response(
             {
                 "item_id": item_id,
-                "post_id": post.id,
                 "status": "approved",
+                "target_id": result.target_id,
+                # Legacy alias (the posts-only queue's response).
+                "post_id": result.post_id,
+                # False: published, but a part (a poll, a listing) did not
+                # save — approving again finishes it.
+                "complete": result.complete,
             }
         )
 
 
 class SpaceModerationRejectView(BaseView):
-    """POST /api/spaces/{id}/moderation/{item_id}/reject."""
+    """``POST /api/spaces/{id}/moderation/{item_id}/reject`` ``{reason?}``."""
 
     async def post(self) -> web.Response:
-        ctx = self.user
-        svc = self.svc(space_service_key)
-        space_id = self.match("id")
         item_id = self.match("item_id")
-        body = await self.body()
+        body = await self.body() if self.request.can_read_body else {}
         reason = body.get("reason") if isinstance(body, dict) else None
-        await svc.reject_moderation_item(
-            space_id,
+        if reason is not None and not isinstance(reason, str):
+            return error_response(422, "UNPROCESSABLE", "reason must be a string.")
+        await self.svc(space_moderation_service_key).reject(
+            self.match("id"),
             item_id,
-            actor_username=ctx.username,
-            reason=str(reason).strip() if reason else None,
+            actor_user_id=self.user.user_id,
+            reason=reason,
         )
         return web.json_response({"item_id": item_id, "status": "rejected"})
 
@@ -1810,21 +1853,6 @@ class SpaceUnbanView(BaseView):
             user_id=user_id,
         )
         return web.json_response({"ok": True})
-
-
-def _moderation_item_dict(item) -> dict:
-    return {
-        "id": item.id,
-        "space_id": item.space_id,
-        "feature": item.feature,
-        "action": item.action,
-        "submitted_by": item.submitted_by,
-        "payload": item.payload,
-        "submitted_at": item.submitted_at.isoformat() if item.submitted_at else None,
-        "expires_at": item.expires_at.isoformat() if item.expires_at else None,
-        "status": item.status.value,
-        "rejection_reason": item.rejection_reason,
-    }
 
 
 class SpaceSyncTriggerView(BaseView):
@@ -2294,7 +2322,11 @@ class SpacePostItemView(BaseView):
 
 
 class SpacePostCollectionView(BaseView):
-    """POST /api/spaces/{id}/posts — create a post in a space."""
+    """POST /api/spaces/{id}/posts — create a post in a space.
+
+    Optional ``poll`` / ``schedule`` objects attach a reply poll / schedule
+    poll atomically. Under ``MODERATED`` posts a member's post answers 202
+    (``BaseView._queued``) and nothing is published until approval."""
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -2308,6 +2340,9 @@ class SpacePostCollectionView(BaseView):
                 "VALIDATION_ERROR",
                 "image_urls must be a list of strings.",
             )
+        # A poll / schedule poll rides in the same request so it is created
+        # with the post — or reviewed with it under MODERATED posts (202).
+        attachments = {k: body[k] for k in ("poll", "schedule") if body.get(k)}
         post = await svc.create_post(
             space_id,
             author_user_id=ctx.user_id,
@@ -2317,9 +2352,8 @@ class SpacePostCollectionView(BaseView):
             image_urls=tuple(strip_signature_query(str(u)) for u in raw_images),
             location=_extract_location(body),
             no_link_preview=bool(body.get("no_link_preview", False)),
+            attachments=attachments or None,
         )
-        if post is None:
-            return web.json_response({"queued": True}, status=202)
         response: dict = {
             "id": post.id,
             "type": post.type.value,

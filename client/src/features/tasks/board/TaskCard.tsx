@@ -63,6 +63,9 @@ export interface TaskCardProps {
   showLock?: boolean
   canMoveUp?: boolean
   canMoveDown?: boolean
+  /** The viewer's change to this task waits for a moderator (§4.3
+   *  "Reviewed") — shows a "Pending review" chip. */
+  pendingReview?: boolean
   onOpen: () => void
   onMoveTo?: (status: TaskStatus) => void
   onStep?: (dir: StepDir) => void
@@ -71,7 +74,7 @@ export interface TaskCardProps {
 
 export function TaskCard({
   task, editable, readOnlyReason, nameOf, people, hintId, dragProps, dragging, pressing, ghost,
-  showLock = true, canMoveUp, canMoveDown, onOpen, onMoveTo, onStep, onDelete,
+  showLock = true, canMoveUp, canMoveDown, pendingReview = false, onOpen, onMoveTo, onStep, onDelete,
 }: TaskCardProps) {
   const done = task.status === 'done'
   const due = task.due_date && !done ? dueLabel(task.due_date) : null
@@ -84,7 +87,8 @@ export function TaskCard({
   const hasNotes = !!task.description?.trim()
   const metaId = `sh-board-card-meta-${task.id}`
   const lock = !editable && showLock && !ghost
-  const showMeta = !!due || hasNotes || lock || assignees.length > 0 || labels.length > 0
+  const review = pendingReview && !ghost
+  const showMeta = !!due || hasNotes || lock || review || assignees.length > 0 || labels.length > 0
   const describedBy = [showMeta ? metaId : '', editable && hintId ? hintId : ''].filter(Boolean).join(' ')
 
   const onKeyDown = (e: KeyboardEvent) => {
@@ -147,6 +151,11 @@ export function TaskCard({
       </div>
       {showMeta && (
         <div class="sh-board-card__meta" id={ghost ? undefined : metaId}>
+          {review && (
+            <span class="sh-badge sh-badge--pending sh-board-card__review" title={t('tasks.pending_review_hint')}>
+              {t('tasks.pending_review')}
+            </span>
+          )}
           {labels.length > 0 && (
             <span class="sh-board-card__labels">
               <span class="sr-only">{t('tasks.labels.sr', { names: joinNames(labels) })}</span>

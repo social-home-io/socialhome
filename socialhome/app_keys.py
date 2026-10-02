@@ -81,6 +81,8 @@ report_repo_key: AppKey = AppKey("report_repo")
 report_service_key: AppKey = AppKey("report_service")
 page_conflict_service_key: AppKey = AppKey("page_conflict_service")
 space_page_service_key: AppKey = AppKey("space_page_service")
+#: The §4.3 space moderation queue (every MODERATED feature, host-local).
+space_moderation_service_key: AppKey = AppKey("space_moderation_service")
 rate_limiter_key: AppKey = AppKey("rate_limiter")
 presence_service_key: AppKey = AppKey("presence_service")
 online_status_service_key: AppKey = AppKey("online_status_service")

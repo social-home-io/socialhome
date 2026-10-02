@@ -354,7 +354,10 @@ export interface Space {
    *  *stub* mirroring a space hosted on another household. The SPA
    *  gates settings + admin gestures on this field so a remote
    *  member never tries to mutate state the host owns. */
-  owner_instance_id?: string
+  owner_instance_id?: string  /** ``GET /api/spaces/{id}`` only: at least one OTHER household has a
+   *  member here. Until federated moderation lands, "Reviewed" can't be
+   *  set for non-post features then (``422 MODERATION_NOT_FEDERATED``). */
+  has_remote_households?: boolean
 }
 
 /** A space feature's access level (``SpaceFeatureAccess`` server-side). */

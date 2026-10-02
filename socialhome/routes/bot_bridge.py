@@ -24,7 +24,8 @@ from ..app_keys import (
     conversation_repo_key,
     space_bot_repo_key,
 )
-from ..domain.space_bot import SpaceBotDisabledError
+from ..domain.space import AccessAdminOnlyError, SpacePermissionError
+from ..domain.space_bot import BotPostsReviewedError, SpaceBotDisabledError
 from ..security import error_response
 from .base import BaseView
 
@@ -88,6 +89,24 @@ class BotBridgeSpacePostView(web.View):
             )
         except SpaceBotDisabledError as exc:
             return error_response(403, "BOT_DISABLED", str(exc))
+        except BotPostsReviewedError:
+            # §4.3: a personal bot's post would skip the review queue.
+            return error_response(
+                403,
+                "BOT_POSTS_REVIEWED",
+                "Posts here are reviewed — a personal bot can't post in this space.",
+            )
+        except AccessAdminOnlyError as exc:
+            return error_response(
+                403,
+                "ACCESS_ADMIN_ONLY",
+                "Only space admins can change this here.",
+                extra={"feature": exc.feature},
+            )
+        except SpacePermissionError:
+            return error_response(
+                403, "FORBIDDEN", "This bot may not post in this space."
+            )
         except KeyError as exc:
             return error_response(404, "NOT_FOUND", str(exc).strip("'\""))
         except ValueError as exc:

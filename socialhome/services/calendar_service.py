@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..domain.calendar import (
     Calendar,
@@ -30,7 +30,16 @@ from ..domain.calendar import (
     RSVPStatus,
 )
 from ..domain.child_protection import ProtectedCapability
-from ..domain.space import AccessDecision, ContentAction, Space, SpacePermissionError
+from ..domain.space import (
+    AccessDecision,
+    ContentAction,
+    ModerationNotFederatedError,
+    ModerationQueueFullError,
+    ModerationTargetGoneError,
+    Space,
+    SpaceModerationItem,
+    SpacePermissionError,
+)
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -40,7 +49,11 @@ from ..domain.events import (
     UserProvisioned,
 )
 from ..domain.federation import FederationEventType
-from ..federation.owner_bound_id import SPACE_CALENDAR_EVENT_KIND, mint_owner_bound_id
+from ..federation.owner_bound_id import (
+    SPACE_CALENDAR_EVENT_KIND,
+    SPACE_POST_KIND,
+    mint_owner_bound_id,
+)
 from ..infrastructure.event_bus import EventBus
 from ..media_signer import strip_signature_query
 from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCalendarRepo
@@ -50,9 +63,11 @@ from ..utils.timezones import is_valid_tz
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .protection_gate import ProtectionGateMixin
+from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
 
 if TYPE_CHECKING:
+    from .space_moderation_service import ModerationSubmitter
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.user_repo import AbstractUserRepo
 
@@ -1152,7 +1167,10 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
 
     Event create / edit / delete pass the space's ``calendar`` access level
     (§4.3, :class:`ContentAccessMixin`) for the acting user; RSVPs and
-    reminders are never gated.
+    reminders are never gated. Under ``MODERATED`` a member's new event,
+    and their edit / delete of somebody else's, waits in the space
+    moderation queue (:class:`CalendarModerationHandler` replays it on
+    approval, gated as the approver via ``approved_by``).
     """
 
     __slots__ = (
@@ -1162,6 +1180,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         "_space_repo",
         "_household",
         "_child_protection",
+        "_moderation",
     )
 
     def __init__(
@@ -1177,6 +1196,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         self._space_repo: AbstractSpaceRepo | None = None
         self._household = None
         self._child_protection = None
+        self._moderation: "ModerationSubmitter | None" = None
 
     # ── Subscription feed tokens (Phase F) ───────────────────────────────
 
@@ -1352,6 +1372,8 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         location: str | None = None,
         tz: str | None = None,
         announce_in_feed: bool = False,
+        event_id: str | None = None,
+        approved_by: str | None = None,
     ) -> CalendarEvent:
         """Create a space-scoped calendar event.
 
@@ -1376,24 +1398,56 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             raise ValueError(f"invalid datetime: {exc}") from exc
         if end_dt < start_dt:
             raise ValueError("end must be at or after start")
-        await self._gate(space_id, created_by, "calendar", ContentAction.CREATE, True)
-        if announce_in_feed and await self.announce_refusal(space_id, created_by):
-            # The feed mirror is a post: a creator the ``posts`` level
-            # keeps from posting straight away keeps the event, never the
-            # announcement. Dropped at the source so the flag federates as
-            # the household meant it; every receiver's
-            # ``CalendarFeedBridge`` re-checks it anyway. The route tells
-            # the creator (``announce_suppressed``).
-            # TODO(PR3): under MODERATED, queue the announce card for
-            # review instead of dropping it.
-            announce_in_feed = False
+        decision = await self._gate(
+            space_id,
+            approved_by or created_by,
+            "calendar",
+            ContentAction.CREATE,
+            approved_by is None,
+        )
+        clean_cover = _clean_cover_url(cover_url)
+        clean_location = _clean_location(location)
+        if decision is AccessDecision.QUEUE:
+            await self._submit_for_review(
+                space_id,
+                created_by,
+                "calendar",
+                ContentAction.CREATE,
+                payload={
+                    "entity": "event",
+                    "target_id": _mint_event_id(space_id, created_by),
+                    "summary": summary,
+                    "start": start_dt.isoformat(),
+                    "end": end_dt.isoformat(),
+                    "description": description,
+                    "all_day": bool(all_day),
+                    "attendees": list(attendees),
+                    "rrule": rrule,
+                    "capacity": capacity,
+                    "cover_url": clean_cover,
+                    "location": clean_location,
+                    "tz": tz,
+                    "announce_in_feed": bool(announce_in_feed),
+                },
+            )
+        queue_announce = False
+        if announce_in_feed:
+            refusal = await self.announce_refusal(space_id, created_by)
+            if refusal:
+                # The feed mirror is a post: a creator the ``posts`` level
+                # keeps from posting straight away keeps the event, never
+                # the announcement. Dropped at the source so the flag
+                # federates as the household meant it; every receiver's
+                # ``CalendarFeedBridge`` re-checks it anyway. Under
+                # MODERATED the card is queued for review as a post linked
+                # to the event instead (below); the route tells the creator.
+                announce_in_feed = False
+                queue_announce = refusal == "moderated"
         event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
         event = CalendarEvent(
             # Owner-bound (v_36): no other household can announce this id
             # first as its own user's event.
-            id=mint_owner_bound_id(
-                SPACE_CALENDAR_EVENT_KIND, space_id=space_id, owner_user_id=created_by
-            ),
+            id=event_id or _mint_event_id(space_id, created_by),
             calendar_id=space_id,  # space-scoped events use space_id as calendar_id
             summary=summary,
             description=description,
@@ -1404,8 +1458,8 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             created_by=created_by,
             rrule=rrule,
             capacity=capacity,
-            cover_url=_clean_cover_url(cover_url),
-            location=_clean_location(location),
+            cover_url=clean_cover,
+            location=clean_location,
             tz=event_tz,
             announce_in_feed=announce_in_feed,
         )
@@ -1413,6 +1467,8 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             raise KeyError(f"calendar event {event.id!r} exists in another space")
         saved = event
         await self._emit(CalendarEventCreated(event=saved))
+        if queue_announce:
+            await self._queue_announce_card(space_id, saved)
         await self._publish_federation_event_saved(
             space_id=space_id,
             event=saved,
@@ -1465,6 +1521,45 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             return None
         space = await self._spaces_or_raise().get(space_id)
         return space.features.access_level("posts").value if space else None
+
+    async def _queue_announce_card(self, space_id: str, event: CalendarEvent) -> None:
+        """Queue the feed card of an event whose creator's posts are
+        reviewed: a ``posts`` CREATE item linked to the event. The event
+        itself is already saved; approving the item makes the card appear.
+        Where the card can't queue (a household that doesn't hold the
+        queue, a full queue) it is dropped, as before."""
+        if self._moderation is None:
+            return
+        space = await self._spaces_or_raise().get(space_id)
+        if space is None:
+            return
+        try:
+            await self._moderation.submit(
+                space,
+                feature="posts",
+                action=ContentAction.CREATE,
+                submitted_by=event.created_by,
+                payload={
+                    "entity": "post",
+                    # Owner-bound (v_36) to the event's creator, like any
+                    # member post: the card stays theirs when approved.
+                    "target_id": mint_owner_bound_id(
+                        SPACE_POST_KIND,
+                        space_id=space_id,
+                        owner_user_id=event.created_by,
+                    ),
+                    "post_id": None,
+                    "type": "event",
+                    "content": event.summary,
+                    "linked_event_id": event.id,
+                },
+            )
+        except (
+            ModerationNotFederatedError,
+            ModerationQueueFullError,
+            SpacePermissionError,
+        ) as exc:
+            log.info("calendar: announce card for %s not queued: %s", event.id, exc)
 
     async def can_edit_event(
         self, space_id: str, user_id: str, event: CalendarEvent
@@ -1559,18 +1654,32 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         return result[1]
 
     async def delete_event(
-        self, event_id: str, *, space_id: str, actor_user_id: str
+        self,
+        event_id: str,
+        *,
+        space_id: str,
+        actor_user_id: str,
+        approved_by: str | None = None,
     ) -> None:
         """Delete ``event_id`` from ``space_id`` — :class:`KeyError` when
         the event isn't in that space."""
         existing = await self.get_event_in_space(event_id, space_id=space_id)
-        await self._gate(
+        decision = await self._gate(
             space_id,
-            actor_user_id,
+            approved_by or actor_user_id,
             "calendar",
             ContentAction.DELETE,
-            existing.created_by == actor_user_id,
+            approved_by is None and existing.created_by == actor_user_id,
         )
+        if decision is AccessDecision.QUEUE:
+            await self._submit_for_review(
+                space_id,
+                actor_user_id,
+                "calendar",
+                ContentAction.DELETE,
+                payload={"entity": "event", "target_id": existing.id},
+                snapshot=_event_dict(existing),
+            )
         # Snapshot the event + the cohort of "still attending"-ish RSVPs
         # before deletion so the push handler can produce a meaningful
         # title and reach affected members. The RSVP rows themselves
@@ -1634,6 +1743,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         cover_url: object = _UNSET,
         location: object = _UNSET,
         tz: str | None = None,
+        approved_by: str | None = None,
     ) -> CalendarEvent:
         """Partial-update a space event. Emits CalendarEventUpdated.
 
@@ -1647,12 +1757,12 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         another space is :class:`KeyError` (→ 404) and nothing changes.
         """
         existing = await self.get_event_in_space(event_id, space_id=space_id)
-        await self._gate(
+        decision = await self._gate(
             space_id,
-            actor_user_id,
+            approved_by or actor_user_id,
             "calendar",
             ContentAction.EDIT,
-            existing.created_by == actor_user_id,
+            approved_by is None and existing.created_by == actor_user_id,
         )
 
         new_summary = (summary if summary is not None else existing.summary).strip()
@@ -1705,6 +1815,49 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             location=new_location,
             tz=new_tz,
         )
+        if decision is AccessDecision.QUEUE:
+            # Validated above; the patch carries exactly what was sent.
+            sent: dict[str, Any] = {
+                k: v
+                for k, v in (
+                    ("summary", summary),
+                    ("start", start),
+                    ("end", end),
+                    ("all_day", all_day),
+                    ("description", description),
+                    ("attendees", list(attendees) if attendees is not None else None),
+                    ("rrule", rrule),
+                    ("capacity", capacity),
+                    ("tz", tz),
+                )
+                if v is not None
+            }
+            if clear_capacity:
+                sent["clear_capacity"] = True
+            if cover_url is not _UNSET:
+                sent["cover_url"] = new_cover
+            if location is not _UNSET:
+                sent["location"] = new_location
+            if not sent:
+                raise ValueError("an edit needs at least one field")
+            after = _event_dict(updated)
+            before = _event_dict(existing)
+            shown = [k for k in sent if k in before] + (
+                ["capacity"] if clear_capacity else []
+            )
+            await self._submit_for_review(
+                space_id,
+                actor_user_id,
+                "calendar",
+                ContentAction.EDIT,
+                payload={
+                    "entity": "event",
+                    "target_id": existing.id,
+                    "patch": sent,
+                    "proposed": {k: after[k] for k in shown},
+                },
+                snapshot={k: before[k] for k in shown},
+            )
         if not await self._repo.save_event(updated, space_id=space_id):
             raise KeyError(f"calendar event {updated.id!r} not found in this space")
         await self._publish_federation_event_saved(
@@ -2369,3 +2522,159 @@ def _parse_iso(value: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"invalid datetime: {value!r}") from exc
+
+
+def _mint_event_id(space_id: str, created_by: str) -> str:
+    return mint_owner_bound_id(
+        SPACE_CALENDAR_EVENT_KIND, space_id=space_id, owner_user_id=created_by
+    )
+
+
+def _event_dict(event: CalendarEvent) -> dict[str, Any]:
+    """A space event's reviewable fields in their API form."""
+    return {
+        "summary": event.summary,
+        "description": event.description,
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "all_day": bool(event.all_day),
+        "attendees": list(event.attendees),
+        "rrule": event.rrule,
+        "capacity": event.capacity,
+        "cover_url": event.cover_url,
+        "location": event.location,
+        "tz": event.tz,
+        "created_by": event.created_by,
+    }
+
+
+_EVENT_CREATE_FIELDS = (
+    "summary",
+    "start",
+    "end",
+    "description",
+    "all_day",
+    "attendees",
+    "rrule",
+    "capacity",
+    "cover_url",
+    "location",
+    "tz",
+    "announce_in_feed",
+)
+
+_EVENT_PATCH_FIELDS = frozenset(
+    {
+        "summary",
+        "start",
+        "end",
+        "all_day",
+        "description",
+        "attendees",
+        "rrule",
+        "capacity",
+        "clear_capacity",
+        "cover_url",
+        "location",
+        "tz",
+    }
+)
+
+
+class CalendarModerationHandler:
+    """Queue items of a space calendar (``calendar`` create / edit /
+    delete). Applies through :class:`SpaceCalendarService` gated as the
+    approver; an edit re-applies only the fields that were sent."""
+
+    __slots__ = ("_svc",)
+
+    def __init__(self, service: SpaceCalendarService) -> None:
+        self._svc = service
+
+    def validate(self, space: Space, payload: dict) -> dict:
+        if payload.get("entity") != "event" or not isinstance(
+            payload.get("target_id"), str
+        ):
+            raise ValueError("not a calendar submission")
+        out: dict[str, Any] = {"entity": "event", "target_id": payload["target_id"]}
+        if "patch" in payload:
+            raw = payload["patch"]
+            if not isinstance(raw, dict) or not raw or set(raw) - _EVENT_PATCH_FIELDS:
+                raise ValueError("invalid event edit")
+            out["patch"] = dict(raw)
+            proposed = payload.get("proposed")
+            out["proposed"] = dict(proposed) if isinstance(proposed, dict) else {}
+        elif "summary" in payload:
+            out.update({k: payload.get(k) for k in _EVENT_CREATE_FIELDS})
+        return out
+
+    async def snapshot(self, space_id: str, target_id: str) -> dict | None:
+        try:
+            event = await self._svc.get_event_in_space(target_id, space_id=space_id)
+        except KeyError:
+            return None
+        return _event_dict(event)
+
+    async def apply(
+        self, item: SpaceModerationItem, *, approved_by: str, force: bool
+    ) -> ApplyResult:
+        p = item.payload
+        target = str(p["target_id"])
+        live = await self.snapshot(item.space_id, target)
+        match item.action:
+            case ContentAction.CREATE.value:
+                if live is None:
+                    await self._svc.create_event(
+                        space_id=item.space_id,
+                        summary=p["summary"],
+                        start=p["start"],
+                        end=p["end"],
+                        created_by=item.submitted_by,
+                        description=p.get("description"),
+                        all_day=bool(p.get("all_day")),
+                        attendees=tuple(p.get("attendees") or ()),
+                        rrule=p.get("rrule"),
+                        capacity=p.get("capacity"),
+                        cover_url=p.get("cover_url"),
+                        location=p.get("location"),
+                        tz=p.get("tz"),
+                        announce_in_feed=bool(p.get("announce_in_feed")),
+                        event_id=target,
+                        approved_by=approved_by,
+                    )
+            case ContentAction.EDIT.value:
+                if live is None:
+                    raise ModerationTargetGoneError(target)
+                patch = dict(p["patch"])
+                extra: dict[str, Any] = {}
+                if "cover_url" in patch:
+                    extra["cover_url"] = patch.pop("cover_url")
+                if "location" in patch:
+                    extra["location"] = patch.pop("location")
+                if "attendees" in patch:
+                    patch["attendees"] = tuple(patch["attendees"])
+                await self._svc.update_event(
+                    target,
+                    space_id=item.space_id,
+                    actor_user_id=item.submitted_by,
+                    approved_by=approved_by,
+                    **patch,
+                    **extra,
+                )
+            case ContentAction.DELETE.value:
+                if live is not None:
+                    await self._svc.delete_event(
+                        target,
+                        space_id=item.space_id,
+                        actor_user_id=item.submitted_by,
+                        approved_by=approved_by,
+                    )
+        return ApplyResult(target_id=target)
+
+    def preview(self, item: SpaceModerationItem) -> dict:
+        p = item.payload
+        if item.action == ContentAction.EDIT.value:
+            return dict(p.get("proposed") or p.get("patch") or {})
+        if item.action == ContentAction.DELETE.value:
+            return item_payload_snapshot(item) or {}
+        return {k: p.get(k) for k in _EVENT_CREATE_FIELDS}

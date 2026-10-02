@@ -177,3 +177,39 @@ async def test_export_includes_timetables_created_by_user(env):
         )
     out = await svc.export_for_user("alice-id")
     assert [t["id"] for t in out.tables["timetables"]] == ["tt1"]
+
+
+# ─── Space moderation queue (§4.3) ─────────────────────────────────────
+
+
+async def test_export_includes_own_moderation_submissions_only(env):
+    """The subject's own queued items (any status) are theirs to export;
+    another member's submissions in the same space are not."""
+    db, svc = env
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp', 'S', 'i', 'alice', 'aa')"
+    )
+    for item_id, who, status in (
+        ("m1", "alice-id", "pending"),
+        ("m2", "alice-id", "rejected"),
+        ("m3", "bob-id", "pending"),
+    ):
+        await db.enqueue(
+            "INSERT INTO space_moderation_queue(id, space_id, feature, action,"
+            " submitted_by, payload_json, current_snapshot, reviewed_by,"
+            " expires_at, status)"
+            " VALUES(?, 'sp', 'posts', 'create', ?, ?, '{\"content\": \"theirs\"}',"
+            " 'uid-mod', '2099-01-01', ?)",
+            (item_id, who, '{"content": "' + item_id + '"}', status),
+        )
+    out = await svc.export_for_user("alice-id")
+    rows = out.tables["space_moderation_queue"]
+    assert sorted(r["id"] for r in rows) == ["m1", "m2"]
+    assert {r["status"] for r in rows} == {"pending", "rejected"}
+    # Their own words stay; somebody else's (the edited item's snapshot)
+    # and the moderator's id do not.
+    assert all("payload_json" in r for r in rows)
+    assert all("current_snapshot" not in r and "reviewed_by" not in r for r in rows)
+    bob = await svc.export_for_user("bob-id")
+    assert [r["id"] for r in bob.tables["space_moderation_queue"]] == ["m3"]

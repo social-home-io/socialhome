@@ -38,6 +38,7 @@ for a listing already settled) is DEBUG — see :func:`log_not_applied`.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -92,7 +93,7 @@ from ...domain.post import (
 )
 from ...domain.space import ContentAction, SpaceZone
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
-from ...domain.task import TaskList, task_from_wire_dict, task_list_from_wire_dict
+from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
     Timetable,
     TimetableValidationError,
@@ -403,9 +404,27 @@ class SpaceContentInboundHandlers:
             row_id=task.id,
             claimed_author=task.created_by if existing is None else "",
             feature="tasks",
-            action=ContentAction.CREATE if existing is None else ContentAction.EDIT,
-            # The held row's creator for an edit — never the payload's.
-            row_owner=task.created_by if existing is None else existing.created_by,
+            action=(
+                ContentAction.CREATE
+                if existing is None
+                # A move within its column (only the position changed) is
+                # LAYOUT, as on the local path — never held for review.
+                else ContentAction.LAYOUT
+                if replace(
+                    task, position=existing.position, updated_at=existing.updated_at
+                )
+                == existing
+                else ContentAction.EDIT
+            ),
+            # The held row's creator for an edit — never the payload's. As
+            # locally, a task's assignee owns its status (and position): a
+            # change of only those, named by an assignee of the HELD row, is
+            # judged as their own row's edit.
+            row_owner=(
+                task.created_by
+                if existing is None
+                else _assignee_owner(existing, task, payload_actor(event))
+            ),
         ):
             return
         if not await self._task_repo.save(task, space_id=space_id):
@@ -824,7 +843,14 @@ class SpaceContentInboundHandlers:
             row_id=sticky_id,
             claimed_author=author if existing is None else "",
             feature="stickies",
-            action=ContentAction.CREATE if existing is None else ContentAction.EDIT,
+            action=(
+                ContentAction.CREATE
+                if existing is None
+                # Same words and colour: a drag across the board (LAYOUT).
+                else ContentAction.LAYOUT
+                if fields.content == existing.content and fields.color == existing.color
+                else ContentAction.EDIT
+            ),
             row_owner=author,
         ):
             return
@@ -2683,3 +2709,23 @@ def _album_text_ok(name: str, description: object) -> bool:
     if description is None:
         return True
     return isinstance(description, str) and len(description) <= DESCRIPTION_MAX
+
+
+def _assignee_owner(existing: Task, incoming: Task, actor: str | None) -> str:
+    """The owner an inbound task edit is judged against: the held row's
+    creator — or the named actor, when they are one of the HELD row's
+    assignees and the edit changes nothing but status / position (the
+    local rule, ``SpaceTaskService.update_task``)."""
+    if (
+        actor
+        and actor in (existing.assignees or ())
+        and replace(
+            incoming,
+            status=existing.status,
+            position=existing.position,
+            updated_at=existing.updated_at,
+        )
+        == existing
+    ):
+        return actor
+    return existing.created_by

@@ -81,8 +81,6 @@ GATED_METHODS: frozenset[str] = frozenset(
         "deny_join_request",
         "list_pending_join_requests",
         "create_post",
-        "approve_moderation_item",
-        "reject_moderation_item",
         "edit_post",
         "delete_post",
         "add_reaction",
@@ -119,7 +117,11 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_comments",  # route layer applies the membership gate
         "mention_tokens",  # read-only; members route applies the gate
         "list_links",
-        "list_pending_moderation",
+        "get_space_post",  # plain row read scoped to the path space
+        # Called only by the moderation queue (SpaceModerationService.approve)
+        # after ITS content-authority check; the posts level is re-checked
+        # for the approver inside.
+        "publish_approved_post",
         "list_subscriptions",
         "list_pending_join_request_space_ids",  # caller's own pending requests
         "is_subscribed",

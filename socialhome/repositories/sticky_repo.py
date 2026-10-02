@@ -26,6 +26,14 @@ DEFAULT_COLOR = DEFAULT_STICKY_COLOR
 __all__ = ["DEFAULT_COLOR", "AbstractStickyRepo", "SqliteStickyRepo", "Sticky"]
 
 
+def mint_sticky_id(*, space_id: str, author: str) -> str:
+    """A space sticky's owner-bound id (v_36): only the author's household
+    can announce it."""
+    return mint_owner_bound_id(
+        SPACE_STICKY_KIND, space_id=space_id, owner_user_id=author
+    )
+
+
 @runtime_checkable
 class AbstractStickyRepo(Protocol):
     async def add(
@@ -37,6 +45,7 @@ class AbstractStickyRepo(Protocol):
         position_x: float = 0.0,
         position_y: float = 0.0,
         space_id: str | None = None,
+        sticky_id: str | None = None,
     ) -> Sticky: ...
     async def get(self, sticky_id: str) -> Sticky | None: ...
     async def get_scoped(
@@ -91,7 +100,11 @@ class SqliteStickyRepo:
         position_x: float = 0.0,
         position_y: float = 0.0,
         space_id: str | None = None,
+        sticky_id: str | None = None,
     ) -> Sticky:
+        """Insert a note. ``sticky_id`` is the id a moderation-queue item
+        minted at submit time (owner-bound to the same author); otherwise
+        one is minted here."""
         content = content.strip()
         if not content:
             raise ValueError("sticky content must not be empty")
@@ -99,12 +112,11 @@ class SqliteStickyRepo:
         sticky = Sticky(
             # A space sticky federates, so its id is owner-bound (v_36):
             # only the author's household can announce it.
-            id=(
+            id=sticky_id
+            or (
                 uuid.uuid4().hex
                 if space_id is None
-                else mint_owner_bound_id(
-                    SPACE_STICKY_KIND, space_id=space_id, owner_user_id=author
-                )
+                else mint_sticky_id(space_id=space_id, author=author)
             ),
             author=author,
             content=content,

@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from socialhome.domain.space import (
     AccessAdminOnlyError,
     AccessDecision,
     ContentAction,
+    ContentQueuedForReview,
     JoinMode,
     Space,
     SpaceFeatureAccess,
     SpaceFeatures,
     SpaceMember,
+    SpaceModerationItem,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
@@ -128,14 +132,96 @@ async def test_moderated_posts_queue_for_a_member_create():
 
 
 @pytest.mark.parametrize("feature", ["pages", "tasks", "stickies", "calendar"])
-async def test_moderated_non_post_features_behave_as_open_for_now(feature):
-    """PR3 adds the queue for these; until then QUEUE maps to PROCEED."""
+async def test_moderated_non_post_features_queue_like_posts(feature):
+    """Every MODERATED feature answers QUEUE for a member's create and edit /
+    delete of somebody else's item; own edits and LAYOUT proceed."""
     spaces = _Spaces(_space(**{feature: SpaceFeatureAccess.MODERATED}), _ROLES)
     svc = _Consumer(spaces)
-    for action in ContentAction:
-        for owns in (True, False):
-            got = await svc._gate("sp-1", "u-member", feature, action, owns)
-            assert got is AccessDecision.PROCEED
+    assert (
+        await svc._gate("sp-1", "u-member", feature, ContentAction.CREATE, True)
+        is AccessDecision.QUEUE
+    )
+    assert (
+        await svc._gate("sp-1", "u-member", feature, ContentAction.EDIT, False)
+        is AccessDecision.QUEUE
+    )
+    assert (
+        await svc._gate("sp-1", "u-member", feature, ContentAction.EDIT, True)
+        is AccessDecision.PROCEED
+    )
+    assert (
+        await svc._gate("sp-1", "u-member", feature, ContentAction.LAYOUT, False)
+        is AccessDecision.PROCEED
+    )
+    assert (
+        await svc._gate("sp-1", "u-mod", feature, ContentAction.DELETE, False)
+        is AccessDecision.PROCEED
+    )
+
+
+class _RecordingSubmitter:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def submit(self, space, **kw):
+        self.calls.append(kw)
+        return SpaceModerationItem(
+            id="item-1",
+            space_id=space.id,
+            feature=kw["feature"],
+            action=kw["action"].value,
+            submitted_by=kw["submitted_by"],
+            payload=kw["payload"],
+            current_snapshot=None,
+            submitted_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc),
+        )
+
+    async def require_moderation_supported(self, space, features) -> None:
+        return None
+
+
+class _QueueConsumer(ContentAccessMixin):
+    __slots__ = ("_spaces", "_moderation")
+
+    def __init__(self, spaces: _Spaces) -> None:
+        self._spaces = spaces
+        self._moderation = None
+
+
+async def test_submit_for_review_raises_queued_with_the_item():
+    spaces = _Spaces(_space(pages=SpaceFeatureAccess.MODERATED), _ROLES)
+    svc = _QueueConsumer(spaces)
+    sub = _RecordingSubmitter()
+    svc.attach_moderation(sub)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc._submit_for_review(
+            "sp-1",
+            "u-member",
+            "pages",
+            ContentAction.CREATE,
+            payload={"entity": "page"},
+        )
+    assert exc.value.item.id == "item-1"
+    assert sub.calls[0]["submitted_by"] == "u-member"
+
+
+async def test_submit_for_review_fails_closed_without_a_queue():
+    spaces = _Spaces(_space(pages=SpaceFeatureAccess.MODERATED), _ROLES)
+    with pytest.raises(SpacePermissionError):
+        await _QueueConsumer(spaces)._submit_for_review(
+            "sp-1", "u-member", "pages", ContentAction.CREATE, payload={}
+        )
+
+
+async def test_submit_for_review_unknown_space_is_404():
+    spaces = _Spaces(_space(pages=SpaceFeatureAccess.MODERATED), _ROLES)
+    svc = _QueueConsumer(spaces)
+    svc.attach_moderation(_RecordingSubmitter())
+    with pytest.raises(KeyError):
+        await svc._submit_for_review(
+            "nope", "u-member", "pages", ContentAction.CREATE, payload={}
+        )
 
 
 async def test_moderated_refuses_a_non_member_plainly():
