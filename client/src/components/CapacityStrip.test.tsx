@@ -12,6 +12,19 @@ describe('CapacityStrip', () => {
     expect(container.textContent).toContain('Be the first to RSVP')
   })
 
+  it('renders nothing for an empty strip when hideEmpty is set', () => {
+    const { container } = render(<CapacityStrip counts={undefined} hideEmpty />)
+    expect(container.textContent).toBe('')
+    expect(container.querySelector('.sh-capacity-strip')).toBeNull()
+  })
+
+  it('still renders real counts when hideEmpty is set', () => {
+    const { container } = render(
+      <CapacityStrip counts={{ going: 3, maybe: 0, declined: 0 }} hideEmpty />,
+    )
+    expect(container.textContent).toContain('3 going')
+  })
+
   it('renders the going segment even when count is zero', () => {
     const { container } = render(
       <CapacityStrip counts={{ going: 0, maybe: 0, declined: 0 }} />,

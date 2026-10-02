@@ -595,6 +595,11 @@ export interface CalendarEvent {
    *  (the edit dialog's full sync) must read this, never the
    *  ``_grouped_*`` render artifacts below. */
   copies?: { event_id: string; calendar_id: string; owner_username: string }[]
+  /** Space events read via ``GET /api/calendars/events/{id}`` only:
+   *  whether the caller may RSVP (``false`` for a read-only subscriber
+   *  or an archived space). A UI hint — the RSVP route enforces it.
+   *  Absent elsewhere; treat absent as "may RSVP". */
+  can_rsvp?: boolean
   /** SPA-only group key, set by :func:`groupSharedEvents`. The composer
    *  fans out a multi-attendee event as one ``POST`` per picked
    *  calendar, which lands as N rows in the DB with the same

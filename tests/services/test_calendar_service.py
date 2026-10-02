@@ -1326,7 +1326,9 @@ async def test_capacity_raise_promotes_waitlist(space_cal_env):
         r.user_id == "uid-bob" and r.status == RSVPStatus.WAITLIST for r in rsvps
     )
     # Raise capacity — bob should promote.
-    await env.space_cal_svc.update_event(event.id, capacity=2)
+    await env.space_cal_svc.update_event(
+        event.id, space_id=event.calendar_id, capacity=2
+    )
     rsvps2 = await env.space_cal_svc.list_rsvps(event.id)
     bob = [r for r in rsvps2 if r.user_id == "uid-bob"][0]
     assert bob.status == RSVPStatus.GOING
@@ -1567,7 +1569,9 @@ async def test_update_event_clears_location_on_explicit_none(space_cal_env):
         location="Hotel bar",
     )
     assert event.location == "Hotel bar"
-    updated = await env.space_cal_svc.update_event(event.id, location=None)
+    updated = await env.space_cal_svc.update_event(
+        event.id, space_id=event.calendar_id, location=None
+    )
     assert updated.location is None
 
 
@@ -1592,7 +1596,9 @@ async def test_update_event_publishes_federation_event(space_cal_env):
         end=now.isoformat(),
         created_by="uid-alice",
     )
-    await env.space_cal_svc.update_event(event.id, summary="New summary")
+    await env.space_cal_svc.update_event(
+        event.id, space_id=event.calendar_id, summary="New summary"
+    )
     updated_calls = [
         c for c in fed.calls if c[1].value == "space_calendar_event_updated"
     ]
@@ -1621,7 +1627,7 @@ async def test_delete_event_publishes_federation_event(space_cal_env):
         end=now.isoformat(),
         created_by="uid-alice",
     )
-    await env.space_cal_svc.delete_event(event.id)
+    await env.space_cal_svc.delete_event(event.id, space_id=event.calendar_id)
     deleted_calls = [
         c for c in fed.calls if c[1].value == "space_calendar_event_deleted"
     ]

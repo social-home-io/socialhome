@@ -61,6 +61,7 @@ class AbstractPageRepo(Protocol):
     async def save(self, page: Page, *, space_id: str | None) -> bool: ...
     async def get(self, page_id: str) -> Page | None: ...
     async def get_space_page(self, page_id: str, *, space_id: str) -> Page | None: ...
+    async def get_household_page(self, page_id: str) -> Page | None: ...
     async def list(
         self,
         *,
@@ -98,7 +99,9 @@ class AbstractPageRepo(Protocol):
     async def clear_delete_request(self, page_id: str) -> None: ...
 
     async def save_version(self, version: PageVersion) -> PageVersion: ...
-    async def list_versions(self, page_id: str) -> builtins.list[PageVersion]: ...
+    async def list_versions(
+        self, page_id: str, *, space_id: str | None
+    ) -> builtins.list[PageVersion]: ...
     async def next_version_number(self, page_id: str) -> int: ...
 
     # Snapshot bookkeeping for §4.4.4.1 conflict resolution.
@@ -257,6 +260,19 @@ class SqlitePageRepo:
         )
         return _row_to_page(row_to_dict(row))
 
+    async def get_household_page(self, page_id: str) -> Page | None:
+        """The household page ``page_id`` — never a space page.
+
+        The household ``/api/pages/{id}`` routes use this so a space
+        page id (from any space, member or not) is simply not found
+        there (§24.11).
+        """
+        row = await self._db.fetchone(
+            "SELECT *, NULL AS space_id FROM pages WHERE id=?",
+            (page_id,),
+        )
+        return _row_to_page(row_to_dict(row))
+
     async def list(
         self,
         *,
@@ -337,6 +353,12 @@ class SqlitePageRepo:
         return n > 0
 
     # ── Locks ──────────────────────────────────────────────────────────
+    #
+    # Edit locks and the two-step delete are a HOUSEHOLD-page surface:
+    # their only callers are the ``/api/pages/{id}/…`` routes, which must
+    # never reach a space page (§24.11). These methods therefore touch
+    # the ``pages`` table only; a space page id is "not found" here.
+    # (``release_expired_locks`` still sweeps both tables.)
 
     async def acquire_lock(
         self,
@@ -355,33 +377,26 @@ class SqlitePageRepo:
         expires = (datetime.now(timezone.utc) + ttl).isoformat()
 
         def _run(conn):
-            held_by = None
-            for table in ("pages", "space_pages"):
-                row = conn.execute(
-                    f"SELECT locked_by, lock_expires_at FROM {table} WHERE id=?",
-                    (page_id,),
-                ).fetchone()
-                if row is None:
-                    continue
-                current_holder = row[0]
-                expiry = row[1]
-                # Another editor holds a still-valid lock → can't take it.
-                if (
-                    current_holder is not None
-                    and current_holder != editor
-                    and (expiry is None or expiry > now_iso)
-                ):
-                    held_by = current_holder
-                    break
-                conn.execute(
-                    f"UPDATE {table} SET locked_by=?, locked_at=?, "
-                    f"lock_expires_at=? WHERE id=?",
-                    (editor, now_iso, expires, page_id),
-                )
-                return
-            if held_by is not None:
-                raise PageLockError(f"page {page_id!r} is locked by {held_by!r}")
-            raise PageNotFoundError(page_id)
+            row = conn.execute(
+                "SELECT locked_by, lock_expires_at FROM pages WHERE id=?",
+                (page_id,),
+            ).fetchone()
+            if row is None:
+                raise PageNotFoundError(page_id)
+            current_holder = row[0]
+            expiry = row[1]
+            # Another editor holds a still-valid lock → can't take it.
+            if (
+                current_holder is not None
+                and current_holder != editor
+                and (expiry is None or expiry > now_iso)
+            ):
+                raise PageLockError(f"page {page_id!r} is locked by {current_holder!r}")
+            conn.execute(
+                "UPDATE pages SET locked_by=?, locked_at=?, "
+                "lock_expires_at=? WHERE id=?",
+                (editor, now_iso, expires, page_id),
+            )
 
         await self._db.transact(_run)
 
@@ -401,28 +416,21 @@ class SqlitePageRepo:
         expires = (datetime.now(timezone.utc) + ttl).isoformat()
 
         def _run(conn):
-            held_by = _UNSET = object()
-            current_holder = None
-            for table in ("pages", "space_pages"):
-                row = conn.execute(
-                    f"SELECT locked_by FROM {table} WHERE id=?",
-                    (page_id,),
-                ).fetchone()
-                if row is None:
-                    continue
-                current_holder = row[0]
-                held_by = current_holder
-                if current_holder is not None and current_holder != editor:
-                    return ("held", current_holder)
-                conn.execute(
-                    f"UPDATE {table} SET locked_by=?, "
-                    f"locked_at=COALESCE(locked_at, datetime('now')), "
-                    f"lock_expires_at=? WHERE id=?",
-                    (editor, expires, page_id),
-                )
-                return ("ok", None)
-            if held_by is _UNSET:
+            row = conn.execute(
+                "SELECT locked_by FROM pages WHERE id=?",
+                (page_id,),
+            ).fetchone()
+            if row is None:
                 return ("missing", None)
+            current_holder = row[0]
+            if current_holder is not None and current_holder != editor:
+                return ("held", current_holder)
+            conn.execute(
+                "UPDATE pages SET locked_by=?, "
+                "locked_at=COALESCE(locked_at, datetime('now')), "
+                "lock_expires_at=? WHERE id=?",
+                (editor, expires, page_id),
+            )
             return ("ok", None)
 
         status, holder = await self._db.transact(_run)
@@ -439,32 +447,29 @@ class SqlitePageRepo:
         missing / the lock has already expired.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
-        for table in ("pages", "space_pages"):
-            row = await self._db.fetchone(
-                f"SELECT locked_by, locked_at, lock_expires_at FROM {table} WHERE id=?",
-                (page_id,),
-            )
-            if row is None:
-                continue
-            locked_by = row["locked_by"]
-            expires = row["lock_expires_at"]
-            if not locked_by or (expires is not None and expires < now_iso):
-                return None
-            return {
-                "locked_by": locked_by,
-                "locked_at": row["locked_at"],
-                "lock_expires_at": expires,
-            }
-        return None
+        row = await self._db.fetchone(
+            "SELECT locked_by, locked_at, lock_expires_at FROM pages WHERE id=?",
+            (page_id,),
+        )
+        if row is None:
+            return None
+        locked_by = row["locked_by"]
+        expires = row["lock_expires_at"]
+        if not locked_by or (expires is not None and expires < now_iso):
+            return None
+        return {
+            "locked_by": locked_by,
+            "locked_at": row["locked_at"],
+            "lock_expires_at": expires,
+        }
 
     async def release_lock(self, page_id: str, editor: str) -> None:
         """Drop a lock. Must match the owning editor to avoid cross-wipes."""
-        for table in ("pages", "space_pages"):
-            await self._db.enqueue(
-                f"UPDATE {table} SET locked_by=NULL, locked_at=NULL, "
-                f"lock_expires_at=NULL WHERE id=? AND locked_by=?",
-                (page_id, editor),
-            )
+        await self._db.enqueue(
+            "UPDATE pages SET locked_by=NULL, locked_at=NULL, "
+            "lock_expires_at=NULL WHERE id=? AND locked_by=?",
+            (page_id, editor),
+        )
 
     async def release_expired_locks(self) -> int:
         """Free any lock whose ``lock_expires_at`` is in the past.
@@ -492,12 +497,11 @@ class SqlitePageRepo:
     # ── Two-step delete ────────────────────────────────────────────────
 
     async def request_delete(self, page_id: str, user_id: str) -> None:
-        for table in ("pages", "space_pages"):
-            await self._db.enqueue(
-                f"UPDATE {table} SET delete_requested_by=?, "
-                f"delete_requested_at=datetime('now') WHERE id=?",
-                (user_id, page_id),
-            )
+        await self._db.enqueue(
+            "UPDATE pages SET delete_requested_by=?, "
+            "delete_requested_at=datetime('now') WHERE id=?",
+            (user_id, page_id),
+        )
 
     async def approve_delete(self, page_id: str, approver: str) -> None:
         """Record approval; the actual row delete is a second step.
@@ -506,22 +510,20 @@ class SqlitePageRepo:
         ``delete_requested_by`` and ``delete_approved_by`` are set, they
         issue :meth:`delete`.
         """
-        for table in ("pages", "space_pages"):
-            await self._db.enqueue(
-                f"UPDATE {table} SET delete_approved_by=?, "
-                f"delete_approved_at=datetime('now') WHERE id=?",
-                (approver, page_id),
-            )
+        await self._db.enqueue(
+            "UPDATE pages SET delete_approved_by=?, "
+            "delete_approved_at=datetime('now') WHERE id=?",
+            (approver, page_id),
+        )
 
     async def clear_delete_request(self, page_id: str) -> None:
-        for table in ("pages", "space_pages"):
-            await self._db.enqueue(
-                f"UPDATE {table} SET "
-                f"delete_requested_by=NULL, delete_requested_at=NULL, "
-                f"delete_approved_by=NULL,  delete_approved_at=NULL "
-                f"WHERE id=?",
-                (page_id,),
-            )
+        await self._db.enqueue(
+            "UPDATE pages SET "
+            "delete_requested_by=NULL, delete_requested_at=NULL, "
+            "delete_approved_by=NULL,  delete_approved_at=NULL "
+            "WHERE id=?",
+            (page_id,),
+        )
 
     # ── Versions ───────────────────────────────────────────────────────
 
@@ -566,10 +568,20 @@ class SqlitePageRepo:
         )
         return version
 
-    async def list_versions(self, page_id: str) -> builtins.list[PageVersion]:
+    async def list_versions(
+        self, page_id: str, *, space_id: str | None
+    ) -> builtins.list[PageVersion]:
+        """Edit history of ``page_id`` in one scope (§24.11).
+
+        ``space_id=None`` is the household page's history; a space id
+        only that space's snapshots — a history row recorded under any
+        other scope (another space, or the household, sharing the page
+        id) is never returned. ``IS`` matches NULL to NULL.
+        """
         rows = await self._db.fetchall(
-            "SELECT * FROM page_edit_history WHERE page_id=? ORDER BY version",
-            (page_id,),
+            "SELECT * FROM page_edit_history WHERE page_id=? AND space_id IS ?"
+            " ORDER BY version",
+            (page_id, space_id),
         )
         return [_row_to_version(d) for d in rows_to_dicts(rows)]
 

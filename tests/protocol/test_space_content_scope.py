@@ -80,6 +80,7 @@ CONTENT_TABLES = (
     "space_pages",
     "pages",
     "stickies",
+    "calendar_events",
     "space_calendar_events",
     "space_calendar_rsvps",
     "pending_federated_rsvps",
@@ -194,8 +195,17 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
         ("delete B's list (and its tasks)", {"id": "list-b"}),
     ],
     # ── Pages ──
-    FET.SPACE_PAGE_CREATED: [("re-create B's page", {"id": "page-b", "title": "x"})],
-    FET.SPACE_PAGE_UPDATED: [("rewrite B's page", {"id": "page-b", "title": "x"})],
+    FET.SPACE_PAGE_CREATED: [
+        ("re-create B's page", {"id": "page-b", "title": "x"}),
+        (
+            "re-create the household's personal page",
+            {"id": "page-home", "title": "x", "created_by": "u-evil"},
+        ),
+    ],
+    FET.SPACE_PAGE_UPDATED: [
+        ("rewrite B's page", {"id": "page-b", "title": "x"}),
+        ("rewrite the household's personal page", {"id": "page-home", "title": "x"}),
+    ],
     FET.SPACE_PAGE_DELETED: [
         ("delete B's page", {"id": "page-b"}),
         ("delete the household's personal page", {"id": "page-home"}),
@@ -244,7 +254,10 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
             },
         ),
     ],
-    FET.SPACE_CALENDAR_EVENT_DELETED: [("delete B's event", {"id": "ev-b"})],
+    FET.SPACE_CALENDAR_EVENT_DELETED: [
+        ("delete B's event", {"id": "ev-b"}),
+        ("delete a household member's personal event", {"id": "ev-home"}),
+    ],
     FET.SPACE_RSVP_UPDATED: [
         (
             "RSVP to B's event",
@@ -569,6 +582,16 @@ _SEED = [
         "INSERT INTO stickies(id, space_id, author, content)"
         " VALUES('sticky-home', NULL, ?, 'Household sticky')",
         (LOCAL_USER,),
+    ),
+    (
+        "INSERT INTO calendars(id, name, owner_username)"
+        " VALUES('cal-home', 'Home', 'local')",
+        (),
+    ),
+    (
+        "INSERT INTO calendar_events(id, calendar_id, summary, start_dt, end_dt,"
+        " created_by) VALUES('ev-home', 'cal-home', 'Dentist', ?, ?, ?)",
+        (_OCC, "2026-06-10T19:00:00+00:00", LOCAL_USER),
     ),
     (
         "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"

@@ -30,6 +30,7 @@ from ..domain.calendar import (
     RSVPStatus,
 )
 from ..domain.child_protection import ProtectedCapability
+from ..domain.space import Space, SpacePermissionError
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -43,10 +44,12 @@ from ..federation.owner_bound_id import SPACE_CALENDAR_EVENT_KIND, mint_owner_bo
 from ..infrastructure.event_bus import EventBus
 from ..media_signer import strip_signature_query
 from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCalendarRepo
+from ..repositories.space_repo import AbstractSpaceRepo
 from ..utils.rrule import expand_rrule
 from ..utils.timezones import is_valid_tz
 from .bus_publisher import BusPublisherMixin
 from .protection_gate import ProtectionGateMixin
+from .space_service import SpaceService
 
 if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -1165,7 +1168,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         self._federation = None
         # Optional helpers used solely for the tz resolution chain at
         # event create time. Tests that don't touch tz can skip both.
-        self._space_repo = None
+        self._space_repo: AbstractSpaceRepo | None = None
         self._household = None
         self._child_protection = None
 
@@ -1216,7 +1219,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         request nor the space row carries one."""
         self._household = svc
 
-    def attach_space_repo(self, space_repo) -> None:
+    def attach_space_repo(self, space_repo: AbstractSpaceRepo) -> None:
         """Wire the space repo so event creation can read ``space.tz``
         as the natural fallback before the household tz."""
         self._space_repo = space_repo
@@ -1422,44 +1425,116 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         )
         return saved
 
-    async def delete_event(self, event_id: str) -> None:
+    # ── Writer gate + scope guard ────────────────────────────────────────
+
+    def _spaces_or_raise(self) -> AbstractSpaceRepo:
+        # Fail closed: a write gate without the space repo can't decide.
+        if self._space_repo is None:
+            raise RuntimeError("SpaceCalendarService: space repo not attached")
+        return self._space_repo
+
+    async def require_writable_space(self, space_id: str) -> Space:
+        """The space, unless it is unknown / dissolved (:class:`KeyError`)
+        or archived (read-only → :class:`SpacePermissionError`).
+
+        The space half of :meth:`require_writer`; used alone for the
+        legacy remote-invite RSVP path that has no local member row.
+        """
+        space = await self._spaces_or_raise().get(space_id)
+        if space is None or space.dissolved:
+            raise KeyError(f"space {space_id!r} not found")
+        if space.archived:
+            raise SpacePermissionError(
+                "space is archived (read-only) — unarchive it to make changes",
+            )
+        return space
+
+    async def require_writer(
+        self, space_id: str, user_id: str, *, action: str = "edit the calendar"
+    ) -> None:
+        """Raise unless ``user_id`` may write this space's calendar.
+
+        ``action`` names the write in the subscriber refusal message
+        (e.g. ``"RSVP to events"``).
+
+        * unknown / dissolved space → :class:`KeyError` (404);
+        * archived space (read-only) → :class:`SpacePermissionError`;
+        * not a member, or a read-only subscriber →
+          :class:`SpacePermissionError` (403), via the uniform
+          :meth:`SpaceService.assert_writable_member` rule.
+
+        Covers event create / edit / delete, RSVPs and host approvals —
+        every write that lands in ``space_calendar_*`` and federates.
+        Fails closed when the space repo was never attached.
+        """
+        space = await self.require_writable_space(space_id)
+        member = await self._spaces_or_raise().get_member(space_id, user_id)
+        if member is None:
+            raise SpacePermissionError("not a member of this space")
+        SpaceService.assert_writable_member(member, action=action, space=space)
+
+    async def can_write(self, space_id: str, user_id: str) -> bool:
+        """Whether :meth:`require_writer` would let ``user_id`` write —
+        a UI hint (e.g. hide RSVP controls for subscribers / archived
+        spaces), never the authority: every write still calls
+        :meth:`require_writer`."""
+        try:
+            await self.require_writer(space_id, user_id)
+        except KeyError, SpacePermissionError:
+            return False
+        return True
+
+    async def get_event_in_space(
+        self, event_id: str, *, space_id: str
+    ) -> CalendarEvent:
+        """The event ``event_id`` of space ``space_id``.
+
+        An event id says nothing about its space, so every by-id
+        operation under ``/api/spaces/{id}/calendar`` takes the PATH
+        space and refuses a row living in another one (§24.11) —
+        :class:`KeyError` (→ 404), never 403, so the response doesn't
+        confirm the id exists elsewhere.
+        """
+        result = await self._repo.get_event(event_id)
+        if result is None or result[0] != space_id:
+            raise KeyError(f"space calendar event {event_id!r} not found in this space")
+        return result[1]
+
+    async def delete_event(self, event_id: str, *, space_id: str) -> None:
+        """Delete ``event_id`` from ``space_id`` — :class:`KeyError` when
+        the event isn't in that space."""
+        existing = await self.get_event_in_space(event_id, space_id=space_id)
         # Snapshot the event + the cohort of "still attending"-ish RSVPs
         # before deletion so the push handler can produce a meaningful
         # title and reach affected members. The RSVP rows themselves
         # CASCADE-delete with the event.
-        result = await self._repo.get_event(event_id)
-        snapshot_summary = result[1].summary if result is not None else None
-        snapshot_space = result[0] if result is not None else None
-        notify: tuple[str, ...] = ()
-        if result is not None:
-            rsvps = await self._repo.list_rsvps(event_id)
-            notify = tuple(
-                {
-                    r.user_id
-                    for r in rsvps
-                    if r.status
-                    in (
-                        RSVPStatus.GOING,
-                        RSVPStatus.WAITLIST,
-                        RSVPStatus.REQUESTED,
-                    )
-                }
-            )
-        if snapshot_space is not None:
-            await self._repo.delete_event(event_id, space_id=snapshot_space)
+        rsvps = await self._repo.list_rsvps(event_id)
+        notify = tuple(
+            {
+                r.user_id
+                for r in rsvps
+                if r.status
+                in (
+                    RSVPStatus.GOING,
+                    RSVPStatus.WAITLIST,
+                    RSVPStatus.REQUESTED,
+                )
+            }
+        )
+        if not await self._repo.delete_event(event_id, space_id=space_id):
+            raise KeyError(f"space calendar event {event_id!r} not found in this space")
         await self._emit(
             CalendarEventDeleted(
                 event_id=event_id,
-                summary=snapshot_summary,
-                space_id=snapshot_space,
+                summary=existing.summary,
+                space_id=space_id,
                 notify_user_ids=notify,
             )
         )
-        if snapshot_space is not None:
-            await self._publish_federation_event_deleted(
-                space_id=snapshot_space,
-                event_id=event_id,
-            )
+        await self._publish_federation_event_deleted(
+            space_id=space_id,
+            event_id=event_id,
+        )
 
     async def resolve_space_id(self, event_id: str) -> str | None:
         """Return the ``space_id`` that owns ``event_id`` or None.
@@ -1477,6 +1552,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         self,
         event_id: str,
         *,
+        space_id: str,
         summary: str | None = None,
         start: str | None = None,
         end: str | None = None,
@@ -1497,11 +1573,11 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         = no change, explicit ``None`` clears the field, a string sets it.
         ``tz`` is validated against the IANA database and only overwrites
         the existing event tz when explicitly passed.
+
+        ``space_id`` is the caller's (path) space: an event living in
+        another space is :class:`KeyError` (→ 404) and nothing changes.
         """
-        result = await self._repo.get_event(event_id)
-        if result is None:
-            raise KeyError(f"space calendar event {event_id!r} not found")
-        space_id, existing = result
+        existing = await self.get_event_in_space(event_id, space_id=space_id)
 
         new_summary = (summary if summary is not None else existing.summary).strip()
         if not new_summary:

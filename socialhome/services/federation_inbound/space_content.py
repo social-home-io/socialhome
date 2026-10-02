@@ -953,8 +953,13 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="calendar event", row_id=event_id
             )
             return
-        # Mirror to the feed bridge so the linked post soft-deletes.
-        await self._bus.publish(CalendarEventDeleted(event_id=event_id))
+        # Mirror to the feed bridge so the linked post soft-deletes. The
+        # space id scopes the ``calendar.deleted`` WS frame to the
+        # space's members (without it RealtimeService fans it out to
+        # the whole household).
+        await self._bus.publish(
+            CalendarEventDeleted(event_id=event_id, space_id=space_id)
+        )
 
     # ─── RSVPs (per-occurrence) ──────────────────────────────────────────
 

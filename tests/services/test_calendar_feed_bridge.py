@@ -113,7 +113,7 @@ async def test_event_update_rewrites_post_body(env):
         created_by="uid-alice",
         announce_in_feed=True,
     )
-    await env.cal_svc.update_event(event.id, summary="New title")
+    await env.cal_svc.update_event(event.id, space_id="sp-feed", summary="New title")
     feed = await env.post_repo.list_feed("sp-feed")
     assert len(feed) == 1
     assert feed[0].content == "New title"
@@ -132,7 +132,7 @@ async def test_event_update_no_body_change_is_noop(env):
         announce_in_feed=True,
     )
     pre = (await env.post_repo.list_feed("sp-feed"))[0]
-    await env.cal_svc.update_event(event.id, summary="Same title")
+    await env.cal_svc.update_event(event.id, space_id="sp-feed", summary="Same title")
     post = (await env.post_repo.list_feed("sp-feed"))[0]
     assert post.edited_at == pre.edited_at  # no edit happened
 
@@ -148,7 +148,7 @@ async def test_event_delete_soft_deletes_post(env):
         created_by="uid-alice",
         announce_in_feed=True,
     )
-    await env.cal_svc.delete_event(event.id)
+    await env.cal_svc.delete_event(event.id, space_id="sp-feed")
     # list_feed filters out deleted posts; the row still exists with deleted=1.
     got = await env.post_repo.get_by_linked_event_id(event.id)
     assert got is not None

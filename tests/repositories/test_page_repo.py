@@ -147,7 +147,7 @@ async def test_page_lock_and_versions(env):
         edited_at=datetime.now(timezone.utc).isoformat(),
     )
     await env.page_repo.save_version(v)
-    versions = await env.page_repo.list_versions(p.id)
+    versions = await env.page_repo.list_versions(p.id, space_id=None)
     assert len(versions) == 1
 
 
@@ -363,3 +363,52 @@ def test_a_space_page_id_commits_to_its_creator():
         is OwnerBinding.MISMATCH
     )
     assert not is_owner_bound(new_page(title="H", content="x", created_by="u1").id)
+
+
+# ─── Household-only surface: locks + two-step delete never reach a space page
+
+
+async def _seed_space_row(env, sid: str) -> None:
+    from socialhome.crypto import generate_identity_keypair as _gkp
+
+    await env.db.enqueue(
+        "INSERT OR IGNORE INTO users(username, user_id, display_name)"
+        " VALUES('pg_owner', 'uid-pg-owner', 'PageOwner')",
+    )
+    await env.db.enqueue(
+        """INSERT INTO spaces(
+            id, name, owner_instance_id, owner_username, identity_public_key,
+            config_sequence, space_type, join_mode
+        ) VALUES(?,?,?,?,?,0,'private','invite_only')""",
+        (sid, "S", env.iid, "pg_owner", _gkp().public_key.hex()),
+    )
+
+
+async def test_get_household_page_never_returns_a_space_page(env):
+    await _seed_space_row(env, "sp-h")
+    sp_page = new_page(title="S", content="x", created_by="u1", space_id="sp-h")
+    await env.page_repo.save(sp_page, space_id="sp-h")
+    hh = new_page(title="H", content="y", created_by="u1")
+    await env.page_repo.save(hh, space_id=None)
+    assert await env.page_repo.get_household_page(sp_page.id) is None
+    got = await env.page_repo.get_household_page(hh.id)
+    assert got is not None and got.space_id is None
+
+
+async def test_lock_and_delete_request_ignore_space_pages(env):
+    await _seed_space_row(env, "sp-h")
+    sp_page = new_page(title="S", content="x", created_by="u1", space_id="sp-h")
+    await env.page_repo.save(sp_page, space_id="sp-h")
+    with pytest.raises(PageNotFoundError):
+        await env.page_repo.acquire_lock(sp_page.id, "anna")
+    with pytest.raises(PageNotFoundError):
+        await env.page_repo.refresh_lock(sp_page.id, "anna")
+    assert await env.page_repo.get_lock(sp_page.id) is None
+    await env.page_repo.request_delete(sp_page.id, "anna")
+    await env.page_repo.approve_delete(sp_page.id, "bob")
+    row = await env.db.fetchone(
+        "SELECT locked_by, delete_requested_by, delete_approved_by"
+        " FROM space_pages WHERE id=?",
+        (sp_page.id,),
+    )
+    assert tuple(row) == (None, None, None)

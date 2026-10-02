@@ -25,6 +25,9 @@ export interface CapacityStripProps {
   /** Current user's RSVP status for this event/occurrence, if any.
    *  When set, the matching segment is rendered as a highlighted pill. */
   myStatus?: 'going' | 'maybe' | 'declined' | 'requested' | 'waitlist' | null
+  /** Render nothing (instead of the "Be the first to RSVP." nudge) when
+   *  there are no responses yet — for viewers who can't RSVP. */
+  hideEmpty?: boolean
 }
 
 const SEGMENT_ORDER: Array<keyof RsvpCounts> = [
@@ -39,8 +42,10 @@ export function CapacityStrip({
   counts,
   capacity,
   myStatus,
+  hideEmpty = false,
 }: CapacityStripProps) {
   if (!counts) {
+    if (hideEmpty) return null
     return (
       <div class="sh-capacity-strip sh-capacity-strip--empty">
         {t('event.capacity.no_rsvps')}
@@ -62,6 +67,7 @@ export function CapacityStrip({
     .filter((x): x is { key: keyof RsvpCounts; label: string; mine: boolean } => x !== null)
 
   if (segments.length === 0) {
+    if (hideEmpty) return null
     return (
       <div class="sh-capacity-strip sh-capacity-strip--empty">
         {t('event.capacity.no_rsvps')}

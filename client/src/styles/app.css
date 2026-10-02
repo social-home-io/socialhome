@@ -17303,6 +17303,15 @@ a.sh-link-preview-link:focus-visible {
 .sh-event-card-rsvp > .sh-post-overflow-wrap {
   margin-left: auto;
 }
+/* Stands in for the RSVP buttons when the viewer can't RSVP (read-only
+ * subscriber, archived space): says why, keeps the row's left side from
+ * reading as a missing control. Shrinks before the ICS link / kebab. */
+.sh-event-card-rsvp-note {
+  flex: 1 1 12em;
+  min-width: 0;
+  color: var(--sh-text-muted);
+  font-size: 0.9em;
+}
 /* "Add to my calendar" promoted out of the kebab — sits on the RSVP
  * row as a sibling action so non-creators can find the .ics export
  * without hunting in the overflow menu. The icon-prefixed link

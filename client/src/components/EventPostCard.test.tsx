@@ -318,4 +318,35 @@ describe('EventPostCard', () => {
       expect.objectContaining({ status: 'going' }),
     )
   })
+
+  it('hides the RSVP buttons for a subscriber (can_rsvp: false)', async () => {
+    apiMock.get.mockResolvedValueOnce({
+      ...futureEvent,
+      id: 'ev-subscriber',
+      can_rsvp: false,
+    })
+    const { container, findByText } = render(<EventPostCard eventId="ev-subscriber" />)
+    await findByText('Friday party')
+    expect(container.textContent).not.toContain('Going')
+    expect(container.textContent).not.toContain('Maybe')
+    expect(container.textContent).not.toContain("Can't make it")
+    // No "Be the first to RSVP." nudge; a read-only note says why instead.
+    expect(container.textContent).not.toContain('Be the first to RSVP')
+    expect(container.querySelector('.sh-event-card-rsvp-note')?.textContent)
+      .toContain('RSVPs are for members')
+    // Reading affordances stay: the ICS download is still offered.
+    expect(container.querySelector('a.sh-event-card-ics')).not.toBeNull()
+    expect(apiMock.post).not.toHaveBeenCalled()
+  })
+
+  it('shows the RSVP buttons when can_rsvp is true', async () => {
+    apiMock.get.mockResolvedValueOnce({
+      ...futureEvent,
+      id: 'ev-member',
+      can_rsvp: true,
+    })
+    const { container, findByText } = render(<EventPostCard eventId="ev-member" />)
+    await findByText('Going')
+    expect(container.querySelector('.sh-event-card-rsvp-note')).toBeNull()
+  })
 })

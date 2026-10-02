@@ -108,7 +108,7 @@ anything below contradicts the file, the file wins.
 | `space_calendar_rsvp_reminders` | Pre-event reminder fan-out — `fire_at` partial index on un-sent + future. Driven by `infrastructure/calendar_reminder_scheduler.py`. |
 | `space_calendar_feed_tokens` | Per-`(user, space)` revocable tokens for the iCal `.ics` feed. The `token_hash` column holds a SHA-256 hash of the raw token (matching `api_tokens`); a leaked DB never exposes a live feed URL. Separate from API tokens so revoking one doesn't affect the other. |
 | `pending_federated_rsvps` | Buffer for RSVP federation events arriving before their event has propagated. Flushed on event arrival. `space_id` (added in `0056`, NULL-defaulted) records the space the §24.11 pipeline gated the sender on, so a buffered RSVP can only ever be applied to an event in that same space; rows for another space (and legacy NULL rows) are never flushed and age out through `gc_pending_rsvps`. |
-| `space_pages` | Wiki-style space pages with edit-lock fields and pending-delete approval workflow. |
+| `space_pages` | Wiki-style space pages. The table carries the same edit-lock (`locked_by` / `locked_at` / `lock_expires_at`) and pending-delete approval (`delete_requested_*` / `delete_approved_*`) columns as `pages`, but both workflows are **household-only** — no route or federation event sets them on a space page (the lock and two-step delete live behind `/api/pages/{id}/…`, which never reaches a space page), so on `space_pages` they stay NULL apart from the periodic expired-lock sweep. Space pages are edited and deleted directly by writing members; each edit snapshots the previous body into `page_edit_history` under the page's `space_id`. |
 | `space_page_snapshots` | Concurrent-edit conflict resolution (§4.4.4.1). Sides are `base` / `mine` / `theirs`; `conflict=1` blocks further edits until resolved. Each row holds a full page body, so growth is bounded: pruned to the newest `MAX_PAGE_SNAPSHOTS` (10) per page on each insert, and dropped explicitly when the page is deleted (no FK cascade). |
 | `space_task_lists` / `space_tasks` | Space task lists and tasks; mirror household `task_lists` / `tasks` (including `priority` and `labels_json`, migration `0064`) with `space_id`. |
 
@@ -237,7 +237,7 @@ themselves moments and link to the conversation root via
 
 | Table | Purpose |
 |---|---|
-| `pages` | Household-level wiki pages — title, content, cover image, lock-by/at/expiry, pending-delete approval. |
+| `pages` | Household-level wiki pages — title, content, cover image, lock-by/at/expiry, pending-delete approval. Edit history lives in `page_edit_history` (shared with space pages; each row's `space_id` — NULL for a household page — scopes which surface may read it). |
 | `page_edit_history` | Append-only history of page edits. Unique by `(page_id, version)`. |
 
 ## Gallery (§23.119)

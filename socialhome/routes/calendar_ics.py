@@ -31,6 +31,7 @@ from ..serialization.ics import (
     serialize_feed,
 )
 from .base import BaseView
+from .calendar import event_access
 
 
 def _ics_response(payload: bytes, *, request: web.BaseRequest) -> web.Response:
@@ -63,14 +64,9 @@ class CalendarEventIcsView(BaseView):
         ctx = self.user
         event_id = self.match("id")
         space_cal_svc = self.svc(K.space_cal_service_key)
-        result = await space_cal_svc._repo.get_event(event_id)
-        if result is None:
-            return error_response(404, "NOT_FOUND", "Event not found.")
-        space_id, event = result
-        space_repo = self.svc(K.space_repo_key)
-        member = await space_repo.get_member(space_id, ctx.user_id)
-        if member is None:
-            return error_response(403, "FORBIDDEN", "Not a space member.")
+        # Shared id-only gate: unknown event or non-member → 404, then
+        # the space's ``calendar`` feature.
+        _space_id, event, _member = await event_access(self, event_id, ctx.user_id)
         # Pull this user's reminders so VALARMs land in the export.
         reminders = await space_cal_svc.list_reminders(
             event_id=event_id,
@@ -106,6 +102,8 @@ class SpaceCalendarFeedView(BaseView):
         space_repo = self.svc(K.space_repo_key)
         if await space_repo.get_member(space_id, token_user) is None:
             return error_response(401, "UNAUTHORIZED", "no longer a member")
+        # The space's calendar tab switched off → no feed either.
+        await self.require_space_feature(space_id, "calendar")
         now = datetime.now(timezone.utc)
         events = await repo.list_events_in_range(
             space_id,
@@ -142,6 +140,7 @@ class SpaceCalendarFeedTokenView(BaseView):
         space_repo = self.svc(K.space_repo_key)
         if await space_repo.get_member(space_id, ctx.user_id) is None:
             return error_response(403, "FORBIDDEN", "Not a space member.")
+        await self.require_space_feature(space_id, "calendar")
         token = await self.svc(K.space_cal_service_key).issue_feed_token(
             user_id=ctx.user_id,
             space_id=space_id,
@@ -168,6 +167,10 @@ class SpaceCalendarFeedTokenView(BaseView):
         space_repo = self.svc(K.space_repo_key)
         if await space_repo.get_member(space_id, ctx.user_id) is None:
             return error_response(403, "FORBIDDEN", "Not a space member.")
+        # Deliberately NOT feature-gated: revoking a feed token is a
+        # safety action and must work while the calendar tab is off
+        # (otherwise a leaked token would come back to life when the
+        # feature is switched on again). The feed itself is gated.
         space_cal_svc = self.svc(K.space_cal_service_key)
         repo = space_cal_svc._repo
         await repo.revoke_feed_token(user_id=ctx.user_id, space_id=space_id)
