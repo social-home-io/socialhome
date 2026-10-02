@@ -15,11 +15,21 @@ Subscribes to :class:`CalendarEventCreated` / :class:`CalendarEventUpdated`
   event is hard-deleted from a peer instance — the body becomes "(event
   removed)" via the renderer.
 
-The bridge bypasses :meth:`SpaceService.create_post` (no moderation
-queue, no per-feature access gate) — by the time a calendar event has
-been persisted, the calendar's own access level has already gated the
-write. Adding a second gate would block events from spaces with
-``posts_access=admin_only`` that still allow calendar.
+The bridge writes the post itself (not through
+:meth:`SpaceService.create_post`): it runs on every household, for local
+and federated events alike, and mints that household's own feed card. The
+card IS a post, though, so it honours the space's ``posts`` access level
+(§4.3): an event is mirrored only when ``posts``
+:meth:`~socialhome.domain.space.SpaceFeatures.access_decision` would let
+its creator create a post right away (PROCEED) — under ``ADMIN_ONLY`` an
+owner / admin, under ``MODERATED`` content authority (the mirror never
+queues). Otherwise the event stays in the Calendar tab and no card is made
+— silently, it is policy. The creator's role is their local seat, or the
+mirrored ``space_remote_members`` seat for a remote creator; a writer
+seated on the space's HOST household passes, because the host's owner is
+mirrored as a plain ``member`` and the host already drops a plain member's
+announcement at the source (``SpaceCalendarService.create_event``) — the
+same rule as :meth:`SpaceAuthorship._seated_as`.
 
 One post per *event series* — recurring events do **not** generate a new
 post per occurrence (would flood the feed). The card surfaces the next
@@ -41,11 +51,22 @@ from ..domain.events import (
     SpacePostCreated,
 )
 from ..domain.post import Post, PostType
+from ..domain.space import (
+    WRITER_ROLES,
+    AccessDecision,
+    ContentAction,
+    Space,
+    SpaceFeatureAccess,
+    SpaceRole,
+)
 from ..infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
     from ..repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ..repositories.space_post_repo import AbstractSpacePostRepo
+    from ..repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
     from ..repositories.space_repo import AbstractSpaceRepo
 
 log = logging.getLogger(__name__)
@@ -54,7 +75,13 @@ log = logging.getLogger(__name__)
 class CalendarFeedBridge:
     """Mirror calendar event lifecycle into the space feed."""
 
-    __slots__ = ("_bus", "_post_repo", "_calendar_repo", "_space_repo")
+    __slots__ = (
+        "_bus",
+        "_post_repo",
+        "_calendar_repo",
+        "_space_repo",
+        "_remote_members",
+    )
 
     def __init__(
         self,
@@ -62,16 +89,17 @@ class CalendarFeedBridge:
         bus: EventBus,
         post_repo: "AbstractSpacePostRepo",
         calendar_repo: "AbstractSpaceCalendarRepo",
-        space_repo: "AbstractSpaceRepo | None" = None,
+        space_repo: "AbstractSpaceRepo",
+        remote_member_repo: "AbstractSpaceRemoteMemberRepo",
     ) -> None:
         self._bus = bus
         self._post_repo = post_repo
         self._calendar_repo = calendar_repo
-        # Optional — when wired, the bridge skips peer households'
-        # cross-household calendar mirrors (their ``space_posts`` FK
-        # would fail without a local ``spaces`` row). Tests that
-        # exercise the bridge in isolation can omit it.
+        # The space row: its ``posts`` access level, and whether this
+        # household holds the space at all (the ``space_posts`` FK).
         self._space_repo = space_repo
+        # A remote creator's mirrored seat (their role).
+        self._remote_members = remote_member_repo
 
     def wire(self) -> None:
         self._bus.subscribe(CalendarEventCreated, self._on_created)
@@ -96,10 +124,17 @@ class CalendarFeedBridge:
         # rather than crash with FOREIGN KEY constraint failed.
         # The peer's calendar UI still renders the event; only the
         # feed-mirror is host-local.
-        if (
-            self._space_repo is not None
-            and await self._space_repo.get(space_id) is None
-        ):
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return
+        if not await self._creator_may_post(space, event.created_by):
+            log.debug(
+                "calendar-feed-bridge: %s's posts level keeps %s's event %s "
+                "out of the feed",
+                space_id,
+                event.created_by,
+                event.id,
+            )
             return
         # Idempotency guard — a peer event arriving twice (initial sync +
         # live federation) shouldn't create two posts. Keyed on the
@@ -125,6 +160,38 @@ class CalendarFeedBridge:
         await self._bus.publish(
             SpacePostCreated(space_id=space_id, post=post),
         )
+
+    async def _creator_may_post(self, space: Space, user_id: str) -> bool:
+        """Would ``space``'s ``posts`` level let ``user_id`` post right now?"""
+        if space.features.access_level("posts") is SpaceFeatureAccess.OPEN:
+            return True
+        return (
+            space.features.access_decision(
+                "posts",
+                role=await self._creator_role(space, user_id),
+                action=ContentAction.CREATE,
+                owns_target=True,
+            )
+            is AccessDecision.PROCEED
+        )
+
+    async def _creator_role(self, space: Space, user_id: str) -> str | None:
+        """The creator's local seat, else their live mirrored remote seat —
+        a writer seat on the host household counting as the host's
+        settings authority (its owner is mirrored as a ``member``)."""
+        member = await self._space_repo.get_member(space.id, user_id)
+        if member is not None:
+            return member.role
+        seat = await self._remote_members.get_including_tombstones(
+            space.id, "", user_id
+        )
+        if seat is None or seat.tombstoned:
+            return None
+        if seat.instance_id == space.owner_instance_id and seat.role in {
+            r.value for r in WRITER_ROLES
+        }:
+            return SpaceRole.ADMIN.value
+        return seat.role
 
     async def _on_updated(self, evt: CalendarEventUpdated) -> None:
         post = await self._find_existing_post(evt.event.id)

@@ -192,3 +192,41 @@ async def test_household_or_peer_applied_list_events_stay_local(env, event):
     bus, fed = env
     await bus.publish(event)
     assert fed.broadcasts == []
+
+
+async def test_every_write_carries_its_actor(env):
+    """v_42: receivers judge a write against the space's ``tasks`` access
+    level by who made it, so the actor rides inside the sealed payload."""
+    bus, fed = env
+    await bus.publish(
+        TaskCreated(task=_task("t1"), space_id="sp-A", actor_user_id="u-a")
+    )
+    await bus.publish(
+        TaskUpdated(task=_task("t1"), space_id="sp-A", actor_user_id="u-b")
+    )
+    await bus.publish(
+        TaskDeleted(task_id="t1", list_id="L", space_id="sp-A", actor_user_id="u-c")
+    )
+    await bus.publish(
+        TaskListCreated(
+            list_id="L",
+            name="n",
+            space_id="sp-A",
+            created_by="u-d",
+            actor_user_id="u-d",
+        )
+    )
+    await bus.publish(
+        TaskListUpdated(list_id="L", name="n2", space_id="sp-A", actor_user_id="u-e")
+    )
+    await bus.publish(
+        TaskListDeleted(list_id="L", space_id="sp-A", actor_user_id="u-f")
+    )
+    assert [p["actor_user_id"] for _s, _t, p in fed.broadcasts] == [
+        "u-a",
+        "u-b",
+        "u-c",
+        "u-d",
+        "u-e",
+        "u-f",
+    ]

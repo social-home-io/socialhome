@@ -307,6 +307,7 @@ from .services.app_service import AppService
 from .services.resync_on_upgrade import request_capability_resync_if_upgraded
 from .services.preferences_service import PreferencesService
 from .services.page_conflict_service import PageConflictService
+from .services.space_page_service import SpacePageService
 from .services.poll_service import PollService
 from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
@@ -1016,6 +1017,8 @@ def _wire_federation_stack(
         remote_member_repo=space_remote_member_repo,
         user_repo=user_repo,
         pending=pending_seat_buffer,
+        # The senders' proto_version: a v_42 sender always names its actor.
+        federation_repo=federation_repo,
     )
 
     inbound_service = FederationInboundService(
@@ -1047,6 +1050,7 @@ def _wire_federation_stack(
         # profile / role-change handlers find a remote member's seat.
         space_remote_member_repo=space_remote_member_repo,
         pending_seat_buffer=pending_seat_buffer,
+        authorship_federation_repo=federation_repo,
         # A host's cover / icon change ships the image; members store it.
         space_cover_repo=space_cover_repo,
         space_icon_repo=space_icon_repo,
@@ -2044,6 +2048,7 @@ def create_app(config: Config | None = None) -> web.Application:
         post_repo=space_post_repo,
         calendar_repo=space_cal_repo,
         space_repo=space_repo,
+        remote_member_repo=repos.space_remote_member,
     )
     calendar_feed_bridge.wire()
 
@@ -2084,6 +2089,13 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── Page conflict resolution (§4.4.4.1) ─────────────────────────────
     page_conflict_service = PageConflictService(page_repo)
+    # Space wiki writes: scope, writer seat, ``pages`` access level (§4.3).
+    space_page_service = SpacePageService(
+        page_repo,
+        space_repo=space_repo,
+        bus=bus,
+        conflict_service=page_conflict_service,
+    )
 
     # ── Presence service (local + remote) ──────────────────────────────
     presence_service = PresenceService(repos.presence, repos.user, bus)
@@ -2461,6 +2473,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.peer_user_visibility_repo_key] = repos.peer_user_visibility
     app[K.page_repo_key] = page_repo
     app[K.page_conflict_service_key] = page_conflict_service
+    app[K.space_page_service_key] = space_page_service
     app[K.presence_service_key] = presence_service
     app[K.online_status_service_key] = online_status_service
     app[K.space_zone_service_key] = space_zone_service

@@ -185,6 +185,11 @@ That single command runs the full sequence:
      own members list and Gamma's roster mirror must both show the role
      (``SPACE_MEMBER_ROLE_CHANGED`` + the authority-signed JOINED gossip),
      then Beta demotes her back to ``member``.
+   - **v_42 ADMIN_ONLY feature access.** Beta (owner) sets the space's
+     ``pages_access`` to ``admin_only``; once the level reaches Alpha's
+     stub, Alpha's own household must refuse Alice's page create with 403
+     ``ACCESS_ADMIN_ONLY`` (member households enforce the level locally,
+     receivers re-check it). Beta then resets it to ``open``.
    - **v_31 routed-origin signature (#692).** Every ``SPACE_ROUTED`` leg
      carries ``origin_sig`` inside its sealed blob and the endpoint
      verifies it against the identity key it already holds for ``path[0]``
@@ -391,7 +396,7 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (41 since the space moderator role).
+   ``OURS`` (42 since ADMIN_ONLY feature access).
 
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is

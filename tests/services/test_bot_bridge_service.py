@@ -197,3 +197,51 @@ async def test_notify_space_without_resolver_carries_no_mentions(stack):
     )
     await svc.notify_space(stack.bot, title=None, message="@anna hi")
     assert captured[0].mentions == ()
+
+
+# ─── §4.3: a bot posts for the member who made it ────────────────────────
+
+
+async def _admin_only_with_member_bot(stack, *, creator_role: str):
+    await stack.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-1', ?, ?)",
+        ("uid-maker", creator_role),
+    )
+    bot, _raw = await SqliteSpaceBotRepo(stack.db).create(
+        bot_id="b-mine",
+        space_id="sp-1",
+        scope=BotScope.MEMBER,
+        slug="mine",
+        name="Mine",
+        icon="🤖",
+        created_by="uid-maker",
+    )
+    await stack.db.enqueue(
+        "UPDATE spaces SET posts_access='admin_only' WHERE id='sp-1'"
+    )
+    return bot
+
+
+async def test_admin_only_posts_refuse_a_members_personal_bot(stack):
+    """A personal bot is its member's voice: under ADMIN_ONLY posts it can't
+    post either — no posting around the level through a webhook."""
+    from socialhome.domain.space import AccessAdminOnlyError
+
+    bot = await _admin_only_with_member_bot(stack, creator_role="member")
+    with pytest.raises(AccessAdminOnlyError):
+        await stack.svc.notify_space(bot, title=None, message="hi")
+    assert await stack.space_post_repo.list_feed("sp-1") == []
+
+
+async def test_admin_only_posts_let_an_admins_bot_post(stack):
+    bot = await _admin_only_with_member_bot(stack, creator_role="admin")
+    post = await stack.svc.notify_space(bot, title=None, message="hi")
+    assert post.author == SYSTEM_AUTHOR
+
+
+async def test_a_bot_whose_maker_left_still_posts_when_posts_are_not_admin_only(stack):
+    """Only ADMIN_ONLY gates a bot (today a bot never queues): a bot whose
+    creator has no seat any more keeps posting under MODERATED."""
+    await stack.db.enqueue("UPDATE spaces SET posts_access='moderated' WHERE id='sp-1'")
+    post = await stack.svc.notify_space(stack.bot, title=None, message="ding")
+    assert post.content == "ding"

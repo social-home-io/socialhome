@@ -40,7 +40,7 @@ from ..domain.post import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..domain.post import BazaarOffer
-from ..domain.space import SpacePermissionError
+from ..domain.space import ContentAction, SpacePermissionError
 from ..repositories.bazaar_repo import (
     AbstractBazaarRepo,
     BidStateError,
@@ -273,6 +273,18 @@ class BazaarService(ProtectionGateMixin):
             raise PermissionError("only the seller may edit this listing")
         if listing.status is not BazaarStatus.ACTIVE:
             raise BazaarServiceError("listing is not active")
+        if self._spaces is None:
+            # Fail closed: without the space service there is no access gate.
+            raise RuntimeError("space service not attached")
+        # The title / description is the wrapper post's content: an edit of
+        # one's own post under the space's ``posts`` level.
+        await self._spaces.require_content_access(
+            listing.space_id,
+            actor_user_id,
+            "posts",
+            ContentAction.EDIT,
+            owns_target=True,
+        )
 
         next_title = listing.title
         next_description = listing.description

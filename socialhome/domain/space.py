@@ -236,6 +236,56 @@ class SpaceFeatureAccess(StrEnum):
     ADMIN_ONLY = "admin_only"
 
 
+#: The features carrying a ``*_access`` level, in wire order. A post of any
+#: type is ``posts``; task lists ride ``tasks``.
+ACCESS_FEATURES: tuple[str, ...] = ("posts", "pages", "stickies", "calendar", "tasks")
+
+
+class ContentAction(StrEnum):
+    """What a write does to a feature's content (§4.3 access levels).
+
+    * ``CREATE`` — a new post / page / task or list / sticky / event.
+    * ``EDIT`` — any change to an existing item's fields, a task's status
+      or column move included.
+    * ``DELETE`` — delete, archive, a task list's delete.
+    * ``LAYOUT`` — arrangement only: a task's reorder within its column,
+      a sticky's position move. ``ADMIN_ONLY`` denies it like any write;
+      under ``MODERATED`` it never queues.
+    """
+
+    CREATE = "create"
+    EDIT = "edit"
+    DELETE = "delete"
+    LAYOUT = "layout"
+
+
+class AccessDecision(StrEnum):
+    """The answer of :meth:`SpaceFeatures.access_decision`."""
+
+    PROCEED = "proceed"
+    QUEUE = "queue"
+    DENY = "deny"
+
+
+def restricted_access_changes(
+    before: "SpaceFeatures", after: "SpaceFeatures"
+) -> tuple[str, ...]:
+    """The :data:`ACCESS_FEATURES` an edit from ``before`` to ``after`` sets
+    to a level other than ``OPEN`` that they did not already have, sorted.
+
+    Relaxing a feature back to ``OPEN`` is never listed: an older peer that
+    cannot enforce a level loses nothing when the level goes away.
+    """
+    return tuple(
+        sorted(
+            f
+            for f in ACCESS_FEATURES
+            if after.access_level(f) is not SpaceFeatureAccess.OPEN
+            and after.access_level(f) is not before.access_level(f)
+        )
+    )
+
+
 # Default allowed post types for a fresh space. Ordered for a stable wire form.
 _ALL_POST_TYPES: tuple[str, ...] = (
     "bazaar",
@@ -385,26 +435,73 @@ class SpaceFeatures:
         val = post_type.value if hasattr(post_type, "value") else str(post_type)
         return val in self.allowed_post_types
 
-    def access_decision(
-        self, feature: str, is_admin: bool, *, is_moderator: bool = False
-    ) -> Literal["proceed", "queue", "deny"]:
-        """Describe what should happen when a member attempts ``feature``.
+    def access_level(self, feature: str) -> SpaceFeatureAccess:
+        """The access level of one of :data:`ACCESS_FEATURES`.
 
-        ``is_admin`` is settings authority (owner / admin); ``is_moderator``
-        is content authority without it. A moderator skips a ``MODERATED``
-        queue but an ``ADMIN_ONLY`` feature still denies them.
-
-        Valid ``feature`` values: ``posts``, ``pages``, ``stickies``,
-        ``calendar``, ``tasks``.
+        :class:`ValueError` for any other name — a typo must not read as
+        ``OPEN``.
         """
-        access: SpaceFeatureAccess = getattr(
-            self, f"{feature}_access", SpaceFeatureAccess.OPEN
-        )
-        if access is SpaceFeatureAccess.ADMIN_ONLY:
-            return "proceed" if is_admin else "deny"
-        if access is SpaceFeatureAccess.MODERATED:
-            return "proceed" if is_admin or is_moderator else "queue"
-        return "proceed"
+        if feature not in ACCESS_FEATURES:
+            raise ValueError(f"unknown access-gated feature {feature!r}")
+        level: SpaceFeatureAccess = getattr(self, f"{feature}_access")
+        return level
+
+    def access_decision(
+        self,
+        feature: str,
+        *,
+        role: "SpaceRole | str | None",
+        action: ContentAction,
+        owns_target: bool,
+    ) -> AccessDecision:
+        """What happens when a seat holding ``role`` attempts ``action``
+        on ``feature`` (§4.3 feature access levels).
+
+        * ``OPEN`` — :attr:`AccessDecision.PROCEED`.
+        * ``ADMIN_ONLY`` — PROCEED for settings authority (owner / admin),
+          DENY for everyone else, moderators included, for every action
+          (``LAYOUT`` too).
+        * ``MODERATED`` — content authority (owner / admin / moderator)
+          PROCEEDs; a member's ``CREATE`` QUEUEs; a member's ``EDIT`` /
+          ``DELETE`` PROCEEDs on their own item and QUEUEs on someone
+          else's; ``LAYOUT`` PROCEEDs.
+
+        ``role`` may be a :class:`SpaceRole` or the raw
+        ``space_members.role`` string. No seat (``None``), a subscriber or
+        an unknown value fails closed (DENY) on a restricted feature — the
+        writer gates refuse those earlier, this is the backstop — except a
+        read-only seat's edit / delete of its own item under ``MODERATED``.
+        """
+        level = self.access_level(feature)
+        if level is SpaceFeatureAccess.OPEN:
+            return AccessDecision.PROCEED
+        try:
+            seat = SpaceRole(str(role)) if role is not None else None
+        except ValueError:
+            seat = None
+        if seat is None or seat not in WRITER_ROLES:
+            # A read-only seat (a demoted author) keeps an edit / delete of
+            # its OWN item under MODERATED — today's rule; never more.
+            if (
+                seat is not None
+                and level is SpaceFeatureAccess.MODERATED
+                and owns_target
+                and action in (ContentAction.EDIT, ContentAction.DELETE)
+            ):
+                return AccessDecision.PROCEED
+            return AccessDecision.DENY
+        if level is SpaceFeatureAccess.ADMIN_ONLY:
+            if seat in SETTINGS_AUTHORITY_ROLES:
+                return AccessDecision.PROCEED
+            return AccessDecision.DENY
+        # MODERATED
+        if seat in CONTENT_AUTHORITY_ROLES:
+            return AccessDecision.PROCEED
+        if action is ContentAction.CREATE:
+            return AccessDecision.QUEUE
+        if action is ContentAction.LAYOUT or owns_target:
+            return AccessDecision.PROCEED
+        return AccessDecision.QUEUE
 
     def with_allowed_post_types(
         self, types: "set[PostType] | set[str]"
@@ -835,6 +932,27 @@ class HouseholdUpgradeRequiredError(SpacePermissionError):
     """A role the target's home household cannot hold yet (v_41
     ``moderator`` on a v_40 peer). The API answers 403 with the stable code
     ``HOUSEHOLD_UPGRADE_REQUIRED`` so the SPA can show translated copy."""
+
+
+class AccessAdminOnlyError(SpacePermissionError):
+    """A write to a feature whose access level is ``ADMIN_ONLY`` by a seat
+    without settings authority. The API answers 403 with the stable code
+    ``ACCESS_ADMIN_ONLY`` (plus the ``feature``) so the SPA can show
+    translated copy."""
+
+    def __init__(self, feature: str) -> None:
+        super().__init__(f"only space admins can change {feature} here")
+        self.feature = feature
+
+
+class PeersTooOldError(Exception):
+    """An access-level change some member households cannot enforce yet
+    (below v_42). The API answers 409 ``PEERS_TOO_OLD`` with the households
+    so the admin can upgrade them first or apply anyway (``force``)."""
+
+    def __init__(self, households: "list[dict[str, object]]") -> None:
+        super().__init__("some member households cannot enforce access levels yet")
+        self.households = households
 
 
 class PublicSpaceLimitError(Exception):

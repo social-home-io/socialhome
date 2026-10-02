@@ -41,7 +41,10 @@ function wireApi(byUrl: Record<string, Row[] | Error>) {
   apiDelete.mockResolvedValue(undefined)
 }
 
-async function setup(byUrl: Record<string, Row[] | Error>, props: { spaceId?: string } = {}) {
+async function setup(
+  byUrl: Record<string, Row[] | Error>,
+  props: { spaceId?: string; readOnly?: string | null } = {},
+) {
   wireApi(byUrl)
   const tl = await import('@testing-library/preact')
   const mod = await import('./StickyBoardPage')
@@ -453,5 +456,39 @@ describe('StickyBoardPage grip pointer', () => {
     t.fireEvent(t.grip, new Event('lostpointercapture'))
     expect(t.container.querySelector('.sh-sticky--dragging')).toBeNull()
     expect(apiPatch).toHaveBeenCalledTimes(1)
+  })
+})
+
+
+describe('StickyBoardPage read-only (an ADMIN_ONLY board, §4.3)', () => {
+  const NOTE = 'Only admins can add or move sticky notes here.'
+
+  it('shows the notes and the note, with no add, edit or move controls', async () => {
+    const t = await setup(
+      { '/api/spaces/sp1/stickies': [sticky('s', { space_id: 'sp1' })] },
+      { spaceId: 'sp1', readOnly: NOTE },
+    )
+    await t.findByText('Note s')
+    expect(t.getByRole('note').textContent).toContain(NOTE)
+    expect(t.queryByRole('button', { name: /^Edit note/ })).toBeNull()
+    expect(t.queryByRole('button', { name: /^Move note/ })).toBeNull()
+    expect(t.container.querySelector('[data-sticky-add]')).toBeNull()
+    expect(apiPatch).not.toHaveBeenCalled()
+  })
+
+  it('the phone grid is read-only too', async () => {
+    setNarrow(true)
+    const t = await setup(
+      { '/api/spaces/sp1/stickies': [sticky('s', { space_id: 'sp1' })] },
+      { spaceId: 'sp1', readOnly: NOTE },
+    )
+    await t.findByText('Note s')
+    expect(t.queryByRole('button', { name: /^Edit note/ })).toBeNull()
+  })
+
+  it('an empty read-only board has no call to action', async () => {
+    const t = await setup({ '/api/spaces/sp1/stickies': [] }, { spaceId: 'sp1', readOnly: NOTE })
+    await t.findByRole('note')
+    expect(t.container.querySelector('[data-sticky-add]')).toBeNull()
   })
 })

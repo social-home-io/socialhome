@@ -175,3 +175,25 @@ describe('SpaceTasksTab', () => {
     ]))
   })
 })
+
+describe('spaceTaskScope — ADMIN_ONLY tasks (§4.3)', () => {
+  it('a member of an admin-only board reads, and is told why', async () => {
+    const { spaceTaskScope } = await import('@/features/tasks/scope')
+    const { spaceTaskStore } = await import('@/store/tasks')
+    const scope = spaceTaskScope({
+      spaceId: 'sp-1', store: spaceTaskStore('sp-1'), writable: false, archived: false, adminOnly: true,
+    })
+    expect(scope.canWrite).toBe(false)
+    expect(scope.canEdit({ created_by: 'me', assignees: [] })).toBe(false)
+    expect(scope.readOnlyReason()).toBe('Only admins can change tasks here.')
+  })
+
+  it('an admin of an admin-only board still writes', async () => {
+    const { spaceTaskScope } = await import('@/features/tasks/scope')
+    const { spaceTaskStore } = await import('@/store/tasks')
+    const scope = spaceTaskScope({
+      spaceId: 'sp-1', store: spaceTaskStore('sp-1'), writable: true, archived: false, adminOnly: true,
+    })
+    expect(scope.canWrite).toBe(true)
+  })
+})

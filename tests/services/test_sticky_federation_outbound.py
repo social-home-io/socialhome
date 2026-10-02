@@ -116,3 +116,40 @@ async def test_sticky_deleted_payload_minimal(env):
     assert event_type is FederationEventType.SPACE_STICKY_DELETED
     assert space_id == "sp-A"
     assert payload == {"id": "s1", "space_id": "sp-A"}
+
+
+async def test_every_write_carries_its_actor(env):
+    """v_42: the actor rides inside the sealed payload so receivers can
+    judge the write against the space's ``stickies`` access level."""
+    bus, fed = env
+    await bus.publish(
+        StickyCreated(
+            sticky_id="s1",
+            space_id="sp-A",
+            author="u-a",
+            content="x",
+            color="#FFF9B1",
+            position_x=0,
+            position_y=0,
+            actor_user_id="u-a",
+        )
+    )
+    await bus.publish(
+        StickyUpdated(
+            sticky_id="s1",
+            space_id="sp-A",
+            content="y",
+            color="#FFF9B1",
+            position_x=0,
+            position_y=0,
+            actor_user_id="u-b",
+        )
+    )
+    await bus.publish(
+        StickyDeleted(sticky_id="s1", space_id="sp-A", actor_user_id="u-c")
+    )
+    assert [p["actor_user_id"] for _s, _t, p in fed.broadcasts] == [
+        "u-a",
+        "u-b",
+        "u-c",
+    ]

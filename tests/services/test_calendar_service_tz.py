@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.domain.space import SpaceFeatures
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import Calendar
@@ -50,6 +53,7 @@ async def env(tmp_dir):
     e.household_svc = PreferencesService(repo=e.household_repo)
     e.cal_svc = CalendarService(e.cal_repo)
     e.space_cal_svc = SpaceCalendarService(e.space_cal_repo)
+    e.space_cal_svc.attach_space_repo(SqliteSpaceRepo(db))
 
     # Plumb the same dependencies wire_extras would set up in app.py.
     class _UserRepoFacade:
@@ -187,7 +191,9 @@ async def test_space_event_inherits_space_tz(env, monkeypatch):
     class _StubSpaceRepo:
         async def get(self, space_id: str):
             class _S:
+                id = "space-1"
                 tz = "Asia/Tokyo"
+                features = SpaceFeatures()  # OPEN — no access gate
 
             return _S() if space_id == "space-1" else None
 

@@ -2,6 +2,7 @@
 // static dependency on auth.ts — breaks the api↔auth import cycle.
 import { token } from '@/store/token'
 import { showToast } from '@/components/Toast'
+import { accessNote } from '@/features/spaces/spaceAccess'
 
 // Logout handler, registered by store/auth at module load. Lets the 401 path
 // clear the session without importing '@/store/auth' (which would re-form the
@@ -159,6 +160,13 @@ class ApiClient {
         if (body && typeof body === 'object'
             && body.error && typeof body.error === 'object') {
           parsed = body.error as { code?: unknown; detail?: unknown }
+          if (parsed.code === 'ACCESS_ADMIN_ONLY') {
+            // §4.3: an ADMIN_ONLY feature refused the write. Every
+            // surface toasts ``err.message`` — give it the translated
+            // "only admins can …" note for that feature.
+            const feature = (parsed as { feature?: unknown }).feature
+            parsed = { ...parsed, detail: accessNote(String(feature ?? '')) }
+          }
         }
       } catch {
         // Non-JSON body — leave ``parsed`` as null.

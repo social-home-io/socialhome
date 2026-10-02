@@ -76,6 +76,10 @@ const CANVAS_SLACK = 16
 
 export interface StickyBoardPageProps {
   spaceId?: string
+  /** Why the viewer may only look (a space that keeps stickies to its
+   *  admins, §4.3): shown above the board, and every note renders
+   *  without its add / edit / move controls. ``null`` → writable. */
+  readOnly?: string | null
 }
 
 /** First ~60 characters of a note, on one line, for labels. */
@@ -156,8 +160,9 @@ function HouseholdTitle() {
   return null
 }
 
-export default function StickyBoardPage({ spaceId }: StickyBoardPageProps) {
+export default function StickyBoardPage({ spaceId, readOnly = null }: StickyBoardPageProps) {
   const scope = spaceId ?? null
+  const writable = readOnly === null
   const store = stickyStoreFor(scope)
   const viewportNarrow = useNarrow()
   const boardRef = useRef<HTMLDivElement | null>(null)
@@ -198,7 +203,7 @@ export default function StickyBoardPage({ spaceId }: StickyBoardPageProps) {
         ? [{ label: t(isOne(n) ? 'stickies.count_one' : 'stickies.count', { n: String(n) }) }]
         : []}
     >
-      {state === 'ready' && n > 0 && (
+      {writable && state === 'ready' && n > 0 && (
         <Button data-sticky-add onClick={addSticky}>
           + {t('stickies.add')}
         </Button>
@@ -216,12 +221,16 @@ export default function StickyBoardPage({ spaceId }: StickyBoardPageProps) {
       <div class="sh-empty-state">
         <div aria-hidden="true">📝</div>
         <h3>{t('stickies.empty.title')}</h3>
-        <p>{t(scope ? 'stickies.empty.body_space' : 'stickies.empty.body')}</p>
-        <div class="sh-empty-state__cta-row">
-          <Button data-sticky-add onClick={addSticky}>
-            {t('stickies.empty.cta')}
-          </Button>
-        </div>
+        {writable && (
+          <>
+            <p>{t(scope ? 'stickies.empty.body_space' : 'stickies.empty.body')}</p>
+            <div class="sh-empty-state__cta-row">
+              <Button data-sticky-add onClick={addSticky}>
+                {t('stickies.empty.cta')}
+              </Button>
+            </div>
+          </>
+        )}
       </div>
     )
   } else if (narrow) {
@@ -231,7 +240,7 @@ export default function StickyBoardPage({ spaceId }: StickyBoardPageProps) {
         {ordered.map(s => (
           <div key={s.id} class={noteClass(s.color)} data-sticky-id={s.id}
                style={{ background: stickyBackground(s.color) }}>
-            <NoteBody sticky={s} scope={scope} />
+            {writable ? <NoteBody sticky={s} scope={scope} /> : <StaticNoteBody sticky={s} />}
           </div>
         ))}
       </div>
@@ -243,7 +252,7 @@ export default function StickyBoardPage({ spaceId }: StickyBoardPageProps) {
         class="sh-sticky-canvas"
         style={{ aspectRatio: `${BOARD_W} / ${BOARD_H}` }}
       >
-        {notes.map(s => (
+        {notes.map(s => (writable ? (
           <BoardNote
             key={s.id}
             sticky={s}
@@ -254,7 +263,20 @@ export default function StickyBoardPage({ spaceId }: StickyBoardPageProps) {
             setDragging={setDragging}
             announce={announce}
           />
-        ))}
+        ) : (
+          <div
+            key={s.id}
+            class={noteClass(s.color)}
+            data-sticky-id={s.id}
+            style={{
+              background: stickyBackground(s.color),
+              '--sh-sticky-x': pct(s.position_x, BOARD_W),
+              '--sh-sticky-y': pct(s.position_y, BOARD_H),
+            }}
+          >
+            <StaticNoteBody sticky={s} />
+          </div>
+        )))}
       </div>
     )
   }
@@ -263,9 +285,24 @@ export default function StickyBoardPage({ spaceId }: StickyBoardPageProps) {
     <div class="sh-sticky-board" ref={wrapRef}>
       {!scope && <HouseholdTitle />}
       {header}
+      {readOnly !== null && (
+        <p class="sh-access-note" role="note">
+          <span aria-hidden="true">🔒</span>
+          <span>{readOnly}</span>
+        </p>
+      )}
       {body}
       <span id={`sh-sticky-hint-${scope ?? 'home'}`} class="sr-only">{t('stickies.move_hint')}</span>
       <div class="sr-only" aria-live="polite">{liveMsg}</div>
+    </div>
+  )
+}
+
+/** A note's text with no editor behind it (a read-only board). */
+function StaticNoteBody({ sticky }: { sticky: StickyRow }) {
+  return (
+    <div class="sh-sticky__body sh-sticky__body--static">
+      <span class="sh-sticky__text">{sticky.content}</span>
     </div>
   )
 }

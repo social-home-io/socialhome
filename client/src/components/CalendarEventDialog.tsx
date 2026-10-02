@@ -14,6 +14,7 @@ import { Avatar } from './Avatar'
 import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
 import { t } from '@/i18n/i18n'
+import { announceSuppressedMessage } from '@/features/spaces/spaceAccess'
 import { currentUser } from '@/store/auth'
 import { householdUsers } from '@/store/householdUsers'
 import { resolveCalendarColor } from '@/utils/calendar'
@@ -589,11 +590,14 @@ export function CalendarEventDialog({ onCreated }: {
         )
         showToast('Event updated', 'success')
       } else if (isSpace) {
-        await api.post(
+        const created = await api.post(
           `/api/spaces/${spaceId.value}/calendar/events`,
           body,
         )
-        showToast(t('event.dialog.created'), 'success')
+        // Saved, but the space's posts level kept the feed card (§4.3):
+        // say so instead of a plain "created".
+        const suppressed = announceSuppressedMessage(created)
+        showToast(suppressed ?? t('event.dialog.created'), suppressed ? 'info' : 'success')
       } else {
         // Multi-target create: fan out one POST per picked calendar.
         // Empty set (e.g. when the dialog opened without a list) falls

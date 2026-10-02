@@ -23,6 +23,8 @@ vi.mock('@/store/auth', () => ({
   setToken: vi.fn(),
   logout: vi.fn(),
 }))
+const { toastMock } = vi.hoisted(() => ({ toastMock: vi.fn() }))
+vi.mock('./Toast', () => ({ showToast: toastMock }))
 vi.mock('@/store/calendarInvitees', () => ({
   calendarInvitees: { value: [] },
   loadCalendarInvitees: vi.fn().mockResolvedValue(undefined),
@@ -65,6 +67,32 @@ describe('CalendarEventDialog', () => {
     )
     expect(call).toBeTruthy()
     expect((call![1] as { announce_in_feed?: boolean }).announce_in_feed).toBe(true)
+  })
+
+  it('says so when the space kept the announcement out of the feed (§4.3)', async () => {
+    const { render, fireEvent } = await import('@testing-library/preact')
+    const { api } = await import('@/api')
+    ;(api.post as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue({
+      id: 'e1', announce_in_feed: false,
+      announce_suppressed: true, announce_suppressed_reason: 'admin_only',
+    })
+    toastMock.mockClear()
+    const mod = await import('./CalendarEventDialog')
+    mod.openSpaceEventDialog('sp-1')
+    const { container } = render(<mod.CalendarEventDialog />)
+    const summary = container.querySelector('input:not([type])') as HTMLInputElement
+    fireEvent.input(summary, { target: { value: 'Picnic' } })
+    const announceLabel = Array.from(container.querySelectorAll('label')).find(
+      (l) => /announce this event in the space feed/i.test(l.textContent ?? ''),
+    )!
+    fireEvent.click(announceLabel.querySelector('input[type="checkbox"]')!)
+    const buttons = Array.from(container.querySelectorAll('button'))
+    fireEvent.click(buttons[buttons.length - 1])
+    await new Promise((r) => setTimeout(r, 0))
+    expect(toastMock).toHaveBeenCalledWith(
+      'Saved — not announced in the feed, because only admins can post here.', 'info',
+    )
+    ;(api.post as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue({})
   })
 
   /** Open the dialog with a clean state and pre-seed start / end with

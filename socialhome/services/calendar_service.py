@@ -30,7 +30,7 @@ from ..domain.calendar import (
     RSVPStatus,
 )
 from ..domain.child_protection import ProtectedCapability
-from ..domain.space import Space, SpacePermissionError
+from ..domain.space import AccessDecision, ContentAction, Space, SpacePermissionError
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -48,6 +48,7 @@ from ..repositories.space_repo import AbstractSpaceRepo
 from ..utils.rrule import expand_rrule
 from ..utils.timezones import is_valid_tz
 from .bus_publisher import BusPublisherMixin
+from .content_access import ContentAccessMixin
 from .protection_gate import ProtectionGateMixin
 from .space_service import SpaceService
 
@@ -1146,8 +1147,13 @@ def _personal_event_payload(event: CalendarEvent, calendar: Calendar) -> dict:
     }
 
 
-class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
-    """Space calendar event operations."""
+class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccessMixin):
+    """Space calendar event operations.
+
+    Event create / edit / delete pass the space's ``calendar`` access level
+    (§4.3, :class:`ContentAccessMixin`) for the acting user; RSVPs and
+    reminders are never gated.
+    """
 
     __slots__ = (
         "_repo",
@@ -1370,6 +1376,17 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
             raise ValueError(f"invalid datetime: {exc}") from exc
         if end_dt < start_dt:
             raise ValueError("end must be at or after start")
+        await self._gate(space_id, created_by, "calendar", ContentAction.CREATE, True)
+        if announce_in_feed and await self.announce_refusal(space_id, created_by):
+            # The feed mirror is a post: a creator the ``posts`` level
+            # keeps from posting straight away keeps the event, never the
+            # announcement. Dropped at the source so the flag federates as
+            # the household meant it; every receiver's
+            # ``CalendarFeedBridge`` re-checks it anyway. The route tells
+            # the creator (``announce_suppressed``).
+            # TODO(PR3): under MODERATED, queue the announce card for
+            # review instead of dropping it.
+            announce_in_feed = False
         event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
         event = CalendarEvent(
             # Owner-bound (v_36): no other household can announce this id
@@ -1400,6 +1417,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
             space_id=space_id,
             event=saved,
             evt_type=FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            actor_user_id=created_by,
         )
         # Phase C: auto-RSVP the creator as going for the first
         # occurrence — they're implicitly going, even on a capped event
@@ -1426,6 +1444,46 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         return saved
 
     # ── Writer gate + scope guard ────────────────────────────────────────
+
+    def _access_space_repo(self) -> AbstractSpaceRepo:
+        """The :class:`ContentAccessMixin` gate fails closed without it."""
+        return self._spaces_or_raise()
+
+    async def announce_refusal(self, space_id: str, user_id: str) -> str | None:
+        """Why ``user_id``'s event can't be announced in the feed: the
+        ``posts`` level (``"admin_only"`` / ``"moderated"``) that keeps them
+        from posting straight away, else ``None``. The feed mirror of an
+        announced event is a post that never queues (``CalendarFeedBridge``
+        applies the same rule on every household)."""
+        try:
+            decision = await self._gate(
+                space_id, user_id, "posts", ContentAction.CREATE, True
+            )
+        except SpacePermissionError:
+            decision = AccessDecision.DENY
+        if decision is AccessDecision.PROCEED:
+            return None
+        space = await self._spaces_or_raise().get(space_id)
+        return space.features.access_level("posts").value if space else None
+
+    async def can_edit_event(
+        self, space_id: str, user_id: str, event: CalendarEvent
+    ) -> bool:
+        """Whether :meth:`update_event` would let ``user_id`` change
+        ``event`` — a UI hint (the edit control); the write re-checks."""
+        if not await self.can_write(space_id, user_id):
+            return False
+        try:
+            await self._gate(
+                space_id,
+                user_id,
+                "calendar",
+                ContentAction.EDIT,
+                event.created_by == user_id,
+            )
+        except SpacePermissionError:
+            return False
+        return True
 
     def _spaces_or_raise(self) -> AbstractSpaceRepo:
         # Fail closed: a write gate without the space repo can't decide.
@@ -1500,10 +1558,19 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
             raise KeyError(f"space calendar event {event_id!r} not found in this space")
         return result[1]
 
-    async def delete_event(self, event_id: str, *, space_id: str) -> None:
+    async def delete_event(
+        self, event_id: str, *, space_id: str, actor_user_id: str
+    ) -> None:
         """Delete ``event_id`` from ``space_id`` — :class:`KeyError` when
         the event isn't in that space."""
         existing = await self.get_event_in_space(event_id, space_id=space_id)
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "calendar",
+            ContentAction.DELETE,
+            existing.created_by == actor_user_id,
+        )
         # Snapshot the event + the cohort of "still attending"-ish RSVPs
         # before deletion so the push handler can produce a meaningful
         # title and reach affected members. The RSVP rows themselves
@@ -1534,6 +1601,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         await self._publish_federation_event_deleted(
             space_id=space_id,
             event_id=event_id,
+            actor_user_id=actor_user_id,
         )
 
     async def resolve_space_id(self, event_id: str) -> str | None:
@@ -1553,6 +1621,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         event_id: str,
         *,
         space_id: str,
+        actor_user_id: str,
         summary: str | None = None,
         start: str | None = None,
         end: str | None = None,
@@ -1578,6 +1647,13 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         another space is :class:`KeyError` (→ 404) and nothing changes.
         """
         existing = await self.get_event_in_space(event_id, space_id=space_id)
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "calendar",
+            ContentAction.EDIT,
+            existing.created_by == actor_user_id,
+        )
 
         new_summary = (summary if summary is not None else existing.summary).strip()
         if not new_summary:
@@ -1635,6 +1711,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
             space_id=space_id,
             event=updated,
             evt_type=FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+            actor_user_id=actor_user_id,
         )
         # Compute *material* field changes — Phase D: only these
         # trigger update push notifications. Cosmetic changes (description,
@@ -2159,6 +2236,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         space_id: str,
         event: CalendarEvent,
         evt_type: FederationEventType,
+        actor_user_id: str,
     ) -> None:
         """Broadcast a SPACE_CALENDAR_EVENT_CREATED / _UPDATED to peers
         co-hosting this space. No-op when federation isn't wired."""
@@ -2192,6 +2270,9 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
             # an older sender → the receiver defaults to True (the historic
             # always-mirror behaviour) so events still surface there.
             "announce_in_feed": event.announce_in_feed,
+            # v_42: who made the write — receivers check it against the
+            # space's ``calendar`` access level. Older peers ignore it.
+            "actor_user_id": actor_user_id,
         }
         await self._federation.broadcast_to_space_members(
             space_id,
@@ -2204,6 +2285,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
         *,
         space_id: str,
         event_id: str,
+        actor_user_id: str,
     ) -> None:
         if self._federation is None:
             return
@@ -2212,7 +2294,11 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin):
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
             # ``space_id`` rides the payload too — see
             # :meth:`_publish_federation_event_saved`.
-            {"event_id": event_id, "space_id": space_id},
+            {
+                "event_id": event_id,
+                "space_id": space_id,
+                "actor_user_id": actor_user_id,
+            },
         )
 
     async def _publish_federation_rsvp(

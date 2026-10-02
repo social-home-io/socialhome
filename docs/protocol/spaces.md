@@ -1144,7 +1144,7 @@ tiers, each one frozenset that every guard — local and federated — reads:
 | **Writer** (`WRITER_ROLES`) | owner, admin, moderator, member | creating content |
 
 An `ADMIN_ONLY` feature stays owner / admin only — a moderator is
-refused like a member. Role-exact `admin` checks stay role-exact: a
+refused like a member (see [Feature access levels](#feature-access-levels-v_42)). Role-exact `admin` checks stay role-exact: a
 remote `moderator` seat never drives `SPACE_REMOTE_ADMIN_ACTION` /
 `SPACE_REMOTE_ADMIN_KICK` (dropped), is not in `list_admin_instances`
 (never receives `SPACE_ADMIN_KEY_SHARE`), and is not a multi-admin
@@ -1177,6 +1177,126 @@ below v_41 is sent the same event with `role: "member"`
 `members` stream likewise ships a moderator as `member` to a requester
 below v_41. Promoting a user whose **home** household is below v_41 is
 refused (403, code `HOUSEHOLD_UPGRADE_REQUIRED`).
+
+## Feature access levels (v_42)
+
+A space sets one access level per collaborative feature —
+`posts_access`, `pages_access`, `tasks_access` (task lists included),
+`stickies_access`, `calendar_access` (`SpaceFeatureAccess`, part of the
+federated `features` block):
+
+| Level | Who may create / edit / delete |
+|---|---|
+| `open` | every writer seat (owner, admin, moderator, member) |
+| `moderated` | posts: a member's post queues on the **host** for content authority; content authority posts directly. Other features behave as `open` in v_42 (the settings UI does not offer `moderated` for them yet) |
+| `admin_only` | the owner and admins only — moderators and members are read-only for that feature (layout moves — a task reorder, a sticky drag — included) |
+
+Never gated: comments, reactions, poll votes, schedule answers, bazaar
+bids / offers, RSVPs and reminders, task comments, closing one's own poll
+or settling one's own listing.
+
+The decision is the pure `SpaceFeatures.access_decision(feature, role=,
+action=, owns_target=)` → `proceed` / `queue` / `deny`, over a
+`ContentAction` (`create`, `edit`, `delete`, `layout`):
+
+| Feature | create | edit | delete | layout |
+|---|---|---|---|---|
+| posts (every type, polls attached to one too) | create | own edit / a bazaar listing's title | own delete | — |
+| pages | create | update, resolve-conflict | delete | — |
+| tasks + lists | task / list create | any field, status change, column move, list rename | delete, archive / unarchive, list delete | reorder |
+| stickies | create | content, colour | delete | position move |
+| calendar | create | update | delete | — |
+
+**Every household enforces its own copy** — the host and each member
+household's stub alike (under `moderated`, a read-only seat keeps the
+edit / delete of its own item it always had). A local write is refused with 403 and the stable
+code `ACCESS_ADMIN_ONLY` (`{"feature": …}`) before it can federate
+(`ContentAccessMixin._gate`, in `SpaceService`, `SpaceTaskService`,
+`StickyService`, `SpaceCalendarService`, `SpacePageService`; the bot
+bridge gates a bot's post on its creator; poll / schedule-poll attach is a
+posts create). Two bridges honour the `posts` level for the feed card they
+mint: an announced calendar event is mirrored into the feed only when its
+creator could post straight away (`SpaceCalendarService` drops the
+announcement at the source, `CalendarFeedBridge` re-checks on every
+household by the creator's local or mirrored seat), and a finalised
+schedule poll adds no calendar event under an `admin_only` calendar.
+
+**Every receiver enforces it again.** Every collaborative write payload —
+page / task / task-list / sticky / calendar-event created / updated /
+deleted, and post created / updated / deleted — carries `actor_user_id`
+(the user who made the write) inside the sealed payload. After the event
+family's authorship rule (above), `SpaceAuthorship.access_admits` checks
+the receiver's own copy of the level:
+
+1. `open` → admitted.
+2. A **create's actor is its author** (`author` / `created_by`): a payload
+   `actor_user_id` that names anybody else is refused, so an admin
+   household cannot pass its plain member's row off as its admin's (by
+   naming the admin or by naming nobody). The one exception is a
+   moderation release, whose actor is the approver — only the host, where
+   the queue lives, may send one. The host relaying a remote member's
+   existing row (resume replay) is admitted, as `may_author` admits it.
+3. A named actor must hold a live writer seat on the **sending** household
+   (`acts_for`) — a household cannot borrow another household's admin. An
+   edit / delete of the actor's own row accepts any live seat (a demoted
+   author). An actor this household has no record of yet is held until the
+   roster gossip seats them (the pending-seat buffer), like a create's
+   author.
+4. `admin_only` → the actor is an admin as the sender records it
+   (`admin_as`; the host's owner, mirrored as a plain `member` seat of the
+   host, passes). An edit / delete naming **no** actor is refused from a
+   v_42 sender (every v_42 producer names one); from a household that
+   advertised less than v_42 — or never advertised — the sending household
+   must hold settings authority (`is_admin_household`). The shared bot
+   identity gets that household rule only on a **bot's own row** (an
+   admin-configured bot's post); as the actor of an edit / delete of
+   anybody else's row it is refused.
+5. `moderated` → admitted in v_42.
+
+**Residual — `proto_version` is self-declared.** A household is judged as
+"older" by what it advertises in `INSTANCE_CAPABILITIES_UPDATED`. One that
+holds an admin seat could under-advertise (claim v_41, or never advertise)
+to keep the household fallback for actor-less edits / deletes — only of
+rows `may_mutate` already lets it touch, never a create (always judged by
+its author). It gains nothing a household with an admin seat couldn't do by
+naming that admin, and an under-advertising household shows up in the
+admin's `PEERS_TOO_OLD` list whenever a level is raised.
+
+GFS-relayed public / global posts (`space_public_inbound`) are not
+re-checked against the level: they arrive inside an envelope signed by the
+**space authority** (the owner, or a delegated admin holding the space
+seed), which is settings authority already.
+
+A refusal logs at WARNING and changes nothing. A member household's §25.6
+sync stream is held to the same rule per record (its creator, as a
+`create`); the host's stream is taken whole.
+
+```mermaid
+sequenceDiagram
+    participant M as Member household (stub)
+    participant H as Host
+    participant O as Other member household
+    Note over M,O: pages_access = admin_only on every copy
+    M->>M: member creates a page
+    M-->>M: 403 ACCESS_ADMIN_ONLY (nothing federates)
+    H->>O: SPACE_PAGE_CREATED {created_by, actor_user_id: owner}
+    O->>O: authorship ✓ → access_admits: admin_as(owner) ✓ → stored
+    M->>O: forged SPACE_PAGE_UPDATED {actor_user_id: u-admin}
+    O->>O: acts_for(M, u-admin) ✗ → refused (WARNING)
+```
+
+**Older households.** A v_41 household neither enforces a level for its own
+people nor names an actor. Raising a level (any feature off `open`) while a
+member household is below v_42 answers 409 `PEERS_TOO_OLD`
+`{"households": [{instance_id, display_name, proto_version}]}`; the admin
+re-sends the PATCH with `"force": true` to apply it anyway. A host applying
+a forwarded remote-admin config edit re-runs the check with its own,
+complete view of the member households — only an explicit "apply anyway"
+(`force`, carried on the forwarded edit) overrides it there. When the host
+refuses, it applies the rest of the edit and keeps every access level as it
+was (WARNING); the forwarding admin's PATCH answered `forwarded: true`, so
+their settings page says the host decides and shows the level in force —
+the config broadcast that follows updates it either way.
 
 ## Cross-household admin promotion
 
@@ -2016,6 +2136,10 @@ shape — no per-event-type `_ROUTED` variants are needed.
 
 - `socialhome/services/space_service.py` — creation, membership
   mutations, permission guards.
+- `socialhome/services/content_access.py` — `ContentAccessMixin`, the
+  per-feature access gate every local write path asks;
+  `socialhome/federation/space_authorship.py` —
+  `SpaceAuthorship.access_admits`, the receiver's.
 - `socialhome/federation/route_discovery.py` —
   `RouteDiscoveryService`: BFS-flooded probe + per-target ephemeral
   caching + 5-min route cache; `cached_target_identity_pk` exposes the

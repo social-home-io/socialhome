@@ -5122,6 +5122,63 @@ def cmd_verify() -> None:
             else:
                 print("  b demotes a back to member ✓")
 
+    # 6f. ADMIN_ONLY space pages (v_42). Beta — the owner — sets the
+    #     space's ``pages`` access level to ``admin_only``. The level
+    #     federates with the space config, and Alpha's own household then
+    #     refuses Alice's page create locally with 403 ``ACCESS_ADMIN_ONLY``
+    #     (member stubs enforce it too — not just the host). Beta resets it
+    #     to ``open`` so a re-run starts clean.
+    if "space_id" in state:
+        host_i = state["instances"]["b"]
+        guest_i = state["instances"]["a"]
+        space_id = state["space_id"]
+        b_space = f"http://127.0.0.1:{host_i['port']}/api/spaces/{space_id}"
+        a_space = f"http://127.0.0.1:{guest_i['port']}/api/spaces/{space_id}"
+        s, body = _request(
+            b_space,
+            token=host_i["token"],
+            method="PATCH",
+            body={"features": {"pages_access": "admin_only"}},
+        )
+        if s != 200:
+            failures.append(f"b: set pages_access=admin_only -> {s} {body!r}")
+        else:
+            seen = None
+            for _ in range(15):
+                s, sp = _request(a_space, token=guest_i["token"])
+                seen = ((sp or {}).get("features") or {}).get("pages_access")
+                if s == 200 and seen == "admin_only":
+                    break
+                time.sleep(1)
+            if seen != "admin_only":
+                failures.append(
+                    f"a: space pages_access is {seen!r} (expected 'admin_only') "
+                    f"— the access level did not federate"
+                )
+            else:
+                s, body = _request(
+                    f"{a_space}/pages",
+                    token=guest_i["token"],
+                    method="POST",
+                    body={"title": "Not allowed", "content": "x"},
+                )
+                code = ((body or {}).get("error") or {}).get("code")
+                if s != 403 or code != "ACCESS_ADMIN_ONLY":
+                    failures.append(
+                        f"a: member page create under admin_only -> {s} {body!r} "
+                        f"(expected 403 ACCESS_ADMIN_ONLY) — v_42 local gate"
+                    )
+                else:
+                    print("  a refuses a member's page in an admin-only wiki ✓")
+            s, body = _request(
+                b_space,
+                token=host_i["token"],
+                method="PATCH",
+                body={"features": {"pages_access": "open"}},
+            )
+            if s != 200:
+                failures.append(f"b: reset pages_access=open -> {s} {body!r}")
+
     # 7. Capability handshake — every confirmed inner-ring peer should
     #    have announced their proto_version via
     #    ``INSTANCE_CAPABILITIES_UPDATED`` at startup. After ``up`` + a

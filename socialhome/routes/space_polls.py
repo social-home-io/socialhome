@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..app_keys import space_poll_service_key, space_repo_key
+from ..app_keys import space_poll_service_key, space_repo_key, space_service_key
+from ..domain.space import ContentAction
 from ..security import error_response
 from .base import BaseView
 
@@ -27,6 +28,14 @@ class _SpacePollBase(BaseView):
         space_repo = self.svc(space_repo_key)
         member = await space_repo.get_member(space_id, user_id)
         return member is not None
+
+    async def _require_post_access(self, space_id: str, user_id: str) -> None:
+        """Attaching a (schedule) poll is the second half of making a poll
+        post: the space's ``posts`` access level applies (§4.3 — 403
+        ``ACCESS_ADMIN_ONLY``). Votes and answers are never gated."""
+        await self.svc(space_service_key).require_content_access(
+            space_id, user_id, "posts", ContentAction.CREATE, owns_target=True
+        )
 
 
 # ─── Reply polls ────────────────────────────────────────────────────────
@@ -61,6 +70,7 @@ class SpacePollSummaryView(_SpacePollBase):
         if not await self._require_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         post_id = self.match("pid")
+        await self._require_post_access(space_id, ctx.user_id)
         body = await self.body()
         svc = self.svc(space_poll_service_key)
         try:
@@ -184,6 +194,7 @@ class SpaceSchedulePollCollectionView(_SpacePollBase):
         if not await self._require_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         post_id = self.match("pid")
+        await self._require_post_access(space_id, ctx.user_id)
         body = await self.body()
         svc = self.svc(space_poll_service_key)
         try:

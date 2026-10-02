@@ -11,7 +11,6 @@ need a writable seat (subscribers → 403) in a non-archived space (→ 403).
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -20,8 +19,8 @@ from aiohttp import web
 from ..app_keys import (
     event_bus_key,
     media_signer_key,
-    page_conflict_service_key,
     page_repo_key,
+    space_page_service_key,
     space_repo_key,
 )
 from ..domain.events import (
@@ -32,7 +31,6 @@ from ..domain.events import (
     PageEditLockReleased,
     PageUpdated,
 )
-from ..domain.space import SpacePermissionError
 from ..media_signer import (
     MediaUrlSigner,
     sign_media_urls_in_markdown,
@@ -46,7 +44,7 @@ from ..repositories.page_repo import (
     new_page,
 )
 from ..security import error_response
-from ..services.space_service import SpaceService
+from ..services.space_page_service import PageStaleError, snapshot_page_version
 from .base import BaseView
 
 
@@ -105,29 +103,6 @@ def _version_dict(v: PageVersion) -> dict:
         "space_id": v.space_id,
         "cover_image_url": v.cover_image_url,
     }
-
-
-async def _snapshot_version(repo, *, previous, editor_user_id: str) -> None:
-    """Persist ``previous`` as a row in ``page_edit_history``.
-
-    Called right before an edit or revert so the history always carries
-    a copy of the pre-change state — the ``versions`` list then shows
-    "what the page looked like before the current live body".
-    """
-    next_no = await repo.next_version_number(previous.id)
-    await repo.save_version(
-        PageVersion(
-            id=uuid.uuid4().hex,
-            page_id=previous.id,
-            version=next_no,
-            title=previous.title,
-            content=previous.content,
-            edited_by=editor_user_id,
-            edited_at=datetime.now(timezone.utc).isoformat(),
-            space_id=previous.space_id,
-            cover_image_url=previous.cover_image_url,
-        )
-    )
 
 
 class PageCollectionView(BaseView):
@@ -231,7 +206,7 @@ class PageDetailView(BaseView):
             kwargs["cover_image_url"] = strip_signature_query(body["cover_image_url"])
         updated = replace(p, **kwargs)
         await repo.save(updated, space_id=updated.space_id)
-        await _snapshot_version(repo, previous=p, editor_user_id=ctx.user_id)
+        await snapshot_page_version(repo, previous=p, editor_user_id=ctx.user_id)
         await bus.publish(
             PageUpdated(
                 page_id=updated.id,
@@ -377,7 +352,7 @@ class PageRevertView(BaseView):
         )
         if target is None:
             return error_response(404, "NOT_FOUND", f"Version {version_num} not found.")
-        await _snapshot_version(repo, previous=current, editor_user_id=ctx.user_id)
+        await snapshot_page_version(repo, previous=current, editor_user_id=ctx.user_id)
         now_iso = datetime.now(timezone.utc).isoformat()
         reverted = replace(
             current,
@@ -477,7 +452,8 @@ class PageDeleteCancelView(BaseView):
 
 
 class _SpacePagesBase(BaseView):
-    """Shared membership / feature / writer gate for space pages."""
+    """Shared membership / feature / writer gate for space pages. The page
+    rules themselves live in :class:`SpacePageService`."""
 
     async def _require_space_member(
         self, space_id: str, user_id: str, *, write: bool = False
@@ -492,17 +468,7 @@ class _SpacePagesBase(BaseView):
             return False
         await self.require_space_feature(space_id, "pages")
         if write:
-            space = await space_repo.get(space_id)
-            if space is None or space.dissolved:
-                raise KeyError(f"space {space_id!r} not found")
-            if space.archived:
-                raise SpacePermissionError(
-                    "space is archived (read-only) — unarchive it to make changes",
-                )
-            # Subscribers read pages; they never write them.
-            SpaceService.assert_writable_member(
-                member, action="edit pages", space=space
-            )
+            await self.svc(space_page_service_key).require_writer(space_id, user_id)
         return True
 
 
@@ -514,8 +480,7 @@ class SpacePageCollectionView(_SpacePagesBase):
         space_id = self.match("id")
         if not await self._require_space_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        repo = self.svc(page_repo_key)
-        pages = await repo.list(space_id=space_id)
+        pages = await self.svc(space_page_service_key).list(space_id)
         return web.json_response([_signed_page_dict(self.request, p) for p in pages])
 
     async def post(self) -> web.Response:
@@ -524,27 +489,14 @@ class SpacePageCollectionView(_SpacePagesBase):
         if not await self._require_space_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         await self.require_household_feature("pages")
-        repo = self.svc(page_repo_key)
-        bus = self.svc(event_bus_key)
         body = await self.body()
-        title = body.get("title", "").strip()
-        content = strip_signed_media_in_markdown(body.get("content", "")) or ""
-        if not title:
+        if not str(body.get("title") or "").strip():
             return error_response(422, "UNPROCESSABLE", "title is required.")
-        p = new_page(
-            title=title,
-            content=content,
-            created_by=ctx.user_id,
-            space_id=space_id,
-        )
-        await repo.save(p, space_id=p.space_id)
-        await bus.publish(
-            PageCreated(
-                page_id=p.id,
-                space_id=p.space_id,
-                title=p.title,
-                content=p.content,
-            )
+        p = await self.svc(space_page_service_key).create(
+            space_id,
+            actor_user_id=ctx.user_id,
+            title=body.get("title"),
+            content=body.get("content", ""),
         )
         return web.json_response(_signed_page_dict(self.request, p), status=201)
 
@@ -552,17 +504,12 @@ class SpacePageCollectionView(_SpacePagesBase):
 class SpacePageDetailView(_SpacePagesBase):
     """GET/PATCH/DELETE /api/spaces/{id}/pages/{pid}."""
 
-    async def _load(self, space_id: str, page_id: str):
-        return await self.svc(page_repo_key).get_space_page(page_id, space_id=space_id)
-
     async def get(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
         if not await self._require_space_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        p = await self._load(space_id, self.match("pid"))
-        if p is None:
-            return error_response(404, "NOT_FOUND", "Page not found.")
+        p = await self.svc(space_page_service_key).get(space_id, self.match("pid"))
         return web.json_response(_signed_page_dict(self.request, p))
 
     async def patch(self) -> web.Response:
@@ -570,21 +517,31 @@ class SpacePageDetailView(_SpacePagesBase):
         space_id = self.match("id")
         if not await self._require_space_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        repo = self.svc(page_repo_key)
-        bus = self.svc(event_bus_key)
-        p = await self._load(space_id, self.match("pid"))
-        if p is None:
-            return error_response(404, "NOT_FOUND", "Page not found.")
         body = await self.body()
-        base = body.get("base_updated_at")
-        if base and base != p.updated_at:
-            theirs_by = p.last_editor_user_id or p.created_by
-            await bus.publish(
+        if "title" in body and not str(body["title"] or "").strip():
+            return error_response(422, "UNPROCESSABLE", "title must not be empty.")
+        fields = {
+            k: body[k] for k in ("title", "content", "cover_image_url") if k in body
+        }
+        try:
+            updated = await self.svc(space_page_service_key).update(
+                space_id,
+                self.match("pid"),
+                actor_user_id=ctx.user_id,
+                base_updated_at=body.get("base_updated_at"),
+                **fields,
+            )
+        except PageStaleError as exc:
+            # Someone else saved since this editor loaded the page: the
+            # client turns the 409 into the side-by-side conflict UI
+            # (§23.72), and a WS ``page.conflict`` reaches any other tab.
+            p = exc.current
+            await self.svc(event_bus_key).publish(
                 PageConflictEmitted(
                     page_id=p.id,
                     space_id=p.space_id,
                     theirs=p.content,
-                    theirs_by=theirs_by,
+                    theirs_by=p.last_editor_user_id or p.created_by,
                 )
             )
             return web.json_response(
@@ -594,32 +551,6 @@ class SpacePageDetailView(_SpacePagesBase):
                 },
                 status=409,
             )
-        now_iso = datetime.now(timezone.utc).isoformat()
-        kwargs: dict = {
-            "updated_at": now_iso,
-            "last_editor_user_id": ctx.user_id,
-            "last_edited_at": now_iso,
-        }
-        if "title" in body:
-            title = body["title"].strip()
-            if not title:
-                return error_response(422, "UNPROCESSABLE", "title must not be empty.")
-            kwargs["title"] = title
-        if "content" in body:
-            kwargs["content"] = strip_signed_media_in_markdown(body["content"])
-        if "cover_image_url" in body:
-            kwargs["cover_image_url"] = strip_signature_query(body["cover_image_url"])
-        updated = replace(p, **kwargs)
-        await repo.save(updated, space_id=updated.space_id)
-        await _snapshot_version(repo, previous=p, editor_user_id=ctx.user_id)
-        await bus.publish(
-            PageUpdated(
-                page_id=updated.id,
-                space_id=updated.space_id,
-                title=updated.title,
-                content=updated.content,
-            )
-        )
         return web.json_response(_signed_page_dict(self.request, updated))
 
     async def delete(self) -> web.Response:
@@ -627,15 +558,9 @@ class SpacePageDetailView(_SpacePagesBase):
         space_id = self.match("id")
         if not await self._require_space_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        repo = self.svc(page_repo_key)
-        bus = self.svc(event_bus_key)
-        p = await self._load(space_id, self.match("pid"))
-        if p is None:
-            return error_response(404, "NOT_FOUND", "Page not found.")
-        await repo.delete(p.id, space_id=space_id)
-        # ``space_id`` is what routes the delete to the space's member
-        # households (``PageFederationOutbound`` drops a scope-less one).
-        await bus.publish(PageDeleted(page_id=p.id, space_id=space_id))
+        await self.svc(space_page_service_key).delete(
+            space_id, self.match("pid"), actor_user_id=ctx.user_id
+        )
         return web.json_response({"ok": True})
 
 
@@ -653,11 +578,9 @@ class SpacePageVersionView(_SpacePagesBase):
         space_id = self.match("id")
         if not await self._require_space_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        repo = self.svc(page_repo_key)
-        page_id = self.match("pid")
-        if await repo.get_space_page(page_id, space_id=space_id) is None:
-            return error_response(404, "NOT_FOUND", "Page not found.")
-        versions = await repo.list_versions(page_id, space_id=space_id)
+        versions = await self.svc(space_page_service_key).versions(
+            space_id, self.match("pid")
+        )
         return web.json_response([_version_dict(v) for v in versions])
 
 
@@ -666,7 +589,6 @@ class PageConflictView(_SpacePagesBase):
 
     async def post(self) -> web.Response:
         ctx = self.user
-        conflict_svc = self.svc(page_conflict_service_key)
         space_id = self.match("id")
         page_id = self.match("pid")
         if not await self._require_space_member(space_id, ctx.user_id, write=True):
@@ -686,10 +608,10 @@ class PageConflictView(_SpacePagesBase):
                 "UNPROCESSABLE",
                 "content is required when resolution is 'merged_content'.",
             )
-        new_body = await conflict_svc.resolve_conflict(
-            space_id=space_id,
-            page_id=page_id,
-            user_id=ctx.user_id,
+        new_body = await self.svc(space_page_service_key).resolve_conflict(
+            space_id,
+            page_id,
+            actor_user_id=ctx.user_id,
             resolution=resolution,
             merged_content=merged,
         )

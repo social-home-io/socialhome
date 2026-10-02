@@ -15,7 +15,8 @@ carries ``origin_instance_id`` was applied from a peer's federation event
 The payload is the shared wire form
 (:func:`socialhome.domain.task.task_to_wire_dict`). ``priority`` and
 ``labels`` (v_40) ride ungated inside the sealed payload: a v_39 receiver
-ignores the unknown keys.
+ignores the unknown keys. So does ``actor_user_id`` (v_42) — who made the
+write, which receivers check against the space's ``tasks`` access level.
 """
 
 from __future__ import annotations
@@ -69,7 +70,7 @@ class TaskFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_TASK_CREATED,
-            task_to_wire_dict(event.task, event.space_id),
+            _with_actor(task_to_wire_dict(event.task, event.space_id), event),
         )
 
     async def _on_updated(self, event: TaskUpdated) -> None:
@@ -78,7 +79,7 @@ class TaskFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_TASK_UPDATED,
-            task_to_wire_dict(event.task, event.space_id),
+            _with_actor(task_to_wire_dict(event.task, event.space_id), event),
         )
 
     async def _on_deleted(self, event: TaskDeleted) -> None:
@@ -87,11 +88,14 @@ class TaskFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_TASK_DELETED,
-            {
-                "id": event.task_id,
-                "list_id": event.list_id,
-                "space_id": event.space_id,
-            },
+            _with_actor(
+                {
+                    "id": event.task_id,
+                    "list_id": event.list_id,
+                    "space_id": event.space_id,
+                },
+                event,
+            ),
         )
 
     async def _on_list_created(self, event: TaskListCreated) -> None:
@@ -100,11 +104,14 @@ class TaskFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_TASK_LIST_CREATED,
-            task_list_to_wire_dict(
-                TaskList(
-                    id=event.list_id, name=event.name, created_by=event.created_by
+            _with_actor(
+                task_list_to_wire_dict(
+                    TaskList(
+                        id=event.list_id, name=event.name, created_by=event.created_by
+                    ),
+                    event.space_id,
                 ),
-                event.space_id,
+                event,
             ),
         )
 
@@ -114,7 +121,10 @@ class TaskFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_TASK_LIST_UPDATED,
-            {"id": event.list_id, "space_id": event.space_id, "name": event.name},
+            _with_actor(
+                {"id": event.list_id, "space_id": event.space_id, "name": event.name},
+                event,
+            ),
         )
 
     async def _on_list_deleted(self, event: TaskListDeleted) -> None:
@@ -123,7 +133,7 @@ class TaskFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_TASK_LIST_DELETED,
-            {"id": event.list_id, "space_id": event.space_id},
+            _with_actor({"id": event.list_id, "space_id": event.space_id}, event),
         )
 
     async def _fan_out(
@@ -144,3 +154,18 @@ class TaskFederationOutbound:
                 space_id,
                 exc,
             )
+
+
+def _with_actor(
+    payload: dict,
+    event: TaskCreated
+    | TaskUpdated
+    | TaskDeleted
+    | TaskListCreated
+    | TaskListUpdated
+    | TaskListDeleted,
+) -> dict:
+    """``payload`` plus the write's ``actor_user_id`` (v_42), when known."""
+    if event.actor_user_id:
+        payload["actor_user_id"] = event.actor_user_id
+    return payload

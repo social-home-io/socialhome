@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import EventReminderDue
@@ -42,6 +44,7 @@ async def env(tmp_dir):
     bus = EventBus()
     repo = SqliteSpaceCalendarRepo(db)
     svc = SpaceCalendarService(repo, bus)
+    svc.attach_space_repo(SqliteSpaceRepo(db))
     sched = SpaceCalendarReminderScheduler(
         calendar_repo=repo,
         bus=bus,

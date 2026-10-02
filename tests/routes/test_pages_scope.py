@@ -375,3 +375,40 @@ async def test_household_versions_never_include_space_history(client):
     rows = await r.json()
     assert [v["space_id"] for v in rows] == [None]
     assert "space-leak" not in await r.text()
+
+
+async def test_a_stale_space_page_patch_is_409_with_the_current_page(client):
+    """The space wiki keeps the household routes' optimistic concurrency:
+    a PATCH based on an old ``updated_at`` changes nothing and answers 409
+    ``stale_update`` with the page as it now is (§23.72)."""
+    admin = _auth(client._tok)
+    await _seed_space(client, "sp-c", client._uid, "owner")
+    r = await client.post(
+        "/api/spaces/sp-c/pages", json={"title": "Wiki", "content": "v1"}, headers=admin
+    )
+    first = await r.json()
+    r = await client.patch(
+        f"/api/spaces/sp-c/pages/{first['id']}", json={"content": "v2"}, headers=admin
+    )
+    assert r.status == 200
+    r = await client.patch(
+        f"/api/spaces/sp-c/pages/{first['id']}",
+        json={"content": "v3", "base_updated_at": first["updated_at"]},
+        headers=admin,
+    )
+    assert r.status == 409
+    body = await r.json()
+    assert body["error"] == "stale_update"
+    assert body["current"]["content"] == "v2"
+
+
+async def test_a_blank_space_page_title_is_422(client):
+    admin = _auth(client._tok)
+    await _seed_space(client, "sp-t", client._uid, "owner")
+    r = await client.post("/api/spaces/sp-t/pages", json={"title": "  "}, headers=admin)
+    assert r.status == 422
+    pid = await _create_space_page(client, "sp-t", admin)
+    r = await client.patch(
+        f"/api/spaces/sp-t/pages/{pid}", json={"title": ""}, headers=admin
+    )
+    assert r.status == 422

@@ -26,6 +26,11 @@ Two guards run on every mutation, in this order:
   alone; zones are moderator-only, and timetables are moderator-only *per
   user* (the named editor is an admin seated on the sender).
 
+A third guard runs on the collaborative families after authorship: the
+space's per-feature **access level** (§4.3, v_42) as this household holds
+it — an ``ADMIN_ONLY`` feature takes writes only from an admin, the named
+``actor_user_id`` bound to the sender (:meth:`SpaceAuthorship.access_admits`).
+
 A refusal is a WARNING; a benign no-op (a replayed delete, a status change
 for a listing already settled) is DEBUG — see :func:`log_not_applied`.
 """
@@ -69,6 +74,7 @@ from ...federation.owner_bound_id import (
     is_owner_bound,
     owner_bound_id_refused,
 )
+from ...federation.space_authorship import payload_actor
 from ...federation.space_scope import (
     log_cross_space_refusal,
     log_not_applied,
@@ -84,7 +90,7 @@ from ...domain.post import (
     BazaarStatus,
     Post,
 )
-from ...domain.space import SpaceZone
+from ...domain.space import ContentAction, SpaceZone
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
@@ -396,6 +402,10 @@ class SpaceContentInboundHandlers:
             what="task",
             row_id=task.id,
             claimed_author=task.created_by if existing is None else "",
+            feature="tasks",
+            action=ContentAction.CREATE if existing is None else ContentAction.EDIT,
+            # The held row's creator for an edit — never the payload's.
+            row_owner=task.created_by if existing is None else existing.created_by,
         ):
             return
         if not await self._task_repo.save(task, space_id=space_id):
@@ -460,7 +470,13 @@ class SpaceContentInboundHandlers:
             )
             return
         if not await self._collaborative_write_allowed(
-            event, space_id, what="task", row_id=task_id
+            event,
+            space_id,
+            what="task",
+            row_id=task_id,
+            feature="tasks",
+            action=ContentAction.DELETE,
+            row_owner=existing[1].created_by,
         ):
             return
         if not await self._task_repo.delete(task_id, space_id=space_id):
@@ -533,6 +549,9 @@ class SpaceContentInboundHandlers:
             what="task list",
             row_id=lst.id,
             claimed_author=lst.created_by if held is None else "",
+            feature="tasks",
+            action=ContentAction.CREATE if held is None else ContentAction.EDIT,
+            row_owner=lst.created_by if held is None else held[1].created_by,
         ):
             return
         if not await self._task_repo.save_list(lst, space_id=space_id):
@@ -587,7 +606,13 @@ class SpaceContentInboundHandlers:
             )
             return
         if not await self._collaborative_write_allowed(
-            event, space_id, what="task list", row_id=lst.id
+            event,
+            space_id,
+            what="task list",
+            row_id=lst.id,
+            feature="tasks",
+            action=ContentAction.EDIT,
+            row_owner=held[1].created_by,
         ):
             return
         renamed = TaskList(id=lst.id, name=lst.name, created_by=held[1].created_by)
@@ -631,7 +656,13 @@ class SpaceContentInboundHandlers:
             )
             return
         if not await self._collaborative_write_allowed(
-            event, space_id, what="task list", row_id=list_id
+            event,
+            space_id,
+            what="task list",
+            row_id=list_id,
+            feature="tasks",
+            action=ContentAction.DELETE,
+            row_owner=held[1].created_by,
         ):
             return
         # The FK cascade drops the list's tasks with it.
@@ -695,6 +726,9 @@ class SpaceContentInboundHandlers:
             what="page",
             row_id=page_id,
             claimed_author=page.created_by if existing is None else "",
+            feature="pages",
+            action=ContentAction.CREATE if existing is None else ContentAction.EDIT,
+            row_owner=page.created_by if existing is None else existing.created_by,
         ):
             return
         if not await self._page_repo.save(page, space_id=space_id):
@@ -721,7 +755,13 @@ class SpaceContentInboundHandlers:
             )
             return
         if not await self._collaborative_write_allowed(
-            event, space_id, what="page", row_id=page_id
+            event,
+            space_id,
+            what="page",
+            row_id=page_id,
+            feature="pages",
+            action=ContentAction.DELETE,
+            row_owner=existing.created_by,
         ):
             return
         if not await self._page_repo.delete(page_id, space_id=space_id):
@@ -783,6 +823,9 @@ class SpaceContentInboundHandlers:
             what="sticky",
             row_id=sticky_id,
             claimed_author=author if existing is None else "",
+            feature="stickies",
+            action=ContentAction.CREATE if existing is None else ContentAction.EDIT,
+            row_owner=author,
         ):
             return
         now_iso = str(
@@ -823,7 +866,13 @@ class SpaceContentInboundHandlers:
             )
             return
         if not await self._collaborative_write_allowed(
-            event, space_id, what="sticky", row_id=sticky_id
+            event,
+            space_id,
+            what="sticky",
+            row_id=sticky_id,
+            feature="stickies",
+            action=ContentAction.DELETE,
+            row_owner=existing.author,
         ):
             return
         if not await self._sticky_repo.delete(sticky_id, space_id=space_id):
@@ -904,6 +953,9 @@ class SpaceContentInboundHandlers:
             what="calendar event",
             row_id=event_id,
             claimed_author=created_by if is_new else "",
+            feature="calendar",
+            action=ContentAction.CREATE if is_new else ContentAction.EDIT,
+            row_owner=created_by if existing is None else existing[1].created_by,
         ):
             return
         if not await self._calendar_repo.save_event(ev, space_id=space_id):
@@ -945,7 +997,13 @@ class SpaceContentInboundHandlers:
             )
             return
         if not await self._collaborative_write_allowed(
-            event, space_id, what="calendar event", row_id=event_id
+            event,
+            space_id,
+            what="calendar event",
+            row_id=event_id,
+            feature="calendar",
+            action=ContentAction.DELETE,
+            row_owner=existing[1].created_by,
         ):
             return
         if not await self._calendar_repo.delete_event(event_id, space_id=space_id):
@@ -2500,11 +2558,38 @@ class SpaceContentInboundHandlers:
         *,
         what: str,
         row_id: str,
+        feature: str,
+        action: ContentAction,
         claimed_author: str = "",
+        row_owner: str = "",
     ) -> bool:
-        """Pages / stickies / calendar events: any writer household edits;
-        a new row's claimed author must be the sender's (or relayed by the
-        host)."""
+        """Tasks / task lists / pages / stickies / calendar events: any
+        writer household edits; a new row's claimed author must be the
+        sender's (or relayed by the host). Then the space's ``feature``
+        access level must admit the payload's ``actor_user_id`` (v_42,
+        :meth:`SpaceAuthorship.access_admits`)."""
+        if not await self._authorship_allows(
+            event, space_id, what=what, row_id=row_id, claimed_author=claimed_author
+        ):
+            return False
+        return await self._authorship.access_admits(
+            event,
+            space_id,
+            feature,
+            action,
+            actor=payload_actor(event),
+            row_owner=row_owner,
+        )
+
+    async def _authorship_allows(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        *,
+        what: str,
+        row_id: str,
+        claimed_author: str,
+    ) -> bool:
         if claimed_author:
             if await self._authorship.may_author(event, space_id, claimed_author):
                 return True

@@ -77,12 +77,17 @@ export function spacePeople(spaceId: string, { subscribers = false } = {}): Pers
 export interface SpaceTaskScopeOpts {
   spaceId: string
   store: TaskStore
-  /** Owner / admin / member of a live space. */
+  /** May write here: a writer seat, and an admin when the space keeps
+   *  tasks to its admins. */
   writable: boolean
   archived: boolean
+  /** ``tasks_access`` is ADMIN_ONLY (§4.3) — names the read-only reason. */
+  adminOnly?: boolean
 }
 
-export function spaceTaskScope({ spaceId, store, writable, archived }: SpaceTaskScopeOpts): TaskScope {
+export function spaceTaskScope({
+  spaceId, store, writable, archived, adminOnly = false,
+}: SpaceTaskScopeOpts): TaskScope {
   const canWrite = writable && !archived
   return {
     store,
@@ -92,7 +97,11 @@ export function spaceTaskScope({ spaceId, store, writable, archived }: SpaceTask
     loadPeople: () => { void loadSpaceMembers(spaceId) },
     canEdit: () => canWrite,
     canWrite,
-    readOnlyReason: () => t(archived ? 'tasks.board.read_only_archived' : 'tasks.board.read_only_space'),
+    readOnlyReason: () => (archived
+      ? t('tasks.board.read_only_archived')
+      : adminOnly
+        ? t('space.access.note.tasks')
+        : t('tasks.board.read_only_space')),
   }
 }
 

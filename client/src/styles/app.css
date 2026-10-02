@@ -6733,6 +6733,8 @@ body.sh-dm-thread-open .sh-messages {
   overflow: hidden;
 }
 .sh-sticky-canvas .sh-sticky__body { padding-top: 22px; }
+/* A read-only board's note: the text, nothing to press. */
+.sh-sticky__body--static { cursor: default; }
 .sh-sticky__text {
   display: block;
   white-space: pre-wrap;
@@ -15743,6 +15745,43 @@ a.sh-link-preview-link:focus-visible {
 .sh-form-fieldset legend {
   padding: 0 var(--sh-space-xs);
   font-weight: 600;
+}
+
+/* ─── Space settings → Who can contribute (§4.3 access levels) ──────── */
+.sh-access-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-xs) var(--sh-space-md);
+  padding: var(--sh-space-sm) 0;
+  border-bottom: 1px dashed var(--sh-border);
+}
+.sh-access-row__label { font-weight: 500; min-width: 8rem; }
+.sh-access-row .sh-access-row__select {
+  width: auto;
+  min-width: 12rem;
+  max-width: 100%;
+  flex: 0 1 16rem;
+}
+.sh-access-explain { margin: var(--sh-space-sm) 0 0; font-size: var(--sh-font-size-sm); }
+@media (max-width: 480px) {
+  .sh-access-row .sh-access-row__select { flex: 1 1 100%; min-width: 0; }
+}
+
+/* A read-only note where a feature's create / edit controls would be —
+ * "Only admins can add pages here" (an ADMIN_ONLY feature, §4.3). */
+.sh-access-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-xs);
+  margin: var(--sh-space-sm) 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px dashed var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
 }
 
 /* ─── Locale picker (§30.4) ─────────────────────────────────────────── */

@@ -884,3 +884,51 @@ async def test_post_without_link_preview_has_no_key():
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
     payload = federation.broadcast_to_space_members.call_args.args[2]
     assert "link_preview" not in payload
+
+
+async def test_post_writes_carry_their_actor():
+    """v_42: receivers judge a post write against the space's ``posts``
+    access level by who made it — a create's actor is its author, an edit
+    or delete names the editor (a moderator, say, not the author)."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    post = Post(
+        id="post-a",
+        author="uid-alice",
+        type=PostType.TEXT,
+        content="hi",
+        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    await bus.publish(PostEdited(post=post, space_id="sp-1", actor_user_id="uid-mod"))
+    await bus.publish(
+        PostDeleted(post_id="post-a", space_id="sp-1", actor_user_id="uid-admin")
+    )
+    actors = [
+        c.args[2].get("actor_user_id")
+        for c in federation.broadcast_to_space_members.call_args_list
+    ]
+    assert actors == ["uid-alice", "uid-mod", "uid-admin"]
+
+
+async def test_an_approved_posts_actor_is_its_approver():
+    """A post released from the moderation queue was made by its approver
+    — receivers check that seat against the space's posts level."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    post = Post(
+        id="post-q",
+        author="uid-bob",
+        type=PostType.TEXT,
+        content="queued",
+        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+    )
+    await bus.publish(
+        SpacePostCreated(post=post, space_id="sp-1", approved_by="uid-olga")
+    )
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert (payload["author"], payload["actor_user_id"]) == ("uid-bob", "uid-olga")

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import RSVPStatus
@@ -46,6 +48,7 @@ async def env(tmp_dir):
     e.space_repo = SqliteSpaceCalendarRepo(db)
     e.svc = CalendarService(e.repo, bus=e.bus)
     e.space_svc = SpaceCalendarService(e.space_repo, bus=e.bus)
+    e.space_svc.attach_space_repo(SqliteSpaceRepo(db))
     yield e
     await db.shutdown()
 
@@ -251,7 +254,9 @@ async def test_space_resolve_happy(env):
 
 async def test_space_update_event_unknown(env):
     with pytest.raises(KeyError):
-        await env.space_svc.update_event("ghost", space_id="sp1", summary="x")
+        await env.space_svc.update_event(
+            "ghost", actor_user_id="u-test", space_id="sp1", summary="x"
+        )
 
 
 async def test_space_update_event_empty_summary(env):
@@ -264,7 +269,9 @@ async def test_space_update_event_empty_summary(env):
         created_by="u1",
     )
     with pytest.raises(ValueError):
-        await env.space_svc.update_event(event.id, space_id="sp1", summary="   ")
+        await env.space_svc.update_event(
+            event.id, actor_user_id="u-test", space_id="sp1", summary="   "
+        )
 
 
 async def test_space_update_event_bad_range(env):
@@ -279,6 +286,7 @@ async def test_space_update_event_bad_range(env):
     with pytest.raises(ValueError):
         await env.space_svc.update_event(
             event.id,
+            actor_user_id="u-test",
             space_id="sp1",
             start="2026-01-01T02:00:00Z",
             end="2026-01-01T01:00:00Z",
@@ -296,6 +304,7 @@ async def test_space_update_event_full(env):
     )
     updated = await env.space_svc.update_event(
         event.id,
+        actor_user_id="u-test",
         space_id="sp1",
         summary="m2",
         all_day=True,

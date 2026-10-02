@@ -96,3 +96,27 @@ async def test_all_day_slot_uses_day_window(env):
     assert len(cal.created) == 1
     assert cal.created[0]["all_day"] is True
     assert cal.created[0]["start"].startswith("2026-05-01T00:00")
+
+
+async def test_an_admin_only_calendar_skips_a_members_finalised_slot(caplog):
+    """Finalising one's schedule poll is never gated, but the calendar entry
+    it would add is a calendar CREATE: under ADMIN_ONLY a member's poll just
+    adds no event — quietly, it is policy, not a failure."""
+    import logging
+
+    from socialhome.domain.space import AccessAdminOnlyError
+
+    class _AdminOnlyCalendar:
+        async def create_event(self, **kw):
+            raise AccessAdminOnlyError("calendar")
+
+    bus = EventBus()
+    ScheduleCalendarBridge(
+        bus=bus,
+        space_calendar_service=_AdminOnlyCalendar(),  # type: ignore[arg-type]
+        household_features=_FakeFeaturesService(enabled=True),  # type: ignore[arg-type]
+    ).wire()
+    with caplog.at_level(logging.DEBUG, logger="socialhome.services"):
+        await bus.publish(_finalized())
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("admin" in r.getMessage() for r in caplog.records)

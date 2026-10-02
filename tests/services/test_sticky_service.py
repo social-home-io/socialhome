@@ -59,10 +59,15 @@ async def test_household_crud_publishes_household_events(env):
     assert s.space_id is None
     assert [x.id for x in await env.svc.list(space_id=None)] == [s.id]
     up = await env.svc.update(
-        s.id, space_id=None, content="eggs", color="#FF0000", position_x=4
+        s.id,
+        space_id=None,
+        actor_user_id="alice",
+        content="eggs",
+        color="#FF0000",
+        position_x=4,
     )
     assert (up.content, up.color, up.position_x) == ("eggs", "#FF0000", 4.0)
-    await env.svc.delete(s.id, space_id=None)
+    await env.svc.delete(s.id, space_id=None, actor_user_id="alice")
     assert await env.repo.get(s.id) is None
     assert [type(e) for e in env.events] == [
         StickyCreated,
@@ -76,9 +81,11 @@ async def test_household_scope_never_touches_space_sticky(env):
     s = await env.svc.create(author="alice", content="secret", space_id="sp-a")
     env.events.clear()
     with pytest.raises(KeyError):
-        await env.svc.update(s.id, space_id=None, content="pwned")
+        await env.svc.update(
+            s.id, space_id=None, actor_user_id="alice", content="pwned"
+        )
     with pytest.raises(KeyError):
-        await env.svc.delete(s.id, space_id=None)
+        await env.svc.delete(s.id, space_id=None, actor_user_id="alice")
     assert (await env.repo.get(s.id)).content == "secret"
     assert env.events == []
 
@@ -89,9 +96,11 @@ async def test_space_scope_never_touches_another_space_or_household(env):
     env.events.clear()
     for sid in (other.id, home.id):
         with pytest.raises(KeyError):
-            await env.svc.update(sid, space_id="sp-a", content="x")
+            await env.svc.update(
+                sid, space_id="sp-a", actor_user_id="alice", content="x"
+            )
         with pytest.raises(KeyError):
-            await env.svc.delete(sid, space_id="sp-a")
+            await env.svc.delete(sid, space_id="sp-a", actor_user_id="alice")
     assert (await env.repo.get(other.id)).content == "b"
     assert (await env.repo.get(home.id)).content == "h"
     assert env.events == []
@@ -99,7 +108,9 @@ async def test_space_scope_never_touches_another_space_or_household(env):
 
 async def test_space_update_publishes_space_scoped_event(env):
     s = await env.svc.create(author="alice", content="a", space_id="sp-a")
-    await env.svc.update(s.id, space_id="sp-a", position_x=1, position_y=2)
+    await env.svc.update(
+        s.id, space_id="sp-a", actor_user_id="alice", position_x=1, position_y=2
+    )
     ev = env.events[-1]
     assert isinstance(ev, StickyUpdated)
     assert (ev.space_id, ev.position_x, ev.position_y) == ("sp-a", 1.0, 2.0)
@@ -115,7 +126,7 @@ async def test_update_validates_types(env):
         {"position_y": {"a": 1}},
     ):
         with pytest.raises(ValueError):
-            await env.svc.update(s.id, space_id=None, **kwargs)
+            await env.svc.update(s.id, space_id=None, actor_user_id="alice", **kwargs)
     assert (await env.repo.get(s.id)).content == "a"
 
 
@@ -159,7 +170,7 @@ async def test_require_writer_unknown_or_dissolved_space_is_keyerror(env):
 async def test_service_without_bus_is_silent(env):
     svc = StickyService(env.repo, None, space_repo=SqliteSpaceRepo(env.db))
     s = await svc.create(author="alice", content="x", space_id=None)
-    await svc.delete(s.id, space_id=None)
+    await svc.delete(s.id, space_id=None, actor_user_id="alice")
     assert env.events == []
 
 
@@ -170,7 +181,7 @@ async def test_color_must_be_hex_and_is_canonicalised(env):
     s = await env.svc.create(author="alice", content="x", space_id=None, color="#abc")
     assert s.color == "#AABBCC"
     with pytest.raises(ValueError):
-        await env.svc.update(s.id, space_id=None, color="url(x)")
+        await env.svc.update(s.id, space_id=None, actor_user_id="alice", color="url(x)")
     assert (await env.repo.get(s.id)).color == "#AABBCC"
 
 
@@ -191,4 +202,81 @@ async def test_content_capped_and_sanitised(env):
     s = await env.svc.create(author="alice", content="a‮b\x00", space_id=None)
     assert s.content == "ab"
     with pytest.raises(ValueError):
-        await env.svc.update(s.id, space_id=None, content="z" * 2001)
+        await env.svc.update(
+            s.id, space_id=None, actor_user_id="alice", content="z" * 2001
+        )
+
+
+# ─── ADMIN_ONLY stickies (§4.3 feature access levels) ───────────────────
+
+
+async def _admin_only_board(env):
+    for uid, role in (("adm", "admin"), ("mod", "moderator")):
+        await env.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, ?)",
+            ("sp-a", uid, role),
+        )
+    note = await env.svc.create(author="mem", content="mine", space_id="sp-a")
+    await env.db.enqueue(
+        "UPDATE spaces SET stickies_access='admin_only' WHERE id='sp-a'"
+    )
+    env.events.clear()
+    return note
+
+
+@pytest.mark.parametrize("actor", ["mem", "mod"])
+@pytest.mark.parametrize(
+    "op",
+    ["create", "edit_content", "edit_color", "move", "delete"],
+)
+async def test_admin_only_board_refuses_members_and_moderators(env, actor, op):
+    from socialhome.domain.space import AccessAdminOnlyError
+
+    note = await _admin_only_board(env)
+    writes = {
+        "create": lambda: env.svc.create(author=actor, content="x", space_id="sp-a"),
+        "edit_content": lambda: env.svc.update(
+            note.id, space_id="sp-a", actor_user_id=actor, content="changed"
+        ),
+        "edit_color": lambda: env.svc.update(
+            note.id, space_id="sp-a", actor_user_id=actor, color="#00FF00"
+        ),
+        "move": lambda: env.svc.update(
+            note.id, space_id="sp-a", actor_user_id=actor, position_x=50
+        ),
+        "delete": lambda: env.svc.delete(note.id, space_id="sp-a", actor_user_id=actor),
+    }
+    with pytest.raises(AccessAdminOnlyError):
+        await writes[op]()
+    held = await env.repo.get(note.id)
+    assert held is not None
+    assert (held.content, held.position_x) == ("mine", note.position_x)
+    assert [s.id for s in await env.svc.list(space_id="sp-a")] == [note.id]
+    assert env.events == []
+
+
+@pytest.mark.parametrize("actor", ["alice", "adm"])
+async def test_admin_only_board_lets_admins_write(env, actor):
+    note = await _admin_only_board(env)
+    created = await env.svc.create(author=actor, content="new", space_id="sp-a")
+    moved = await env.svc.update(
+        note.id, space_id="sp-a", actor_user_id=actor, position_x=9, content="ok"
+    )
+    assert (moved.content, moved.position_x) == ("ok", 9.0)
+    await env.svc.delete(created.id, space_id="sp-a", actor_user_id=actor)
+    assert await env.repo.get(created.id) is None
+
+
+async def test_the_household_board_has_no_access_level(env):
+    """The household board is not a space: nothing to gate."""
+    await _admin_only_board(env)
+    s = await env.svc.create(author="mem", content="hi", space_id=None)
+    await env.svc.update(s.id, space_id=None, actor_user_id="mem", content="yo")
+    await env.svc.delete(s.id, space_id=None, actor_user_id="mem")
+
+
+async def test_space_sticky_events_name_their_actor(env):
+    s = await env.svc.create(author="mem", content="a", space_id="sp-a")
+    await env.svc.update(s.id, space_id="sp-a", actor_user_id="alice", content="b")
+    await env.svc.delete(s.id, space_id="sp-a", actor_user_id="alice")
+    assert [e.actor_user_id for e in env.events] == ["mem", "alice", "alice"]

@@ -196,3 +196,102 @@ async def test_compat_unknown_space_404(client):
         "/api/spaces/does-not-exist/compat", headers=_auth(client._admin_token)
     )
     assert resp.status == 404
+
+
+# ─── PATCH features: PEERS_TOO_OLD (§4.3, v_42) ──────────────────────────
+
+
+async def test_raising_an_access_level_with_an_old_household_is_409(client):
+    """A member household below v_42 neither enforces an access level for
+    its people nor names the actor of its writes: the admin is told which
+    households lag, and nothing changes until they apply it anyway."""
+    sid = await _make_space(client)
+    await _seed_member_household(
+        client,
+        sid,
+        instance_id="peer-41",
+        display_name="Granny's house",
+        proto_version=41,
+        capabilities_seen_at="2026-06-01T00:00:00+00:00",
+    )
+    admin = _auth(client._admin_token)
+    resp = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"tasks_access": "admin_only"}},
+        headers=admin,
+    )
+    assert resp.status == 409, await resp.text()
+    err = (await resp.json())["error"]
+    assert err["code"] == "PEERS_TOO_OLD"
+    assert err["households"] == [
+        {
+            "instance_id": "peer-41",
+            "display_name": "Granny's house",
+            "proto_version": 41,
+        }
+    ]
+    space = await (await client.get(f"/api/spaces/{sid}", headers=admin)).json()
+    assert space["features"]["tasks_access"] == "open"
+
+    resp = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"tasks_access": "admin_only"}, "force": True},
+        headers=admin,
+    )
+    assert resp.status == 200, await resp.text()
+    space = await (await client.get(f"/api/spaces/{sid}", headers=admin)).json()
+    assert space["features"]["tasks_access"] == "admin_only"
+
+
+async def test_other_feature_edits_are_never_held_up(client):
+    sid = await _make_space(client)
+    await _seed_member_household(
+        client,
+        sid,
+        instance_id="peer-41",
+        display_name="Granny's house",
+        proto_version=41,
+        capabilities_seen_at="2026-06-01T00:00:00+00:00",
+    )
+    resp = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"bazaar": False}, "name": "Renamed"},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 200, await resp.text()
+
+
+async def test_an_edit_forwarded_to_the_host_says_so(client):
+    """On a space hosted by another household the PATCH only forwards: the
+    answer carries ``forwarded`` so the SPA never shows it as applied."""
+    from unittest.mock import AsyncMock, patch
+
+    from socialhome.services.space_service import SpaceService
+
+    db = client._db
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-remote', 'R', 'inst-host', 'h', ?)",
+        ("ab" * 32,),
+    )
+    row = await db.fetchone("SELECT user_id FROM users WHERE username='pascal'")
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES('sp-remote', ?, 'admin')",
+        (row["user_id"],),
+    )
+    fwd = AsyncMock(return_value=True)
+    with patch.object(SpaceService, "_forward_admin_action_if_remote", fwd):
+        resp = await client.patch(
+            "/api/spaces/sp-remote",
+            json={"features": {"tasks_access": "admin_only"}},
+            headers=_auth(client._admin_token),
+        )
+    assert resp.status == 200, await resp.text()
+    assert (await resp.json())["forwarded"] is True
+    assert fwd.await_count == 1
+    sid = await _make_space(client)
+    resp = await client.patch(
+        f"/api/spaces/{sid}", json={"name": "Local"}, headers=_auth(client._admin_token)
+    )
+    assert (await resp.json()).get("forwarded") is False

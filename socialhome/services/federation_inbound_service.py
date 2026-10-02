@@ -67,6 +67,7 @@ from ..domain.post import (
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..domain.presence import truncate_coord
 from ..domain.space import (
+    ContentAction,
     Space,
     SpaceRole,
     role_change_event_type,
@@ -99,7 +100,7 @@ from ..federation.owner_bound_id import (
     is_owner_bound,
     owner_bound_id_refused,
 )
-from ..federation.space_authorship import SpaceAuthorship
+from ..federation.space_authorship import SpaceAuthorship, payload_actor
 from ..federation.space_scope import (
     log_cross_space_refusal,
     log_not_applied,
@@ -143,6 +144,7 @@ if TYPE_CHECKING:
     from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..domain.federation import FederationEvent
     from ..repositories.bazaar_repo import AbstractBazaarRepo
+    from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.conversation_repo import AbstractConversationRepo
     from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.moment_repo import AbstractMomentRepo
@@ -409,6 +411,7 @@ class FederationInboundService(ProtectionGateMixin):
         gallery_repo: "AbstractGalleryRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
         pending_seat_buffer: "PendingSeatBuffer | None" = None,
+        authorship_federation_repo: "AbstractFederationRepo | None" = None,
         space_cover_repo: "AbstractSpaceCoverRepo | None" = None,
         space_icon_repo: "AbstractSpaceIconRepo | None" = None,
     ) -> None:
@@ -451,6 +454,7 @@ class FederationInboundService(ProtectionGateMixin):
                 remote_member_repo=space_remote_member_repo,
                 user_repo=user_repo,
                 pending=pending_seat_buffer,
+                federation_repo=authorship_federation_repo,
             )
             if space_remote_member_repo is not None
             else None
@@ -1688,6 +1692,19 @@ class FederationInboundService(ProtectionGateMixin):
                 user_id=post.author,
             )
             return
+        # §4.3 (v_42): the space's ``posts`` level, by who made the write.
+        if not await authorship.access_admits(
+            event,
+            space_id,
+            "posts",
+            ContentAction.CREATE if existing is None else ContentAction.EDIT,
+            actor=payload_actor(event),
+            row_owner=post.author,
+            # A new post's actor is its author — or, from the host, the
+            # moderator / admin who released it from the queue.
+            release_ok=existing is None,
+        ):
+            return
         raw_relay = event.payload.get("public_relay")
         public_relay = raw_relay if isinstance(raw_relay, dict) else None
         if await self._space_post_repo.save(space_id, post) is None:
@@ -1996,7 +2013,9 @@ class FederationInboundService(ProtectionGateMixin):
         gated_space_id = resolve_space_id(event)
         if not gated_space_id:
             return
-        if not await self._owned_post_mutation_allowed(event, gated_space_id, post_id):
+        if not await self._owned_post_mutation_allowed(
+            event, gated_space_id, post_id, action=ContentAction.EDIT
+        ):
             return
         # Same card rule as the author's household applied to its own copy
         # (``card_survives_edit``) — derived from content both sides hold.
@@ -2050,7 +2069,9 @@ class FederationInboundService(ProtectionGateMixin):
         space_id = resolve_space_id(event)
         if not space_id:
             return
-        if not await self._owned_post_mutation_allowed(event, space_id, post_id):
+        if not await self._owned_post_mutation_allowed(
+            event, space_id, post_id, action=ContentAction.DELETE
+        ):
             return
         moderated_by = event.payload.get("moderated_by")
         if not await self._space_post_repo.soft_delete(
@@ -2275,10 +2296,13 @@ class FederationInboundService(ProtectionGateMixin):
         event: "FederationEvent",
         space_id: str,
         post_id: str,
+        *,
+        action: ContentAction,
     ) -> bool:
         """Edit / delete of a space post: the author's household or a
         moderator (the federated "author or space admin" rule of
-        ``SpaceService.edit_post`` / ``delete_post``).
+        ``SpaceService.edit_post`` / ``delete_post``) — and then the
+        space's ``posts`` access level for the payload's actor (v_42).
 
         Also sorts the benign no-ops (unknown here, already deleted) to
         DEBUG from the refusals (another space, not the author's
@@ -2311,7 +2335,14 @@ class FederationInboundService(ProtectionGateMixin):
                 user_id=post.author,
             )
             return False
-        return True
+        return await authorship.access_admits(
+            event,
+            space_id,
+            "posts",
+            action,
+            actor=payload_actor(event),
+            row_owner=post.author,
+        )
 
     async def _owned_comment_mutation_allowed(
         self,

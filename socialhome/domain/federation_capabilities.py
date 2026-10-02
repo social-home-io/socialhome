@@ -639,7 +639,24 @@ from __future__ import annotations
 #:   household is below v_41 is refused ("household must upgrade"); other
 #:   behind households see the moderator as a member and refuse their
 #:   moderation edits, which only degrades content authority there.
-OURS: int = 41
+#: * **v_42** (2026-10-02) — per-feature access levels enforced everywhere
+#:   (§4.3). ``ADMIN_ONLY`` on posts / pages / tasks (lists too) / stickies /
+#:   calendar now holds on EVERY household: each one gates its own users'
+#:   writes against its copy of the space's features (member households'
+#:   stubs included — no more "the host decides"), and every receiver
+#:   re-checks inbound writes and non-host sync records
+#:   (``SpaceAuthorship.access_admits``). Every collaborative write payload
+#:   (page / task / task list / sticky / calendar created / updated /
+#:   deleted, post updated / deleted, post created too) carries the
+#:   ``actor_user_id`` who made it, inside the sealed payload, so the
+#:   receiver can bind it to the sender and check its seat. **Ungated,
+#:   fallback**: older receivers ignore the field and don't enforce; a
+#:   payload without an actor (a v_41 sender) is judged by the sending
+#:   household's settings authority. Because a behind household lets its
+#:   own people write locally (and its writes reach every member by sync),
+#:   raising a level while a member household is below v_42 answers 409
+#:   ``PEERS_TOO_OLD`` until the admin applies it anyway (``force``).
+OURS: int = 42
 
 
 class FederationCapability:
@@ -1007,6 +1024,12 @@ class FederationCapability:
     #: ``role: "member"`` instead of ``"moderator"``.
     MIN_FOR_SPACE_MODERATOR_ROLE = 41
 
+    #: Minimum proto_version that enforces per-feature access levels on its
+    #: own users' writes and names ``actor_user_id`` on collaborative writes
+    #: (v_42). A features PATCH that raises a level while a member household
+    #: is below it answers 409 ``PEERS_TOO_OLD`` unless forced.
+    MIN_FOR_CONTENT_ACCESS_ENFORCEMENT = 42
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1127,6 +1150,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
         "Space moderators",
     ),
+    (
+        FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT,
+        "Admin-only space features",
+    ),
 ]
 
 
@@ -1193,6 +1220,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_SPACE_TIMETABLE,
         FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS,
         FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+        FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT,
     }
 )
 

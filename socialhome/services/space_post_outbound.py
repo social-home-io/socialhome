@@ -163,6 +163,10 @@ class SpacePostOutbound:
             "id": post.id,
             "space_id": event.space_id,
             "author": post.author,
+            # v_42: who made the write — receivers check it against the
+            # space's ``posts`` access level. A create's actor is its author,
+            # or the moderator / admin who released it from the queue.
+            "actor_user_id": event.approved_by or post.author,
             "type": post.type.value,
             "content": post.content,
             "media_url": post.media_url,
@@ -305,6 +309,9 @@ class SpacePostOutbound:
             "space_id": event.space_id,
             "content": post.content,
         }
+        if event.actor_user_id:
+            # v_42: the editor (the author, or a moderator / admin).
+            payload["actor_user_id"] = event.actor_user_id
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,
@@ -328,6 +335,8 @@ class SpacePostOutbound:
             "post_id": event.post_id,
             "space_id": event.space_id,
         }
+        if event.actor_user_id:
+            payload["actor_user_id"] = event.actor_user_id
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,

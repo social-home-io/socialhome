@@ -17,7 +17,7 @@ from PIL import Image
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import SpaceConfigChanged
+from socialhome.domain.events import SpaceConfigChanged, SpacePostCreated
 from socialhome.domain.post import PostType
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -795,22 +795,23 @@ async def test_remote_stub_moderated_post_proceeds_not_queued(stack):
     assert await stack.space_repo.list_moderation_queue(sid) == []
 
 
-async def test_remote_stub_admin_only_post_proceeds(stack):
-    """On a REMOTE stub with ADMIN_ONLY posts_access, a non-admin member's post
-    no longer raises — the host applies its own policy to content it hosts."""
+async def test_remote_stub_admin_only_post_is_refused_locally(stack):
+    """A member household's stub enforces the host's ADMIN_ONLY posts level
+    from its own federated features — the member's post never leaves."""
+    from socialhome.domain.space import AccessAdminOnlyError
+
     sid, uid = await _seat_remote_space_with_posts_access(
         stack, actor="bob", posts_access=SpaceFeatureAccess.ADMIN_ONLY
     )
 
-    result = await stack.space_svc.create_post(
-        sid,
-        author_user_id=uid,
-        type=PostType.TEXT,
-        content="remote member post",
-    )
-
-    assert result is not None
-    assert result.content == "remote member post"
+    with pytest.raises(AccessAdminOnlyError):
+        await stack.space_svc.create_post(
+            sid,
+            author_user_id=uid,
+            type=PostType.TEXT,
+            content="remote member post",
+        )
+    assert await stack.space_post_repo.list_feed(sid) == []
 
 
 async def test_transfer_ownership(stack):
@@ -3671,6 +3672,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3696,6 +3698,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     )
 
 
@@ -3733,6 +3736,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3785,6 +3789,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -8047,3 +8052,308 @@ async def test_a_remote_moderator_kick_reaches_a_v25_peer(stack):
             left.kwargs["min_proto_version"]
             == FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP
         )
+
+
+# ─── ADMIN_ONLY posts: edits and deletes (§4.3) ───────────────────────────
+
+
+async def _admin_only_posts(stack, space):
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY),
+    )
+
+
+async def test_admin_only_refuses_a_member_editing_their_own_post(stack):
+    from socialhome.domain.space import AccessAdminOnlyError
+
+    space, u = await _space_with_roles(stack)
+    post = await stack.space_svc.create_post(
+        space.id, author_user_id=u["bob"].user_id, type=PostType.TEXT, content="v1"
+    )
+    await _admin_only_posts(stack, space)
+    with pytest.raises(AccessAdminOnlyError):
+        await stack.space_svc.edit_post(
+            post.id, editor_user_id=u["bob"].user_id, new_content="v2"
+        )
+    with pytest.raises(AccessAdminOnlyError):
+        await stack.space_svc.delete_post(post.id, actor_user_id=u["bob"].user_id)
+    _sid, row = await stack.space_post_repo.get(post.id)
+    assert row.content == "v1"
+    assert not row.deleted
+
+
+async def test_admin_only_refuses_a_moderator_on_others_posts(stack):
+    from socialhome.domain.space import AccessAdminOnlyError
+
+    space, u = await _space_with_roles(stack)
+    post = await stack.space_svc.create_post(
+        space.id, author_user_id=u["bob"].user_id, type=PostType.TEXT, content="v1"
+    )
+    await _admin_only_posts(stack, space)
+    with pytest.raises(AccessAdminOnlyError):
+        await stack.space_svc.edit_post(
+            post.id, editor_user_id=u["mo"].user_id, new_content="tidied"
+        )
+    with pytest.raises(AccessAdminOnlyError):
+        await stack.space_svc.delete_post(post.id, actor_user_id=u["mo"].user_id)
+    _sid, row = await stack.space_post_repo.get(post.id)
+    assert row.content == "v1"
+    assert not row.deleted
+
+
+async def test_admin_only_lets_admins_and_the_owner_work_posts(stack):
+    space, u = await _space_with_roles(stack)
+    await _admin_only_posts(stack, space)
+    for name in ("anna", "olga"):
+        post = await stack.space_svc.create_post(
+            space.id, author_user_id=u[name].user_id, type=PostType.TEXT, content="a"
+        )
+        assert post is not None
+        edited = await stack.space_svc.edit_post(
+            post.id, editor_user_id=u[name].user_id, new_content="b"
+        )
+        assert edited.content == "b"
+        await stack.space_svc.delete_post(post.id, actor_user_id=u[name].user_id)
+        _sid, row = await stack.space_post_repo.get(post.id)
+        assert row.deleted
+
+
+async def test_admin_only_still_allows_comments_and_reactions(stack):
+    """Comments and reactions are never gated by the posts level."""
+    space, u = await _space_with_roles(stack)
+    post = await stack.space_svc.create_post(
+        space.id, author_user_id=u["anna"].user_id, type=PostType.TEXT, content="hi"
+    )
+    await _admin_only_posts(stack, space)
+    comment = await stack.space_svc.add_comment(
+        post.id, author_user_id=u["bob"].user_id, content="nice"
+    )
+    assert comment.content == "nice"
+    await stack.space_svc.add_reaction(post.id, user_id=u["bob"].user_id, emoji="👍")
+
+
+async def test_require_content_access_exposes_the_gate(stack):
+    """Sibling services (bazaar) gate through the space service."""
+    from socialhome.domain.space import AccessAdminOnlyError, ContentAction
+
+    space, u = await _space_with_roles(stack)
+    await _admin_only_posts(stack, space)
+    with pytest.raises(AccessAdminOnlyError):
+        await stack.space_svc.require_content_access(
+            space.id, u["bob"].user_id, "posts", ContentAction.EDIT, owns_target=True
+        )
+    await stack.space_svc.require_content_access(
+        space.id, u["olga"].user_id, "posts", ContentAction.EDIT, owns_target=True
+    )
+
+
+async def test_post_edit_and_delete_events_name_the_actor(stack):
+    from socialhome.domain.events import PostDeleted, PostEdited
+
+    space, u = await _space_with_roles(stack)
+    seen: list = []
+    stack.space_svc._bus.subscribe(PostEdited, seen.append)
+    stack.space_svc._bus.subscribe(PostDeleted, seen.append)
+    post = await stack.space_svc.create_post(
+        space.id, author_user_id=u["bob"].user_id, type=PostType.TEXT, content="a"
+    )
+    await stack.space_svc.edit_post(
+        post.id, editor_user_id=u["mo"].user_id, new_content="b"
+    )
+    await stack.space_svc.delete_post(post.id, actor_user_id=u["olga"].user_id)
+    assert [e.actor_user_id for e in seen] == [u["mo"].user_id, u["olga"].user_id]
+
+
+# ─── PEERS_TOO_OLD: raising a level a member household can't enforce ─────
+
+
+async def _space_with_old_peer(stack):
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    stack.space_svc._federation_repo = _FakeFedRepo(
+        [
+            _member(
+                "peer-old",
+                FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT - 1,
+                seen=True,
+                name="Granny's house",
+            ),
+            _member(
+                "peer-new",
+                FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT,
+                seen=True,
+            ),
+            _member("peer-mystery", 1, seen=False),  # mid-handshake: not counted
+        ]
+    )
+    return space
+
+
+async def test_raising_a_level_with_an_old_member_household_is_refused(stack):
+    from socialhome.domain.space import PeersTooOldError
+
+    space = await _space_with_old_peer(stack)
+    with pytest.raises(PeersTooOldError) as info:
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="anna",
+            features=SpaceFeatures(tasks_access=SpaceFeatureAccess.ADMIN_ONLY),
+        )
+    assert info.value.households == [
+        {
+            "instance_id": "peer-old",
+            "display_name": "Granny's house",
+            "proto_version": 41,
+        }
+    ]
+    got = await stack.space_repo.get(space.id)
+    assert got.features.tasks_access is SpaceFeatureAccess.OPEN
+
+
+async def test_force_applies_the_level_anyway(stack):
+    space = await _space_with_old_peer(stack)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(pages_access=SpaceFeatureAccess.ADMIN_ONLY),
+        force=True,
+    )
+    got = await stack.space_repo.get(space.id)
+    assert got.features.pages_access is SpaceFeatureAccess.ADMIN_ONLY
+
+
+async def test_relaxing_or_keeping_levels_never_asks(stack):
+    """Back to OPEN, or an edit that leaves the levels alone, has nothing an
+    older household could fail to enforce."""
+    space = await _space_with_old_peer(stack)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(pages_access=SpaceFeatureAccess.ADMIN_ONLY),
+        force=True,
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(
+            pages_access=SpaceFeatureAccess.ADMIN_ONLY, bazaar=False
+        ),
+    )
+    await stack.space_svc.update_config(
+        space.id, actor_username="anna", features=SpaceFeatures()
+    )
+    await stack.space_svc.update_config(space.id, actor_username="anna", name="New")
+
+
+async def test_up_to_date_households_never_block(stack):
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    stack.space_svc._federation_repo = _FakeFedRepo(
+        [_member("peer-new", 42, seen=True)]
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+
+
+async def test_a_moderator_cannot_approve_into_an_admin_only_feed(stack):
+    """A post queued while MODERATED cannot slip in once the space keeps
+    posts to its admins: approving it is creating it. An admin still may,
+    and the approved post federates with the approver as its actor."""
+    from socialhome.domain.space import AccessAdminOnlyError
+
+    space, u = await _space_with_roles(stack)
+    await _moderated(stack, space)
+    await stack.space_svc.create_post(
+        space.id, author_user_id=u["bob"].user_id, type=PostType.TEXT, content="q"
+    )
+    (item,) = await stack.space_svc.list_pending_moderation(
+        space.id, actor_username="anna"
+    )
+    await _admin_only_posts(stack, space)
+    with pytest.raises(AccessAdminOnlyError):
+        await stack.space_svc.approve_moderation_item(
+            space.id, item.id, actor_username="mo"
+        )
+    created: list = []
+    stack.space_svc._bus.subscribe(SpacePostCreated, created.append)
+    post = await stack.space_svc.approve_moderation_item(
+        space.id, item.id, actor_username="olga"
+    )
+    assert post.author == u["bob"].user_id
+    assert [e.approved_by for e in created] == [u["olga"].user_id]
+
+
+async def test_the_host_rechecks_a_forwarded_access_raise(stack, caplog):
+    """A remote admin's household may not be paired with every member
+    household: the host re-runs PEERS_TOO_OLD with its own view, and only
+    a forwarded "apply anyway" (``force``) overrides it."""
+    import logging
+
+    space = await _space_with_old_peer(stack)
+    params = {
+        "features": {"tasks_access": "admin_only", "bazaar": False},
+        "name": "Renamed",
+    }
+    with caplog.at_level(logging.WARNING):
+        await stack.space_svc.apply_approved_admin_action(
+            space.id, action="update_config", params=params
+        )
+    got = await stack.space_repo.get(space.id)
+    assert got.features.tasks_access is SpaceFeatureAccess.OPEN
+    # The rest of the edit is not lost with it.
+    assert got.name == "Renamed"
+    assert got.features.bazaar is False
+    assert any("below v_42" in r.getMessage() for r in caplog.records)
+    await stack.space_svc.apply_approved_admin_action(
+        space.id, action="update_config", params={**params, "force": True}
+    )
+    got = await stack.space_repo.get(space.id)
+    assert got.features.tasks_access is SpaceFeatureAccess.ADMIN_ONLY
+
+
+async def test_a_forwarded_apply_anyway_carries_force(stack):
+    """The remote admin's "apply anyway" rides the forwarded edit (the host
+    re-checks PEERS_TOO_OLD without it)."""
+    from unittest.mock import AsyncMock, patch
+
+    from socialhome.domain.space import SpaceMember, SpaceRole
+
+    sid, uid = await _seat_remote_space_with_posts_access(
+        stack, actor="ada", posts_access=SpaceFeatureAccess.OPEN
+    )
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=sid, user_id=uid, role=SpaceRole.ADMIN, joined_at="2025-01-01"
+        )
+    )
+    current = (await stack.space_repo.get(sid)).features
+    raised = SpaceFeatures.from_wire_dict(
+        {"pages_access": "admin_only"}, defaults=current
+    )
+    fwd = AsyncMock(return_value=True)
+    with patch.object(type(stack.space_svc), "_forward_admin_action_if_remote", fwd):
+        await stack.space_svc.update_config(
+            sid, actor_username="ada", features=raised, force=True
+        )
+        forced = fwd.call_args.args[-1]
+        await stack.space_svc.update_config(sid, actor_username="ada", features=raised)
+        plain = fwd.call_args.args[-1]
+    assert forced == {"features": {"pages_access": "admin_only"}, "force": True}
+    assert plain == {"features": {"pages_access": "admin_only"}}
+
+
+async def test_config_edits_forward_answers_for_a_remote_hosted_space(stack):
+    sid, _uid = await _seat_remote_space_with_posts_access(
+        stack, actor="ada", posts_access=SpaceFeatureAccess.OPEN
+    )
+    assert await stack.space_svc.config_edits_forward(sid) is True
+    await stack.provision_user("anna", is_admin=True)
+    own = await stack.space_svc.create_space(owner_username="anna", name="Mine")
+    assert await stack.space_svc.config_edits_forward(own.id) is False

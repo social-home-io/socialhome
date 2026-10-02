@@ -7,9 +7,10 @@ Covers the core space lifecycle a v1 household needs:
   with an atomic ``config_sequence`` bump for federation ordering.
 * Member management — add / remove / set-role / list, plus bans.
 * Invites (create token, accept), join requests (open→approve/deny).
-* Space posts — create, edit, delete, reactions, comments. Access-level
-  routing (open / moderated / admin_only) runs through the moderation
-  queue for non-admin members.
+* Space posts — create, edit, delete, reactions, comments. The ``posts``
+  access level (§4.3, :class:`ContentAccessMixin`) gates create / edit /
+  delete on every household: ``admin_only`` refuses non-admins (moderators
+  included); ``moderated`` queues a member's post on the host.
 
 Permissions enforced here (route layer never duplicates them):
 
@@ -106,6 +107,7 @@ from ..domain.federation_capabilities import (
 from ..media.cleanup import unlink_unreferenced
 from .space_purge import purge_space_and_media
 from .protection_gate import ProtectionGateMixin
+from .content_access import ContentAccessMixin
 from ..domain.link_preview import card_survives_edit, link_preview_to_dict
 from .link_preview_service import wire_link_preview
 from ..media.image_processor import ImageProcessor
@@ -122,6 +124,11 @@ from ..domain.post import (
 from ..domain.mention import Mention
 from ..domain.presence import truncate_coord
 from ..domain.space import (
+    ACCESS_FEATURES,
+    AccessDecision,
+    ContentAction,
+    PeersTooOldError,
+    restricted_access_changes,
     PUBLIC_SPACE_TIERS,
     SPACE_CATEGORIES,
     JoinMode,
@@ -273,7 +280,7 @@ def _invite_expiry_epoch(expires_at: str | None) -> int:
     return min(when, cap)
 
 
-class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
+class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixin):
     """Orchestrates space lifecycle + member + post flows."""
 
     __slots__ = (
@@ -1671,6 +1678,36 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             behind_members=tuple(behind),
         )
 
+    async def config_edits_forward(self, space_id: str) -> bool:
+        """Whether a config edit here is forwarded to another household's
+        host rather than applied (the route tells the SPA, which then says
+        the host decides instead of "saved")."""
+        space = await self._require_space(space_id)
+        is_remote_host = bool(space.owner_instance_id) and (
+            space.owner_instance_id != self._own_instance_id
+        )
+        return is_remote_host and not await self._executes_locally_as_delegated_admin(
+            space
+        )
+
+    async def _households_below(
+        self, space_id: str, min_version: int
+    ) -> list[dict[str, object]]:
+        """Member households of ``space_id`` that advertised a
+        ``proto_version`` below ``min_version``. One that never advertised
+        (mid-first-handshake) is skipped, like :meth:`space_version_compat`."""
+        if self._federation_repo is None:
+            return []
+        return [
+            {
+                "instance_id": m.id,
+                "display_name": m.effective_display_name,
+                "proto_version": m.proto_version,
+            }
+            for m in await self._federation_repo.list_instances_in_space(space_id)
+            if m.capabilities_seen_at is not None and m.proto_version < min_version
+        ]
+
     async def update_config(
         self,
         space_id: str,
@@ -1688,9 +1725,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         bot_enabled: bool | None = None,
         category: str | None = None,
         allow_here_mention: bool | None = None,
+        force: bool = False,
     ) -> Space:
         """Owner or admin may update space metadata. Atomically bumps
         ``config_sequence`` and publishes :class:`SpaceConfigChanged`.
+
+        Raising a feature's access level (§4.3) while a member household
+        is below v_42 — which neither enforces it for its own people nor
+        names the actor of its writes — raises :class:`PeersTooOldError`
+        (409 ``PEERS_TOO_OLD``) naming those households, unless ``force``.
 
         Flipping ``space_type`` to/from ``global`` also triggers
         auto-publish/unpublish against every paired GFS
@@ -1735,6 +1778,18 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             and features.allow_subscribers != space.features.allow_subscribers
         ):
             await self._require_owner(space, actor_username)
+        # §4.3 / v_42: a level an older member household cannot enforce is
+        # applied only once the admin has seen which households lag.
+        if (
+            features is not None
+            and not force
+            and restricted_access_changes(space.features, features)
+        ):
+            behind = await self._households_below(
+                space_id, FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT
+            )
+            if behind:
+                raise PeersTooOldError(behind)
 
         # Delegated-admin authoritative path (v_24): when this space has
         # ``delegated_admin_authority`` ON and THIS household holds the space
@@ -1777,6 +1832,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
                 }
                 if changed:
                     fwd["features"] = changed
+                    if force:
+                        # The admin chose "apply anyway" after PEERS_TOO_OLD;
+                        # the host re-checks with its own (complete) view of
+                        # the member households unless this rides along.
+                        fwd["force"] = True
             if join_mode is not None:
                 fwd["join_mode"] = _coerce_join_mode(join_mode).value
             if space_type is not None:
@@ -2725,7 +2785,37 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
                         ),
                         allow_subscribers=space.features.allow_subscribers,
                     )
-                await self.update_config(space_id, actor_username=owner, **kwargs)
+                # The host re-runs the PEERS_TOO_OLD check with its own view
+                # of the member households (the forwarder may not be paired
+                # with all of them) — unless the forwarding admin already
+                # chose "apply anyway".
+                try:
+                    await self.update_config(
+                        space_id,
+                        actor_username=owner,
+                        force=p.get("force") is True,
+                        **kwargs,
+                    )
+                except PeersTooOldError as exc:
+                    # Apply the rest of the edit; keep every access level as
+                    # it is. The forwarding admin sees the outcome in the
+                    # config broadcast that follows (their stub mirrors the
+                    # host), and their SPA said the host decides.
+                    log.warning(
+                        "forwarded config edit for space %s: raised access "
+                        "level not applied — member households below v_42 "
+                        "cannot enforce it (%s); applying the rest",
+                        space_id,
+                        ", ".join(str(h.get("instance_id")) for h in exc.households),
+                    )
+                    kwargs["features"] = replace(
+                        kwargs["features"],
+                        **{
+                            f"{f}_access": space.features.access_level(f)
+                            for f in ACCESS_FEATURES
+                        },
+                    )
+                    await self.update_config(space_id, actor_username=owner, **kwargs)
             case "archive":
                 await self.archive_space(space_id, actor_username=owner)
             case "unarchive":
@@ -4658,27 +4748,22 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             location,
             image_urls_tuple,
         )
-        is_admin = member.role in SETTINGS_AUTHORITY_ROLES
-        is_moderator = member.role in CONTENT_AUTHORITY_ROLES
+        # ``posts_access`` is enforced on EVERY household from its own copy
+        # of the features — the host and each member household's stub
+        # alike: ADMIN_ONLY refuses a non-admin's post here, before it can
+        # federate (receivers refuse it again, ``access_admits``). A
+        # MODERATED post queues only on the host: the queue is the host's
+        # (its admins resolve it), so a stub sends the post on and the
+        # host applies its own policy to it.
+        decision = await self._gate(
+            space, author.user_id, "posts", ContentAction.CREATE, True
+        )
         is_host = (
             self._own_instance_id is not None
             and space.owner_instance_id == self._own_instance_id
         )
-        # posts_access (deny / moderation-queue) is HOST-authoritative: a remote
-        # member composes into their local stub and the post federates to the host.
-        # Enforcing the host's MODERATED/ADMIN_ONLY policy locally would dead-end the
-        # post in a moderation queue this household can't resolve (the queue isn't
-        # federated to the host's admins). The host applies its own policy to content
-        # it hosts. On a stub, proceed.
-        decision = (
-            space.features.access_decision(
-                "posts", is_admin=is_admin, is_moderator=is_moderator
-            )
-            if is_host
-            else "allow"
-        )
-        if decision == "deny":
-            raise SpacePermissionError("posting is admin-only in this space")
+        if decision is AccessDecision.QUEUE and not is_host:
+            decision = AccessDecision.PROCEED
 
         # Truncate to 4dp at the service boundary regardless of what the
         # client sent — the column never holds higher precision than the
@@ -4722,7 +4807,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             no_link_preview=bool(no_link_preview),
             link_preview=link_preview,
         )
-        if decision == "queue":
+        if decision is AccessDecision.QUEUE:
             now = datetime.now(timezone.utc)
             item = SpaceModerationItem(
                 id=uuid.uuid4().hex,
@@ -4760,7 +4845,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         await self._persist_post(space_id, post)
         return post
 
-    async def _persist_post(self, space_id: str, post: Post) -> Post:
+    async def _persist_post(
+        self, space_id: str, post: Post, *, approved_by: str | None = None
+    ) -> Post:
         """Persist a Post and publish SpacePostCreated.
 
         Shared by the direct ``create_post`` path and the moderation-approve
@@ -4778,9 +4865,26 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
                 mentions=await self._mentions().resolve(
                     space_id, post.content, author_id=post.author
                 ),
+                # The approver of a queued post made it appear — the actor
+                # receivers check against the posts level (v_42).
+                approved_by=approved_by,
             )
         )
         return post
+
+    async def require_content_access(
+        self,
+        space_id: str,
+        actor_user_id: str,
+        feature: str,
+        action: ContentAction,
+        *,
+        owns_target: bool,
+    ) -> AccessDecision:
+        """The §4.3 access gate for a sibling service that writes this
+        space's content through its own repo (the Bazaar's listing edits).
+        Raises :class:`AccessAdminOnlyError` on an ADMIN_ONLY refusal."""
+        return await self._gate(space_id, actor_user_id, feature, action, owns_target)
 
     def _mentions(self) -> SpaceMentionResolver:
         """Mention resolver over this household's view of the space's
@@ -4848,8 +4952,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
                 f"item {item_id!r} is already {item.status.value}",
             )
 
+        # Releasing a post IS creating it: the space's posts level applies to
+        # the approver (an ADMIN_ONLY feed takes it from an admin only).
+        await self._gate(space, actor.user_id, "posts", ContentAction.CREATE, False)
         post = _post_from_queue_payload(item)
-        await self._persist_post(space_id, post)
+        await self._persist_post(space_id, post, approved_by=actor.user_id)
         await self._spaces.update_moderation_item_status(
             item_id,
             status=ModerationStatus.APPROVED,
@@ -4912,7 +5019,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         if post.deleted:
             raise KeyError("post already deleted")
         # Verifies space exists + is writable (not archived) — raises if not.
-        await self._require_writable_space(space_id)
+        space = await self._require_writable_space(space_id)
         if post.author != editor_user_id:
             # Content-authority override (owner / admin / moderator)
             editor = await self._users.get_by_user_id(editor_user_id)
@@ -4923,6 +5030,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
                 raise PermissionError(
                     "only the author or a space moderator can edit",
                 )
+        await self._gate(
+            space,
+            editor_user_id,
+            "posts",
+            ContentAction.EDIT,
+            post.author == editor_user_id,
+        )
         _validate_text_length(new_content, limit=MAX_POST_LENGTH)
         await self._posts.edit(
             post_id,
@@ -4941,6 +5055,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             PostEdited(
                 post=refreshed[1],
                 space_id=space_id,
+                actor_user_id=editor_user_id,
                 new_mentions=await self._edit_mentions(
                     space_id,
                     post.content,
@@ -4980,6 +5095,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
                     "only the author or a space moderator can delete",
                 )
             moderated_by = actor_user_id
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "posts",
+            ContentAction.DELETE,
+            post.author == actor_user_id,
+        )
         await self._posts.soft_delete(
             post_id, space_id=space_id, moderated_by=moderated_by
         )
@@ -4998,7 +5120,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         # index, federation outbound for SPACE_POST_DELETED) have a single
         # hook regardless of who deleted the row. ``space_id`` gates the
         # outbound broadcast so household-feed deletes stay local.
-        await self._bus.publish(PostDeleted(post_id=post_id, space_id=space_id))
+        await self._bus.publish(
+            PostDeleted(post_id=post_id, space_id=space_id, actor_user_id=actor_user_id)
+        )
         # The names came with the post — possibly from another household —
         # so a file goes only when no other row (any space, feed, DM,
         # gallery, …) still points at it.
@@ -5940,11 +6064,13 @@ def _space_metadata_for_federation(space: Space) -> dict:
         # silently dropped — receivers ignore unknown keys, so adding the
         # access-level + subscriber fields here is additive and fail-soft.
         # Notable consumers of the now-federated fields:
-        # * ``allowed_post_types`` (§23.49) + the ``*_access`` levels — a member
-        #   household enforces the host's per-feature restriction locally when
-        #   its users compose (each instance gates ``create_post`` against its
-        #   own stub). An older sender omitting a field → the receiver defaults
-        #   to all-allowed / OPEN (the historical behaviour).
+        # * ``allowed_post_types`` (§23.49) + the ``*_access`` levels (§4.3) — a
+        #   member household enforces them locally on every write its users make
+        #   (posts, pages, tasks, stickies, calendar: ``ContentAccessMixin``
+        #   against its own stub) and again on what it receives
+        #   (``SpaceAuthorship.access_admits``). An older sender omitting a field
+        #   → the receiver defaults to all-allowed / OPEN (the historical
+        #   behaviour).
         # * ``delegated_admin_authority`` — a §D1b joiner's stub (and a member
         #   applying the config-flip broadcast) needs delegation ON locally
         #   before its SPACE_ADMIN_KEY_SHARE handler accepts the signing seed.

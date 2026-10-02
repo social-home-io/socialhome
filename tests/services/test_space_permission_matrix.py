@@ -100,6 +100,12 @@ GATED_METHODS: frozenset[str] = frozenset(
 #: Each entry needs a justification — listed inline.
 UNGATED_METHODS: frozenset[str] = frozenset(
     {
+        # The §4.3 access gate itself — a decision sibling services (the
+        # Bazaar's listing edits) ask; it guards, it mutates nothing.
+        "require_content_access",
+        # Read-only: whether a config edit here would be forwarded to the
+        # host (the PATCH route's ``forwarded`` hint). Mutates nothing.
+        "config_edits_forward",
         # Pure reads.
         # Deliberately ungated and reachable with NO session: the invite
         # token IS the credential, so whoever holds it can already redeem

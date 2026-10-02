@@ -116,3 +116,27 @@ describe('ModerationQueue', () => {
     })
   })
 })
+
+describe('ModerationQueue — ADMIN_ONLY posts (§4.3)', () => {
+  beforeEach(() => { vi.resetModules() })
+
+  it('a moderator gets Reject and a note instead of Approve', async () => {
+    vi.doMock('@/api', () => ({
+      api: {
+        get: vi.fn(async () => ([{
+          id: 'item-1', space_id: 'sp-1', feature: 'posts', action: 'create',
+          submitted_by: 'uid-bob', status: 'pending', payload: { content: 'hi' },
+          submitted_at: '2026-04-18T00:00:00Z', expires_at: '2026-04-25T00:00:00Z',
+        }])),
+        post: vi.fn(),
+      },
+    }))
+    const { ModerationQueue } = await import('./ModerationQueue')
+    const { findByText, queryByText } = render(
+      <ModerationQueue spaceId="sp-1" canApprove={false} />,
+    )
+    expect(await findByText('Reject')).toBeTruthy()
+    expect(queryByText('Approve')).toBeNull()
+    expect(queryByText('Only admins can approve posts here — you can still reject them.')).toBeTruthy()
+  })
+})

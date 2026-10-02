@@ -74,7 +74,13 @@ class StickyFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_STICKY_DELETED,
-            {"id": event.sticky_id, "space_id": event.space_id},
+            _drop_blank_actor(
+                {
+                    "id": event.sticky_id,
+                    "space_id": event.space_id,
+                    "actor_user_id": event.actor_user_id,
+                }
+            ),
         )
 
     async def _fan_out(
@@ -101,11 +107,19 @@ def _payload_from_created(event: StickyCreated) -> dict:
     d = asdict(event)
     d.pop("occurred_at", None)
     d["id"] = d.pop("sticky_id")
-    return d
+    return _drop_blank_actor(d)
 
 
 def _payload_from_updated(event: StickyUpdated) -> dict:
     d = asdict(event)
     d.pop("occurred_at", None)
     d["id"] = d.pop("sticky_id")
-    return d
+    return _drop_blank_actor(d)
+
+
+def _drop_blank_actor(payload: dict) -> dict:
+    """``actor_user_id`` (v_42) rides only when known — who made the write,
+    which receivers check against the space's ``stickies`` access level."""
+    if not payload.get("actor_user_id"):
+        payload.pop("actor_user_id", None)
+    return payload

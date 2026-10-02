@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import (
@@ -945,6 +947,7 @@ async def space_cal_env(env):
 
     env.bus = EventBus()
     env.space_cal_svc = SpaceCalendarService(env.space_cal_repo, env.bus)
+    env.space_cal_svc.attach_space_repo(SqliteSpaceRepo(env.db))
     yield env
 
 
@@ -1327,7 +1330,7 @@ async def test_capacity_raise_promotes_waitlist(space_cal_env):
     )
     # Raise capacity — bob should promote.
     await env.space_cal_svc.update_event(
-        event.id, space_id=event.calendar_id, capacity=2
+        event.id, actor_user_id="u-test", space_id=event.calendar_id, capacity=2
     )
     rsvps2 = await env.space_cal_svc.list_rsvps(event.id)
     bob = [r for r in rsvps2 if r.user_id == "uid-bob"][0]
@@ -1570,7 +1573,7 @@ async def test_update_event_clears_location_on_explicit_none(space_cal_env):
     )
     assert event.location == "Hotel bar"
     updated = await env.space_cal_svc.update_event(
-        event.id, space_id=event.calendar_id, location=None
+        event.id, actor_user_id="u-test", space_id=event.calendar_id, location=None
     )
     assert updated.location is None
 
@@ -1597,7 +1600,10 @@ async def test_update_event_publishes_federation_event(space_cal_env):
         created_by="uid-alice",
     )
     await env.space_cal_svc.update_event(
-        event.id, space_id=event.calendar_id, summary="New summary"
+        event.id,
+        actor_user_id="u-test",
+        space_id=event.calendar_id,
+        summary="New summary",
     )
     updated_calls = [
         c for c in fed.calls if c[1].value == "space_calendar_event_updated"
@@ -1627,7 +1633,9 @@ async def test_delete_event_publishes_federation_event(space_cal_env):
         end=now.isoformat(),
         created_by="uid-alice",
     )
-    await env.space_cal_svc.delete_event(event.id, space_id=event.calendar_id)
+    await env.space_cal_svc.delete_event(
+        event.id, actor_user_id="u-test", space_id=event.calendar_id
+    )
     deleted_calls = [
         c for c in fed.calls if c[1].value == "space_calendar_event_deleted"
     ]
@@ -1730,6 +1738,7 @@ async def test_space_calendar_service_list(env):
     from socialhome.services.calendar_service import SpaceCalendarService
 
     svc = SpaceCalendarService(env.space_cal_repo)
+    svc.attach_space_repo(SqliteSpaceRepo(env.db))
     # Need a space
     kp2 = generate_identity_keypair()
     await env.db.enqueue(
@@ -2470,3 +2479,214 @@ async def test_update_event_reraises_unrelated_integrity_error(env):
 
     with pytest.raises(sqlite3.IntegrityError):
         await env.cal_svc.update_event(ev.id, summary="Edited")
+
+
+# ─── ADMIN_ONLY space calendar (§4.3 feature access levels) ─────────────
+
+
+async def _admin_only_calendar(env, *, posts_admin_only: bool = False):
+    """``cal-ao``: owner / admin / moderator / member; one event made while
+    the calendar was OPEN, then ``calendar_access`` flips to ADMIN_ONLY."""
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+    from socialhome.services.calendar_service import SpaceCalendarService
+
+    await env.db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+           identity_public_key, config_sequence, space_type, join_mode)
+           VALUES(?,?,?,?,?,0,'private','invite_only')""",
+        ("cal-ao", "AO", env.iid, "o", generate_identity_keypair().public_key.hex()),
+    )
+    for uid, role in (
+        ("u-owner", "owner"),
+        ("u-admin", "admin"),
+        ("u-mod", "moderator"),
+        ("u-member", "member"),
+    ):
+        await env.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,?)",
+            ("cal-ao", uid, role),
+        )
+    svc = SpaceCalendarService(env.space_cal_repo)
+    svc.attach_space_repo(SqliteSpaceRepo(env.db))
+    now = datetime.now(timezone.utc)
+    ev = await svc.create_event(
+        space_id="cal-ao",
+        summary="Picnic",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-member",
+    )
+    await env.db.enqueue(
+        "UPDATE spaces SET calendar_access='admin_only'"
+        + (", posts_access='admin_only'" if posts_admin_only else "")
+        + " WHERE id='cal-ao'"
+    )
+    return svc, ev, now
+
+
+@pytest.mark.parametrize("actor", ["u-member", "u-mod"])
+@pytest.mark.parametrize("op", ["create", "update", "delete"])
+async def test_admin_only_calendar_refuses_members_and_moderators(env, actor, op):
+    from socialhome.domain.space import AccessAdminOnlyError
+
+    svc, ev, now = await _admin_only_calendar(env)
+    writes = {
+        "create": lambda: svc.create_event(
+            space_id="cal-ao",
+            summary="Mine",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by=actor,
+        ),
+        "update": lambda: svc.update_event(
+            ev.id, space_id="cal-ao", actor_user_id=actor, summary="Changed"
+        ),
+        "delete": lambda: svc.delete_event(
+            ev.id, space_id="cal-ao", actor_user_id=actor
+        ),
+    }
+    with pytest.raises(AccessAdminOnlyError):
+        await writes[op]()
+    held = await env.space_cal_repo.get_event(ev.id)
+    assert held is not None and held[1].summary == "Picnic"
+    rows = await env.space_cal_repo.list_events_in_range(
+        "cal-ao",
+        start=now - timedelta(days=1),
+        end=now + timedelta(days=1),
+    )
+    assert [e.id for e in rows] == [ev.id]
+
+
+@pytest.mark.parametrize("actor", ["u-owner", "u-admin"])
+async def test_admin_only_calendar_lets_admins_write(env, actor):
+    svc, ev, now = await _admin_only_calendar(env)
+    mine = await svc.create_event(
+        space_id="cal-ao",
+        summary="Admin's",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by=actor,
+    )
+    up = await svc.update_event(
+        ev.id, space_id="cal-ao", actor_user_id=actor, summary="Renamed"
+    )
+    assert up.summary == "Renamed"
+    await svc.delete_event(mine.id, space_id="cal-ao", actor_user_id=actor)
+    assert await env.space_cal_repo.get_event(mine.id) is None
+
+
+async def test_admin_only_calendar_still_takes_rsvps(env):
+    """RSVPs are never gated by the calendar level."""
+    svc, ev, now = await _admin_only_calendar(env)
+    await svc.rsvp(
+        event_id=ev.id,
+        user_id="u-mod",
+        status="going",
+        occurrence_at=ev.start.isoformat(),
+    )
+
+
+async def test_a_member_cannot_announce_into_admin_only_posts(env):
+    """``announce_in_feed`` mirrors the event as a post: with ``posts`` at
+    ADMIN_ONLY a member's announcement is dropped at the source, while an
+    admin's is kept."""
+    svc, _ev, now = await _admin_only_calendar(env, posts_admin_only=True)
+    await env.db.enqueue("UPDATE spaces SET calendar_access='open' WHERE id='cal-ao'")
+    member_ev = await svc.create_event(
+        space_id="cal-ao",
+        summary="Member's",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-member",
+        announce_in_feed=True,
+    )
+    assert member_ev.announce_in_feed is False
+    admin_ev = await svc.create_event(
+        space_id="cal-ao",
+        summary="Admin's",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-admin",
+        announce_in_feed=True,
+    )
+    assert admin_ev.announce_in_feed is True
+
+
+async def test_calendar_writes_federate_their_actor(space_cal_env):
+    """v_42: the actor rides inside every event create / update / delete
+    payload so receivers check it against the space's ``calendar`` level."""
+    env = space_cal_env
+
+    class _FakeFed:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        async def broadcast_to_space_members(self, space_id, event_type, payload):
+            self.calls.append((space_id, event_type, payload))
+
+    fed = _FakeFed()
+    env.space_cal_svc.attach_federation(fed)
+    now = _SEED
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="E",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+    )
+    await env.space_cal_svc.update_event(
+        event.id, space_id="sp-cal", actor_user_id="uid-editor", summary="F"
+    )
+    await env.space_cal_svc.delete_event(
+        event.id, space_id="sp-cal", actor_user_id="uid-deleter"
+    )
+    by_type = {
+        c[1].value: c[2].get("actor_user_id")
+        for c in fed.calls
+        if c[1].value.startswith("space_calendar_event_")
+    }
+    assert by_type == {
+        "space_calendar_event_created": "uid-alice",
+        "space_calendar_event_updated": "uid-editor",
+        "space_calendar_event_deleted": "uid-deleter",
+    }
+
+
+async def test_a_member_cannot_announce_past_a_moderated_posts_queue(env):
+    """The mirrored card would skip the posts review queue, so under
+    MODERATED a member's announcement is dropped too; a moderator's stays."""
+    svc, _ev, now = await _admin_only_calendar(env)
+    await env.db.enqueue(
+        "UPDATE spaces SET calendar_access='open', posts_access='moderated'"
+        " WHERE id='cal-ao'"
+    )
+    member_ev = await svc.create_event(
+        space_id="cal-ao",
+        summary="M",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-member",
+        announce_in_feed=True,
+    )
+    mod_ev = await svc.create_event(
+        space_id="cal-ao",
+        summary="Mo",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-mod",
+        announce_in_feed=True,
+    )
+    assert (member_ev.announce_in_feed, mod_ev.announce_in_feed) == (False, True)
+
+
+async def test_announce_refusal_names_the_posts_level(env):
+    """Why an announcement would be dropped: the posts level that keeps
+    the creator from posting straight away — or None when nothing does."""
+    svc, _ev, _now = await _admin_only_calendar(env, posts_admin_only=True)
+    assert await svc.announce_refusal("cal-ao", "u-member") == "admin_only"
+    assert await svc.announce_refusal("cal-ao", "u-admin") is None
+    await env.db.enqueue("UPDATE spaces SET posts_access='moderated' WHERE id='cal-ao'")
+    assert await svc.announce_refusal("cal-ao", "u-member") == "moderated"
+    assert await svc.announce_refusal("cal-ao", "u-mod") is None
+    await env.db.enqueue("UPDATE spaces SET posts_access='open' WHERE id='cal-ao'")
+    assert await svc.announce_refusal("cal-ao", "u-member") is None

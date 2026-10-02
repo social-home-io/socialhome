@@ -558,3 +558,311 @@ async def test_settings_tier_may_mutate_refuses_a_moderator():
     assert await a.may_mutate(_ev(ADMIN_HOUSE), SPACE, "u-author", settings=True)
     assert await a.may_mutate(_ev(HOST), SPACE, "u-author", settings=True)
     assert await a.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-author", settings=True)
+
+
+# ─── access_admits: the §4.3 access levels on the receiver (v_42) ──────
+
+
+@dataclass
+class _FeaturedSpace:
+    owner_instance_id: str
+    features: object
+
+
+MOD_HOUSE = "inst-mod"
+
+
+class _Instances:
+    """``remote_instances`` stand-in: instance id → advertised proto_version."""
+
+    def __init__(self, versions: dict[str, int]) -> None:
+        self.versions = versions
+
+    async def get_instance(self, instance_id: str, **_kw):
+        v = self.versions.get(instance_id)
+        return None if v is None else SimpleNamespace(proto_version=v)
+
+
+def _access_authorship(
+    versions: dict[str, int] | None = None, **levels
+) -> SpaceAuthorship:
+    from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
+
+    features = SpaceFeatures(
+        **{f"{k}_access": SpaceFeatureAccess(v) for k, v in levels.items()}
+    )
+    return SpaceAuthorship(
+        space_repo=_Spaces({SPACE: _FeaturedSpace(HOST, features)}),
+        remote_member_repo=_Seats(
+            [
+                _seat(AUTHOR_HOUSE, "u-author"),
+                _seat(ADMIN_HOUSE, "u-admin", role="admin"),
+                _seat(ADMIN_HOUSE, "u-plain"),
+                _seat(MOD_HOUSE, "u-mod", role="moderator"),
+                _seat(AUTHOR_HOUSE, "u-sub", role="subscriber"),
+                _seat(HOST, "u-owner"),
+            ]
+        ),
+        user_repo=_Users({"u-local"}),
+        federation_repo=_Instances(
+            versions
+            if versions is not None
+            else {h: 42 for h in (HOST, AUTHOR_HOUSE, ADMIN_HOUSE, MOD_HOUSE)}
+        ),
+    )
+
+
+async def _admits(auth, sender, actor, *, feature="tasks", action=None):
+    from socialhome.domain.space import ContentAction
+
+    return await auth.access_admits(
+        _ev(sender),
+        SPACE,
+        feature,
+        action or ContentAction.EDIT,
+        actor=actor,
+        row_owner="u-author",
+    )
+
+
+async def test_open_admits_anyone_the_authorship_rules_let_through():
+    auth = _access_authorship()
+    assert await _admits(auth, AUTHOR_HOUSE, "u-author")
+    assert await _admits(auth, AUTHOR_HOUSE, None)
+
+
+async def test_admin_only_admits_only_admins_seated_on_the_sender():
+    auth = _access_authorship(tasks="admin_only")
+    assert await _admits(auth, ADMIN_HOUSE, "u-admin")
+    # The host's own people: the owner is mirrored as a member seat.
+    assert await _admits(auth, HOST, "u-owner")
+    for sender, actor in (
+        (AUTHOR_HOUSE, "u-author"),  # a member
+        (MOD_HOUSE, "u-mod"),  # a moderator — content authority is not enough
+        (AUTHOR_HOUSE, "u-sub"),  # a follower
+        (ADMIN_HOUSE, "u-plain"),  # an admin household's plain member
+        ("inst-stranger", "u-x"),  # no seat at all
+    ):
+        assert not await _admits(auth, sender, actor), (sender, actor)
+
+
+async def test_a_forged_actor_naming_another_households_admin_is_refused():
+    auth = _access_authorship(pages="admin_only")
+    assert not await _admits(auth, AUTHOR_HOUSE, "u-admin", feature="pages")
+
+
+async def test_a_missing_actor_falls_back_to_the_sending_household():
+    """An older (v_41) sender names no actor: settle for its seats."""
+    auth = _access_authorship(
+        {h: 41 for h in (HOST, AUTHOR_HOUSE, ADMIN_HOUSE, MOD_HOUSE)},
+        stickies="admin_only",
+    )
+    assert await _admits(auth, ADMIN_HOUSE, None, feature="stickies")
+    assert await _admits(auth, HOST, "", feature="stickies")
+    assert not await _admits(auth, AUTHOR_HOUSE, None, feature="stickies")
+    assert not await _admits(auth, MOD_HOUSE, None, feature="stickies")
+
+
+async def test_a_v42_sender_must_name_the_actor_of_an_edit_or_delete():
+    """Every v_42 producer names its actor: one that omits it on an
+    ADMIN_ONLY edit / delete is refused — even from an admin household,
+    which could otherwise pass off its plain member's change."""
+    from socialhome.domain.space import ContentAction
+
+    auth = _access_authorship(pages="admin_only")
+    for action in (ContentAction.EDIT, ContentAction.DELETE):
+        assert not await _admits(
+            auth, ADMIN_HOUSE, None, feature="pages", action=action
+        )
+        assert not await _admits(auth, HOST, None, feature="pages", action=action)
+        assert await _admits(
+            auth, ADMIN_HOUSE, "u-admin", feature="pages", action=action
+        )
+    # An unknown (never advertised) peer reads as old: the household rule.
+    old = _access_authorship({}, pages="admin_only")
+    assert await _admits(old, ADMIN_HOUSE, None, feature="pages")
+
+
+async def test_a_create_is_judged_by_its_author_not_a_named_actor():
+    """A create's actor IS its author: an admin household cannot launder
+    its plain member's page by naming its admin, nor by naming nobody."""
+    from socialhome.domain.space import ContentAction
+
+    auth = _access_authorship(pages="admin_only")
+
+    async def create(sender, *, author, actor):
+        return await auth.access_admits(
+            _ev(sender),
+            SPACE,
+            "pages",
+            ContentAction.CREATE,
+            actor=actor,
+            row_owner=author,
+        )
+
+    assert not await create(ADMIN_HOUSE, author="u-plain", actor="u-admin")
+    assert not await create(ADMIN_HOUSE, author="u-plain", actor=None)
+    assert await create(ADMIN_HOUSE, author="u-admin", actor="u-admin")
+    assert await create(ADMIN_HOUSE, author="u-admin", actor=None)
+    # v_41 senders get the same author rule — the author is on every create.
+    old = _access_authorship({h: 41 for h in (ADMIN_HOUSE,)}, pages="admin_only")
+    assert not await old.access_admits(
+        _ev(ADMIN_HOUSE),
+        SPACE,
+        "pages",
+        ContentAction.CREATE,
+        actor=None,
+        row_owner="u-plain",
+    )
+
+
+async def test_only_the_host_may_release_someone_elses_post():
+    """A moderation release is the one create whose actor (the approver)
+    is not its author — and the queue lives on the host."""
+    from socialhome.domain.space import ContentAction
+
+    auth = _access_authorship(posts="admin_only")
+
+    async def release(sender, actor):
+        return await auth.access_admits(
+            _ev(sender),
+            SPACE,
+            "posts",
+            ContentAction.CREATE,
+            actor=actor,
+            row_owner="u-author",
+            release_ok=True,
+        )
+
+    assert await release(HOST, "u-owner")
+    assert not await release(ADMIN_HOUSE, "u-admin")
+
+
+async def test_the_host_relays_a_remote_members_existing_row():
+    """Resume replay: the host re-sends a remote member's row (made while
+    the feature was open); like ``may_author``, that relay is admitted."""
+    from socialhome.domain.space import ContentAction
+
+    auth = _access_authorship(tasks="admin_only")
+    assert await auth.access_admits(
+        _ev(HOST),
+        SPACE,
+        "tasks",
+        ContentAction.CREATE,
+        actor=None,
+        row_owner="u-author",
+    )
+    assert not await auth.access_admits(
+        _ev(ADMIN_HOUSE),
+        SPACE,
+        "tasks",
+        ContentAction.CREATE,
+        actor=None,
+        row_owner="u-author",
+    )
+
+
+async def test_the_bot_identity_counts_as_its_household():
+    """A bot posts as the shared system author; bots are configured by
+    admins, so an admin household's bot post passes."""
+    from socialhome.domain.space import ContentAction
+
+    auth = _access_authorship(posts="admin_only")
+
+    async def bot(sender, owner):
+        return await auth.access_admits(
+            _ev(sender),
+            SPACE,
+            "posts",
+            ContentAction.EDIT,
+            actor=SYSTEM_AUTHOR,
+            row_owner=owner,
+        )
+
+    assert await bot(ADMIN_HOUSE, SYSTEM_AUTHOR)
+    assert not await bot(AUTHOR_HOUSE, SYSTEM_AUTHOR)
+    # As the actor on anybody else's row, the bot identity is nobody.
+    assert not await bot(ADMIN_HOUSE, "u-author")
+    assert not await bot(HOST, "u-author")
+
+
+async def test_moderated_admits_for_now_but_still_binds_the_actor():
+    auth = _access_authorship(calendar="moderated")
+    assert await _admits(auth, AUTHOR_HOUSE, "u-author", feature="calendar")
+    assert not await _admits(auth, AUTHOR_HOUSE, "u-admin", feature="calendar")
+
+
+async def test_an_unknown_space_admits_nothing_restricted():
+    auth = _access_authorship(tasks="admin_only")
+    from socialhome.domain.space import ContentAction
+
+    assert not await auth.access_admits(
+        _ev(ADMIN_HOUSE),
+        "sp-unknown",
+        "tasks",
+        ContentAction.CREATE,
+        actor="u-admin",
+        row_owner="",
+    )
+
+
+async def test_a_refusal_is_a_warning(caplog):
+    auth = _access_authorship(tasks="admin_only")
+    with caplog.at_level(logging.WARNING):
+        assert not await _admits(auth, AUTHOR_HOUSE, "u-author")
+    assert any("admin_only" in r.getMessage() for r in caplog.records)
+
+
+async def test_moderated_admits_a_followers_own_delete():
+    """A demoted author's household may still delete their own post under
+    MODERATED (like ``may_mutate(any_role=True)``); not someone else's."""
+    from socialhome.domain.space import ContentAction
+
+    auth = _access_authorship(posts="moderated")
+    ev = _ev(AUTHOR_HOUSE)
+    assert await auth.access_admits(
+        ev, SPACE, "posts", ContentAction.DELETE, actor="u-sub", row_owner="u-sub"
+    )
+    assert not await auth.access_admits(
+        ev, SPACE, "posts", ContentAction.DELETE, actor="u-sub", row_owner="u-author"
+    )
+    assert not await auth.access_admits(
+        ev, SPACE, "posts", ContentAction.CREATE, actor="u-sub", row_owner="u-sub"
+    )
+
+
+async def test_an_actor_whose_seat_has_not_arrived_is_held():
+    """The roster gossip seating the actor may trail their write: hold it
+    (like ``may_author``) instead of dropping it for good."""
+    from socialhome.domain.space import ContentAction, SpaceFeatureAccess, SpaceFeatures
+
+    class _Pending:
+        def __init__(self):
+            self.held = []
+
+        def hold(self, event, *, space_id, user_id):
+            self.held.append(user_id)
+            return True
+
+    pending = _Pending()
+    auth = SpaceAuthorship(
+        space_repo=_Spaces(
+            {
+                SPACE: _FeaturedSpace(
+                    HOST, SpaceFeatures(pages_access=SpaceFeatureAccess.ADMIN_ONLY)
+                )
+            }
+        ),
+        remote_member_repo=_Seats([_seat(ADMIN_HOUSE, "u-admin", role="admin")]),
+        user_repo=_Users(set()),
+        pending=pending,
+    )
+    assert not await auth.access_admits(
+        _ev(ADMIN_HOUSE),
+        SPACE,
+        "pages",
+        ContentAction.EDIT,
+        actor="u-new",
+        row_owner="",
+    )
+    assert pending.held == ["u-new"]
