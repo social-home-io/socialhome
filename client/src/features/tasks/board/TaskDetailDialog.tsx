@@ -14,6 +14,7 @@
 import { useRef, useState } from 'preact/hooks'
 import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
+import { openReport } from '@/components/ReportDialog'
 import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { PeoplePicker, type Person } from '@/components/PeoplePicker'
 import { currentUser } from '@/store/auth'
@@ -54,10 +55,14 @@ export interface TaskDetailDialogProps {
   labelSuggestions: readonly string[]
   onClose: () => void
   onSave: (patch: TaskPatch) => Promise<void>
+  /** The space the task lives in — offers "Report" (to its moderators)
+   *  on someone else's task. */
+  spaceId?: string | null
 }
 
 export function TaskDetailDialog({
   task, editable, readOnlyReason, people, nameOf, labelSuggestions, onClose, onSave,
+  spaceId = null,
 }: TaskDetailDialogProps) {
   const snap = useRef(task)
   const base = snap.current
@@ -72,6 +77,14 @@ export function TaskDetailDialog({
   const [titleError, setTitleError] = useState(false)
   const nameRef = useRef<HTMLInputElement | null>(null)
   useAutofocus(nameRef, editable)
+  const report = spaceId && base.created_by && base.created_by !== currentUser.value?.user_id
+    ? (
+      <Button variant="ghost" type="button"
+              onClick={() => { onClose(); openReport('task', base.id, spaceId) }}>
+        {t('report.action')}
+      </Button>
+    )
+    : null
 
   const addedBy = base.created_by && (
     <p class="sh-task-edit__added">
@@ -128,6 +141,7 @@ export function TaskDetailDialog({
           </dl>
           {addedBy}
           <div class="sh-form-actions">
+            {report}
             <Button variant="secondary" onClick={onClose}>{t('common.close')}</Button>
           </div>
         </div>
@@ -238,6 +252,7 @@ export function TaskDetailDialog({
         />
         {addedBy}
         <div class="sh-form-actions">
+          {report}
           <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
           <Button type="submit" loading={saving}>{t('common.save')}</Button>
         </div>

@@ -37,6 +37,9 @@ export interface TaskScope {
   canWrite: boolean
   /** Why a task can't be changed (lock tooltip, read-only dialog). */
   readOnlyReason: () => string
+  /** The space these tasks live in (``null``/absent: the household's) —
+   *  a task report goes to that space's moderators. */
+  spaceId?: string | null
 }
 
 export function householdPeople(): Person[] {
@@ -92,6 +95,7 @@ export function spaceTaskScope({
   return {
     store,
     key: `space:${spaceId}`,
+    spaceId,
     people: () => spacePeople(spaceId),
     nameOf: uid => personName(spacePeople(spaceId, { subscribers: true }), uid),
     loadPeople: () => { void loadSpaceMembers(spaceId) },

@@ -10368,6 +10368,219 @@ def cmd_group_dm() -> None:
     print("group-dm: ok")
 
 
+def cmd_space_report() -> None:
+    """Space-scoped reports (v_45): a space's moderators triage its reports.
+
+    Beta (b) hosts a fresh space ("Report club") with Alice (a), Carol (c)
+    and Dave (d) as remote members and promotes Alice to ``moderator``.
+    Dave (d, a plain member) posts in it.
+
+    1. **Carol reports the post on her own household (c)**: ``POST
+       /api/reports`` answers ``space_id`` set — the space's moderators,
+       not c's household admin, triage it — and c sends ``SPACE_REPORT``
+       to the host b and the moderator household a only.
+    2. **a's and b's space report queues** (``GET
+       /api/spaces/{id}/reports``) list it; no household admin queue
+       (``/api/admin/reports``) does.
+    3. **d — a plain member household — never received it**: no
+       ``content_reports`` row for the space in d's DB, and the report's
+       target never appears in d's log after the post landed.
+    4. **Alice resolves it on a**: ``SPACE_REPORT_DECIDED`` reaches b and
+       b's copy reads ``resolved`` (b's queue is empty).
+
+    Beta then demotes Alice; the space stays (its own, so no earlier
+    step's assertions change).
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' + 'relay-pair' first")
+    inst = state["instances"]
+    a, b, c = inst["a"], inst["b"], inst["c"]
+    b_base = f"http://127.0.0.1:{b['port']}"
+    s, space = _request(
+        f"{b_base}/api/spaces",
+        token=b["token"],
+        method="POST",
+        body={"name": "Report club", "join_mode": "invite_only"},
+    )
+    space_id = _must("space create(b)", s, space, ok=(201,))["id"]
+    print(f"  b: space {space_id[:8]} created")
+    for label in ("a", "c", "d"):
+        guest = inst[label]
+        s, inv = _request(
+            f"{b_base}/api/spaces/{space_id}/remote-invites",
+            token=b["token"],
+            method="POST",
+            body={
+                "invitee_instance_id": guest["instance_id"],
+                "invitee_user_id": guest["user_id"],
+            },
+        )
+        _must(f"remote-invite({label})", s, inv, ok=(201,))
+
+    def _invite_token(label: str) -> str | None:
+        guest = inst[label]
+        s, invites = _request(
+            f"http://127.0.0.1:{guest['port']}/api/remote_invites",
+            token=guest["token"],
+        )
+        items = invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        hit = next((i for i in items if i.get("space_id") == space_id), None)
+        return hit["invite_token"] if s == 200 and hit else None
+
+    for label in ("a", "c", "d"):
+        _wait_for(
+            f"{label} to receive b's invite",
+            lambda label=label: _invite_token(label) is not None,
+            timeout=60.0,
+        )
+        token = _invite_token(label)
+        guest = inst[label]
+        s, r = _request(
+            f"http://127.0.0.1:{guest['port']}/api/remote_invites/{token}/accept",
+            token=guest["token"],
+            method="POST",
+        )
+        _must(f"accept-invite({label})", s, r, ok=(204,))
+
+    def _seated(label: str) -> bool:
+        return bool(
+            _rows(
+                "b",
+                "SELECT 1 FROM space_remote_members WHERE space_id=? AND user_id=?"
+                " AND tombstoned=0",
+                (space_id, inst[label]["user_id"]),
+            )
+        )
+
+    for label in ("a", "c", "d"):
+        _wait_for(f"b to seat {label}", lambda label=label: _seated(label), timeout=60.0)
+    print("  a, c and d seated in the Report club")
+
+    s, body = _request(
+        f"{b_base}/api/spaces/{space_id}/remote-members/{a['instance_id']}/{a['user_id']}",
+        token=b["token"],
+        method="PATCH",
+        body={"role": "moderator"},
+    )
+    _must("promote alice to moderator", s, body)
+
+    def _local_role(label: str) -> str | None:
+        rows = _rows(
+            label,
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, inst[label]["user_id"]),
+        )
+        return rows[0][0] if rows else None
+
+    _wait_for("a to hold alice's moderator seat", lambda: _local_role("a") == "moderator")
+    # c must also know a reviews the space (the roster mirror carries it).
+    _wait_for(
+        "c to mirror alice as moderator",
+        lambda: bool(
+            _rows(
+                "c",
+                "SELECT 1 FROM space_remote_members WHERE space_id=? AND user_id=?"
+                " AND role='moderator' AND tombstoned=0",
+                (space_id, a["user_id"]),
+            )
+        ),
+        timeout=60.0,
+    )
+
+    # Dave (d, a plain member) writes the reported post. Not b's owner: the
+    # author is the report's SUBJECT and never sees it in their own queue
+    # (and a's moderator is other authority, so no anonymous fallback) —
+    # b's queue as Bob would rightly stay empty.
+    d = inst["d"]
+    s, post = _request(
+        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/posts",
+        token=d["token"],
+        method="POST",
+        body={"type": "text", "content": f"Report me {int(time.time())}"},
+    )
+    post_id = _must("d posts", s, post, ok=(201,))["id"]
+
+    def _holds_post(label: str) -> bool:
+        return bool(_rows(label, "SELECT 1 FROM space_posts WHERE id=?", (post_id,)))
+
+    for label in ("a", "b", "c"):
+        _wait_for(f"{label} to hold d's post", lambda label=label: _holds_post(label), timeout=60.0)
+    d_log_before = _log_size("d")
+
+    s, filed = _request(
+        f"http://127.0.0.1:{c['port']}/api/reports",
+        token=c["token"],
+        method="POST",
+        body={"target_type": "post", "target_id": post_id, "category": "spam"},
+    )
+    filed = _must("c: carol reports dave's post", s, filed, ok=(201,))
+    if filed.get("space_id") != space_id:
+        raise SystemExit(
+            f"space-report: c's report -> {filed!r} (expected space_id {space_id} "
+            "— the space's moderators triage it)"
+        )
+    print("  c: Carol reported the post — space-scoped ✓")
+
+    def _queue(label: str) -> list:
+        v = inst[label]
+        s, rows = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/reports",
+            token=v["token"],
+        )
+        return [r for r in rows if r.get("target_id") == post_id] if s == 200 else []
+
+    _wait_for("a's space report queue to list it", lambda: bool(_queue("a")), timeout=60.0)
+    _wait_for("b's space report queue to list it", lambda: bool(_queue("b")), timeout=60.0)
+    print("  a (moderator household) and b (host) list the report ✓")
+    for label in ("a", "b", "c"):
+        v = inst[label]
+        s, rows = _request(
+            f"http://127.0.0.1:{v['port']}/api/admin/reports", token=v["token"]
+        )
+        if s == 200 and any(r.get("target_id") == post_id for r in rows):
+            raise SystemExit(f"space-report: {label}'s household admin queue lists it")
+    print("  no household admin queue lists it ✓")
+
+    if _rows("d", "SELECT 1 FROM content_reports WHERE target_id=?", (post_id,)):
+        raise SystemExit("space-report: plain member household d stores the report")
+    if _log_contains("d", "space_report", offset=d_log_before):
+        raise SystemExit("space-report: d's log names a SPACE_REPORT")
+    print("  d (plain member) never received the report ✓")
+
+    rid = _queue("a")[0]["id"]
+    s, body = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/reports/{rid}/resolve",
+        token=a["token"],
+        method="POST",
+        body={},
+    )
+    _must("a: alice resolves the report", s, body)
+
+    def _b_status() -> str | None:
+        rows = _rows(
+            "b",
+            "SELECT status FROM content_reports WHERE space_id=? AND target_id=?",
+            (space_id, post_id),
+        )
+        return rows[0][0] if rows else None
+
+    _wait_for("b's copy to read resolved", lambda: _b_status() == "resolved", timeout=60.0)
+    if _queue("b"):
+        raise SystemExit("space-report: b still lists the resolved report")
+    print("  b: resolved by Alice's decision on a (SPACE_REPORT_DECIDED) ✓")
+
+    _request(
+        f"{b_base}/api/spaces/{space_id}/remote-members/{a['instance_id']}/{a['user_id']}",
+        token=b["token"],
+        method="PATCH",
+        body={"role": "member"},
+    )
+    state["space_report_space_id"] = space_id
+    _save(state)
+    print("space-report: ok")
+
+
 def cmd_federated_moderation() -> None:
     """Federated moderation (v_43): "Reviewed" across households.
 
@@ -10724,6 +10937,10 @@ def main() -> None:
         # b, c and d all hold the task, and plain-member household d never
         # received the pending item.
         cmd_federated_moderation()
+        # ``space-report`` (v_45): a member on c reports a post in a space
+        # hosted by b; the moderator on a sees it, plain-member household d
+        # never receives it, and a's resolve clears it on b.
+        cmd_space_report()
         # ``admin-revoke-rotation`` (v_44): a demotes delegated admin b; a
         # rotates the space authority key, c and b re-pin from the owner's
         # cert, b's old seed is cleared and b can no longer sign.

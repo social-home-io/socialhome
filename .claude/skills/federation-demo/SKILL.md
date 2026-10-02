@@ -396,7 +396,7 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (44 since the authority-key rotation).
+   ``OURS`` (45 since space-scoped reports).
 
 9c. ``federated-moderation`` (v_43 "Reviewed" across households) — **b**
    hosts a fresh "Reviewed club" with **a**'s, **c**'s and **d**'s admins as
@@ -410,6 +410,16 @@ That single command runs the full sequence:
    and **d** all hold the task created by Alice, **a**'s own queue row reads
    ``approved``, and **d** — a plain member household — holds no queue row
    for the item and its log never names it.
+
+9c2. ``space-report`` (v_45 space-scoped reports) — **b** hosts a fresh
+   "Report club" with **a**'s, **c**'s and **d**'s users as remote members
+   and promotes **a**'s to ``moderator``; **d**'s Dave posts (not **b**'s owner:
+   an author never triages a report on their own post). Carol reports the post
+   **on c**: the answer carries ``space_id`` (the space's moderators triage
+   it) and ``SPACE_REPORT`` reaches only **b** and **a** — both space report
+   queues list it, no household admin queue does, and **d** (plain member)
+   stores no row and logs no ``space_report``. Alice resolves it **on a**;
+   ``SPACE_REPORT_DECIDED`` reaches **b**, whose copy reads ``resolved``.
 
 9d. ``admin-revoke-rotation`` (v_44 space authority key rotation) — **a**
    creates a private space with ``delegated_admin_authority`` on, invites
@@ -466,7 +476,7 @@ invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
-admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
+space-report → admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
 unpair-offline`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /

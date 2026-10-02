@@ -1439,12 +1439,34 @@ async def test_space_report_inbound_persists_remote_report(db, bus):
         user_repo=SqliteUserRepo(db),
         report_service=report_service,
     )
+    # The reporter is a user of the sending household (bound to it).
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "peer-a",
+            "Peer",
+            "ab" * 32,
+            "00",
+            "00",
+            "https://p/x",
+            "p",
+            "confirmed",
+            "manual",
+        ),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username, display_name)"
+        " VALUES(?,?,?,?)",
+        ("u-remote", "peer-a", "u", "U"),
+    )
     await svc._on_space_report(
         _event(
             FederationEventType.SPACE_REPORT,
             {
-                "target_type": "post",
-                "target_id": "p-remote",
+                "target_type": "moment",
+                "target_id": "m-remote",
                 "category": "spam",
                 "notes": "looks sketchy",
                 "reporter_user_id": "u-remote",

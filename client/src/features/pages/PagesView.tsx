@@ -34,6 +34,8 @@ import type { ComponentChildren } from 'preact'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { t } from '@/i18n/i18n'
+import { currentUser } from '@/store/auth'
+import { openReport } from '@/components/ReportDialog'
 import { Button } from '@/components/Button'
 import {
   MarkdownToolbar,
@@ -637,6 +639,15 @@ export function PagesView({ scope, header }: {
                     {t('common.delete')}
                   </Button>
                 </>
+              )}
+              {scope.spaceId && page.created_by !== currentUser.value?.user_id && (
+                // A space page goes to the space's moderators.
+                <Button
+                  variant="ghost"
+                  onClick={() => openReport('page', page.id, scope.spaceId)}
+                >
+                  {t('report.action')}
+                </Button>
               )}
             </div>
           </div>

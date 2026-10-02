@@ -511,6 +511,7 @@ class FederationInboundService(ProtectionGateMixin):
         registry.register(FET.USER_STATUS_UPDATED, self._on_user_status_updated)
 
         registry.register(FET.SPACE_REPORT, self._on_space_report)
+        registry.register(FET.SPACE_REPORT_DECIDED, self._on_space_report_decided)
 
         # Highlights — only registered when a highlight repo is wired in. Tests
         # that instantiate :class:`FederationInboundService` for non-
@@ -2390,18 +2391,68 @@ class FederationInboundService(ProtectionGateMixin):
     # ── Report handler ─────────────────────────────────────────────────
 
     async def _on_space_report(self, event: "FederationEvent") -> None:
-        """A peer's member reported content we host — persist locally."""
+        """A peer's member reported content — persist it if it is ours to
+        triage. ``ReportService.create_report_from_remote`` re-derives the
+        space from the target and checks this household reviews it, the
+        reporter's seat on the sender and the ban list."""
         if self._report_service is None:
             log.debug("SPACE_REPORT received but no ReportService attached")
             return
         p = event.payload
+        space_id = resolve_space_id(event)
+        if space_id is None and (event.space_id or p.get("space_id")):
+            return  # routing / payload space disagree (logged)
+        notes = p.get("notes")
         await self._report_service.create_report_from_remote(
             reporter_user_id=str(p.get("reporter_user_id") or ""),
             reporter_instance_id=event.from_instance,
             target_type=str(p.get("target_type") or ""),
             target_id=str(p.get("target_id") or ""),
             category=str(p.get("category") or ""),
-            notes=p.get("notes"),
+            notes=notes if isinstance(notes, str) else None,
+            space_id=space_id,
+            # Trusted by the service only when the sender is the host.
+            origin_instance_id=(str(p.get("reporter_instance_id") or "") or None),
+        )
+
+    async def _on_space_report_decided(self, event: "FederationEvent") -> None:
+        """Another reviewer household resolved / dismissed a space report
+        (v_45). Admitted only from a household with content authority in
+        the space, naming a decider seated there with it (``moderates_as``);
+        ``ReportService.apply_remote_decision`` applies the first decision
+        and refuses one by the report's subject."""
+        if self._report_service is None:
+            return
+        p = event.payload
+        space_id = resolve_space_id(event)
+        decided_by = str(p.get("decided_by") or "")
+        if not space_id or not decided_by:
+            log.warning(
+                "SPACE_REPORT_DECIDED from %s: no space / decider — dropped",
+                event.from_instance,
+            )
+            return
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return
+        if not await authorship.has_content_authority(
+            event, space_id
+        ) or not await authorship.moderates_as(event, space_id, decided_by):
+            log.warning(
+                "SPACE_REPORT_DECIDED from %s in %s refused: %s holds no "
+                "content authority there",
+                event.from_instance,
+                space_id,
+                decided_by,
+            )
+            return
+        await self._report_service.apply_remote_decision(
+            space_id=space_id,
+            target_type=str(p.get("target_type") or ""),
+            target_id=str(p.get("target_id") or ""),
+            reporter_user_id=str(p.get("reporter_user_id") or ""),
+            decision=str(p.get("decision") or ""),
+            decided_by=decided_by,
         )
 
     # ── Space membership handlers ──────────────────────────────────────

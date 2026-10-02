@@ -29,5 +29,6 @@
   "notification.space.feature.tasks": "Tâches",
   "notification.space.feature.stickies": "Notes",
   "notification.space.feature.calendar": "Événements",
-  "notification.space.admins_reconfirm": "Restauré depuis une sauvegarde : vérifie les administrateurs de l'espace, puis réactive l'administration déléguée"
+  "notification.space.admins_reconfirm": "Restauré depuis une sauvegarde : vérifie les administrateurs de l'espace, puis réactive l'administration déléguée",
+  "notification.space.report.filed": "Nouveau signalement dans {space_name}"
 }

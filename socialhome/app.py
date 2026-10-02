@@ -331,6 +331,7 @@ from .services.public_space_discovery_service import PublicSpaceDiscoveryService
 from .services.push_service import PushService, load_or_create_vapid
 from .services.recovery_kit_service import RecoveryKitService
 from .services.recovery_reconnect_service import RecoveryReconnectService
+from .services.report_scope import ReportScope
 from .services.report_service import ReportService
 from .services.realtime_service import RealtimeService
 from .services.search_service import SearchService
@@ -1007,6 +1008,7 @@ def _wire_federation_stack(
         federation_service,
         identity.instance_id,
     )
+    report_service.watch_seats(bus)
     dm_routing_service.attach_federation(
         federation_service,
         own_instance_id=identity.instance_id,
@@ -1955,6 +1957,16 @@ def create_app(config: Config | None = None) -> web.Application:
         bus=bus,
         space_repo=space_repo,
         space_post_repo=space_post_repo,
+        remote_member_repo=repos.space_remote_member,
+        scope=ReportScope(
+            space_post_repo=space_post_repo,
+            post_repo=post_repo,
+            page_repo=page_repo,
+            sticky_repo=sticky_repo,
+            space_task_repo=space_task_repo,
+            space_calendar_repo=repos.space_cal,
+            gallery_repo=gallery_repo,
+        ),
     )
     task_service = TaskService(task_repo, bus, user_repo=user_repo)
     space_task_service = SpaceTaskService(

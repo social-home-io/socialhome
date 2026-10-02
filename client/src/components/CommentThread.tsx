@@ -34,6 +34,8 @@ import { splitMentions } from '@/utils/mentions'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { Comment } from '@/types'
 import { confirmDialog } from '@/components/confirm'
+import { openReport } from './ReportDialog'
+import { t } from '@/i18n/i18n'
 
 interface CommentThreadProps {
   comments: Comment[]
@@ -335,7 +337,10 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
   }
 
   const closeMenu = () => setMenuOpen(false)
-  const hasMenu = canEdit || canDelete
+  // Anyone may report someone else's comment — in a space it goes to the
+  // space's moderators (``ReportDialog``).
+  const canReport = !isMine
+  const hasMenu = canEdit || canDelete || canReport
 
   return (
     <div class={`sh-comment-item ${indent ? 'sh-comment--indent' : ''}`}>
@@ -397,6 +402,17 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
                         }
                       }}>
                       Delete
+                    </button>
+                  )}
+                  {canReport && (
+                    <button
+                      role="menuitem"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        closeMenu()
+                        openReport('comment', comment.id, spaceId)
+                      }}>
+                      {t('report.action')}
                     </button>
                   )}
                 </div>

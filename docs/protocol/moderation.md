@@ -214,6 +214,154 @@ sequenceDiagram
     H->>C: SPACE_MODERATION_DECIDED {approved} → moderation_decided bell
 ```
 
+## Reports (`SPACE_REPORT`, `SPACE_REPORT_DECIDED`)
+
+A **report** about content inside a space — a post, comment, page, task,
+sticky, calendar event or gallery item — or about a member's conduct in it,
+is triaged by the space's **content authority** (owner, admins,
+moderators), never by household admins: a household admin is not a seat in
+the space, and a space's reports are as private as its content. A household
+admin who holds no seat sees nothing of a space's reports (`403` on
+`GET /api/spaces/{id}/reports`). Household-level reports (feed content, a
+user outside any space, a space itself, highlights, moments) stay with
+household admins (`/api/admin/reports`). A space report never gates the
+reported user's household relay (`relay_policy` counts household-level
+reports only).
+
+The report's space is **derived from the target** on every household — the
+reporter's household and each receiver look the item up themselves. A
+client names a space only for a member report (`target_type: "user"`), and
+the reported user must then hold a live seat in it. A report on an id this
+household does not hold is refused exactly like one in a space the reporter
+is not in (the same 404 body) and nothing is stored — no existence oracle.
+
+### Event types
+
+- `SPACE_REPORT` — reporter's household → host + reviewer households
+  (v_45+). Reader event (`SPACE_READER_EVENT_TYPES`): a report is about
+  content, not content.
+- `SPACE_REPORT_DECIDED` — the deciding household → the other reviewer
+  households (v_45+): `{space_id, target_type, target_id,
+  reporter_user_id, decision: resolved|dismissed, decided_by,
+  decided_at}`, all inside the sealed payload. Reader event; in
+  `SPACE_SESSION_ALLOWED_EVENT_TYPES` (a link-joined moderator decides).
+  The rows are matched on `(space, target, reporter)` — every household
+  holds its own row id.
+
+### Rules
+
+- **Delivery.** `SPACE_REPORT` goes to the space's **host** and every
+  household holding a **live `admin` or `moderator` seat** at **v_45 or
+  above** — one targeted send each (`send_with_mesh_fallback`, sealed under
+  `SPACE_ROUTED` across a relay). Plain member households, households below
+  v_45 and the GFS never receive it. Nor does a household whose **only** live
+  admin / moderator seats belong to the report's subject — a report about
+  X never lands where only X could read it (the host always gets it). Plaintext on the envelope is the
+  routing `space_id`; target, category, notes and reporter ride inside the
+  encrypted payload (which repeats `space_id`).
+- **Receiver rules for a report** (each refusal stores nothing; WARNING
+  except the first): this household reviews the space (host, or ≥1 local
+  content-authority member) — a misdirected report is dropped at INFO; a
+  routing `space_id` that disagrees with the payload copy is dropped; the
+  target resolves into that same space here (a cross-space or unknown id
+  is dropped); the reporter holds a live seat on the **sending** household
+  and is not banned; for a member report, the reported user holds a live
+  seat in the space; caps — 20 pending per (space, sending household,
+  reporter), 50 per (space, sending household), 500 per space; notes are
+  cut at 1000 characters. One report per (reporter, target, space) — a
+  replay is a no-op. A report **without** `space_id` (household-level)
+  must name a reporter who is a user of the sending household.
+- **Receiver rules for a decision:** the sender has content authority in
+  the space (`has_content_authority`) and the named decider holds a
+  content-authority seat on it (`moderates_as`); the decider is not the
+  report's subject; the first decision wins — a replay or a later contrary
+  verdict changes nothing.
+- **No self-triage.** A report's *subject* — the reported member, or the
+  reported item's author / creator — never sees it in the queue, cannot
+  resolve it (404) and is not notified. Exception: the space **owner when
+  the space has no other content authority anywhere** (no other local
+  owner / admin / moderator, no remote admin / moderator seat). Otherwise
+  that report could never be cleared, so the owner sees it with the
+  reporter hidden (`anonymous`: no reporter id, household, name or
+  **notes** — their own words could name them) and may only **dismiss** it
+  (`dismiss_only`; resolving → 403) — the reporter cannot be retaliated
+  against. Eligibility is **pinned when the report is filed**
+  (`content_reports.sole_reviewer_user_id`): if anyone else held content
+  authority then, the owner never gets the fallback — demoting everyone
+  afterwards does not unlock it — and it must still hold at review time
+  (a moderator promoted later takes the report over).
+- **Resolution** uses the existing powers — a moderator deletes the post /
+  comment / page through the ordinary delete, which federates as usual —
+  then marks the report resolved or dismissed, which is synced with
+  `SPACE_REPORT_DECIDED`.
+- **Notification.** Each reviewing household tells its local content
+  authority (except the reporter and the subject, per the rule above) with
+  a title-only bell entry and push, `New report in {space_name}`, linking
+  to the space's Moderation tab (`/spaces/{id}?tab=moderation`) — never the
+  category, notes or reporter (§25.3).
+- **Purge.** When this household stops reviewing a space (its last
+  content-authority member demoted or gone) it deletes the reports other
+  households filed there; a dissolved space's reports all go.
+- **Re-delivery.** When the host promotes a remote seat to admin /
+  moderator (that household reviews again — a temporary demotion purged
+  its copies), the host re-sends the space's pending reports to it over
+  the same `SPACE_REPORT` path (v_45 only; the receiver's dedupe makes a
+  repeat a no-op). The payload names the reporter's own household
+  (`reporter_instance_id`, sealed); the receiver trusts it **only from the
+  host** — the reporter must hold a live seat on that household, and the
+  per-household caps and the stored `reporter_instance_id` key on it, so a
+  relayed report never counts against the host. From any other sender the
+  field is ignored and the sender is the origin (it may only send reports
+  by its own members). A re-delivery skips a household whose only reviewer
+  is the report's subject, too.
+- **GFS.** The automatic fraud forward fires for space content only when
+  the space is `public` / `global`, and for a reported user (as their
+  household) or a public / global space itself. What the GFS gets: the
+  target, the category and this household's signed identity
+  (`reporter_instance_id` + signature, which it needs to verify the report)
+  — **never the reporter user or the notes**. Feed content and anything in
+  a private / household space never reaches a connection server.
+
+```mermaid
+sequenceDiagram
+    participant A as Reporter household (member)
+    participant H as Host
+    participant C as Moderator household
+    participant D as Plain member household
+    A->>A: POST /api/reports — derive space from target, store (space_id)
+    A->>H: SPACE_REPORT {space_id, target, category, notes, reporter} (sealed)
+    A->>C: SPACE_REPORT (sealed)
+    Note over D: never sent
+    H->>H: reviews here? reporter seated on A? not banned? target in space? caps?
+    C->>C: same checks, store
+    H-->>H: notify owner / admins / moderators except the subject (title only)
+    C-->>C: notify local moderator (title only)
+    C->>C: POST /api/spaces/{id}/reports/{rid}/resolve
+    C->>H: SPACE_REPORT_DECIDED {space_id, target, reporter, decision, decided_by} (sealed)
+    H->>H: C has content authority? decider seated? not the subject? still pending?
+    Note over D: never sent
+```
+
+**Compatibility (v_45, `MIN_FOR_SPACE_REPORT_SCOPE`).** Gated, no
+fallback: a reviewer household below v_45 is sent neither event — it would
+file the report for its household admins. A pre-v_45 sender omits
+`space_id` and fans a report out to every member household; a v_45
+receiver derives the space from the target and drops it unless it reviews
+the space.
+
+### Known residuals (reports)
+
+- **N4 — a reviewer household's decision is trusted.** Any household with
+  a live admin / moderator seat can resolve or dismiss a report for every
+  reviewer (first decision wins). A rogue moderator household can clear
+  reports about its own members or allies; the remedy is the owner demoting it (its
+  copies are purged, later reports no longer reach it). Decisions are not
+  re-checked against the content.
+- **N5 — every reviewer household learns who reported.** The reporter's
+  user id and notes ride (sealed) to the host and every admin / moderator
+  household, and are stored there. A moderator on another household can
+  therefore see who reported a member of theirs. Only the anonymous
+  sole-owner fallback hides the reporter, and only from the subject.
 ## Compatibility
 
 - **v_43** (`MIN_FOR_FEDERATED_MODERATION`). Submissions skip a reviewer
@@ -252,6 +400,12 @@ sequenceDiagram
 - **An approved event does not RSVP its creator** when approved on a
   household that is not the creator's (the approver can't speak for them),
   and its feed card is not queued in their name there.
+- **Report decisions reach v_45 households only.** A reviewer household
+  below v_45 receives neither the report nor its decision.
+- **A sole-authority owner may dismiss a report about themself** (the
+  reporter hidden). The rule trades a self-dismiss for a report that would
+  otherwise sit forever; members who want an outside view can leave or
+  report the space itself to their household admin.
 - **Clock skew around `expires_at`**: the approver checks its own copy's
   expiry; an author's household that already expired its copy refuses the
   release.
@@ -272,8 +426,12 @@ sequenceDiagram
 - `socialhome/federation/space_authorship.py` —
   `SpaceAuthorship.may_author_approved`, the approval path of
   `access_admits`.
+- `socialhome/services/report_service.py` / `report_scope.py` — space-scoped
+  reports: scope derivation, `SPACE_REPORT` targets and receiver checks,
+  the content-authority triage.
 - Tests: `tests/protocol/test_space_moderation_federated.py` (four real
-  households), `tests/services/test_space_moderation_federation.py`,
+  households), `tests/protocol/test_space_report_scope.py` (reports, four
+  real households), `tests/services/test_space_moderation_federation.py`,
   `tests/federation/test_moderation_approval.py`.
 
 ## Spec refs

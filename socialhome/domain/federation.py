@@ -396,6 +396,9 @@ class FederationEventType(str, enum.Enum):
 
     # ── Moderation ──
     SPACE_REPORT = "space_report"
+    #: A reviewer's resolve / dismiss of a space report, synced to the
+    #: other reviewer households (v_45). First decision wins.
+    SPACE_REPORT_DECIDED = "space_report_decided"
 
     # ── Presence ──
     PRESENCE_UPDATED = "presence_updated"
@@ -634,6 +637,8 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_TIMETABLE_DELETED,
         #: Moderation reports raised inside the space.
         FederationEventType.SPACE_REPORT,
+        #: A reviewer's verdict on one (v_45) — a link-joined moderator decides.
+        FederationEventType.SPACE_REPORT_DECIDED,
         #: Federated moderation (v_43): a link-joined member's submission to
         #: the reviewers, and a link-joined moderator's verdict. Both are
         #: re-judged by their handlers (the submitter seated on the sender;
@@ -926,6 +931,10 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: that somebody who can only read still has a way to flag what
         #: they read.
         FederationEventType.SPACE_REPORT,
+        #: A verdict on a space report (v_45). Not content; its handler
+        #: admits it only from a household with content authority, naming
+        #: a decider seated there (``moderates_as``).
+        FederationEventType.SPACE_REPORT_DECIDED,
         #: A verdict on a pending item (v_43). Not content itself — the
         #: approved content rides its own ``SPACE_*`` write — and it must
         #: still land in an archived space (a reject works there). Its

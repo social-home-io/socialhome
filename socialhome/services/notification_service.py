@@ -60,6 +60,7 @@ from ..domain.events import (
     PostCreated,
     PostEdited,
     RemoteSpaceDissolved,
+    ReportFiled,
     SpaceAdminSeedsRetiredAfterRestore,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
@@ -374,6 +375,7 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(TaskDeadlineDue, self.on_task_deadline_due)
         self._bus.subscribe(SpacePostCreated, self.on_space_post_created)
         self._bus.subscribe(SpaceModerationQueued, self.on_moderation_queued)
+        self._bus.subscribe(ReportFiled, self.on_report_filed)
         self._bus.subscribe(SpaceModerationApproved, self.on_moderation_decided)
         self._bus.subscribe(SpaceModerationRejected, self.on_moderation_decided)
         self._bus.subscribe(SpaceModerationExpired, self.on_moderation_decided)
@@ -1109,9 +1111,60 @@ class NotificationService(ProtectionGateMixin):
                             fallback="New content pending review in {space_name}",
                             space_name=space.name,
                         ),
-                        link_url=f"/spaces/{event.item.space_id}/moderation",
+                        link_url=f"/spaces/{event.item.space_id}?tab=moderation",
                     )
                 )
+
+    async def on_report_filed(self, event: ReportFiled) -> None:
+        """A space-scoped report: tell the space's content authority
+        (owner / admin / moderator) on this household — except the reporter
+        and the report's subject (the reported member / the item's author,
+        unless they are the space's sole authority) — title only, never the category, notes or
+        reporter (§25.3). Household-level reports
+        notify nobody (household admins look in the admin page)."""
+        if not event.space_id:
+            return
+        space = await self._spaces.get(event.space_id)
+        if space is None or space.dissolved:
+            return
+        members = await self._spaces.list_members(event.space_id)
+        authority = [m for m in members if m.role in CONTENT_AUTHORITY_ROLES]
+        subject = event.subject_user_id
+        # The subject reviews a report about themself only as the space's
+        # sole content authority (its owner, nobody else anywhere) — the
+        # ``ReportService.review_space`` rule.
+        subject_reviews = (
+            subject is not None
+            and len(authority) == 1
+            and authority[0].user_id == subject
+            and authority[0].role == SpaceRole.OWNER
+            and not (
+                self._remote_members is not None
+                and await self._remote_members.list_instances_with_roles(
+                    event.space_id,
+                    frozenset({SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value}),
+                )
+            )
+        )
+        for member in authority:
+            if member.user_id == event.reporter_user_id:
+                continue
+            if member.user_id == subject and not subject_reviews:
+                continue  # never told about a report on themself
+            recipient = await self._users.get_by_user_id(member.user_id)
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_report",
+                    title=self._t(
+                        "notification.space.report.filed",
+                        locale=self._locale(recipient),
+                        fallback="New report in {space_name}",
+                        space_name=space.name,
+                    ),
+                    link_url=f"/spaces/{event.space_id}?tab=moderation",
+                )
+            )
 
     async def on_remote_seat_live(self, event: SpaceRemoteSeatLive) -> None:
         """A household's FIRST member just took a seat in a space that keeps

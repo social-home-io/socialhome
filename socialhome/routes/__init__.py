@@ -355,6 +355,8 @@ from .reports import (
     AdminReportCollectionView,
     AdminReportResolveView,
     ReportCollectionView,
+    SpaceReportCollectionView,
+    SpaceReportResolveView,
 )
 from .storage import StorageQuotaView, StorageUsageView
 from .tasks import (
@@ -1368,6 +1370,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/reports", ReportCollectionView)
     app.router.add_view("/api/admin/reports", AdminReportCollectionView)
     app.router.add_view("/api/admin/reports/{id}/resolve", AdminReportResolveView)
+    app.router.add_view("/api/spaces/{id}/reports", SpaceReportCollectionView)
+    app.router.add_view(
+        "/api/spaces/{id}/reports/{report_id}/resolve", SpaceReportResolveView
+    )
 
     # ── HA user sync (admin only — 501 in standalone mode) ────────────
     app.router.add_view("/api/admin/ha-users", HaUsersCollectionView)

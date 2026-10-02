@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent } from '@testing-library/preact'
+import { render, fireEvent, waitFor } from '@testing-library/preact'
 
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 
@@ -111,5 +111,24 @@ describe('ImageLightbox', () => {
       expect(writeText).toHaveBeenCalledOnce()
       expect(writeText.mock.calls[0][0]).toBe('![Lunch](/api/media/x.webp)')
     })
+  })
+
+  it('an item with onReport shows Report, which closes the viewer first', async () => {
+    closeLightbox()
+    const onReport = vi.fn()
+    const r = render(<ImageLightbox />)
+    openLightbox({ items: [{ id: 'g1', url: '/api/media/a.webp', onReport }] })
+    fireEvent.click(await r.findByRole('button', { name: /🚩/ }))
+    expect(onReport).toHaveBeenCalled()
+    await waitFor(() => expect(r.queryByRole('button', { name: /🚩/ })).toBeNull())
+  })
+
+  it('an item without onReport shows no Report', async () => {
+    closeLightbox()
+    const r = render(<ImageLightbox />)
+    openLightbox({ items: [{ id: 'g1', url: '/api/media/a.webp' }] })
+    await r.findByRole('button', { name: /Copy/ })
+    expect(r.queryByRole('button', { name: /🚩/ })).toBeNull()
+    closeLightbox()
   })
 })

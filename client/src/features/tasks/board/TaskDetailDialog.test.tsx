@@ -128,4 +128,19 @@ describe('TaskDetailDialog', () => {
     expect(dl.textContent).toContain('School')
     expect(dl.textContent).toContain('Bo')
   })
+
+  it('someone else\'s space task offers Report to the space\'s moderators', async () => {
+    const mod = await import('@/components/ReportDialog')
+    const spy = vi.spyOn(mod, 'openReport').mockImplementation(() => {})
+    const t = open({ created_by: 'u2' }, { spaceId: 'sp-1' })
+    fireEvent.click(t.getByRole('button', { name: 'Report' }))
+    expect(spy).toHaveBeenCalledWith('task', 't1', 'sp-1')
+    expect(t.onClose).toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  it('no Report on your own task, nor on a household task', () => {
+    expect(open({}, { spaceId: 'sp-1' }).queryByRole('button', { name: 'Report' })).toBeNull()
+    expect(open({ created_by: 'u2' }).queryByRole('button', { name: 'Report' })).toBeNull()
+  })
 })

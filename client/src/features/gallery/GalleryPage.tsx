@@ -17,6 +17,8 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { openLightbox, type LightboxItem } from '@/components/ImageLightbox'
+import { openReport } from '@/components/ReportDialog'
+import { currentUser } from '@/store/auth'
 import { describeUploadError } from '@/utils/uploadErrors'
 
 interface Album {
@@ -311,6 +313,10 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
     taken_at:      i.taken_at,
     width:         i.width,
     height:        i.height,
+    // A space item someone else uploaded goes to the space's moderators.
+    onReport: album.space_id && i.uploaded_by !== currentUser.value?.user_id
+      ? () => openReport('gallery_item', i.id, album.space_id)
+      : undefined,
   }))
 
   // Drag-drop is a noop on the system album — the album rejects
