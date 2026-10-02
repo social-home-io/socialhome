@@ -32,6 +32,10 @@ export interface SpaceProposal {
   total_admins: number
   needed: number
   proposed_by_user: string
+  /** The proposer's display name, resolved by the host from the signed
+   *  ``(proposed_by_instance, proposed_by_user)`` seat; ``null`` when
+   *  unknown (the banner then says "a member of another household"). */
+  proposed_by_label?: string | null
   /** Owner-only proposals (forwarded admin actions) may be approved only
    *  by the space owner — a co-admin's vote is rejected by the host. */
   owner_only?: boolean
@@ -50,48 +54,50 @@ interface Props {
   isOwner: boolean
 }
 
-/** Human-readable phrase for a forwarded admin action. Reads after
- *  "A proposal to …". */
-const FWD_ACTION_COPY: Record<string, string> = {
-  ban: 'remove a member',
-  unban: 'reinstate a member',
-  update_config: "change this space's settings",
-  archive: 'archive this space',
-  unarchive: 'restore this space',
-  invite: 'invite a member to this space',
+/** Phrase for a forwarded admin action — fills ``{action}`` in
+ *  ``space.proposal.owner_body`` ("A proposal to …"). Literal ``t()``
+ *  calls so the i18n check sees every key. */
+const FWD_ACTION_COPY: Record<string, () => string> = {
+  ban: () => t('space.proposal.fwd.ban'),
+  unban: () => t('space.proposal.fwd.unban'),
+  update_config: () => t('space.proposal.fwd.update_config'),
+  archive: () => t('space.proposal.fwd.archive'),
+  unarchive: () => t('space.proposal.fwd.unarchive'),
+  invite: () => t('space.proposal.fwd.invite'),
 }
 
 /** "make Carol …" — the role a forwarded ``set_member_role`` asks for. */
-const ROLE_PHRASE: Record<string, string> = {
-  owner: 'the owner',
-  admin: 'an admin',
-  moderator: 'a moderator',
-  member: 'a member',
-  subscriber: 'a follower',
+const ROLE_PHRASE: Record<string, (name: string) => string> = {
+  owner: (name) => t('space.proposal.role.owner', { name }),
+  admin: (name) => t('space.proposal.role.admin', { name }),
+  moderator: (name) => t('space.proposal.role.moderator', { name }),
+  member: (name) => t('space.proposal.role.member', { name }),
+  subscriber: (name) => t('space.proposal.role.subscriber', { name }),
 }
 
 function describe(p: SpaceProposal): string {
-  if (p.action === 'dissolve') return 'permanently delete this space'
+  if (p.action === 'dissolve') return t('space.proposal.action.dissolve')
   if (p.action === 'set_public_tier') {
     const tier = p.params?.space_type
     return tier
-      ? `change the publication tier to “${tier}”`
-      : 'change the publication tier'
+      ? t('space.proposal.action.tier', { tier })
+      : t('space.proposal.action.tier_any')
   }
   if (p.action === 'remote_admin_action' && p.fwd_action === 'set_member_role') {
     // "make Carol a moderator" — the owner must see exactly what they
     // approve: who, and to which role.
-    // (English like the rest of this banner's sentence.)
     const role = parseSpaceRole(p.fwd_params?.role)
-    const who = p.fwd_target_label || 'someone'
-    return role ? `make ${who} ${ROLE_PHRASE[role]}` : `change ${who}'s role`
+    const who = p.fwd_target_label || t('space.proposal.someone')
+    return role ? ROLE_PHRASE[role](who) : t('space.proposal.role.change', { name: who })
   }
   if (p.action === 'remote_admin_action') {
-    const base =
-      (p.fwd_action && FWD_ACTION_COPY[p.fwd_action]) || 'perform an admin action'
-    return p.fwd_target_label ? `${base} (${p.fwd_target_label})` : base
+    const copy = p.fwd_action ? FWD_ACTION_COPY[p.fwd_action] : undefined
+    const base = copy ? copy() : t('space.proposal.fwd.generic')
+    return p.fwd_target_label
+      ? t('space.proposal.action.with_target', { action: base, target: p.fwd_target_label })
+      : base
   }
-  return 'make a critical change'
+  return t('space.proposal.action.critical')
 }
 
 export function SpaceProposalsBanner({ spaceId, canVote, isOwner }: Props) {
@@ -131,17 +137,17 @@ export function SpaceProposalsBanner({ spaceId, canVote, isOwner }: Props) {
     setBusy(p.id)
     try {
       await api.post(`/api/spaces/${spaceId}/proposals/${p.id}/vote`, { approve })
-      showToast(approve ? 'Approval recorded' : 'Proposal rejected', 'info')
+      showToast(approve ? t('space.proposal.approved_toast') : t('space.proposal.rejected_toast'), 'info')
       // The WS frame updates the tally / removes it; no optimistic edit.
     } catch (err) {
-      showToast((err as Error)?.message || 'Vote failed', 'error')
+      showToast((err as Error)?.message || t('space.proposal.vote_failed'), 'error')
     } finally {
       setBusy(null)
     }
   }
 
   return (
-    <div class="sh-space-proposals" role="region" aria-label="Pending approvals">
+    <div class="sh-space-proposals" role="region" aria-label={t('space.proposal.region_aria')}>
       {proposals.map((p) => {
         const icon =
           p.action === 'dissolve'
@@ -166,23 +172,29 @@ export function SpaceProposalsBanner({ spaceId, canVote, isOwner }: Props) {
               </span>
               <div class="sh-proposal-banner__text">
                 <strong>
-                  {p.owner_only ? 'Owner approval needed' : 'Admin approval needed'}
+                  {p.owner_only ? t('space.proposal.owner_title') : t('space.proposal.admin_title')}
                 </strong>
                 {p.owner_only ? (
                   <p class="sh-muted">
-                    A proposal to {describe(p)} needs the space owner to
-                    approve.
+                    {t('space.proposal.owner_body', { action: describe(p) })}
                   </p>
                 ) : (
                   <p class="sh-muted">
-                    A proposal to {describe(p)} needs a majority of admins to
-                    approve. <strong>{p.approvals} of {p.needed}</strong>{' '}
-                    approvals so far ({p.total_admins} admins).
+                    {t('space.proposal.admin_body', { action: describe(p) })}{' '}
+                    <strong>
+                      {t('space.proposal.tally', {
+                        approvals: String(p.approvals),
+                        needed: String(p.needed),
+                      })}
+                    </strong>{' '}
+                    {t('space.proposal.admin_count', { n: String(p.total_admins) })}
                   </p>
                 )}
                 {p.action === 'remote_admin_action' && (
                   <p class="sh-muted sh-proposal-banner__requester">
-                    Requested by {p.proposed_by_user}
+                    {t('space.proposal.requested_by', {
+                      name: p.proposed_by_label || t('space.proposal.requester_unknown'),
+                    })}
                   </p>
                 )}
               </div>
@@ -194,7 +206,7 @@ export function SpaceProposalsBanner({ spaceId, canVote, isOwner }: Props) {
                   disabled={busy === p.id}
                   onClick={() => void vote(p, false)}
                 >
-                  Reject
+                  {t('space.proposal.reject')}
                 </Button>
                 {approveLocked ? (
                   <p class="sh-muted sh-proposal-banner__note">
@@ -206,15 +218,13 @@ export function SpaceProposalsBanner({ spaceId, canVote, isOwner }: Props) {
                     disabled={busy === p.id}
                     onClick={() => void vote(p, true)}
                   >
-                    Approve
+                    {t('space.proposal.approve')}
                   </Button>
                 )}
               </div>
             ) : (
               <p class="sh-muted sh-proposal-banner__note">
-                {p.owner_only
-                  ? 'Waiting for the space owner to decide.'
-                  : 'Waiting for the space admins to decide.'}
+                {p.owner_only ? t('space.proposal.waiting_owner') : t('space.proposal.waiting_admins')}
               </p>
             )}
           </div>

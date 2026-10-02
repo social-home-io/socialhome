@@ -24,7 +24,9 @@
  * row bands, then left-to-right). No moving — stored positions are left
  * untouched.
  *
- * Tapping / clicking a note's body opens the edit dialog.
+ * Tapping / clicking a note's body opens the edit dialog. A read-only
+ * board has no editor, so each note someone else wrote carries its own
+ * small Report button (to the space's moderators).
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { useTitle } from '@/store/pageTitle'
@@ -37,6 +39,8 @@ import {
   openCreateStickyDialog,
   openEditStickyDialog,
 } from '@/components/StickyDialog'
+import { openReport } from '@/components/ReportDialog'
+import { currentUser } from '@/store/auth'
 import { stickyStoreFor, type StickyRow, type StickyStore } from '@/store/stickies'
 import { isOne } from '@/store/tasks'
 import { t } from '@/i18n/i18n'
@@ -240,7 +244,7 @@ export default function StickyBoardPage({ spaceId, readOnly = null }: StickyBoar
         {ordered.map(s => (
           <div key={s.id} class={noteClass(s.color)} data-sticky-id={s.id}
                style={{ background: stickyBackground(s.color) }}>
-            {writable ? <NoteBody sticky={s} scope={scope} /> : <StaticNoteBody sticky={s} />}
+            {writable ? <NoteBody sticky={s} scope={scope} /> : <StaticNoteBody sticky={s} scope={scope} />}
           </div>
         ))}
       </div>
@@ -274,7 +278,7 @@ export default function StickyBoardPage({ spaceId, readOnly = null }: StickyBoar
               '--sh-sticky-y': pct(s.position_y, BOARD_H),
             }}
           >
-            <StaticNoteBody sticky={s} />
+            <StaticNoteBody sticky={s} scope={scope} />
           </div>
         )))}
       </div>
@@ -298,12 +302,29 @@ export default function StickyBoardPage({ spaceId, readOnly = null }: StickyBoar
   )
 }
 
-/** A note's text with no editor behind it (a read-only board). */
-function StaticNoteBody({ sticky }: { sticky: StickyRow }) {
+/** A note's text with no editor behind it (a read-only board). The
+ *  editor is where Report lives on a writable board, so a space note by
+ *  someone else gets its own Report button here. */
+function StaticNoteBody({ sticky, scope }: { sticky: StickyRow; scope: string | null }) {
+  const reportable = scope !== null && !!sticky.author
+    && sticky.author !== currentUser.value?.user_id
   return (
-    <div class="sh-sticky__body sh-sticky__body--static">
-      <span class="sh-sticky__text">{sticky.content}</span>
-    </div>
+    <>
+      <div class={`sh-sticky__body sh-sticky__body--static${reportable ? ' sh-sticky__body--reportable' : ''}`}>
+        <span class="sh-sticky__text">{sticky.content}</span>
+      </div>
+      {reportable && (
+        <button
+          type="button"
+          class="sh-sticky__report"
+          aria-label={t('stickies.report_label', { text: noteSnippet(sticky.content, 40) })}
+          title={t('stickies.report_title')}
+          onClick={() => openReport('sticky', sticky.id, scope)}
+        >
+          <span aria-hidden="true">⚑</span>
+        </button>
+      )}
+    </>
   )
 }
 

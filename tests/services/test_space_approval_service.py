@@ -8,6 +8,7 @@ isolation.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -501,8 +502,9 @@ async def test_enqueue_owner_approval_creates_pending_no_vote(stack):
     assert v["status"] == ProposalStatus.PENDING.value
     assert v["params"]["fwd_action"] == "ban"
     assert v["params"]["fwd_params"] == {"user_id": "u-victim"}
-    assert v["params"]["actor_instance"] == "host-B"
-    assert v["params"]["actor_user"] == "ben"
+    # The proposer is the signer-bound pair, not a params copy.
+    assert v["proposed_by_instance"] == "host-B"
+    assert v["proposed_by_user"] == "ben"
     # No vote recorded.
     assert await stack.proposals.list_votes(v["id"]) == []
     # An update event was emitted.
@@ -745,6 +747,109 @@ async def test_owner_only_view_label_none_for_targetless_action(stack):
     )
     v = (await stack.approvals.list_for_space(space.id))[0]
     assert v["fwd_target_label"] is None
+
+
+# ── proposed_by_label: the requester's name, never a raw id ─────────
+
+
+async def test_owner_only_view_labels_proposer_from_remote_member(stack):
+    """The signer-bound proposer resolves to its seated remote member's
+    display_name for the owner's "Requested by …" line."""
+    space = await _space(stack)
+    await stack.remote.add(
+        space_id=space.id,
+        instance_id="host-B",
+        user_id="u-ben",
+        user_pk=None,
+        display_name="Ben",
+    )
+    await stack.approvals.enqueue_owner_approval(
+        space.id,
+        actor_instance="host-B",
+        actor_user="u-ben",
+        fwd_action="archive",
+        fwd_params={},
+    )
+    v = (await stack.approvals.list_for_space(space.id))[0]
+    assert v["proposed_by_label"] == "Ben"
+
+
+async def test_owner_only_view_proposer_label_none_when_unknown(stack):
+    """An unresolvable proposer → None (the SPA shows a generic fallback),
+    never the raw user id."""
+    space = await _space(stack)
+    await stack.approvals.enqueue_owner_approval(
+        space.id,
+        actor_instance="host-B",
+        actor_user="u-ghost",
+        fwd_action="archive",
+        fwd_params={},
+    )
+    v = (await stack.approvals.list_for_space(space.id))[0]
+    assert v["proposed_by_label"] is None
+
+
+async def test_owner_only_view_omits_untrusted_actor_params(stack):
+    """``actor_instance`` / ``actor_user`` are never trusted (the signer-bound
+    ``proposed_by_*`` are) — the view doesn't echo them in ``params``, even
+    for a row stored before they were dropped."""
+    space = await _space(stack)
+    await stack.approvals.enqueue_owner_approval(
+        space.id,
+        actor_instance="host-B",
+        actor_user="u-ben",
+        fwd_action="ban",
+        fwd_params={"user_id": "u-victim"},
+    )
+    v = (await stack.approvals.list_for_space(space.id))[0]
+    assert "actor_instance" not in v["params"]
+    assert "actor_user" not in v["params"]
+    assert v["params"]["fwd_action"] == "ban"
+    # A legacy row that still carries them is scrubbed too.
+    stored = (await stack.proposals.list_open(space.id))[0]
+    await stack.proposals.upsert(
+        dataclasses.replace(
+            stored,
+            params={
+                **stored.params,
+                "actor_instance": "forged",
+                "actor_user": "forged",
+            },
+        )
+    )
+    v = (await stack.approvals.list_for_space(space.id))[0]
+    assert "actor_instance" not in v["params"]
+    assert "actor_user" not in v["params"]
+
+
+async def test_mirror_view_omits_untrusted_actor_params(stack):
+    """A member household serving an (older) host's mirrored view strips
+    the untrusted actor fields too."""
+    space = await _space(stack)
+    await stack.approvals.apply_mirror_update(
+        space.id,
+        {
+            "id": "p-mirror",
+            "action": "remote_admin_action",
+            "status": "pending",
+            "params": {
+                "fwd_action": "archive",
+                "fwd_params": {},
+                "actor_instance": "host-B",
+                "actor_user": "u-ben",
+            },
+            "proposed_by_instance": "host-B",
+            "proposed_by_user": "u-ben",
+            "owner_only": True,
+            "approvals": 0,
+            "total_admins": 1,
+            "needed": 1,
+            "created_at": "2026-06-01T00:00:00+00:00",
+            "expires_at": "2999-01-01T00:00:00+00:00",
+        },
+    )
+    v = (await stack.approvals.list_for_space(space.id))[0]
+    assert v["params"] == {"fwd_action": "archive", "fwd_params": {}}
 
 
 # ── §CP.R: a protected admin can't publish a space ───────────────────

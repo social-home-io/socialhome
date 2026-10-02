@@ -14,6 +14,11 @@ vi.mock('@/api', () => ({
   },
 }))
 
+const openReport = vi.fn()
+vi.mock('@/components/ReportDialog', () => ({
+  openReport: (...args: unknown[]) => openReport(...args),
+}))
+
 vi.mock('@/store/auth', () => ({
   currentUser: { value: { user_id: 'u1', username: 'admin', display_name: 'Admin', is_admin: true } },
   token: { value: 'test-tok' },
@@ -25,6 +30,7 @@ vi.mock('@/store/auth', () => ({
 interface Row {
   id: string; content: string; color: string; position_x: number; position_y: number
   space_id: string | null
+  author?: string
 }
 const sticky = (id: string, over: Partial<Row> = {}): Row => ({
   id, content: `Note ${id}`, color: '#FFF9B1', position_x: 100, position_y: 100,
@@ -81,6 +87,7 @@ beforeEach(() => {
   apiPost.mockReset()
   apiPatch.mockReset()
   apiDelete.mockReset()
+  openReport.mockReset()
   mm = window.matchMedia
   setNarrow(false)
   observers.length = 0
@@ -484,6 +491,43 @@ describe('StickyBoardPage read-only (an ADMIN_ONLY board, §4.3)', () => {
     )
     await t.findByText('Note s')
     expect(t.queryByRole('button', { name: /^Edit note/ })).toBeNull()
+  })
+
+  it("someone else's note has a Report button that opens the space report", async () => {
+    const t = await setup(
+      { '/api/spaces/sp1/stickies': [sticky('s', { space_id: 'sp1', author: 'u-other' })] },
+      { spaceId: 'sp1', readOnly: NOTE },
+    )
+    const btn = await t.findByRole('button', { name: 'Report note: Note s' })
+    t.fireEvent.click(btn)
+    expect(openReport).toHaveBeenCalledWith('sticky', 's', 'sp1')
+  })
+
+  it('the phone grid offers Report on others\' notes too', async () => {
+    setNarrow(true)
+    const t = await setup(
+      { '/api/spaces/sp1/stickies': [sticky('s', { space_id: 'sp1', author: 'u-other' })] },
+      { spaceId: 'sp1', readOnly: NOTE },
+    )
+    await t.findByRole('button', { name: 'Report note: Note s' })
+  })
+
+  it("the viewer's own note has no Report button", async () => {
+    const t = await setup(
+      { '/api/spaces/sp1/stickies': [sticky('s', { space_id: 'sp1', author: 'u1' })] },
+      { spaceId: 'sp1', readOnly: NOTE },
+    )
+    await t.findByText('Note s')
+    expect(t.queryByRole('button', { name: /^Report note/ })).toBeNull()
+  })
+
+  it('a writable board keeps Report in the editor, not on the card', async () => {
+    const t = await setup(
+      { '/api/spaces/sp1/stickies': [sticky('s', { space_id: 'sp1', author: 'u-other' })] },
+      { spaceId: 'sp1' },
+    )
+    await t.findByText('Note s')
+    expect(t.queryByRole('button', { name: /^Report note/ })).toBeNull()
   })
 
   it('an empty read-only board has no call to action', async () => {

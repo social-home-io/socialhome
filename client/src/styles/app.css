@@ -6794,6 +6794,34 @@ body.sh-dm-thread-open .sh-messages {
 .sh-sticky-canvas .sh-sticky__body { padding-top: 22px; }
 /* A read-only board's note: the text, nothing to press. */
 .sh-sticky__body--static { cursor: default; }
+/* …except, on someone else's note, a small Report flag in the corner
+ * (the editor that holds Report on a writable board isn't offered). */
+.sh-sticky__body--reportable { padding-inline-end: 40px; }
+.sh-sticky__report {
+  position: absolute;
+  top: 2px;
+  inset-inline-end: 2px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: var(--sh-radius-sm);
+  background: transparent;
+  color: var(--sh-sticky-ink-muted);
+  font-size: var(--sh-font-size-md);
+  line-height: 36px;
+  cursor: pointer;
+  z-index: 1;
+  transition: background var(--sh-transition-fast), color var(--sh-transition-fast);
+}
+.sh-sticky__report:hover {
+  background: var(--sh-sticky-tape);
+  color: var(--sh-sticky-ink);
+}
+.sh-sticky .sh-sticky__report:focus-visible {
+  outline: 2px solid var(--sh-sticky-ink);
+  outline-offset: -2px;
+}
 .sh-sticky__text {
   display: block;
   white-space: pre-wrap;

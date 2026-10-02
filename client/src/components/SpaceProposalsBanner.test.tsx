@@ -124,9 +124,55 @@ describe('SpaceProposalsBanner', () => {
       expect(container.textContent).toContain('Owner approval needed'),
     )
     expect(container.textContent).toContain('remove a member')
-    expect(container.textContent).toContain('Requested by bob')
     // No fwd_target_label → no trailing "(name)".
     expect(container.textContent).not.toContain('remove a member (')
+  })
+
+  it("names the requester by display name, never the raw user id", async () => {
+    apiGet.mockResolvedValue({
+      proposals: [ownerActionProposal({ proposed_by_user: 'u-bob', proposed_by_label: 'Bob' })],
+    })
+    const { container } = render(
+      <SpaceProposalsBanner spaceId="s1" canVote={true} isOwner={true} />,
+    )
+    await waitFor(() => expect(container.textContent).toContain('Requested by Bob'))
+    expect(container.textContent).not.toContain('u-bob')
+  })
+
+  it('an unresolved requester reads as a member of another household', async () => {
+    apiGet.mockResolvedValue({
+      proposals: [ownerActionProposal({ proposed_by_user: 'u-bob', proposed_by_label: null })],
+    })
+    const { container } = render(
+      <SpaceProposalsBanner spaceId="s1" canVote={true} isOwner={true} />,
+    )
+    await waitFor(() =>
+      expect(container.textContent).toContain('Requested by a member of another household'))
+    expect(container.textContent).not.toContain('u-bob')
+  })
+
+  it('the banner sentence is translated', async () => {
+    const i18n = await import('@/i18n/i18n')
+    const de = (await import('@/i18n/locales/de.json')).default as Record<string, string>
+    await i18n.setLocale('de')
+    try {
+      apiGet.mockResolvedValue({
+        proposals: [ownerActionProposal({ proposed_by_label: null })],
+      })
+      const { container } = render(
+        <SpaceProposalsBanner spaceId="s1" canVote={true} isOwner={true} />,
+      )
+      const action = de['space.proposal.fwd.ban']
+      await waitFor(() =>
+        expect(container.textContent).toContain(
+          de['space.proposal.owner_body'].replace('{action}', action)))
+      expect(container.textContent).toContain(de['space.proposal.owner_title'])
+      expect(container.textContent).toContain(
+        de['space.proposal.requested_by'].replace('{name}', de['space.proposal.requester_unknown']))
+      expect(container.textContent).not.toContain('needs the space owner')
+    } finally {
+      await i18n.setLocale('en')
+    }
   })
 
   it('appends the target name when fwd_target_label is present', async () => {

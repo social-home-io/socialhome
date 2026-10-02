@@ -89,5 +89,12 @@
   "theme.font.mono": "Name of a monospace font style. Keep short.",
   "theme.layout.magazine": "Post layout name: roomy, reading-oriented cards. Keep short.",
   "theme.font.inherit": "Space theme font option: no font override, the space uses the household's font.",
-  "theme.corner_radius": "Slider label. {px} = a number of pixels, 0\u201324."
+  "theme.corner_radius": "Slider label. {px} = a number of pixels, 0\u201324.",
+
+  "space.proposal.owner_body": "Approval banner sentence. {action} = one of the space.proposal.action.* / role.* / fwd.* phrases, already in the form that fits here (e.g. German zu-infinitive). Translate those phrases to read naturally inside this sentence.",
+  "space.proposal.admin_body": "Same as space.proposal.owner_body; a majority of the space's admins must approve.",
+  "space.proposal.requested_by": "{name} = the requester's display name, or space.proposal.requester_unknown.",
+  "space.proposal.requester_unknown": "Fallback for {name} in space.proposal.requested_by when the requester's name isn't known.",
+  "space.proposal.role.moderator": "Fills {action} in space.proposal.owner_body. {name} = a member's display name, or space.proposal.someone.",
+  "space.proposal.fwd.ban": "Fills {action} in space.proposal.owner_body — like the other space.proposal.fwd.* / action.* phrases."
 }

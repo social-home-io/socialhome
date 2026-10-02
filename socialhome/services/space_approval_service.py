@@ -388,8 +388,6 @@ class SpaceApprovalService(ProtectionGateMixin):
             params={
                 "fwd_action": fwd_action,
                 "fwd_params": fwd_params,
-                "actor_instance": actor_instance,
-                "actor_user": actor_user,
             },
             proposed_by_instance=actor_instance,
             proposed_by_user=actor_user,
@@ -728,7 +726,10 @@ class SpaceApprovalService(ProtectionGateMixin):
         # against this household's possibly-stale roster. Only the current
         # status is taken from the local row.
         if proposal.host_view is not None:
-            return {**proposal.host_view, "status": proposal.status.value}
+            view = {**proposal.host_view, "status": proposal.status.value}
+            if isinstance(view.get("params"), dict):
+                view["params"] = _public_params(view["params"])
+            return view
         if proposal.action == ProposalAction.REMOTE_ADMIN_ACTION:
             owner_key = await self._owner_key(proposal.space_id)
             votes = await self._proposals.list_votes(proposal.id)
@@ -746,10 +747,17 @@ class SpaceApprovalService(ProtectionGateMixin):
                 "id": proposal.id,
                 "space_id": proposal.space_id,
                 "action": proposal.action.value,
-                "params": proposal.params,
+                "params": _public_params(proposal.params),
                 "status": proposal.status.value,
                 "proposed_by_instance": proposal.proposed_by_instance,
                 "proposed_by_user": proposal.proposed_by_user,
+                # The signer-bound proposer's display name for the owner's
+                # "Requested by …" line; None → the SPA's generic fallback.
+                "proposed_by_label": await self._seat_label(
+                    proposal.space_id,
+                    proposal.proposed_by_instance,
+                    proposal.proposed_by_user,
+                ),
                 "owner_only": True,
                 "fwd_action": p.get("fwd_action"),
                 "fwd_params": p.get("fwd_params"),
@@ -771,10 +779,15 @@ class SpaceApprovalService(ProtectionGateMixin):
             "id": proposal.id,
             "space_id": proposal.space_id,
             "action": proposal.action.value,
-            "params": proposal.params,
+            "params": _public_params(proposal.params),
             "status": proposal.status.value,
             "proposed_by_instance": proposal.proposed_by_instance,
             "proposed_by_user": proposal.proposed_by_user,
+            "proposed_by_label": await self._seat_label(
+                proposal.space_id,
+                proposal.proposed_by_instance,
+                proposal.proposed_by_user,
+            ),
             "approvals": approvals,
             "total_admins": total,
             "needed": (total // 2) + 1,
@@ -808,6 +821,17 @@ class SpaceApprovalService(ProtectionGateMixin):
                     proposal.space_id,
                 )
         return view
+
+
+#: Proposal ``params`` keys never shown in a view: the proposer copied
+#: into params by older builds. Nothing trusts them — the signer-bound
+#: ``proposed_by_instance`` / ``proposed_by_user`` are authoritative.
+_UNTRUSTED_PARAM_KEYS = frozenset({"actor_instance", "actor_user"})
+
+
+def _public_params(params: dict) -> dict:
+    """``params`` without the untrusted proposer copies."""
+    return {k: v for k, v in params.items() if k not in _UNTRUSTED_PARAM_KEYS}
 
 
 def _vote_str(approve: bool) -> str:
