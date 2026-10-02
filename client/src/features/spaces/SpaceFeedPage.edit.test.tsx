@@ -55,7 +55,15 @@ vi.mock('@/components/PostCard', () => ({
   ),
 }))
 
-const SOON = new Date(Date.now() + 2 * 3600_000)
+// Tomorrow at 10:00 local time: an event an hour long never crosses midnight,
+// so the agenda lists it once whatever time of day the suite runs. (A
+// "now + 2 h" start split the event over two days in the evening.)
+const SOON = (() => {
+  const d = new Date()
+  d.setDate(d.getDate() + 1)
+  d.setHours(10, 0, 0, 0)
+  return d
+})()
 
 function wire(role: string, opts: { archived?: boolean; features?: Record<string, unknown> } = {}) {
   apiGet.mockImplementation(async (url: string) => {
