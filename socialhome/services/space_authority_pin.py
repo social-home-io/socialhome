@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Protocol
 from ..authority_cert import (
     InvalidAuthorityCert,
     UnsupportedAuthorityCertSuite,
+    VerifiedAuthorityCert,
     sign_authority_cert,
     verify_authority_cert,
 )
@@ -126,6 +127,28 @@ class AuthorityCertOutcome(StrEnum):
         return self in (AuthorityCertOutcome.APPLIED, AuthorityCertOutcome.CURRENT)
 
 
+async def _remember(
+    space_repo: "AbstractSpaceRepo",
+    space_id: str,
+    verified: VerifiedAuthorityCert,
+    cert: object,
+) -> None:
+    """Keep the cert of the key we now pin (v_46): the proof our authority
+    epoch echo shows the owner. Skipped when it is already stored, so a
+    cert repeated on every config / snapshot costs one read, not a write."""
+    if not isinstance(cert, dict):
+        return
+    stored = await space_repo.get_authority_cert(space_id)
+    if stored is not None and stored.get("key_epoch") == verified.key_epoch:
+        return
+    await space_repo.remember_authority_cert(
+        space_id,
+        key_epoch=verified.key_epoch,
+        public_key_hex=verified.authority_pk_hex,
+        cert=cert,
+    )
+
+
 async def apply_authority_cert(
     space_repo: "AbstractSpaceRepo",
     space: "Space",
@@ -178,6 +201,7 @@ async def apply_authority_cert(
         )
         return AuthorityCertOutcome.STALE
     if verified.key_epoch == held_epoch:
+        await _remember(space_repo, space.id, verified, cert)
         return AuthorityCertOutcome.CURRENT
     if await space_repo.adopt_authority_key(
         space.id, verified.authority_pk_hex, verified.key_epoch
@@ -187,6 +211,7 @@ async def apply_authority_cert(
             space.id,
             verified.key_epoch,
         )
+        await _remember(space_repo, space.id, verified, cert)
         return AuthorityCertOutcome.APPLIED
     # Lost a compare-and-set race against a concurrent apply: judge the
     # cert against what is stored now.

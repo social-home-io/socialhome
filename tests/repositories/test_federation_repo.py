@@ -879,3 +879,144 @@ async def test_a_re_pair_never_lowers_the_stored_proto_version(env):
     await env.fed_repo.delete_instance("peer-rp")
     await env.fed_repo.save_instance(replace(inst, proto_version=1))
     assert (await env.fed_repo.get_instance("peer-rp")).proto_version == 1
+
+
+# ── Bulk housekeeping purges like PeerUnpairService.purge ────────────────
+
+
+async def _seed_side_rows(db, instance_id: str) -> None:
+    """One row per table ``PeerUnpairService.purge`` clears, addressed to
+    (or announced by) ``instance_id``. Raw SQL, past the INSERT guards: the
+    point is what the purge leaves behind, whatever queued it."""
+    await db.enqueue(
+        "INSERT OR IGNORE INTO conversations(id, type, created_at)"
+        " VALUES('conv-p', 'dm', datetime('now'))"
+    )
+    await db.enqueue(
+        "INSERT OR IGNORE INTO conversation_messages(id, conversation_id,"
+        " sender_user_id, content, type, created_at)"
+        " VALUES('m-p', 'conv-p', 'u', '', 'image', datetime('now'))"
+    )
+    await db.enqueue(
+        "INSERT OR IGNORE INTO spaces(id, name, owner_instance_id,"
+        " owner_username, identity_public_key, space_type, join_mode)"
+        " VALUES('sp-p', 'S', 'x', 'o', ?, 'household', 'invite_only')",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO federation_outbox(id, instance_id, event_type, payload_json)"
+        " VALUES(?, ?, 'unpair', '{}')",
+        (f"msg-{instance_id}", instance_id),
+    )
+    await db.enqueue(
+        "INSERT INTO dm_media_outbox(blob_id, message_id, target_instance_id,"
+        " bytes_path) VALUES('b', 'm-p', ?, '/x')",
+        (instance_id,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_media_outbox(blob_id, space_id, correlation_id,"
+        " target_instance_id, bytes_path) VALUES('b', 'sp-p', 'c', ?, '/x')",
+        (instance_id,),
+    )
+    await db.enqueue(
+        "INSERT INTO network_discovery(instance_id, discovered_via)"
+        " VALUES('far-away', ?)",
+        (instance_id,),
+    )
+
+
+async def _side_row_counts(db, instance_id: str) -> tuple[int, int, int, int]:
+    return (
+        await db.fetchval(
+            "SELECT COUNT(*) FROM federation_outbox WHERE instance_id=?",
+            (instance_id,),
+        ),
+        await db.fetchval(
+            "SELECT COUNT(*) FROM dm_media_outbox WHERE target_instance_id=?",
+            (instance_id,),
+        ),
+        await db.fetchval(
+            "SELECT COUNT(*) FROM space_media_outbox WHERE target_instance_id=?",
+            (instance_id,),
+        ),
+        await db.fetchval(
+            "SELECT COUNT(*) FROM network_discovery WHERE discovered_via=?",
+            (instance_id,),
+        ),
+    )
+
+
+async def test_cleanup_expired_pairings_purges_what_the_half_pair_queued(env):
+    """An expired half-paired row goes like any other removed pairing: its
+    outbox envelopes, DM / space media and announced mesh hints go in the
+    same transaction. A confirmed peer's rows are untouched."""
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    await env.fed_repo.create_pairing(
+        PairingSession(
+            token="tok-p",
+            own_identity_pk="aa" * 32,
+            own_dh_pk="bb" * 32,
+            own_dh_sk="cc" * 32,
+            inbox_url="https://local/inbox/own-p",
+            own_local_inbox_id="own-p",
+            issued_at=past,
+            expires_at=past,
+            status=PairingStatus.PENDING_RECEIVED,
+        )
+    )
+    await env.fed_repo.save_instance(
+        replace_status(_tomb_inst("peer-half", "own-p"), PairingStatus.PENDING_SENT)
+    )
+    await env.fed_repo.save_instance(_tomb_inst("peer-live", "own-live"))
+    await _seed_side_rows(env.db, "peer-half")
+    await _seed_side_rows(env.db, "peer-live")
+
+    assert await env.fed_repo.cleanup_expired_pairings() == 1
+
+    assert await env.fed_repo.get_instance("peer-half") is None
+    assert await _side_row_counts(env.db, "peer-half") == (0, 0, 0, 0)
+    assert await env.fed_repo.get_instance("peer-live") is not None
+    assert await _side_row_counts(env.db, "peer-live") == (1, 1, 1, 1)
+
+
+async def test_save_instance_replacing_a_tombstone_purges_its_side_rows(env):
+    """A re-pair replaces the tombstone the way ``PeerUnpairService.purge``
+    removes a row: its stale UNPAIR (sealed for the dead pairing), its
+    media and the mesh hints it announced go with it, in the same
+    transaction as the new row."""
+    await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-old"))
+    await env.fed_repo.mark_unpairing("peer-t")
+    await _seed_side_rows(env.db, "peer-t")
+    await _seed_side_rows(env.db, "peer-other")
+
+    await env.fed_repo.save_instance(
+        replace_status(_tomb_inst("peer-t", "wh-new"), PairingStatus.PENDING_RECEIVED)
+    )
+
+    assert await _side_row_counts(env.db, "peer-t") == (0, 0, 0, 0)
+    assert await _side_row_counts(env.db, "peer-other") == (1, 1, 1, 1)
+
+
+async def test_save_instance_of_a_live_row_keeps_its_side_rows(env):
+    """Only a replaced tombstone purges: re-saving a live pairing (a URL
+    update, a confirm) never drops what is queued for it."""
+    await env.fed_repo.save_instance(_tomb_inst("peer-l", "wh-l"))
+    await _seed_side_rows(env.db, "peer-l")
+
+    await env.fed_repo.save_instance(_tomb_inst("peer-l", "wh-l"))
+
+    assert await _side_row_counts(env.db, "peer-l") == (1, 1, 1, 1)
+
+
+async def test_failed_tombstone_replacement_keeps_its_side_rows(env):
+    """The purge rides the replacement's transaction: when the new row
+    cannot be written, the tombstone keeps its queued UNPAIR."""
+    await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-old"))
+    await env.fed_repo.mark_unpairing("peer-t")
+    await env.fed_repo.save_instance(_tomb_inst("peer-o", "wh-taken"))
+    await _seed_side_rows(env.db, "peer-t")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-taken"))
+
+    assert await _side_row_counts(env.db, "peer-t") == (1, 1, 1, 1)

@@ -111,23 +111,39 @@ class RecoveryReconnectService:
         restore's own timestamp, so a second restore rotates again and a
         plain reboot never does. Never raises.
         """
-        marker = "|".join(
+        marker = await self._restore_marker()
+        if marker == "|" or await self._get(AUTHORITY_ROTATED_FOR_KEY) == marker:
+            return 0
+        try:
+            n = await rotation.rotate_hosted_after_restore(marker)
+        except Exception:
+            log.warning(
+                "post-restore authority rotation failed — authority epoch "
+                "echo healing and seed sharing are paused; the next boot "
+                "retries the spaces not rotated yet",
+                exc_info=True,
+            )
+            return 0
+        log.info("post-restore: rotated the authority key of %d hosted space(s)", n)
+        await self._set(AUTHORITY_ROTATED_FOR_KEY, marker)
+        return n
+
+    async def authority_rotation_pending(self) -> bool:
+        """A restore happened and its post-restore authority rotation has not
+        run (or failed) yet (v_46). Until then the hosted ``spaces`` rows are
+        the restored ones — delegation possibly still on, the admin list
+        possibly stale — so nothing may rotate off them and share a seed."""
+        marker = await self._restore_marker()
+        return marker != "|" and await self._get(AUTHORITY_ROTATED_FOR_KEY) != marker
+
+    async def _restore_marker(self) -> str:
+        return "|".join(
             v or ""
             for v in (
                 await self._get(RECOVERED_AT_KEY),
                 await self._get(BACKUP_RESTORED_AT_KEY),
             )
         )
-        if marker == "|" or await self._get(AUTHORITY_ROTATED_FOR_KEY) == marker:
-            return 0
-        try:
-            n = await rotation.rotate_hosted_after_restore()
-        except Exception:
-            log.warning("post-restore authority rotation failed", exc_info=True)
-            return 0
-        log.info("post-restore: rotated the authority key of %d hosted space(s)", n)
-        await self._set(AUTHORITY_ROTATED_FOR_KEY, marker)
-        return n
 
     async def _get(self, key: str) -> str | None:
         row = await self._db.fetchone(

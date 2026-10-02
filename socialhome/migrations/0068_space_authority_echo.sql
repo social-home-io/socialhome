@@ -1,0 +1,51 @@
+-- 0068 — the authority epoch echo is cert-proven and durable (federation v_46).
+--
+-- A member household tells the space's owner, on ``SPACE_SYNC_BEGIN``, which
+-- authority epoch it pins and which rotation epoch the owner's post-restore
+-- bundle showed it forgot. The owner only reacts to an epoch it can PROVE it
+-- issued: the echo carries the owner-signed ``authority_cert`` for it, and
+-- the owner verifies that against its own household identity key (which a
+-- restore keeps). Two nullable columns on ``spaces``:
+--
+-- * ``authority_cert_json`` — the owner-signed cert for the key this row pins
+--   (``identity_public_key`` at ``authority_key_epoch``), as received (a
+--   member) or as signed (the owner). Written only when the cert matches the
+--   row's pin, in one conditional UPDATE; NULL for epoch 0, for rows pinned
+--   before v_46 until the cert is seen again (every config, roster snapshot
+--   and bundle carries it).
+-- * ``authority_echo_json`` — the echo state of THIS household for the space:
+--   on a member, ``{forgotten_epoch, forgotten_cert}`` (the epoch the owner
+--   forgot and its proof, kept until a bundle names it — so a restart does
+--   not lose the heal); on the owner, the header of its last rotation
+--   ``{epoch, baseline, prior_key_epoch, forgotten_key_epoch, max_forgotten,
+--   max_baseline, restore_prior, restore_epoch}``, so a bundle it re-sends to
+--   a lagging member says what the original said, an already-handled
+--   forgotten epoch is not acted on twice, and only an epoch inside the
+--   restore window (set by the post-restore rotation alone) can count as
+--   forgotten.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every path that touches the pin and the rotation state:
+--       ``rotate_authority_key`` / ``adopt_authority_key`` (compare-and-set on
+--       the epoch), ``apply_authority_cert`` (every inbound cert path funnels
+--       there), the rotation bundle (``SpaceAuthorityRotationService``), the
+--       baseline columns of 0066. None keeps the cert: 0066 rejected storing
+--       it because the OWNER can re-sign on demand — but a MEMBER cannot (the
+--       cert is signed with the owner's household key and carries
+--       ``issued_at``), and after the pin moves the cert of the epoch the
+--       owner forgot exists nowhere else. The whole-table dumps (backup,
+--       recovery kit, data export) copy ``spaces`` with ``SELECT *`` and
+--       round-trip both columns; ``save`` never writes them.
+--   (2) Non-migration alternatives, rejected: ``instance_config`` key/value
+--       rows per space (no repository, no cascade on space delete, a second
+--       place for space state); in-memory only (the review: a restart loses
+--       the heal, and a resend could not say what the original said); the
+--       owed marker in ``authority_baseline_epoch`` (it already encodes
+--       claimed-vs-owed for the baseline, and cannot hold a cert); trusting
+--       the echoed epochs without proof (any member could force rotations and
+--       resets, or mask an honest report).
+--   (3) Smallest change: two additive NULL-defaulted TEXT columns, no
+--       backfill, no index (always read with the row by primary key).
+ALTER TABLE spaces ADD COLUMN authority_cert_json TEXT;
+ALTER TABLE spaces ADD COLUMN authority_echo_json TEXT;

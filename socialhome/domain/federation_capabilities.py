@@ -704,7 +704,22 @@ from __future__ import annotations
 #:   fallback**: a reviewer household below v_45 is sent neither event — it
 #:   would file the report for its HOUSEHOLD admins, who must not see a
 #:   space's reports.
-OURS: int = 45
+#: * **v_46** (2026-10-02) — authority epoch echo. A member household's
+#:   ``SPACE_SYNC_BEGIN`` to the space owner carries
+#:   ``authority_epoch_echo`` — the authority epoch it pins, the baseline it
+#:   claimed / owes, a rotation epoch it held that the owner's post-restore
+#:   bundle showed the owner forgot, and the owner's cert for each claimed
+#:   epoch. The owner reacts with its OWN signed state only: a fresh
+#:   rotation past an epoch its own cert proves (the bundle carries
+#:   ``forgotten_key_epoch``, so members that missed that rotation reset
+#:   what it retired), or — unproven — at most a re-sent bundle for a
+#:   member that is behind, rate-limited per household and space. **Gated,
+#:   degraded fallback**: the echo goes only to an owner at or above v_46
+#:   (or a mesh-only one whose version is unknown — an older one ignores
+#:   the field); a v_45 owner ignores it, a v_45 member never sends it and
+#:   ignores ``forgotten_key_epoch``, so a forgotten rotation stays
+#:   undetected there, as before.
+OURS: int = 46
 
 
 class FederationCapability:
@@ -1100,6 +1115,12 @@ class FederationCapability:
     #: (v_45): ``SPACE_REPORT`` with ``space_id`` and
     #: ``SPACE_REPORT_DECIDED``. Neither is sent to a household below it.
     MIN_FOR_SPACE_REPORT_SCOPE = 45
+    #: Minimum proto_version that echoes its held space authority epochs to
+    #: the owner on ``SPACE_SYNC_BEGIN`` (``authority_epoch_echo``) and
+    #: applies a bundle's ``forgotten_key_epoch`` (v_46). A member sends the
+    #: echo only to an owner at or above it; the owner's reaction (a resent
+    #: or fresh ``SPACE_AUTHORITY_ROTATED``) is its own signed state.
+    MIN_FOR_AUTHORITY_EPOCH_ECHO = 46
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -1237,6 +1258,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE,
         "Space reports for moderators",
     ),
+    (
+        FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO,
+        "Space key epoch echo",
+    ),
 ]
 
 
@@ -1307,6 +1332,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_FEDERATED_MODERATION,
         FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
         FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE,
+        FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO,
     }
 )
 

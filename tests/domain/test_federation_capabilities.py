@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 45
+    assert fc.OURS == 46
 
 
 def test_space_authority_rotation_capability_threshold():
@@ -22,8 +22,23 @@ def test_space_authority_rotation_capability_threshold():
     assert fc.space_features_missing_below(43) == [
         "Space key rotation on revoke",
         "Space reports for moderators",
+        "Space key epoch echo",
     ]
-    assert fc.features_missing_below(45) == []
+    assert fc.features_missing_below(45) == ["Space key epoch echo"]
+    assert fc.features_missing_below(46) == []
+
+
+def test_authority_epoch_echo_capability_threshold():
+    """v_46 — members echo their held authority epochs to the owner on
+    ``SPACE_SYNC_BEGIN`` and apply ``forgotten_key_epoch``. Space-scoped: a
+    v_45 member never reports a rotation the restored owner forgot."""
+    assert fc.FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO == 46
+    assert fc.FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.space_features_missing_below(45) == ["Space key epoch echo"]
+    assert fc.features_missing_below(46) == []
 
 
 def test_space_report_scope_capability_threshold():
@@ -33,7 +48,10 @@ def test_space_report_scope_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.space_features_missing_below(44) == ["Space reports for moderators"]
+    assert fc.space_features_missing_below(44) == [
+        "Space reports for moderators",
+        "Space key epoch echo",
+    ]
 
 
 def test_federated_moderation_capability_threshold():
@@ -49,6 +67,7 @@ def test_federated_moderation_capability_threshold():
         "Reviewed across households",
         "Space key rotation on revoke",
         "Space reports for moderators",
+        "Space key epoch echo",
     ]
     assert "Reviewed across households" not in fc.features_missing_below(43)
 
@@ -67,6 +86,7 @@ def test_content_access_enforcement_capability_threshold():
         "Reviewed across households",
         "Space key rotation on revoke",
         "Space reports for moderators",
+        "Space key epoch echo",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -86,6 +106,7 @@ def test_space_moderator_role_capability_threshold():
         "Reviewed across households",
         "Space key rotation on revoke",
         "Space reports for moderators",
+        "Space key epoch echo",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -106,6 +127,7 @@ def test_task_priority_labels_capability_threshold():
         "Reviewed across households",
         "Space key rotation on revoke",
         "Space reports for moderators",
+        "Space key epoch echo",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -166,6 +188,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Reviewed across households",
         "Space key rotation on revoke",
         "Space reports for moderators",
+        "Space key epoch echo",
     ]
 
 
@@ -188,6 +211,7 @@ def test_moment_origin_signature_capability_threshold():
         "Reviewed across households",
         "Space key rotation on revoke",
         "Space reports for moderators",
+        "Space key epoch echo",
     ]
 
 

@@ -1872,11 +1872,118 @@ keeps removals newer than the snapshot — so a kick the revoked household
 forged under the old key also stands there until the owner re-adds the
 seat. A rotation the
 restored owner no longer knows about (made after the backup) AND that a
-member never saw is undetectable on both sides: that member keeps whatever
-the revoked household inflated until the next ordinary (baseline)
-rotation. A member that joined after a rotation is not flagged by its first
+member never saw is caught by the authority epoch echo below (v_46) — as
+long as at least one v_46 member household held it when the post-restore
+bundle arrived. A member that joined after a rotation is not flagged by its first
 adoption (its pin moves from the creation-time key), only once it moves
 past a rotated key without that key's bundle.
+
+#### Authority epoch echo (v_46)
+
+The owner had no view of which authority epoch each member household holds,
+so a rotation the restored owner forgot (made after the backup) stayed
+invisible: the member that missed it kept what the revoked household
+inflated. Every member household's `SPACE_SYNC_BEGIN` to the space's owner
+(the periodic sync, every 30 min for a paired owner; the mesh catch-up for a
+mesh-only one) now carries an optional, encrypted `authority_epoch_echo`:
+
+```
+{key_epoch, baseline_epoch, owed_epoch, forgotten_epoch,
+ key_cert?, forgotten_cert?}
+```
+
+`key_epoch` is the pin, `baseline_epoch` / `owed_epoch` the claimed and owed
+baselines (`spaces.authority_baseline_epoch`), and `forgotten_epoch` a
+rotation epoch this household held that the owner no longer knows. A member
+learns the last one from the post-restore bundle itself: its
+`prior_key_epoch` (the epoch the owner's rotation replaced) is BELOW the pin
+the member held, so the owner was restored from a backup taken before that
+rotation. `key_cert` / `forgotten_cert` are the owner-signed
+`authority_cert`s for those epochs: every household keeps the cert of the
+key it pins (`spaces.authority_cert_json`, written wherever a cert is
+applied), and on noticing a forgotten epoch it keeps that epoch's cert with
+it (`spaces.authority_echo_json`) — durably, so a restart does not lose the
+heal. It then sends a BEGIN to the owner at once (`SpaceAuthorityEchoDue`,
+queued at security priority) and keeps echoing until a bundle NAMES the
+epoch (`forgotten_key_epoch` at least as high) — nothing another household
+can provoke clears it.
+
+The echo is the member's claim; the owner never adopts it.
+
+- **Rotation needs proof.** An epoch above the owner's own, or a forgotten
+  epoch, counts only with the owner's OWN cert for it — verified against the
+  owner household's identity key, which a restore keeps; a cert for another
+  epoch, space or signer proves nothing. A real cert is not enough on its
+  own: every member holds certs for epochs the owner superseded knowingly.
+  So a forgotten epoch must also lie STRICTLY inside the restore window the
+  post-restore rotation recorded — above the epoch it replaced (what the
+  backup held), below the one it issued — and above any forgotten epoch
+  already announced (`max_forgotten`). Echo-triggered and ordinary
+  rotations never move the window; with no restore recorded, nothing can
+  have been forgotten.
+  The owner then rotates past it (`max(proven + 1, current + 1, unix
+  seconds)`), marked `baseline: false` with `forgotten_key_epoch`. A member
+  resets state written under a key OLDER than that epoch to the owner's
+  snapshot, with the same rules as the missed-baseline catch-up (newer
+  removals stand); one that applied the forgotten rotation's own baseline
+  holds no such state, so for it the reset is a no-op. At most one such
+  rotation per space per 6 hours; a proof arriving inside the window is
+  kept (the highest one) and rotated past on the next echo once it opens; a
+  rotation that rotates nothing (a lost race, an error) gives the window
+  back and keeps the proof.
+- **Without proof, at most a re-send.** A member behind on the key or its
+  baseline (pin below the owner's, an owed baseline, a claimed baseline
+  below the owner's epoch) gets the current bundle again, to that household
+  only, at most once per household and space per hour. The owner stores the
+  header of each rotation (`authority_echo_json`: kind, `prior_key_epoch`,
+  the forgotten epochs announced), so the re-send says what the original
+  said and names the highest forgotten epoch announced; a rotation with no
+  header (made before v_46) is re-sent as a baseline.
+
+Further bounds: only a household holding a writer seat (not a subscriber);
+an epoch above wall-clock seconds + 1 day is ignored before any check; a
+rejected echo spends no slot. The rotation and the re-send run as tasks,
+off the inbound dispatch path, drained (bounded, then cancelled) on app
+cleanup while the database is still up; nothing new starts after that.
+After a restore, the post-restore rotation runs during startup BEFORE any
+transport (GFS WebSocket, outbox, reconnect queue) starts, and until it has
+run for that restore every echo is deferred (no rotation, no re-send): the
+restored rows may still have delegation on and an admin list naming a
+household revoked after the backup, so a rotation off them would share it a
+fresh seed. While it is pending, an admin revocation still rotates (it never
+waits) but shares the new seed with nobody, and a WARNING (once per boot)
+says echo healing is paused. The post-restore rotation records the restore
+marker on each space's header, so a retry after a partial failure rotates
+only the spaces still missing — never overwriting a restore window already
+recorded for that restore. The echo goes only to an owner at or above
+v_46, or to a mesh-only owner whose version is unknown (an older one
+ignores the field).
+
+Residuals: a member that adopted the post-restore cert inline before the
+bundle arrived cannot tell what the bundle replaced; a member that adopted
+the forgotten epoch before upgrading to v_46 holds no cert for it and
+cannot prove it; a mesh-only member echoes only on its catch-up syncs
+(startup, and right after it learns of a forgotten epoch); a proof kept
+through the window is in the owner's memory (the member re-echoes it); a
+v_45 household neither echoes nor applies `forgotten_key_epoch`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as HFS O (owner, restored)
+    participant A as HFS A (held e1)
+    participant M as HFS M (missed e1)
+    Note over O: restored from a backup taken before e1<br/>(pins e0, forgot e1)
+    O-->>A: SPACE_AUTHORITY_ROTATED e2 {baseline:false, prior_key_epoch: e0}
+    O-->>M: SPACE_AUTHORITY_ROTATED e2 {baseline:false, prior_key_epoch: e0}
+    A->>A: prior e0 < held e1 → owner forgot e1
+    M->>M: nothing missed as far as M knows
+    A->>O: SPACE_SYNC_BEGIN {…, authority_epoch_echo:<br/>{forgotten_epoch: e1, forgotten_cert: cert(e1)}}
+    O->>O: writer seat? cert(e1) signed by OUR household key?<br/>not handled yet, window open → rotate to e3
+    O-->>M: SPACE_AUTHORITY_ROTATED e3 {baseline:false, forgotten_key_epoch: e1}
+    M->>M: reset state written under keys older than e1<br/>(what the revoked household inflated)
+    O-->>A: SPACE_AUTHORITY_ROTATED e3 (no-op reset; forgets the note)
+```
 
 ### Cross-household kick (phase 2, v_9+)
 

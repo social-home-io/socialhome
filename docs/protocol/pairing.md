@@ -439,7 +439,8 @@ runs once a minute and calls
 [`federation_repo.cleanup_expired_pairings`](../../socialhome/repositories/federation_repo.py).
 That call deletes the expired `pending_pairings` row AND any
 PENDING_SENT / PENDING_RECEIVED `remote_instances` row whose
-`local_inbox_id` matched it — so the SPA's pending handshake list
+`local_inbox_id` matched it (with everything queued or learned for that
+row, as in [Cleanup](#cleanup), in one transaction) — so the SPA's pending handshake list
 self-empties within ~1 minute of expiry. CONFIRMED rows are protected
 by an explicit status filter (the real `confirm()` path deletes the
 session before flipping the instance, so the scenario is defensive
@@ -542,9 +543,12 @@ startup) deletes every `federation_outbox` row whose `remote_instances` row
 is gone, whatever its status; the DM and space media outboxes run the same
 sweep when their sync services start (space media keeps rows for a member
 household of that space). A tombstone still has its row, so its queued
-`UNPAIR` survives the sweep. The repository's own bulk housekeeping
-(expired pending handshakes, a tombstone replaced by a re-pair) relies on
-the same sweep.
+`UNPAIR` survives the sweep. The repository's own bulk housekeeping —
+expired pending handshakes, a tombstone replaced by a re-pair — runs the
+same cleanup in the same order inside its own transaction: the instance
+row first, then its outbox envelopes, DM and space media and the mesh
+hints it announced (the re-pair before the new row is written, so nothing
+the new pairing queues is touched).
 
 Space membership is **not** touched. A space is shared by its members, not
 by the pairing: two households that stop being direct connections stay

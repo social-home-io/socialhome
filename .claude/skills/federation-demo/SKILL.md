@@ -396,7 +396,7 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (45 since space-scoped reports).
+   ``OURS`` (46 since the authority epoch echo).
 
 9c. ``federated-moderation`` (v_43 "Reviewed" across households) — **b**
    hosts a fresh "Reviewed club" with **a**'s, **c**'s and **d**'s admins as

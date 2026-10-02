@@ -1489,6 +1489,19 @@ class SpaceAdminSeedsRetiredAfterRestore(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceAuthorityEchoDue(DomainEvent):
+    """A member household just learned something its space owner must hear
+    now rather than on the next periodic sync (v_46): the owner's
+    post-restore bundle replaced an epoch BELOW the one this household held,
+    so the owner forgot a rotation. The sync scheduler answers with a
+    ``SPACE_SYNC_BEGIN`` to the owner carrying the authority epoch echo."""
+
+    space_id: str
+    owner_instance_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteSpaceInviteDeclined(DomainEvent):
     """Mirror of :class:`RemoteSpaceInviteAccepted` for the decline path."""
 

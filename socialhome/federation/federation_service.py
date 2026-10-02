@@ -1491,8 +1491,12 @@ class FederationService:
         *,
         space_id: str,
         host_instance_id: str,
+        extra_payload: dict | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
+
+        ``extra_payload`` is the v_46 ``authority_epoch_echo`` for the
+        host, carried on the BEGIN under that key when given.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
         relay), the normal SpaceSyncScheduler never triggers (it only syncs with
@@ -1527,15 +1531,18 @@ class FederationService:
                 requester_instance_id=self._own_instance_id,
                 provider_instance_id=host_instance_id,
             )
+            payload: dict = {
+                "sync_id": sync_id,
+                "space_id": space_id,
+                "sync_mode": "initial",
+                "prefer_direct": False,
+            }
+            if extra_payload is not None:
+                payload["authority_epoch_echo"] = extra_payload
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
-                payload={
-                    "sync_id": sync_id,
-                    "space_id": space_id,
-                    "sync_mode": "initial",
-                    "prefer_direct": False,
-                },
+                payload=payload,
                 space_id=space_id,
             )
             if not result.ok:
