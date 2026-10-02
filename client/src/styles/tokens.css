@@ -27,8 +27,23 @@
   --sh-primary:         #D2542A;     /* hearth — terracotta */
   --sh-primary-hover:   #A33F1A;     /* hearth-deep */
   --sh-primary-soft:    #F1D9CA;     /* hearth-tint — for tinted surfaces */
-  --sh-danger:          #EF4444;     /* red-500 */
-  --sh-danger-hover:    #DC2626;     /* red-600 */
+  /* Brick red: red-500 (#EF4444) read at only 2.9–3.2:1 as text on the
+     paper surfaces and under the paper ink on danger buttons. Deepened
+     so plain danger text is ≥ 5.7:1 on bg / bg-secondary / bg-tertiary
+     and paper on a danger fill is 6.4:1. */
+  --sh-danger:          #A61B1B;
+  --sh-danger-hover:    #861515;     /* paper on it: 8.4:1 */
+  /* Danger text ON a danger tint (badges, error pills, destructive
+     hovers — color-mix(danger 10–22%, …)): one notch deeper, ≥ 5.2:1. */
+  --sh-danger-on-soft:  color-mix(in srgb, var(--sh-danger) 80%, #000);
+  /* Text on a success / warning fill. Paper ink reads on the deep moss
+     (light) and the ember ink on the lifted moss (dark); honey is light
+     in BOTH themes, so it always takes the dark ink. */
+  --sh-on-success-fill: var(--sh-bg);
+  --sh-on-warning-fill: var(--sh-text);
+  /* Text on a danger fill: paper on the brick red (6.4:1), ember on the
+     lifted dark red (6.5:1). */
+  --sh-on-danger-fill:  var(--sh-bg);
   --sh-success:         #1F4438;     /* moss — hearth-green secondary */
   --sh-warning:         #C8902F;     /* honey — replaces amber-500 */
   /* Hearth used as TEXT (links, active tabs, icons): the fill hearth is
@@ -44,9 +59,18 @@
      only 3.55:1, so the fill is deepened 14% toward ink → #B54824,
      4.58:1 under --sh-bg text (AA). Derived from --sh-primary so a
      space / household override still tints the fill. Borders, links,
-     icons, focus rings and decorative bars keep --sh-primary; hover
-     keeps --sh-primary-hover. Not the same job as --sh-primary-text. */
+     icons, focus rings and decorative bars keep --sh-primary; a filled
+     hover uses --sh-primary-fill-hover. Not the same job as
+     --sh-primary-text. */
   --sh-primary-fill: color-mix(in srgb, var(--sh-primary) 86%, #000);
+  /* Text ON that fill, and the fill's hover. The brand pairing is
+     --sh-bg ink (cream here, ember in dark mode — 4.58:1 / 5.65:1), the
+     hover moving AWAY from the ink (darker here → 5.8:1, lighter in
+     dark mode → 6.7:1). A custom space primary can be mid-tone, so
+     useSpaceTheme supplies per-theme overrides computed by
+     utils/primaryFill.ts (keep its formulas in sync with these). */
+  --sh-on-primary-fill: var(--sh-on-primary-fill-light, var(--sh-bg));
+  --sh-primary-fill-hover: var(--sh-primary-fill-hover-light, color-mix(in srgb, var(--sh-primary-fill) 85%, #000));
 
   /* ── Surface ladder — cream parchment, never pure white ───────── */
   --sh-bg:              #F4ECE0;     /* paper — primary surface */
@@ -224,13 +248,19 @@
   --sh-primary-soft:   #4A2419;  /* hearth-on-dark — for tinted accents */
   --sh-success:        #6FA38B;  /* moss-light — readable on dark */
   --sh-warning:        #E8B865;  /* honey-light */
-  --sh-danger:         #F87171;  /* red-400 */
-  --sh-danger-hover:   #EF4444;
+  --sh-danger:         #F87171;  /* red-400 — 5.4:1 as text on the ember surfaces */
+  --sh-danger-hover:   #EF4444;  /* ember ink on it: 4.8:1 */
+  --sh-danger-on-soft: color-mix(in srgb, var(--sh-danger) 60%, var(--sh-text));
+  --sh-on-warning-fill: var(--sh-bg);
   /* Hearth lifted toward the cream ink: ≥ 6:1 on --sh-primary-soft and
      on the dark surfaces (the plain dark hearth is ~4.2:1 on its tint). */
   --sh-primary-on-soft: color-mix(in srgb, var(--sh-primary) 55%, var(--sh-text));
-  /* Dark text (--sh-bg) on the lifted hearth is already 5.65:1. */
+  /* Dark text (--sh-bg) on the lifted hearth is already 5.65:1. The
+     old darker hover (--sh-primary-hover, #C04E22) fell to 3.73:1
+     under that ink, so the filled hover LIFTS instead (6.7:1). */
   --sh-primary-fill: var(--sh-primary);
+  --sh-on-primary-fill: var(--sh-on-primary-fill-dark, var(--sh-bg));
+  --sh-primary-fill-hover: var(--sh-primary-fill-hover-dark, color-mix(in srgb, var(--sh-primary-fill) 85%, #fff));
 
   --sh-bg:             #1A1612;  /* deep ember — warm coffee */
   --sh-bg-secondary:   #251E18;  /* one notch up for chrome */

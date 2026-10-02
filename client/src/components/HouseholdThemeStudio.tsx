@@ -19,9 +19,9 @@ import { api } from '@/api'
 import { Button } from './Button'
 import { Spinner } from './Spinner'
 import { showToast } from './Toast'
+import { FONT_STACKS, fontStack, type FontId } from '@/utils/themeFonts'
 
 type Mode     = 'light' | 'dark' | 'auto'
-type FontId   = 'system' | 'serif' | 'rounded' | 'mono'
 type Density  = 'compact' | 'comfortable' | 'spacious'
 
 interface HouseholdTheme {
@@ -241,13 +241,7 @@ function applyToDocument() {
   r.setProperty('--hh-accent',       accent.value)
   if (surface.value)     r.setProperty('--hh-surface',      surface.value)
   if (surfaceDark.value) r.setProperty('--hh-surface-dark', surfaceDark.value)
-  const fontMap: Record<FontId, string> = {
-    system:  'system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
-    serif:   'Georgia, "Times New Roman", serif',
-    rounded: '"SF Pro Rounded", "Quicksand", system-ui, sans-serif',
-    mono:    'ui-monospace, Menlo, Consolas, monospace',
-  }
-  r.setProperty('--hh-font', fontMap[font.value])
+  r.setProperty('--hh-font', fontStack(font.value) ?? FONT_STACKS.system)
   r.setProperty('--hh-radius-card', `${cornerRadius.value}px`)
   r.setProperty('--hh-radius-btn',  `${cornerRadius.value}px`)
   const gapMap: Record<Density, string> = {
