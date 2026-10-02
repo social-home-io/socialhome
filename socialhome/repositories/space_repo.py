@@ -71,6 +71,12 @@ class AbstractSpaceRepo(Protocol):
     ) -> bool: ...
     async def claim_authority_baseline(self, space_id: str, key_epoch: int) -> bool: ...
     async def get_authority_baseline(self, space_id: str) -> tuple[int, int]: ...
+    async def remember_authority_cert(
+        self, space_id: str, *, key_epoch: int, public_key_hex: str, cert: dict
+    ) -> bool: ...
+    async def get_authority_cert(self, space_id: str) -> dict | None: ...
+    async def get_authority_echo(self, space_id: str) -> dict: ...
+    async def set_authority_echo(self, space_id: str, record: dict | None) -> None: ...
     async def get_authority_config_epoch(self, space_id: str) -> int: ...
     async def save_config_if_authority_epoch(
         self, space: Space, *, verified_epoch: int
@@ -853,6 +859,45 @@ class SqliteSpaceRepo:
         )
         raw = int(row["authority_baseline_epoch"] or 0) if row else 0
         return (raw, 0) if raw >= 0 else (0, -raw)
+
+    async def remember_authority_cert(
+        self, space_id: str, *, key_epoch: int, public_key_hex: str, cert: dict
+    ) -> bool:
+        """Keep the owner-signed ``cert`` for the key this row pins (v_46).
+
+        Lands only while the row still pins ``public_key_hex`` at
+        ``key_epoch`` — one conditional UPDATE, so a cert for a key we moved
+        past (or never held) is never stored. The caller has verified it.
+        """
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET authority_cert_json=? WHERE id=?"
+            " AND authority_key_epoch=? AND lower(identity_public_key)=?",
+            (dump_json(cert), space_id, key_epoch, public_key_hex.lower()),
+        )
+        return changed > 0
+
+    async def get_authority_cert(self, space_id: str) -> dict | None:
+        """The stored cert for the pinned key, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT authority_cert_json FROM spaces WHERE id=?", (space_id,)
+        )
+        cert = load_json(row["authority_cert_json"], None) if row else None
+        return cert if isinstance(cert, dict) else None
+
+    async def get_authority_echo(self, space_id: str) -> dict:
+        """This household's echo state for the space (v_46); ``{}`` if none
+        (see migration 0068 for the member / owner shapes)."""
+        row = await self._db.fetchone(
+            "SELECT authority_echo_json FROM spaces WHERE id=?", (space_id,)
+        )
+        record = load_json(row["authority_echo_json"], {}) if row else {}
+        return record if isinstance(record, dict) else {}
+
+    async def set_authority_echo(self, space_id: str, record: dict | None) -> None:
+        await self._db.enqueue(
+            "UPDATE spaces SET authority_echo_json=? WHERE id=?",
+            (dump_json(record) if record else None, space_id),
+        )
 
     async def get_authority_config_epoch(self, space_id: str) -> int:
         """The authority-key epoch in force when this space's config was

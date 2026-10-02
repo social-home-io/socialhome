@@ -142,7 +142,7 @@ class _RotationStub:
         self.calls = 0
         self._raises = raises
 
-    async def rotate_hosted_after_restore(self) -> int:
+    async def rotate_hosted_after_restore(self, marker=None) -> int:
         self.calls += 1
         if self._raises:
             raise RuntimeError("boom")
@@ -178,5 +178,45 @@ async def test_rotation_failure_is_retried_next_boot(tmp_dir):
         await _set(db, RECOVERED_AT_KEY, "2026-10-01T00:00:00+00:00")
         assert await svc.maybe_rotate_space_authority(_RotationStub(raises=True)) == 0
         assert await svc.maybe_rotate_space_authority(_RotationStub()) == 2
+    finally:
+        await db.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_authority_rotation_pending_until_the_restore_rotated(tmp_dir):
+    """v_46 restore gate: pending from a restore until its post-restore
+    rotation ran; a failed rotation keeps it pending (fail closed)."""
+    db = await _make_db(tmp_dir)
+    try:
+        svc = RecoveryReconnectService(db, _UrlUpdateStub(), _AdapterStub())
+        assert await svc.authority_rotation_pending() is False  # no restore
+        await _set(db, RECOVERED_AT_KEY, "2026-10-01T00:00:00+00:00")
+        assert await svc.authority_rotation_pending() is True
+        await svc.maybe_rotate_space_authority(_RotationStub(raises=True))
+        assert await svc.authority_rotation_pending() is True
+        await svc.maybe_rotate_space_authority(_RotationStub())
+        assert await svc.authority_rotation_pending() is False
+    finally:
+        await db.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_rotation_gets_the_restore_marker_and_failure_warns(tmp_dir, caplog):
+    db = await _make_db(tmp_dir)
+    try:
+        seen: list = []
+
+        class _Rec(_RotationStub):
+            async def rotate_hosted_after_restore(self, marker=None) -> int:
+                seen.append(marker)
+                return await super().rotate_hosted_after_restore(marker)
+
+        svc = RecoveryReconnectService(db, _UrlUpdateStub(), _AdapterStub())
+        await _set(db, RECOVERED_AT_KEY, "2026-10-01T00:00:00+00:00")
+        with caplog.at_level("WARNING"):
+            await svc.maybe_rotate_space_authority(_RotationStub(raises=True))
+        assert any("echo healing" in r.getMessage() for r in caplog.records)
+        await svc.maybe_rotate_space_authority(_Rec())
+        assert seen == ["2026-10-01T00:00:00+00:00|"]
     finally:
         await db.shutdown()

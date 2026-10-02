@@ -231,3 +231,23 @@ async def test_owner_cert_is_none_off_the_owner_or_without_key_material(env):
         own_identity_pk=env.owner.public_key,
     )
     assert owner_authority_cert_via(real_fed, space)["key_epoch"] == 1
+
+
+async def test_applied_and_current_certs_are_remembered_as_proof(env):
+    """v_46: the cert of the key we pin is kept — the proof the authority
+    epoch echo shows the owner. Repeating the same cert writes nothing."""
+    k2 = generate_identity_keypair().public_key.hex()
+    cert = _cert(env, epoch=1, pk=k2)
+    assert await _apply(env, cert) is AuthorityCertOutcome.APPLIED
+    assert await env.repo.get_authority_cert(SPACE) == cert
+    again = _cert(env, epoch=1, pk=k2)  # re-signed: another issued_at
+    assert await _apply(env, again) is AuthorityCertOutcome.CURRENT
+    assert await env.repo.get_authority_cert(SPACE) == cert
+
+
+async def test_current_cert_backfills_a_pin_adopted_before_v46(env):
+    k2 = generate_identity_keypair().public_key.hex()
+    assert await env.repo.adopt_authority_key(SPACE, k2, 1)  # no cert kept
+    cert = _cert(env, epoch=1, pk=k2)
+    assert await _apply(env, cert) is AuthorityCertOutcome.CURRENT
+    assert await env.repo.get_authority_cert(SPACE) == cert

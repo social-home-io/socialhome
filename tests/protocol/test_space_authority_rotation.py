@@ -27,6 +27,7 @@ that keeps its seat. After the demotion:
 from __future__ import annotations
 
 import base64
+import time
 import uuid
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -36,8 +37,10 @@ import pytest
 from socialhome.app import create_app
 from socialhome.app_keys import (
     db_key,
+    event_bus_key,
     federation_repo_key,
     federation_service_key,
+    recovery_reconnect_service_key,
     space_authority_rotation_key,
     space_crypto_service_key,
     space_remote_member_repo_key,
@@ -49,6 +52,7 @@ from socialhome.authority_cert import sign_authority_cert
 from socialhome.authority_sig import sign_authority_event, strip_authority_sig_fields
 from socialhome.config import Config
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.domain.events import SpaceAuthorityEchoDue
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
@@ -66,7 +70,11 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.federation.federation_service import FederationService
+from socialhome.services.recovery_kit_service import RECOVERED_AT_KEY
 from socialhome.services.space_authority_pin import apply_authority_cert
+from socialhome.services.space_authority_rotation_service import (
+    SpaceAuthorityRotationService,
+)
 from socialhome.services.space_crypto_service import KEY_SUITE_AESGCM_256
 from socialhome.services.space_service import space_metadata_for_federation
 
@@ -1047,7 +1055,6 @@ async def test_rotation_epoch_survives_a_restore_from_an_old_backup(world):
     """I3: the epoch is at least wall-clock seconds, so an owner restored
     from a backup taken before a rotation still issues a HIGHER epoch than
     the members hold, instead of being refused as stale forever."""
-    import time
 
     w = world
     before = int(time.time())
@@ -1604,3 +1611,583 @@ async def test_missed_baseline_reset_never_reseats_a_household_kicked_later(worl
     row = await m_rm.get_including_tombstones(w.space_id, kicked, "ux")
     assert row is not None and row.tombstoned
     assert kicked not in await w.m_app[space_repo_key].list_member_instances(w.space_id)
+
+
+# ── v_46: the authority epoch echo closes the forgotten-rotation gap ──────
+
+_OWNER_ROW_COLS = (
+    "identity_public_key",
+    "identity_private_key",
+    "authority_key_epoch",
+    "authority_baseline_epoch",
+    "authority_seed_shared_epoch",
+    "authority_config_epoch",
+    "authority_cert_json",
+    "authority_echo_json",
+)
+
+
+async def _backup_owner_row(w: World) -> dict:
+    row = await w.o_app[db_key].fetchone(
+        f"SELECT {', '.join(_OWNER_ROW_COLS)} FROM spaces WHERE id=?",
+        (w.space_id,),
+    )
+    return {c: row[c] for c in _OWNER_ROW_COLS}
+
+
+async def _restore_owner_row(w: World, backup: dict) -> None:
+    """The owner's ``spaces`` row as a backup taken earlier brings it back:
+    the key, seed, epochs and rotation header of THEN — it no longer knows
+    later rotations."""
+    sets = ", ".join(f"{c}=?" for c in _OWNER_ROW_COLS)
+    await w.o_app[db_key].enqueue(
+        f"UPDATE spaces SET {sets} WHERE id=?",
+        (*backup.values(), w.space_id),
+    )
+
+
+async def _echo_to_owner(w: World, *, sender: str, echo: dict | None) -> None:
+    """A member household's ``SPACE_SYNC_BEGIN`` reaching the owner. No
+    ``sync_id``: the sync admission handler steps aside, the echo handler
+    still reads it. Waits for the reaction (it runs as a task)."""
+    payload: dict = {"space_id": w.space_id}
+    if echo is not None:
+        payload["authority_epoch_echo"] = echo
+    await _deliver(
+        w.o_app, sender=sender, event_type=FET.SPACE_SYNC_BEGIN, payload=payload
+    )
+    await w.o_app[space_authority_rotation_key].wait_idle()
+
+
+def _restore_happens_later(monkeypatch, seconds: int = 100) -> None:
+    """The restore comes a while after the rotation it forgets: the
+    post-restore epoch (wall-clock seconds) lands above it."""
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + seconds)
+
+
+def _bundles_to(w: World, inst: str) -> list[dict]:
+    return w.outbound(to=inst, event_type=FET.SPACE_AUTHORITY_ROTATED)
+
+
+def _cert_of(w: World, epoch: int) -> dict:
+    """The owner's cert for ``epoch`` as a member received it."""
+    for p in w.outbound(event_type=FET.SPACE_AUTHORITY_ROTATED):
+        if p["authority_cert"]["key_epoch"] == epoch:
+            return p["authority_cert"]
+    raise AssertionError(f"no bundle for epoch {epoch}")
+
+
+def _open_rotation_window(w: World) -> None:
+    w.o_app[space_authority_rotation_key]._echo_rotated.clear()
+
+
+async def _forget_e1(w: World, monkeypatch, *, inflate: bool = True) -> tuple:
+    """B inflates M under K1; the owner revokes B (e1, M never sees it), is
+    restored from a backup taken before e1 and rotates again (e2, prior 0).
+    Returns ``(e1, e2)``."""
+    if inflate:
+        await _inflate_with_k1(w)
+    backup = await _backup_owner_row(w)
+    await _demote_b(w)  # e1
+    e1 = (await w.o_space()).authority_key_epoch
+    await _restore_owner_row(w, backup)
+    _restore_happens_later(monkeypatch)
+    await _restore_rotate(w)  # e2
+    return e1, (await w.o_space()).authority_key_epoch
+
+
+async def test_forgotten_rotation_heals_a_member_that_missed_it(world, monkeypatch):
+    """The gap: M missed e1 and keeps what B inflated under K1, the
+    restored owner forgot e1, and nothing at M or the owner can tell. A
+    household that DID hold e1 echoes it as forgotten WITH the owner's own
+    e1 cert as proof; the owner rotates past it (e3, ``forgotten_key_epoch``
+    e1), and M resets."""
+    w = world
+    e1, e2 = await _forget_e1(w, monkeypatch)
+    assert _bundles_to(w, w.m_id)[-1]["prior_key_epoch"] == 0
+    await _deliver_bundle_to_m(w)
+    assert (await w.m_space()).name == "B's name"  # the gap, before v_46
+
+    await _echo_to_owner(
+        w,
+        sender=A_ID,
+        echo={
+            "key_epoch": e2,
+            "baseline_epoch": e2,
+            "forgotten_epoch": e1,
+            "forgotten_cert": _cert_of(w, e1),
+        },
+    )
+    e3 = (await w.o_space()).authority_key_epoch
+    assert e3 > e2
+    e3_bundle = _bundles_to(w, w.m_id)[-1]
+    assert e3_bundle["baseline"] is False
+    assert e3_bundle["forgotten_key_epoch"] == e1
+    await _deliver_bundle_to_m(w)
+
+    await _assert_reset_to_owner(w)
+
+
+async def test_unproven_forgotten_or_high_epoch_moves_nothing(world, monkeypatch):
+    """Review I1/I2: an echoed epoch without the owner's cert for it —
+    missing, for another epoch, forged — triggers no rotation and no reset,
+    however high or plausible it is."""
+    w = world
+    e1, e2 = await _forget_e1(w, monkeypatch)
+    await _deliver_bundle_to_m(w)
+    stranger = generate_identity_keypair()
+    forged = sign_authority_cert(
+        space_id=w.space_id,
+        owner_instance_id=w.o_id,
+        owner_seed=stranger.private_key,
+        owner_pk_hex=stranger.public_key.hex(),
+        authority_pk_hex="ab" * 32,
+        key_epoch=e1,
+    )
+    before = len(_bundles_to(w, w.m_id))
+    for sender, echo in (
+        (A_ID, {"key_epoch": e2, "baseline_epoch": e2, "forgotten_epoch": e1}),
+        (
+            A_ID,
+            {
+                "key_epoch": e2,
+                "baseline_epoch": e2,
+                "forgotten_epoch": e1,
+                "forgotten_cert": _cert_of(w, e2),  # a cert, but for e2
+            },
+        ),
+        (
+            w.m_id,
+            {
+                "key_epoch": e2,
+                "baseline_epoch": e2,
+                "forgotten_epoch": e1,
+                "forgotten_cert": forged,
+            },
+        ),
+        (w.m_id, {"key_epoch": e2 + 5000, "baseline_epoch": e2 + 5000}),
+        (A_ID, {"key_epoch": e2 + 9, "key_cert": forged}),
+    ):
+        await _echo_to_owner(w, sender=sender, echo=echo)
+        _open_rotation_window(w)
+    assert (await w.o_space()).authority_key_epoch == e2
+    assert len(_bundles_to(w, w.m_id)) == before
+    assert (await w.m_space()).name == "B's name"
+
+
+async def test_member_that_held_the_forgotten_epoch_proves_it_and_heals(
+    world, monkeypatch
+):
+    """Member side, end to end through the real apps: M held e1 (and kept
+    its cert) when the restored owner's e2 bundle arrived naming prior 0.
+    M notes e1 durably with that cert, asks to echo now, and the echo it
+    builds makes the owner rotate past e1; the e3 bundle naming e1 clears
+    the note."""
+    w = world
+    published: list = []
+
+    async def _seen(ev):
+        published.append(ev)
+
+    w.m_app[event_bus_key].subscribe(SpaceAuthorityEchoDue, _seen)
+    backup = await _backup_owner_row(w)
+    await _rotated(w)  # e1, M applied it
+    e1 = (await w.m_space()).authority_key_epoch
+    await _restore_owner_row(w, backup)
+    _restore_happens_later(monkeypatch)
+    await _restore_rotate(w)
+    await _deliver_bundle_to_m(w)  # e2, prior 0 < e1
+
+    rotation = w.m_app[space_authority_rotation_key]
+    echo = await rotation.authority_epoch_echo(w.space_id, w.o_id)
+    assert echo is not None and echo["forgotten_epoch"] == e1
+    assert echo["forgotten_cert"]["key_epoch"] == e1
+    assert echo["key_cert"]["key_epoch"] == echo["key_epoch"]
+    assert [(e.space_id, e.owner_instance_id) for e in published] == [
+        (w.space_id, w.o_id)
+    ]
+
+    await _echo_to_owner(w, sender=w.m_id, echo=echo)
+    assert _bundles_to(w, w.m_id)[-1]["forgotten_key_epoch"] == e1
+    await _deliver_bundle_to_m(w)
+    assert (await w.m_space()).authority_key_epoch == (
+        await w.o_space()
+    ).authority_key_epoch
+    echo = await rotation.authority_epoch_echo(w.space_id, w.o_id)
+    assert echo is not None and echo["forgotten_epoch"] == 0
+
+
+async def test_forgotten_note_survives_a_member_restart(world, monkeypatch):
+    """Review M1: the note is durable — a fresh service over the same
+    database (a restarted household) still echoes it, with its proof."""
+    w = world
+    backup = await _backup_owner_row(w)
+    await _rotated(w)
+    e1 = (await w.m_space()).authority_key_epoch
+    await _restore_owner_row(w, backup)
+    _restore_happens_later(monkeypatch)
+    await _restore_rotate(w)
+    await _deliver_bundle_to_m(w)
+
+    restarted = SpaceAuthorityRotationService(
+        space_repo=w.m_app[space_repo_key],
+        remote_member_repo=w.m_app[space_remote_member_repo_key],
+        bus=w.m_app[event_bus_key],
+        own_instance_id=w.m_id,
+    )
+    restarted.attach_federation(
+        w.m_app[federation_service_key], w.m_app[federation_repo_key]
+    )
+    echo = await restarted.authority_epoch_echo(w.space_id, w.o_id)
+    assert echo is not None and echo["forgotten_epoch"] == e1
+    assert echo["forgotten_cert"]["key_epoch"] == e1
+
+
+async def test_accomplice_cannot_erase_an_honest_forgotten_report(world, monkeypatch):
+    """Review I1 race: before the honest echo lands, an accomplice gets the
+    owner to rotate with a SMALLER forgotten epoch. M keeps its note (only
+    a bundle naming at least its epoch clears it) and its later echo still
+    heals the space."""
+    w = world
+    backup = await _backup_owner_row(w)
+    await _rotated(w)
+    e1 = (await w.m_space()).authority_key_epoch
+    await _restore_owner_row(w, backup)
+    _restore_happens_later(monkeypatch)
+    await _restore_rotate(w)
+    await _deliver_bundle_to_m(w)
+    rotation = w.m_app[space_authority_rotation_key]
+
+    # The accomplice-provoked rotation names some lower epoch than e1.
+    await w.o_app[space_authority_rotation_key].rotate(
+        w.space_id, baseline=False, forgotten_key_epoch=e1 - 1
+    )
+    await _deliver_bundle_to_m(w)
+    echo = await rotation.authority_epoch_echo(w.space_id, w.o_id)
+    assert echo is not None and echo["forgotten_epoch"] == e1
+
+    _open_rotation_window(w)
+    await _echo_to_owner(w, sender=w.m_id, echo=echo)
+    assert _bundles_to(w, w.m_id)[-1]["forgotten_key_epoch"] == e1
+
+
+async def test_two_forgotten_epochs_the_higher_is_kept_through_the_window(
+    world, monkeypatch
+):
+    """Review I1: the owner forgot two rotations (e1, e1b). The first proof
+    rotates past e1; the second arrives inside the per-space window — it is
+    kept, not dropped, and rotated past as soon as the window opens."""
+    w = world
+    o_rot = w.o_app[space_authority_rotation_key]
+    backup = await _backup_owner_row(w)
+    await _demote_b(w)  # e1
+    e1 = (await w.o_space()).authority_key_epoch
+    _restore_happens_later(monkeypatch, 10)
+    await o_rot.rotate(w.space_id)  # e1b
+    e1b = (await w.o_space()).authority_key_epoch
+    assert e1b > e1
+    await _restore_owner_row(w, backup)
+    _restore_happens_later(monkeypatch, 200)
+    await _restore_rotate(w)  # e2
+
+    await _echo_to_owner(
+        w, sender=A_ID, echo={"forgotten_epoch": e1, "forgotten_cert": _cert_of(w, e1)}
+    )
+    assert _bundles_to(w, w.m_id)[-1]["forgotten_key_epoch"] == e1
+    after_first = (await w.o_space()).authority_key_epoch
+    await _echo_to_owner(
+        w,
+        sender=w.m_id,
+        echo={"forgotten_epoch": e1b, "forgotten_cert": _cert_of(w, e1b)},
+    )
+    assert (await w.o_space()).authority_key_epoch == after_first  # window shut
+    assert o_rot._echo_pending[w.space_id] == e1b
+
+    _open_rotation_window(w)
+    await _echo_to_owner(w, sender=A_ID, echo={"key_epoch": after_first})
+    assert (await w.o_space()).authority_key_epoch > after_first
+    assert _bundles_to(w, w.m_id)[-1]["forgotten_key_epoch"] == e1b
+    assert w.space_id not in o_rot._echo_pending
+
+
+async def test_owner_restored_below_a_member_rotates_past_it(world):
+    """A restored owner that did NOT rotate after the restore (its backup
+    had no authority history) sits below what M pins. M's echo carries its
+    pin's cert, so the owner rotates to at least that epoch + 1."""
+    w = world
+    backup = await _backup_owner_row(w)
+    await _rotated(w)
+    e1 = (await w.m_space()).authority_key_epoch
+    await _restore_owner_row(w, backup)
+    before = len(_bundles_to(w, w.m_id))
+
+    echo = await w.m_app[space_authority_rotation_key].authority_epoch_echo(
+        w.space_id, w.o_id
+    )
+    assert echo is not None and echo["key_epoch"] == e1 and "key_cert" in echo
+    await _echo_to_owner(w, sender=w.m_id, echo=echo)
+
+    o = await w.o_space()
+    assert o.authority_key_epoch > e1
+    assert len(_bundles_to(w, w.m_id)) == before + 1
+    assert _bundles_to(w, w.m_id)[-1]["forgotten_key_epoch"] == e1
+    await _deliver_bundle_to_m(w)
+    m = await w.m_space()
+    assert (m.authority_key_epoch, m.identity_public_key) == (
+        o.authority_key_epoch,
+        o.identity_public_key,
+    )
+
+
+async def test_member_behind_on_the_key_gets_the_current_bundle_again(world):
+    """No restore: M missed the e1 bundle (still on K1, B's inflation
+    intact). Its unproven echo can only earn it the current bundle, re-sent
+    to M alone — a baseline, as the original was — and M resets."""
+    w = world
+    await _inflate_with_k1(w)
+    await _demote_b(w)
+    e1 = (await w.o_space()).authority_key_epoch
+    sent_before = len(w.sent)
+    await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": 0})
+    assert (await w.o_space()).authority_key_epoch == e1  # no new rotation
+    resent = [t for s, t, et, _p in w.sent[sent_before:] if s == w.o_id]
+    assert resent == [w.m_id]
+    bundle = _bundles_to(w, w.m_id)[-1]
+    assert bundle["authority_cert"]["key_epoch"] == e1
+    assert "baseline" not in bundle  # a baseline, like the original
+    await _deliver_bundle_to_m(w)
+    await _assert_reset_to_owner(w)
+
+
+async def test_v44_era_owner_row_resends_as_a_baseline(world):
+    """Review I3: a rotation made before v_46 left no header. The re-send
+    cannot know what the original said, so it is a baseline (owner state
+    beats possibly-revoked state) — never a non-baseline that would burn
+    M's one reset at that epoch for nothing."""
+    w = world
+    await _inflate_with_k1(w)
+    await _demote_b(w)
+    await w.o_app[space_repo_key].set_authority_echo(w.space_id, None)
+    await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": 0})
+    bundle = _bundles_to(w, w.m_id)[-1]
+    assert "baseline" not in bundle
+    await _deliver_bundle_to_m(w)
+    await _assert_reset_to_owner(w)
+
+
+async def test_resend_after_an_echo_rotation_names_the_forgotten_epoch(
+    world, monkeypatch
+):
+    """Review I3: the owner keeps the forgotten epoch it announced; a member
+    that missed THAT bundle gets it again in the re-send, and resets."""
+    w = world
+    e1, e2 = await _forget_e1(w, monkeypatch)
+    await _echo_to_owner(
+        w, sender=A_ID, echo={"forgotten_epoch": e1, "forgotten_cert": _cert_of(w, e1)}
+    )
+    await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": 0})
+    bundle = _bundles_to(w, w.m_id)[-1]
+    assert bundle["baseline"] is False
+    assert bundle["forgotten_key_epoch"] == e1
+    assert bundle["prior_key_epoch"] == e2
+    await _deliver_bundle_to_m(w)
+    await _assert_reset_to_owner(w)
+
+
+async def test_echo_resends_are_rate_limited_per_household_and_space(world):
+    w = world
+    await _demote_b(w)
+    await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": 0})
+    count = len(_bundles_to(w, w.m_id))
+    for _ in range(3):
+        await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": 0})
+    assert len(_bundles_to(w, w.m_id)) == count
+    # A rejected echo first does not spend the slot (review M4).
+    w.o_app[space_authority_rotation_key]._echo_reacted.clear()
+    await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": -1})
+    await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": 0})
+    assert len(_bundles_to(w, w.m_id)) == count + 1
+
+
+async def test_a_proven_epoch_rotates_once_per_window(world, monkeypatch):
+    w = world
+    e1, _e2 = await _forget_e1(w, monkeypatch, inflate=False)
+    proof = {"forgotten_epoch": e1, "forgotten_cert": _cert_of(w, e1)}
+    await _echo_to_owner(w, sender=A_ID, echo=proof)
+    once = (await w.o_space()).authority_key_epoch
+    for sender in (A_ID, w.m_id, A_ID):
+        await _echo_to_owner(w, sender=sender, echo=proof)
+        _open_rotation_window(w)
+    # Already announced: the same epoch is never rotated past twice.
+    assert (await w.o_space()).authority_key_epoch == once
+
+
+async def test_malformed_or_implausible_echo_is_ignored(world):
+    w = world
+    await _rotated(w)
+    o = await w.o_space()
+    for echo in (
+        {"key_epoch": 2**62},
+        {"key_epoch": 1, "forgotten_epoch": 2**62},
+        {"key_epoch": -1},
+        {"key_epoch": True},
+        {"key_epoch": "9"},
+        "not a dict",
+    ):
+        await _echo_to_owner(w, sender=w.m_id, echo=echo)
+    after = await w.o_space()
+    assert (after.authority_key_epoch, after.identity_public_key) == (
+        o.authority_key_epoch,
+        o.identity_public_key,
+    )
+
+
+async def test_echo_from_a_subscriber_or_seatless_household_is_ignored(
+    world, monkeypatch
+):
+    """Review M3: only a writer seat counts. A subscriber, a stranger or a
+    removed household triggers nothing — even with valid proof."""
+    w = world
+    e1, e2 = await _forget_e1(w, monkeypatch, inflate=False)
+    proof = {"forgotten_epoch": e1, "forgotten_cert": _cert_of(w, e1)}
+    o_rm = w.o_app[space_remote_member_repo_key]
+    await o_rm.set_role(w.space_id, w.m_id, "um", SpaceRole.SUBSCRIBER.value)
+    await _echo_to_owner(w, sender=w.m_id, echo=proof)
+    await _echo_to_owner(w, sender="z" * 32, echo=proof)
+    await o_rm.remove(w.space_id, A_ID, "ua")
+    await _echo_to_owner(w, sender=A_ID, echo=proof)
+    await _echo_to_owner(w, sender=w.m_id, echo={"key_epoch": 0})
+    assert (await w.o_space()).authority_key_epoch == e2
+
+
+async def test_old_peer_without_the_echo_changes_nothing(world):
+    """A v_45 member's BEGIN carries no echo: the owner does nothing. And a
+    member never sends the echo to an owner it knows is below v_46."""
+    w = world
+    await _rotated(w)
+    own = (await w.o_space()).authority_key_epoch
+    sent_before = len(w.sent)
+    await _echo_to_owner(w, sender=w.m_id, echo=None)
+    assert (await w.o_space()).authority_key_epoch == own
+    assert len(w.sent) == sent_before
+
+    rotation = w.m_app[space_authority_rotation_key]
+    m_fed_repo = w.m_app[federation_repo_key]
+    await m_fed_repo.save_instance(_peer(w.o_id, 45))
+    assert await rotation.authority_epoch_echo(w.space_id, w.o_id) is None
+    await m_fed_repo.save_instance(_peer(w.o_id, 46))
+    assert await rotation.authority_epoch_echo(w.space_id, w.o_id) is not None
+    # Never to anyone but the owner, and never for a space we host.
+    assert await rotation.authority_epoch_echo(w.space_id, A_ID) is None
+    o_rotation = w.o_app[space_authority_rotation_key]
+    assert await o_rotation.authority_epoch_echo(w.space_id, w.m_id) is None
+
+
+async def test_a_v44_member_ignores_forgotten_key_epoch(world):
+    """Fail-soft: the field is optional; a bundle without it behaves as in
+    v_45 (non-baseline, nothing missed → nothing reset)."""
+    w = world
+    await _inflate_with_k1(w)
+    await _restore_rotate(w)
+    bundle = dict(_bundles_to(w, w.m_id)[-1])
+    bundle.pop("forgotten_key_epoch", None)
+    await _deliver(
+        w.m_app, sender=w.o_id, event_type=FET.SPACE_AUTHORITY_ROTATED, payload=bundle
+    )
+    assert (await w.m_space()).name == "B's name"
+
+
+async def test_replayed_superseded_certs_never_buy_another_rotation(world, monkeypatch):
+    """Re-review N1: every member holds real certs of ours for epochs we
+    superseded (the post-restore one, each echo rotation's predecessor).
+    Only an epoch strictly inside the recorded restore window — between
+    what the backup held and what the post-restore rotation issued — can
+    have been forgotten; echo rotations never move that window. Replaying
+    any other real cert, window after window, rotates nothing."""
+    w = world
+    e1, e2 = await _forget_e1(w, monkeypatch, inflate=False)
+    await _echo_to_owner(
+        w, sender=A_ID, echo={"forgotten_epoch": e1, "forgotten_cert": _cert_of(w, e1)}
+    )
+    healed = (await w.o_space()).authority_key_epoch
+    assert healed > e2
+    await w.o_app[space_authority_rotation_key].rotate(w.space_id, baseline=False)
+    own = (await w.o_space()).authority_key_epoch
+    replayable = {
+        p["authority_cert"]["key_epoch"]: p["authority_cert"]
+        for p in w.outbound(event_type=FET.SPACE_AUTHORITY_ROTATED)
+        if p["authority_cert"]["key_epoch"] < own
+    }
+    assert {e1, e2, healed} <= set(replayable)
+    for _round in range(3):
+        for epoch, cert in sorted(replayable.items()):
+            _open_rotation_window(w)
+            await _echo_to_owner(
+                w,
+                sender=w.m_id,
+                echo={
+                    "key_epoch": own,
+                    "baseline_epoch": own,
+                    "forgotten_epoch": epoch,
+                    "forgotten_cert": cert,
+                },
+            )
+    assert (await w.o_space()).authority_key_epoch == own
+
+
+async def test_no_restore_recorded_means_nothing_was_forgotten(world):
+    """Without a post-restore rotation on record, a real superseded cert
+    echoed as forgotten is just an old epoch we issued knowingly."""
+    w = world
+    await _demote_b(w)
+    e1 = (await w.o_space()).authority_key_epoch
+    await w.o_app[space_authority_rotation_key].rotate(w.space_id, baseline=False)
+    own = (await w.o_space()).authority_key_epoch
+    await _echo_to_owner(
+        w,
+        sender=w.m_id,
+        echo={
+            "key_epoch": own,
+            "baseline_epoch": own,
+            "forgotten_epoch": e1,
+            "forgotten_cert": _cert_of(w, e1),
+        },
+    )
+    assert (await w.o_space()).authority_key_epoch == own
+
+
+async def test_echo_before_the_post_restore_rotation_shares_no_seed(world):
+    """Re-review R1: the owner was restored (marker set) but its
+    post-restore rotation has not run yet — the restored row still has
+    delegation ON and an admin list that may name a household revoked after
+    the backup. A cert-proven echo arriving now must not rotate and share a
+    fresh seed with that list; it is deferred until the restore rotation
+    ran (which turns delegation off), and only then acted on."""
+    w = world
+    backup = await _backup_owner_row(w)
+    await _rotated(w)  # e1, M applied it (and keeps its cert)
+    e1 = (await w.m_space()).authority_key_epoch
+    await _restore_owner_row(w, backup)  # delegation still on, B listed admin
+    await w.o_app[db_key].enqueue(
+        "INSERT INTO instance_config(key,value) VALUES(?,?)",
+        (RECOVERED_AT_KEY, "2026-10-02T00:00:00+00:00"),
+    )
+    shares_before = len(w.outbound(event_type=FET.SPACE_ADMIN_KEY_SHARE))
+    echo = await w.m_app[space_authority_rotation_key].authority_epoch_echo(
+        w.space_id, w.o_id
+    )
+    assert echo is not None and echo["key_epoch"] == e1 and "key_cert" in echo
+
+    await _echo_to_owner(w, sender=w.m_id, echo=echo)
+    assert (await w.o_space()).authority_key_epoch == 0  # nothing rotated
+    assert len(w.outbound(event_type=FET.SPACE_ADMIN_KEY_SHARE)) == shares_before
+
+    recovery = w.o_app[recovery_reconnect_service_key]
+    await recovery.maybe_rotate_space_authority(w.o_app[space_authority_rotation_key])
+    assert (await w.o_space()).features.delegated_admin_authority is False
+    assert (await w.o_space()).authority_key_epoch >= e1
+    # Acted on now — and with delegation off, still no seed goes anywhere.
+    _open_rotation_window(w)
+    await _echo_to_owner(w, sender=w.m_id, echo=echo)
+    assert len(w.outbound(event_type=FET.SPACE_ADMIN_KEY_SHARE)) == shares_before

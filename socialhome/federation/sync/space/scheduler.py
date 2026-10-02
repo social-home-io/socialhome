@@ -15,6 +15,10 @@ Four triggers:
    ``sync_id`` and the host's route cache both live in RAM. Startup and
    every periodic tick re-issue ``SPACE_SYNC_BEGIN`` for any such space
    that has not yet been seen to complete (#648).
+5. **Authority epoch echo** (v_46) — a BEGIN to a space's owner carries
+   the ``authority_epoch_echo`` the attached builder returns
+   (:meth:`attach_authority_echo`), and :class:`SpaceAuthorityEchoDue`
+   sends one to the owner right away.
 
 Follows the `_stop: asyncio.Event` lifecycle (CLAUDE.md "Schedulers").
 """
@@ -28,11 +32,15 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from ....domain.events import PairingConfirmed, SpaceSyncComplete
+from ....domain.events import (
+    PairingConfirmed,
+    SpaceAuthorityEchoDue,
+    SpaceSyncComplete,
+)
 from ....domain.federation import FederationEventType, PairingStatus
 from ....domain.space import Space, SpaceType
 from ....infrastructure.event_bus import EventBus
-from ....infrastructure.reconnect_queue import P4_DM, P6_PRODUCTIVITY
+from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
 
 if TYPE_CHECKING:
     from ....infrastructure.reconnect_queue import ReconnectSyncQueue
@@ -98,6 +106,7 @@ class SpaceSyncScheduler:
         "_mesh_catchup_done",
         "_mesh_catchup_attempts",
         "_roster_refresh",
+        "_authority_echo",
     )
 
     def __init__(
@@ -133,6 +142,8 @@ class SpaceSyncScheduler:
         #: v_32 roster self-heal, run once per tick (see
         #: :meth:`attach_roster_refresh`).
         self._roster_refresh: Callable[[], Awaitable[object]] | None = None
+        #: v_46 authority epoch echo builder (see :meth:`attach_authority_echo`).
+        self._authority_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
 
     def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
         """Run ``refresh`` on every periodic tick — the host re-sending each
@@ -142,10 +153,48 @@ class SpaceSyncScheduler:
         its own, not wait for an operator."""
         self._roster_refresh = refresh
 
+    def attach_authority_echo(
+        self, echo: Callable[[str, str], Awaitable[dict | None]]
+    ) -> None:
+        """``echo(space_id, to_instance_id)`` → the ``authority_epoch_echo``
+        a BEGIN to that household carries, or ``None``
+        (``SpaceAuthorityRotationService.authority_epoch_echo``, v_46)."""
+        self._authority_echo = echo
+
     def wire(self) -> None:
         """Subscribe to the bus events we act on. Idempotent."""
         self._bus.subscribe(PairingConfirmed, self._on_pairing_confirmed)
         self._bus.subscribe(SpaceSyncComplete, self._on_space_sync_complete)
+        self._bus.subscribe(SpaceAuthorityEchoDue, self._on_authority_echo_due)
+
+    async def _echo_for(self, space_id: str, to_instance_id: str) -> dict | None:
+        if self._authority_echo is None:
+            return None
+        try:
+            return await self._authority_echo(space_id, to_instance_id)
+        except Exception:
+            log.exception("authority epoch echo for %s failed", space_id)
+            return None
+
+    async def _on_authority_echo_due(self, event: SpaceAuthorityEchoDue) -> None:
+        """Tell the owner now, not on the next periodic tick (v_46)."""
+        owner = event.owner_instance_id
+        if not owner or owner == self._own_instance_id:
+            return
+        if await self._federation.is_confirmed_peer(owner):
+            # Security priority: ahead of any bulk sync queued in front of it.
+            # The owner spends its per-household re-send slot only on an
+            # actual re-send, and a proven forgotten epoch never needs one,
+            # so a periodic echo just before this one cannot swallow it.
+            await self.enqueue_sync_for_space(
+                space_id=event.space_id, peer_instance_id=owner, priority=P1_SECURITY
+            )
+            return
+        await self._federation.begin_mesh_catchup_sync(
+            space_id=event.space_id,
+            host_instance_id=owner,
+            extra_payload=await self._echo_for(event.space_id, owner),
+        )
 
     async def _on_space_sync_complete(self, event: SpaceSyncComplete) -> None:
         """Record the end-of-stream sentinel as the catch-up watermark.
@@ -217,16 +266,20 @@ class SpaceSyncScheduler:
                 space_id=space_id,
                 provider_instance_id=peer_instance_id,
             )
+            payload: dict = {
+                "sync_id": sync_id,
+                "space_id": space_id,
+                "sync_mode": "initial",
+                "prefer_direct": prefer_direct,
+            }
+            echo = await self._echo_for(space_id, peer_instance_id)
+            if echo is not None:
+                payload["authority_epoch_echo"] = echo
             try:
                 await self._federation.send_event(
                     to_instance_id=peer_instance_id,
                     event_type=FederationEventType.SPACE_SYNC_BEGIN,
-                    payload={
-                        "sync_id": sync_id,
-                        "space_id": space_id,
-                        "sync_mode": "initial",
-                        "prefer_direct": prefer_direct,
-                    },
+                    payload=payload,
                     space_id=space_id,
                 )
             except Exception:  # pragma: no cover
@@ -390,6 +443,7 @@ class SpaceSyncScheduler:
                 shipped = await self._federation.begin_mesh_catchup_sync(
                     space_id=space.id,
                     host_instance_id=host,
+                    extra_payload=await self._echo_for(space.id, host),
                 )
             except Exception:  # pragma: no cover — begin_* is fail-soft
                 log.exception(

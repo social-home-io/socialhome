@@ -8,7 +8,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from socialhome.domain.events import PairingConfirmed, SpaceSyncComplete
+from socialhome.domain.events import (
+    PairingConfirmed,
+    SpaceAuthorityEchoDue,
+    SpaceSyncComplete,
+)
 from socialhome.domain.federation import FederationEventType, PairingStatus
 from socialhome.domain.space import (
     JoinMode,
@@ -39,6 +43,8 @@ class _FakeFederation:
         self.catchup_ships: bool = True
         #: (sync_id, space_id, provider) recorded before each BEGIN.
         self.requests: list[tuple[str, str, str]] = []
+        #: The ``extra_payload`` (v_46 authority echo) of each catch-up.
+        self.mesh_extras: list[dict | None] = []
 
     def record_sync_request(self, *, sync_id, space_id, provider_instance_id):
         """A requester notes the sync_id it is about to ask for, so the
@@ -48,8 +54,11 @@ class _FakeFederation:
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
 
-    async def begin_mesh_catchup_sync(self, *, space_id, host_instance_id):
+    async def begin_mesh_catchup_sync(
+        self, *, space_id, host_instance_id, extra_payload=None
+    ):
         self.mesh_catchups.append((space_id, host_instance_id))
+        self.mesh_extras.append(extra_payload)
         # Mirrors the real return contract: True = the BEGIN shipped, False =
         # a transient failure (``no_route`` on a still-warming mesh).
         return self.catchup_ships
@@ -608,3 +617,131 @@ async def test_tick_runs_the_roster_refresh_and_survives_its_failure(
     await sched._tick_once()
     assert calls == [1, 1]
     assert sync_manager.reap_stale.call_count == 2
+
+
+# ── v_46 authority epoch echo ─────────────────────────────────────────────
+
+
+def _echo_sched(bus, queue, sync_manager, fed, *, spaces=None, members=None):
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("owner-o")]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type=spaces or {}, members_by_space=members or {}
+        ),
+        queue=queue,
+        sync_manager=sync_manager,
+        own_instance_id="self",
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def _echo(space_id, to):
+        calls.append((space_id, to))
+        return {"key_epoch": 7} if to == "owner-o" else None
+
+    sched.attach_authority_echo(_echo)
+    sched.wire()
+    return sched, calls
+
+
+async def test_begin_to_the_owner_carries_the_authority_echo(bus, queue, sync_manager):
+    fed = _FakeFederation(confirmed={"owner-o"})
+    sched, calls = _echo_sched(bus, queue, sync_manager, fed)
+    await queue.start()
+    try:
+        await sched.enqueue_sync_for_space(space_id="sp-1", peer_instance_id="owner-o")
+        await sched.enqueue_sync_for_space(space_id="sp-1", peer_instance_id="peer-b")
+        for _ in range(50):
+            if len(fed.sent) == 2:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.stop()
+    by_to = {m["to"]: m["payload"] for m in fed.sent}
+    assert by_to["owner-o"]["authority_epoch_echo"] == {"key_epoch": 7}
+    assert "authority_epoch_echo" not in by_to["peer-b"]
+    assert ("sp-1", "owner-o") in calls
+
+
+async def test_echo_builder_failure_never_blocks_the_begin(bus, queue, sync_manager):
+    fed = _FakeFederation(confirmed={"owner-o"})
+    sched, _ = _echo_sched(bus, queue, sync_manager, fed)
+
+    async def _boom(space_id, to):
+        raise RuntimeError("boom")
+
+    sched.attach_authority_echo(_boom)
+    await queue.start()
+    try:
+        await sched.enqueue_sync_for_space(space_id="sp-1", peer_instance_id="owner-o")
+        for _ in range(50):
+            if fed.sent:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.stop()
+    assert fed.sent and "authority_epoch_echo" not in fed.sent[0]["payload"]
+
+
+async def test_mesh_catchup_carries_the_echo(bus, queue, sync_manager):
+    fed = _FakeFederation()
+    spaces = {SpaceType.HOUSEHOLD: [_space("sp-m", owner_instance_id="owner-o")]}
+    sched, _ = _echo_sched(bus, queue, sync_manager, fed, spaces=spaces)
+    await sched._tick_mesh_catchup()
+    assert fed.mesh_catchups == [("sp-m", "owner-o")]
+    assert fed.mesh_extras == [{"key_epoch": 7}]
+
+
+async def test_echo_due_reaches_a_confirmed_owner_now(bus, queue, sync_manager):
+    fed = _FakeFederation(confirmed={"owner-o"})
+    _echo_sched(bus, queue, sync_manager, fed)
+    await queue.start()
+    try:
+        await bus.publish(
+            SpaceAuthorityEchoDue(space_id="sp-1", owner_instance_id="owner-o")
+        )
+        for _ in range(50):
+            if fed.sent:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.stop()
+    assert fed.sent[0]["to"] == "owner-o"
+    assert fed.sent[0]["type"] is FederationEventType.SPACE_SYNC_BEGIN
+    assert fed.sent[0]["payload"]["authority_epoch_echo"] == {"key_epoch": 7}
+
+
+async def test_echo_due_reaches_a_mesh_only_owner_over_the_mesh(
+    bus, queue, sync_manager
+):
+    fed = _FakeFederation()
+    _echo_sched(bus, queue, sync_manager, fed)
+    await bus.publish(
+        SpaceAuthorityEchoDue(space_id="sp-1", owner_instance_id="owner-o")
+    )
+    assert fed.mesh_catchups == [("sp-1", "owner-o")]
+    assert fed.mesh_extras == [{"key_epoch": 7}]
+
+
+async def test_echo_due_for_our_own_space_is_ignored(bus, queue, sync_manager):
+    fed = _FakeFederation()
+    _echo_sched(bus, queue, sync_manager, fed)
+    await bus.publish(SpaceAuthorityEchoDue(space_id="sp-1", owner_instance_id="self"))
+    assert fed.mesh_catchups == [] and fed.sent == []
+
+
+async def test_no_echo_builder_means_no_echo(bus, queue, sync_manager):
+    fed = _FakeFederation()
+    spaces = {SpaceType.HOUSEHOLD: [_space("sp-m", owner_instance_id="owner-o")]}
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([]),
+        space_repo=_FakeSpaceRepo(spaces_by_type=spaces, members_by_space={}),
+        queue=queue,
+        sync_manager=sync_manager,
+        own_instance_id="self",
+    )
+    await sched._tick_mesh_catchup()
+    assert fed.mesh_extras == [None]

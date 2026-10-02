@@ -3046,6 +3046,11 @@ def create_app(config: Config | None = None) -> web.Application:
             subscriber_key_outbound=space_subscriber_key_outbound,
         )
         app[K.space_authority_rotation_key] = space_authority_rotation
+        # v_46: a member's BEGIN to a space's owner echoes its held
+        # authority epochs, so a restored owner learns what it forgot.
+        app[K.space_sync_scheduler_key].attach_authority_echo(
+            space_authority_rotation.authority_epoch_echo
+        )
         # v_32 roster snapshots: the host re-sends its whole roster to a
         # member household that just upgraded, and on every periodic sync
         # tick, so a roster mirror that missed gossip heals by itself.
@@ -3410,6 +3415,25 @@ def create_app(config: Config | None = None) -> web.Application:
             if space_subscriber_key_outbound is not None:
                 await space_subscriber_key_outbound.reconcile(gfs_id)
 
+        # Post-restore authority rotation BEFORE any transport starts (GFS
+        # WebSocket, outbox, reconnect queue): until it runs, the hosted
+        # space rows are the restored ones, and nothing arriving from a peer
+        # may act on them (v_46 — an echo would otherwise rotate off a stale
+        # admin list and share it a seed). Inbound HTTP opens only after
+        # startup. The rotation service also defers echoes while it is
+        # pending, should it fail here.
+        recovery_reconnect_service = RecoveryReconnectService(
+            db, app[K.url_update_outbound_key], platform_adapter
+        )
+        app[K.recovery_reconnect_service_key] = recovery_reconnect_service
+        if space_authority_rotation is not None:
+            space_authority_rotation.attach_restore_gate(
+                recovery_reconnect_service.authority_rotation_pending
+            )
+            await recovery_reconnect_service.maybe_rotate_space_authority(
+                space_authority_rotation
+            )
+
         nonlocal gfs_ws_supervisor
         gfs_ws_supervisor = GfsWebSocketSupervisor(
             repo=repos.gfs_connection,
@@ -3666,18 +3690,12 @@ def create_app(config: Config | None = None) -> web.Application:
         #     wired (url_update_outbound exists). On the FIRST boot after a
         #     Recovery Kit restore it fans URL_UPDATED out to every confirmed
         #     peer so they update our inbox URL; guarded to run exactly once.
-        recovery_reconnect_service = RecoveryReconnectService(
-            db, app[K.url_update_outbound_key], platform_adapter
-        )
-        app[K.recovery_reconnect_service_key] = recovery_reconnect_service
+        #     (The authority rotation for a restore already ran, before any
+        #     transport started — see above.)
         try:
             await recovery_reconnect_service.maybe_reconnect()
         except Exception:
             log.warning("post-restore reconnect hook failed", exc_info=True)
-        if space_authority_rotation is not None:
-            await recovery_reconnect_service.maybe_rotate_space_authority(
-                space_authority_rotation
-            )
 
         # 8. Default-calendar backfill. Runs after the adapter (so the
         #    headless ``provision_admin`` path is included) and after the
@@ -3797,6 +3815,10 @@ def create_app(config: Config | None = None) -> web.Application:
         sync_sched = app.get(K.space_sync_scheduler_key)
         if sync_sched is not None:
             await sync_sched.stop()
+        # v_46 echo-triggered rotations / re-sends: drained (bounded) while
+        # the database is still up.
+        if space_authority_rotation is not None:
+            await space_authority_rotation.stop()
         await bazaar_expiry_scheduler.stop()
         await highlight_retention_scheduler.stop()
         await moment_retention_scheduler.stop()

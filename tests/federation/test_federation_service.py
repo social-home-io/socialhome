@@ -1625,8 +1625,32 @@ async def test_begin_mesh_catchup_sync_registers_session_and_sends_for_mesh_host
     assert send_kwargs["payload"]["space_id"] == "sp-1"
     assert send_kwargs["payload"]["sync_mode"] == "initial"
     assert send_kwargs["payload"]["prefer_direct"] is False
+    assert "authority_epoch_echo" not in send_kwargs["payload"]
     # Success → session NOT closed (the chunk replies still need it).
     sync_manager.close_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_begin_mesh_catchup_sync_carries_the_authority_echo():
+    """v_46: the BEGIN to a mesh-only owner carries the echo it is given."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(
+        return_value=DeliveryResult(instance_id="host-1", ok=True),
+    )
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        await svc.begin_mesh_catchup_sync(
+            space_id="sp-1", host_instance_id="host-1", extra_payload={"key_epoch": 3}
+        )
+    payload = send_mock.call_args.kwargs["payload"]
+    assert payload["authority_epoch_echo"] == {"key_epoch": 3}
 
 
 @pytest.mark.asyncio

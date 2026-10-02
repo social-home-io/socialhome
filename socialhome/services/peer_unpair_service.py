@@ -274,8 +274,8 @@ class PeerUnpairService:
         The one way a service removes a ``remote_instances`` row (see
         :class:`InstancePurger`). The repository itself drops rows only in
         bulk housekeeping (expired pending handshakes, a tombstone replaced
-        by a re-pair); anything those strand is collected by the outbox
-        sweep below. The row goes FIRST: from then on the
+        by a re-pair), and runs these same deletes in this same order inside
+        that transaction. The row goes FIRST: from then on the
         outboxes refuse to queue for this household (their INSERTs check
         ``remote_instances``), so the deletes below sweep everything a send
         still in flight could have queued. The reverse order left a window

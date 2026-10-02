@@ -180,10 +180,17 @@ class SqliteFederationRepo:
             # uses; and nothing the tombstone holds (old keys, old URL) may
             # leak into the new row. One transaction: if the new row cannot
             # be written, the tombstone (and our pending UNPAIR) survives.
-            conn.execute(
+            # The tombstone goes the way every removed ``remote_instances``
+            # row goes (``PeerUnpairService.purge``): row first, then its
+            # queued UNPAIR — addressed to the dead pairing's keys — its
+            # media and the mesh hints it announced, all before the new
+            # row exists, so nothing the new pairing queues is touched.
+            gone = conn.execute(
                 "DELETE FROM remote_instances WHERE id=? AND status=?",
                 (inst.id, PairingStatus.UNPAIRING.value),
-            )
+            ).rowcount
+            if gone:
+                _purge_instance_side_rows(conn, [inst.id])
             conn.execute(_UPSERT_INSTANCE_SQL, _instance_params(inst))
 
         await self._db.transact(_run)
@@ -641,6 +648,10 @@ class SqliteFederationRepo:
         PENDING_RECEIVED status) whose ``local_inbox_id`` matched one
         of those sessions. Returns the count of pairing rows pruned.
 
+        A pruned instance row takes its queued outbox envelopes, DM and
+        space media and announced mesh hints with it, in the same
+        transaction (see :func:`_purge_instance_side_rows`).
+
         SQLite's ``datetime()`` function normalises both the
         ``"YYYY-MM-DDTHH:MM:SS+00:00"`` ISO 8601 shape Python's
         :meth:`datetime.isoformat` produces and the
@@ -660,20 +671,37 @@ class SqliteFederationRepo:
         )
         if not expired_count:
             return 0
-        await self._db.enqueue(
-            """
-            DELETE FROM remote_instances
-            WHERE status IN ('pending_sent', 'pending_received')
-              AND local_inbox_id IN (
-                SELECT own_local_inbox_id FROM pending_pairings
-                WHERE datetime(expires_at) < datetime('now')
-              )
-            """,
-        )
-        await self._db.enqueue(
-            "DELETE FROM pending_pairings WHERE datetime(expires_at) < datetime('now')",
-        )
-        return int(expired_count)
+
+        def _run(conn) -> int:
+            # The same order and scope as ``PeerUnpairService.purge``, in one
+            # transaction: the half-paired rows first (from then on every
+            # outbox INSERT refuses them), then whatever was queued or
+            # learned for them, then the sessions.
+            ids = [
+                str(r[0])
+                for r in conn.execute(
+                    """
+                    SELECT id FROM remote_instances
+                    WHERE status IN ('pending_sent', 'pending_received')
+                      AND local_inbox_id IN (
+                        SELECT own_local_inbox_id FROM pending_pairings
+                        WHERE datetime(expires_at) < datetime('now')
+                      )
+                    """
+                ).fetchall()
+            ]
+            conn.executemany(
+                "DELETE FROM remote_instances WHERE id=?"
+                " AND status IN ('pending_sent', 'pending_received')",
+                [(i,) for i in ids],
+            )
+            _purge_instance_side_rows(conn, ids)
+            return conn.execute(
+                "DELETE FROM pending_pairings"
+                " WHERE datetime(expires_at) < datetime('now')"
+            ).rowcount
+
+        return int(await self._db.transact(_run))
 
     # ── Instance bans ──────────────────────────────────────────────────
 
@@ -771,6 +799,23 @@ def _instance_params(inst: RemoteInstance) -> tuple:
         inst.unreachable_since,
         int(inst.share_home),
     )
+
+
+def _purge_instance_side_rows(conn, instance_ids: list[str]) -> None:
+    """Inside a repository transaction that just deleted ``instance_ids``'
+    ``remote_instances`` rows: drop what ``PeerUnpairService.purge`` drops
+    after the row — queued outbox envelopes, DM and space media, and the
+    mesh hints those households announced. Bulk housekeeping uses this so
+    it never strands rows for the orphan sweep to find later."""
+    params = [(i,) for i in instance_ids]
+    if not params:
+        return
+    conn.executemany("DELETE FROM federation_outbox WHERE instance_id=?", params)
+    conn.executemany("DELETE FROM dm_media_outbox WHERE target_instance_id=?", params)
+    conn.executemany(
+        "DELETE FROM space_media_outbox WHERE target_instance_id=?", params
+    )
+    conn.executemany("DELETE FROM network_discovery WHERE discovered_via=?", params)
 
 
 def _live_clause(include_unpairing: bool) -> str:

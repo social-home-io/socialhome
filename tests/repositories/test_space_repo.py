@@ -1714,3 +1714,49 @@ async def test_save_config_baseline_refuses_when_the_pin_moved(env):
     assert not await env.repo.save_config_baseline(
         replace(_space("nope"), name="Ghost"), author="x", epoch=7
     )
+
+
+# ── Authority epoch echo state (v_46, migration 0068) ─────────────────────
+
+
+async def test_authority_cert_is_kept_only_for_the_pinned_key(env):
+    await env.repo.save(_space("sp-cert"))
+    assert await env.repo.get_authority_cert("sp-cert") is None
+    assert await env.repo.adopt_authority_key("sp-cert", "Ab" * 32, 3)
+    cert = {"key_epoch": 3, "authority_pk": "ab" * 32}
+    # Wrong epoch or wrong key: not the pin, never stored.
+    assert not await env.repo.remember_authority_cert(
+        "sp-cert", key_epoch=2, public_key_hex="ab" * 32, cert=cert
+    )
+    assert not await env.repo.remember_authority_cert(
+        "sp-cert", key_epoch=3, public_key_hex="cd" * 32, cert=cert
+    )
+    assert await env.repo.get_authority_cert("sp-cert") is None
+    assert await env.repo.remember_authority_cert(
+        "sp-cert", key_epoch=3, public_key_hex="AB" * 32, cert=cert
+    )
+    assert await env.repo.get_authority_cert("sp-cert") == cert
+    assert await env.repo.get_authority_cert("sp-none") is None
+
+
+async def test_authority_echo_round_trips_and_clears(env):
+    await env.repo.save(_space("sp-echo"))
+    assert await env.repo.get_authority_echo("sp-echo") == {}
+    await env.repo.set_authority_echo("sp-echo", {"forgotten_epoch": 7})
+    assert await env.repo.get_authority_echo("sp-echo") == {"forgotten_epoch": 7}
+    await env.repo.set_authority_echo("sp-echo", None)
+    assert await env.repo.get_authority_echo("sp-echo") == {}
+    assert await env.repo.get_authority_echo("sp-none") == {}
+    await env.db.enqueue(
+        "UPDATE spaces SET authority_echo_json='[1]', authority_cert_json='\"x\"'"
+        " WHERE id='sp-echo'"
+    )
+    assert await env.repo.get_authority_echo("sp-echo") == {}
+    assert await env.repo.get_authority_cert("sp-echo") is None
+
+
+async def test_save_never_writes_the_echo_columns(env):
+    await env.repo.save(_space("sp-keep"))
+    await env.repo.set_authority_echo("sp-keep", {"forgotten_epoch": 2})
+    await env.repo.save(_space("sp-keep"))
+    assert await env.repo.get_authority_echo("sp-keep") == {"forgotten_epoch": 2}
