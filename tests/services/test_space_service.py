@@ -1748,6 +1748,35 @@ async def test_space_edit_post_nonexistent(stack):
         await stack.space_svc.edit_post("nope", editor_user_id="u", new_content="x")
 
 
+async def test_space_post_writes_are_scoped_to_the_given_space(stack):
+    """``space_id`` (the route's path space): another space's post is
+    KeyError for edit and delete — unchanged — even for the owner of both;
+    the right space, or no scope (internal callers), still works."""
+    anna = await stack.provision_user("anna")
+    a = await stack.space_svc.create_space(owner_username="anna", name="A")
+    b = await stack.space_svc.create_space(owner_username="anna", name="B")
+    p = await stack.space_svc.create_post(
+        b.id, author_user_id=anna.user_id, type=PostType.TEXT, content="v1"
+    )
+    with pytest.raises(KeyError):
+        await stack.space_svc.edit_post(
+            p.id, editor_user_id=anna.user_id, new_content="x", space_id=a.id
+        )
+    with pytest.raises(KeyError):
+        await stack.space_svc.delete_post(
+            p.id, actor_user_id=anna.user_id, space_id=a.id
+        )
+    got = await stack.space_svc._posts.get(p.id)
+    assert got is not None and got[1].content == "v1" and not got[1].deleted
+    edited = await stack.space_svc.edit_post(
+        p.id, editor_user_id=anna.user_id, new_content="v2", space_id=b.id
+    )
+    assert edited.content == "v2"
+    await stack.space_svc.delete_post(p.id, actor_user_id=anna.user_id, space_id=b.id)
+    got = await stack.space_svc._posts.get(p.id)
+    assert got is not None and got[1].deleted
+
+
 async def test_space_edit_post_author_allowed(stack):
     """Author can edit their own space post."""
     _anna = await stack.provision_user("anna")

@@ -3,7 +3,7 @@
  * Uses PostCard for display and Composer for creation.
  */
 import { useEffect } from 'preact/hooks'
-import { posts, feedLoading, feedHasMore, loadFeed } from '@/store/feed'
+import { posts, feedLoading, feedHasMore, loadFeed, mergePostEdit } from '@/store/feed'
 import { api } from '@/api'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { useTitle } from '@/store/pageTitle'
@@ -16,6 +16,8 @@ import { Button } from '@/components/Button'
 import { PullToRefresh } from '@/components/PullToRefresh'
 import { showToast } from '@/components/Toast'
 import { instanceConfig } from '@/store/instance'
+import { currentUser } from '@/store/auth'
+import { t } from '@/i18n/i18n'
 import type { FeedPost } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 
@@ -74,6 +76,21 @@ export default function FeedPage() {
     // wireFeedWs() removes the row on `post.deleted`. No reload.
   }
 
+  /** Inline edit of a post's text (author or household admin — the
+   *  server's rule). ``true`` closes the editor. */
+  const handleEdit = async (postId: string, content: string): Promise<boolean> => {
+    try {
+      const updated = await api.patch(`/api/feed/posts/${postId}`, { content }) as FeedPost
+      posts.value = posts.value.map((p) => (p.id === postId ? mergePostEdit(p, updated) : p))
+      showToast(t('post.edit.saved'), 'success')
+      return true
+    } catch (err: unknown) {
+      showToast(t('post.edit.failed', { error: String((err as Error)?.message ?? err) }), 'error')
+      return false
+    }
+  }
+  const me = currentUser.value
+
   // Cold-start: no posts yet AND a fetch in flight → show the
   // layout-stable skeleton instead of an isolated spinner so the eye
   // can register the page chrome immediately. Subsequent fetches
@@ -96,6 +113,9 @@ export default function FeedPage() {
             onReact={(emoji) => handleReact(post.id, emoji)}
             onComment={() => openCommentOverlay(post, null)}
             onDelete={() => handleDelete(post.id)}
+            onEdit={me && (post.author === me.user_id || me.is_admin)
+              ? (content) => handleEdit(post.id, content)
+              : undefined}
           />
         </div>
       ))}

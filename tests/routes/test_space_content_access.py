@@ -318,3 +318,36 @@ async def test_the_event_detail_says_whether_the_viewer_may_edit(client, space):
     await _set_access(client, "calendar", "admin_only")
     assert not (await (await client.get(url, headers=space["mem"])).json())["can_edit"]
     assert (await (await client.get(url, headers=space["adm"])).json())["can_edit"]
+
+
+async def test_the_space_event_list_says_whether_the_viewer_may_edit(client, space):
+    """``GET …/calendar/events`` carries ``can_edit`` per row — the space
+    calendar's Edit / Delete controls. Open: every writer; ADMIN_ONLY: the
+    owner / admins only; a subscriber never."""
+    ids = await _seed_content(client, space)
+    now = datetime.now(timezone.utc)
+    url = (
+        f"/api/spaces/{SID}/calendar/events?start={now.date().isoformat()}"
+        f"&end={(now + timedelta(days=3)).date().isoformat()}"
+    )
+
+    async def hint(who: str) -> bool:
+        r = await client.get(url, headers=space[who])
+        assert r.status == 200, await r.text()
+        (row,) = [e for e in await r.json() if e["id"] == ids["event"]]
+        return row["can_edit"]
+
+    assert await hint("mem") and await hint("mod") and await hint("owner")
+    await _set_access(client, "calendar", "admin_only")
+    assert not await hint("mem")
+    assert not await hint("mod")
+    assert await hint("adm") and await hint("owner")
+    # Reviewed: a member's change to the event they made goes straight
+    # through, somebody else's queues — both are offered.
+    await _set_access(client, "calendar", "moderated")
+    assert await hint("mem") and await hint("adm")
+    await client._db.enqueue(
+        "UPDATE space_members SET role='subscriber' WHERE space_id=? AND user_id=?",
+        (SID, "uid-mem"),
+    )
+    assert not await hint("mem")

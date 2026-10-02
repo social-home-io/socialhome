@@ -28,13 +28,15 @@ import { Modal } from '@/components/Modal'
 import { SubscribeFeed } from '@/components/SubscribeFeed'
 import { PostCard } from '@/components/PostCard'
 import { Composer, type ComposerExtras } from '@/components/Composer'
-import { contentWrite } from '@/utils/contentWrite'
+import { announceQueued, contentWrite, isQueuedWrite } from '@/utils/contentWrite'
+import { pendingDeletes, undoableDelete } from '@/utils/undoableDelete'
 import { PendingReviewStrip } from '@/components/PendingReviewStrip'
 import { useModerationMine } from '@/store/moderationMine'
 import { itemPreview } from './moderationItems'
 import { openCommentOverlay } from '@/components/CommentOverlay'
 import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
 import { SpaceTasksTab } from './SpaceTasksTab'
+import { SpacePagesTab } from './SpacePagesTab'
 import { SpaceCalendarHost } from './SpaceCalendarHost'
 import { calendarTabLabel, parseSpaceTab, visibleSpaceTabs } from './spaceTabs'
 import {
@@ -58,8 +60,6 @@ import { SpaceVersionBanner } from '@/components/SpaceVersionBanner'
 import { SpaceHero } from '@/components/SpaceHero'
 import { SpaceNotifPrefsMenu } from './SpaceNotifPrefsMenu'
 import { confirmDialog } from '@/components/confirm'
-
-interface SpacePage { id: string; title: string; updated_at: string }
 
 interface SpaceDetail {
   id: string
@@ -150,7 +150,6 @@ const loading = signal(true)
 const activeTab = signal<SpaceTab>('feed')
 /** Calendar tab → "Subscribe" dialog (private iCal link). */
 const subscribeFeedOpen = signal(false)
-const spacePages = signal<SpacePage[]>([])
 const spaceCalEvents = signal<CalendarEvent[]>([])
 const spaceCalCursor = signal(new Date())
 const spaceCalView = signal<CalendarViewMode>('month')
@@ -214,6 +213,44 @@ async function loadSpaceCalendar(spaceId: string) {
   } catch {
     spaceCalEvents.value = []
   }
+}
+
+/** A stored event id from an agenda row's id — the range query expands a
+ *  recurring event into ``"{id}@{occurrence}"`` rows (see
+ *  ``isOccurrenceId``); edits and deletes act on the stored series. */
+export function seriesEventId(id: string): string {
+  const at = id.indexOf('@')
+  return at === -1 ? id : id.slice(0, at)
+}
+
+/** Delete a space event with Undo (``undoableDelete``): every row of it
+ *  disappears at once, the DELETE goes out when the toast closes. Held
+ *  for review (somebody else's event in a "Reviewed" calendar, §4.3): the
+ *  event comes back and the toast says it waits for a moderator. A
+ *  recurring event goes as a whole series — the toast says so. */
+export function deleteSpaceEvent(spaceId: string, ev: CalendarEvent) {
+  const id = seriesEventId(ev.id)
+  selectedSpaceEventId.value = null
+  undoableDelete({
+    ids: [id],
+    message: ev.rrule
+      ? t('event.deleted_series', { title: ev.summary })
+      : t('event.deleted_named', { title: ev.summary }),
+    commit: async ({ keepalive }) => {
+      const path = `/api/spaces/${spaceId}/calendar/events/${id}`
+      try {
+        const res = await (keepalive
+          ? api.delete<unknown>(path, { keepalive: true })
+          : api.delete<unknown>(path))
+        if (isQueuedWrite(res)) announceQueued({ spaceId })
+      } catch (err) {
+        if ((err as { status?: unknown })?.status !== 404) throw err
+      }
+      // The Undo window may close after the viewer moved to another space:
+      // the calendar signal is that space's now — don't refill it with ours.
+      if (spaceDetail.value?.id === spaceId) void loadSpaceCalendar(spaceId)
+    },
+  })
 }
 
 function navigateSpaceCalendar(direction: number, spaceId: string) {
@@ -347,11 +384,6 @@ export default function SpaceFeedPage() {
 
   const loadTabData = (tab: SpaceTab) => {
     activeTab.value = tab
-    if (tab === 'pages') {
-      api.get(`/api/spaces/${spaceId}/pages`).then((data: SpacePage[]) => {
-        spacePages.value = data
-      }).catch(() => { spacePages.value = [] })
-    }
     // The events endpoint refuses while the calendar feature is off
     // (the tab then holds only the timetable).
     if (tab === 'calendar' && (spaceDetail.value?.features?.calendar ?? true)) {
@@ -409,6 +441,30 @@ export default function SpaceFeedPage() {
     void loadSpaceFeed(spaceId)
   }
 
+  /** Inline edit of a post's text: ``true`` closes the editor (saved,
+   *  or held for review), ``false`` keeps it (toasted). A 403 means the
+   *  viewer's seat or the space's access level changed — refetch both. */
+  const handleEdit = async (postId: string, content: string): Promise<boolean> => {
+    try {
+      const res = await contentWrite<{ id: string; content: string; edited_at: string | null }>(
+        api.patch(`/api/spaces/${spaceId}/posts/${postId}`, { content }),
+        { spaceId },
+      )
+      if (res.queued) return true
+      posts.value = posts.value.map(p => p.id === postId
+        ? { ...p, content: res.data.content, edited_at: res.data.edited_at }
+        : p)
+      showToast(t('post.edit.saved'), 'success')
+      // The link preview may have been dropped by the edit.
+      void loadSpaceFeed(spaceId)
+      return true
+    } catch (err: unknown) {
+      showToast(t('post.edit.failed', { error: String((err as Error)?.message ?? err) }), 'error')
+      if ((err as { status?: unknown })?.status === 403) void loadSpaceHeader(spaceId)
+      return false
+    }
+  }
+
   if (loading.value) return <Spinner />
 
   // Content authority (owner / admin / moderator, v_41): acting on other
@@ -435,6 +491,14 @@ export default function SpaceFeedPage() {
     canContribute(accessLevel(f, feature), viewerRole.value)
   const adminOnly = (feature: AccessFeature) =>
     roleKnown.value && blockedByAdminOnly(accessLevel(f, feature), viewerRole.value)
+  // Edit / Delete on a post: the author, or content authority (owner /
+  // admin / moderator) on somebody else's — once the member list said
+  // who the viewer is, never for a read-only subscriber, and not where
+  // the space keeps posts to its admins (§4.3).
+  const canActOnPost = (author: string) =>
+    roleKnown.value && isWriterRole(viewerRole.value)
+    && (author === currentUser.value?.user_id || canModerate)
+    && !adminOnly('posts')
 
   return (
     <div class="sh-space-feed sh-space-scope">
@@ -620,9 +684,12 @@ export default function SpaceFeedPage() {
                 // The author, or content authority (owner / admin /
                 // moderator) acting on somebody else's post — unless the
                 // space keeps posts to its admins (§4.3).
-                onDelete={(post.author === currentUser.value?.user_id || canModerate)
-                  && !adminOnly('posts')
+                onDelete={canActOnPost(post.author)
                   ? () => handleDelete(post.id)
+                  : undefined}
+                // Same rule for editing the text, and never in an archive.
+                onEdit={canActOnPost(post.author) && !s?.archived
+                  ? (content) => handleEdit(post.id, content)
                   : undefined}
                 spaceId={spaceId}
                 surface="space"
@@ -642,18 +709,16 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'pages' && (
-        <div class="sh-space-pages">
-          <h2>Pages</h2>
-          {adminOnly('pages') && <AccessNote feature="pages" />}
-          <PendingReviewStrip spaceId={spaceId} feature="pages" />
-          {spacePages.value.length === 0 && <p class="sh-muted">No pages in this space.</p>}
-          {spacePages.value.map(p => (
-            <div key={p.id} class="sh-page-card">
-              <strong>{p.title}</strong>
-              <time class="sh-muted">{new Date(p.updated_at).toLocaleString()}</time>
-            </div>
-          ))}
-        </div>
+        <SpacePagesTab
+          spaceId={spaceId}
+          role={viewerRole.value}
+          level={accessLevel(f, 'pages')}
+          // Read-only until the member list answers (no flash of edit
+          // controls a subscriber can't use).
+          writable={roleKnown.value && canWrite('pages')}
+          adminOnly={adminOnly('pages')}
+          archived={!!s?.archived}
+        />
       )}
 
       {activeTab.value === 'calendar' && visibleTabs.includes('calendar') && (
@@ -663,8 +728,11 @@ export default function SpaceFeedPage() {
         // range query is overlap-based, so an event that started before
         // the period comes back and would otherwise file an
         // out-of-range day card.
+        // Rows waiting out their Undo window stay hidden.
+        const hidden = pendingDeletes.value
+        const shown = spaceCalEvents.value.filter(e => !hidden.has(seriesEventId(e.id)))
         const grouped = groupEventsByDay(
-          spaceCalEvents.value,
+          shown,
           dateRangeForMode(spaceCalCursor.value, spaceCalView.value),
         )
         // Keys are ``YYYY-MM-DD`` (see ``groupEventsByDay``) so a plain
@@ -734,7 +802,7 @@ export default function SpaceFeedPage() {
               </div>
             </div>
 
-            {spaceCalEvents.value.length === 0 && (
+            {shown.length === 0 && (
               <div class="sh-empty-state">
                 <div aria-hidden="true">📅</div>
                 <h3>No events in this {spaceCalView.value}</h3>
@@ -805,6 +873,17 @@ export default function SpaceFeedPage() {
                           <span>{t('event.starts')} {bounds.starts}</span>
                           <span>{t('event.ends')} {bounds.ends}</span>
                         </div>
+                        {/* ``can_edit``: the calendar's access level lets
+                         *  the viewer change this event (§4.3) — absent
+                         *  from an older host: no control offered. */}
+                        {e.can_edit === true && !s?.archived && (
+                          <div class="sh-event-admin sh-row">
+                            <Button variant="danger"
+                                    onClick={() => deleteSpaceEvent(spaceId, e)}>
+                              {t('event.delete')}
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

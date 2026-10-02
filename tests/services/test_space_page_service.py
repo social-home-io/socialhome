@@ -118,6 +118,15 @@ async def test_create_and_update_need_a_title(env):
         await env.svc.update("sp-a", page.id, actor_user_id="u-member", title=" ")
 
 
+async def test_titles_are_capped_at_200_characters(env):
+    """The service backstop (a queued page replays through it too)."""
+    with pytest.raises(ValueError):
+        await env.svc.create("sp-a", actor_user_id="u-member", title="x" * 201)
+    page = await env.svc.create("sp-a", actor_user_id="u-member", title="y" * 200)
+    with pytest.raises(ValueError):
+        await env.svc.update("sp-a", page.id, actor_user_id="u-member", title="z" * 201)
+
+
 async def test_a_stale_update_reports_the_current_page(env):
     page = await env.svc.create("sp-a", actor_user_id="u-member", title="T")
     with pytest.raises(PageStaleError) as info:

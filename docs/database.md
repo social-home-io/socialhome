@@ -237,7 +237,7 @@ themselves moments and link to the conversation root via
 
 | Table | Purpose |
 |---|---|
-| `pages` | Household-level wiki pages — title, content, cover image, lock-by/at/expiry, pending-delete approval. Edit history lives in `page_edit_history` (shared with space pages; each row's `space_id` — NULL for a household page — scopes which surface may read it). |
+| `pages` | Household-level wiki pages — title, content, cover image, lock-by/at/expiry, pending-delete approval. Edit history lives in `page_edit_history` (shared with space pages; each row's `space_id` — NULL for a household page — scopes which surface may read it). `updated_at` (here and in `space_pages`) is the writer's tz-aware ISO-8601 UTC stamp on insert *and* update — the PATCH routes' optimistic-concurrency `base_updated_at` compares against it verbatim. Rows last edited before this was unified still hold SQLite's naive `datetime('now')` shape from the old upsert until their next edit (no backfill; both are UTC). |
 | `page_edit_history` | Append-only history of page edits. Unique by `(page_id, version)`. |
 
 ## Gallery (§23.119)

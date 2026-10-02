@@ -402,6 +402,30 @@ async def test_a_stale_space_page_patch_is_409_with_the_current_page(client):
     assert body["current"]["content"] == "v2"
 
 
+async def test_space_page_autosave_chain_bases_each_save_on_the_last_answer(client):
+    """The PATCH answer carries the stored ``updated_at``, so an editor
+    basing each autosave on the previous answer never trips a false 409."""
+    admin = _auth(client._tok)
+    await _seed_space(client, "sp-a", client._uid, "owner")
+    r = await client.post(
+        "/api/spaces/sp-a/pages", json={"title": "Wiki", "content": "v1"}, headers=admin
+    )
+    page = await r.json()
+    for n in (2, 3, 4):
+        r = await client.patch(
+            f"/api/spaces/sp-a/pages/{page['id']}",
+            json={"content": f"v{n}", "base_updated_at": page["updated_at"]},
+            headers=admin,
+        )
+        assert r.status == 200, await r.text()
+        page = await r.json()
+        assert page["content"] == f"v{n}"
+    stored = await (
+        await client.get(f"/api/spaces/sp-a/pages/{page['id']}", headers=admin)
+    ).json()
+    assert stored["updated_at"] == page["updated_at"]
+
+
 async def test_a_blank_space_page_title_is_422(client):
     admin = _auth(client._tok)
     await _seed_space(client, "sp-t", client._uid, "owner")
@@ -412,3 +436,23 @@ async def test_a_blank_space_page_title_is_422(client):
         f"/api/spaces/sp-t/pages/{pid}", json={"title": ""}, headers=admin
     )
     assert r.status == 422
+
+
+async def test_page_titles_are_capped_at_200_characters(client):
+    """Household and space pages refuse a title over 200 characters on
+    create and on rename (422, nothing stored); 200 exactly is fine."""
+    admin = _auth(client._tok)
+    await _seed_space(client, "sp-cap", client._uid, "owner")
+    long, ok = "x" * 201, "y" * 200
+    for base in ("/api/pages", "/api/spaces/sp-cap/pages"):
+        r = await client.post(base, json={"title": long}, headers=admin)
+        assert r.status == 422, (base, await r.text())
+        r = await client.post(base, json={"title": ok}, headers=admin)
+        assert r.status == 201, await r.text()
+        page = await r.json()
+        r = await client.patch(
+            f"{base}/{page['id']}", json={"title": long}, headers=admin
+        )
+        assert r.status == 422, (base, await r.text())
+        stored = await (await client.get(f"{base}/{page['id']}", headers=admin)).json()
+        assert stored["title"] == ok

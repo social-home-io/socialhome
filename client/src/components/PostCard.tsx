@@ -2,7 +2,7 @@
  * PostCard — canonical post display component (§23.43).
  * Renders in household feed, space feeds, search results.
  */
-import { useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Avatar } from './Avatar'
 import { OnlinePill } from './OnlinePill'
@@ -22,6 +22,8 @@ import { ScheduleUI } from './ScheduleUI'
 import { currentUser } from '@/store/auth'
 import { spaceMentionRender } from '@/store/spaceMembers'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
+import { t } from '@/i18n/i18n'
+import { Button } from './Button'
 import type { FeedPost } from '@/types'
 
 // Module-level signal so only one reaction picker is open across the
@@ -37,12 +39,28 @@ function isBotPost(post: FeedPost): boolean {
   return post.author === SYSTEM_AUTHOR
 }
 
+/** The server's post-text cap (``MAX_POST_LENGTH``). */
+const MAX_POST_LENGTH = 10_000
+
+/** Can this post's text be edited inline? Not a deleted or bot post, and
+ *  not one whose text is generated from a linked object (an event card's
+ *  title, a bazaar listing). */
+export function isTextEditable(post: FeedPost): boolean {
+  if (post.content === null || isBotPost(post)) return false
+  return post.type !== 'event' && post.type !== 'bazaar'
+}
+
 interface PostCardProps {
   post: FeedPost
   onReact?: (emoji: string) => void
   onComment?: () => void
   onDelete?: () => void
-  onEdit?: () => void
+  /** Offers "Edit" in the post menu: the text becomes an inline editor,
+   *  and Save calls this with the new text. Resolve ``true`` when the
+   *  edit is done (saved, or held for review) to close the editor;
+   *  ``false`` keeps it open (the caller toasted the error). Only for
+   *  posts whose text is editable (see ``isTextEditable``). */
+  onEdit?: (content: string) => Promise<boolean>
   /** Space the post belongs to. Threaded into sub-renderers
    *  (avatar / display-name resolvers, PollUI, ScheduleUI). On
    *  ``surface='space'`` callers should pass this so the inline
@@ -87,6 +105,16 @@ export function PostCard({ post, onReact, onComment, onDelete, onEdit, spaceId, 
 function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spaceId, spaceName, surface }: PostCardProps & { timeAgo: string }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const closeMenu = () => setMenuOpen(false)
+  // Inline edit: the draft text while the editor is open, else ``null``.
+  const [draft, setDraft] = useState<string | null>(null)
+  const canEdit = !!onEdit && isTextEditable(post)
+  const menuButton = useRef<HTMLButtonElement | null>(null)
+  // Closing the inline editor hands focus back to the ··· button that
+  // opened it (keyboard and screen-reader users land where they were).
+  const closeEditor = () => {
+    setDraft(null)
+    window.setTimeout(() => menuButton.current?.focus(), 0)
+  }
 
   // Menu always exists for non-deleted posts so users can report. Edit /
   // Delete are owner-only and driven by the parent passing callbacks.
@@ -150,6 +178,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
         {hasMenu && (
           <div class="sh-post-overflow-wrap">
             <button
+              ref={menuButton}
               class="sh-post-overflow"
               type="button"
               aria-label="Post actions"
@@ -162,13 +191,13 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
             </button>
             {menuOpen && (
               <div class="sh-post-menu" role="menu">
-                {onEdit && (
+                {canEdit && (
                   <button
                     role="menuitem"
                     onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => { closeMenu(); onEdit() }}
+                    onClick={() => { closeMenu(); setDraft(post.content ?? '') }}
                   >
-                    Edit
+                    {t('post.edit')}
                   </button>
                 )}
                 {onDelete && (
@@ -209,7 +238,16 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
                 headline). Same for highlight shares which carry their
                 own headline. Every other post type keeps the
                 markdown body. */}
-            {post.content && post.type !== 'event' && (
+            {draft !== null && onEdit ? (
+              <PostEditForm
+                draft={draft}
+                setDraft={setDraft}
+                original={post.content ?? ''}
+                requireText={post.type === 'text'}
+                onSave={onEdit}
+                onDone={closeEditor}
+              />
+            ) : post.content && post.type !== 'event' && (
               <PostBody content={post.content} spaceId={scopedSpaceId}
                 authorId={post.author} />
             )}
@@ -422,6 +460,67 @@ function PostImageGrid({ urls, alt }: { urls: string[]; alt?: string }) {
         </button>
       )}
     </div>
+  )
+}
+
+/** The inline editor that replaces a post's text while editing. Esc
+ *  cancels, Ctrl/⌘+Enter saves; focus lands in the field. */
+function PostEditForm({ draft, setDraft, original, requireText, onSave, onDone }: {
+  draft: string
+  setDraft: (s: string) => void
+  original: string
+  /** A text post can't be emptied (it would be a blank card). */
+  requireText: boolean
+  onSave: (content: string) => Promise<boolean>
+  onDone: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const ref = useRef<HTMLTextAreaElement | null>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  }, [])
+  const unchanged = draft === original
+  const empty = requireText && !draft.trim()
+  const save = async () => {
+    if (busy || unchanged || empty) return
+    setBusy(true)
+    try {
+      if (await onSave(draft)) onDone()
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <form
+      class="sh-post-edit"
+      onSubmit={(e) => { e.preventDefault(); void save() }}
+    >
+      <textarea
+        ref={ref}
+        class="sh-post-edit-input"
+        aria-label={t('post.edit.label')}
+        value={draft}
+        maxLength={MAX_POST_LENGTH}
+        rows={Math.min(12, Math.max(3, draft.split('\n').length + 1))}
+        onInput={(e) => setDraft((e.target as HTMLTextAreaElement).value)}
+        onKeyDown={(e) => {
+          // No cancel mid-save: the answer would land on a closed editor.
+          if (e.key === 'Escape') { e.preventDefault(); if (!busy) onDone() }
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void save() }
+        }}
+      />
+      <div class="sh-post-edit-actions">
+        <Button variant="secondary" type="button" onClick={onDone} disabled={busy}>
+          {t('common.cancel')}
+        </Button>
+        <Button type="submit" loading={busy} disabled={unchanged || empty}>
+          {t('common.save')}
+        </Button>
+      </div>
+    </form>
   )
 }
 

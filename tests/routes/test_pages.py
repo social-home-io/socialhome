@@ -97,6 +97,26 @@ async def test_patch_with_fresh_base_succeeds(client):
     assert r2.status == 200
 
 
+async def test_autosave_chain_bases_each_save_on_the_last_answer(client):
+    """An editor sends the ``updated_at`` of the previous PATCH answer as
+    the next ``base_updated_at``: that answer must be the stored row's, or
+    every second save of one editing session is a false 409."""
+    h = _auth(client._tok)
+    r = await client.post("/api/pages", json={"title": "P", "content": "v1"}, headers=h)
+    page = await r.json()
+    for n in (2, 3, 4):
+        r = await client.patch(
+            f"/api/pages/{page['id']}",
+            json={"content": f"v{n}", "base_updated_at": page["updated_at"]},
+            headers=h,
+        )
+        assert r.status == 200, await r.text()
+        page = await r.json()
+        assert page["content"] == f"v{n}"
+    stored = await (await client.get(f"/api/pages/{page['id']}", headers=h)).json()
+    assert stored["updated_at"] == page["updated_at"]
+
+
 # ─── Lock routes ─────────────────────────────────────────────────────────
 
 

@@ -23,6 +23,7 @@ from ..app_keys import (
     space_page_service_key,
     space_repo_key,
 )
+from ..domain.page import MAX_PAGE_TITLE_LENGTH
 from ..domain.events import (
     PageConflictEmitted,
     PageCreated,
@@ -46,6 +47,13 @@ from ..repositories.page_repo import (
 from ..security import error_response
 from ..services.space_page_service import PageStaleError, snapshot_page_version
 from .base import BaseView
+
+
+_TITLE_TOO_LONG = f"title must be at most {MAX_PAGE_TITLE_LENGTH} characters."
+
+
+def _title_too_long(value: object) -> bool:
+    return len(str(value or "").strip()) > MAX_PAGE_TITLE_LENGTH
 
 
 def _signed_page_dict(request: web.Request, page) -> dict:
@@ -127,6 +135,8 @@ class PageCollectionView(BaseView):
         content = strip_signed_media_in_markdown(body.get("content", "")) or ""
         if not title:
             return error_response(422, "UNPROCESSABLE", "title is required.")
+        if _title_too_long(title):
+            return error_response(422, "UNPROCESSABLE", _TITLE_TOO_LONG)
         p = new_page(
             title=title,
             content=content,
@@ -199,6 +209,8 @@ class PageDetailView(BaseView):
             title = body["title"].strip()
             if not title:
                 return error_response(422, "UNPROCESSABLE", "title must not be empty.")
+            if _title_too_long(title):
+                return error_response(422, "UNPROCESSABLE", _TITLE_TOO_LONG)
             kwargs["title"] = title
         if "content" in body:
             kwargs["content"] = strip_signed_media_in_markdown(body["content"])
@@ -206,6 +218,11 @@ class PageDetailView(BaseView):
             kwargs["cover_image_url"] = strip_signature_query(body["cover_image_url"])
         updated = replace(p, **kwargs)
         await repo.save(updated, space_id=updated.space_id)
+        # Answer with the stored row: the upsert stamps its own
+        # ``updated_at``, which the editor sends back as the next save's
+        # ``base_updated_at`` (echoing ``now_iso`` made every second
+        # autosave a false 409).
+        updated = await repo.get_household_page(page_id) or updated
         await snapshot_page_version(repo, previous=p, editor_user_id=ctx.user_id)
         await bus.publish(
             PageUpdated(
@@ -492,6 +509,8 @@ class SpacePageCollectionView(_SpacePagesBase):
         body = await self.body()
         if not str(body.get("title") or "").strip():
             return error_response(422, "UNPROCESSABLE", "title is required.")
+        if _title_too_long(body.get("title")):
+            return error_response(422, "UNPROCESSABLE", _TITLE_TOO_LONG)
         p = await self.svc(space_page_service_key).create(
             space_id,
             actor_user_id=ctx.user_id,
@@ -520,6 +539,8 @@ class SpacePageDetailView(_SpacePagesBase):
         body = await self.body()
         if "title" in body and not str(body["title"] or "").strip():
             return error_response(422, "UNPROCESSABLE", "title must not be empty.")
+        if "title" in body and _title_too_long(body["title"]):
+            return error_response(422, "UNPROCESSABLE", _TITLE_TOO_LONG)
         fields = {
             k: body[k] for k in ("title", "content", "cover_image_url") if k in body
         }

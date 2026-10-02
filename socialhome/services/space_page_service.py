@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
-from ..domain.page import Page, PageVersion
+from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
 from ..domain.space import (
     AccessDecision,
     ContentAction,
@@ -103,6 +103,10 @@ def _title(value: object) -> str:
     title = str(value or "").strip()
     if not title:
         raise ValueError("page title must not be empty")
+    if len(title) > MAX_PAGE_TITLE_LENGTH:
+        raise ValueError(
+            f"page title must be at most {MAX_PAGE_TITLE_LENGTH} characters"
+        )
     return title
 
 
@@ -277,6 +281,13 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
         }
         updated = replace(page, **fields)
         await self._pages.save(updated, space_id=space_id)
+        # The stored row is the answer: the upsert stamps its own
+        # ``updated_at``, and the editor sends exactly that back as the
+        # next save's ``base_updated_at`` — echoing ``now_iso`` instead
+        # made every second save of one editing session a false 409.
+        updated = (
+            await self._pages.get_space_page(page.id, space_id=space_id) or updated
+        )
         await snapshot_page_version(
             self._pages, previous=page, editor_user_id=actor_user_id
         )
