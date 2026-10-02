@@ -7,6 +7,8 @@ protocol shape.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
@@ -375,3 +377,47 @@ async def test_finalize_schedule_poll_in_space_is_scoped(two_spaces):
     meta = await env.repo.get_schedule_meta("post-2")
     assert meta["closed"] is True
     assert meta["finalized_slot_id"] == "s-b"
+
+
+# ── Create-once (concurrent moderation resumes, review N1) ─────────────────
+
+
+async def test_create_poll_if_absent_creates_once_even_when_racing(env):
+    async def attempt(tag: str) -> bool:
+        return await env.repo.create_poll_if_absent(
+            post_id="post-1",
+            question="Q?",
+            closes_at=None,
+            allow_multiple=False,
+            options=[
+                {"id": f"{tag}-a", "text": "a", "position": 0},
+                {"id": f"{tag}-b", "text": "b", "position": 1},
+            ],
+        )
+
+    results = await asyncio.gather(attempt("x"), attempt("y"), attempt("z"))
+    assert sorted(results) == [False, False, True]
+    rows = await env.db.fetchall(
+        "SELECT id FROM space_poll_options WHERE post_id='post-1'"
+    )
+    assert len(rows) == 2
+
+
+async def test_create_schedule_poll_if_absent_creates_once_even_when_racing(env):
+    async def attempt(tag: str) -> bool:
+        return await env.repo.create_schedule_poll_if_absent(
+            post_id="post-1",
+            title="When?",
+            deadline=None,
+            slots=[
+                {"id": f"{tag}-1", "slot_date": "2026-11-01", "position": 0},
+                {"id": f"{tag}-2", "slot_date": "2026-11-02", "position": 1},
+            ],
+        )
+
+    results = await asyncio.gather(attempt("x"), attempt("y"))
+    assert sorted(results) == [False, True]
+    rows = await env.db.fetchall(
+        "SELECT id FROM space_schedule_slots WHERE post_id='post-1'"
+    )
+    assert len(rows) == 2

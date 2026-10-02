@@ -87,6 +87,14 @@ class SpaceBotSlugTakenError(SpaceBotError):
     """
 
 
+class BotPostsReviewedError(SpaceBotError):
+    """A member's personal bot posting while the space's posts are
+    ``MODERATED`` (§4.3). Its post would skip the review queue, so it is
+    refused — not queued: a bot is an unattended automation, and queuing
+    would silently fill its maker's pending cap and publish time-critical
+    notices hours late. Maps to HTTP 403 ``BOT_POSTS_REVIEWED``."""
+
+
 class SpaceBotDisabledError(SpaceBotError):
     """Raised when posting to a space whose ``notify_enabled`` is off.
 

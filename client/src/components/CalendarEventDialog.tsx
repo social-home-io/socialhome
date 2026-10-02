@@ -18,6 +18,8 @@ import { announceSuppressedMessage } from '@/features/spaces/spaceAccess'
 import { currentUser } from '@/store/auth'
 import { householdUsers } from '@/store/householdUsers'
 import { resolveCalendarColor } from '@/utils/calendar'
+import { contentWrite } from '@/utils/contentWrite'
+import { refreshModerationMine } from '@/store/moderationMine'
 import {
   detectBrowserTz,
   localPartsToUtcIso,
@@ -584,20 +586,33 @@ export function CalendarEventDialog({ onCreated }: {
         // federation). Without this branch the dialog used to POST a
         // duplicate event whenever the user tapped Save on a space
         // event — visible as Pascal's "no option to edit" report.
-        await api.patch(
-          `/api/spaces/${spaceId.value}/calendar/events/${editingEventId.value}`,
-          body,
+        // Held for review (someone else's event in a "Reviewed" space,
+        // §4.3): ``contentWrite`` toasts it.
+        const res = await contentWrite(
+          api.patch(
+            `/api/spaces/${spaceId.value}/calendar/events/${editingEventId.value}`,
+            body,
+          ),
+          { spaceId: spaceId.value },
         )
-        showToast('Event updated', 'success')
+        if (!res.queued) showToast(t('event.dialog.updated'), 'success')
       } else if (isSpace) {
-        const created = await api.post(
-          `/api/spaces/${spaceId.value}/calendar/events`,
-          body,
+        const res = await contentWrite<{ announce_queued?: boolean }>(
+          api.post(`/api/spaces/${spaceId.value}/calendar/events`, body),
+          { spaceId: spaceId.value },
         )
-        // Saved, but the space's posts level kept the feed card (§4.3):
-        // say so instead of a plain "created".
-        const suppressed = announceSuppressedMessage(created)
-        showToast(suppressed ?? t('event.dialog.created'), suppressed ? 'info' : 'success')
+        if (!res.queued) {
+          // Saved. Its feed card may wait for review (posts "Reviewed")
+          // or have been kept back (posts admin-only, §4.3): say so
+          // instead of a plain "created".
+          const suppressed = announceSuppressedMessage(res.data)
+          if (res.data?.announce_queued === true) {
+            showToast(t('event.announce_queued'), 'info')
+            if (spaceId.value) void refreshModerationMine(spaceId.value)
+          } else {
+            showToast(suppressed ?? t('event.dialog.created'), suppressed ? 'info' : 'success')
+          }
+        }
       } else {
         // Multi-target create: fan out one POST per picked calendar.
         // Empty set (e.g. when the dialog opened without a list) falls

@@ -3,8 +3,8 @@
  * ``SpaceFeatures.*_access`` / ``SpaceFeatureAccess`` server-side.
  *
  * Each collaborative feature (posts, pages, tasks, stickies, calendar)
- * has one level: ``open`` (every member), ``moderated`` (members' posts
- * wait for review — posts only for now), ``admin_only`` (owners and
+ * has one level: ``open`` (every member), ``moderated`` (members' new items, and their
+ * changes to other people's, wait for review), ``admin_only`` (owners and
  * admins; moderators and members read). These helpers only decide what
  * the UI offers and says; the server re-checks every write and answers
  * ``403 ACCESS_ADMIN_ONLY`` when it refuses one.
@@ -34,15 +34,29 @@ export function accessLevel(
   return (LEVELS as readonly unknown[]).includes(raw) ? raw as SpaceAccessLevel : 'admin_only'
 }
 
-/** The levels the settings offer for ``feature``. Review (``moderated``)
- *  exists for posts only — other features join it later — but a level
- *  already set (e.g. through the API) stays listed so a save keeps it. */
-export function levelOptions(
+/** The levels the settings offer — every feature can be Reviewed
+ *  (``moderated``); whether Reviewed can be PICKED for a feature is
+ *  ``moderatedBlocked``'s call. */
+export function levelOptions(): SpaceAccessLevel[] {
+  return [...LEVELS]
+}
+
+/** Where the space can't hold non-post features for review yet: the
+ *  queue lives on the host and isn't federated (§4.3, until protocol
+ *  v43), so a space with members from other households — or a stub of a
+ *  space hosted elsewhere — keeps Reviewed for posts only. The host
+ *  refuses it anyway (``422 MODERATION_NOT_FEDERATED``). */
+export function moderatedBlocked(
   feature: AccessFeature,
-  current: SpaceAccessLevel,
-): SpaceAccessLevel[] {
-  if (feature === 'posts' || current === 'moderated') return [...LEVELS]
-  return ['open', 'admin_only']
+  opts: { hasRemoteHouseholds?: boolean; isRemoteSpace?: boolean },
+): boolean {
+  if (feature === 'posts') return false
+  return !!opts.hasRemoteHouseholds || !!opts.isRemoteSpace
+}
+
+/** Is ``err`` the host's ``MODERATION_NOT_FEDERATED`` refusal? */
+export function isModerationNotFederated(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 'MODERATION_NOT_FEDERATED'
 }
 
 /** Is ``role`` a writer the ADMIN_ONLY ``level`` alone keeps out — a

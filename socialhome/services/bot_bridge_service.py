@@ -33,8 +33,13 @@ from datetime import datetime, timezone
 from ..domain.conversation import ConversationMessage
 from ..domain.events import DmMessageCreated, SpacePostCreated
 from ..domain.post import Post, PostType
-from ..domain.space import ContentAction, SpaceFeatureAccess
-from ..domain.space_bot import SpaceBot, SpaceBotDisabledError
+from ..domain.space import AccessDecision, ContentAction, SpaceFeatureAccess
+from ..domain.space_bot import (
+    BotPostsReviewedError,
+    BotScope,
+    SpaceBot,
+    SpaceBotDisabledError,
+)
 from ..domain.user import SYSTEM_AUTHOR
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
@@ -123,10 +128,22 @@ class BotBridgeService(ContentAccessMixin):
             raise SpaceBotDisabledError("bot posting is disabled for this space")
         # A bot speaks for the member who made it (a personal bot) or the
         # admin who set it up: under an ADMIN_ONLY ``posts`` level (§4.3) its
-        # post is theirs — no posting around it through a webhook. Any other
-        # level keeps today's rule: a bot post never queues.
-        if space.features.access_level("posts") is SpaceFeatureAccess.ADMIN_ONLY:
+        # post is theirs — no posting around it through a webhook.
+        level = space.features.access_level("posts")
+        if level is SpaceFeatureAccess.ADMIN_ONLY:
             await self._gate(space, bot.created_by, "posts", ContentAction.CREATE, True)
+        elif level is SpaceFeatureAccess.MODERATED and bot.scope is BotScope.MEMBER:
+            # A personal bot's post is its member's post: where that member's
+            # post would wait for review, the bot is refused rather than
+            # queued (``BotPostsReviewedError``). Content authority's bots,
+            # and space-scope bots an admin set up, keep posting.
+            decision = await self._gate(
+                space, bot.created_by, "posts", ContentAction.CREATE, True
+            )
+            if decision is AccessDecision.QUEUE:
+                raise BotPostsReviewedError(
+                    "posts in this space are reviewed — a personal bot can't post here"
+                )
         content = f"**{title}**\n{message}" if title else message
         post = Post(
             id=str(uuid.uuid4()),

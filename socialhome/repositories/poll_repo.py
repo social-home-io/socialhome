@@ -34,6 +34,23 @@ class AbstractPollRepo(Protocol):
         allow_multiple: bool,
         options: list[dict],
     ) -> None: ...
+    async def create_poll_if_absent(
+        self,
+        *,
+        post_id: str,
+        question: str,
+        closes_at: str | None,
+        allow_multiple: bool,
+        options: list[dict],
+    ) -> bool: ...
+    async def create_schedule_poll_if_absent(
+        self,
+        *,
+        post_id: str,
+        title: str,
+        deadline: str | None,
+        slots: list[dict],
+    ) -> bool: ...
     async def get_meta(self, post_id: str) -> dict | None: ...
     async def option_belongs_to_post(
         self,
@@ -155,6 +172,83 @@ class SqlitePollRepo:
                     int(opt.get("position", 0)),
                 ),
             )
+
+    async def create_poll_if_absent(
+        self,
+        *,
+        post_id: str,
+        question: str,
+        closes_at: str | None,
+        allow_multiple: bool,
+        options: list[dict],
+    ) -> bool:
+        """Create a reply poll for ``post_id`` unless one exists — the poll
+        row and its options in ONE transaction, the options only when this
+        call created the poll. Two racing calls can't duplicate options
+        (a moderation resume). True when this call created it."""
+
+        def _tx(conn) -> bool:
+            cur = conn.execute(
+                "INSERT INTO polls(post_id, question, closes_at, closed,"
+                " allow_multiple) VALUES(?, ?, ?, 0, ?)"
+                " ON CONFLICT(post_id) DO NOTHING",
+                (post_id, question, closes_at, 1 if allow_multiple else 0),
+            )
+            if cur.rowcount == 0:
+                return False
+            conn.executemany(
+                "INSERT INTO poll_options(id, post_id, text, position)"
+                " VALUES(?, ?, ?, ?)",
+                [
+                    (o["id"], post_id, o["text"], int(o.get("position", 0)))
+                    for o in options
+                ],
+            )
+            return True
+
+        created: bool = await self._db.transact(_tx)
+        return created
+
+    async def create_schedule_poll_if_absent(
+        self,
+        *,
+        post_id: str,
+        title: str,
+        deadline: str | None,
+        slots: list[dict],
+    ) -> bool:
+        """Create a schedule poll for ``post_id`` unless one exists — meta
+        and slots in ONE transaction, the slots only when this call created
+        the meta row. True when this call created it."""
+
+        def _tx(conn) -> bool:
+            cur = conn.execute(
+                "INSERT INTO schedule_poll_meta(post_id, title, deadline,"
+                " finalized_slot_id, closed) VALUES(?, ?, ?, NULL, 0)"
+                " ON CONFLICT(post_id) DO NOTHING",
+                (post_id, title, deadline),
+            )
+            if cur.rowcount == 0:
+                return False
+            conn.executemany(
+                "INSERT INTO schedule_slots(id, post_id, slot_date, start_time,"
+                " end_time, position) VALUES(?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        s["id"],
+                        post_id,
+                        s["slot_date"],
+                        s.get("start_time"),
+                        s.get("end_time"),
+                        int(s.get("position", 0)),
+                    )
+                    for s in slots
+                ],
+            )
+            return True
+
+        created: bool = await self._db.transact(_tx)
+        return created
 
     async def get_meta(self, post_id: str) -> dict | None:
         row = await self._db.fetchone(

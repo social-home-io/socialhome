@@ -322,20 +322,142 @@ async def test_an_older_sender_without_an_actor_is_judged_by_its_household(
     assert after != before, feature
 
 
-async def test_moderated_keeps_todays_behaviour_on_receivers(access_env):
-    """MODERATED is not tightened on the receiver in v_42: a member's write
-    lands, but its named actor is still bound to the sender."""
+_REVIEWED = ("pages", "tasks", "stickies", "calendar")
+
+
+@pytest.mark.parametrize("feature", _REVIEWED)
+@pytest.mark.parametrize(
+    ("action", "sender", "actor", "lands"),
+    [
+        # A plain member's create / edit of somebody else's row would wait
+        # for review, which no household but the host can hold: refused.
+        ("create", AUTHOR, "u-a", False),
+        ("edit-other", AUTHOR, "u-a", False),
+        # Own rows stay the member's to change.
+        ("edit-own", AUTHOR, "u-a", True),
+        ("delete", AUTHOR, "u-a", True),
+        # Content authority bypasses review.
+        ("create", MOD, "u-mod", True),
+        ("edit-other", MOD, "u-mod", True),
+        ("create", ADMIN, "u-adm", True),
+        ("create", HOST, "u-h", True),
+    ],
+)
+async def test_moderated_holds_on_the_receiver_for_non_post_features(
+    access_env, feature, action, sender, actor, lands
+):
+    """Adversarial review I3: MODERATED for a feature other than posts is
+    enforced on every receiver, fail closed — a modified or older member
+    household cannot publish past review."""
     app, db = access_env
     await _seed_owned_rows(db)
-    await _set_level(db, "pages", "moderated")
-    before, after = await _send(app, db, "pages", "edit-own", AUTHOR, "u-a")
+    await _set_level(db, feature, "moderated")
+    before, after = await _send(app, db, feature, action, sender, actor)
+    assert (after != before) is lands, (feature, action, sender)
+
+
+@pytest.mark.parametrize("feature", _REVIEWED)
+async def test_moderated_refuses_an_actorless_member_household(access_env, feature):
+    """An older sender naming nobody is judged by its household: a plain
+    member household's create is refused, a moderator household's lands."""
+    app, db = access_env
+    await _seed_owned_rows(db)
+    await _set_level(db, feature, "moderated")
+    for inst in (AUTHOR, MOD):
+        await _set_version(db, inst, 41)
+    before, after = await _send(
+        app, db, feature, "create", AUTHOR, "u-a", with_actor=False
+    )
+    assert after == before
+    before, after = await _send(
+        app, db, feature, "create", MOD, "u-mod", with_actor=False
+    )
     assert after != before
-    event_type, payload = _write("pages", "edit-own", "u-a")
+
+
+async def test_moderated_posts_keep_todays_behaviour_on_receivers(access_env):
+    """Posts queue on the host only: a member household's post still lands,
+    but its named actor is still bound to the sender."""
+    app, db = access_env
+    await _seed_owned_rows(db)
+    await _set_level(db, "posts", "moderated")
+    before, after = await _send(app, db, "posts", "create", AUTHOR, "u-a")
+    assert after != before
+    event_type, payload = _write("posts", "create", "u-a")
+    payload["id"] = "post-forged-actor"
     before = await _snapshot(db)
     await _deliver(
         app, event_type, {**payload, "actor_user_id": "u-adm"}, sender=AUTHOR
     )
     assert await _snapshot(db) == before
+
+
+async def test_moderated_an_assignee_moves_their_task_but_not_its_title(access_env):
+    """N4: as locally, an assignee owns a task's status (and position) — a
+    status change of the host owner's task by its remote assignee lands; a
+    title change by them is refused."""
+    app, db = access_env
+    await _seed_owned_rows(db)
+    await _set_level(db, "tasks", "moderated")
+    task_id = _row("task", "u-h")
+    await db.enqueue(
+        "UPDATE space_tasks SET assignees_json='[\"u-a\"]' WHERE id=?", (task_id,)
+    )
+    before = await _snapshot(db)
+    await _deliver(
+        app,
+        FET.SPACE_TASK_UPDATED,
+        {
+            "id": task_id,
+            "list_id": "list-a",
+            "title": "A task",
+            "status": "done",
+            "actor_user_id": "u-a",
+        },
+        sender=AUTHOR,
+    )
+    after = await _snapshot(db)
+    assert after != before
+    row = await db.fetchone("SELECT status FROM space_tasks WHERE id=?", (task_id,))
+    assert row["status"] == "done"
+    await _deliver(
+        app,
+        FET.SPACE_TASK_UPDATED,
+        {
+            "id": task_id,
+            "list_id": "list-a",
+            "title": "Renamed by assignee",
+            "actor_user_id": "u-a",
+        },
+        sender=AUTHOR,
+    )
+    row = await db.fetchone("SELECT title FROM space_tasks WHERE id=?", (task_id,))
+    assert row["title"] == "A task"
+
+
+async def test_moderated_layout_moves_still_land(access_env):
+    """A sticky drag of somebody else's note is LAYOUT — never refused."""
+    app, db = access_env
+    await _seed_owned_rows(db)
+    await _set_level(db, "stickies", "moderated")
+    row = await db.fetchone(
+        "SELECT content, color FROM stickies WHERE id=?", (_row("sticky", "u-h"),)
+    )
+    before = await _snapshot(db)
+    await _deliver(
+        app,
+        FET.SPACE_STICKY_UPDATED,
+        {
+            "id": _row("sticky", "u-h"),
+            "content": row["content"],
+            "color": row["color"],
+            "position_x": 123,
+            "position_y": 45,
+            "actor_user_id": "u-a",
+        },
+        sender=AUTHOR,
+    )
+    assert await _snapshot(db) != before
 
 
 # ─── Sync admit: a member household cannot stream what it couldn't send ──

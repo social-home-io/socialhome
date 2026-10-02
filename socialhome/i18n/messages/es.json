@@ -4,7 +4,7 @@
   "notification.task.assigned": "Te asignaron: {title}",
   "notification.task.deadline_due": "Tarea pendiente hoy: {title}",
   "notification.space.post.created": "Nueva publicación en {space_name}",
-  "notification.space.moderation.queued": "Una publicación espera moderación",
+  "notification.space.moderation.queued": "Hay algo pendiente de revisión en {space_name}",
   "notification.space.join.approved": "Ya estás dentro: {space_name}",
   "notification.space.join.denied": "Tu solicitud de ingreso fue rechazada.",
   "notification.space.remote_invite.accepted": "Tu invitación fue aceptada.",
@@ -20,5 +20,13 @@
   "notification.space.comment.added": "{author} comentó en {space_name}",
   "notification.space.here": "{author} avisó a todos en {space_name}",
   "notification.dm.mention": "{author} te mencionó en {chat_name}",
-  "notification.dm.mention_unnamed": "{author} te mencionó en un chat de grupo"
+  "notification.dm.mention_unnamed": "{author} te mencionó en un chat de grupo",
+  "notification.space.moderation.approved": "Tu envío en {space_name} fue aprobado",
+  "notification.space.moderation.rejected": "Tu envío en {space_name} no fue aprobado",
+  "notification.space.moderation.expired": "Tu envío en {space_name} caducó sin revisión",
+  "notification.space.moderation.unavailable": "«Revisado» no está disponible para {features} en {space_name} mientras haya miembros de otros hogares en este espacio: los cambios de los miembros se rechazan hasta que elijas otro nivel",
+  "notification.space.feature.pages": "Páginas",
+  "notification.space.feature.tasks": "Tareas",
+  "notification.space.feature.stickies": "Notas adhesivas",
+  "notification.space.feature.calendar": "Eventos"
 }

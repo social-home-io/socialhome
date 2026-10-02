@@ -18,6 +18,7 @@ import { wireTasksWs, resetTasks } from './store/tasks'
 import { wireNotificationsWs } from './store/notifications'
 import { wirePresenceWs, loadPresence } from './store/presence'
 import { wireStickiesWs, resetStickies } from './store/stickies'
+import { resetModerationMine } from './store/moderationMine'
 import { wireDmWs } from './store/dms'
 import { wireCallsWs } from './store/calls'
 import { wireConnectionsWs } from './store/connections'
@@ -61,6 +62,7 @@ setUnauthorizedHandler(logout)
 onLogout(resetShopping)
 onLogout(resetTasks)
 onLogout(resetStickies)
+onLogout(resetModerationMine)
 
 ws.connect()
 

@@ -65,6 +65,12 @@ export interface ComposerExtras {
   imageUrls?: string[]
   /** The author removed the link card — sent as ``no_link_preview``. */
   noLinkPreview?: boolean
+  /** Space posts only: the poll / schedule poll, sent in the SAME
+   *  request as the post so a post held for review (§4.3) carries its
+   *  attachment atomically. The household feed still attaches them with
+   *  a follow-up call once the post exists. */
+  poll?: PollDraft
+  schedule?: ScheduleDraft
 }
 
 interface ComposerProps {
@@ -404,6 +410,11 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
       if (postType.value === 'text' && linkPreview.dismissed) {
         extras.noLinkPreview = true
       }
+      // A space post takes its poll / schedule in the create request.
+      if (spaceId && postType.value === 'poll' && pendingPoll) extras.poll = pendingPoll
+      if (spaceId && postType.value === 'schedule' && pendingSchedule) {
+        extras.schedule = pendingSchedule
+      }
       const newPostId = await onSubmit(
         postType.value,
         content.value,
@@ -413,10 +424,9 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
         isImage ? undefined : (mediaUrl ?? undefined),
         Object.keys(extras).length > 0 ? extras : undefined,
       )
-      if (postType.value === 'schedule' && pendingSchedule && newPostId) {
-        const base = spaceId
-          ? `/api/spaces/${spaceId}/posts/${newPostId}/schedule-poll`
-          : `/api/posts/${newPostId}/schedule-poll`
+      // Household feed: attach the schedule / poll to the new post.
+      if (!spaceId && postType.value === 'schedule' && pendingSchedule && newPostId) {
+        const base = `/api/posts/${newPostId}/schedule-poll`
         try {
           await api.post(base, {
             title: pendingSchedule.title,
@@ -429,10 +439,8 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
           )
         }
       }
-      if (postType.value === 'poll' && pendingPoll && newPostId) {
-        const pollUrl = spaceId
-          ? `/api/spaces/${spaceId}/posts/${newPostId}/poll`
-          : `/api/posts/${newPostId}/poll`
+      if (!spaceId && postType.value === 'poll' && pendingPoll && newPostId) {
+        const pollUrl = `/api/posts/${newPostId}/poll`
         try {
           await api.post(pollUrl, {
             question:       pendingPoll.question,

@@ -286,6 +286,7 @@ from .spaces import (
     SpaceMemberPictureView,
     SpaceMembersView,
     SpaceModerationApproveView,
+    SpaceModerationMineView,
     SpaceModerationQueueView,
     SpaceModerationRejectView,
     SpaceOwnershipView,
@@ -648,6 +649,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         "/api/bot-bridge/conversations/{id}", BotBridgeConversationPostView
     )
     app.router.add_view("/api/spaces/{id}/moderation", SpaceModerationQueueView)
+    app.router.add_view("/api/spaces/{id}/moderation/mine", SpaceModerationMineView)
     app.router.add_view(
         "/api/spaces/{id}/moderation/{item_id}/approve",
         SpaceModerationApproveView,

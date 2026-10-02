@@ -18,6 +18,7 @@ import calendar
 import uuid
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any
 
 from ..domain.events import (
     TaskAssigned,
@@ -50,7 +51,14 @@ from ..domain.task import (
     sanitize_block,
     sanitize_line,
 )
-from ..domain.space import ContentAction, SpacePermissionError
+from ..domain.space import (
+    AccessDecision,
+    ContentAction,
+    ModerationTargetGoneError,
+    Space,
+    SpaceModerationItem,
+    SpacePermissionError,
+)
 from ..federation.owner_bound_id import (
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
@@ -62,7 +70,11 @@ from ..repositories.task_repo import AbstractTaskRepo, AbstractSpaceTaskRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
+from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
+
+if TYPE_CHECKING:
+    from .space_moderation_service import ModerationSubmitter
 
 
 def parse_assignees(value: object) -> tuple[str, ...] | None:
@@ -825,10 +837,19 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
     Every write passes the space's ``tasks`` access level (§4.3,
     :class:`ContentAccessMixin`) for the acting user: under
     ``ADMIN_ONLY`` only the owner / admins create, edit, move, reorder,
-    archive or delete tasks and lists. Task comments are never gated.
+    archive or delete tasks and lists. Under ``MODERATED`` a member's new
+    task / list, and their edit / delete / archive of somebody else's,
+    waits in the space moderation queue (:class:`TaskModerationHandler`
+    replays it on approval). A task's assignees own its status: their
+    status change / column move proceeds. A same-column reorder is LAYOUT
+    and never queues. Task comments are never gated.
+
+    Every write takes ``approved_by`` — the moderation queue's replay —
+    which gates it as that approver instead of the actor; the row stays
+    the actor's.
     """
 
-    __slots__ = ("_repo", "_bus", "_spaces", "_remote_members")
+    __slots__ = ("_repo", "_bus", "_spaces", "_remote_members", "_moderation")
 
     def __init__(
         self,
@@ -844,6 +865,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         # Optional: without it only local members are valid assignees
         # (fail-closed for cross-household assignment).
         self._remote_members = remote_member_repo
+        self._moderation: "ModerationSubmitter | None" = None
 
     # ── Writer gate ──────────────────────────────────────────────────────
 
@@ -903,6 +925,16 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
     # space B's rows by id. Raised as KeyError (→ 404), never 403, so the
     # response does not confirm the id exists elsewhere.
 
+    async def get_list_in_space(self, list_id: str, space_id: str) -> TaskList:
+        """The task list ``list_id`` of ``space_id`` — :class:`KeyError`
+        otherwise (never another space's)."""
+        return await self._list_in_space(list_id, space_id)
+
+    async def get_task_in_space(self, task_id: str, space_id: str) -> Task:
+        """The task ``task_id`` of ``space_id`` — :class:`KeyError`
+        otherwise (never another space's)."""
+        return await self._task_in_space(task_id, space_id)
+
     async def _list_in_space(self, list_id: str, space_id: str) -> TaskList:
         result = await self._repo.get_list(list_id)
         if result is None or result[0] != space_id:
@@ -923,15 +955,33 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         space_id: str,
         name: str,
         created_by: str,
+        list_id: str | None = None,
+        approved_by: str | None = None,
     ) -> TaskList:
         name = parse_list_name(name)
-        await self._gate(space_id, created_by, "tasks", ContentAction.CREATE, True)
+        decision = await self._gate(
+            space_id,
+            approved_by or created_by,
+            "tasks",
+            ContentAction.CREATE,
+            approved_by is None,
+        )
+        if decision is AccessDecision.QUEUE:
+            await self._submit_for_review(
+                space_id,
+                created_by,
+                "tasks",
+                ContentAction.CREATE,
+                payload={
+                    "entity": "list",
+                    "target_id": _mint_list_id(space_id, created_by),
+                    "name": name,
+                },
+            )
         lst = TaskList(
             # Owner-bound (v_40): only the creator's household can
             # announce this list id.
-            id=mint_owner_bound_id(
-                SPACE_TASK_LIST_KIND, space_id=space_id, owner_user_id=created_by
-            ),
+            id=list_id or _mint_list_id(space_id, created_by),
             name=name,
             created_by=created_by,
         )
@@ -955,16 +1005,30 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         space_id: str,
         name: str,
         actor_user_id: str,
+        approved_by: str | None = None,
     ) -> TaskList:
         name = parse_list_name(name)
         current = await self._list_in_space(list_id, space_id)
-        await self._gate(
+        decision = await self._gate(
             space_id,
-            actor_user_id,
+            approved_by or actor_user_id,
             "tasks",
             ContentAction.EDIT,
-            current.created_by == actor_user_id,
+            approved_by is None and current.created_by == actor_user_id,
         )
+        if decision is AccessDecision.QUEUE:
+            await self._submit_for_review(
+                space_id,
+                actor_user_id,
+                "tasks",
+                ContentAction.EDIT,
+                payload={
+                    "entity": "list",
+                    "target_id": list_id,
+                    "patch": {"name": name},
+                },
+                snapshot={"name": current.name},
+            )
         updated = replace(current, name=name)
         if not await self._repo.save_list(updated, space_id=space_id):
             raise KeyError(f"task list {list_id!r} not found")
@@ -980,16 +1044,30 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         return saved
 
     async def delete_list(
-        self, list_id: str, *, space_id: str, actor_user_id: str
+        self,
+        list_id: str,
+        *,
+        space_id: str,
+        actor_user_id: str,
+        approved_by: str | None = None,
     ) -> None:
         current = await self._list_in_space(list_id, space_id)
-        await self._gate(
+        decision = await self._gate(
             space_id,
-            actor_user_id,
+            approved_by or actor_user_id,
             "tasks",
             ContentAction.DELETE,
-            current.created_by == actor_user_id,
+            approved_by is None and current.created_by == actor_user_id,
         )
+        if decision is AccessDecision.QUEUE:
+            await self._submit_for_review(
+                space_id,
+                actor_user_id,
+                "tasks",
+                ContentAction.DELETE,
+                payload={"entity": "list", "target_id": list_id},
+                snapshot={"name": current.name, "created_by": current.created_by},
+            )
         await self._repo.delete_list(list_id, space_id=space_id)
         await self._emit(
             TaskListDeleted(
@@ -1028,6 +1106,8 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         status: str | None = None,
         priority: str | None = None,
         labels: list[str] | None = None,
+        task_id: str | None = None,
+        approved_by: str | None = None,
     ) -> Task:
         """Create a space task at the bottom of its status column."""
         title = parse_title(title)
@@ -1037,15 +1117,39 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         task_priority = parse_priority(priority)
         task_labels = parse_labels(labels)
         due = parse_due_date(due_date)
-        await self._gate(space_id, created_by, "tasks", ContentAction.CREATE, True)
+        decision = await self._gate(
+            space_id,
+            approved_by or created_by,
+            "tasks",
+            ContentAction.CREATE,
+            approved_by is None,
+        )
         await self._require_member_assignees(space_id, parsed_assignees)
+        if decision is AccessDecision.QUEUE:
+            await self._list_in_space(list_id, space_id)
+            await self._submit_for_review(
+                space_id,
+                created_by,
+                "tasks",
+                ContentAction.CREATE,
+                payload={
+                    "entity": "task",
+                    "target_id": _mint_task_id(space_id, created_by),
+                    "list_id": list_id,
+                    "title": title,
+                    "description": description,
+                    "status": task_status.value,
+                    "due_date": due.isoformat() if due else None,
+                    "assignees": list(parsed_assignees),
+                    "priority": task_priority.value if task_priority else None,
+                    "labels": list(task_labels),
+                },
+            )
         now = datetime.now(timezone.utc)
         task = Task(
             # Owner-bound (v_36): only the creator's household can
             # announce this id.
-            id=mint_owner_bound_id(
-                SPACE_TASK_KIND, space_id=space_id, owner_user_id=created_by
-            ),
+            id=task_id or _mint_task_id(space_id, created_by),
             list_id=list_id,
             title=title,
             status=task_status,
@@ -1092,26 +1196,61 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         position: int | None | Unset = UNSET,
         priority: str | None | Unset = UNSET,
         labels: list[str] | None | Unset = UNSET,
+        approved_by: str | None = None,
     ) -> Task:
         """Partial edit, same field rules as :meth:`TaskService.update_task`.
 
         Collaborative: any writable member may edit any task of the space
         (the route's writer gate already ran), subject to the ``tasks``
         access level. A change of ``position`` alone is a LAYOUT write;
-        anything else — a status change / column move included — an EDIT.
+        anything else — a status change / column move included — an EDIT,
+        which the task's creator owns, and its assignees too as far as the
+        status (and position) go.
         """
         task = await self._task_in_space(task_id, space_id)
-        layout_only = not isinstance(position, Unset) and all(
-            isinstance(v, Unset)
-            for v in (title, description, status, due_date, assignees, priority, labels)
+        sent = {
+            k: v
+            for k, v in (
+                ("title", title),
+                ("description", description),
+                ("status", status),
+                ("due_date", due_date),
+                ("assignees", assignees),
+                ("position", position),
+                ("priority", priority),
+                ("labels", labels),
+            )
+            if not isinstance(v, Unset)
+        }
+        layout_only = set(sent) == {"position"}
+        owns = task.created_by == actor_user_id or (
+            actor_user_id in (task.assignees or ())
+            and set(sent) <= {"status", "position"}
         )
-        await self._gate(
+        decision = await self._gate(
             space_id,
-            actor_user_id,
+            approved_by or actor_user_id,
             "tasks",
             ContentAction.LAYOUT if layout_only else ContentAction.EDIT,
-            task.created_by == actor_user_id,
+            approved_by is None and owns,
         )
+        if decision is AccessDecision.QUEUE:
+            patch = _task_patch(sent)
+            if "assignees" in patch:
+                previous_ids = set(task.assignees or ())
+                await self._require_member_assignees(
+                    space_id,
+                    tuple(u for u in patch["assignees"] if u not in previous_ids),
+                )
+            before = _task_dict(task)
+            await self._submit_for_review(
+                space_id,
+                actor_user_id,
+                "tasks",
+                ContentAction.EDIT,
+                payload={"entity": "task", "target_id": task.id, "patch": patch},
+                snapshot={k: before.get(k) for k in patch},
+            )
 
         parsed_assignees = (
             None if isinstance(assignees, Unset) else parse_assignees(assignees)
@@ -1218,16 +1357,30 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         return updated
 
     async def delete_task(
-        self, task_id: str, *, space_id: str, actor_user_id: str
+        self,
+        task_id: str,
+        *,
+        space_id: str,
+        actor_user_id: str,
+        approved_by: str | None = None,
     ) -> None:
         task = await self._task_in_space(task_id, space_id)
-        await self._gate(
+        decision = await self._gate(
             space_id,
-            actor_user_id,
+            approved_by or actor_user_id,
             "tasks",
             ContentAction.DELETE,
-            task.created_by == actor_user_id,
+            approved_by is None and task.created_by == actor_user_id,
         )
+        if decision is AccessDecision.QUEUE:
+            await self._submit_for_review(
+                space_id,
+                actor_user_id,
+                "tasks",
+                ContentAction.DELETE,
+                payload={"entity": "task", "target_id": task.id, "op": "delete"},
+                snapshot=_task_dict(task),
+            )
         await self._repo.delete(task_id, space_id=space_id)
         await self._emit(
             TaskDeleted(
@@ -1239,15 +1392,27 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         )
 
     async def archive_task(
-        self, task_id: str, *, space_id: str, actor_user_id: str
-    ) -> Task:
-        return await self._set_archived(task_id, space_id, actor_user_id, archived=True)
-
-    async def unarchive_task(
-        self, task_id: str, *, space_id: str, actor_user_id: str
+        self,
+        task_id: str,
+        *,
+        space_id: str,
+        actor_user_id: str,
+        approved_by: str | None = None,
     ) -> Task:
         return await self._set_archived(
-            task_id, space_id, actor_user_id, archived=False
+            task_id, space_id, actor_user_id, archived=True, approved_by=approved_by
+        )
+
+    async def unarchive_task(
+        self,
+        task_id: str,
+        *,
+        space_id: str,
+        actor_user_id: str,
+        approved_by: str | None = None,
+    ) -> Task:
+        return await self._set_archived(
+            task_id, space_id, actor_user_id, archived=False, approved_by=approved_by
         )
 
     async def _set_archived(
@@ -1257,15 +1422,29 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         actor_user_id: str,
         *,
         archived: bool,
+        approved_by: str | None = None,
     ) -> Task:
         task = await self._task_in_space(task_id, space_id)
-        await self._gate(
+        decision = await self._gate(
             space_id,
-            actor_user_id,
+            approved_by or actor_user_id,
             "tasks",
             ContentAction.DELETE,
-            task.created_by == actor_user_id,
+            approved_by is None and task.created_by == actor_user_id,
         )
+        if decision is AccessDecision.QUEUE:
+            await self._submit_for_review(
+                space_id,
+                actor_user_id,
+                "tasks",
+                ContentAction.DELETE,
+                payload={
+                    "entity": "task",
+                    "target_id": task.id,
+                    "op": "archive" if archived else "unarchive",
+                },
+                snapshot=_task_dict(task),
+            )
         now = datetime.now(timezone.utc)
         updated = replace(
             task,
@@ -1279,3 +1458,215 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
             TaskUpdated(task=saved, space_id=space_id, actor_user_id=actor_user_id)
         )
         return saved
+
+
+def _mint_task_id(space_id: str, created_by: str) -> str:
+    return mint_owner_bound_id(
+        SPACE_TASK_KIND, space_id=space_id, owner_user_id=created_by
+    )
+
+
+def _mint_list_id(space_id: str, created_by: str) -> str:
+    return mint_owner_bound_id(
+        SPACE_TASK_LIST_KIND, space_id=space_id, owner_user_id=created_by
+    )
+
+
+def _task_dict(task: Task) -> dict[str, Any]:
+    """A task's reviewable fields in their API form."""
+    return {
+        "list_id": task.list_id,
+        "title": task.title,
+        "description": task.description,
+        "status": task.status.value,
+        "due_date": task.due_date.isoformat() if task.due_date else None,
+        "assignees": list(task.assignees or ()),
+        "position": int(task.position),
+        "priority": task.priority.value if task.priority is not None else None,
+        "labels": list(task.labels),
+        "created_by": task.created_by,
+        "archived": task.archived_at is not None,
+    }
+
+
+def _task_patch(sent: dict[str, Any]) -> dict[str, Any]:
+    """The sent task fields normalised with the REST path's parsers into
+    their API form. ``None`` keeps its per-field meaning (clears the
+    nullable ones, "no change" for title / status / position)."""
+    patch: dict[str, Any] = {}
+    for key, value in sent.items():
+        match key:
+            case "title":
+                if value is not None:
+                    patch["title"] = parse_title(value)
+            case "description":
+                patch["description"] = parse_description(value)
+            case "status":
+                if value is not None:
+                    patch["status"] = parse_status(value).value
+            case "due_date":
+                due = parse_due_date(value)
+                patch["due_date"] = due.isoformat() if due else None
+            case "assignees":
+                parsed = parse_assignees(value)
+                if parsed is not None:
+                    patch["assignees"] = list(parsed)
+            case "position":
+                if value is not None:
+                    patch["position"] = parse_position(value)
+            case "priority":
+                prio = parse_priority(value)
+                patch["priority"] = prio.value if prio is not None else None
+            case "labels":
+                patch["labels"] = list(parse_labels(value))
+    if not patch:
+        raise ValueError("an edit needs at least one field")
+    return patch
+
+
+_TASK_CREATE_FIELDS = (
+    "list_id",
+    "title",
+    "description",
+    "status",
+    "due_date",
+    "assignees",
+    "priority",
+    "labels",
+)
+
+
+class TaskModerationHandler:
+    """Queue items of a space's task board (``tasks`` create / edit /
+    delete of a task or a task list; archive / unarchive ride ``delete``).
+    Applies through :class:`SpaceTaskService` gated as the approver; a
+    field edit is latest-wins per field."""
+
+    __slots__ = ("_svc",)
+
+    def __init__(self, service: SpaceTaskService) -> None:
+        self._svc = service
+
+    def validate(self, space: Space, payload: dict) -> dict:
+        entity = payload.get("entity")
+        if entity not in ("task", "list") or not isinstance(
+            payload.get("target_id"), str
+        ):
+            raise ValueError("not a task submission")
+        out: dict[str, Any] = {"entity": entity, "target_id": payload["target_id"]}
+        if "patch" in payload:
+            raw = payload["patch"]
+            if not isinstance(raw, dict) or not raw:
+                raise ValueError("an edit needs at least one field")
+            out["patch"] = (
+                {"name": parse_list_name(raw.get("name"))}
+                if entity == "list"
+                else _task_patch(raw)
+            )
+        elif "op" in payload:
+            if payload["op"] not in ("delete", "archive", "unarchive"):
+                raise ValueError("unknown task operation")
+            out["op"] = payload["op"]
+        elif entity == "list" and "name" in payload:
+            out["name"] = parse_list_name(payload["name"])
+        elif entity == "task" and "title" in payload:
+            out.update({k: payload.get(k) for k in _TASK_CREATE_FIELDS})
+            out["title"] = parse_title(out["title"])
+            out["description"] = parse_description(out["description"])
+        return out
+
+    async def snapshot(self, space_id: str, target_id: str) -> dict | None:
+        try:
+            task = await self._svc.get_task_in_space(target_id, space_id)
+        except KeyError:
+            try:
+                lst = await self._svc.get_list_in_space(target_id, space_id)
+            except KeyError:
+                return None
+            return {"name": lst.name, "created_by": lst.created_by}
+        return _task_dict(task)
+
+    async def apply(
+        self, item: SpaceModerationItem, *, approved_by: str, force: bool
+    ) -> ApplyResult:
+        p = item.payload
+        target = str(p["target_id"])
+        live = await self.snapshot(item.space_id, target)
+        common: dict[str, Any] = {
+            "space_id": item.space_id,
+            "approved_by": approved_by,
+        }
+        match (item.action, p["entity"]):
+            case (ContentAction.CREATE.value, "list"):
+                if live is None:
+                    await self._svc.create_list(
+                        name=p["name"],
+                        created_by=item.submitted_by,
+                        list_id=target,
+                        **common,
+                    )
+            case (ContentAction.CREATE.value, "task"):
+                if live is None:
+                    try:
+                        await self._svc.create_task(
+                            list_id=p["list_id"],
+                            title=p["title"],
+                            created_by=item.submitted_by,
+                            description=p.get("description"),
+                            due_date=p.get("due_date"),
+                            assignees=p.get("assignees") or [],
+                            status=p.get("status"),
+                            priority=p.get("priority"),
+                            labels=p.get("labels") or [],
+                            task_id=target,
+                            **common,
+                        )
+                    except KeyError as exc:
+                        # The list it was meant for is gone.
+                        raise ModerationTargetGoneError(target) from exc
+            case (ContentAction.EDIT.value, entity):
+                if live is None:
+                    raise ModerationTargetGoneError(target)
+                if entity == "list":
+                    await self._svc.rename_list(
+                        target,
+                        name=p["patch"]["name"],
+                        actor_user_id=item.submitted_by,
+                        **common,
+                    )
+                else:
+                    await self._svc.update_task(
+                        target,
+                        actor_user_id=item.submitted_by,
+                        **common,
+                        **p["patch"],
+                    )
+            case (ContentAction.DELETE.value, entity):
+                if live is not None:
+                    if entity == "list":
+                        await self._svc.delete_list(
+                            target, actor_user_id=item.submitted_by, **common
+                        )
+                    elif p.get("op") == "archive":
+                        await self._svc.archive_task(
+                            target, actor_user_id=item.submitted_by, **common
+                        )
+                    elif p.get("op") == "unarchive":
+                        await self._svc.unarchive_task(
+                            target, actor_user_id=item.submitted_by, **common
+                        )
+                    else:
+                        await self._svc.delete_task(
+                            target, actor_user_id=item.submitted_by, **common
+                        )
+        return ApplyResult(target_id=target)
+
+    def preview(self, item: SpaceModerationItem) -> dict:
+        p = item.payload
+        if item.action == ContentAction.EDIT.value:
+            return dict(p.get("patch") or {})
+        if item.action == ContentAction.DELETE.value:
+            return item_payload_snapshot(item) or {}
+        if p.get("entity") == "list":
+            return {"name": p.get("name")}
+        return {k: p.get(k) for k in _TASK_CREATE_FIELDS}

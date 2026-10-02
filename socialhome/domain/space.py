@@ -965,6 +965,83 @@ class ModerationAlreadyDecidedError(Exception):
     """
 
 
+class ContentQueuedForReview(Exception):
+    """Not an error: a write under ``MODERATED`` went to the space's
+    moderation queue instead of the content table (§4.3).
+
+    Raised (never returned) by every content service whose gate answered
+    QUEUE, so no caller can mistake the queued submission for the persisted
+    object — the write simply did not happen yet. The API answers 202
+    ``{queued: true, item_id, feature, action}`` (``BaseView._queued``).
+    """
+
+    def __init__(self, item: "SpaceModerationItem") -> None:
+        super().__init__(f"{item.feature} {item.action} queued for review")
+        self.item = item
+
+
+class ModerationNotFederatedError(SpacePermissionError):
+    """``MODERATED`` for a feature other than posts needs the queue on the
+    space's host with no remote member households (until federated
+    moderation lands). The config API answers 422, a write that would queue
+    on a household that cannot hold the queue 403 — code
+    ``MODERATION_NOT_FEDERATED`` either way, never a silent PROCEED."""
+
+    def __init__(self, feature: str, *, http_status: int = 422) -> None:
+        super().__init__(
+            f"review for {feature} is not available in spaces shared with "
+            "other households yet"
+        )
+        self.feature = feature
+        self.http_status = http_status
+
+
+class ModerationQueueFullError(Exception):
+    """Too many pending items for one submitter or one space (429)."""
+
+
+class ModerationPayloadTooLargeError(ValueError):
+    """A submission whose serialised payload exceeds the queue cap (413)."""
+
+
+class ModerationStaleError(Exception):
+    """The target changed since the item was submitted (a page edit based
+    on an older version). 409 ``STALE``; approving with ``force`` applies
+    anyway (latest wins)."""
+
+    def __init__(self, *, current: dict, proposed: dict, base: dict) -> None:
+        super().__init__("the item changed since this was submitted")
+        self.current = current
+        self.proposed = proposed
+        self.base = base
+
+
+class ModerationTargetGoneError(Exception):
+    """An edit of an item that no longer exists — the queue item expires
+    (410 ``TARGET_GONE``)."""
+
+
+class ModerationExpiredError(ModerationTargetGoneError):
+    """Approving an item past its review window: it expires instead
+    (410 ``EXPIRED``)."""
+
+
+class ModerationInProgressError(Exception):
+    """Another approve (or resume) of the same item is still running here:
+    409 ``IN_PROGRESS`` instead of a second, racing apply."""
+
+
+class ModerationNotHostError(Exception):
+    """The moderation queue is the host household's: an approve anywhere
+    else is refused before any work (409 ``NOT_HOST``)."""
+
+
+class ModerationUnavailableError(Exception):
+    """The feature was switched off or the space archived since the item
+    was submitted: approve answers 409 ``FEATURE_UNAVAILABLE`` (reject still
+    works)."""
+
+
 # ─── Space entity (§4.3) ──────────────────────────────────────────────────
 
 

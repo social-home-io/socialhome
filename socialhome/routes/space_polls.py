@@ -16,7 +16,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import space_poll_service_key, space_repo_key, space_service_key
-from ..domain.space import ContentAction
+from ..domain.space import AccessDecision, ContentAction, SpacePermissionError
 from ..security import error_response
 from .base import BaseView
 
@@ -32,10 +32,17 @@ class _SpacePollBase(BaseView):
     async def _require_post_access(self, space_id: str, user_id: str) -> None:
         """Attaching a (schedule) poll is the second half of making a poll
         post: the space's ``posts`` access level applies (§4.3 — 403
-        ``ACCESS_ADMIN_ONLY``). Votes and answers are never gated."""
-        await self.svc(space_service_key).require_content_access(
+        ``ACCESS_ADMIN_ONLY``). Under ``MODERATED`` a member's poll must be
+        reviewed with its post — sent in the same ``POST …/posts`` — so a
+        late attach is refused rather than bypassing the queue. Votes and
+        answers are never gated."""
+        decision = await self.svc(space_service_key).require_content_access(
             space_id, user_id, "posts", ContentAction.CREATE, owns_target=True
         )
+        if decision is AccessDecision.QUEUE:
+            raise SpacePermissionError(
+                "posts here are reviewed — send the poll with the post"
+            )
 
 
 # ─── Reply polls ────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -24,21 +24,31 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
-from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
+from socialhome.domain.space import (
+    ContentAction,
+    ContentQueuedForReview,
+    SpaceFeatureAccess,
+    SpaceFeatures,
+)
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.user import RemoteUser
-from socialhome.domain.events import TaskAssigned
+from socialhome.domain.events import SpaceRemoteSeatLive, TaskAssigned
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import SqliteCalendarRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.notification_repo import SqliteNotificationRepo
 from socialhome.repositories.post_repo import SqlitePostRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.feed_service import FeedService
 from socialhome.services.notification_service import NotificationService
+from socialhome.services.space_moderation_service import SpaceModerationService
+from socialhome.services.space_post_moderation import PostModerationHandler
 from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
 
@@ -262,6 +272,19 @@ async def _mention_space(stack, *members, name="M", levels=None):
     return space_svc, space, users
 
 
+def _with_queue(stack, space_svc):
+    """Wire the posts moderation queue onto ``space_svc``."""
+    mod = SpaceModerationService(
+        _space_repo(stack.db),
+        user_repo=SqliteUserRepo(stack.db),
+        bus=stack.bus,
+        own_instance_id="iid",
+    )
+    space_svc.attach_moderation(mod)
+    mod.register("posts", ContentAction.CREATE, PostModerationHandler(space_svc))
+    return mod
+
+
 _CONTENT_TYPES = {"space_mention", "space_post_created", "space_comment_added"}
 
 
@@ -375,17 +398,18 @@ async def test_moderated_post_mentions_notify_on_approval(stack):
         actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
-    assert (
+    mod = _with_queue(stack, space_svc)
+    with pytest.raises(ContentQueuedForReview) as exc:
         await space_svc.create_post(
             space.id,
             author_user_id=u["bob"].user_id,
             type=PostType.TEXT,
             content="@carl hello",
         )
-        is None
-    )
-    item = (await space_svc.list_pending_moderation(space.id, actor_username="anna"))[0]
-    await space_svc.approve_moderation_item(space.id, item.id, actor_username="anna")
+    # Nobody is mentioned while the post waits.
+    notes = await stack.notif_repo.list(u["carl"].user_id, limit=50)
+    assert not [n for n in notes if n.type == "space_mention"]
+    await mod.approve(space.id, exc.value.item.id, actor_user_id=u["anna"].user_id)
     notes = await stack.notif_repo.list(u["carl"].user_id, limit=50)
     assert [n.title for n in notes if n.type == "space_mention"] == [
         "bob mentioned you in M"
@@ -476,10 +500,11 @@ async def test_moderation_queued_notifies_admins(stack):
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
     # Bob is regular member — post goes to queue → admin (anna) gets notification
-    result = await space_svc.create_post(
-        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="pending"
-    )
-    assert result is None  # queued
+    _with_queue(stack, space_svc)
+    with pytest.raises(ContentQueuedForReview):
+        await space_svc.create_post(
+            space.id, author_user_id=b.user_id, type=PostType.TEXT, content="pending"
+        )
     anna_n = await stack.notif_repo.list(a.user_id, limit=50)
     assert any("pending review" in n.title for n in anna_n)
 
@@ -513,9 +538,11 @@ async def test_moderation_queued_notifies_moderators_but_not_members(stack):
         actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
-    await space_svc.create_post(
-        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="pending"
-    )
+    _with_queue(stack, space_svc)
+    with pytest.raises(ContentQueuedForReview):
+        await space_svc.create_post(
+            space.id, author_user_id=b.user_id, type=PostType.TEXT, content="pending"
+        )
     mo_n = await stack.notif_repo.list(mo.user_id, limit=50)
     cara_n = await stack.notif_repo.list(c.user_id, limit=50)
     assert any("pending review" in n.title for n in mo_n)
@@ -2311,3 +2338,166 @@ async def test_dm_edit_mention_across_a_guardian_block_is_silent(stack):
     )
     assert await stack.notif_repo.list(kid.user_id) == []
     assert [n.type for n in await stack.notif_repo.list(carl.user_id)] == ["dm_mention"]
+
+
+async def _queued_by_bob(stack):
+    """anna owns a MODERATED space; bob's post is queued. Returns
+    ``(mod, space, anna, bob, item)``."""
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space_svc = SpaceService(
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Mod")
+    await space_svc.add_member(space.id, actor_username="anna", user_id=b.user_id)
+    await space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+    mod = _with_queue(stack, space_svc)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await space_svc.create_post(
+            space.id, author_user_id=b.user_id, type=PostType.TEXT, content="secret"
+        )
+    return mod, space, a, b, exc.value.item
+
+
+@pytest.mark.parametrize("outcome", ["approved", "rejected", "expired"])
+async def test_moderation_decided_notifies_the_submitter_title_only(stack, outcome):
+    """The submitter learns the outcome; the bell carries neither the
+    content nor the moderator's reason (§25.3)."""
+    mod, space, a, b, item = await _queued_by_bob(stack)
+    if outcome == "approved":
+        await mod.approve(space.id, item.id, actor_user_id=a.user_id)
+    elif outcome == "rejected":
+        await mod.reject(
+            space.id, item.id, actor_user_id=a.user_id, reason="private reason"
+        )
+    else:
+        await mod.expire_due(datetime.now(timezone.utc) + timedelta(days=8))
+    notes = [
+        n
+        for n in await stack.notif_repo.list(b.user_id, limit=50)
+        if n.type == "moderation_decided"
+    ]
+    assert len(notes) == 1
+    title = notes[0].title
+    assert "Mod" in title
+    assert {"approved": "approved", "rejected": "not approved", "expired": "expired"}[
+        outcome
+    ] in title
+    assert "secret" not in title and "private reason" not in title
+    # The owner gets no outcome bell for someone else's item.
+    anna = await stack.notif_repo.list(a.user_id, limit=50)
+    assert not [n for n in anna if n.type == "moderation_decided"]
+
+
+async def test_moderation_decided_skips_a_submitter_who_left(stack):
+    mod, space, a, b, item = await _queued_by_bob(stack)
+    await stack.db.enqueue("DELETE FROM space_members WHERE user_id=?", (b.user_id,))
+    await mod.reject(space.id, item.id, actor_user_id=a.user_id)
+    notes = await stack.notif_repo.list(b.user_id, limit=50)
+    assert not [n for n in notes if n.type == "moderation_decided"]
+
+
+# ─── A remote household joins a space with a Reviewed feature (I3b) ─────
+
+
+async def _reviewed_space_with_remote(stack, *, tasks_access="moderated"):
+    a = await stack.provision_user("anna")
+    space_svc = SpaceService(
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Club")
+    await stack.db.enqueue(
+        "UPDATE spaces SET tasks_access=?, stickies_access='moderated' WHERE id=?",
+        (tasks_access, space.id),
+    )
+    remote = SqliteSpaceRemoteMemberRepo(stack.db)
+    stack.notif_svc.attach_remote_member_repo(remote)
+    return a, space, remote
+
+
+async def _seat_remote(stack, remote, space_id, user_id, inst="inst-remote"):
+    await remote.add(
+        space_id=space_id,
+        instance_id=inst,
+        user_id=user_id,
+        user_pk=None,
+        display_name=user_id,
+    )
+    await stack.bus.publish(
+        SpaceRemoteSeatLive(space_id=space_id, instance_id=inst, user_id=user_id)
+    )
+
+
+async def test_first_remote_member_warns_admins_once_about_reviewed_features(stack):
+    a, space, remote = await _reviewed_space_with_remote(stack)
+    await _seat_remote(stack, remote, space.id, "u-r1")
+    await _seat_remote(stack, remote, space.id, "u-r2")  # same household
+    notes = [
+        n
+        for n in await stack.notif_repo.list(a.user_id, limit=50)
+        if n.type == "moderation_unavailable"
+    ]
+    assert len(notes) == 1
+    title = notes[0].title
+    assert "Club" in title and "Tasks" in title and "Sticky notes" in title
+    assert notes[0].link_url == f"/spaces/{space.id}/settings?household=inst-remote"
+
+
+async def test_no_warning_without_a_reviewed_non_post_feature(stack):
+    a, space, remote = await _reviewed_space_with_remote(stack, tasks_access="open")
+    await stack.db.enqueue(
+        "UPDATE spaces SET stickies_access='open', posts_access='moderated' WHERE id=?",
+        (space.id,),
+    )
+    await _seat_remote(stack, remote, space.id, "u-r1")
+    notes = await stack.notif_repo.list(a.user_id, limit=50)
+    assert not [n for n in notes if n.type == "moderation_unavailable"]
+
+
+class _PushSpy:
+    def __init__(self) -> None:
+        self.pushed: list[tuple[str, str]] = []
+
+    async def push_to_user(self, user_id, payload) -> None:
+        self.pushed.append((user_id, payload.tag))
+
+
+async def test_unavailable_warning_pushes_once_per_household(stack):
+    """N5: one push per (space, household). The same household leaving and
+    rejoining (first seat again) bumps the bell in-app, it does not push
+    again; a different household is news and pushes."""
+    a, space, remote = await _reviewed_space_with_remote(stack)
+    spy = _PushSpy()
+    stack.notif_svc.attach_push_service(spy)
+    await _seat_remote(stack, remote, space.id, "u-r1")
+    # Mark it read, then the household rejoins after everyone left.
+    await stack.notif_repo.mark_all_read(a.user_id)
+    await remote.remove(space.id, "inst-remote", "u-r1")
+    await _seat_remote(stack, remote, space.id, "u-r1")
+    await _seat_remote(stack, remote, space.id, "u-o1", inst="inst-other")
+    pushes = [p for p in spy.pushed if p[1] == "moderation_unavailable"]
+    assert len(pushes) == 2  # inst-remote once, inst-other once
+    notes = [
+        n
+        for n in await stack.notif_repo.list(a.user_id, limit=50)
+        if n.type == "moderation_unavailable"
+    ]
+    # In-app the rejoin shows again (a fresh unread row — the old one was
+    # read); it just doesn't push.
+    assert {n.link_url for n in notes} == {
+        f"/spaces/{space.id}/settings?household={inst}"
+        for inst in ("inst-other", "inst-remote")
+    }
+    assert any(n.read_at is None for n in notes if "inst-remote" in n.link_url)

@@ -25,12 +25,13 @@ default; a consumer keeping it under another name overrides the method.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from ..domain.space import (
     AccessAdminOnlyError,
     AccessDecision,
     ContentAction,
+    ContentQueuedForReview,
     Space,
     SpaceFeatureAccess,
     SpacePermissionError,
@@ -38,6 +39,7 @@ from ..domain.space import (
 
 if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .space_moderation_service import ModerationSubmitter
 
 
 class ContentAccessMixin:
@@ -89,9 +91,47 @@ class ContentAccessMixin:
             if level is SpaceFeatureAccess.ADMIN_ONLY:
                 raise AccessAdminOnlyError(feature)
             raise SpacePermissionError(f"not allowed to change {feature} here")
-        if decision is AccessDecision.QUEUE and feature != "posts":
-            # TODO(PR3): queue MODERATED pages / tasks / stickies / calendar
-            # writes for review like posts. Until the moderation queue knows
-            # those types they behave as OPEN.
-            return AccessDecision.PROCEED
         return decision
+
+    def _moderation_submitter(self) -> "ModerationSubmitter | None":
+        """The moderation queue this service submits to (``_moderation``,
+        set by ``attach_moderation``). The consumer declares the slot."""
+        submitter: "ModerationSubmitter | None" = getattr(self, "_moderation", None)
+        return submitter
+
+    def attach_moderation(self, submitter: "ModerationSubmitter") -> None:
+        """Wire the space moderation queue (``app._build_services``)."""
+        setattr(self, "_moderation", submitter)
+
+    async def _submit_for_review(
+        self,
+        space_id: str,
+        submitted_by: str,
+        feature: str,
+        action: ContentAction,
+        *,
+        payload: dict,
+        snapshot: dict | None = None,
+    ) -> NoReturn:
+        """Queue a write the gate answered QUEUE for, then raise
+        :class:`ContentQueuedForReview` so the caller stops right there —
+        nothing is persisted in the content table until approval.
+
+        Fails closed: without an attached queue the write is refused, it
+        never falls through to a direct write.
+        """
+        submitter = self._moderation_submitter()
+        if submitter is None:
+            raise SpacePermissionError(f"{feature} here needs review, which is off")
+        space = await self._access_space_repo().get(space_id)
+        if space is None:
+            raise KeyError(f"space {space_id!r} not found")
+        item = await submitter.submit(
+            space,
+            feature=feature,
+            action=action,
+            submitted_by=submitted_by,
+            payload=payload,
+            snapshot=snapshot,
+        )
+        raise ContentQueuedForReview(item)

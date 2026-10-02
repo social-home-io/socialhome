@@ -15032,7 +15032,135 @@ a.sh-link-preview-link:focus-visible {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.sh-moderation-actions { display: flex; gap: var(--sh-space-xs); margin-top: var(--sh-space-sm); }
+.sh-moderation-actions { display: flex; gap: var(--sh-space-xs); margin-top: var(--sh-space-sm); flex-wrap: wrap; }
+.sh-moderation-actions .sh-btn { min-height: 36px; }
+.sh-moderation-meta__times {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sh-space-xs);
+}
+.sh-moderation-item > * + * { margin-top: var(--sh-space-sm); }
+.sh-moderation-preview__line { margin: 0; overflow-wrap: anywhere; }
+.sh-moderation-preview__options { margin: var(--sh-space-xs) 0 0; padding-inline-start: 1.25rem; }
+.sh-moderation-preview__url { overflow-wrap: anywhere; }
+.sh-moderation-preview-body { overflow-wrap: anywhere; }
+.sh-moderation-preview-body .sh-chip-swatch { vertical-align: -2px; }
+/* "Field: value" pairs inside a preview card (a task's status, an
+ * event's start). */
+.sh-moderation-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px var(--sh-space-sm);
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-moderation-fields__row { display: contents; }
+.sh-moderation-fields dt { color: var(--sh-text-muted); }
+.sh-moderation-fields dd { margin: 0; overflow-wrap: anywhere; }
+.sh-moderation-delete__lead { margin: 0 0 var(--sh-space-xs); font-size: var(--sh-font-size-sm); }
+/* An edit, old → new: one row per changed field. Fixed layout + wrap so
+ * a long value never widens the page on a phone. */
+.sh-moderation-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-moderation-table th,
+.sh-moderation-table td {
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border-bottom: 1px solid var(--sh-border);
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.sh-moderation-table thead th { color: var(--sh-text-muted); font-weight: 600; }
+.sh-moderation-table tbody th { font-weight: 500; width: 28%; }
+.sh-moderation-table__old { color: var(--sh-text-muted); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--sh-danger) 60%, transparent); }
+.sh-moderation-table__new { font-weight: 600; }
+.sh-moderation-table__row--stale td,
+.sh-moderation-table__row--stale th { background: color-mix(in srgb, var(--sh-warning) 12%, transparent); }
+.sh-moderation-table__since {
+  display: block;
+  margin-top: 2px;
+  font-weight: 400;
+  font-size: var(--sh-font-size-xs);
+  color: color-mix(in srgb, var(--sh-warning) 70%, var(--sh-text));
+}
+/* A page body, line by line: + added (moss), − removed (danger). */
+.sh-moderation-diff {
+  margin: 0;
+  max-height: 24rem;
+  overflow: auto;
+  padding: var(--sh-space-xs) 0;
+  background: var(--sh-bg-secondary);
+  border-radius: var(--sh-radius-sm);
+  font-family: var(--sh-font-family-mono);
+  font-size: var(--sh-font-size-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sh-moderation-diff--split { background: none; max-height: none; font-family: inherit; }
+.sh-moderation-diff__text {
+  margin: 0 0 var(--sh-space-sm);
+  padding: var(--sh-space-sm);
+  background: var(--sh-bg-secondary);
+  border-radius: var(--sh-radius-sm);
+  font-family: var(--sh-font-family-mono);
+  font-size: var(--sh-font-size-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sh-moderation-diff__line { padding: 0 var(--sh-space-sm); }
+.sh-moderation-diff__line--add { background: color-mix(in srgb, var(--sh-success) 16%, transparent); }
+.sh-moderation-diff__line--del {
+  background: color-mix(in srgb, var(--sh-danger) 12%, transparent);
+  color: var(--sh-danger-on-soft);
+}
+.sh-moderation-diff__mark { display: inline-block; width: 1.25em; user-select: none; }
+.sh-moderation-stale > * + * { margin-top: var(--sh-space-sm); }
+
+/* Badge for an item waiting for a moderator (the author's own). */
+.sh-badge--pending {
+  background: color-mix(in srgb, var(--sh-warning) 16%, transparent);
+  border-color: color-mix(in srgb, var(--sh-warning) 45%, transparent);
+  color: color-mix(in srgb, var(--sh-warning) 70%, var(--sh-text));
+}
+.sh-board-card__review { align-self: flex-start; }
+
+/* "Pending review (n)" — the author's own queued items on a space tab
+ * (§4.3). Dimmed: nobody else sees them until approved. */
+.sh-pending-review {
+  margin: var(--sh-space-sm) 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px dashed var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+}
+.sh-pending-review__heading { margin: 0; font-size: var(--sh-font-size-sm); font-weight: 600; }
+/* Body face + lining figures: the display face's ss01 "4" reads as "1". */
+.sh-pending-review__count {
+  font-family: var(--sh-font-family);
+  font-feature-settings: normal;
+  font-variant-numeric: lining-nums tabular-nums;
+}
+.sh-pending-review__hint { margin: 2px 0 var(--sh-space-xs); font-size: var(--sh-font-size-xs); }
+.sh-pending-review__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sh-space-xs); }
+.sh-pending-review__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+  padding: var(--sh-space-xs) 0;
+  opacity: 0.75;
+  min-width: 0;
+}
+.sh-pending-review__body { display: flex; flex-wrap: wrap; gap: 0 var(--sh-space-xs); flex: 1 1 12rem; min-width: 0; font-size: var(--sh-font-size-sm); }
+.sh-pending-review__action { font-weight: 600; }
+.sh-pending-review__text { color: var(--sh-text-muted); overflow-wrap: anywhere; min-width: 0; }
+.sh-pending-review__expiry { font-size: var(--sh-font-size-xs); }
+.sh-pending-review__more { min-height: 36px; padding: 0; }
 
 /* Network map */
 .sh-network-map { position: relative; }
@@ -15765,6 +15893,17 @@ a.sh-link-preview-link:focus-visible {
   flex: 0 1 16rem;
 }
 .sh-access-explain { margin: var(--sh-space-sm) 0 0; font-size: var(--sh-font-size-sm); }
+/* A Reviewed level the space can no longer hold (other households joined). */
+.sh-access-row__warning {
+  flex: 1 1 100%;
+  margin: 0;
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border-radius: var(--sh-radius-sm);
+  border: 1px solid var(--sh-warning);
+  background: color-mix(in srgb, var(--sh-warning) 14%, transparent);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-sm);
+}
 @media (max-width: 480px) {
   .sh-access-row .sh-access-row__select { flex: 1 1 100%; min-width: 0; }
 }

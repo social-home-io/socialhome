@@ -15,7 +15,11 @@ from socialhome.domain.space import (
     SpaceMember,
     SpaceType,
 )
-from socialhome.domain.space_bot import BotScope, SpaceBotDisabledError
+from socialhome.domain.space_bot import (
+    BotPostsReviewedError,
+    BotScope,
+    SpaceBotDisabledError,
+)
 from socialhome.domain.user import SYSTEM_AUTHOR
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -245,3 +249,48 @@ async def test_a_bot_whose_maker_left_still_posts_when_posts_are_not_admin_only(
     await stack.db.enqueue("UPDATE spaces SET posts_access='moderated' WHERE id='sp-1'")
     post = await stack.svc.notify_space(stack.bot, title=None, message="ding")
     assert post.content == "ding"
+
+
+# ─── §4.3 MODERATED: a member's personal bot can't post around review ────
+
+
+async def _moderated_with_bot(stack, *, creator_role: str, scope=BotScope.MEMBER):
+    await stack.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-1', ?, ?)",
+        ("uid-maker", creator_role),
+    )
+    bot, _raw = await SqliteSpaceBotRepo(stack.db).create(
+        bot_id="b-mod",
+        space_id="sp-1",
+        scope=scope,
+        slug="modbot",
+        name="Mod bot",
+        icon="🤖",
+        created_by="uid-maker",
+    )
+    await stack.db.enqueue("UPDATE spaces SET posts_access='moderated' WHERE id='sp-1'")
+    return bot
+
+
+async def test_moderated_posts_refuse_a_members_personal_bot(stack):
+    """A personal bot is its member's voice: under MODERATED posts its post
+    would skip the queue, so it is refused (403 BOT_POSTS_REVIEWED) and
+    nothing is published."""
+    bot = await _moderated_with_bot(stack, creator_role="member")
+    with pytest.raises(BotPostsReviewedError):
+        await stack.svc.notify_space(bot, title=None, message="unreviewed")
+    assert await stack.space_post_repo.list_feed("sp-1") == []
+
+
+@pytest.mark.parametrize("role", ["moderator", "admin", "owner"])
+async def test_moderated_posts_let_content_authoritys_personal_bot_post(stack, role):
+    bot = await _moderated_with_bot(stack, creator_role=role)
+    post = await stack.svc.notify_space(bot, title=None, message="ok")
+    assert post.bot_id == "b-mod"
+
+
+async def test_moderated_posts_leave_space_scope_bots_alone(stack):
+    """A space-scope bot is an admin's automation: unchanged under MODERATED."""
+    bot = await _moderated_with_bot(stack, creator_role="member", scope=BotScope.SPACE)
+    post = await stack.svc.notify_space(bot, title=None, message="space bot")
+    assert post.content == "space bot"

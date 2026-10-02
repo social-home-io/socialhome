@@ -11,6 +11,7 @@
 import { signal } from '@preact/signals'
 import { useEffect, useRef } from 'preact/hooks'
 import { api } from '@/api'
+import { contentWrite } from '@/utils/contentWrite'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
@@ -176,10 +177,13 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
     }
     submitting.value = true
     try {
-      await api.post('/api/bazaar', body)
-      showToast('Listing created', 'success')
+      // The listing's feed post may be held for review (posts
+      // "Reviewed", §4.3) — then nothing is listed yet; ``contentWrite``
+      // toasts that.
+      const res = await contentWrite(api.post('/api/bazaar', body), { spaceId: spaceId.value })
+      if (!res.queued) showToast('Listing created', 'success')
       open.value = false
-      onCreated?.()
+      if (!res.queued) onCreated?.()
     } catch (err: unknown) {
       showToast(
         `Create failed: ${(err as Error).message ?? err}`, 'error',

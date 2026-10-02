@@ -35,6 +35,10 @@ noted:
     (the re-encoded link-preview image; one file may back several posts
     that linked the same page)
 
+  * ``space_moderation_queue.payload_json`` of PENDING items — a queued
+    post / page / event / listing publishes its media only on approval
+    (up to 7 days later), so until then the payload is the reference
+
 A soft-deleted post keeps ``image_urls_json`` (only ``media_url`` is
 cleared), so a post's image list counts only while the post is live.
 
@@ -46,6 +50,7 @@ staging dir — the sweep skips those by pattern; ``dm_gc`` owns them.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Protocol, runtime_checkable
 
 import orjson
@@ -90,6 +95,20 @@ _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("feed_posts", "link_preview_json", "$.thumbnail_url"),
     ("space_posts", "link_preview_json", "$.thumbnail_url"),
 )
+
+
+#: ``(table, text column, live-row filter)`` scanned for every
+#: ``api/media/<file>`` inside a free-form JSON payload.
+_PAYLOAD_SCANS: tuple[tuple[str, str, str], ...] = (
+    ("space_moderation_queue", "payload_json", "status='pending'"),
+)
+_MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
+
+
+def _names_in_payload(raw: object) -> set[str]:
+    if not isinstance(raw, str) or not raw:
+        return set()
+    return {name for name in _MEDIA_REF_RE.findall(raw) if name not in (".", "..")}
 
 
 def _like_escape(value: str) -> str:
@@ -157,6 +176,12 @@ class SqliteMediaReferenceRepo:
                 name = media_basename(r.get("v"))
                 if name:
                     out.add(name)
+        for table, col, live in _PAYLOAD_SCANS:
+            rows = await self._db.fetchall(
+                f"SELECT {col} AS v FROM {table} WHERE {col} IS NOT NULL AND {live}"
+            )
+            for r in rows_to_dicts(rows):
+                out.update(_names_in_payload(r.get("v")))
         return out
 
     async def is_referenced(self, basename: str) -> bool:
@@ -190,5 +215,13 @@ class SqliteMediaReferenceRepo:
                 (path, pattern),
             )
             if any(media_basename(r["v"]) == basename for r in rows):
+                return True
+        for table, col, live in _PAYLOAD_SCANS:
+            rows = await self._db.fetchall(
+                f"SELECT {col} AS v FROM {table} "
+                f"WHERE {col} LIKE ? ESCAPE '\\' AND {live}",
+                (pattern,),
+            )
+            if any(basename in _names_in_payload(r["v"]) for r in rows):
                 return True
         return False

@@ -56,6 +56,14 @@ class PollService(BusPublisherMixin):
 
     # ─── Reply polls ──────────────────────────────────────────────────────
 
+    async def has_poll(self, post_id: str) -> bool:
+        """Is a reply poll attached to ``post_id``?"""
+        return await self._repo.get_meta(post_id) is not None
+
+    async def has_schedule_poll(self, post_id: str) -> bool:
+        """Is a schedule poll attached to ``post_id``?"""
+        return await self._repo.get_schedule_meta(post_id) is not None
+
     async def create_poll(
         self,
         *,
@@ -93,6 +101,47 @@ class PollService(BusPublisherMixin):
             )
         )
         return await self.summary(post_id, space_id=space_id)
+
+    async def create_poll_once(
+        self,
+        *,
+        post_id: str,
+        question: str,
+        options: list[str],
+        allow_multiple: bool = False,
+        closes_at: str | None = None,
+        space_id: str | None = None,
+    ) -> bool:
+        """Attach a reply poll to ``post_id`` unless it already has one —
+        atomically in the repo, so racing callers (a moderation approve
+        resumed twice) create it once. Publishes :class:`PollCreated` only
+        for the call that created it. True when this call did."""
+        question = question.strip()
+        if not question:
+            raise ValueError("question must not be empty")
+        cleaned = [str(o).strip() for o in options if str(o).strip()]
+        if len(cleaned) < 2:
+            raise ValueError("a poll needs at least two options")
+        created = await self._repo.create_poll_if_absent(
+            post_id=post_id,
+            question=question,
+            closes_at=closes_at,
+            allow_multiple=allow_multiple,
+            options=[
+                {"id": uuid.uuid4().hex, "text": t, "position": i}
+                for i, t in enumerate(cleaned)
+            ],
+        )
+        if created:
+            await self._emit(
+                PollCreated(
+                    post_id=post_id,
+                    question=question,
+                    allow_multiple=allow_multiple,
+                    space_id=space_id,
+                )
+            )
+        return created
 
     async def cast_vote(
         self,
@@ -296,6 +345,52 @@ class PollService(BusPublisherMixin):
             ),
         )
         return await self.schedule_summary(post_id, space_id=space_id)
+
+    async def create_schedule_poll_once(
+        self,
+        *,
+        post_id: str,
+        title: str,
+        deadline: str | None = None,
+        slots: list[dict],
+        space_id: str | None = None,
+    ) -> bool:
+        """Create a schedule poll for ``post_id`` unless it has one —
+        atomically in the repo; :class:`SchedulePollCreated` only for the
+        call that created it. True when this call did."""
+        title = title.strip()
+        if not title:
+            raise ValueError("title must not be empty")
+        if not slots:
+            raise ValueError("at least one slot is required")
+        minted = []
+        for i, s in enumerate(slots):
+            sd = str(s.get("slot_date") or "").strip()
+            if not sd:
+                raise ValueError("each slot needs a slot_date")
+            minted.append(
+                {
+                    "id": uuid.uuid4().hex,
+                    "slot_date": sd,
+                    "start_time": s.get("start_time") or None,
+                    "end_time": s.get("end_time") or None,
+                    "position": int(s.get("position", i)),
+                }
+            )
+        created = await self._repo.create_schedule_poll_if_absent(
+            post_id=post_id, title=title, deadline=deadline, slots=minted
+        )
+        if created:
+            await self._emit(
+                SchedulePollCreated(
+                    post_id=post_id,
+                    title=title,
+                    deadline=deadline,
+                    slots=tuple(minted),
+                    space_id=space_id,
+                ),
+            )
+        return created
 
     async def respond_schedule(
         self,

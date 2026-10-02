@@ -222,3 +222,37 @@ async def test_link_preview_images_are_referenced(db):
     assert await repo.is_referenced("lp_1.webp")
     assert await repo.is_referenced("lp_2.webp")
     assert not await repo.is_referenced("lp_.webp")
+
+
+async def test_pending_moderation_payloads_keep_their_media(db):
+    """A queued post's images are referenced only by its queue payload until
+    it is approved (up to 7 days) — the orphan sweep must keep them; once the
+    item is decided the payload no longer counts."""
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp', 'S', 'i', 'o', 'aa')"
+    )
+    payload = (
+        '{"entity": "post", "image_urls": ["api/media/pend1.webp",'
+        ' "/api/media/pend2.webp?exp=1&sig=x"],'
+        ' "attachments": {"bazaar": {"image_urls": ["api/media/listing.webp"]}}}'
+    )
+    for item_id, status in (("m1", "pending"), ("m2", "rejected")):
+        await db.enqueue(
+            "INSERT INTO space_moderation_queue(id, space_id, feature, action,"
+            " submitted_by, payload_json, expires_at, status)"
+            " VALUES(?, 'sp', 'posts', 'create', 'u', ?, '2099-01-01', ?)",
+            (
+                item_id,
+                payload.replace("pend", "pend" if status == "pending" else "gone"),
+                status,
+            ),
+        )
+    repo = SqliteMediaReferenceRepo(db)
+    names = await repo.referenced_basenames()
+    assert {"pend1.webp", "pend2.webp", "listing.webp"} <= names
+    assert "gone1.webp" not in names
+    assert await repo.is_referenced("pend2.webp")
+    assert await repo.is_referenced("listing.webp")
+    assert not await repo.is_referenced("gone1.webp")
+    assert not await repo.is_referenced("pend")

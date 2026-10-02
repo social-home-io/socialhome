@@ -6,15 +6,26 @@ import pytest
 
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import PageCreated, PageDeleted, PageUpdated
-from socialhome.domain.space import AccessAdminOnlyError, SpacePermissionError
+from socialhome.domain.space import (
+    AccessAdminOnlyError,
+    ContentAction,
+    ContentQueuedForReview,
+    ModerationStaleError,
+    ModerationStatus,
+    ModerationTargetGoneError,
+    SpacePermissionError,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.page_repo import SqlitePageRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictService,
 )
+from socialhome.services.space_moderation_service import SpaceModerationService
 from socialhome.services.space_page_service import (
+    PageModerationHandler,
     PageStaleError,
     SpacePageService,
 )
@@ -229,3 +240,127 @@ async def test_resolve_conflict_rejects_an_unknown_resolution(env):
         await env.svc.resolve_conflict(
             "sp-a", page.id, actor_user_id="u-member", resolution="yolo"
         )
+
+
+# ── MODERATED pages (§4.3 review queue) ──────────────────────────────────
+
+
+async def _moderated(env):
+
+    await env.db.enqueue(
+        "UPDATE spaces SET pages_access='moderated', feature_pages=1 WHERE id='sp-a'"
+    )
+    mod = SpaceModerationService(
+        SqliteSpaceRepo(env.db),
+        user_repo=SqliteUserRepo(env.db),
+        own_instance_id="inst",
+    )
+    env.svc.attach_moderation(mod)
+    handler = PageModerationHandler(env.svc)
+    for action in ContentAction:
+        if action is not ContentAction.LAYOUT:
+            mod.register("pages", action, handler)
+    return mod
+
+
+async def test_moderated_member_create_queues_then_approve_keeps_author(env):
+
+    mod = await _moderated(env)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.create("sp-a", actor_user_id="u-member", title="T", content="b")
+    assert await env.svc.list("sp-a") == []
+    assert env.events == []
+    item = exc.value.item
+    await mod.approve("sp-a", item.id, actor_user_id="u-mod")
+    [page] = await env.svc.list("sp-a")
+    assert (page.id, page.created_by, page.content) == (
+        item.payload["target_id"],
+        "u-member",
+        "b",
+    )
+    assert [type(e) for e in env.events] == [PageCreated]
+
+
+async def test_moderated_own_edit_proceeds_others_queues(env):
+
+    mod = await _moderated(env)
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="v1"
+    )
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.update("sp-a", page.id, actor_user_id="u-member", content="v2")
+    assert (await env.svc.get("sp-a", page.id)).content == "v1"
+    described = await mod.describe(exc.value.item, with_current=True)
+    assert described["snapshot"] == {"content": "v1"}
+    assert described["preview"] == {"content": "v2"}
+    await mod.approve("sp-a", exc.value.item.id, actor_user_id="u-mod")
+    got = await env.svc.get("sp-a", page.id)
+    assert (got.content, got.last_editor_user_id) == ("v2", "u-member")
+
+
+async def test_moderated_page_edit_stale_then_force(env):
+
+    mod = await _moderated(env)
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="v1"
+    )
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.update("sp-a", page.id, actor_user_id="u-member", content="mine")
+    await env.svc.update("sp-a", page.id, actor_user_id="u-owner", content="theirs")
+    with pytest.raises(ModerationStaleError) as stale:
+        await mod.approve("sp-a", exc.value.item.id, actor_user_id="u-mod")
+    assert stale.value.current == {"content": "theirs"}
+    assert stale.value.proposed == {"content": "mine"}
+    assert stale.value.base == {"content": "v1"}
+    assert (
+        await mod.get_item("sp-a", exc.value.item.id)
+    ).status is ModerationStatus.PENDING
+    await mod.approve("sp-a", exc.value.item.id, actor_user_id="u-mod", force=True)
+    assert (await env.svc.get("sp-a", page.id)).content == "mine"
+
+
+async def test_moderated_page_delete_queues_and_gone_edit_410(env):
+
+    mod = await _moderated(env)
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="v1"
+    )
+    with pytest.raises(ContentQueuedForReview) as d:
+        await env.svc.delete("sp-a", page.id, actor_user_id="u-member")
+    with pytest.raises(ContentQueuedForReview) as e:
+        await env.svc.update("sp-a", page.id, actor_user_id="u-member", title="New")
+    assert (await mod.describe(d.value.item))["preview"]["content"] == "v1"
+    await mod.approve("sp-a", d.value.item.id, actor_user_id="u-mod")
+    assert await env.svc.list("sp-a") == []
+    with pytest.raises(ModerationTargetGoneError):
+        await mod.approve("sp-a", e.value.item.id, actor_user_id="u-mod")
+    assert (
+        await mod.get_item("sp-a", e.value.item.id)
+    ).status is ModerationStatus.EXPIRED
+
+
+async def test_moderated_resolve_conflict_queues_and_gone_conflict_410(env):
+
+    mod = await _moderated(env)
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="v1"
+    )
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.resolve_conflict(
+            "sp-a",
+            page.id,
+            actor_user_id="u-member",
+            resolution="merged_content",
+            merged_content="merged",
+        )
+    item = exc.value.item
+    assert item.payload["op"] == "resolve_conflict"
+    # No conflict is open any more → nothing to resolve.
+    with pytest.raises(ModerationTargetGoneError):
+        await mod.approve("sp-a", item.id, actor_user_id="u-mod")
+
+
+async def test_moderated_moderator_writes_directly(env):
+    await _moderated(env)
+    page = await env.svc.create("sp-a", actor_user_id="u-mod", title="T", content="x")
+    assert (await env.svc.get("sp-a", page.id)).created_by == "u-mod"

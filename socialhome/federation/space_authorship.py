@@ -423,7 +423,12 @@ class SpaceAuthorship:
           authority (:meth:`is_admin_household`), as it must for the shared
           bot identity — and that only on a bot's own row. A moderator never
           passes.
-        * ``MODERATED`` → admitted for now.
+        * ``MODERATED`` → posts admitted (the host's queue judged them); every
+          other feature admits only content authority (:meth:`moderates_as`;
+          an actor-less older sender: :meth:`has_content_authority`), an
+          edit / delete of the actor's own row, and a layout move — a plain
+          member's create or edit of someone else's row would have waited
+          for review, which no household but a remote-free host can hold.
 
         A refusal logs at WARNING. An unknown space admits nothing beyond
         ``OPEN``: there is no level to check against.
@@ -496,9 +501,27 @@ class SpaceAuthorship:
             if not admitted:
                 self._log_access_refusal(event, space_id, feature, action, actor, level)
             return admitted
-        # MODERATED: v_42 receivers admit it like OPEN — the review queue is
-        # the host's, and a later version moves the other features into it.
-        return True
+        # MODERATED. Posts keep their v_42 rule: the host's queue judges a
+        # member's post, and its receivers admit what the host published.
+        # Every other feature queues only on a host WITHOUT remote member
+        # households (no household but the host can hold the queue yet), so
+        # a remote plain member's write here is exactly one that would have
+        # waited for review — refused, fail closed, on every receiver alike:
+        # a modified or older stub cannot publish past review. Own edits /
+        # deletes and layout moves proceed, as locally.
+        if feature == "posts" or action is ContentAction.LAYOUT or own_row:
+            return True
+        if named:
+            admitted = await self.moderates_as(event, space_id, str(actor))
+        elif actor == SYSTEM_AUTHOR:
+            admitted = False  # a bot posts, it never writes these features
+        elif not await self._sender_names_actors(event):
+            admitted = await self.has_content_authority(event, space_id)
+        else:
+            admitted = False  # a v_42 sender that named nobody
+        if not admitted:
+            self._log_access_refusal(event, space_id, feature, action, actor, level)
+        return admitted
 
     async def _sender_names_actors(self, event: "FederationEvent") -> bool:
         """The sender advertised v_42+ — it names ``actor_user_id`` on every

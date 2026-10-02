@@ -217,3 +217,44 @@ describe('Composer link preview', () => {
     expect(extras.noLinkPreview).toBe(true)
   })
 })
+
+describe('Composer — poll attachments', () => {
+  async function composePoll(spaceId?: string) {
+    const post = vi.fn().mockResolvedValue({})
+    vi.doMock('@/api', () => ({ api: { get: vi.fn(), post } }))
+    vi.doMock('@/store/auth', () => ({
+      currentUser: { value: { username: 'pascal', display_name: 'Pascal' } },
+    }))
+    vi.doMock('./Toast', () => ({ showToast: vi.fn() }))
+    const { Composer } = await import('./Composer')
+    const onSubmit = vi.fn().mockResolvedValue('p1')
+    const view = render(<Composer onSubmit={onSubmit} spaceId={spaceId} context={spaceId ?? 'home'} />)
+    fireEvent.click(view.getByLabelText('Poll'))
+    // First submit opens the builder.
+    fireEvent.submit(view.container.querySelector('form.sh-composer')!)
+    fireEvent.input(await view.findByPlaceholderText('e.g. Pizza or tacos tonight?'),
+      { target: { value: 'Dinner?' } })
+    fireEvent.input(view.getByPlaceholderText('Option 1'), { target: { value: 'Pizza' } })
+    fireEvent.input(view.getByPlaceholderText('Option 2'), { target: { value: 'Tacos' } })
+    fireEvent.submit(document.querySelector('form.sh-poll-builder')!)
+    fireEvent.submit(view.container.querySelector('form.sh-composer')!)
+    await new Promise(r => setTimeout(r, 0))
+    return { onSubmit, post }
+  }
+
+  it('a space post sends its poll in the same request (no follow-up call)', async () => {
+    const { onSubmit, post } = await composePoll('space-1')
+    expect(onSubmit).toHaveBeenCalledOnce()
+    const extras = onSubmit.mock.calls[0][3]
+    expect(extras.poll).toMatchObject({ question: 'Dinner?', options: ['Pizza', 'Tacos'] })
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('the household feed still attaches the poll after the post exists', async () => {
+    const { onSubmit, post } = await composePoll()
+    expect(onSubmit.mock.calls[0][3]?.poll).toBeUndefined()
+    expect(post).toHaveBeenCalledWith('/api/posts/p1/poll', expect.objectContaining({
+      question: 'Dinner?', options: ['Pizza', 'Tacos'],
+    }))
+  })
+})

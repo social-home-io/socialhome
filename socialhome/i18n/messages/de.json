@@ -4,7 +4,7 @@
   "notification.task.assigned": "Dir wurde zugewiesen: {title}",
   "notification.task.deadline_due": "Aufgabe heute fällig: {title}",
   "notification.space.post.created": "Neuer Beitrag in {space_name}",
-  "notification.space.moderation.queued": "Ein Beitrag wartet auf Moderation",
+  "notification.space.moderation.queued": "In {space_name} wartet etwas auf Prüfung",
   "notification.space.join.approved": "Du bist dabei: {space_name}",
   "notification.space.join.denied": "Deine Beitrittsanfrage wurde abgelehnt.",
   "notification.space.remote_invite.accepted": "Deine Einladung wurde angenommen.",
@@ -20,5 +20,13 @@
   "notification.space.comment.added": "{author} hat in {space_name} kommentiert",
   "notification.space.here": "{author} hat alle in {space_name} benachrichtigt",
   "notification.dm.mention": "{author} hat dich in {chat_name} erwähnt",
-  "notification.dm.mention_unnamed": "{author} hat dich in einem Gruppenchat erwähnt"
+  "notification.dm.mention_unnamed": "{author} hat dich in einem Gruppenchat erwähnt",
+  "notification.space.moderation.approved": "Dein Beitrag in {space_name} wurde freigegeben",
+  "notification.space.moderation.rejected": "Dein Beitrag in {space_name} wurde nicht freigegeben",
+  "notification.space.moderation.expired": "Dein Beitrag in {space_name} ist ohne Prüfung abgelaufen",
+  "notification.space.moderation.unavailable": "„Geprüft“ ist für {features} in {space_name} nicht verfügbar, solange Mitglieder aus anderen Haushalten im Space sind — Änderungen von Mitgliedern werden abgelehnt, bis du eine andere Stufe wählst",
+  "notification.space.feature.pages": "Seiten",
+  "notification.space.feature.tasks": "Aufgaben",
+  "notification.space.feature.stickies": "Haftnotizen",
+  "notification.space.feature.calendar": "Termine"
 }

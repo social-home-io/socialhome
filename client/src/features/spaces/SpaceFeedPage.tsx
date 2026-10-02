@@ -28,7 +28,11 @@ import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
 import { SubscribeFeed } from '@/components/SubscribeFeed'
 import { PostCard } from '@/components/PostCard'
-import { Composer } from '@/components/Composer'
+import { Composer, type ComposerExtras } from '@/components/Composer'
+import { contentWrite } from '@/utils/contentWrite'
+import { PendingReviewStrip } from '@/components/PendingReviewStrip'
+import { useModerationMine } from '@/store/moderationMine'
+import { itemPreview } from './moderationItems'
 import { openCommentOverlay } from '@/components/CommentOverlay'
 import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
 import { SpaceTasksTab } from './SpaceTasksTab'
@@ -96,6 +100,9 @@ interface SpaceDetail {
    *  was removed. The latter two are remote-terminated read-only archives
    *  that can't be revived — the banner copy adapts to this. */
   archived_reason?: 'dissolved' | 'removed' | null
+  /** Another household has a member here (§4.3: "Reviewed" is posts-only
+   *  then, until federated moderation lands). */
+  has_remote_households?: boolean
 }
 
 /** Reason-aware copy for the read-only archive banner + empty-state.
@@ -245,6 +252,9 @@ export default function SpaceFeedPage() {
   // Live header / tabs / role on a config change elsewhere; a dissolve
   // leaves for the spaces list with a toast.
   useSpaceConfigWs(spaceId, () => { void loadSpaceHeader(spaceId) })
+  // The viewer's own items waiting for review (§4.3) — the
+  // "Pending review (n)" strip on each tab.
+  useModerationMine(spaceId)
   // Surface the space's name in the global TopBar (matches the
   // household feed pattern). Falls back to "Space" while the detail
   // request is in flight.
@@ -355,11 +365,7 @@ export default function SpaceFeedPage() {
     type: string,
     content: string,
     mediaUrl?: string,
-    extras?: {
-      location?: { lat: number; lon: number; label: string | null }
-      imageUrls?: string[]
-      noLinkPreview?: boolean
-    },
+    extras?: ComposerExtras,
   ) => {
     const body: Record<string, unknown> = {
       type, content, media_url: mediaUrl ?? null,
@@ -367,13 +373,28 @@ export default function SpaceFeedPage() {
     }
     if (extras?.location) body.location = extras.location
     if (extras?.noLinkPreview) body.no_link_preview = true
-    const post = await api.post(
-      `/api/spaces/${spaceId}/posts`,
-      body,
-    ) as { id: string }
-    showToast('Post shared', 'success')
+    // Poll / schedule ride the create request (atomic with the post, so
+    // a post held for review carries them).
+    if (extras?.poll) {
+      body.poll = {
+        question: extras.poll.question,
+        options: extras.poll.options,
+        allow_multiple: extras.poll.allow_multiple,
+        closes_at: extras.poll.closes_at,
+      }
+    }
+    if (extras?.schedule) {
+      body.schedule = { title: extras.schedule.title, slots: extras.schedule.slots }
+    }
+    const res = await contentWrite<{ id: string }>(
+      api.post(`/api/spaces/${spaceId}/posts`, body),
+      { spaceId },
+    )
+    // Held for review (202): nothing is in the feed yet.
+    if (res.queued) return undefined
+    showToast(t('feed.post_shared'), 'success')
     await loadSpaceFeed(spaceId)
-    return post?.id
+    return res.data?.id
   }
 
   const handleReact = async (postId: string, emoji: string) => {
@@ -574,6 +595,7 @@ export default function SpaceFeedPage() {
               allowedTypes={spaceDetail.value?.features?.allowed_post_types}
               bazaarEnabled={spaceDetail.value?.features?.bazaar ?? true} />
           )}
+          <PendingReviewStrip spaceId={spaceId} feature="posts" />
           {posts.value.length === 0 && (
             <div class="sh-empty-state">
               <div aria-hidden="true">{spaceDetail.value?.archived ? '🗄️' : '💬'}</div>
@@ -632,6 +654,7 @@ export default function SpaceFeedPage() {
         <div class="sh-space-pages">
           <h2>Pages</h2>
           {adminOnly('pages') && <AccessNote feature="pages" />}
+          <PendingReviewStrip spaceId={spaceId} feature="pages" />
           {spacePages.value.length === 0 && <p class="sh-muted">No pages in this space.</p>}
           {spacePages.value.map(p => (
             <div key={p.id} class="sh-page-card">
@@ -671,6 +694,7 @@ export default function SpaceFeedPage() {
               )}
             </div>
             {adminOnly('calendar') && <AccessNote feature="calendar" />}
+            <PendingReviewStrip spaceId={spaceId} feature="calendar" />
             <Modal
               open={subscribeFeedOpen.value}
               onClose={() => { subscribeFeedOpen.value = false }}
@@ -806,6 +830,9 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'tasks' && (
+        <PendingReviewStrip spaceId={spaceId} feature="tasks" />
+      )}
+      {activeTab.value === 'tasks' && (
         <SpaceTasksTab
           spaceId={spaceId}
           // Unknown until the member list answers: the tab waits rather
@@ -817,6 +844,9 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'stickies' && (
+        <PendingReviewStrip spaceId={spaceId} feature="stickies" />
+      )}
+      {activeTab.value === 'stickies' && (
         <StickyBoardPage
           spaceId={spaceId}
           readOnly={adminOnly('stickies') ? accessNote('stickies') : null}
@@ -827,6 +857,10 @@ export default function SpaceFeedPage() {
         <GalleryPage spaceId={spaceId} />
       )}
 
+      {activeTab.value === 'bazaar' && (
+        <PendingReviewStrip spaceId={spaceId} feature="posts"
+                            filter={i => !!itemPreview(i).bazaar} />
+      )}
       {activeTab.value === 'bazaar' && (
         <SpaceBazaarTab spaceId={spaceId} canSell={!adminOnly('posts')} />
       )}
@@ -843,7 +877,12 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'moderation' && canModerateQueue && (
-        <ModerationQueue spaceId={spaceId} canApprove={!adminOnly('posts')} />
+        // Approving creates the item as the approver: a moderator can't
+        // where the feature is kept to admins (§4.3) — rejecting stays open.
+        <ModerationQueue
+          spaceId={spaceId}
+          canApprove={(feature) => !adminOnly(feature as AccessFeature)}
+        />
       )}
     </div>
   )

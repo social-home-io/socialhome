@@ -206,6 +206,14 @@ class SpaceModerationRejected(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceModerationExpired(DomainEvent):
+    """A queued item nobody decided within its review window (7 days)."""
+
+    item: "SpaceModerationItem"
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class ReportFiled(DomainEvent):
     """A user filed a report on a post / comment / user / space."""
 

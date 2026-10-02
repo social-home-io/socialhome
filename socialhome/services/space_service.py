@@ -57,6 +57,7 @@ from ..federation.owner_bound_id import (
 )
 
 if TYPE_CHECKING:
+    from .space_moderation_service import ModerationSubmitter
     import pathlib
 
     from ..federation.invite_bootstrap import InviteBootstrapHint
@@ -86,9 +87,6 @@ from ..domain.events import (
     SpaceMemberJoined,
     SpaceMemberLeft,
     SpaceMemberProfileUpdated,
-    SpaceModerationApproved,
-    SpaceModerationQueued,
-    SpaceModerationRejected,
     SpacePostCreated,
     SpacePostModerated,
 )
@@ -108,8 +106,7 @@ from ..media.cleanup import unlink_unreferenced
 from .space_purge import purge_space_and_media
 from .protection_gate import ProtectionGateMixin
 from .content_access import ContentAccessMixin
-from ..domain.link_preview import card_survives_edit, link_preview_to_dict
-from .link_preview_service import wire_link_preview
+from ..domain.link_preview import card_survives_edit
 from ..media.image_processor import ImageProcessor
 from ..repositories.profile_picture_repo import compute_picture_hash
 from ..domain.post import (
@@ -127,6 +124,7 @@ from ..domain.space import (
     ACCESS_FEATURES,
     AccessDecision,
     ContentAction,
+    ModerationNotFederatedError,
     PeersTooOldError,
     restricted_access_changes,
     PUBLIC_SPACE_TIERS,
@@ -135,15 +133,12 @@ from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
     HouseholdUpgradeRequiredError,
-    ModerationAlreadyDecidedError,
-    ModerationStatus,
     PublicSpaceLimitError,
     RemoteAdminOutcome,
     Space,
     SpaceConfigEventType,
     SpaceFeatures,
     SpaceMember,
-    SpaceModerationItem,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
@@ -177,6 +172,7 @@ from .space_crypto_service import (
 )
 from .space_member_guard import SpaceMemberGuardMixin
 from .space_mentions import SpaceMentionResolver
+from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
 
 
 log = logging.getLogger(__name__)
@@ -308,6 +304,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_invite_keywrap_pk",
         "_invite_keywrap_sig",
         "_link_previews",
+        "_moderation",
+        "_post_attachments",
     )
 
     def __init__(
@@ -356,6 +354,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._invite_keywrap_pk = ""
         self._invite_keywrap_sig = ""
         self._link_previews: LinkPreviewService | None = None
+        # The space moderation queue (``attach_moderation``) and what rides
+        # with a post (polls / schedule polls / Bazaar listings).
+        self._moderation: "ModerationSubmitter | None" = None
+        self._post_attachments = SpacePostAttachments()
 
     def attach_invite_identity(
         self,
@@ -387,6 +389,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """Wire the gallery repo so a hard-deleted space's gallery media
         files are unlinked alongside its post media."""
         self._gallery = gallery_repo
+
+    def attach_post_attachments(self, attachments: SpacePostAttachments) -> None:
+        """Wire the poll / schedule / Bazaar creators a post can carry."""
+        self._post_attachments = attachments
+
+    def post_attachments(self) -> SpacePostAttachments:
+        return self._post_attachments
 
     def attach_bazaar_repo(self, bazaar_repo) -> None:
         """Wire the bazaar repo so a hard-deleted space's listing photos
@@ -1790,6 +1799,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
             if behind:
                 raise PeersTooOldError(behind)
+        # §4.3: review for a feature other than posts needs the queue on the
+        # host of a space without remote member households (federated
+        # moderation is a later protocol step). Refused before any
+        # forward, so a stub can't ask its host for it either.
+        if features is not None and self._moderation is not None:
+            await self._moderation.require_moderation_supported(space, features)
 
         # Delegated-admin authoritative path (v_24): when this space has
         # ``delegated_admin_authority`` ON and THIS household holds the space
@@ -2796,18 +2811,29 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                         force=p.get("force") is True,
                         **kwargs,
                     )
-                except PeersTooOldError as exc:
+                except (PeersTooOldError, ModerationNotFederatedError) as exc:
                     # Apply the rest of the edit; keep every access level as
                     # it is. The forwarding admin sees the outcome in the
                     # config broadcast that follows (their stub mirrors the
                     # host), and their SPA said the host decides.
-                    log.warning(
-                        "forwarded config edit for space %s: raised access "
-                        "level not applied — member households below v_42 "
-                        "cannot enforce it (%s); applying the rest",
-                        space_id,
-                        ", ".join(str(h.get("instance_id")) for h in exc.households),
-                    )
+                    if isinstance(exc, PeersTooOldError):
+                        log.warning(
+                            "forwarded config edit for space %s: raised access "
+                            "level not applied — member households below v_42 "
+                            "cannot enforce it (%s); applying the rest",
+                            space_id,
+                            ", ".join(
+                                str(h.get("instance_id")) for h in exc.households
+                            ),
+                        )
+                    else:
+                        log.warning(
+                            "forwarded config edit for space %s: review for %s "
+                            "not applied — the space has remote member "
+                            "households; applying the rest",
+                            space_id,
+                            exc.feature,
+                        )
                     kwargs["features"] = replace(
                         kwargs["features"],
                         **{
@@ -4720,13 +4746,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         linked_highlight_id: str | None = None,
         hidden_from_feed: bool = False,
         no_link_preview: bool = False,
-    ) -> Post | None:
+        attachments: dict | None = None,
+    ) -> Post:
         """Create a post in the space, subject to the feature's access level.
 
         Returns the persisted :class:`Post` for `open` / admin paths. For
-        `moderated` access where the author isn't an admin, the content
-        enters the moderation queue and this method returns ``None`` after
-        publishing :class:`SpaceModerationQueued`.
+        `moderated` access where the author isn't content authority, the
+        post (with its ``attachments`` — poll / schedule / Bazaar listing)
+        enters the moderation queue and :class:`ContentQueuedForReview` is
+        raised: nothing is persisted until approval.
         """
         space = await self._require_writable_space(space_id)
         author = await self._users.get_by_user_id(author_user_id)
@@ -4748,6 +4776,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             location,
             image_urls_tuple,
         )
+        clean_attachments = self._post_attachments.validate(post_type, attachments)
         # ``posts_access`` is enforced on EVERY household from its own copy
         # of the features — the host and each member household's stub
         # alike: ADMIN_ONLY refuses a non-admin's post here, before it can
@@ -4808,41 +4837,44 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             link_preview=link_preview,
         )
         if decision is AccessDecision.QUEUE:
-            now = datetime.now(timezone.utc)
-            item = SpaceModerationItem(
-                id=uuid.uuid4().hex,
-                space_id=space_id,
-                feature="posts",
-                action="create",
-                submitted_by=author.user_id,
-                payload={
-                    "post_id": post.id,
-                    "type": post_type.value,
-                    "content": content,
-                    "media_url": media_url,
-                    "file_meta": _file_meta_to_payload(file_meta),
-                    "location": (
-                        {
-                            "lat": location.lat,
-                            "lon": location.lon,
-                            "label": location.label,
-                        }
-                        if location is not None
-                        else None
-                    ),
-                    "no_link_preview": bool(no_link_preview),
-                    "link_preview": link_preview_to_dict(link_preview),
-                },
-                current_snapshot=None,
-                submitted_at=now,
-                expires_at=now + timedelta(days=7),
-                status=ModerationStatus.PENDING,
+            await self._submit_for_review(
+                space_id,
+                author.user_id,
+                "posts",
+                ContentAction.CREATE,
+                payload=post_to_queue_payload(post, clean_attachments),
             )
-            await self._spaces.save_moderation_item(item)
-            await self._bus.publish(SpaceModerationQueued(item=item))
-            return None
 
         await self._persist_post(space_id, post)
+        if clean_attachments:
+            await self._post_attachments.apply(space_id, post, clean_attachments)
+        return post
+
+    async def get_space_post(self, space_id: str, post_id: str) -> Post | None:
+        """The post ``post_id`` of ``space_id`` (deleted included), else None."""
+        got = await self._posts.get(post_id)
+        if got is None or got[0] != space_id:
+            return None
+        return got[1]
+
+    async def publish_approved_post(
+        self,
+        space_id: str,
+        post: Post,
+        *,
+        approved_by: str,
+        attachments: dict | None = None,
+    ) -> Post:
+        """Publish a post released from the moderation queue — the same
+        persist + :class:`SpacePostCreated` path as a direct post, the
+        approver named as its ``approved_by`` (v_42). The posts level is
+        checked for the APPROVER: ADMIN_ONLY takes a release from an admin
+        only."""
+        space = await self._require_writable_space(space_id)
+        await self._gate(space, approved_by, "posts", ContentAction.CREATE, False)
+        await self._persist_post(space_id, post, approved_by=approved_by)
+        if attachments:
+            await self._post_attachments.apply(space_id, post, attachments)
         return post
 
     async def _persist_post(
@@ -4914,96 +4946,6 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """user_id → the @-token (without ``@``) a composer inserts to
         mention that member so it resolves uniquely (``GET .../members``)."""
         return await self._mentions().tokens(space_id)
-
-    # ── Moderation queue admin API ─────────────────────────────────────
-
-    async def list_pending_moderation(
-        self,
-        space_id: str,
-        *,
-        actor_username: str,
-    ) -> list[SpaceModerationItem]:
-        """List pending queue items (content authority)."""
-        space = await self._require_space(space_id)
-        await self._require_content_authority(space, actor_username)
-        return await self._spaces.list_moderation_queue(
-            space_id,
-            status=ModerationStatus.PENDING,
-        )
-
-    async def approve_moderation_item(
-        self,
-        space_id: str,
-        item_id: str,
-        *,
-        actor_username: str,
-    ) -> Post:
-        """Approve a queued post. Persists the post and marks the item
-        APPROVED. Raises :class:`ModerationAlreadyDecidedError` if the
-        item is not in ``PENDING`` status.
-        """
-        space = await self._require_space(space_id)
-        actor = await self._require_content_authority(space, actor_username)
-        item = await self._spaces.get_moderation_item(item_id)
-        if item is None or item.space_id != space_id:
-            raise KeyError(f"moderation item {item_id!r} not found")
-        if item.status is not ModerationStatus.PENDING:
-            raise ModerationAlreadyDecidedError(
-                f"item {item_id!r} is already {item.status.value}",
-            )
-
-        # Releasing a post IS creating it: the space's posts level applies to
-        # the approver (an ADMIN_ONLY feed takes it from an admin only).
-        await self._gate(space, actor.user_id, "posts", ContentAction.CREATE, False)
-        post = _post_from_queue_payload(item)
-        await self._persist_post(space_id, post, approved_by=actor.user_id)
-        await self._spaces.update_moderation_item_status(
-            item_id,
-            status=ModerationStatus.APPROVED,
-            reviewed_by=actor.user_id,
-        )
-        approved = replace(
-            item,
-            status=ModerationStatus.APPROVED,
-            reviewed_by=actor.user_id,
-            reviewed_at=datetime.now(timezone.utc),
-        )
-        await self._bus.publish(SpaceModerationApproved(item=approved))
-        return post
-
-    async def reject_moderation_item(
-        self,
-        space_id: str,
-        item_id: str,
-        *,
-        actor_username: str,
-        reason: str | None = None,
-    ) -> None:
-        """Reject a queued item; item status becomes REJECTED."""
-        space = await self._require_space(space_id)
-        actor = await self._require_content_authority(space, actor_username)
-        item = await self._spaces.get_moderation_item(item_id)
-        if item is None or item.space_id != space_id:
-            raise KeyError(f"moderation item {item_id!r} not found")
-        if item.status is not ModerationStatus.PENDING:
-            raise ModerationAlreadyDecidedError(
-                f"item {item_id!r} is already {item.status.value}",
-            )
-
-        await self._spaces.update_moderation_item_status(
-            item_id,
-            status=ModerationStatus.REJECTED,
-            reviewed_by=actor.user_id,
-            rejection_reason=reason,
-        )
-        rejected = replace(
-            item,
-            status=ModerationStatus.REJECTED,
-            reviewed_by=actor.user_id,
-            reviewed_at=datetime.now(timezone.utc),
-            rejection_reason=reason,
-        )
-        await self._bus.publish(SpaceModerationRejected(item=rejected))
 
     async def edit_post(
         self,
@@ -6584,47 +6526,3 @@ def _round4(value: float | None) -> float | None:
     if value is None:
         return None
     return round(float(value), 4)
-
-
-def _file_meta_to_payload(fm: FileMeta | None) -> dict | None:
-    if fm is None:
-        return None
-    return {
-        "url": fm.url,
-        "mime_type": fm.mime_type,
-        "original_name": fm.original_name,
-        "size_bytes": fm.size_bytes,
-    }
-
-
-def _post_from_queue_payload(item: SpaceModerationItem) -> Post:
-    """Rebuild a :class:`Post` from a moderation-queue payload.
-
-    Kept in sync with the shape we serialise in :meth:`SpaceService.create_post`
-    when ``decision == "queue"``. Any change to that shape must be mirrored
-    here or approved items lose fields in round-trip.
-    """
-    payload = item.payload
-    raw_fm = payload.get("file_meta")
-    file_meta: FileMeta | None = None
-    if raw_fm:
-        try:
-            file_meta = FileMeta(
-                url=str(raw_fm.get("url", "")),
-                mime_type=str(raw_fm.get("mime_type", "")),
-                original_name=str(raw_fm.get("original_name", "")),
-                size_bytes=int(raw_fm.get("size_bytes", 0)),
-            )
-        except TypeError, ValueError:
-            file_meta = None
-    return Post(
-        id=str(payload.get("post_id") or uuid.uuid4().hex),
-        author=item.submitted_by,
-        type=_coerce_post_type(str(payload.get("type") or "text")),
-        created_at=item.submitted_at,
-        content=payload.get("content"),
-        media_url=payload.get("media_url"),
-        file_meta=file_meta,
-        no_link_preview=bool(payload.get("no_link_preview", False)),
-        link_preview=wire_link_preview(payload.get("link_preview")),
-    )

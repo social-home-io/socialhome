@@ -274,7 +274,7 @@ async def test_comments_reactions_and_rsvps_are_never_gated(client, space):
     ("level", "who", "reason"),
     [
         ("admin_only", "mem", "admin_only"),
-        ("moderated", "mem", "moderated"),
+        ("moderated", "mem", "queued"),
         ("admin_only", "adm", None),
     ],
 )
@@ -282,7 +282,8 @@ async def test_a_dropped_announcement_is_reported_to_its_creator(
     client, space, level, who, reason
 ):
     """The event saves, but its feed card is dropped when the posts level
-    keeps the creator from posting — and the response says so (and why)."""
+    keeps the creator from posting — and the response says so (and why).
+    Under MODERATED posts the card waits in the review queue instead."""
     await _set_access(client, "posts", level)
     start = datetime.now(timezone.utc) + timedelta(days=1)
     r = await client.post(
@@ -300,6 +301,10 @@ async def test_a_dropped_announcement_is_reported_to_its_creator(
     if reason is None:
         assert "announce_suppressed" not in body
         assert body["announce_in_feed"] is True
+    elif reason == "queued":
+        assert body["announce_queued"] is True and body["announce_item_id"]
+        assert "announce_suppressed" not in body
+        assert body["announce_in_feed"] is False
     else:
         assert body["announce_suppressed"] is True
         assert body["announce_suppressed_reason"] == reason

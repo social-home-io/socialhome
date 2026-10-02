@@ -360,10 +360,8 @@ class HighlightShareView(BaseView):
             feed_service=self.svc(feed_service_key),
             space_service=self.svc(space_service_key),
         )
-        # ``post`` may be ``None`` for moderated space scopes — surface a
-        # 202 Accepted so the SPA shows a "queued for review" toast.
-        if post is None:
-            return web.json_response({"queued": True}, status=202)
+        # A moderated space scope raises ContentQueuedForReview, which
+        # BaseView answers 202 with the queue item id.
         return self._json(
             {"post_id": getattr(post, "id", None), "highlight_id": highlight_id},
             status=201,

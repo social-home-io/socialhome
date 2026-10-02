@@ -22,7 +22,7 @@
   "notification.space.join.requested": "{name} wants to join {space_name}",
   "notification.space.member.joined": "{name} joined {space_name}",
   "notification.space.mention": "{author} mentioned you in {space_name}",
-  "notification.space.moderation.queued": "A post is awaiting moderation",
+  "notification.space.moderation.queued": "Something is waiting for review in {space_name}",
   "notification.space.post.created": "New post in {space_name}",
   "notification.space.remote_invite.accepted": "Your invite was accepted.",
   "notification.space.remote_invite.declined": "Your invite was declined.",
@@ -30,5 +30,13 @@
   "notification.task.completed": "{name} completed: {title}",
   "notification.task.deadline_due": "Task due today: {title}",
   "notification.dm.mention": "{author} mentioned you in {chat_name}",
-  "notification.dm.mention_unnamed": "{author} mentioned you in a group chat"
+  "notification.dm.mention_unnamed": "{author} mentioned you in a group chat",
+  "notification.space.moderation.approved": "Your submission in {space_name} was approved",
+  "notification.space.moderation.rejected": "Your submission in {space_name} was not approved",
+  "notification.space.moderation.expired": "Your submission in {space_name} expired without a review",
+  "notification.space.moderation.unavailable": "Reviewed isn't available for {features} in {space_name} while members from other households are in this space — member changes are refused until you choose another level",
+  "notification.space.feature.pages": "Pages",
+  "notification.space.feature.tasks": "Tasks",
+  "notification.space.feature.stickies": "Sticky notes",
+  "notification.space.feature.calendar": "Calendar events"
 }

@@ -20,6 +20,7 @@ from socialhome.domain.calendar import (
 )
 from socialhome.federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
+    SPACE_POST_KIND,
     OwnerBinding,
     check_owner_bound_id,
 )
@@ -31,7 +32,19 @@ from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
 )
-from socialhome.services.calendar_service import CalendarService
+from socialhome.services import calendar_service as calendar_service_module
+from socialhome.services.calendar_service import (
+    CalendarModerationHandler,
+    CalendarService,
+)
+from socialhome.domain.space import (
+    ContentAction,
+    ContentQueuedForReview,
+    ModerationStatus,
+    ModerationTargetGoneError,
+)
+from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.space_moderation_service import SpaceModerationService
 
 
 # Event seeds are anchored in the near future so the service's
@@ -2690,3 +2703,200 @@ async def test_announce_refusal_names_the_posts_level(env):
     assert await svc.announce_refusal("cal-ao", "u-mod") is None
     await env.db.enqueue("UPDATE spaces SET posts_access='open' WHERE id='cal-ao'")
     assert await svc.announce_refusal("cal-ao", "u-member") is None
+
+
+# ─── MODERATED space calendar (§4.3 review queue) ───────────────────────
+
+
+async def _moderated_calendar(env):
+    """``cal-ao`` hosted here with ``calendar_access`` MODERATED and the
+    queue wired."""
+    svc, ev, now = await _admin_only_calendar(env)
+    await env.db.enqueue(
+        "UPDATE spaces SET calendar_access='moderated', feature_calendar=1"
+        " WHERE id='cal-ao'"
+    )
+    mod = SpaceModerationService(
+        SqliteSpaceRepo(env.db),
+        user_repo=SqliteUserRepo(env.db),
+        own_instance_id=env.iid,
+    )
+    svc.attach_moderation(mod)
+    handler = CalendarModerationHandler(svc)
+    for action in (ContentAction.CREATE, ContentAction.EDIT, ContentAction.DELETE):
+        mod.register("calendar", action, handler)
+    return svc, mod, ev, now
+
+
+async def _range(env, now):
+    return await env.space_cal_repo.list_events_in_range(
+        "cal-ao", start=now - timedelta(days=1), end=now + timedelta(days=1)
+    )
+
+
+async def test_moderated_member_event_create_queues_then_approves(env):
+    svc, mod, ev, now = await _moderated_calendar(env)
+    other = await svc.create_event(
+        space_id="cal-ao",
+        summary="Own",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-mod",
+    )
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.create_event(
+            space_id="cal-ao",
+            summary="Pending",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by="u-member",
+        )
+    assert {e.id for e in await _range(env, now)} == {ev.id, other.id}
+    item = exc.value.item
+    await mod.approve("cal-ao", item.id, actor_user_id="u-mod")
+    held = await env.space_cal_repo.get_event(item.payload["target_id"])
+    assert held is not None
+    assert (held[1].summary, held[1].created_by) == ("Pending", "u-member")
+
+
+async def test_moderated_others_event_edit_and_delete_queue(env):
+    svc, mod, ev, now = await _moderated_calendar(env)
+    theirs = await svc.create_event(
+        space_id="cal-ao",
+        summary="Owner's",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-owner",
+        description="keep",
+    )
+    with pytest.raises(ContentQueuedForReview) as e:
+        await svc.update_event(
+            theirs.id, space_id="cal-ao", actor_user_id="u-member", summary="Changed"
+        )
+    described = await mod.describe(e.value.item, with_current=True)
+    assert described["snapshot"] == {"summary": "Owner's"}
+    assert described["preview"] == {"summary": "Changed"}
+    assert (await env.space_cal_repo.get_event(theirs.id))[1].summary == "Owner's"
+    await mod.approve("cal-ao", e.value.item.id, actor_user_id="u-mod")
+    got = (await env.space_cal_repo.get_event(theirs.id))[1]
+    assert (got.summary, got.description) == ("Changed", "keep")
+    # The member's own event (made while OPEN) is theirs to edit.
+    own = await svc.update_event(
+        ev.id, space_id="cal-ao", actor_user_id="u-member", summary="Mine"
+    )
+    assert own.summary == "Mine"
+    with pytest.raises(ContentQueuedForReview) as d:
+        await svc.delete_event(theirs.id, space_id="cal-ao", actor_user_id="u-member")
+    assert (await mod.describe(d.value.item))["preview"]["summary"] == "Changed"
+    await mod.approve("cal-ao", d.value.item.id, actor_user_id="u-mod")
+    assert await env.space_cal_repo.get_event(theirs.id) is None
+
+
+async def test_moderated_event_edit_of_deleted_event_410(env):
+    svc, mod, _ev, now = await _moderated_calendar(env)
+    theirs = await svc.create_event(
+        space_id="cal-ao",
+        summary="Owner's",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-owner",
+    )
+    with pytest.raises(ContentQueuedForReview) as e:
+        await svc.update_event(
+            theirs.id, space_id="cal-ao", actor_user_id="u-member", summary="x"
+        )
+    await svc.delete_event(theirs.id, space_id="cal-ao", actor_user_id="u-owner")
+    with pytest.raises(ModerationTargetGoneError):
+        await mod.approve("cal-ao", e.value.item.id, actor_user_id="u-mod")
+    assert (await mod.get_item("cal-ao", e.value.item.id)).status is (
+        ModerationStatus.EXPIRED
+    )
+
+
+async def test_moderated_event_create_reject_persists_nothing(env):
+    svc, mod, ev, now = await _moderated_calendar(env)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.create_event(
+            space_id="cal-ao",
+            summary="No",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by="u-member",
+        )
+    await mod.reject("cal-ao", exc.value.item.id, actor_user_id="u-mod", reason="dup")
+    assert [e.id for e in await _range(env, now)] == [ev.id]
+
+
+async def test_announce_under_moderated_posts_queues_the_card(env):
+    """The event saves; its feed card waits in the posts queue."""
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def submit(self, space, **kw):
+            self.calls.append(kw)
+
+    svc, _ev, now = await _admin_only_calendar(env)
+    await env.db.enqueue(
+        "UPDATE spaces SET calendar_access='open', posts_access='moderated'"
+        " WHERE id='cal-ao'"
+    )
+    rec = _Recorder()
+    svc.attach_moderation(rec)
+    saved = await svc.create_event(
+        space_id="cal-ao",
+        summary="Party",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-member",
+        announce_in_feed=True,
+    )
+    assert saved.announce_in_feed is False
+    assert await env.space_cal_repo.get_event(saved.id) is not None
+    [call] = rec.calls
+    assert call["feature"] == "posts" and call["action"] is ContentAction.CREATE
+    assert call["submitted_by"] == "u-member"
+    assert call["payload"]["type"] == "event"
+    assert call["payload"]["linked_event_id"] == saved.id
+    # The card's post id is owner-bound to the event's creator (v_36).
+    assert (
+        check_owner_bound_id(
+            SPACE_POST_KIND,
+            call["payload"]["target_id"],
+            space_id="cal-ao",
+            owner_user_id="u-member",
+        )
+        is OwnerBinding.VALID
+    )
+
+
+async def test_moderated_event_create_landed_then_federation_failed_stays_approved(
+    env, monkeypatch
+):
+    """Adversarial review I2(d): the event was saved, then a later step
+    (federation / announce) raised — the item stays APPROVED, not pending."""
+    svc, mod, _ev, now = await _moderated_calendar(env)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.create_event(
+            space_id="cal-ao",
+            summary="Saved anyway",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by="u-member",
+        )
+
+    async def boom(self, **kw):
+        raise RuntimeError("outbox down")
+
+    monkeypatch.setattr(
+        calendar_service_module.SpaceCalendarService,
+        "_publish_federation_event_saved",
+        boom,
+    )
+    result = await mod.approve("cal-ao", exc.value.item.id, actor_user_id="u-mod")
+    assert result.complete is False
+    assert await env.space_cal_repo.get_event(exc.value.item.payload["target_id"])
+    assert (await mod.get_item("cal-ao", exc.value.item.id)).status is (
+        ModerationStatus.APPROVED
+    )

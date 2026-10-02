@@ -20,6 +20,7 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 from __future__ import annotations
 
 import logging
+from typing import Any
 import pathlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +102,7 @@ from .infrastructure.app_pending_session_scheduler import (
     AppPendingSessionPruneScheduler,
 )
 from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
+from .infrastructure.moderation_expiry_scheduler import ModerationExpiryScheduler
 from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
 from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
 from .infrastructure.highlight_retention_scheduler import HighlightRetentionScheduler
@@ -203,7 +205,11 @@ from .services.moment_public_signaling_handler import MomentPublicSignalingHandl
 from .services.bot_bridge_service import BotBridgeService
 from .services.space_bot_service import SpaceBotService
 from .services.calendar_import_service import CalendarImportService
-from .services.calendar_service import CalendarService, SpaceCalendarService
+from .services.calendar_service import (
+    CalendarModerationHandler,
+    CalendarService,
+    SpaceCalendarService,
+)
 from .services.child_protection_service import ChildProtectionService
 from .services.audio_transcription_service import AudioTranscriptionService
 from .services.data_export_service import DataExportService
@@ -290,6 +296,7 @@ from .federation.sync.dm_history import (
     DmHistoryScheduler,
 )
 from .domain.events import PeerProtoVersionRaised
+from .domain.space import ContentAction
 from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
@@ -307,7 +314,9 @@ from .services.app_service import AppService
 from .services.resync_on_upgrade import request_capability_resync_if_upgraded
 from .services.preferences_service import PreferencesService
 from .services.page_conflict_service import PageConflictService
-from .services.space_page_service import SpacePageService
+from .services.space_page_service import PageModerationHandler, SpacePageService
+from .services.space_moderation_service import SpaceModerationService
+from .services.space_post_moderation import PostModerationHandler, SpacePostAttachments
 from .services.poll_service import PollService
 from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
@@ -334,8 +343,8 @@ from .services.space_crypto_service import (
 from .services.storage_quota_service import StorageQuotaService
 from .services.setup_service import SetupService
 from .services.stt_service import SttService
-from .services.sticky_service import StickyService
-from .services.task_service import SpaceTaskService, TaskService
+from .services.sticky_service import StickyModerationHandler, StickyService
+from .services.task_service import SpaceTaskService, TaskModerationHandler, TaskService
 from .services.timetable_service import SpaceTimetableService, TimetableService
 from .services.theme_service import ThemeService
 from .services.typing_service import TypingService
@@ -1582,6 +1591,69 @@ def _build_link_previews(
     )
 
 
+def _build_space_moderation(
+    *,
+    space_repo,
+    user_repo,
+    bus: EventBus,
+    federation_repo,
+    own_instance_id: str,
+    space_service: SpaceService,
+    page_service: SpacePageService,
+    task_service: SpaceTaskService,
+    sticky_service: StickyService,
+    calendar_service: SpaceCalendarService,
+    space_poll_service: PollService,
+    bazaar_service: BazaarService,
+) -> SpaceModerationService:
+    """The §4.3 moderation queue + its per-(feature, action) handler
+    registry, attached to every content service that can queue.
+
+    Built at startup, once the real ``SpaceService`` (with this household's
+    instance id — the queue lives on the host) exists. Posts register only
+    ``create``: an edit / delete of somebody else's post is content
+    authority's alone and never queues."""
+    moderation = SpaceModerationService(
+        space_repo,
+        user_repo=user_repo,
+        bus=bus,
+        federation_repo=federation_repo,
+        own_instance_id=own_instance_id,
+    )
+    # A post's poll / schedule poll / Bazaar listing ride with it (created
+    # with the post, or on its approval) — and the Bazaar must mint its
+    # wrapper post through the real SpaceService, which knows it is the host.
+    space_service.attach_post_attachments(
+        SpacePostAttachments(
+            poll_service=space_poll_service, bazaar_service=bazaar_service
+        )
+    )
+    bazaar_service.attach_spaces(space_service)
+    writes = (ContentAction.CREATE, ContentAction.EDIT, ContentAction.DELETE)
+    registrations: tuple[tuple[Any, str, Any, tuple[ContentAction, ...]], ...] = (
+        (
+            space_service,
+            "posts",
+            PostModerationHandler(space_service),
+            (ContentAction.CREATE,),
+        ),
+        (page_service, "pages", PageModerationHandler(page_service), writes),
+        (task_service, "tasks", TaskModerationHandler(task_service), writes),
+        (sticky_service, "stickies", StickyModerationHandler(sticky_service), writes),
+        (
+            calendar_service,
+            "calendar",
+            CalendarModerationHandler(calendar_service),
+            writes,
+        ),
+    )
+    for service, feature, handler, actions in registrations:
+        service.attach_moderation(moderation)
+        for action in actions:
+            moderation.register(feature, action, handler)
+    return moderation
+
+
 def _build_middleware(config: Config, limiter: RateLimiter):
     """Compose the HTTP middleware stack.
 
@@ -2074,6 +2146,7 @@ def create_app(config: Config | None = None) -> web.Application:
         bus=bus,
     )
     notification_service.attach_calendar_repo(space_cal_repo)
+    notification_service.attach_remote_member_repo(repos.space_remote_member)
     notification_service.attach_personal_calendar_repo(calendar_repo)
 
     # ── Per-user data export (§25.8.7) ──────────────────────────────────
@@ -2362,6 +2435,7 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
     routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
+    moderation_expiry_scheduler: ModerationExpiryScheduler | None = None
     app_pending_session_scheduler: AppPendingSessionPruneScheduler | None = None
     audio_transcript_scheduler: AudioTranscriptScheduler | None = None
     dm_relay_seen_scheduler: DmRelaySeenPruneScheduler | None = None
@@ -2840,6 +2914,25 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo=federation_repo,
             remote_member_repo=repos.space_remote_member,
         )
+        # §4.3 moderation queue for every MODERATED feature (host-local).
+        space_moderation = _build_space_moderation(
+            space_repo=space_repo,
+            user_repo=user_repo,
+            bus=bus,
+            federation_repo=federation_repo,
+            own_instance_id=real_instance_id,
+            space_service=real_space_service,
+            page_service=space_page_service,
+            task_service=space_task_service,
+            sticky_service=sticky_service,
+            calendar_service=space_cal_service,
+            space_poll_service=space_poll_service,
+            bazaar_service=bazaar_service,
+        )
+        app[K.space_moderation_service_key] = space_moderation
+        nonlocal moderation_expiry_scheduler
+        moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
+        await moderation_expiry_scheduler.start()
         # #114 phase 2 — the SPACE_REMOTE_ADMIN_KICK inbound handler
         # was constructed inside ``_wire_federation_stack`` before
         # ``real_space_service`` existed; wire it now so the host
@@ -3533,6 +3626,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await moment_public_signaling_handler.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        if moderation_expiry_scheduler is not None:
+            await moderation_expiry_scheduler.stop()
         if app_pending_session_scheduler is not None:
             await app_pending_session_scheduler.stop()
         if dm_relay_seen_scheduler is not None:

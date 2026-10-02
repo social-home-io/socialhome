@@ -9,6 +9,7 @@ own item.
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -17,6 +18,7 @@ from socialhome.domain.events import (
     SpaceJoinDenied,
     SpaceJoinRequested,
     SpaceModerationApproved,
+    SpaceModerationExpired,
     SpaceModerationQueued,
     SpaceModerationRejected,
 )
@@ -117,10 +119,22 @@ async def test_moderation_queued_reaches_owner_and_admins_only(env):
     assert _got(socks["adm"], "space.moderation.queued")
     # A moderator works the queue (v_41).
     assert _got(socks["mod"], "space.moderation.queued")
-    # Plain members, subscribers — and the submitter, who already knows
-    # what they submitted — never get the pending item over WS.
-    for uid in ("sub", "mem", "fol"):
+    # Plain members and subscribers never get the pending item over WS.
+    for uid in ("mem", "fol"):
         assert socks[uid].sent == [], uid
+    # The submitter, who already knows what they submitted, gets only the
+    # content-free receipt that refreshes their pending strip.
+    assert not _got(socks["sub"], "space.moderation.queued")
+    [receipt] = [json.loads(m) for m in socks["sub"].sent]
+    assert receipt == {
+        "type": "space.moderation.mine",
+        "space_id": "sp-1",
+        "item_id": "mod-1",
+        "feature": "post",
+        "action": "create",
+        "status": "pending",
+    }
+    assert "secret body" not in socks["sub"].sent[0]
 
 
 @pytest.mark.parametrize(
@@ -144,7 +158,18 @@ async def test_moderation_outcome_reaches_admins_and_submitter(
 async def test_moderation_outcome_not_duplicated_for_admin_submitter(env):
     bus, socks = env
     await bus.publish(SpaceModerationApproved(item=_item(submitted_by="adm")))
-    assert len(socks["adm"].sent) == 1
+    approved = [m for m in socks["adm"].sent if "space.moderation.approved" in m]
+    assert len(approved) == 1
+
+
+async def test_moderation_expired_reaches_moderators_and_submitter(env):
+    bus, socks = env
+    await bus.publish(SpaceModerationExpired(item=_item()))
+    for uid in ("own", "adm", "mod", "sub"):
+        assert _got(socks[uid], "space.moderation.expired"), uid
+    assert _got(socks["sub"], "space.moderation.mine")
+    for uid in ("mem", "fol"):
+        assert socks[uid].sent == [], uid
 
 
 async def test_moderation_outcome_skips_submitter_not_in_space(env):

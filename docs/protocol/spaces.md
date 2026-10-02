@@ -1140,7 +1140,7 @@ tiers, each one frozenset that every guard — local and federated — reads:
 | Tier | Roles | What it covers |
 |---|---|---|
 | **Settings** (`SETTINGS_AUTHORITY_ROLES`) | owner, admin | config, features, access levels, members and roles, invites, bans / kicks, ownership, key rotation, archive / delete, zones, timetables, bots, themes, `@here`, join requests, multi-admin votes, the delegated signing seed, renaming / deleting someone else's whole gallery album |
-| **Content** (`CONTENT_AUTHORITY_ROLES`) | owner, admin, **moderator** | the post moderation queue (list / approve / reject), editing and deleting other people's posts and comments, deleting single gallery items, deciding RSVP requests on someone else's event; bypasses `MODERATED` for one's own posts |
+| **Content** (`CONTENT_AUTHORITY_ROLES`) | owner, admin, **moderator** | the moderation queue of every feature (list / approve / reject), editing and deleting other people's posts and comments, deleting single gallery items, deciding RSVP requests on someone else's event; bypasses `MODERATED` for one's own writes |
 | **Writer** (`WRITER_ROLES`) | owner, admin, moderator, member | creating content |
 
 An `ADMIN_ONLY` feature stays owner / admin only — a moderator is
@@ -1188,7 +1188,7 @@ federated `features` block):
 | Level | Who may create / edit / delete |
 |---|---|
 | `open` | every writer seat (owner, admin, moderator, member) |
-| `moderated` | posts: a member's post queues on the **host** for content authority; content authority posts directly. Other features behave as `open` in v_42 (the settings UI does not offer `moderated` for them yet) |
+| `moderated` ("Reviewed") | a member's **new** item, and their edit / delete of **somebody else's** item, waits in the host's moderation queue until content authority approves it; own edits / deletes, layout moves and content authority's own writes proceed. Features other than posts: host-only spaces until federated moderation (see [Moderation queue](#moderation-queue-local)) |
 | `admin_only` | the owner and admins only — moderators and members are read-only for that feature (layout moves — a task reorder, a sticky drag — included) |
 
 Never gated: comments, reactions, poll votes, schedule answers, bazaar
@@ -1251,7 +1251,29 @@ the receiver's own copy of the level:
    identity gets that household rule only on a **bot's own row** (an
    admin-configured bot's post); as the actor of an edit / delete of
    anybody else's row it is refused.
-5. `moderated` → admitted in v_42.
+5. `moderated` → **posts** admitted (the host's queue already judged a
+   member's post). **Every other feature** (pages, tasks + lists, stickies,
+   calendar) admits only a content-authority actor (`moderates_as`; from an
+   older sender naming nobody, a content-authority household —
+   `has_content_authority`), an edit / delete of the actor's own row, and a
+   layout move (a sticky drag with unchanged content and colour; a task whose
+   only change is its position). A plain member's create, or edit / delete of
+   someone else's row, is exactly a write that would have waited for review
+   — which only a host without remote households can hold — so it is
+   **refused, fail closed, on every receiver** (WARNING): a modified or older
+   member household cannot publish past review. As locally, a task's
+   **assignee** owns its status and position: an edit naming an assignee of
+   the held task that changes nothing else is judged as their own row's.
+
+   *Actor-less older senders.* A household below v_42 (or one that never
+   advertised) names no `actor_user_id`, so its write is judged by the
+   **household**: admitted when the sender is the host or holds a live
+   `admin` / `moderator` seat (`has_content_authority`), refused otherwise.
+   The residual mirrors `ADMIN_ONLY`'s: a pre-v_42 household with one
+   moderator seat passes for all of its users' writes — it gains nothing a
+   v_42 household couldn't by naming that moderator, and it shows in
+   `PEERS_TOO_OLD` whenever a level is raised. A v_42 sender that names
+   nobody is refused.
 
 **Residual — `proto_version` is self-declared.** A household is judged as
 "older" by what it advertises in `INSTANCE_CAPABILITIES_UPDATED`. One that
@@ -1297,6 +1319,138 @@ refuses, it applies the rest of the edit and keeps every access level as it
 was (WARNING); the forwarding admin's PATCH answered `forwarded: true`, so
 their settings page says the host decides and shows the level in force —
 the config broadcast that follows updates it either way.
+
+## Moderation queue (local)
+
+Under `moderated` the queue lives on the space's **host** household
+(`space_moderation_queue`, `SpaceModerationService`). Nothing about it is on
+the wire in this version: an approval replays the write through the
+feature's normal persist path, so the released content federates exactly
+like a direct write (a post's `SPACE_POST_CREATED` names the approver as
+`actor_user_id`, the moderation release `access_admits` allows the host).
+
+**What queues** — `SpaceFeatures.access_decision` answers `queue` for a
+plain member's:
+
+* create of any item (a post with its poll / schedule poll / Bazaar
+  listing, a page, a task or list, a sticky, a calendar event);
+* edit / delete / archive of an item somebody else owns (a task's
+  assignees own its status and column moves).
+
+Never queued: own edits / deletes, layout (a same-column task reorder, a
+sticky move), comments, reactions, RSVPs, reminders, and every write by the
+owner, an admin or a moderator.
+
+**Where it holds** — until federated moderation (a later protocol version)
+the queue holds a feature other than `posts` only for a space with **no
+remote member households**:
+
+* `PATCH /api/spaces/{id}` setting `pages` / `tasks` / `stickies` /
+  `calendar` to `moderated` answers **422 `MODERATION_NOT_FEDERATED`** on a
+  space with a remote member household, or on a remote-hosted stub (checked
+  before the edit is forwarded). A forwarded remote-admin edit asking for it
+  is applied without the level change (WARNING), like `PEERS_TOO_OLD`.
+* A write that would queue where the queue cannot hold it (a household that
+  joined after the level was set, a stub) is refused with **403
+  `MODERATION_NOT_FEDERATED`** — never applied.
+* When a household's **first** member takes a seat in a space that keeps a
+  feature other than posts `moderated`, the space's local owner / admins get
+  one `moderation_unavailable` notification ("Reviewed isn't available for
+  Tasks in … — member changes are refused until you choose another level")
+  and the settings page flags each such feature until another level is
+  picked. It is pushed once per (space, household): the bell's link names
+  the household, so the same household rejoining shows it again in-app
+  without another push.
+* **Upgrade note.** A space that already had a non-post feature at
+  `moderated` together with remote member households (possible under v_42,
+  where it behaved as `open`) now **refuses** members' changes to that
+  feature — locally (403 `MODERATION_NOT_FEDERATED`) and on every receiver —
+  until an admin chooses `open` or `admin_only`.
+* **Personal bots.** Under `moderated` posts a member-scope bot (its
+  maker's voice) is refused — `POST /api/bot-bridge/spaces/{id}` answers 403
+  `BOT_POSTS_REVIEWED` — rather than queued: a bot is an unattended
+  automation, and queuing would silently fill its maker's pending cap and
+  publish time-critical notices hours late. A bot made by content authority,
+  and a space-scope bot an admin set up, keep posting.
+* **Posts keep their older behaviour:** a member's post queues on the host;
+  a member household sends its member's post straight on, and the host's
+  receivers admit it (`moderated` → admitted).
+
+**Life of an item.** Submit validates the payload with the live path's
+codecs, mints the new item's owner-bound id up front (approval is
+idempotent, the item stays the submitter's), stores the proposed state in
+`payload_json` and — for an edit — the old values of exactly the changed
+fields in `current_snapshot` (the full row for a delete), and answers 202.
+Caps: 20 pending per submitter per space, 500 per space (429
+`QUEUE_FULL`), 256 KiB per payload (413), a rejection reason ≤ 500
+characters. Approve claims the row with a conditional `UPDATE … WHERE
+status='pending'` (two moderators approving at once persist it once), checks
+the feature's level for the **approver** (`admin_only` → admins only), and
+replays it; a page edit whose page changed since submit is 409 `STALE`
+until approved with `force` (latest wins); a task / sticky / event edit is
+latest-wins per field; an edit of a deleted item expires (410
+`TARGET_GONE`), a delete of one is a no-op approval; a disabled feature or
+archived space is 409 `FEATURE_UNAVAILABLE` (reject still works); an author
+who left is expired. An approved post's `created_at` is the moment of
+**approval**, not of submission, so it lands at the top of the feed when it
+appears (the queue item keeps `submitted_at`); the post id is still the one
+minted at submit. Items expire after 7 days, and the content of
+decided / expired items is NULLed 7 days later
+(`ModerationExpiryScheduler`, hourly). Approving an item past `expires_at`
+expires it (410 `EXPIRED`); approving anywhere but the host is 409
+`NOT_HOST`, before any work.
+
+**A failure part-way never reopens published content.** If the apply fails
+before the item's primary write landed, the claim is released — and only
+from the status this approve claimed, so it can never reopen an item
+decided meanwhile. If the content already landed (the post, the event,
+the edit reads back as proposed) and only a later step failed — the poll /
+schedule / listing riding with a post, a bus publish, a federation enqueue
+— the item **stays approved** (WARNING) and the approve answers
+`complete: false`; approving the approved item again creates whatever is
+still missing (attachment creation is idempotent) and answers
+`complete: true`. A post's attachments can't share one transaction with it
+(separate repos, each publishing its own event), hence resumable rather
+than atomic. Two guards keep a resume from ever duplicating:
+
+* **One apply per item at a time.** While an approve or resume of an item
+  runs, another answers 409 `IN_PROGRESS` (a double-click, two moderators).
+  A household is one process with one database writer, so an in-process
+  check-and-add serialises it without any new column.
+* **Create-once in the repo.** Each attachment is written once per post in
+  one transaction — the poll row and its options, the schedule and its
+  slots (`INSERT … ON CONFLICT(post_id) DO NOTHING`, children only when the
+  parent was new), the listing (an insert that never updates) — and its
+  event is published only by the call that created it.
+
+A resume runs the same checks as an approve first (expiry, archived space,
+feature off, the feature's level for the approver, the author still a
+writer); it never changes a published item's status.
+
+**Who sees pending content** — only its submitter (`GET …/moderation/mine`,
+the `space.moderation.mine` receipt frame) and the space's content
+authority (`GET …/moderation`, `space.moderation.*` frames,
+`moderation_pending` bell). No feed, list, search index, sync stream,
+export, backup or federation event carries it; the submitter's
+`moderation_decided` bell is title-only and never carries the reason. The
+media a pending item will publish is kept by the orphan sweep (its payload
+counts as a reference) until it is decided.
+
+```mermaid
+sequenceDiagram
+    participant Mem as Member (host household)
+    participant H as Host SpaceModerationService
+    participant Mod as Moderator
+    participant O as Member households
+    Mem->>H: POST /api/spaces/{id}/stickies (stickies_access = moderated)
+    H->>H: queue_holds? (host, no remote households) ✓ → insert pending
+    H-->>Mem: 202 {queued, item_id, feature, action}
+    H-->>Mod: space.moderation.queued + moderation_pending bell
+    Mod->>H: POST …/moderation/{item_id}/approve
+    H->>H: claim (WHERE status='pending') → StickyService.create(approved_by=Mod)
+    H-->>Mem: space.moderation.mine + moderation_decided bell
+    Note over H,O: posts only: SPACE_POST_CREATED {actor_user_id: Mod} as today
+```
 
 ## Cross-household admin promotion
 
@@ -2140,6 +2294,15 @@ shape — no per-event-type `_ROUTED` variants are needed.
   per-feature access gate every local write path asks;
   `socialhome/federation/space_authorship.py` —
   `SpaceAuthorship.access_admits`, the receiver's.
+- `socialhome/services/space_moderation_service.py` —
+  `SpaceModerationService`, the host-local moderation queue and its
+  per-(feature, action) handler registry; the handlers live with their
+  content services (`PageModerationHandler`, `TaskModerationHandler`,
+  `StickyModerationHandler`, `CalendarModerationHandler`) and in
+  `space_post_moderation.py` (`PostModerationHandler`, the queued-post
+  round trip and `SpacePostAttachments`);
+  `socialhome/infrastructure/moderation_expiry_scheduler.py` — the hourly
+  expiry + payload purge.
 - `socialhome/federation/route_discovery.py` —
   `RouteDiscoveryService`: BFS-flooded probe + per-target ephemeral
   caching + 5-min route cache; `cached_target_identity_pk` exposes the

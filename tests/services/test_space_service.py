@@ -26,6 +26,8 @@ from socialhome.federation.owner_bound_id import (
     check_owner_bound_id,
 )
 from socialhome.domain.space import (
+    ContentAction,
+    ContentQueuedForReview,
     HouseholdUpgradeRequiredError,
     JoinMode,
     Space,
@@ -49,6 +51,8 @@ from socialhome.domain.media_constraints import (
     SPACE_COVER_SNAPSHOT_MAX_BYTES,
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
+from socialhome.services.space_moderation_service import SpaceModerationService
+from socialhome.services.space_post_moderation import PostModerationHandler
 from socialhome.services.space_service import (
     SPACE_CATEGORIES,
     SpaceService,
@@ -81,11 +85,17 @@ async def stack(tmp_dir):
     space_svc = SpaceService(
         space_repo, space_post_repo, user_repo, bus, own_instance_id=iid
     )
+    moderation = SpaceModerationService(
+        space_repo, user_repo=user_repo, bus=bus, own_instance_id=iid
+    )
+    space_svc.attach_moderation(moderation)
+    moderation.register("posts", ContentAction.CREATE, PostModerationHandler(space_svc))
 
     class Stack:
         pass
 
     s = Stack()
+    s.mod = moderation
     s.db = db
     s.bus = bus
     s.user_svc = user_svc
@@ -101,6 +111,45 @@ async def stack(tmp_dir):
     s.provision_user = provision_user
     yield s
     await db.shutdown()
+
+
+async def _uid(stack, username: str) -> str:
+    user = await stack.space_svc._users.get(username)
+    assert user is not None
+    return user.user_id
+
+
+async def _queue_post(stack, space_id: str, **kw):
+    """A post that must go to the review queue; returns the queue item."""
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await stack.space_svc.create_post(space_id, **kw)
+    return exc.value.item
+
+
+async def _list_pending(stack, space_id: str, *, actor_username: str):
+    return await stack.mod.list_items(
+        space_id, actor_user_id=await _uid(stack, actor_username)
+    )
+
+
+async def _approve(stack, space_id: str, item_id: str, *, actor_username: str):
+    result = await stack.mod.approve(
+        space_id, item_id, actor_user_id=await _uid(stack, actor_username)
+    )
+    got = await stack.space_post_repo.get(result.post_id)
+    assert got is not None
+    return got[1]
+
+
+async def _reject(
+    stack, space_id: str, item_id: str, *, actor_username: str, reason=None
+):
+    await stack.mod.reject(
+        space_id,
+        item_id,
+        actor_user_id=await _uid(stack, actor_username),
+        reason=reason,
+    )
 
 
 async def test_create_and_dissolve(stack):
@@ -539,13 +588,13 @@ async def test_space_post_with_moderation(stack):
         actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
-    result = await stack.space_svc.create_post(
+    await _queue_post(
+        stack,
         space.id,
         author_user_id=b.user_id,
         type=PostType.TEXT,
         content="pending",
     )
-    assert result is None
     direct = await stack.space_svc.create_post(
         space.id,
         author_user_id=a.user_id,
@@ -569,21 +618,21 @@ async def test_approve_moderation_item_persists_post(stack):
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
     # Bob's post goes to the queue.
-    assert (
-        await stack.space_svc.create_post(
-            space.id,
-            author_user_id=b.user_id,
-            type=PostType.TEXT,
-            content="hello",
-        )
-        is None
+    await _queue_post(
+        stack,
+        space.id,
+        author_user_id=b.user_id,
+        type=PostType.TEXT,
+        content="hello",
     )
-    pending = await stack.space_svc.list_pending_moderation(
+    pending = await _list_pending(
+        stack,
         space.id,
         actor_username="anna",
     )
     assert len(pending) == 1
-    approved_post = await stack.space_svc.approve_moderation_item(
+    approved_post = await _approve(
+        stack,
         space.id,
         pending[0].id,
         actor_username="anna",
@@ -592,7 +641,8 @@ async def test_approve_moderation_item_persists_post(stack):
     assert approved_post.author == b.user_id
     # Item is now APPROVED; no longer listed as pending.
     assert (
-        await stack.space_svc.list_pending_moderation(
+        await _list_pending(
+            stack,
             space.id,
             actor_username="anna",
         )
@@ -616,17 +666,20 @@ async def test_reject_moderation_item_records_reason(stack):
         actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
-    await stack.space_svc.create_post(
+    await _queue_post(
+        stack,
         space.id,
         author_user_id=b.user_id,
         type=PostType.TEXT,
         content="spam",
     )
-    pending = await stack.space_svc.list_pending_moderation(
+    pending = await _list_pending(
+        stack,
         space.id,
         actor_username="anna",
     )
-    await stack.space_svc.reject_moderation_item(
+    await _reject(
+        stack,
         space.id,
         pending[0].id,
         actor_username="anna",
@@ -648,24 +701,28 @@ async def test_moderation_requires_admin(stack):
         actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
-    await stack.space_svc.create_post(
+    await _queue_post(
+        stack,
         space.id,
         author_user_id=b.user_id,
         type=PostType.TEXT,
         content="x",
     )
-    pending = await stack.space_svc.list_pending_moderation(
+    pending = await _list_pending(
+        stack,
         space.id,
         actor_username="anna",
     )
     with pytest.raises(SpacePermissionError):
-        await stack.space_svc.approve_moderation_item(
+        await _approve(
+            stack,
             space.id,
             pending[0].id,
             actor_username="bob",
         )
     with pytest.raises(SpacePermissionError):
-        await stack.space_svc.list_pending_moderation(
+        await _list_pending(
+            stack,
             space.id,
             actor_username="bob",
         )
@@ -683,29 +740,34 @@ async def test_double_decide_raises_already_decided(stack):
         actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
-    await stack.space_svc.create_post(
+    await _queue_post(
+        stack,
         space.id,
         author_user_id=b.user_id,
         type=PostType.TEXT,
         content="x",
     )
-    pending = await stack.space_svc.list_pending_moderation(
+    pending = await _list_pending(
+        stack,
         space.id,
         actor_username="anna",
     )
-    await stack.space_svc.approve_moderation_item(
+    await _approve(
+        stack,
         space.id,
         pending[0].id,
         actor_username="anna",
     )
     with pytest.raises(ModerationAlreadyDecidedError):
-        await stack.space_svc.approve_moderation_item(
+        await _approve(
+            stack,
             space.id,
             pending[0].id,
             actor_username="anna",
         )
     with pytest.raises(ModerationAlreadyDecidedError):
-        await stack.space_svc.reject_moderation_item(
+        await _reject(
+            stack,
             space.id,
             pending[0].id,
             actor_username="anna",
@@ -7524,21 +7586,15 @@ async def test_space_post_link_preview_built_by_author_and_survives_moderation(s
         actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
     )
-    assert (
-        await stack.space_svc.create_post(
-            space.id,
-            author_user_id=b.user_id,
-            type=PostType.TEXT,
-            content="queued https://example.com/",
-        )
-        is None
+    await _queue_post(
+        stack,
+        space.id,
+        author_user_id=b.user_id,
+        type=PostType.TEXT,
+        content="queued https://example.com/",
     )
-    pending = await stack.space_svc.list_pending_moderation(
-        space.id, actor_username="anna"
-    )
-    approved = await stack.space_svc.approve_moderation_item(
-        space.id, pending[0].id, actor_username="anna"
-    )
+    pending = await _list_pending(stack, space.id, actor_username="anna")
+    approved = await _approve(stack, space.id, pending[0].id, actor_username="anna")
     assert approved.link_preview is not None and approved.link_preview.title == "Card"
     opted_out = await stack.space_svc.create_post(
         space.id,
@@ -7610,23 +7666,18 @@ async def test_moderator_works_the_moderation_queue(stack):
     space, u = await _space_with_roles(stack)
     await _moderated(stack, space)
     for content in ("one", "two"):
-        await stack.space_svc.create_post(
+        await _queue_post(
+            stack,
             space.id,
             author_user_id=u["bob"].user_id,
             type=PostType.TEXT,
             content=content,
         )
-    pending = await stack.space_svc.list_pending_moderation(
-        space.id, actor_username="mo"
-    )
+    pending = await _list_pending(stack, space.id, actor_username="mo")
     assert len(pending) == 2
-    approved = await stack.space_svc.approve_moderation_item(
-        space.id, pending[0].id, actor_username="mo"
-    )
+    approved = await _approve(stack, space.id, pending[0].id, actor_username="mo")
     assert approved.author == u["bob"].user_id
-    await stack.space_svc.reject_moderation_item(
-        space.id, pending[1].id, actor_username="mo", reason="no"
-    )
+    await _reject(stack, space.id, pending[1].id, actor_username="mo", reason="no")
     item = await stack.space_repo.get_moderation_item(pending[0].id)
     assert item.status is ModerationStatus.APPROVED
     assert item.reviewed_by == u["mo"].user_id
@@ -7635,7 +7686,7 @@ async def test_moderator_works_the_moderation_queue(stack):
 async def test_a_member_still_cannot_work_the_queue(stack):
     space, _u = await _space_with_roles(stack)
     with pytest.raises(SpacePermissionError):
-        await stack.space_svc.list_pending_moderation(space.id, actor_username="bob")
+        await _list_pending(stack, space.id, actor_username="bob")
 
 
 async def test_moderator_bypasses_moderated_but_not_admin_only(stack):
@@ -8270,22 +8321,20 @@ async def test_a_moderator_cannot_approve_into_an_admin_only_feed(stack):
 
     space, u = await _space_with_roles(stack)
     await _moderated(stack, space)
-    await stack.space_svc.create_post(
-        space.id, author_user_id=u["bob"].user_id, type=PostType.TEXT, content="q"
+    await _queue_post(
+        stack,
+        space.id,
+        author_user_id=u["bob"].user_id,
+        type=PostType.TEXT,
+        content="q",
     )
-    (item,) = await stack.space_svc.list_pending_moderation(
-        space.id, actor_username="anna"
-    )
+    (item,) = await _list_pending(stack, space.id, actor_username="anna")
     await _admin_only_posts(stack, space)
     with pytest.raises(AccessAdminOnlyError):
-        await stack.space_svc.approve_moderation_item(
-            space.id, item.id, actor_username="mo"
-        )
+        await _approve(stack, space.id, item.id, actor_username="mo")
     created: list = []
     stack.space_svc._bus.subscribe(SpacePostCreated, created.append)
-    post = await stack.space_svc.approve_moderation_item(
-        space.id, item.id, actor_username="olga"
-    )
+    post = await _approve(stack, space.id, item.id, actor_username="olga")
     assert post.author == u["bob"].user_id
     assert [e.approved_by for e in created] == [u["olga"].user_id]
 

@@ -4,7 +4,7 @@
   "notification.task.assigned": "Toegewezen: {title}",
   "notification.task.deadline_due": "Taak verloopt vandaag: {title}",
   "notification.space.post.created": "Nieuw bericht in {space_name}",
-  "notification.space.moderation.queued": "Een bericht wacht op moderatie",
+  "notification.space.moderation.queued": "Er wacht iets op beoordeling in {space_name}",
   "notification.space.join.approved": "Je zit erin: {space_name}",
   "notification.space.join.denied": "Je deelname-aanvraag is afgewezen.",
   "notification.space.remote_invite.accepted": "Je uitnodiging is aanvaard.",
@@ -20,5 +20,13 @@
   "notification.space.comment.added": "{author} reageerde in {space_name}",
   "notification.space.here": "{author} heeft iedereen in {space_name} gewaarschuwd",
   "notification.dm.mention": "{author} noemde je in {chat_name}",
-  "notification.dm.mention_unnamed": "{author} noemde je in een groepschat"
+  "notification.dm.mention_unnamed": "{author} noemde je in een groepschat",
+  "notification.space.moderation.approved": "Je inzending in {space_name} is goedgekeurd",
+  "notification.space.moderation.rejected": "Je inzending in {space_name} is niet goedgekeurd",
+  "notification.space.moderation.expired": "Je inzending in {space_name} is verlopen zonder beoordeling",
+  "notification.space.moderation.unavailable": "‘Beoordeeld’ is niet beschikbaar voor {features} in {space_name} zolang er leden van andere huishoudens in deze space zijn — wijzigingen van leden worden geweigerd tot je een ander niveau kiest",
+  "notification.space.feature.pages": "Pagina's",
+  "notification.space.feature.tasks": "Taken",
+  "notification.space.feature.stickies": "Notities",
+  "notification.space.feature.calendar": "Agenda-items"
 }

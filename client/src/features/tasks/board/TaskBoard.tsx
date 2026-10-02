@@ -32,6 +32,7 @@ import type { TaskItem } from '@/types'
 import { ArchiveDivider } from '@/features/organize/shared/ArchiveDivider'
 import { useNarrow } from '@/features/timetable/useNarrow'
 import { pendingDeletes } from '@/utils/undoableDelete'
+import { pendingTargetIds } from '@/store/moderationMine'
 import { useTaskScope } from '../scope'
 import { BOARD_COLUMNS, columnTasks, planMove, planStep, type MovePlan, type StepDir } from './moves'
 import { TaskCard, statusLabel } from './TaskCard'
@@ -106,6 +107,8 @@ export function TaskBoard({ listId, tasks, onOpen }: Props) {
     BOARD_COLUMNS.map(s => [s, columnTasks(shownTasks, s)]),
   ) as Record<TaskStatus, TaskItem[]>
   const editable = (x: TaskItem) => scope.canEdit(x)
+  // The viewer's own changes waiting for a moderator (§4.3).
+  const inReview = store.spaceId ? pendingTargetIds(store.spaceId, 'tasks') : new Set<string>()
   const readOnlyReason = scope.readOnlyReason()
 
   /** The list as the store has it now (minus pending deletes) and the
@@ -143,7 +146,14 @@ export function TaskBoard({ listId, tasks, onOpen }: Props) {
       const pending = store.moveTask(plan.id, plan.status, plan.order)
       if (focus) focusCard(plan.id)
       try {
-        await pending
+        if (await pending === 'queued') {
+          // Held for review (someone else's task in a "Reviewed" space):
+          // the card went back; the store toasted.
+          setAnnounce(t('tasks.board.move_queued', { title: task.title }))
+          if (narrow) setMobileCol(original)
+          if (focus) focusCard(plan.id)
+          return
+        }
         // A late re-render may have taken focus from the moved card.
         if (focus && document.activeElement === document.body) focusCard(plan.id)
       } catch (err) {
@@ -249,6 +259,7 @@ export function TaskBoard({ listId, tasks, onOpen }: Props) {
             pressing={drag.pressingId === x.id}
             canMoveUp={i > 0}
             canMoveDown={i < rows.length - 1}
+            pendingReview={inReview.has(x.id)}
             onOpen={() => onOpen(x)}
             onMoveTo={s => moveTo(x.id, s)}
             onStep={d => step(x.id, d)}
