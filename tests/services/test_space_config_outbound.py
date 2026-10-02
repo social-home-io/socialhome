@@ -143,7 +143,13 @@ async def test_dissolved_is_skipped_here(fed, space_repo):
 
 @pytest.mark.parametrize(
     "event_type",
-    ["admin_granted", "admin_revoked", "member_banned", "member_unbanned"],
+    [
+        "admin_granted",
+        "admin_revoked",
+        "role_changed",
+        "member_banned",
+        "member_unbanned",
+    ],
 )
 async def test_roster_events_are_not_federated_as_config(fed, space_repo, event_type):
     """Role / ban / unban events ride the LOCAL bus (realtime/UI) but federate

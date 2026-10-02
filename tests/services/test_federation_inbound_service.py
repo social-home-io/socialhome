@@ -1064,6 +1064,64 @@ async def test_space_member_role_changed_promotes_local_member(db, bus, inbound)
     assert len(captured) == 1
 
 
+@pytest.mark.parametrize("role", ["moderator", "member", "admin"])
+async def test_space_member_role_changed_applies_every_assignable_role(
+    db, inbound, role
+):
+    """v_41 — the receiver accepts {admin, moderator, member}."""
+    await _seed_role_space(db)
+    await inbound._on_space_member_role_changed(
+        _event(
+            FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+            {"user_id": "u-1", "role": role},
+            space_id="sp-role",
+            from_instance="peer-a",
+        )
+    )
+    row = await db.fetchone(
+        "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+        ("sp-role", "u-1"),
+    )
+    assert row["role"] == role
+
+
+async def test_space_member_role_changed_names_a_moderator_change(db, bus, inbound):
+    await _seed_role_space(db)
+    captured: list = []
+
+    async def _cap(e):
+        captured.append(e)
+
+    bus.subscribe(SpaceConfigChanged, _cap)
+    await inbound._on_space_member_role_changed(
+        _event(
+            FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+            {"user_id": "u-1", "role": "moderator"},
+            space_id="sp-role",
+            from_instance="peer-a",
+        )
+    )
+    assert [e.event_type for e in captured] == ["role_changed"]
+
+
+@pytest.mark.parametrize("role", ["owner", "subscriber", "overlord", ""])
+async def test_space_member_role_changed_drops_unassignable_roles(db, inbound, role):
+    await _seed_role_space(db)
+    await inbound._on_space_member_role_changed(
+        _event(
+            FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+            {"user_id": "u-1", "role": role},
+            space_id="sp-role",
+            from_instance="peer-a",
+        )
+    )
+    row = await db.fetchone(
+        "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+        ("sp-role", "u-1"),
+    )
+    assert row["role"] == "member"
+
+
 async def test_space_member_role_changed_rejects_non_host(db, inbound):
     """Roles are host-authoritative — a role change from anyone other than
     the owning instance is dropped (no privilege spoofing)."""

@@ -966,6 +966,18 @@ async def test_space_writer_refuses_every_write_family_from_a_follower(
     assert ctx.early_response == REFUSED
 
 
+@pytest.mark.parametrize("role", ["member", "moderator", "admin"])
+async def test_space_writer_admits_every_writer_seat(role):
+    """A ``moderator`` seat (v_41) writes like a member — the gate must not
+    drop a moderator household's posts as follower writes."""
+    ctx = await _run(
+        _writer_step(seats=[_FakeSeat(role)]),
+        FederationEventType.SPACE_POST_CREATED,
+        {"author": "u-x", "content": "hi"},
+    )
+    assert ctx.early_response is None
+
+
 async def test_space_writer_refuses_a_spoofed_author():
     """The decision is keyed on the SIGNED ``from_instance``, never on the
     payload's author field, which the sender writes.

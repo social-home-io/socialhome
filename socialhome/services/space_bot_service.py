@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..domain.events import DomainEvent
-from ..domain.space import SpacePermissionError, SpaceRole
+from ..domain.space import SETTINGS_AUTHORITY_ROLES, SpacePermissionError
 from ..domain.space_bot import (
     MAX_BOT_ICON_LEN,
     MAX_BOT_NAME_LEN,
@@ -287,7 +287,7 @@ class SpaceBotService(SpaceMemberGuardMixin):
         await self._role_or_raise(
             space_id,
             actor.user_id,
-            (SpaceRole.OWNER, SpaceRole.ADMIN),
+            SETTINGS_AUTHORITY_ROLES,
             message="owner/admin required to manage space-scope bots",
         )
 
@@ -295,7 +295,7 @@ class SpaceBotService(SpaceMemberGuardMixin):
         """Admin/owner always; creating member for their own scope=member bot."""
         actor = await self._actor_or_raise(actor_username, label="user")
         member = await self._member_or_raise(bot.space_id, actor.user_id)
-        if member.role in (SpaceRole.OWNER, SpaceRole.ADMIN):
+        if member.role in SETTINGS_AUTHORITY_ROLES:
             return
         # Non-admins can only manage their own member-scope bots.
         if bot.scope is BotScope.MEMBER and bot.created_by == actor.user_id:

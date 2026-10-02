@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 from ..domain import timetable as td
 from ..domain.events import TimetableDeleted, TimetableSaved
 from ..domain.preferences import FeatureDisabledError
-from ..domain.space import SpacePermissionError, SpaceRole
+from ..domain.space import SETTINGS_AUTHORITY_ROLES, SpacePermissionError
 from ..domain.timetable import (
     UNSET,
     ResolvedDay,
@@ -86,7 +86,7 @@ _MAX_SHIFT_MINUTES: Final = 24 * 60 - 1
 _SECTION: Final = "timetable"
 #: The :class:`~socialhome.domain.space.SpaceFeatures` field gating spaces.
 _SPACE_FEATURE: Final = "timetable"
-_SPACE_EDITORS: Final = (SpaceRole.OWNER, SpaceRole.ADMIN)
+_SPACE_EDITORS: Final = SETTINGS_AUTHORITY_ROLES
 _COPY_SUFFIX: Final = " (copy)"
 _DEFAULTS_KEYS: Final = frozenset(td.defaults_to_dict(td.TimetableDefaults()))
 

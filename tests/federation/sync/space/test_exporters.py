@@ -64,6 +64,32 @@ async def test_members_exporter():
     assert recs[0]["role"] == "member"
 
 
+async def test_pre_moderator_members_exporter_downgrades_only_moderators():
+    from socialhome.federation.sync.space.exporters import MembersExporter
+    from socialhome.federation.sync.space.exporters.members import (
+        PreModeratorMembersExporter,
+    )
+
+    rows = [
+        SpaceMember(space_id="sp-1", user_id=uid, role=role, joined_at="2026")
+        for uid, role in (
+            ("u-o", "owner"),
+            ("u-a", "admin"),
+            ("u-mod", "moderator"),
+            ("u-m", "member"),
+        )
+    ]
+    ex = PreModeratorMembersExporter(MembersExporter(_FakeSpaceRepo(members=rows)))
+    assert ex.resource == "members"
+    recs = await ex.list_records("sp-1")
+    assert {r["user_id"]: r["role"] for r in recs} == {
+        "u-o": "owner",
+        "u-a": "admin",
+        "u-mod": "member",
+        "u-m": "member",
+    }
+
+
 async def test_bans_exporter():
     from socialhome.federation.sync.space.exporters import BansExporter
 

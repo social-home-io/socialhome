@@ -819,7 +819,9 @@ async def test_0054_remote_member_role_admits_subscriber(tmp_path):
         assert row["role"] == "subscriber"
 
         # …and the constraint still holds the line on everything else.
-        for bad in ("owner", "moderator", ""):
+        # (``moderator`` became a real seat in 0065, so the junk value is
+        # one no migration will ever admit.)
+        for bad in ("owner", "overlord", ""):
             with pytest.raises(sqlite3.IntegrityError):
                 await db.enqueue(
                     "INSERT INTO space_remote_members"

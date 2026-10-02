@@ -85,34 +85,104 @@ def normalize_min_age(value: object) -> int:
 class SpaceRole(StrEnum):
     """Membership role stored in ``space_members.role``.
 
-    Per spec §4.2.3, admin authority is *holding the space private key* —
-    not a row in an ACL table. The four roles below are a social-layer
-    distinction: ``OWNER`` and ``ADMIN`` are programmatically identical
-    at the signing level, ``MEMBER`` is the regular participant, and
-    ``SUBSCRIBER`` is the read-only follower of public/global spaces —
-    which exist only while the space's ``SpaceFeatures.allow_subscribers``
-    opt-in is ON.
-    Adding a fifth role, custom per-space roles, or per-user permission
-    bitfields would break the federation model — extend
-    :class:`SpaceFeatures` with a new feature gate instead.
+    Per spec §4.2.3, signing authority is *holding the space private key*
+    — not a row in an ACL table. The roles below are a social-layer
+    distinction, ordered ``OWNER > ADMIN > MODERATOR > MEMBER >
+    SUBSCRIBER``:
+
+    * ``OWNER`` / ``ADMIN`` hold **settings authority** — config,
+      features, access levels, members and roles, invites, bans, keys,
+      archive, zones, timetables, bots, themes, ``@here``.
+      (:data:`SETTINGS_AUTHORITY_ROLES`)
+    * ``MODERATOR`` holds **content authority** only — approve / reject
+      the moderation queue, edit / delete other people's content,
+      bypass ``MODERATED`` for their own. No settings power at all.
+      (:data:`CONTENT_AUTHORITY_ROLES`)
+    * ``MEMBER`` is the regular participant. (:data:`WRITER_ROLES`)
+    * ``SUBSCRIBER`` is the read-only follower of public/global spaces,
+      which exists only while ``SpaceFeatures.allow_subscribers`` is ON.
+
+    The role set is closed and ordered — one role per seat, never a
+    per-user permission bitfield or custom per-space roles. A new
+    *capability* on existing roles extends :class:`SpaceFeatures` with a
+    feature gate; a new *role* (as ``MODERATOR`` was, federation v_41) is
+    a protocol change: a migration widening both role CHECKs, a
+    ``proto_version`` bump, and a degraded wire form for older peers.
+    Compare against the authority sets below, never against an ad-hoc
+    tuple, so a role added later lands in exactly one place.
     """
 
     OWNER = "owner"
     ADMIN = "admin"
+    MODERATOR = "moderator"
     MEMBER = "member"
     SUBSCRIBER = "subscriber"
 
 
+#: Settings authority — the space's structure and people (§4.2.3). Every
+#: settings guard (``_require_admin_or_owner`` and friends) reads this.
+SETTINGS_AUTHORITY_ROLES: frozenset[SpaceRole] = frozenset(
+    {SpaceRole.OWNER, SpaceRole.ADMIN}
+)
+
+#: Content authority — act on other people's content: the moderation
+#: queue, edits / deletes of others' posts and comments, single gallery
+#: item deletes, RSVP approvals. Settings authority implies it. (A whole
+#: gallery album stays settings authority.)
+CONTENT_AUTHORITY_ROLES: frozenset[SpaceRole] = frozenset(
+    {SpaceRole.OWNER, SpaceRole.ADMIN, SpaceRole.MODERATOR}
+)
+
+#: Seats that write space content — everyone but a read-only subscriber.
+WRITER_ROLES: frozenset[SpaceRole] = frozenset(
+    {SpaceRole.OWNER, SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER}
+)
+
+
+def role_change_allowed(
+    actor_role: object, target_current_role: object, new_role: object
+) -> bool:
+    """May a seat holding ``actor_role`` move a target from
+    ``target_current_role`` to ``new_role``?
+
+    * The **owner** may set ``admin`` / ``moderator`` / ``member`` on any
+      non-owner seat.
+    * An **admin** may move a target only between ``member`` and
+      ``moderator`` — never touch another admin, never make one.
+    * Nobody else changes roles. Nobody assigns ``owner`` (that is
+      ``transfer_ownership``) and nobody demotes the owner.
+
+    Unknown values (a future role, junk from a request body) answer
+    ``False``. Plain strings and :class:`SpaceRole` members compare equal.
+    """
+    try:
+        actor = SpaceRole(str(actor_role))
+        current = SpaceRole(str(target_current_role))
+        new = SpaceRole(str(new_role))
+    except ValueError:
+        return False
+    if current is SpaceRole.OWNER or new is SpaceRole.OWNER:
+        return False
+    if actor is SpaceRole.OWNER:
+        return new in (SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER)
+    if actor is SpaceRole.ADMIN:
+        movable = (SpaceRole.MODERATOR, SpaceRole.MEMBER)
+        return current in movable and new in movable
+    return False
+
+
 #: Roles a **remote** household's seat may carry — the
-#: ``space_remote_members.role`` CHECK (migrations 0009 + 0054), in code.
-#: ``subscriber`` is a household that redeemed a Follower invite link
-#: (v_30); ``owner`` is absent because ownership is a local-only privilege
-#: with no remote row shape, and the host legitimately ships its own
-#: ``space_members.role`` — ``owner`` included — on the roster wire.
+#: ``space_remote_members.role`` CHECK (migrations 0009 + 0054 + 0065), in
+#: code. ``subscriber`` is a household that redeemed a Follower invite link
+#: (v_30); ``moderator`` is a content-authority seat (v_41); ``owner`` is
+#: absent because ownership is a local-only privilege with no remote row
+#: shape, and the host legitimately ships its own ``space_members.role`` —
+#: ``owner`` included — on the roster wire.
 MIRRORABLE_REMOTE_ROLES: frozenset[str] = frozenset(
     {
         SpaceRole.MEMBER.value,
         SpaceRole.ADMIN.value,
+        SpaceRole.MODERATOR.value,
         SpaceRole.SUBSCRIBER.value,
     }
 )
@@ -154,9 +224,11 @@ class SpaceFeatureAccess(StrEnum):
     """Per-feature permission level for a space.
 
     * ``OPEN`` — any member may create / edit / delete.
-    * ``MODERATED`` — members' submissions enter a pending queue; admins
-      approve or reject. Admins bypass the queue.
-    * ``ADMIN_ONLY`` — only admins / owner may mutate. Members read-only.
+    * ``MODERATED`` — members' submissions enter a pending queue; content
+      authority (owner / admin / moderator) approves or rejects, and
+      bypasses the queue for its own submissions.
+    * ``ADMIN_ONLY`` — only admins / owner may mutate. Members and
+      moderators read-only.
     """
 
     OPEN = "open"
@@ -314,9 +386,13 @@ class SpaceFeatures:
         return val in self.allowed_post_types
 
     def access_decision(
-        self, feature: str, is_admin: bool
+        self, feature: str, is_admin: bool, *, is_moderator: bool = False
     ) -> Literal["proceed", "queue", "deny"]:
         """Describe what should happen when a member attempts ``feature``.
+
+        ``is_admin`` is settings authority (owner / admin); ``is_moderator``
+        is content authority without it. A moderator skips a ``MODERATED``
+        queue but an ``ADMIN_ONLY`` feature still denies them.
 
         Valid ``feature`` values: ``posts``, ``pages``, ``stickies``,
         ``calendar``, ``tasks``.
@@ -327,7 +403,7 @@ class SpaceFeatures:
         if access is SpaceFeatureAccess.ADMIN_ONLY:
             return "proceed" if is_admin else "deny"
         if access is SpaceFeatureAccess.MODERATED:
-            return "proceed" if is_admin else "queue"
+            return "proceed" if is_admin or is_moderator else "queue"
         return "proceed"
 
     def with_allowed_post_types(
@@ -677,6 +753,10 @@ class SpaceConfigEventType(StrEnum):
     JOIN_MODE_CHANGED = "join_mode_changed"
     ADMIN_GRANTED = "admin_granted"
     ADMIN_REVOKED = "admin_revoked"
+    #: A role change that neither grants nor revokes admin (member ↔
+    #: moderator, v_41). Local bus / realtime only — like the two above it
+    #: never federates as ``SPACE_CONFIG_CHANGED``.
+    ROLE_CHANGED = "role_changed"
     OWNERSHIP_TRANSFERRED = "ownership_transferred"
     MEMBER_BANNED = "member_banned"
     MEMBER_UNBANNED = "member_unbanned"
@@ -687,6 +767,18 @@ class SpaceConfigEventType(StrEnum):
     COVER_UPDATED = "cover_updated"
     ICON_UPDATED = "icon_updated"
     ABOUT_UPDATED = "about_updated"
+
+
+def role_change_event_type(
+    old_role: object, new_role: object
+) -> "SpaceConfigEventType":
+    """The bus event naming a role change: admin granted / revoked when the
+    admin seat moves, else :attr:`SpaceConfigEventType.ROLE_CHANGED`."""
+    if str(new_role) == SpaceRole.ADMIN.value:
+        return SpaceConfigEventType.ADMIN_GRANTED
+    if str(old_role) == SpaceRole.ADMIN.value:
+        return SpaceConfigEventType.ADMIN_REVOKED
+    return SpaceConfigEventType.ROLE_CHANGED
 
 
 @dataclass(slots=True, frozen=True)
@@ -737,6 +829,12 @@ class SpacePermissionError(Exception):
     def __init__(self, message: str, *, banned: bool = False) -> None:
         super().__init__(message)
         self.banned = banned
+
+
+class HouseholdUpgradeRequiredError(SpacePermissionError):
+    """A role the target's home household cannot hold yet (v_41
+    ``moderator`` on a v_40 peer). The API answers 403 with the stable code
+    ``HOUSEHOLD_UPGRADE_REQUIRED`` so the SPA can show translated copy."""
 
 
 class PublicSpaceLimitError(Exception):

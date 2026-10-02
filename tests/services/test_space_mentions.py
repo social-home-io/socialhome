@@ -222,6 +222,7 @@ async def _here_space(env, *, allow=True):
     for uid, uname, role in (
         ("r-admin", "radmin", SpaceRole.ADMIN.value),
         ("r-member", "rmember", SpaceRole.MEMBER.value),
+        ("r-mod", "rmod", SpaceRole.MODERATOR.value),
         ("r-sub", "rsub", SpaceRole.SUBSCRIBER.value),
     ):
         await _seat_remote(env, space.id, uid, username=uname)
@@ -244,6 +245,7 @@ async def test_here_kept_only_for_owner_and_admins(env):
     assert await here("r-admin")  # remote admin seat (roster mirror)
     assert not await here(bob.user_id)  # local member
     assert not await here("r-member")  # remote member seat
+    assert not await here("r-mod")  # remote moderator seat: @here is settings
     assert not await here("r-sub")  # remote subscriber seat
     assert not await here("stranger")  # no seat at all
     assert not await here(None)  # unknown author → fail closed

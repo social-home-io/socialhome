@@ -624,7 +624,22 @@ from __future__ import annotations
 #:   not hold. New list ids are owner-bound (kind ``space-task-list``). A
 #:   v_39 receiver drops the unknown list events and sync resource — its
 #:   tasks keep failing as they always did, nothing regresses.
-OURS: int = 40
+#: * **v_41** (2026-10-01) — the space ``moderator`` seat
+#:   (:attr:`~socialhome.domain.space.SpaceRole.MODERATOR`): content
+#:   authority (the moderation queue, edits / deletes of others'
+#:   content) without settings authority. The roster gossip and snapshot
+#:   carry ``role: "moderator"``; a v_40 receiver's
+#:   ``mirrorable_remote_role`` coerces it DOWN to ``member`` (safe, and the
+#:   gossip is authority-signed so it cannot be per-peer anyway). The
+#:   legacy ``SPACE_MEMBER_ROLE_CHANGED`` is NOT safe the same way — a v_40
+#:   receiver drops an unknown role, so a demoted admin would stay ``admin``
+#:   there — so the host sends households below v_41 the same event with
+#:   ``role: "member"`` (``broadcast_to_space_members(legacy_payload=...,
+#:   legacy_below=...)``). **Gated, fallback**: promoting a user whose HOME
+#:   household is below v_41 is refused ("household must upgrade"); other
+#:   behind households see the moderator as a member and refuse their
+#:   moderation edits, which only degrades content authority there.
+OURS: int = 41
 
 
 class FederationCapability:
@@ -986,6 +1001,12 @@ class FederationCapability:
     #: ungated: a v_39 receiver drops the unknown events).
     MIN_FOR_TASK_PRIORITY_LABELS = 40
 
+    #: Minimum proto_version that knows the space ``moderator`` seat (v_41).
+    #: The host refuses to promote a user whose home household is below it,
+    #: and sends households below it ``SPACE_MEMBER_ROLE_CHANGED`` with
+    #: ``role: "member"`` instead of ``"moderator"``.
+    MIN_FOR_SPACE_MODERATOR_ROLE = 41
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1102,6 +1123,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS,
         "Task priority and labels",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+        "Space moderators",
+    ),
 ]
 
 
@@ -1167,6 +1192,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID,
         FederationCapability.MIN_FOR_SPACE_TIMETABLE,
         FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS,
+        FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
     }
 )
 

@@ -6,7 +6,20 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 40
+    assert fc.OURS == 41
+
+
+def test_space_moderator_role_capability_threshold():
+    """v_41 — the space ``moderator`` seat. Space-scoped: a behind member
+    household mirrors a moderator as a plain member, so the banner names
+    the gap."""
+    assert fc.FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE == 41
+    assert fc.FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.space_features_missing_below(40) == ["Space moderators"]
+    assert fc.features_missing_below(41) == []
 
 
 def test_task_priority_labels_capability_threshold():
@@ -18,8 +31,11 @@ def test_task_priority_labels_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert "Task priority and labels" in fc.features_missing_below(39)
-    assert fc.space_features_missing_below(39) == ["Task priority and labels"]
-    assert fc.features_missing_below(40) == []
+    assert fc.space_features_missing_below(39) == [
+        "Task priority and labels",
+        "Space moderators",
+    ]
+    assert "Task priority and labels" not in fc.features_missing_below(40)
 
 
 def test_space_timetable_capability_threshold():
@@ -73,6 +89,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Creator-bound content ids",
         "Space timetables",
         "Task priority and labels",
+        "Space moderators",
     ]
 
 
@@ -90,6 +107,7 @@ def test_moment_origin_signature_capability_threshold():
         "Creator-bound content ids",
         "Space timetables",
         "Task priority and labels",
+        "Space moderators",
     ]
 
 

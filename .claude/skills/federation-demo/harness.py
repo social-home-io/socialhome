@@ -5056,6 +5056,72 @@ def cmd_verify() -> None:
                     f"due_date cleared, labels kept ✓"
                 )
 
+    # 6e. Space moderator (v_41). Beta — the owner — promotes Alice to
+    #     ``moderator`` over the remote-member PATCH. Alice's own household
+    #     applies SPACE_MEMBER_ROLE_CHANGED to her seat, and Carol's roster
+    #     mirror (the authority-signed JOINED gossip) carries the new role.
+    #     Beta then demotes her back to ``member`` so a re-run starts clean.
+    if "space_id" in state:
+        b = state["instances"]["b"]
+        a_info = state["instances"]["a"]
+        space_id = state["space_id"]
+        role_url = (
+            f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}/remote-members/"
+            f"{a_info['instance_id']}/{a_info['user_id']}"
+        )
+
+        def _role_seen(viewer: str, want: str) -> str | None:
+            v = state["instances"][viewer]
+            got = None
+            for _ in range(10):
+                s, members = _request(
+                    f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/members",
+                    token=v["token"],
+                )
+                mlist = (
+                    members
+                    if isinstance(members, list)
+                    else (members or {}).get("members", [])
+                )
+                got = next(
+                    (
+                        m.get("role")
+                        for m in (mlist if s == 200 else [])
+                        if m.get("user_id") == a_info["user_id"]
+                    ),
+                    None,
+                )
+                if got == want:
+                    return got
+                time.sleep(1)
+            return got
+
+        s, body = _request(
+            role_url, token=b["token"], method="PATCH", body={"role": "moderator"}
+        )
+        if s != 200:
+            failures.append(f"b: promote a to moderator -> {s} {body!r}")
+        else:
+            for viewer in ("a", "c"):
+                got = _role_seen(viewer, "moderator")
+                if got != "moderator":
+                    failures.append(
+                        f"{viewer}: a's space role is {got!r} (expected "
+                        f"'moderator') — v_41 SPACE_MEMBER_ROLE_CHANGED / "
+                        f"roster gossip did not round-trip"
+                    )
+                else:
+                    print(f"  {viewer} sees a as space moderator ✓")
+            s, body = _request(
+                role_url, token=b["token"], method="PATCH", body={"role": "member"}
+            )
+            if s != 200:
+                failures.append(f"b: demote a back to member -> {s} {body!r}")
+            elif _role_seen("a", "member") != "member":
+                failures.append("a: demotion back to member did not land")
+            else:
+                print("  b demotes a back to member ✓")
+
     # 7. Capability handshake — every confirmed inner-ring peer should
     #    have announced their proto_version via
     #    ``INSTANCE_CAPABILITIES_UPDATED`` at startup. After ``up`` + a

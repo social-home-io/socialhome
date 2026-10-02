@@ -1383,7 +1383,9 @@ class SpaceContentInboundHandlers:
 
         The owner is read from the stored row — never the payload — and the
         rule is the local "owner or space admin" one
-        (``GalleryService._require_album_owner_or_admin``).
+        (``GalleryService._require_album_owner_or_admin``) — settings
+        authority, so a moderator seat does not rename / delete a whole
+        album that is not its own.
         """
         assert self._gallery_repo is not None
         album = await self._gallery_repo.get_album(album_id)
@@ -1401,7 +1403,7 @@ class SpaceContentInboundHandlers:
             )
             return False
         owner = album.owner_user_id or ""
-        if not await self._authorship.may_mutate(event, space_id, owner):
+        if not await self._authorship.may_mutate(event, space_id, owner, settings=True):
             await self._authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
@@ -1463,7 +1465,8 @@ class SpaceContentInboundHandlers:
 
         Remembering it refuses the album's create later, so for an
         owner-bound id (v_34) only a household that could delete the album
-        once it lands may do it: a moderator, or the owner's own household
+        once it lands may do it: an admin household (settings authority —
+        not a moderator seat), or the owner's own household
         — the payload's ``owner_user_id`` must be the one the id commits to
         and be seated on the sender. A legacy id carries no owner to check
         and keeps the v_33 behaviour.
@@ -1474,7 +1477,7 @@ class SpaceContentInboundHandlers:
         )
         if binding is OwnerBinding.LEGACY:
             return True
-        if await self._authorship.is_moderator(event, space_id):
+        if await self._authorship.is_admin_household(event, space_id):
             return True
         if binding is OwnerBinding.VALID and await self._authorship.acts_for(
             event, space_id, owner, any_role=True
@@ -2410,7 +2413,7 @@ class SpaceContentInboundHandlers:
             ):
                 if await self._authorship.acts_for(
                     event, space_id, cal.created_by
-                ) or await self._authorship.is_moderator(event, space_id):
+                ) or await self._authorship.has_content_authority(event, space_id):
                     return True
             if (
                 current == RSVPStatus.WAITLIST
@@ -2534,7 +2537,7 @@ class SpaceContentInboundHandlers:
     ) -> bool:
         """Zones are admin-only locally (``SpaceZoneService``): the host or
         a household holding a live admin seat."""
-        if await self._authorship.is_moderator(event, space_id):
+        if await self._authorship.is_admin_household(event, space_id):
             return True
         log.warning(
             "%s from %s: zone %s in space %s — the sending household does not "
@@ -2558,8 +2561,8 @@ class SpaceContentInboundHandlers:
         space (the host, or a live admin seat), and the user the write is
         recorded as must be a moderator seated on it — never a plain member
         of an admin household, another household's admin, or a banned user
-        (:meth:`SpaceAuthorship.moderates_as`)."""
-        if not await self._authorship.is_moderator(event, space_id):
+        (:meth:`SpaceAuthorship.admin_as`)."""
+        if not await self._authorship.is_admin_household(event, space_id):
             log.warning(
                 "%s from %s: timetable %s in space %s — the sending household "
                 "does not moderate this space; refusing the write",
@@ -2569,7 +2572,7 @@ class SpaceContentInboundHandlers:
                 space_id,
             )
             return False
-        if await self._authorship.moderates_as(event, space_id, user_id):
+        if await self._authorship.admin_as(event, space_id, user_id):
             return True
         log.warning(
             "%s from %s: timetable %s in space %s is recorded as %r, who is "

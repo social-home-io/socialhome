@@ -21,6 +21,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import GalleryAlbumDeleted, GalleryAlbumUpdated
+from socialhome.domain.space import SpaceMember
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
@@ -633,3 +634,78 @@ async def test_list_albums_pins_system_album_first(env):
     rows = await env.list_albums(space_id="sp-1", actor_user_id="a-id")
     assert rows[0].id == sys.id
     assert rows[0].is_system is True
+
+
+# ─── v_41 moderator: content authority over others' gallery content ──────
+
+
+async def _with_moderator(env):
+    """eve becomes a space moderator in sp-1."""
+    await env._space_repo.save_member(  # type: ignore[attr-defined]
+        SpaceMember(
+            space_id="sp-1",
+            user_id="e-id",
+            role="moderator",
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+
+
+async def _bobs_item(env):
+    import io
+
+    from PIL import Image
+
+    album = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="B")
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(buf, format="JPEG")
+    item = await env.upload_item(
+        album.id,
+        data=buf.getvalue(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="b-id",
+    )
+    return album, item
+
+
+async def test_a_moderator_deletes_others_items_but_not_their_albums(env):
+    """M4 — item-level moderation is content authority; renaming or
+    deleting somebody else's WHOLE album is settings authority (or being
+    its owner)."""
+    await _with_moderator(env)
+    album, item = await _bobs_item(env)
+    with pytest.raises(GalleryPermissionError):
+        await env.update_album(album.id, actor_user_id="e-id", name="Tidied")
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_album(album.id, actor_user_id="e-id")
+    await env.delete_item(item.id, actor_user_id="e-id")
+    # The owner (settings authority) and the album's owner still can.
+    await env.update_album(album.id, actor_user_id="a-id", name="Renamed")
+    await env.delete_album(album.id, actor_user_id="b-id")
+    with pytest.raises(GalleryNotFoundError):
+        await env.get_album(album.id, actor_user_id="a-id")
+
+
+async def test_a_moderator_cannot_change_retention_on_others_albums(env):
+    """Retention is a space setting — settings authority only."""
+    await _with_moderator(env)
+    album, _item = await _bobs_item(env)
+    with pytest.raises(GalleryPermissionError):
+        await env.set_retention_exempt(album.id, True, actor_user_id="e-id")
+    # The owner (settings authority) still can.
+    await env.set_retention_exempt(album.id, True, actor_user_id="a-id")
+
+
+async def test_a_member_cannot_delete_others_items(env):
+    await env._space_repo.save_member(  # type: ignore[attr-defined]
+        SpaceMember(
+            space_id="sp-1",
+            user_id="e-id",
+            role="member",
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    _album, item = await _bobs_item(env)
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(item.id, actor_user_id="e-id")

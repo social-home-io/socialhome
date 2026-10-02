@@ -180,6 +180,11 @@ That single command runs the full sequence:
    - **v_40 space task + list.** Beta's edit of the task ``calendar``
      created (priority ``high`` → ``low``, due date cleared with an explicit
      ``null``) reached Alpha and Gamma, and the labels survived it.
+   - **v_41 space moderator.** Beta (owner) promotes Alpha's user to
+     ``moderator`` over ``PATCH /api/spaces/{id}/remote-members/…``; Alpha's
+     own members list and Gamma's roster mirror must both show the role
+     (``SPACE_MEMBER_ROLE_CHANGED`` + the authority-signed JOINED gossip),
+     then Beta demotes her back to ``member``.
    - **v_31 routed-origin signature (#692).** Every ``SPACE_ROUTED`` leg
      carries ``origin_sig`` inside its sealed blob and the endpoint
      verifies it against the identity key it already holds for ``path[0]``
@@ -386,7 +391,7 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (40 since the task priority / labels bump).
+   ``OURS`` (41 since the space moderator role).
 
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is

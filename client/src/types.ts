@@ -46,7 +46,7 @@ export interface UserStatus {
 
 export interface SpaceMemberProfile {
   user_id: string
-  role: 'owner' | 'admin' | 'member'
+  role: 'owner' | 'admin' | 'moderator' | 'member'
   joined_at: string
   space_display_name: string | null
   picture_hash: string | null

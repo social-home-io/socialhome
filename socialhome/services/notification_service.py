@@ -75,7 +75,7 @@ from ..domain.events import (
     UserFollowed,
 )
 from ..domain.mention import Mention, MentionType
-from ..domain.space import SpaceRole
+from ..domain.space import CONTENT_AUTHORITY_ROLES, SETTINGS_AUTHORITY_ROLES
 from ..i18n import Catalog
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
@@ -1040,13 +1040,14 @@ class NotificationService(ProtectionGateMixin):
         return True
 
     async def on_moderation_queued(self, event: SpaceModerationQueued) -> None:
-        """Notify space admins/owners that content is pending review."""
+        """Notify everyone who works the queue (owner / admin / moderator)
+        that content is pending review."""
         space = await self._spaces.get(event.item.space_id)
         if space is None:
             return
         members = await self._spaces.list_members(event.item.space_id)
         for member in members:
-            if member.role in (SpaceRole.OWNER, SpaceRole.ADMIN):
+            if member.role in CONTENT_AUTHORITY_ROLES:
                 recipient = await self._users.get_by_user_id(member.user_id)
                 await self._save_notif(
                     new_notification(
@@ -1392,7 +1393,7 @@ class NotificationService(ProtectionGateMixin):
         name = requester.display_name if requester else event.user_id
         members = await self._spaces.list_members(event.space_id)
         for member in members:
-            if member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
+            if member.role not in SETTINGS_AUTHORITY_ROLES:
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
             await self._save_notif(
@@ -1478,7 +1479,7 @@ class NotificationService(ProtectionGateMixin):
         members = await self._spaces.list_members(event.space_id)
         # Narrow to space admins: members with role admin|owner.
         for m in members:
-            if m.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
+            if m.role not in SETTINGS_AUTHORITY_ROLES:
                 continue
             recipient = await self._users.get_by_user_id(m.user_id)
             await self._save_notif(
@@ -1503,7 +1504,7 @@ class NotificationService(ProtectionGateMixin):
             return
         members = await self._spaces.list_members(event.space_id)
         for m in members:
-            if m.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
+            if m.role not in SETTINGS_AUTHORITY_ROLES:
                 continue
             recipient = await self._users.get_by_user_id(m.user_id)
             await self._save_notif(

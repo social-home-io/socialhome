@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 
 from ..domain.events import SpaceZoneDeleted, SpaceZoneUpserted
 from ..domain.presence import truncate_coord
-from ..domain.space import SpaceRole, SpaceZone
+from ..domain.space import SETTINGS_AUTHORITY_ROLES, SpaceZone
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.space_zone_repo import AbstractSpaceZoneRepo
@@ -269,7 +269,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         await self._role_or_raise(
             space_id,
             actor.user_id,
-            (SpaceRole.OWNER, SpaceRole.ADMIN),
+            SETTINGS_AUTHORITY_ROLES,
             message="admin or owner required",
         )
 

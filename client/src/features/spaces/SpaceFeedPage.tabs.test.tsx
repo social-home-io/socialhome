@@ -86,6 +86,26 @@ describe('SpaceFeedPage ?tab=', () => {
     await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:true:false'))
   }, 20000)
 
+  it('a moderator writes tasks and gets the Moderation tab', async () => {
+    route.query = { tab: 'tasks' }
+    wire({ todo: true }, 'moderator')
+    const tl = await import('@testing-library/preact')
+    const { default: Page } = await import('./SpaceFeedPage')
+    const r = tl.render(<Page />)
+    await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:true:false'))
+    await tl.waitFor(() => expect(r.getByRole('tab', { name: 'Moderation' })).toBeTruthy())
+  }, 20000)
+
+  it('a plain member gets no Moderation tab', async () => {
+    route.query = { tab: 'tasks' }
+    wire({ todo: true }, 'member')
+    const tl = await import('@testing-library/preact')
+    const { default: Page } = await import('./SpaceFeedPage')
+    const r = tl.render(<Page />)
+    await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:true:false'))
+    expect(r.queryByRole('tab', { name: 'Moderation' })).toBeNull()
+  }, 20000)
+
   it('a tab the space has turned off falls back to the feed', async () => {
     route.query = { tab: 'tasks' }
     wire({ todo: false }, 'member')

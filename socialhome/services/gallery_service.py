@@ -46,7 +46,11 @@ from ..domain.media_constraints import (
     VIDEO_MAX_DIMENSION,
 )
 from ..domain.post import Post, PostType
-from ..domain.space import SpaceRole
+from ..domain.space import (
+    CONTENT_AUTHORITY_ROLES,
+    SETTINGS_AUTHORITY_ROLES,
+    SpaceRole,
+)
 from ..federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -449,10 +453,12 @@ class GalleryService:
             )
         if album is not None and album.space_id is not None:
             is_uploader = item.uploaded_by == actor_user_id
-            is_admin = await self._is_space_admin(album.space_id, actor_user_id)
-            if not (is_uploader or is_admin):
+            is_moderator = await self._has_content_authority(
+                album.space_id, actor_user_id
+            )
+            if not (is_uploader or is_moderator):
                 raise GalleryPermissionError(
-                    "Only the uploader or a space admin may delete this item"
+                    "Only the uploader or a space moderator may delete this item"
                 )
         await self._repo.delete_item(item_id)
         await self._repo.increment_item_count(item.album_id, -1)
@@ -623,23 +629,30 @@ class GalleryService:
                 f"user {user_id!r} is not a member of space {space_id!r}"
             )
 
-    async def _is_space_admin(self, space_id: str, user_id: str) -> bool:
+    async def _has_role(
+        self, space_id: str, user_id: str, roles: frozenset[SpaceRole]
+    ) -> bool:
         member = await self._space_repo.get_member(space_id, user_id)
-        return member is not None and member.role in (
-            SpaceRole.OWNER,
-            SpaceRole.ADMIN,
-        )
+        return member is not None and member.role in roles
+
+    async def _has_content_authority(self, space_id: str, user_id: str) -> bool:
+        """Owner / admin / moderator — may act on others' gallery content."""
+        return await self._has_role(space_id, user_id, CONTENT_AUTHORITY_ROLES)
 
     async def _require_album_owner_or_admin(
         self,
         album: GalleryAlbum,
         actor_user_id: str,
     ) -> None:
+        """The album's owner, or settings authority (owner / admin).
+
+        A whole album — rename, delete, retention — is not moderation: a
+        moderator acts on single items (:meth:`delete_item`)."""
+        roles = SETTINGS_AUTHORITY_ROLES
         if album.owner_user_id == actor_user_id:
             return
-        if album.space_id is not None and await self._is_space_admin(
-            album.space_id,
-            actor_user_id,
+        if album.space_id is not None and await self._has_role(
+            album.space_id, actor_user_id, roles
         ):
             return
         raise GalleryPermissionError(

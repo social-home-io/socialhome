@@ -2,7 +2,7 @@
 
 The frame carries the full pending item (post body, rejection reason),
 so it goes only to the people who can read the moderation queue — the
-space's owner and admins — plus the submitter for the outcome of their
+space's owner, admins and moderators — plus the submitter for the outcome of their
 own item.
 """
 
@@ -74,7 +74,7 @@ def _item(submitted_by: str = "sub") -> SpaceModerationItem:
     )
 
 
-_UIDS = ("own", "adm", "sub", "mem", "fol")
+_UIDS = ("own", "adm", "mod", "sub", "mem", "fol")
 
 
 @pytest.fixture
@@ -90,6 +90,7 @@ async def env():
                 "sp-1": [
                     _member("own", SpaceRole.OWNER),
                     _member("adm", SpaceRole.ADMIN),
+                    _member("mod", SpaceRole.MODERATOR),
                     _member("sub", SpaceRole.MEMBER),
                     _member("mem", SpaceRole.MEMBER),
                     _member("fol", SpaceRole.SUBSCRIBER),
@@ -114,6 +115,8 @@ async def test_moderation_queued_reaches_owner_and_admins_only(env):
     await bus.publish(SpaceModerationQueued(item=_item()))
     assert _got(socks["own"], "space.moderation.queued")
     assert _got(socks["adm"], "space.moderation.queued")
+    # A moderator works the queue (v_41).
+    assert _got(socks["mod"], "space.moderation.queued")
     # Plain members, subscribers — and the submitter, who already knows
     # what they submitted — never get the pending item over WS.
     for uid in ("sub", "mem", "fol"):
@@ -132,7 +135,7 @@ async def test_moderation_outcome_reaches_admins_and_submitter(
 ):
     bus, socks = env
     await bus.publish(event_cls(item=_item()))
-    for uid in ("own", "adm", "sub"):
+    for uid in ("own", "adm", "mod", "sub"):
         assert _got(socks[uid], frame_type), uid
     for uid in ("mem", "fol"):
         assert socks[uid].sent == [], uid
@@ -160,7 +163,8 @@ async def test_join_requested_reaches_owner_and_admins_only(env):
     await bus.publish(SpaceJoinRequested(space_id="sp-1", user_id="x", request_id="r"))
     assert _got(socks["own"], "space.join.requested")
     assert _got(socks["adm"], "space.join.requested")
-    for uid in ("sub", "mem", "fol"):
+    # Join requests are settings authority — a moderator is not told.
+    for uid in ("mod", "sub", "mem", "fol"):
         assert socks[uid].sent == [], uid
 
 
@@ -171,5 +175,5 @@ async def test_join_denied_reaches_admins_and_requester(env):
     )
     for uid in ("own", "adm", "mem"):
         assert _got(socks[uid], "space.join.denied"), uid
-    for uid in ("sub", "fol"):
+    for uid in ("mod", "sub", "fol"):
         assert socks[uid].sent == [], uid

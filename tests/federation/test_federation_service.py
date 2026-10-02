@@ -3189,6 +3189,77 @@ async def test_broadcast_to_space_members_sends_the_relay_payload_to_relay_seats
     }
 
 
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_sends_the_legacy_payload_below_a_version(
+    monkeypatch,
+):
+    """``legacy_payload`` goes INSTEAD of ``payload`` to every member
+    household whose ``proto_version`` is below ``legacy_below`` — or that
+    has not advertised one at all (the conservative default). The v_41
+    moderator role uses it so a v_40 household gets ``role: member``
+    rather than dropping a role it does not know."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    new, _ = _make_remote_instance(km)
+    old, _ = _make_remote_instance(km)
+    new = dataclasses.replace(new, proto_version=41)
+    old = dataclasses.replace(old, proto_version=40)
+    await fed_repo.save_instance(new)
+    await fed_repo.save_instance(old)
+    space_id = "space-legacy-variant"
+    fed_repo.add_space_member(space_id, new.id)
+    fed_repo.add_space_member(space_id, old.id)
+    fed_repo.add_space_member(space_id, "mesh-only-unknown")
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    sent: dict[str, dict] = {}
+
+    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
+        sent[to_instance_id] = payload
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+    await svc.broadcast_to_space_members(
+        space_id,
+        FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+        {"role": "moderator"},
+        legacy_payload={"role": "member"},
+        legacy_below=41,
+    )
+    assert sent == {
+        new.id: {"role": "moderator"},
+        old.id: {"role": "member"},
+        "mesh-only-unknown": {"role": "member"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_without_a_legacy_payload_sends_one_shape(
+    monkeypatch,
+):
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    old, _ = _make_remote_instance(km)
+    old = dataclasses.replace(old, proto_version=40)
+    await fed_repo.save_instance(old)
+    fed_repo.add_space_member("sp", old.id)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    sent: dict[str, dict] = {}
+
+    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
+        sent[to_instance_id] = payload
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+    await svc.broadcast_to_space_members(
+        "sp",
+        FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+        {"role": "admin"},
+        legacy_payload=None,
+        legacy_below=41,
+    )
+    assert sent == {old.id: {"role": "admin"}}
+
+
 async def test_broadcast_to_space_members_warns_about_failed_targets(caplog):
     """The mesh fan-out has no outbox, so a failed target is a permanent,
     invisible loss. The minimum bar is a diagnosable WARNING naming the

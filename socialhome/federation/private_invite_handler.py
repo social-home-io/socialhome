@@ -35,6 +35,7 @@ from ..domain.events import (
 from ..crypto import derive_instance_id
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.space import (
+    WRITER_ROLES,
     RemoteAdminOutcome,
     SpaceRole,
     mirrorable_remote_role,
@@ -884,10 +885,7 @@ class PrivateSpaceInviteHandler:
             event.from_instance,
             user_id,
         )
-        if match is None or match.role not in (
-            SpaceRole.MEMBER.value,
-            SpaceRole.ADMIN.value,
-        ):
+        if match is None or match.role not in WRITER_ROLES:
             log.debug(
                 "SPACE_LOCATION_UPDATED: %s@%s holds no writing seat in %s",
                 user_id,

@@ -125,6 +125,14 @@ SEATABLE_REMOTE_ROLES: frozenset[str] = frozenset(
     }
 )
 
+#: Seats an already-seated redeemer may be RE-ACKed with (a retry after a
+#: lost ACK): every seatable role plus ``moderator`` (v_41) — a seat that
+#: is only ever reached by promotion after joining, so it is never handed
+#: out by a new redeem, but its holder re-redeeming keeps it.
+REACKABLE_REMOTE_ROLES: frozenset[str] = SEATABLE_REMOTE_ROLES | {
+    SpaceRole.MODERATOR.value
+}
+
 
 #: How long the receiver waits for an ACK / DENY before giving up.
 #: Calibrated for a single hop over a healthy WebRTC DataChannel.
@@ -1160,7 +1168,7 @@ class SpaceInviteTokenRedeemCoordinator:
             if await self._spaces.is_banned(space_id, redeemer_user_id):
                 return None, REDEEM_DENY_REASON
             role = str(seat.role or SpaceRole.MEMBER.value)
-            if role not in SEATABLE_REMOTE_ROLES:
+            if role not in REACKABLE_REMOTE_ROLES:
                 return None, REDEEM_DENY_REASON
             ack_body = await self._build_ack_body(
                 space_id,

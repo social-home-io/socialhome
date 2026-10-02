@@ -571,6 +571,16 @@ async def test_set_role(env):
     assert fetched.role == "admin"
 
 
+async def test_set_role_admits_moderator(env):
+    """``moderator`` (migration 0065) is a real seat the allow-list and the
+    CHECK both admit."""
+    await env.repo.save(_space("sp-mod-role"))
+    await env.repo.save_member(_member("sp-mod-role", "uid-alice", role="member"))
+    await env.repo.set_role("sp-mod-role", "uid-alice", "moderator")
+    fetched = await env.repo.get_member("sp-mod-role", "uid-alice")
+    assert fetched.role == "moderator"
+
+
 async def test_set_role_invalid_raises(env):
     """set_role raises ValueError for an unknown role string."""
     await env.repo.save(_space("sp-bad-role"))

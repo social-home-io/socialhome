@@ -68,6 +68,21 @@ async def test_list_admin_instances_distinct_and_admin_only(repo):
     assert sorted(admins) == ["i-a", "i-b"]
 
 
+async def test_list_admin_instances_never_lists_a_moderator_household(repo):
+    """The delegated signing seed goes to ``list_admin_instances`` — a
+    moderator holds content authority only and must never receive it."""
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-mod",
+        user_id="u1",
+        user_pk=None,
+        display_name=None,
+        role=SpaceRole.MODERATOR.value,
+    )
+    assert (await repo.get("sp1", "i-mod", "u1")).role == "moderator"
+    assert await repo.list_admin_instances("sp1") == []
+
+
 async def test_list_admin_instances_empty_when_no_admins(repo):
     await repo.add(
         space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None

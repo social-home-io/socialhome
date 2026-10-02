@@ -20,7 +20,7 @@ describe('visibleSpaceTabs', () => {
     expect(tabs({ calendar: false })).toBe(false)
   })
 
-  it('admins get moderation, location adds the map', () => {
+  it('content authority (owner / admin / moderator) gets moderation, location adds the map', () => {
     const tabs = visibleSpaceTabs({ location: true }, true)
     expect(tabs).toContain('map')
     expect(tabs[tabs.length - 1]).toBe('moderation')

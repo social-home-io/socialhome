@@ -66,7 +66,11 @@ from ..domain.post import (
 )
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..domain.presence import truncate_coord
-from ..domain.space import Space, SpaceConfigEventType, SpaceRole
+from ..domain.space import (
+    Space,
+    SpaceRole,
+    role_change_event_type,
+)
 from ..domain.highlight import (
     Highlight,
     HighlightAudience,
@@ -1651,7 +1655,8 @@ class FederationInboundService(ProtectionGateMixin):
                 row.author != post.author
                 or not await authorship.may_mutate(event, space_id, row.author)
                 or (
-                    row.moderated and not await authorship.is_moderator(event, space_id)
+                    row.moderated
+                    and not await authorship.has_content_authority(event, space_id)
                 )
             ):
                 await authorship.hold_or_refuse(
@@ -2367,10 +2372,11 @@ class FederationInboundService(ProtectionGateMixin):
     # ── Space membership handlers ──────────────────────────────────────
 
     async def _on_space_member_role_changed(self, event: "FederationEvent") -> None:
-        """Apply a host's admin promotion/demotion locally (§13, multi-admin).
+        """Apply a host's role change locally (§13, multi-admin; v_41
+        moderator).
 
         The host broadcasts ``SPACE_MEMBER_ROLE_CHANGED`` whenever it
-        grants/revokes admin on a member. Without applying it, the role
+        changes a member's role among admin / moderator / member. Without applying it, the role
         lived only on the host: a promoted cross-household admin stayed a
         plain ``member`` on their own household, and every admin guard
         (``_require_admin_or_owner`` reads the *local* role) blocked them —
@@ -2386,6 +2392,7 @@ class FederationInboundService(ProtectionGateMixin):
             or role
             not in (
                 SpaceRole.ADMIN,
+                SpaceRole.MODERATOR,
                 SpaceRole.MEMBER,
             )
         ):
@@ -2413,6 +2420,10 @@ class FederationInboundService(ProtectionGateMixin):
             # our roster mirror so the Members tab shows the right role.
             if self._space_remote_member_repo is None:
                 return
+            seat = await self._space_remote_member_repo.get(
+                space_id, member_instance, user_id
+            )
+            old_role = seat.role if seat is not None else ""
             await self._space_remote_member_repo.set_role(
                 space_id,
                 member_instance,
@@ -2422,8 +2433,10 @@ class FederationInboundService(ProtectionGateMixin):
         else:
             # One of our own users was promoted/demoted — update their
             # local space_members role so the admin guards + SPA see it.
-            if await self._space_repo.get_member(space_id, user_id) is None:
+            local = await self._space_repo.get_member(space_id, user_id)
+            if local is None:
                 return
+            old_role = local.role
             await self._space_repo.set_role(space_id, user_id, role)
         # Mirror the host's local notification so connected tabs refresh
         # the roster. Safe on a receiver: space_config_outbound only
@@ -2431,11 +2444,7 @@ class FederationInboundService(ProtectionGateMixin):
         await self._bus.publish(
             SpaceConfigChanged(
                 space_id=space_id,
-                event_type=(
-                    SpaceConfigEventType.ADMIN_GRANTED
-                    if role == SpaceRole.ADMIN
-                    else SpaceConfigEventType.ADMIN_REVOKED
-                ).value,
+                event_type=role_change_event_type(old_role, role).value,
                 payload={
                     "user_id": user_id,
                     "instance_id": member_instance,

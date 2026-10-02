@@ -133,7 +133,7 @@ from ..domain.events import (
     UserPreferencesChanged,
     UserStatusChanged,
 )
-from ..domain.space import SpaceRole
+from ..domain.space import CONTENT_AUTHORITY_ROLES, SETTINGS_AUTHORITY_ROLES
 from ..domain.timetable import to_wire_dict as timetable_to_wire_dict
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
@@ -151,8 +151,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: Space roles that may read the moderation queue / act on join requests.
-_SPACE_ADMIN_ROLES = frozenset({SpaceRole.OWNER, SpaceRole.ADMIN})
+#: Space roles that may act on join requests (settings authority).
+_SPACE_ADMIN_ROLES = SETTINGS_AUTHORITY_ROLES
+
+#: Space roles that may read the moderation queue (content authority, v_41).
+_SPACE_MODERATOR_ROLES = CONTENT_AUTHORITY_ROLES
 
 
 class RealtimeService:
@@ -773,12 +776,12 @@ class RealtimeService:
 
     # ``space.moderation.*`` frames carry the full queued item (the
     # pending body, the rejection reason). Only the people who can read
-    # the queue (``GET …/moderation`` is owner/admin-only) receive them;
+    # the queue (``GET …/moderation`` is owner / admin / moderator) get them;
     # the submitter additionally learns the outcome of their own item.
 
     async def _on_space_mod_queued(self, event: SpaceModerationQueued) -> None:
         item = event.item
-        await self._broadcast_space_admins(
+        await self._broadcast_space_moderators(
             item.space_id,
             {
                 "type": "space.moderation.queued",
@@ -789,7 +792,7 @@ class RealtimeService:
 
     async def _on_space_mod_approved(self, event: SpaceModerationApproved) -> None:
         item = event.item
-        await self._broadcast_space_admins(
+        await self._broadcast_space_moderators(
             item.space_id,
             {
                 "type": "space.moderation.approved",
@@ -801,7 +804,7 @@ class RealtimeService:
 
     async def _on_space_mod_rejected(self, event: SpaceModerationRejected) -> None:
         item = event.item
-        await self._broadcast_space_admins(
+        await self._broadcast_space_moderators(
             item.space_id,
             {
                 "type": "space.moderation.rejected",
@@ -1706,17 +1709,17 @@ class RealtimeService:
         members = await self._space_repo.list_members(space_id)
         return [m.user_id for m in members if m.role in _SPACE_ADMIN_ROLES]
 
-    async def _broadcast_space_admins(
+    async def _broadcast_space_moderators(
         self,
         space_id: str,
         payload: dict,
         *,
         also: str | None = None,
     ) -> int:
-        """Space fan-out narrowed to the owner + admins, plus ``also``
-        (e.g. a submitter) while that user is still a member."""
+        """Space fan-out narrowed to the owner, admins and moderators, plus
+        ``also`` (e.g. a submitter) while that user is still a member."""
         members = await self._space_repo.list_members(space_id)
-        ids = [m.user_id for m in members if m.role in _SPACE_ADMIN_ROLES]
+        ids = [m.user_id for m in members if m.role in _SPACE_MODERATOR_ROLES]
         if also is not None and also not in ids:
             if any(m.user_id == also for m in members):
                 ids.append(also)

@@ -28,6 +28,7 @@ from ..domain.child_protection import AccountProtectedError
 from ..domain.preferences import FeatureDisabledError
 from ..services.preferences_service import ScopeMismatchError
 from ..domain.space import (
+    HouseholdUpgradeRequiredError,
     ModerationAlreadyDecidedError,
     PublicSpaceLimitError,
     SpacePermissionError,
@@ -323,6 +324,10 @@ class BaseView(web.View):
             return error_response(409, "NO_CONFLICT", str(exc))
         except PageLockError as exc:
             return error_response(409, "LOCKED", str(exc))
+        except HouseholdUpgradeRequiredError as exc:
+            # A SpacePermissionError subclass — must precede it. A stable
+            # code: the SPA renders its own translated copy.
+            return error_response(403, "HOUSEHOLD_UPGRADE_REQUIRED", str(exc))
         except (
             SpacePermissionError,
             GalleryPermissionError,

@@ -26,7 +26,7 @@ from ..domain.mention import (
     mention_tokens,
     mentions_added,
 )
-from ..domain.space import SpaceRole
+from ..domain.space import SETTINGS_AUTHORITY_ROLES, SpaceRole
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -34,7 +34,7 @@ from ..repositories.user_repo import AbstractUserRepo
 log = logging.getLogger(__name__)
 
 #: Local roles that may use ``@here`` (when the space allows it at all).
-_HERE_ROLES = frozenset({SpaceRole.OWNER.value, SpaceRole.ADMIN.value})
+_HERE_ROLES = SETTINGS_AUTHORITY_ROLES
 
 
 def _names(*names: str | None) -> tuple[str, ...]:

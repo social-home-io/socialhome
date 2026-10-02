@@ -65,6 +65,13 @@ from .media_status import READY, media_filename, video_poster_path
 
 _PROFILE_PICTURE_MAX_UPLOAD_BYTES = PROFILE_PICTURE_MAX_UPLOAD_BYTES
 
+#: Roles the member-role PATCH routes accept (the service applies the
+#: owner / admin matrix). ``owner`` moves only by transfer; ``subscriber``
+#: is seated by a Follower link, never assigned.
+_ASSIGNABLE_ROLES: frozenset[str] = frozenset(
+    {SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value, SpaceRole.MEMBER.value}
+)
+
 
 def _features_from_body(
     raw: object,
@@ -1143,19 +1150,24 @@ class SpaceMemberDetailView(BaseView):
         return self.user.user_id if raw == "me" else raw
 
     async def patch(self) -> web.Response:
-        """Owner-only: promote / demote a member (``role`` in body)."""
+        """Change a member's role (``role`` in body).
+
+        ``admin`` / ``moderator`` / ``member``. The owner sets any of them;
+        an admin moves a member between ``member`` and ``moderator`` only
+        (:func:`role_change_allowed` — 403 otherwise).
+        """
         ctx = self.user
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         user_id = self._resolve_user_id()
         body = await self.body()
         role = str(body.get("role") or "").strip()
-        if role not in ("admin", "member"):
+        if role not in _ASSIGNABLE_ROLES:
             return web.json_response(
                 {
                     "error": {
                         "code": "UNPROCESSABLE",
-                        "detail": "role must be 'admin' or 'member'",
+                        "detail": "role must be 'admin', 'moderator' or 'member'",
                     }
                 },
                 status=422,
@@ -1357,9 +1369,11 @@ class SpaceRemoteMemberRoleView(BaseView):
     """``PATCH`` / ``DELETE /api/spaces/{id}/remote-members/{instance_id}/{user_id}``
     — set a remote member's role (#114) or kick them (#114 phase 2).
 
-    ``PATCH`` body ``{"role": "admin"|"member"}`` — owner-only;
-    the change federates to every member household via
-    ``SPACE_MEMBER_ROLE_CHANGED``.
+    ``PATCH`` body ``{"role": "admin"|"moderator"|"member"}`` — the owner
+    sets any of them, an admin moves a member between ``member`` and
+    ``moderator`` only; the change federates to every member household via
+    ``SPACE_MEMBER_ROLE_CHANGED``. ``moderator`` needs the member's home
+    household at v_41 (403 "must upgrade" otherwise).
 
     ``DELETE`` — admin/owner only; routes through
     :meth:`SpaceService.remove_remote_member` which broadcasts
@@ -1375,11 +1389,11 @@ class SpaceRemoteMemberRoleView(BaseView):
         user_id = self.match("user_id")
         body = await self.body()
         role = str(body.get("role") or "").strip()
-        if role not in ("admin", "member"):
+        if role not in _ASSIGNABLE_ROLES:
             return error_response(
                 422,
                 "UNPROCESSABLE",
-                "role must be 'admin' or 'member'",
+                "role must be 'admin', 'moderator' or 'member'",
             )
         await svc.set_remote_member_role(
             space_id,

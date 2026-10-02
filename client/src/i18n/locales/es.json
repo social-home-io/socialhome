@@ -1046,5 +1046,18 @@
   "space.feature.timetable": "Horario",
   "space.feature.timetable_sub": "Un horario semanal compartido, p. ej. el de una clase",
   "timetable.space.pinned_household_off": "Los horarios están desactivados en tu hogar, así que los horarios fijados no aparecerán en el inicio",
-  "timetable.space.pin_short": "Inicio"
+  "timetable.space.pin_short": "Inicio",
+  "space.role.owner": "Propietario",
+  "space.role.admin": "Admin",
+  "space.role.moderator": "Moderador",
+  "space.role.member": "Miembro",
+  "space.role.subscriber": "Seguidor",
+  "space.member.role_heading": "Rol",
+  "space.member.make_admin": "Hacer admin",
+  "space.member.make_moderator": "Hacer moderador",
+  "space.member.make_member": "Hacer miembro",
+  "space.member.role_changed": "Rol cambiado a {role}",
+  "space.member.role_change_failed": "No se pudo cambiar el rol. Inténtalo de nuevo.",
+  "space.member.role_upgrade_required": "Su hogar tiene que actualizar Social Home antes de que pueda ser moderador.",
+  "space.member.role_change_forbidden": "No puedes asignar este rol."
 }

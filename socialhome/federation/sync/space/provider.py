@@ -26,7 +26,9 @@ from ....domain.federation import (
     DeliveryResult,
     FederationEventType,
 )
+from ....domain.federation_capabilities import FederationCapability
 from .exporter import ChunkBuilder, RESOURCE_ORDER, serialise_chunk
+from .exporters.members import PreModeratorMembersExporter
 
 if TYPE_CHECKING:
     from ...sync_manager import SyncSessionRecord
@@ -137,6 +139,27 @@ class SpaceSyncService:
         #: "https"``); ``_send`` falls back to RTC when ``None``.
         self._federation = None
 
+    async def _exporter_for(
+        self, resource: str, session: "SyncSessionRecord"
+    ) -> "ResourceExporter | None":
+        """The exporter for ``resource``, shaped for this requester.
+
+        v_41: a requester below ``MIN_FOR_SPACE_MODERATOR_ROLE`` (or one we
+        cannot ask — no federation attached) gets moderator rows as
+        ``member`` (:class:`PreModeratorMembersExporter`).
+        """
+        exporter = self._exporters.get(resource)
+        if exporter is None or resource != "members":
+            return exporter
+        supports = (
+            self._federation is not None
+            and await self._federation.peer_supports(
+                session.requester_instance_id,
+                min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+            )
+        )
+        return exporter if supports else PreModeratorMembersExporter(exporter)
+
     def attach_federation(self, federation_service) -> None:
         """Wire the federation service so HTTPS-mode sessions can
         stream chunks via ``SPACE_SYNC_CHUNK`` events."""
@@ -158,7 +181,7 @@ class SpaceSyncService:
         waits: dict[str, int] = {}
         try:
             for resource in RESOURCE_ORDER:
-                exporter = self._exporters.get(resource)
+                exporter = await self._exporter_for(resource, session)
                 if exporter is None:
                     log.debug("no exporter for resource %s — skipping", resource)
                     continue
@@ -457,7 +480,7 @@ class SpaceSyncService:
         sane bounds.
         """
         resource = str(cleaned.get("resource") or "")
-        exporter = self._exporters.get(resource)
+        exporter = await self._exporter_for(resource, session)
         if exporter is None:
             log.debug(
                 "REQUEST_MORE for %s has no exporter — skipping",

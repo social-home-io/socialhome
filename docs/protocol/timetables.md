@@ -68,7 +68,7 @@ sequenceDiagram
     A->>A: TimetableFederationOutbound<br/>(skips household + inbound echoes)
     A->>B: SPACE_TIMETABLE_UPSERTED<br/>broadcast_to_space_members, v_39+ only<br/>(payload sealed with the A→B session key)
     B->>B: §24.11 pipeline (sig, replay, ban,<br/>Follower write gate)
-    B->>B: resolve_space_id → parse + validate →<br/>no assignees → same space → id bound to creator →<br/>sender moderates AND updated_by is its admin →<br/>not deleted → last-writer-wins upsert
+    B->>B: resolve_space_id → parse + validate →<br/>no assignees → same space → id bound to creator →<br/>sender is an admin household AND updated_by is its admin →<br/>not deleted → last-writer-wins upsert
     B-->>M: WS timetable.changed (space_id)
 ```
 
@@ -77,7 +77,7 @@ the row (`deleted_at`, content cleared) and emits `TimetableDeleted`
 (carrying the row's `created_by`); the receiver tombstones the id in its
 space — even an id it never saw, so a create that the delete overtook
 can't land later — **but an unseen id only when it is owner-bound to the
-payload's `created_by` in this space**. Without that, a moderator of any
+payload's `created_by` in this space**. Without that, an admin of any
 space shared with the receiver could pre-tombstone another space's
 timetable id under its own space (the tombstone owns the id, so every later
 upsert of it would be dropped), and junk ids would grow the table.
@@ -106,7 +106,7 @@ catch-up completes, never syncs again until it restarts. Accepting the
 host's writer seats costs nothing: the host is the roster authority and
 could authority-sign any of its users into an `admin` seat anyway, and an
 honest host never emits a plain member's edit — its local service refuses
-one (`SpaceAuthorship.moderates_as`).
+one (`SpaceAuthorship.admin_as`).
 
 Additional receiver rules:
 
@@ -134,7 +134,8 @@ Additional receiver rules:
 `TimetablesExporter` streams a space's live timetables as wire dicts. A
 chunk from the host is applied whole (after the same parse / bound-id
 checks); a chunk from another member household is admitted per record only
-when that household moderates the space and the record's `updated_by` is
+when that household is an admin household (`is_admin_household` — a v_41
+`moderator` seat does not count) and the record's `updated_by` is
 its admin (and, for a timetable new here, it speaks for `created_by`).
 Deletes are not streamed — no other resource streams its tombstones: a
 joiner has nothing to delete, an offline member gets the live
@@ -168,7 +169,7 @@ left, or whose timetable feature is off, is silently ignored
 - `socialhome/services/federation_inbound/space_content.py` —
   `_on_timetable_upserted` / `_on_timetable_deleted`,
   `_timetable_write_allowed`.
-- `socialhome/federation/space_authorship.py` — `moderates_as`.
+- `socialhome/federation/space_authorship.py` — `admin_as`.
 - `socialhome/federation/sync/space/exporters/timetables.py`,
   `socialhome/federation/sync/space/receiver.py` (`timetables` resource).
 - `socialhome/repositories/timetable_repo.py` — `SqliteSpaceTimetableRepo`

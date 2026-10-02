@@ -267,3 +267,162 @@ async def test_ban_list_forbidden_for_non_admin(client):
         headers=_auth(client._bob_token),
     )
     assert resp.status == 403
+
+
+# ── v_41 moderator seat over HTTP ─────────────────────────────────────
+
+
+async def _add_user(client, name: str) -> tuple[str, str]:
+    """Insert a household user + API token. Returns (user_id, token)."""
+    db = client.server.app[_db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'",
+    )
+    uid = derive_user_id(bytes.fromhex(row["identity_public_key"]), name)
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) VALUES(?,?,?,0)",
+        (name, uid, name.title()),
+    )
+    token = f"{name}-token"
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        (f"tid-{name}", uid, "test", sha256_token_hash(token)),
+    )
+    return uid, token
+
+
+async def _seat(client, sid: str, uid: str, token: str) -> None:
+    r = await client.post(
+        f"/api/spaces/{sid}/members",
+        json={"user_id": uid},
+        headers=_auth(client._admin_token),
+    )
+    invitation_id = (await r.json())["invitation_id"]
+    r2 = await client.post(
+        f"/api/local_invites/{invitation_id}/accept",
+        json={},
+        headers=_auth(token),
+    )
+    assert r2.status == 200, await r2.text()
+
+
+async def _set_role(client, sid, uid, role, token):
+    return await client.patch(
+        f"/api/spaces/{sid}/members/{uid}",
+        json={"role": role},
+        headers=_auth(token),
+    )
+
+
+async def _moderator_space(client):
+    """ModSpace (bob's post queued) + cara as moderator, olga as admin."""
+    sid = await _seed_moderated_space(client)
+    cara_uid, cara = await _add_user(client, "cara")
+    olga_uid, olga = await _add_user(client, "olga")
+    await _seat(client, sid, cara_uid, cara)
+    await _seat(client, sid, olga_uid, olga)
+    r = await _set_role(client, sid, cara_uid, "moderator", client._admin_token)
+    assert r.status == 200, await r.text()
+    assert (await r.json())["role"] == "moderator"
+    r = await _set_role(client, sid, olga_uid, "admin", client._admin_token)
+    assert r.status == 200, await r.text()
+    return sid, (cara_uid, cara), (olga_uid, olga)
+
+
+async def test_a_moderator_lists_and_approves_the_queue(client):
+    sid, (_cuid, cara), _olga = await _moderator_space(client)
+    resp = await client.get(f"/api/spaces/{sid}/moderation", headers=_auth(cara))
+    assert resp.status == 200
+    [item] = await resp.json()
+    resp = await client.post(
+        f"/api/spaces/{sid}/moderation/{item['id']}/approve",
+        headers=_auth(cara),
+    )
+    assert resp.status == 200
+    assert (await resp.json())["status"] == "approved"
+
+
+async def test_a_moderator_rejects_from_the_queue(client):
+    sid, (_cuid, cara), _olga = await _moderator_space(client)
+    [item] = await (
+        await client.get(f"/api/spaces/{sid}/moderation", headers=_auth(cara))
+    ).json()
+    resp = await client.post(
+        f"/api/spaces/{sid}/moderation/{item['id']}/reject",
+        json={"reason": "no"},
+        headers=_auth(cara),
+    )
+    assert resp.status == 200
+
+
+async def test_a_moderator_gets_403_on_settings_and_roles(client):
+    sid, (_cuid, cara), _olga = await _moderator_space(client)
+    r = await client.patch(
+        f"/api/spaces/{sid}", json={"name": "Mine"}, headers=_auth(cara)
+    )
+    assert r.status == 403
+    r = await _set_role(client, sid, client._bob_uid, "moderator", cara)
+    assert r.status == 403
+    r = await client.get(f"/api/spaces/{sid}/bans", headers=_auth(cara))
+    assert r.status == 403
+    r = await client.delete(
+        f"/api/spaces/{sid}/members/{client._bob_uid}", headers=_auth(cara)
+    )
+    assert r.status == 403
+
+
+async def test_an_admin_promotes_a_member_to_moderator_but_not_to_admin(client):
+    sid, _cara, (_ouid, olga) = await _moderator_space(client)
+    r = await _set_role(client, sid, client._bob_uid, "moderator", olga)
+    assert r.status == 200, await r.text()
+    r = await _set_role(client, sid, client._bob_uid, "member", olga)
+    assert r.status == 200, await r.text()
+    r = await _set_role(client, sid, client._bob_uid, "admin", olga)
+    assert r.status == 403
+    body = await r.json()
+    assert "cannot change" in str(body)
+
+
+async def test_member_role_route_rejects_unknown_roles(client):
+    sid = await _seed_moderated_space(client)
+    for role in ("owner", "subscriber", "overlord"):
+        r = await _set_role(client, sid, client._bob_uid, role, client._admin_token)
+        assert r.status == 422, role
+
+
+async def test_remote_member_role_route_accepts_moderator(client):
+    """The remote-member PATCH passes ``moderator`` to the service (404 for
+    a seat that doesn't exist — not the 422 of an unknown role)."""
+    sid = await _seed_moderated_space(client)
+    r = await client.patch(
+        f"/api/spaces/{sid}/remote-members/peer-x/ru-1",
+        json={"role": "moderator"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status != 422, await r.text()
+    r = await client.patch(
+        f"/api/spaces/{sid}/remote-members/peer-x/ru-1",
+        json={"role": "owner"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+
+
+async def test_promoting_a_behind_household_answers_a_stable_code(client):
+    """The SPA maps the refusal by code to translated copy — never by the
+    server's English sentence."""
+    sid = await _seed_moderated_space(client)
+    db = client.server.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,'member')",
+        (sid, "peer-old", "ru-old"),
+    )
+    r = await client.patch(
+        f"/api/spaces/{sid}/remote-members/peer-old/ru-old",
+        json={"role": "moderator"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 403
+    body = await r.json()
+    assert body["error"]["code"] == "HOUSEHOLD_UPGRADE_REQUIRED"

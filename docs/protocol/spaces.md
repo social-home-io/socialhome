@@ -181,7 +181,8 @@ used to tear down a seat that is still carrying another shared space. See
 
 `SPACE_MEMBER_ROLE_CHANGED` (v_8+), `SPACE_REMOTE_ADMIN_KICK` (v_9+),
 `SPACE_REMOTE_ADMIN_ACTION` (v_15+), `SPACE_ADMIN_PROPOSAL_UPDATED`
-(v_16+). Role propagation + remote admins running mutations on a space
+(v_16+), the `moderator` role (v_41). Role propagation + remote admins
+running mutations on a space
 hosted elsewhere + multi-admin approval of critical actions. See
 "Cross-household admin promotion / kick / actions" and "Multi-admin
 approval" below.
@@ -320,16 +321,16 @@ act as one — only moderation (below) reaches a local user's rows.
 
 | Family | Create | Edit / state change | Delete |
 |---|---|---|---|
-| Posts, comments | author seated (with a writer role) on the sender, or the host relaying a row of a user the space has a record of (§25.6 resume / §319.6 resync replay); from v_36 an owner-bound id must commit to that author and space | the author's household, or a **moderator** — the host, or a household holding a live `admin` seat | same as edit |
-| Gallery albums (v_33) | owner seated on the sender (or the host's relay); from v_34 an owner-bound id must commit to that owner and space | the stored owner's household or a moderator (the payload's owner is ignored) | same as edit |
+| Posts, comments | author seated (with a writer role) on the sender, or the host relaying a row of a user the space has a record of (§25.6 resume / §319.6 resync replay); from v_36 an owner-bound id must commit to that author and space | the author's household, or **content authority** — the host, or a household holding a live `admin` or `moderator` (v_41) seat | same as edit |
+| Gallery albums (v_33) | owner seated on the sender (or the host's relay); from v_34 an owner-bound id must commit to that owner and space | the stored owner's household or **settings** authority — the host or an `admin` seat, never a `moderator` (the payload's owner is ignored) | same as edit |
 | Gallery items | uploader seated on the sender (or the host's relay); from v_36 an owner-bound id must commit to that uploader and space | — | uploader's household or a moderator |
 | Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household; from v_36 a new row's owner-bound id must commit to that creator and space | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
 | Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |
 | RSVPs | the user seated on the sender; plus the two writes the calendar service makes for another household: the event creator's household or a moderator settling a `requested` RSVP (→ `going` / `waitlist`, or removed), and any writer household promoting a `waitlist` RSVP into a free seat | | |
 | Poll close, schedule create / finalise | the wrapper post's author's household | | |
 | Bazaar listing | the seller seated on the sender, on the seller's own wrapper post, once (a re-send is a no-op) | status (sold / expired / cancelled) and offer acceptance: the seller's household only (a non-seller's expiry of an ended listing is DEBUG noise — every household sweeps expiries, only the seller's announces) | — |
-| Zones | moderators only (the local service is admin-only); a new zone's `created_by` bound like a create | moderators | moderators |
-| Timetables (v_39) | a moderator household, recording the edit as **a moderator** (`updated_by` holds a live `admin` seat on the sender; from the host, the roster authority, any live writer seat on the host — the owner is mirrored as a member — or a relayed remote user with a live `admin` seat; never a follower); the id must be owner-bound to `created_by` in this space (no legacy window) and a new row's `created_by` bound like a create | same — last-writer-wins on `version` (a jump > 10 000 or a version near the cap refused); a tombstoned id never comes back | same, bound to `deleted_by`; an unseen id is tombstoned only when owner-bound to the payload's `created_by` in this space — see [`timetables.md`](./timetables.md) |
+| Zones | settings authority only — the host or a live `admin` seat; a `moderator` seat is refused (the local service is admin-only); a new zone's `created_by` bound like a create | same | same |
+| Timetables (v_39) | an admin household, recording the edit as **an admin** (`SpaceAuthorship.admin_as`: `updated_by` holds a live `admin` seat on the sender — never a `moderator`; from the host, the roster authority, any live writer seat on the host — the owner is mirrored as a member — or a relayed remote user with a live `admin` seat; never a follower); the id must be owner-bound to `created_by` in this space (no legacy window) and a new row's `created_by` bound like a create | same — last-writer-wins on `version` (a jump > 10 000 or a version near the cap refused); a tombstoned id never comes back | same, bound to `deleted_by`; an unseen id is tombstoned only when owner-bound to the payload's `created_by` in this space — see [`timetables.md`](./timetables.md) |
 
 **Creator-bound ids (v_34 albums, v_36 everything else).** The rules
 above bind the user a payload names to the signing household, but a new
@@ -389,8 +390,9 @@ co-member household on a timer, so a chunk from any **other** provider is
 held to the same rules as a live event: it may only *add* rows (never
 overwrite one the receiver holds — author, content and moderation state
 stand), each attributed to a member seated on that provider; the roster
-and bans are the host's alone, and zones a moderator's; timetables a
-moderator household's, recorded as its admin (`SpaceSyncReceiver._admit`).
+and bans are the host's alone, and zones an admin household's (never a
+v_41 `moderator` seat); timetables an admin household's, recorded as its
+admin (`SpaceSyncReceiver._admit`).
 
 ### Keeping the roster mirror complete
 
@@ -1129,15 +1131,62 @@ sequenceDiagram
     Note over A,W: apply_member_event — version-guarded merge<br/>(removal-wins-tie; stale dropped)
 ```
 
+## Space roles (v_41)
+
+One role per seat, ordered `owner > admin > moderator > member >
+subscriber` (`SpaceRole`, `domain/space.py`). Authority comes in two
+tiers, each one frozenset that every guard — local and federated — reads:
+
+| Tier | Roles | What it covers |
+|---|---|---|
+| **Settings** (`SETTINGS_AUTHORITY_ROLES`) | owner, admin | config, features, access levels, members and roles, invites, bans / kicks, ownership, key rotation, archive / delete, zones, timetables, bots, themes, `@here`, join requests, multi-admin votes, the delegated signing seed, renaming / deleting someone else's whole gallery album |
+| **Content** (`CONTENT_AUTHORITY_ROLES`) | owner, admin, **moderator** | the post moderation queue (list / approve / reject), editing and deleting other people's posts and comments, deleting single gallery items, deciding RSVP requests on someone else's event; bypasses `MODERATED` for one's own posts |
+| **Writer** (`WRITER_ROLES`) | owner, admin, moderator, member | creating content |
+
+An `ADMIN_ONLY` feature stays owner / admin only — a moderator is
+refused like a member. Role-exact `admin` checks stay role-exact: a
+remote `moderator` seat never drives `SPACE_REMOTE_ADMIN_ACTION` /
+`SPACE_REMOTE_ADMIN_KICK` (dropped), is not in `list_admin_instances`
+(never receives `SPACE_ADMIN_KEY_SHARE`), and is not a multi-admin
+voter. On the federated side `SpaceAuthorship.is_admin_household` /
+`admin_as` are the settings tier (zones, timetables) and
+`has_content_authority` / `moderates_as` the content tier (`may_mutate`,
+a moderation-held post's re-edit, gallery item deletes, RSVP overrides);
+`may_mutate(settings=True)` and the album-tombstone check keep a whole
+album on the settings tier.
+
+**Who may change a role** (`role_change_allowed`): the owner sets
+`admin` / `moderator` / `member` on any non-owner seat; an admin moves a
+seat only between `member` and `moderator`; nobody else changes roles.
+Role changes happen on the host only — there is no forward path from a
+member stub yet. Nobody *joins* as a moderator: an invite link refuses
+the role and `SEATABLE_REMOTE_ROLES` omits it — though a household already
+seated as a moderator that re-redeems its link (a lost ACK) is re-ACKed with
+the seat it holds (`REACKABLE_REMOTE_ROLES`).
+
+**Older peers.** The roster gossip and snapshot are authority-signed, so
+a JOINED carries `role: "moderator"` to everyone; every v_30+ receiver
+coerces an unknown role down to `member` (`mirrorable_remote_role`), and a
+moderator's JOINED rides the v_30 floor like a subscriber's. A moderator's
+LEFT (kick, ban, leave) is signed as `role: "member"` and is **not**
+floored, so the removal reaches every v_23+ household.
+`SPACE_MEMBER_ROLE_CHANGED` is different — a v_40 receiver drops an
+unknown role, so a demoted admin would stay `admin` there — so a household
+below v_41 is sent the same event with `role: "member"`
+(`broadcast_to_space_members(legacy_payload=…, legacy_below=…)`); the §25.6
+`members` stream likewise ships a moderator as `member` to a requester
+below v_41. Promoting a user whose **home** household is below v_41 is
+refused (403, code `HOUSEHOLD_UPGRADE_REQUIRED`).
+
 ## Cross-household admin promotion
 
 `SPACE_MEMBER_ROLE_CHANGED` (#114, PR #434, v_8+) propagates a role
 change for a remote member to every member household. The host emits
 this on every `PATCH /api/spaces/{id}/remote-members/{instance}/{user}`
-that flips between `'member'` and `'admin'`. Owner is intentionally
-not assignable to a remote member — ownership carries local-only
-privileges (dissolve, ownership transfer) that can't sensibly cross
-households.
+that moves a seat between `'member'`, `'moderator'` (v_41) and
+`'admin'`. Owner is intentionally not assignable to a remote member —
+ownership carries local-only privileges (dissolve, ownership transfer)
+that can't sensibly cross households.
 
 ```mermaid
 sequenceDiagram
@@ -1145,10 +1194,10 @@ sequenceDiagram
     participant H as HFS H (host)
     participant A as HFS A (promoted member)
     participant W as HFS W (witness member)
-    H->>H: PATCH /api/spaces/{id}/remote-members/...<br/>{role: admin}
-    H->>H: space_remote_members.set_role(...)
+    H->>H: PATCH /api/spaces/{id}/remote-members/...<br/>{role: admin | moderator | member}
+    H->>H: role_change_allowed(actor, current, new)<br/>+ space_remote_members.set_role(...)
     H->>A: SPACE_MEMBER_ROLE_CHANGED
-    H->>W: SPACE_MEMBER_ROLE_CHANGED
+    H->>W: SPACE_MEMBER_ROLE_CHANGED<br/>(role: member if W is below v_41)
     Note over A: update space_members.role on local stub<br/>+ space_remote_members.role for witnesses
     Note over W: update space_remote_members.role<br/>so the rendered member list shows the new badge
 ```

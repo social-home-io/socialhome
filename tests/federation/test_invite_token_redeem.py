@@ -65,6 +65,7 @@ from socialhome.federation.invite_token_redeem import (
     BOOTSTRAP_INBOUND_WINDOW_S,
     BOOTSTRAP_PER_SENDER_LIMIT,
     BOOTSTRAP_PER_SENDER_WINDOW_S,
+    SEATABLE_REMOTE_ROLES,
     SpaceInviteTokenRedeemCoordinator,
 )
 from socialhome.federation.keywrap_seal import seal_to_keywrap
@@ -2591,6 +2592,26 @@ async def test_a_lost_ack_is_answered_again_on_retry():
     assert len(env.issuer_members.added) == 1
     # The joiner seated the space from the re-sent snapshot.
     assert "space-1" in env.redeemer_spaces.spaces
+
+
+async def test_a_moderator_re_redeeming_the_link_keeps_their_seat():
+    """M3 — a household promoted to ``moderator`` after joining re-redeems
+    its link (a lost ACK, a reinstall): the re-ACK answers with the seat
+    it holds, ``moderator``, and nothing is consumed or re-seated. A NEW
+    redeem still can never seat a moderator (``SEATABLE_REMOTE_ROLES``)."""
+    env = _atomic_pair()
+    env.relay.lose_to.add(env.redeemer_party.instance_id)
+    with pytest.raises(TimeoutError):
+        await _redeem(env)
+    key = ("space-1", env.redeemer_party.instance_id, "u-local")
+    env.issuer_members.live[key]["role"] = SpaceRole.MODERATOR.value
+    env.relay.lose_to.clear()
+    result = await _redeem(env)
+    assert result["role"] == SpaceRole.MODERATOR.value
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 0
+    assert len(env.issuer_members.added) == 1
+    assert env.issuer_members.live[key]["role"] == SpaceRole.MODERATOR.value
+    assert SpaceRole.MODERATOR.value not in SEATABLE_REMOTE_ROLES
 
 
 async def test_a_re_ack_that_is_refused_rolls_nothing_back():

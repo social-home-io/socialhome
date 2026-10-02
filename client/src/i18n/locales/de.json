@@ -1026,5 +1026,18 @@
   "space.feature.timetable": "Stundenplan",
   "space.feature.timetable_sub": "Ein gemeinsamer Wochenstundenplan, z. B. der einer Klasse",
   "timetable.space.pinned_household_off": "Stundenpläne sind für deinen Haushalt ausgeschaltet, daher erscheinen angeheftete Stundenpläne nicht auf der Startseite",
-  "timetable.space.pin_short": "Start"
+  "timetable.space.pin_short": "Start",
+  "space.role.owner": "Eigentümer",
+  "space.role.admin": "Admin",
+  "space.role.moderator": "Moderator",
+  "space.role.member": "Mitglied",
+  "space.role.subscriber": "Follower",
+  "space.member.role_heading": "Rolle",
+  "space.member.make_admin": "Zum Admin machen",
+  "space.member.make_moderator": "Zum Moderator machen",
+  "space.member.make_member": "Zum Mitglied machen",
+  "space.member.role_changed": "Rolle geändert zu {role}",
+  "space.member.role_change_failed": "Die Rolle konnte nicht geändert werden. Versuch es noch einmal.",
+  "space.member.role_upgrade_required": "Ihr Haushalt muss Social Home aktualisieren, bevor sie Moderator werden können.",
+  "space.member.role_change_forbidden": "Diese Rolle kannst du nicht vergeben."
 }

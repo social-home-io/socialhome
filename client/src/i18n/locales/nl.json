@@ -1021,5 +1021,18 @@
   "space.feature.timetable": "Rooster",
   "space.feature.timetable_sub": "Een gedeeld weekrooster, bijv. een klasrooster",
   "timetable.space.pinned_household_off": "Roosters staan uit voor je huishouden, dus vastgezette roosters verschijnen niet op de startpagina",
-  "timetable.space.pin_short": "Start"
+  "timetable.space.pin_short": "Start",
+  "space.role.owner": "Eigenaar",
+  "space.role.admin": "Beheerder",
+  "space.role.moderator": "Moderator",
+  "space.role.member": "Lid",
+  "space.role.subscriber": "Volger",
+  "space.member.role_heading": "Rol",
+  "space.member.make_admin": "Beheerder maken",
+  "space.member.make_moderator": "Moderator maken",
+  "space.member.make_member": "Lid maken",
+  "space.member.role_changed": "Rol gewijzigd naar {role}",
+  "space.member.role_change_failed": "De rol kon niet worden gewijzigd. Probeer het opnieuw.",
+  "space.member.role_upgrade_required": "Hun huishouden moet Social Home bijwerken voordat ze moderator kunnen worden.",
+  "space.member.role_change_forbidden": "Je kunt deze rol niet toekennen."
 }

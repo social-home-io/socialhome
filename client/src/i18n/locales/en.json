@@ -1340,5 +1340,18 @@
   "space.feature.timetable": "Timetable",
   "space.feature.timetable_sub": "A shared weekly timetable, e.g. a class schedule",
   "timetable.space.pinned_household_off": "Timetables are turned off for your household, so pinned timetables won't show on Home",
-  "timetable.space.pin_short": "Home"
+  "timetable.space.pin_short": "Home",
+  "space.role.owner": "Owner",
+  "space.role.admin": "Admin",
+  "space.role.moderator": "Moderator",
+  "space.role.member": "Member",
+  "space.role.subscriber": "Follower",
+  "space.member.role_heading": "Role",
+  "space.member.make_admin": "Make admin",
+  "space.member.make_moderator": "Make moderator",
+  "space.member.make_member": "Make member",
+  "space.member.role_changed": "Role changed to {role}",
+  "space.member.role_change_failed": "Couldn't change the role. Try again.",
+  "space.member.role_upgrade_required": "Their household needs to update Social Home before they can be a moderator.",
+  "space.member.role_change_forbidden": "You can't give this role."
 }
