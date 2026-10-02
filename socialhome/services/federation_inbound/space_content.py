@@ -382,6 +382,15 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="task", row_id=task_id
             )
             return
+        if (
+            held is None
+            and task_id
+            and await self._task_repo.is_task_deleted(task_id, space_id=space_id)
+        ):
+            # A household that missed the delete re-announcing the task
+            # (or a replay of its create): the tombstone wins.
+            log_not_applied(event, what="task", row_id=task_id, reason="deleted here")
+            return
         existing = held[1] if held is not None else None
         # The shared wire codec merges onto the held row: an absent key
         # keeps our value, and a v39 sender's lossy fields never wipe it.
@@ -498,7 +507,11 @@ class SpaceContentInboundHandlers:
             row_owner=existing[1].created_by,
         ):
             return
-        if not await self._task_repo.delete(task_id, space_id=space_id):
+        # Tombstoned, not removed (migration 0071): sync / resume tell a
+        # household that missed it, and a stale copy cannot come back.
+        if not await self._task_repo.delete(
+            task_id, space_id=space_id, deleted_by=_deleter(event)
+        ):
             log_cross_space_refusal(
                 event, space_id=space_id, what="task", row_id=task_id
             )
@@ -694,7 +707,7 @@ class SpaceContentInboundHandlers:
         ):
             return
         # Tombstoned, not removed (sync / resume tell a household that
-        # missed it); the migration-0069 trigger drops the list's tasks.
+        # missed it); the list-tombstone trigger (0071) tombstones its tasks.
         if not await self._task_repo.delete_list(
             list_id, space_id=space_id, deleted_by=_deleter(event)
         ):
@@ -2744,9 +2757,9 @@ def _assignee_owner(existing: Task, incoming: Task, actor: str | None) -> str:
 
 
 def _deleter(event: "FederationEvent") -> str:
-    """Who authorised a delete, for the list tombstone's ``deleted_by``: the
-    approver of a reviewed (v_43) delete, else the payload's actor (v_42),
-    else nobody. A replay of the tombstone names this user, so it passes
+    """Who authorised a delete, for a list or task tombstone's
+    ``deleted_by``: the approver of a reviewed (v_43) delete, else the
+    payload's actor (v_42), else nobody. A replay of the tombstone names this user, so it passes
     the space's level wherever the live delete did."""
     block = event.payload.get(MODERATION_BLOCK_KEY)
     if isinstance(block, dict):

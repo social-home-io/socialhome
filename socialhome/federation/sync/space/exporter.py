@@ -55,6 +55,11 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # tasks) before ``tasks`` streams. An older receiver drops the unknown
     # resource.
     "task_lists_deleted",
+    # Task tombstones (migration 0071) after the lists, before the live
+    # tasks: a household that missed a task delete drops its copy, and a
+    # stub for one never held needs its list held here already. An older
+    # receiver drops the unknown resource.
+    "tasks_deleted",
     "tasks",
     "tasks_archived",
     "pages",
@@ -91,7 +96,7 @@ ROSTER_RESOURCES: frozenset[str] = frozenset({"bans", "members", "member_picture
 #: Content resources that only ever REMOVE rows. Like the live
 #: ``ARCHIVED_ALLOWED_REMOVAL_TYPES``, they still land in a space that is
 #: archived here — a delete must not outlive itself on the snapshot.
-REMOVAL_RESOURCES: frozenset[str] = frozenset({"task_lists_deleted"})
+REMOVAL_RESOURCES: frozenset[str] = frozenset({"task_lists_deleted", "tasks_deleted"})
 
 
 #: Sentinel resource sent over the channel after all real chunks.

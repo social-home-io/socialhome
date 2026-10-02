@@ -534,10 +534,32 @@ async def test_a_streamed_list_delete_still_lands_in_an_archived_space(
         "SELECT deleted_at FROM space_task_lists WHERE id='list-a'", ()
     )
     assert row["deleted_at"] is not None
+    # Its tasks are tombstoned with it (0071 trigger), not left live.
     assert (
-        await db.fetchone("SELECT 1 FROM space_tasks WHERE list_id='list-a'", ())
+        await db.fetchone(
+            "SELECT 1 FROM space_tasks WHERE list_id='list-a' AND deleted_at IS NULL",
+            (),
+        )
         is None
     )
+
+
+@pytest.mark.parametrize("reason", [None, "dissolved", "removed"])
+@pytest.mark.parametrize("provider", [HOST, AUTHOR])
+async def test_a_streamed_task_delete_still_lands_in_an_archived_space(
+    env, reason, provider
+):
+    """Single-task tombstones (migration 0071) are a removal too."""
+    app, db = env
+    await _archive(db, reason)
+    await _stream(
+        app,
+        "tasks_deleted",
+        [{"id": "task-a", "space_id": SP, "list_id": "list-a"}],
+        provider,
+    )
+    row = await db.fetchone("SELECT deleted_at FROM space_tasks WHERE id='task-a'", ())
+    assert row["deleted_at"] is not None
 
 
 def test_every_content_sync_resource_is_classified():

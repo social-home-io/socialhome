@@ -239,6 +239,8 @@ class _FakeSpaceTaskRepo:
         self.saved_lists: list = []
         self.deleted_lists: list = []
         self.tombstoned: set[str] = set()
+        self.tombstoned_tasks: set[str] = set()
+        self.deleted_by: dict[str, str] = {}
 
     def hold(self, task: Task, space_id: str) -> None:
         self.rows.claim(task.id, space_id)
@@ -257,11 +259,16 @@ class _FakeSpaceTaskRepo:
         self.tasks[task.id] = task
         return True
 
-    async def delete(self, task_id, *, space_id):
+    async def delete(self, task_id, *, space_id, deleted_by=""):
         if not self.rows.drop(task_id, space_id):
             return False
         self.deleted.append(task_id)
+        self.deleted_by[task_id] = deleted_by
+        self.tombstoned_tasks.add(task_id)
         return True
+
+    async def is_task_deleted(self, task_id, *, space_id):
+        return task_id in self.tombstoned_tasks
 
     # ── Lists (v_40) ──
     async def get_list(self, list_id):
@@ -590,6 +597,45 @@ async def test_task_deleted(repos, handlers):
         )
     )
     assert repos["task"].deleted == ["t-1"]
+
+
+async def test_task_deleted_records_the_deleter(repos, handlers):
+    """The tombstone's ``deleted_by`` is the payload's actor, so the
+    resume replay / ``tasks_deleted`` stream can name it (migration 0071)."""
+    repos["task"].rows.claim("t-1", "sp-1")
+    await handlers._on_task_deleted(
+        _event(
+            FederationEventType.SPACE_TASK_DELETED,
+            {"id": "t-1", "actor_user_id": "u-del"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["task"].deleted_by == {"t-1": "u-del"}
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [FederationEventType.SPACE_TASK_CREATED, FederationEventType.SPACE_TASK_UPDATED],
+)
+async def test_a_task_deleted_here_is_not_recreated(
+    repos, handlers, caplog, event_type
+):
+    repos["task"].tombstoned_tasks.add("t-1")
+    with caplog.at_level("DEBUG"):
+        await handlers._on_task_saved(
+            _event(
+                event_type,
+                {
+                    "id": "t-1",
+                    "list_id": "list-1",
+                    "title": "Back from the dead",
+                    "created_by": "u-1",
+                },
+                space_id="sp-1",
+            )
+        )
+    assert repos["task"].saved == []
+    assert "deleted here" in caplog.text
 
 
 def _record(bus, *types):

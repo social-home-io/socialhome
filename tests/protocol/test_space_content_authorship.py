@@ -57,6 +57,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
     mint_owner_bound_id,
@@ -109,6 +110,12 @@ _LIST_SYNC = mint_owner_bound_id(SPACE_TASK_LIST_KIND, space_id=SP, owner_user_i
 #: that space's real list on this household forever (ids are global).
 _LIST_ELSEWHERE = mint_owner_bound_id(
     SPACE_TASK_LIST_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
+)
+#: The task twins (migration 0071): a fresh task id bound to u-a in SP,
+#: and one bound to u-a in another space.
+_TASK_SYNC = mint_owner_bound_id(SPACE_TASK_KIND, space_id=SP, owner_user_id="u-a")
+_TASK_ELSEWHERE = mint_owner_bound_id(
+    SPACE_TASK_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
 )
 _TT_FOR_U_A = mint_owner_bound_id(
     SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-a"
@@ -1760,6 +1767,41 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         "task_lists_deleted",
         "stub a legacy (unbound) list id never held here",
         [{"id": "l-legacy-tomb", "space_id": SP, "created_by": "u-a"}],
+        (),
+        (HOST, AUTHOR),
+    ),
+    (
+        "tasks_deleted",
+        "delete u-a's task (a delete the provider heard, we missed)",
+        [{"id": "task-a", "space_id": SP, "list_id": "list-a"}],
+        (HOST, AUTHOR, OTHER),
+        (STRANGER,),
+    ),
+    (
+        "tasks_deleted",
+        "tombstone a task id not held here",
+        [{"id": _TASK_SYNC, "space_id": SP, "list_id": "list-a", "created_by": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "tasks_deleted",
+        "stub a task id bound to another space (a cross-space squat)",
+        [
+            {
+                "id": _TASK_ELSEWHERE,
+                "space_id": SP,
+                "list_id": "list-a",
+                "created_by": "u-a",
+            }
+        ],
+        (),
+        (HOST, AUTHOR, OTHER),
+    ),
+    (
+        "tasks_deleted",
+        "stub a legacy (unbound) task id never held here",
+        [{"id": "t-legacy-tomb", "space_id": SP, "list_id": "list-a"}],
         (),
         (HOST, AUTHOR),
     ),
