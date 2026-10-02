@@ -175,6 +175,19 @@ class TaskList:
 
 
 @dataclass(slots=True, frozen=True)
+class TaskListTombstone:
+    """A deleted space task list (migration 0069): its id, when it was
+    deleted here (naive UTC, SQLite ``datetime('now')``), the list's
+    creator (binds an owner-bound id to its space on the receiver) and the
+    user who deleted it (empty when nobody can be named)."""
+
+    id: str
+    deleted_at: str
+    created_by: str = ""
+    deleted_by: str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class Task:
     id: str
     list_id: str
@@ -484,6 +497,21 @@ def task_list_to_wire_dict(task_list: TaskList, space_id: str) -> dict[str, Any]
         "space_id": space_id,
         "name": task_list.name,
         "created_by": task_list.created_by,
+    }
+
+
+def task_list_tombstone_to_wire_dict(
+    tombstone: TaskListTombstone, space_id: str
+) -> dict[str, Any]:
+    """The ``task_lists_deleted`` sync record of a deleted space list, and
+    the replayed ``SPACE_TASK_LIST_DELETED`` payload: ``{id, space_id,
+    created_by, actor_user_id}`` (the deleter, v_42 — the receiver judges
+    the delete against the space's ``tasks`` level for that user)."""
+    return {
+        "id": tombstone.id,
+        "space_id": space_id,
+        "created_by": tombstone.created_by,
+        "actor_user_id": tombstone.deleted_by,
     }
 
 

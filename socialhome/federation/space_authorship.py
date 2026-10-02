@@ -154,6 +154,10 @@ def payload_actor(event: "FederationEvent") -> str | None:
     return actor if isinstance(actor, str) and actor else None
 
 
+def _quiet_refusal(*_args: object) -> None:
+    """The refusal log of a ``quiet`` :meth:`SpaceAuthorship.access_admits`."""
+
+
 class SpaceAuthorship:
     """Bind the users a space-content payload names to the sending household."""
 
@@ -589,6 +593,7 @@ class SpaceAuthorship:
         actor: str | None,
         row_owner: str = "",
         release_ok: bool = False,
+        quiet: bool = False,
     ) -> bool:
         """Does ``space_id``'s ``feature`` access level, as THIS household
         holds it, admit the write?
@@ -628,12 +633,15 @@ class SpaceAuthorship:
           release alone (:meth:`may_author_approved`), at every level but
           ``OPEN``.
 
-        A refusal logs at WARNING. An unknown space admits nothing beyond
-        ``OPEN``: there is no level to check against.
+        A refusal logs at WARNING — unless ``quiet``, for a caller that
+        reports its refusals itself (once per §25.6 sync chunk, rather than
+        once per record on every scheduler tick). An unknown space admits
+        nothing beyond ``OPEN``: there is no level to check against.
         """
+        refuse = _quiet_refusal if quiet else self._log_access_refusal
         space = await self._spaces.get(space_id)
         if space is None:
-            self._log_access_refusal(event, space_id, feature, action, actor, "unknown")
+            refuse(event, space_id, feature, action, actor, "unknown")
             return False
         level = space.features.access_level(feature)
         if level is SpaceFeatureAccess.OPEN:
@@ -645,7 +653,7 @@ class SpaceAuthorship:
         if action is ContentAction.CREATE and row_owner:
             if actor and actor != row_owner:
                 if not (release_ok and await self.is_host(event, space_id)):
-                    self._log_access_refusal(
+                    refuse(
                         event,
                         space_id,
                         feature,
@@ -701,7 +709,7 @@ class SpaceAuthorship:
             else:
                 admitted = False  # a v_42 sender that named nobody
             if not admitted:
-                self._log_access_refusal(event, space_id, feature, action, actor, level)
+                refuse(event, space_id, feature, action, actor, level)
             return admitted
         # MODERATED. A plain member's create, or edit / delete of someone
         # else's row, is exactly a write that waits for review — every
@@ -730,7 +738,7 @@ class SpaceAuthorship:
         else:
             admitted = False  # a v_42 sender that named nobody
         if not admitted:
-            self._log_access_refusal(event, space_id, feature, action, actor, level)
+            refuse(event, space_id, feature, action, actor, level)
         return admitted
 
     async def _release_admitted(

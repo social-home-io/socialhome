@@ -14,7 +14,13 @@ from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
 from socialhome.domain.sticky import Sticky
-from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
+from socialhome.domain.task import (
+    TaskListTombstone,
+    Task,
+    TaskList,
+    TaskPriority,
+    TaskStatus,
+)
 from socialhome.services.gallery_tombstones import GalleryAlbumTombstones
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
@@ -88,13 +94,25 @@ class _FakeListSinceRepo:
     """Generic stub for repos whose since-method is just ``list_since``."""
 
     def __init__(
-        self, rows: list, *, method: str = "list_since", lists: list | None = None
+        self,
+        rows: list,
+        *,
+        method: str = "list_since",
+        lists: list | None = None,
+        tombstones: list | None = None,
     ) -> None:
         self._rows = rows
         self._method = method
         self._lists = lists or []
+        self._tombstones = tombstones or []
 
     def __getattr__(self, name):  # type: ignore[no-redef]
+        if name == "list_list_tombstones":
+
+            async def _tombstones(space_id, *, since=None, limit=500):
+                return self._tombstones[:limit]
+
+            return _tombstones
         if name == "list_lists_since":
 
             async def _lists(space_id, since, *, limit=500):
@@ -472,6 +490,46 @@ async def test_handle_request_replays_task_lists_before_tasks():
         "space_id": "sp-1",
         "name": "Chores",
         "created_by": "u-1",
+    }
+
+
+async def test_handle_request_replays_list_deletes_before_lists_and_tasks():
+    """Migration 0069: a list deleted since ``since`` goes out as
+    SPACE_TASK_LIST_DELETED ``{id, space_id}`` ahead of the live lists."""
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    fed = _FakeFederation()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(),
+        space_task_repo=_FakeListSinceRepo(
+            [],
+            lists=[TaskList(id="l-1", name="Chores", created_by="u-1")],
+            tombstones=[
+                TaskListTombstone(
+                    id="l-gone",
+                    deleted_at="2026-04-02",
+                    created_by="u-1",
+                    deleted_by="u-adm",
+                )
+            ],
+        ),
+    )
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert sent == 2
+    assert [s["type"] for s in fed.sent] == [
+        FederationEventType.SPACE_TASK_LIST_DELETED,
+        FederationEventType.SPACE_TASK_LIST_CREATED,
+    ]
+    # The deleter rides as ``actor_user_id`` so a restricted level can judge
+    # the replayed delete; ``created_by`` binds the id to its space.
+    assert fed.sent[0]["payload"] == {
+        "id": "l-gone",
+        "space_id": "sp-1",
+        "created_by": "u-1",
+        "actor_user_id": "u-adm",
     }
 
 

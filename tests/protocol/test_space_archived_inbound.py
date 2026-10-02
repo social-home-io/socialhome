@@ -56,6 +56,7 @@ from socialhome.federation.inbound_validator import (
 )
 from socialhome.federation.sync.space.exporter import (
     ALLOWED_RESOURCES,
+    REMOVAL_RESOURCES,
     ROSTER_RESOURCES,
 )
 from socialhome.federation.routed_envelope import SpaceRoutedHandler
@@ -453,7 +454,7 @@ def _sync(senders_of):
     return [
         pytest.param(r, recs, prov, id=f"{r}: {label} <- {prov}")
         for r, label, recs, allowed, _refused in SYNC_CASES
-        if r not in ROSTER_RESOURCES
+        if r not in ROSTER_RESOURCES and r not in REMOVAL_RESOURCES
         for prov in senders_of(allowed)
     ]
 
@@ -517,11 +518,40 @@ async def test_the_roster_still_syncs_into_a_terminated_space(env):
     )
 
 
+@pytest.mark.parametrize("reason", [None, "dissolved", "removed"])
+@pytest.mark.parametrize("provider", [HOST, AUTHOR])
+async def test_a_streamed_list_delete_still_lands_in_an_archived_space(
+    env, reason, provider
+):
+    """Removals propagate into the snapshot, as the live gate lets
+    ``SPACE_TASK_LIST_DELETED`` through: a delete must not outlive itself."""
+    app, db = env
+    await _archive(db, reason)
+    await _stream(
+        app, "task_lists_deleted", [{"id": "list-a", "space_id": SP}], provider
+    )
+    row = await db.fetchone(
+        "SELECT deleted_at FROM space_task_lists WHERE id='list-a'", ()
+    )
+    assert row["deleted_at"] is not None
+    assert (
+        await db.fetchone("SELECT 1 FROM space_tasks WHERE list_id='list-a'", ())
+        is None
+    )
+
+
 def test_every_content_sync_resource_is_classified():
-    """Every sync resource is roster (still applies) or content (refused
-    into an archived space, with an end-to-end case)."""
+    """Every sync resource is roster (still applies), a removal (still
+    applies, with an end-to-end case above) or content (refused into an
+    archived space, with an end-to-end case)."""
     assert ROSTER_RESOURCES <= ALLOWED_RESOURCES
-    content = set(ALLOWED_RESOURCES) - ROSTER_RESOURCES - _SYNC_NOT_WRITTEN.keys()
+    assert REMOVAL_RESOURCES <= ALLOWED_RESOURCES
+    content = (
+        set(ALLOWED_RESOURCES)
+        - ROSTER_RESOURCES
+        - REMOVAL_RESOURCES
+        - _SYNC_NOT_WRITTEN.keys()
+    )
     covered = {p.values[0] for p in _MEMBER_SYNC} | {p.values[0] for p in _HOST_SYNC}
     assert not content - covered, sorted(content - covered)
 

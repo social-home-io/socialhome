@@ -58,6 +58,7 @@ class _FakeRepos:
         self.comments = []
         self.tasks = []
         self.task_lists = []
+        self.deleted_list_ids: set[str] = set()
         self.held_tasks: dict = {}
         self.pages = []
         self.stickies = []
@@ -138,6 +139,9 @@ class _TaskRepoStub:
 
     async def get_list(self, list_id):
         return None
+
+    async def is_list_deleted(self, list_id, *, space_id):
+        return list_id in self._c.deleted_list_ids
 
     async def get(self, task_id):
         return self._c.held_tasks.get(task_id)

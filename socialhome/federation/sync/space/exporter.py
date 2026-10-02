@@ -50,6 +50,11 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # Task lists (v_40) ship BEFORE tasks: a space task is only filed under
     # a list the receiver already holds in that space.
     "task_lists",
+    # List tombstones (migration 0069) right after the live lists: a
+    # household that missed a list delete drops its copy (and the copy's
+    # tasks) before ``tasks`` streams. An older receiver drops the unknown
+    # resource.
+    "task_lists_deleted",
     "tasks",
     "tasks_archived",
     "pages",
@@ -82,6 +87,11 @@ ALLOWED_RESOURCES: frozenset[str] = frozenset(RESOURCE_ORDER)
 #: :func:`socialhome.federation.space_scope.archive_refusal`). The roster
 #: still converges on an archived space, like the roster events do.
 ROSTER_RESOURCES: frozenset[str] = frozenset({"bans", "members", "member_pictures"})
+
+#: Content resources that only ever REMOVE rows. Like the live
+#: ``ARCHIVED_ALLOWED_REMOVAL_TYPES``, they still land in a space that is
+#: archived here — a delete must not outlive itself on the snapshot.
+REMOVAL_RESOURCES: frozenset[str] = frozenset({"task_lists_deleted"})
 
 
 #: Sentinel resource sent over the channel after all real chunks.
