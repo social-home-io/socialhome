@@ -90,3 +90,21 @@ describe('joinOptionsForVisibility', () => {
     expect(opts.every(o => !o.disabled)).toBe(true)
   })
 })
+
+describe('RadioCardGroup fontFamily', () => {
+  it('renders an option title + icon in its own font stack, others unstyled', () => {
+    const { getByText } = render(
+      <RadioCardGroup
+        legend="Font" name="f" value="a"
+        options={[
+          { value: 'a', icon: 'Aa', title: 'Serif', subtitle: 's', fontFamily: 'Georgia, serif' },
+          { value: 'b', icon: 'Bb', title: 'Plain', subtitle: 'p' },
+        ]}
+        onChange={() => {}}
+      />,
+    )
+    expect(getByText('Serif').style.fontFamily).toContain('Georgia')
+    expect(getByText('Aa').style.fontFamily).toContain('Georgia')
+    expect(getByText('Plain').getAttribute('style')).toBeNull()
+  })
+})

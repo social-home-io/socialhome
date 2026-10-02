@@ -15,62 +15,37 @@ permissions (admins only for household, space admins for a space).
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 
-# Domain dataclasses live in ``socialhome/domain/theme.py``;
+# Domain dataclasses + validators live in ``socialhome/domain/theme.py``;
 # re-exported here so existing repo-level imports keep working.
-from ..domain.theme import HouseholdTheme, SpaceTheme  # noqa: F401,E402
+from ..domain.theme import (  # noqa: F401
+    ALLOWED_DENSITIES,
+    ALLOWED_FONTS,
+    ALLOWED_MODES,
+    ALLOWED_POST_LAYOUTS,
+    DEFAULT_FONT,
+    DEFAULT_POST_LAYOUT,
+    HouseholdTheme,
+    SpaceTheme,
+    ThemeValidationError,
+    validate_choice,
+    validate_color,
+    validate_corner_radius,
+    validate_optional_choice,
+    validate_optional_color,
+)
 
 
-_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
-
-ALLOWED_MODES = frozenset({"light", "dark", "auto"})
-ALLOWED_FONTS = frozenset({"system", "serif", "rounded", "mono"})
-ALLOWED_DENSITIES = frozenset({"compact", "comfortable", "spacious"})
-ALLOWED_POST_LAYOUTS = frozenset({"card", "compact", "magazine"})
-
-
-def validate_color(value: str) -> str:
-    """Reject anything that isn't ``#RRGGBB``. Returns the normalised value."""
-    if not isinstance(value, str) or not _HEX_COLOR_RE.match(value):
-        raise ValueError(f"Invalid hex colour: {value!r}")
-    return value.lower()
-
-
-def _validate_optional_color(value: str | None) -> str | None:
-    if value is None:
-        return None
-    return validate_color(value)
-
-
-def _validate_choice(value: str, allowed: frozenset[str], label: str) -> str:
-    if value not in allowed:
-        raise ValueError(f"{label} must be one of {sorted(allowed)}")
-    return value
-
-
-def _validate_optional_choice(
-    value: str | None,
-    allowed: frozenset[str],
-    label: str,
-) -> str | None:
-    if value is None:
-        return None
-    return _validate_choice(value, allowed, label)
-
-
-def _validate_corner_radius(value: int) -> int:
-    try:
-        v = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("corner_radius must be an integer") from exc
-    if not (0 <= v <= 24):
-        raise ValueError("corner_radius must be between 0 and 24")
-    return v
+def _reset_or_keep(patch: dict, key: str, current: str, default: str) -> object:
+    """Absent → keep ``current``; ``null`` → the column ``default``."""
+    if key not in patch:
+        return current
+    value = patch[key]
+    return default if value is None else value
 
 
 @runtime_checkable
@@ -119,26 +94,30 @@ class SqliteThemeRepo:
 
     async def update_household(self, **patch) -> HouseholdTheme:
         current = await self.get_household()
-        primary = validate_color(patch.get("primary_color", current.primary_color))
-        accent = validate_color(patch.get("accent_color", current.accent_color))
-        surface = _validate_optional_color(
-            patch.get("surface_color", current.surface_color)
+        primary = validate_color(
+            patch.get("primary_color", current.primary_color), "primary_color"
         )
-        surface_dark = _validate_optional_color(
-            patch.get("surface_dark", current.surface_dark)
+        accent = validate_color(
+            patch.get("accent_color", current.accent_color), "accent_color"
         )
-        mode = _validate_choice(patch.get("mode", current.mode), ALLOWED_MODES, "mode")
-        font = _validate_choice(
+        surface = validate_optional_color(
+            patch.get("surface_color", current.surface_color), "surface_color"
+        )
+        surface_dark = validate_optional_color(
+            patch.get("surface_dark", current.surface_dark), "surface_dark"
+        )
+        mode = validate_choice(patch.get("mode", current.mode), ALLOWED_MODES, "mode")
+        font = validate_choice(
             patch.get("font_family", current.font_family),
             ALLOWED_FONTS,
             "font_family",
         )
-        density = _validate_choice(
+        density = validate_choice(
             patch.get("density", current.density),
             ALLOWED_DENSITIES,
             "density",
         )
-        corner_radius = _validate_corner_radius(
+        corner_radius = validate_corner_radius(
             patch.get("corner_radius", current.corner_radius),
         )
         ts = datetime.now(timezone.utc).isoformat()
@@ -209,30 +188,36 @@ class SqliteThemeRepo:
 
     async def upsert_space(self, *, space_id: str, **patch) -> SpaceTheme:
         current = await self.get_space(space_id) or SpaceTheme(space_id=space_id)
-        primary = validate_color(patch.get("primary_color", current.primary_color))
-        accent = validate_color(patch.get("accent_color", current.accent_color))
+        primary = validate_color(
+            patch.get("primary_color", current.primary_color), "primary_color"
+        )
+        accent = validate_color(
+            patch.get("accent_color", current.accent_color), "accent_color"
+        )
         header = patch.get("header_image_file", current.header_image_file)
         if header is not None and not isinstance(header, str):
-            raise ValueError("header_image_file must be a string or null")
-        tint = _validate_optional_color(
+            raise ThemeValidationError("header_image_file must be a string or null")
+        tint = validate_optional_color(
             patch.get("background_tint", current.background_tint),
+            "background_tint",
         )
-        mode_override = _validate_optional_choice(
+        mode_override = validate_optional_choice(
             patch.get("mode_override", current.mode_override),
             ALLOWED_MODES,
             "mode_override",
         )
         # ``font_family`` / ``post_layout`` are non-null columns with a
-        # default ("system" / "card"). The SPA sends ``null`` to mean
-        # "no override → default", so coerce null/absent back to the
-        # current value (the default on a fresh theme) rather than 422.
-        font = _validate_choice(
-            patch.get("font_family") or current.font_family,
+        # default ("system" / "card"). Absent keeps the current value;
+        # ``null`` means "no override" and resets to the column default.
+        font = validate_choice(
+            _reset_or_keep(patch, "font_family", current.font_family, DEFAULT_FONT),
             ALLOWED_FONTS,
             "font_family",
         )
-        layout = _validate_choice(
-            patch.get("post_layout") or current.post_layout,
+        layout = validate_choice(
+            _reset_or_keep(
+                patch, "post_layout", current.post_layout, DEFAULT_POST_LAYOUT
+            ),
             ALLOWED_POST_LAYOUTS,
             "post_layout",
         )

@@ -71,18 +71,56 @@ describe('useSpaceTheme', () => {
     get.mockResolvedValue({ primary_color: '#3366ff', font_family: 'system' })
     const first = render(<Probe id="sp-5" />)
     await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe('sp-5'))
-    expect(root.style.getPropertyValue('--sh-font-family')).toBe('')
+    expect(root.style.getPropertyValue('--sh-space-font')).toBe('')
     first.unmount()
 
     get.mockResolvedValue({ font_family: 'serif' })
     const { unmount } = render(<Probe id="sp-6" />)
-    await waitFor(() => expect(root.style.getPropertyValue('--sh-font-family')).toContain('Georgia'))
+    await waitFor(() => expect(root.style.getPropertyValue('--sh-space-font')).toContain('Georgia'))
     unmount()
-    expect(root.style.getPropertyValue('--sh-font-family')).toBe('')
+    expect(root.style.getPropertyValue('--sh-space-font')).toBe('')
 
     get.mockResolvedValue({ font_family: 'Comic Sans' })
     render(<Probe id="sp-7" />)
     await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe('sp-7'))
+    expect(root.style.getPropertyValue('--sh-space-font')).toBe('')
+  })
+})
+
+describe('useSpaceTheme post layout', () => {
+  beforeEach(() => root.removeAttribute('data-post-layout'))
+
+  it('marks <html> with a non-default layout id, and rolls it back', async () => {
+    for (const layout of ['compact', 'magazine']) {
+      get.mockResolvedValue({ post_layout: layout })
+      const { unmount } = render(<Probe id={`sp-l-${layout}`} />)
+      await waitFor(() => expect(root.getAttribute('data-post-layout')).toBe(layout))
+      unmount()
+      expect(root.hasAttribute('data-post-layout')).toBe(false)
+    }
+  })
+
+  it('leaves "card" (the default) and unknown values unmarked', async () => {
+    for (const layout of ['card', 'spacious', 'Comic', null]) {
+      get.mockResolvedValue({ post_layout: layout })
+      const { unmount } = render(<Probe id={`sp-u-${String(layout)}`} />)
+      await waitFor(() => expect(root.getAttribute('data-space-theme')).toBe(`sp-u-${String(layout)}`))
+      expect(root.hasAttribute('data-post-layout')).toBe(false)
+      expect(root.style.getPropertyValue('--sh-post-layout-gap')).toBe('')
+      unmount()
+    }
+  })
+})
+
+describe('useSpaceTheme font vs household font', () => {
+  it('never touches the household font var — the space font is its own layer', async () => {
+    root.style.setProperty('--hh-font', 'Georgia, serif')
+    get.mockResolvedValue({ font_family: 'mono' })
+    const { unmount } = render(<Probe id="sp-hh" />)
+    await waitFor(() => expect(root.style.getPropertyValue('--sh-space-font')).toContain('monospace'))
+    unmount()
+    expect(root.style.getPropertyValue('--sh-space-font')).toBe('')
+    expect(root.style.getPropertyValue('--hh-font')).toBe('Georgia, serif')
     expect(root.style.getPropertyValue('--sh-font-family')).toBe('')
   })
 })

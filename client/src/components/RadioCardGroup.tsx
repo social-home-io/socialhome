@@ -20,6 +20,9 @@ export interface RadioCardOption {
   /** When true, this single option is shown but not selectable (e.g. a
    *  join mode that doesn't apply to the chosen visibility). */
   disabled?: boolean
+  /** CSS font stack for the icon + title — lets a font picker show each
+   *  choice in its own face. */
+  fontFamily?: string
 }
 
 export function RadioCardGroup({
@@ -61,9 +64,15 @@ export function RadioCardGroup({
               disabled={optDisabled}
               onChange={() => onChange(opt.value)}
             />
-            <span class="sh-radio-card__icon" aria-hidden="true">{opt.icon}</span>
+            <span class="sh-radio-card__icon" aria-hidden="true"
+                  style={opt.fontFamily ? { fontFamily: opt.fontFamily } : undefined}>
+              {opt.icon}
+            </span>
             <span class="sh-radio-card__body">
-              <span class="sh-radio-card__title">{opt.title}</span>
+              <span class="sh-radio-card__title"
+                    style={opt.fontFamily ? { fontFamily: opt.fontFamily } : undefined}>
+                {opt.title}
+              </span>
               <span class="sh-radio-card__subtitle">{opt.subtitle}</span>
             </span>
           </label>
