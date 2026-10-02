@@ -1069,7 +1069,12 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
                 payload={"entity": "list", "target_id": list_id},
                 snapshot={"name": current.name, "created_by": current.created_by},
             )
-        await self._repo.delete_list(list_id, space_id=space_id)
+        # ``deleted_by`` is who authorised it — the approver for a
+        # reviewed delete — so a replay of the tombstone passes the space's
+        # level on a household that missed the live (approved) event.
+        await self._repo.delete_list(
+            list_id, space_id=space_id, deleted_by=approved_by or actor_user_id
+        )
         await self._emit(
             TaskListDeleted(
                 list_id=list_id,

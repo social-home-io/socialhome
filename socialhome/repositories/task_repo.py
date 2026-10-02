@@ -24,6 +24,7 @@ from ..domain.task import (
     TaskAttachment,
     TaskComment,
     TaskList,
+    TaskListTombstone,
     TaskPriority,
     TaskStatus,
     normalize_labels,
@@ -466,7 +467,16 @@ class AbstractSpaceTaskRepo(Protocol):
     async def list_lists_since(
         self, space_id: str, since: str, *, limit: int = 500
     ) -> list[TaskList]: ...
-    async def delete_list(self, list_id: str, *, space_id: str) -> bool: ...
+    async def delete_list(
+        self, list_id: str, *, space_id: str, deleted_by: str = ""
+    ) -> bool: ...
+    async def tombstone_list(
+        self, list_id: str, *, space_id: str, created_by: str, deleted_by: str = ""
+    ) -> bool: ...
+    async def is_list_deleted(self, list_id: str, *, space_id: str) -> bool: ...
+    async def list_list_tombstones(
+        self, space_id: str, *, since: str | None = None, limit: int = 500
+    ) -> list[TaskListTombstone]: ...
 
     async def save(self, task: Task, *, space_id: str) -> bool: ...
     async def get(self, task_id: str) -> tuple[str, Task] | None: ...
@@ -502,14 +512,22 @@ class SqliteSpaceTaskRepo:
 
         ``space_id`` is authoritative (§24.11): a conflict on an id that
         already belongs to another space is refused, and ``False`` says
-        nothing was written.
+        nothing was written. So is a conflict on a **tombstoned** id — a
+        deleted list never comes back (its ids are owner-bound, never
+        reused). A rename stamps ``updated_at`` for the resume replay; an
+        unchanged name (every host sync re-sends it) does not.
         """
         n = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_task_lists(id, space_id, name, created_by)
             VALUES(?,?,?,?)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name
+            ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                updated_at=CASE WHEN space_task_lists.name IS excluded.name
+                    THEN space_task_lists.updated_at
+                    ELSE datetime('now') END
             WHERE space_task_lists.space_id = excluded.space_id
+              AND space_task_lists.deleted_at IS NULL
             """,
             (list_.id, space_id, list_.name, list_.created_by),
         )
@@ -520,7 +538,7 @@ class SqliteSpaceTaskRepo:
         list_id: str,
     ) -> tuple[str, TaskList] | None:
         row = await self._db.fetchone(
-            "SELECT * FROM space_task_lists WHERE id=?",
+            "SELECT * FROM space_task_lists WHERE id=? AND deleted_at IS NULL",
             (list_id,),
         )
         d = row_to_dict(row)
@@ -530,7 +548,8 @@ class SqliteSpaceTaskRepo:
 
     async def list_lists(self, space_id: str) -> list[TaskList]:
         rows = await self._db.fetchall(
-            "SELECT * FROM space_task_lists WHERE space_id=? ORDER BY created_at",
+            "SELECT * FROM space_task_lists WHERE space_id=? AND deleted_at IS NULL"
+            " ORDER BY created_at",
             (space_id,),
         )
         return [_row_to_list(d) for d in rows_to_dicts(rows)]
@@ -550,30 +569,102 @@ class SqliteSpaceTaskRepo:
     async def list_lists_since(
         self, space_id: str, since: str, *, limit: int = 500
     ) -> list[TaskList]:
-        """Lists created at or after ``since``, oldest first (resume
-        catch-up).
+        """Live lists created or renamed at or after ``since``, oldest
+        change first (resume catch-up).
 
-        ``created_at`` is SQLite's naive UTC ``datetime('now')`` while
-        ``since`` is an ISO 8601 string, so both go through ``datetime()``
-        rather than a string compare. That is second precision, so the
-        compare is ``>=``: a list made in the same second as ``since`` is
-        replayed (a duplicate create is an idempotent upsert) rather than
-        skipped.
+        ``created_at`` / ``updated_at`` are SQLite's naive UTC
+        ``datetime('now')`` while ``since`` is an ISO 8601 string, so both
+        go through ``datetime()`` rather than a string compare. That is
+        second precision, so the compare is ``>=``: a list changed in the
+        same second as ``since`` is replayed (an idempotent upsert) rather
+        than skipped.
         """
         rows = await self._db.fetchall(
             "SELECT * FROM space_task_lists"
-            " WHERE space_id=? AND datetime(created_at) >= datetime(?)"
-            " ORDER BY created_at ASC LIMIT ?",
+            " WHERE space_id=? AND deleted_at IS NULL"
+            " AND datetime(COALESCE(updated_at, created_at)) >= datetime(?)"
+            " ORDER BY COALESCE(updated_at, created_at) ASC LIMIT ?",
             (space_id, since, int(limit)),
         )
         return [_row_to_list(d) for d in rows_to_dicts(rows)]
 
-    async def delete_list(self, list_id: str, *, space_id: str) -> bool:
+    async def delete_list(
+        self, list_id: str, *, space_id: str, deleted_by: str = ""
+    ) -> bool:
+        """Tombstone a live list of ``space_id``; ``False`` if none.
+
+        The row stays (``deleted_at`` set, ``deleted_by`` naming who
+        deleted it — empty when nobody can be named) so sync and resume
+        can tell a household that missed the delete; the migration-0069
+        trigger drops the list's tasks, as the FK cascade did for the old
+        hard delete.
+        """
         n = await self._db.enqueue_rowcount(
-            "DELETE FROM space_task_lists WHERE id=? AND space_id=?",
-            (list_id, space_id),
+            "UPDATE space_task_lists SET deleted_at=datetime('now'),"
+            " deleted_by=NULLIF(?, '')"
+            " WHERE id=? AND space_id=? AND deleted_at IS NULL",
+            (deleted_by, list_id, space_id),
         )
         return n > 0
+
+    async def tombstone_list(
+        self, list_id: str, *, space_id: str, created_by: str, deleted_by: str = ""
+    ) -> bool:
+        """Record a delete of a list never held here: a content-free stub
+        row, so a stale copy streamed later can't create it.
+
+        Insert-only — an id already held (live or tombstoned, in any space)
+        is never touched, and ``False`` says nothing was written (or the
+        space is missing). The caller must have proven the id is this
+        space's (owner-bound to ``created_by`` in ``space_id``): list ids
+        are global, so a stub for another space's id would block that
+        space's real list here forever.
+        """
+        n = await self._db.enqueue_rowcount(
+            "INSERT INTO space_task_lists(id, space_id, name, created_by,"
+            " deleted_at, deleted_by)"
+            " SELECT ?, ?, '', ?, datetime('now'), NULLIF(?, '')"
+            " WHERE EXISTS (SELECT 1 FROM spaces WHERE id=?)"
+            " ON CONFLICT(id) DO NOTHING",
+            (list_id, space_id, created_by, deleted_by, space_id),
+        )
+        return n > 0
+
+    async def is_list_deleted(self, list_id: str, *, space_id: str) -> bool:
+        """Whether ``list_id`` is a tombstone of ``space_id`` here."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM space_task_lists"
+            " WHERE id=? AND space_id=? AND deleted_at IS NOT NULL",
+            (list_id, space_id),
+        )
+        return row is not None
+
+    async def list_list_tombstones(
+        self, space_id: str, *, since: str | None = None, limit: int = 500
+    ) -> list[TaskListTombstone]:
+        """The space's deleted lists, newest delete first (so a ``limit``
+        keeps the deletes a peer is likeliest to have missed) — all of
+        them, or those deleted at or after ``since`` (same ``>=`` compare
+        as :meth:`list_lists_since`)."""
+        sql = (
+            "SELECT id, created_by, deleted_at, deleted_by FROM space_task_lists"
+            " WHERE space_id=? AND deleted_at IS NOT NULL"
+        )
+        params: tuple = (space_id,)
+        if since is not None:
+            sql += " AND datetime(deleted_at) >= datetime(?)"
+            params += (since,)
+        sql += " ORDER BY deleted_at DESC LIMIT ?"
+        rows = await self._db.fetchall(sql, (*params, int(limit)))
+        return [
+            TaskListTombstone(
+                id=d["id"],
+                deleted_at=d["deleted_at"],
+                created_by=d["created_by"] or "",
+                deleted_by=d["deleted_by"] or "",
+            )
+            for d in rows_to_dicts(rows)
+        ]
 
     # ── Space tasks ────────────────────────────────────────────────────
 
@@ -583,7 +674,8 @@ class SqliteSpaceTaskRepo:
         ``space_id`` is authoritative (§24.11) and guards three things
         in a single statement: the row's own scope, the parent list's
         scope (``task.list_id`` comes from the same untrusted payload,
-        so a task must not be filed under another space's list), and
+        so a task must not be filed under another space's list — nor
+        under a deleted one), and
         the conflict case (an id owned by another space is refused).
         ``False`` means nothing was written.
         """
@@ -598,7 +690,8 @@ class SqliteSpaceTaskRepo:
                      COALESCE(?, datetime('now')),
                      COALESCE(?, datetime('now'))
                WHERE EXISTS (
-                   SELECT 1 FROM space_task_lists WHERE id=? AND space_id=?
+                   SELECT 1 FROM space_task_lists
+                    WHERE id=? AND space_id=? AND deleted_at IS NULL
                )
             ON CONFLICT(id) DO UPDATE SET
                 title=excluded.title,

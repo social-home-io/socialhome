@@ -91,7 +91,7 @@ from ...domain.post import (
     BazaarStatus,
     Post,
 )
-from ...domain.space import ContentAction, SpaceZone
+from ...domain.space import MODERATION_BLOCK_KEY, ContentAction, SpaceZone
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
@@ -536,6 +536,15 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="task list", row_id=lst.id
             )
             return
+        if held is None and await self._task_repo.is_list_deleted(
+            lst.id, space_id=space_id
+        ):
+            # A household that missed the delete re-announcing the list
+            # (or a replay of its create): the tombstone wins.
+            log_not_applied(
+                event, what="task list", row_id=lst.id, reason="deleted here"
+            )
+            return
         if held is None and not lst.created_by:
             log.warning(
                 "%s from %s: new task list %s names no created_by — dropping",
@@ -684,8 +693,11 @@ class SpaceContentInboundHandlers:
             row_owner=held[1].created_by,
         ):
             return
-        # The FK cascade drops the list's tasks with it.
-        if not await self._task_repo.delete_list(list_id, space_id=space_id):
+        # Tombstoned, not removed (sync / resume tell a household that
+        # missed it); the migration-0069 trigger drops the list's tasks.
+        if not await self._task_repo.delete_list(
+            list_id, space_id=space_id, deleted_by=_deleter(event)
+        ):
             log_cross_space_refusal(
                 event, space_id=space_id, what="task list", row_id=list_id
             )
@@ -2729,3 +2741,16 @@ def _assignee_owner(existing: Task, incoming: Task, actor: str | None) -> str:
     ):
         return actor
     return existing.created_by
+
+
+def _deleter(event: "FederationEvent") -> str:
+    """Who authorised a delete, for the list tombstone's ``deleted_by``: the
+    approver of a reviewed (v_43) delete, else the payload's actor (v_42),
+    else nobody. A replay of the tombstone names this user, so it passes
+    the space's level wherever the live delete did."""
+    block = event.payload.get(MODERATION_BLOCK_KEY)
+    if isinstance(block, dict):
+        approver = block.get("approved_by")
+        if isinstance(approver, str) and approver:
+            return approver
+    return payload_actor(event) or ""

@@ -24,6 +24,7 @@ from socialhome.domain.events import (
     TaskUpdated,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.services.federation_inbound.space_content import _deleter
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.federation.owner_bound_id import (
     SPACE_TASK_LIST_KIND,
@@ -237,6 +238,7 @@ class _FakeSpaceTaskRepo:
         self.lists: dict[str, tuple[str, TaskList]] = {}
         self.saved_lists: list = []
         self.deleted_lists: list = []
+        self.tombstoned: set[str] = set()
 
     def hold(self, task: Task, space_id: str) -> None:
         self.rows.claim(task.id, space_id)
@@ -274,13 +276,17 @@ class _FakeSpaceTaskRepo:
         self.saved_lists.append((space_id, lst))
         return True
 
-    async def delete_list(self, list_id, *, space_id):
+    async def delete_list(self, list_id, *, space_id, deleted_by=""):
         held = self.lists.get(list_id)
         if held is None or held[0] != space_id:
             return False
         del self.lists[list_id]
         self.deleted_lists.append(list_id)
+        self.tombstoned.add(list_id)
         return True
+
+    async def is_list_deleted(self, list_id, *, space_id):
+        return list_id in self.tombstoned
 
 
 class _FakeSpaceCalendarRepo:
@@ -4335,3 +4341,27 @@ async def test_a_task_edit_is_judged_on_the_held_rows_creator(handlers, repos):
         )
     )
     assert repos["auth"].access_owners == ["u-author"]
+
+
+def test_deleter_prefers_the_approver_then_the_actor():
+    """A list tombstone's ``deleted_by``: the approver of a reviewed delete
+    (v_43), else the payload actor (v_42), else nobody."""
+
+    def ev(payload):
+        return FederationEvent(
+            msg_id="m",
+            event_type=FederationEventType.SPACE_TASK_LIST_DELETED,
+            from_instance="peer",
+            to_instance="us",
+            timestamp="",
+            payload=payload,
+            space_id="sp-1",
+        )
+
+    assert _deleter(ev({"actor_user_id": "u-a"})) == "u-a"
+    assert (
+        _deleter(ev({"actor_user_id": "u-a", "moderation": {"approved_by": "u-mod"}}))
+        == "u-mod"
+    )
+    assert _deleter(ev({"moderation": "junk", "actor_user_id": "u-a"})) == "u-a"
+    assert _deleter(ev({})) == ""

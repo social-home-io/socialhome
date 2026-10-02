@@ -32,11 +32,64 @@ list reaches a member household only through its **host's** sync stream
 (taken whole) — otherwise a household seated in two spaces could
 first-come squat one space's legacy list id under the other.
 
-**Replay and deletes (known gaps).** The resume replay sends lists
-*created* at or after `since` (second precision, so `>=`); a rename is
-not replayed — the next `task_lists` sync from the host heals it. There
-are no list-delete tombstones yet: a household that missed a delete can
-re-announce the list (the same holds for tasks today).
+**Deletes, renames and catch-up.** A list delete keeps the row as a
+tombstone (`space_task_lists.deleted_at`, migration `0069`) recording
+who authorised it (`deleted_by`: the deleting user, or the approver of a
+reviewed delete) and drops the list's tasks (a trigger, as the FK
+cascade did for the old hard delete). A tombstoned id never comes back
+in its space — an upsert, a live or replayed `SPACE_TASK_LIST_CREATED`
+(DEBUG, "deleted here"), and a sync record of the list or of a task
+filed under it all skip it. A household that missed a delete learns it
+two ways, both carrying `{id, space_id, created_by, actor_user_id}`
+(`actor_user_id` = `deleted_by`, v_42):
+
+- the **`task_lists_deleted`** §25.6 sync resource, streamed right after
+  `task_lists`:
+  - a list held live **in that space** is tombstoned. From a member
+    household only under the live delete rule — a writer household, the
+    actor seated on it, and the space's `tasks` level admitting the
+    delete for that actor (`ADMIN_ONLY`: an admin; `MODERATED`: content
+    authority or the list's creator; an actor-less record from a v_42
+    household is refused). Refusals are summarised in one line per
+    chunk, not one WARNING per record;
+  - from the **host** only, an id never held here gets a content-free
+    stub, so a stale copy streamed later cannot create it — but only if
+    the id is owner-bound to `created_by` in **this** space. List ids are
+    global, so a stub for another space's id would block that space's
+    real list on this household; a legacy or mismatched id is skipped
+    (INFO), and a tombstone naming a list held in another space is
+    refused (WARNING, one line per chunk);
+  - like a live delete it still lands in a space archived here; a
+    separate resource rather than a flag on `task_lists`, so an older
+    household drops it as unknown instead of reading a tombstone as a
+    live list — no capability bump.
+- the **`SPACE_SYNC_RESUME`** replay, which sends every list deleted at
+  or after `since` as `SPACE_TASK_LIST_DELETED` ahead of the lists,
+  judged by the live handler like any delete (so it converges under a
+  restricted level when the deleter is seated on the replaying
+  household — the host's own people always are).
+
+A rename stamps `space_task_lists.updated_at` (an unchanged name, which
+every host sync re-sends, does not). The resume replay sends the lists
+created **or renamed** at or after `since` (second precision, so `>=`)
+as `SPACE_TASK_LIST_CREATED`, which a household holding the list
+applies as a rename; a list unchanged since `since` is not re-sent, so
+a co-member that missed a rename does not re-send its old name. Two
+renames that cross are last-writer-wins by arrival, as for the live
+`SPACE_TASK_LIST_UPDATED` — there is no version on a list. The host's
+`task_lists` stream (taken whole) heals a missed rename too.
+
+**Limits.** The sync stream carries a space's newest **500** tombstones
+(the resume replay at most 500 since `since`): a household that missed
+more deletes than that across one outage keeps the older lists until
+the host's tombstone for each reaches it some other way — in practice
+never, since a space deleting 500+ lists between two syncs is not a
+real workload, and the bound keeps a chunk small. Tombstones are **never
+pruned**, like `space_timetables` tombstones: a row is a few dozen
+bytes, and pruning one would let a household offline past the window
+resurrect the list. They cascade away with the space. Single-task
+deletes still have no tombstone: a household that missed a
+`SPACE_TASK_DELETED` can re-announce that task.
 
 **Received text is sanitised** like REST input (control / bidi /
 spoofing characters removed) and cut to fit — title ≤ 200, list name
@@ -175,8 +228,9 @@ first-come rule. See [`spaces.md`](./spaces.md) and the v_36 row in
 - `socialhome/services/federation_inbound/space_content.py` —
   `SPACE_TASK_*` inbound handlers.
 - `socialhome/federation/sync/space/exporters/tasks.py`,
-  `tasks_archived.py`, `receiver.py`, `resume.py` — §25.6 sync and the
-  resume replay.
+  `tasks_archived.py`, `task_lists.py`, `task_lists_deleted.py`,
+  `receiver.py`, `resume.py` — §25.6 sync (list tombstones included) and
+  the resume replay.
 - `socialhome/repositories/task_repo.py` — `SqliteTaskRepo`,
   `SqliteSpaceTaskRepo`.
 - `socialhome/routes/tasks.py` — REST endpoints.

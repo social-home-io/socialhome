@@ -518,3 +518,118 @@ async def test_space_open_counts_are_scoped_to_the_space(two_spaces):
     await _archive(env, "space_tasks", "t-1c")
     assert await env.space_repo.open_counts("sp-1") == {"l-1": 1}
     assert await env.space_repo.open_counts("sp-none") == {}
+
+
+# ── Space list tombstones (migration 0069) ───────────────────────────────
+
+
+async def _deleted_by(env, list_id):
+    row = await env.db.fetchone(
+        "SELECT deleted_by FROM space_task_lists WHERE id=?", (list_id,)
+    )
+    return row["deleted_by"]
+
+
+async def test_space_list_delete_tombstones_and_drops_its_tasks(two_spaces):
+    env = two_spaces
+    assert (
+        await env.space_repo.delete_list("l-1", space_id="sp-1", deleted_by="u-x")
+        is True
+    )
+    assert await env.space_repo.get_list("l-1") is None
+    assert await env.space_repo.list_lists("sp-1") == []
+    assert await env.space_repo.is_list_deleted("l-1", space_id="sp-1") is True
+    assert await _deleted_by(env, "l-1") == "u-x"
+    assert await env.space_repo.get("t-1") is None  # the trigger's cascade
+    # Scoped: not a tombstone of another space; that space's rows untouched.
+    assert await env.space_repo.is_list_deleted("l-1", space_id="sp-2") is False
+    assert await env.space_repo.get("t-2") is not None
+    assert await env.space_repo.is_list_deleted("l-2", space_id="sp-2") is False
+    # A second delete changes nothing (and keeps the first deleter).
+    assert (
+        await env.space_repo.delete_list("l-1", space_id="sp-1", deleted_by="u-y")
+        is False
+    )
+    assert await _deleted_by(env, "l-1") == "u-x"
+
+
+async def test_a_delete_naming_nobody_stores_null(two_spaces):
+    env = two_spaces
+    assert await env.space_repo.delete_list("l-1", space_id="sp-1")
+    assert await _deleted_by(env, "l-1") is None
+    (tomb,) = await env.space_repo.list_list_tombstones("sp-1")
+    assert tomb.deleted_by == ""
+
+
+async def test_a_tombstoned_list_never_comes_back(two_spaces):
+    env = two_spaces
+    await env.space_repo.delete_list("l-1", space_id="sp-1")
+    assert (
+        await env.space_repo.save_list(_list_("l-1", "back"), space_id="sp-1") is False
+    )
+    assert await env.space_repo.save(_task("t-new", "l-1"), space_id="sp-1") is False
+    assert await env.space_repo.get_list("l-1") is None
+    assert await env.space_repo.get("t-new") is None
+
+
+async def test_tombstone_list_stubs_only_an_unseen_id(two_spaces):
+    env = two_spaces
+    assert await env.space_repo.tombstone_list(
+        "l-unseen", space_id="sp-1", created_by="u-c", deleted_by="u-d"
+    )
+    assert await env.space_repo.is_list_deleted("l-unseen", space_id="sp-1")
+    assert await env.space_repo.save_list(_list_("l-unseen"), space_id="sp-1") is False
+    (tomb,) = await env.space_repo.list_list_tombstones("sp-1")
+    assert (tomb.id, tomb.created_by, tomb.deleted_by) == ("l-unseen", "u-c", "u-d")
+    # Insert-only: a held id (live, tombstoned, or another space's) is never
+    # touched, and neither is a space we don't hold.
+    assert not await env.space_repo.tombstone_list(
+        "l-1", space_id="sp-1", created_by="u-c"
+    )
+    assert await env.space_repo.get_list("l-1") is not None
+    assert not await env.space_repo.tombstone_list(
+        "l-unseen", space_id="sp-1", created_by="u-c"
+    )
+    assert not await env.space_repo.tombstone_list(
+        "l-2", space_id="sp-1", created_by="u-c"
+    )
+    assert await env.space_repo.get_list("l-2") is not None
+    assert not await env.space_repo.tombstone_list(
+        "l-x", space_id="sp-none", created_by="u-c"
+    )
+
+
+async def test_list_list_tombstones_newest_first_and_since(two_spaces):
+    env = two_spaces
+    await env.space_repo.save_list(_list_("l-1b"), space_id="sp-1")
+    await env.space_repo.delete_list("l-1", space_id="sp-1")
+    await env.space_repo.delete_list("l-1b", space_id="sp-1")
+    await env.db.enqueue(
+        "UPDATE space_task_lists SET deleted_at='2026-01-01 00:00:00' WHERE id='l-1'"
+    )
+    got = await env.space_repo.list_list_tombstones("sp-1")
+    assert [t.id for t in got] == ["l-1b", "l-1"]
+    assert got[1].deleted_at == "2026-01-01 00:00:00"
+    assert got[1].created_by == "uid-alice"
+    since = await env.space_repo.list_list_tombstones(
+        "sp-1", since="2026-06-01T00:00:00+00:00"
+    )
+    assert [t.id for t in since] == ["l-1b"]
+    assert await env.space_repo.list_list_tombstones("sp-1", limit=1) == got[:1]
+    assert await env.space_repo.list_list_tombstones("sp-2") == []
+
+
+async def test_a_rename_stamps_updated_at_for_the_resume_replay(env):
+    await env.space_repo.save_list(_list_("sl-1", "Old"), space_id="sp-1")
+    await env.db.enqueue(
+        "UPDATE space_task_lists SET created_at='2026-01-01 00:00:00' WHERE id='sl-1'"
+    )
+    since = "2026-06-01T00:00:00+00:00"
+    # Re-saving the same name (every host sync does) is not a change.
+    assert await env.space_repo.save_list(_list_("sl-1", "Old"), space_id="sp-1")
+    assert await env.space_repo.list_lists_since("sp-1", since) == []
+    assert await env.space_repo.save_list(_list_("sl-1", "New"), space_id="sp-1")
+    got = await env.space_repo.list_lists_since("sp-1", since)
+    assert [(lst.id, lst.name) for lst in got] == [("sl-1", "New")]
+    await env.space_repo.delete_list("sl-1", space_id="sp-1")
+    assert await env.space_repo.list_lists_since("sp-1", since) == []

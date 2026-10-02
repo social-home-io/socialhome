@@ -13,8 +13,14 @@ Resource types replayed today:
 * ``SPACE_POST_CREATED``         — posts in the space.
 * ``SPACE_COMMENT_CREATED``      — comments on those posts (joined
   via ``space_post_comments.post_id`` → ``space_posts.space_id``).
-* ``SPACE_TASK_LIST_CREATED``    — the space's task lists created since
-  ``since`` (v_40), sent before the tasks filed under them.
+* ``SPACE_TASK_LIST_DELETED``    — the space's task lists deleted since
+  ``since`` (their tombstones, migration 0069), so a household that
+  missed a delete drops the list and its tasks.
+* ``SPACE_TASK_LIST_CREATED``    — the space's task lists created *or
+  renamed* since ``since`` (v_40), sent before the tasks filed under them.
+  A held list's create applies as a rename, so a missed rename heals; a
+  list unchanged since ``since`` is not re-sent, so a co-member that
+  missed a rename cannot revert it with its old name.
 * ``SPACE_TASK_CREATED``         — task rows.
 * ``SPACE_PAGE_CREATED``         — wiki-style pages.
 * ``SPACE_STICKY_CREATED``       — corkboard notes.
@@ -39,7 +45,11 @@ from typing import TYPE_CHECKING
 
 from ....domain.federation import FederationEventType
 from ....domain.link_preview import link_preview_to_dict
-from ....domain.task import task_list_to_wire_dict, task_to_wire_dict
+from ....domain.task import (
+    task_list_to_wire_dict,
+    task_list_tombstone_to_wire_dict,
+    task_to_wire_dict,
+)
 
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
@@ -213,6 +223,7 @@ class SpaceSyncResumeProvider:
         sent += await self._replay_posts(space_id, since, to=instance_id)
         sent += await self._replay_comments(space_id, since, to=instance_id)
         # Lists before tasks: a task is only filed under a list held here.
+        sent += await self._replay_task_list_deletes(space_id, since, to=instance_id)
         sent += await self._replay_task_lists(space_id, since, to=instance_id)
         sent += await self._replay_tasks(space_id, since, to=instance_id)
         sent += await self._replay_pages(space_id, since, to=instance_id)
@@ -283,6 +294,28 @@ class SpaceSyncResumeProvider:
                     exc,
                 )
         return sent
+
+    async def _replay_task_list_deletes(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        to: str,
+    ) -> int:
+        if self._space_task_repo is None:
+            return 0
+        tombstones = await self._space_task_repo.list_list_tombstones(
+            space_id,
+            since=since,
+            limit=MAX_PER_RESOURCE,
+        )
+        return await self._send_each(
+            tombstones,
+            FederationEventType.SPACE_TASK_LIST_DELETED,
+            lambda tombstone: task_list_tombstone_to_wire_dict(tombstone, space_id),
+            space_id=space_id,
+            to=to,
+        )
 
     async def _replay_task_lists(
         self,
