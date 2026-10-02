@@ -592,6 +592,8 @@
   "pages.status.error": "Save failed — retry",
   "pages.save_close": "Save & close",
   "pages.review_note": "This space reviews changes to other people’s pages: your edit goes to a moderator, and the page stays as it is until they approve it.",
+  "pages.pending_edit_mine": "Your edit to this page is waiting for review.",
+  "pages.pending_delete_mine": "Your request to delete this page is waiting for review.",
   "pages.tab.edit": "Edit",
   "pages.tab.preview": "Preview",
   "pages.source_label": "Markdown source",

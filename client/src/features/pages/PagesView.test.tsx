@@ -28,7 +28,10 @@ vi.mock('@/components/Toast', async (orig) => ({
   showToast: toast.show,
 }))
 vi.mock('@/components/confirm', () => ({ confirmDialog: vi.fn().mockResolvedValue(true) }))
-vi.mock('@/store/moderationMine', () => ({ refreshModerationMine: vi.fn() }))
+vi.mock('@/store/moderationMine', async (orig) => ({
+  ...(await orig<object>()),
+  refreshModerationMine: vi.fn(),
+}))
 
 vi.mock('@/store/auth', () => ({
   currentUser: { value: { user_id: 'u1', username: 'me', display_name: 'Me', is_admin: true, picture_url: null, bio: null, is_new_member: false } },
@@ -38,6 +41,8 @@ vi.mock('@/store/auth', () => ({
   logout: vi.fn(),
 }))
 
+import { moderationMine } from '@/store/moderationMine'
+import type { ModerationItem } from '@/features/spaces/moderationItems'
 import { PagesView } from './PagesView'
 import { householdPageScope, spacePageScope, type PageScope } from './scope'
 
@@ -74,8 +79,17 @@ function wire(rows: Page[] = [page()]) {
 beforeEach(() => {
   apiGet.mockReset(); apiPost.mockReset(); apiPatch.mockReset(); apiDelete.mockReset()
   toast.show.mockClear()
+  moderationMine.value = {}
 })
 afterEach(() => { cleanup(); vi.useRealTimers() })
+
+function mineItem(over: Partial<ModerationItem> = {}): ModerationItem {
+  return {
+    id: 'm1', space_id: 's1', feature: 'pages', action: 'edit', target_id: 'p1',
+    submitted_by: 'u1', submitted_at: '2026-01-01T00:00:00+00:00',
+    expires_at: '2099-01-01T00:00:00+00:00', status: 'pending', ...over,
+  }
+}
 
 async function openPage(r: ReturnType<typeof render>, title = 'Plan') {
   fireEvent.click(await waitFor(() => r.getByRole('button', { name: new RegExp(title) })))
@@ -203,6 +217,38 @@ describe('PagesView — space scope', () => {
     fireEvent.click(r.getByRole('button', { name: 'Delete' }))
     await waitFor(() => expect(apiDelete).toHaveBeenCalledWith(`${BASE}/p1`))
     expect(r.getByRole('heading', { name: 'Plan' })).toBeTruthy()
+  })
+
+  it('the viewer says when the viewer\'s own edit of this page waits for review', async () => {
+    wire([page(), page({ id: 'p2', title: 'Other' })])
+    moderationMine.value = { s1: [
+      mineItem(),
+      // Not shown: another page's edit, a decided one, a new-page create.
+      mineItem({ id: 'm2', target_id: 'p2', action: 'delete' }),
+      mineItem({ id: 'm3', status: 'rejected', action: 'delete' }),
+      mineItem({ id: 'm4', action: 'create', target_id: null }),
+    ] }
+    const r = render(<PagesView scope={space({ level: 'moderated' })} />)
+    await openPage(r)
+    const note = r.getByTestId('page-pending-review')
+    expect(note.getAttribute('role')).toBe('status')
+    expect(note.textContent).toContain('Your edit to this page is waiting for review.')
+    expect(note.textContent).not.toContain('delete')
+    // The moderator decides: the store refreshes and the notice goes.
+    act(() => { moderationMine.value = { s1: [mineItem({ status: 'approved' })] } })
+    expect(r.queryByTestId('page-pending-review')).toBeNull()
+    // A pending delete reads as one.
+    act(() => { moderationMine.value = { s1: [mineItem({ id: 'm5', action: 'delete' })] } })
+    expect(r.getByTestId('page-pending-review').textContent)
+      .toContain('Your request to delete this page is waiting for review.')
+  })
+
+  it('no pending notice on a page the viewer has nothing pending on', async () => {
+    wire()
+    moderationMine.value = { s1: [mineItem({ target_id: 'p9' })] }
+    const r = render(<PagesView scope={space({ level: 'moderated' })} />)
+    await openPage(r)
+    expect(r.queryByTestId('page-pending-review')).toBeNull()
   })
 
   it('read-only (admin-only for a member, or archived): no create / edit / delete', async () => {

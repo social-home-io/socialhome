@@ -169,6 +169,13 @@
   --sh-space-2xl: 3rem;
   --sh-space-3xl: 4rem;
 
+  /* ── Touch targets (``@media (pointer: coarse)``) ─────────────── */
+  /* The floor for anything tappable on a touch screen, and the
+   * compact floor for dense rows (toolbars, chip strips, the
+   * composer's type picker) where 44 px each would not fit. */
+  --sh-tap-target:         44px;
+  --sh-tap-target-compact: 36px;
+
   /* ── Radii ────────────────────────────────────────────────────── */
   --sh-radius-sm:   6px;     /* bumped from 4 — softer on buttons */
   --sh-radius-md:   10px;    /* bumped from 8 — cards feel less corporate */

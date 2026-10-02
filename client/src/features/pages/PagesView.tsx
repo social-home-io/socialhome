@@ -23,6 +23,10 @@
  *     every save would queue another item — one "Submit for review" sends
  *     the edit; the 202 toasts and refreshes the pending strip
  *     (``contentWrite``).
+ *   - The viewer of a space page with the viewer's own edit or delete
+ *     still waiting for a moderator says so ("Your edit to this page is
+ *     waiting for review") — the pending strip only shows on the list.
+ *     Read from ``store/moderationMine``, so it clears on the decision.
  */
 import { useEffect, useRef } from 'preact/hooks'
 import { useSignal } from '@preact/signals'
@@ -41,6 +45,7 @@ import { PageHistoryDrawer } from '@/components/PageHistoryDrawer'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
+import { pendingMine } from '@/store/moderationMine'
 import { contentWrite } from '@/utils/contentWrite'
 import { extractHeadings } from '@/utils/markdown'
 import { normaliseTimestamp, relativeDocsTime } from '@/utils/relativeTime'
@@ -591,6 +596,14 @@ export function PagesView({ scope, header }: {
     const editorUid = page.last_editor_user_id || page.created_by
     const editedAt = page.last_edited_at || page.updated_at
     const lockedByOther = !!editLock.value
+    // The viewer's own edit / delete of this page waiting for review.
+    const mine = scope.spaceId
+      ? pendingMine(scope.spaceId, 'pages').filter(
+        i => i.target_id === page.id && i.action !== 'create',
+      )
+      : []
+    const pendingDelete = mine.some(i => i.action === 'delete')
+    const pendingEdit = mine.some(i => i.action !== 'delete')
     return (
       <>
         <div class="sh-page-viewer">
@@ -627,7 +640,21 @@ export function PagesView({ scope, header }: {
               )}
             </div>
           </div>
-          {scope.canWrite && reviewed(page) && (
+          {(pendingEdit || pendingDelete) && (
+            <p
+              class="sh-page-review-note sh-page-review-note--pending"
+              role="status"
+              data-testid="page-pending-review"
+            >
+              <span class="sh-badge sh-badge--pending">{t('moderation.mine.badge')}</span>
+              <span>
+                {pendingEdit && t('pages.pending_edit_mine')}
+                {pendingEdit && pendingDelete && ' '}
+                {pendingDelete && t('pages.pending_delete_mine')}
+              </span>
+            </p>
+          )}
+          {scope.canWrite && reviewed(page) && !pendingEdit && !pendingDelete && (
             <p class="sh-page-review-note" role="note">{t('pages.review_note')}</p>
           )}
           {editLock.value && (

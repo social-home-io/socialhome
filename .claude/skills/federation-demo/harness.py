@@ -10397,7 +10397,7 @@ def cmd_federated_moderation() -> None:
     if not state:
         raise SystemExit("run 'up' + 'pair' + 'relay-pair' first")
     inst = state["instances"]
-    a, b, c, d = inst["a"], inst["b"], inst["c"], inst["d"]
+    a, b, c = inst["a"], inst["b"], inst["c"]
     b_base = f"http://127.0.0.1:{b['port']}"
     s, space = _request(
         f"{b_base}/api/spaces",

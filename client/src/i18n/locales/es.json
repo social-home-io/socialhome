@@ -480,6 +480,10 @@
   "dashboard.conversations": "conversaciones",
 
   "pages.title": "P\u00e1ginas",
+
+  "pages.pending_edit_mine": "Tu edición de esta página está pendiente de revisión.",
+
+  "pages.pending_delete_mine": "Tu solicitud para eliminar esta página está pendiente de revisión.",
   "pages.new_page": "Nueva p\u00e1gina",
   "pages.no_pages": "A\u00fan no hay p\u00e1ginas.",
   "pages.empty_page": "P\u00e1gina vac\u00eda",

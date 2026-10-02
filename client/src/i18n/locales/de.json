@@ -466,6 +466,8 @@
   "dashboard.unread": "ungelesen",
   "dashboard.conversations": "Unterhaltungen",
   "pages.title": "Seiten",
+  "pages.pending_edit_mine": "Deine Änderung an dieser Seite wartet auf Prüfung.",
+  "pages.pending_delete_mine": "Deine Anfrage, diese Seite zu löschen, wartet auf Prüfung.",
   "pages.new_page": "Neue Seite",
   "pages.no_pages": "Noch keine Seiten.",
   "pages.empty_page": "Leere Seite",
