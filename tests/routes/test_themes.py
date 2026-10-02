@@ -244,3 +244,110 @@ async def test_update_space_theme_unauthenticated_401(client):
         json={"primary_color": "#000000", "accent_color": "#ffffff"},
     )
     assert r.status == 401
+
+
+# ─── Studio contract: ids only, clear 422s ────────────────────────────────
+
+
+async def _owned_space(client, space_id: str) -> None:
+    db = client._db
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'S', 'inst-x', 'pascal', ?)",
+        (space_id, "aa" * 32),
+    )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'owner')",
+        (space_id, client._uid),
+    )
+
+
+async def test_space_theme_css_font_stack_422_names_field_and_choices(client):
+    """The pre-fix SpaceThemeStudio sent a CSS stack as ``font_family``.
+    The refusal must say which field and which values are allowed — not
+    the blanket "Request could not be processed." — and save nothing."""
+    await _owned_space(client, "sp-font")
+    r = await client.put(
+        "/api/spaces/sp-font/theme",
+        json={
+            "primary_color": "#abcdef",
+            "accent_color": "#fedcba",
+            "font_family": "Inter, system-ui, sans-serif",
+            "post_layout": None,
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "INVALID_THEME"
+    assert "font_family" in body["error"]["detail"]
+    for choice in ("system", "serif", "rounded", "mono"):
+        assert choice in body["error"]["detail"]
+    # Nothing was applied — the colours in the same request did not land.
+    g = await client.get("/api/spaces/sp-font/theme", headers=_auth(client._tok))
+    assert (await g.json())["is_default"] is True
+
+
+async def test_space_theme_unknown_layout_422_names_field_and_choices(client):
+    """The pre-fix studio offered ``spacious`` — not a server layout."""
+    await _owned_space(client, "sp-lay")
+    r = await client.put(
+        "/api/spaces/sp-lay/theme",
+        json={"post_layout": "spacious"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "INVALID_THEME"
+    assert "post_layout" in body["error"]["detail"]
+    for choice in ("card", "compact", "magazine"):
+        assert choice in body["error"]["detail"]
+
+
+async def test_space_theme_bad_colour_422_names_field_not_value(client):
+    await _owned_space(client, "sp-col")
+    r = await client.put(
+        "/api/spaces/sp-col/theme",
+        json={"accent_color": "<script>"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "INVALID_THEME"
+    assert "accent_color" in body["error"]["detail"]
+    assert "<script>" not in body["error"]["detail"]
+
+
+async def test_household_theme_bad_font_422_names_field(client):
+    r = await client.put(
+        "/api/theme",
+        json={"font_family": "Comic Sans"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "INVALID_THEME"
+    assert "font_family" in body["error"]["detail"]
+
+
+async def test_space_theme_studio_ids_round_trip(client):
+    """What the fixed studio sends — every font id and layout id — saves."""
+    await _owned_space(client, "sp-ok")
+    for font in ("system", "serif", "rounded", "mono"):
+        for layout in ("card", "compact", "magazine"):
+            r = await client.put(
+                "/api/spaces/sp-ok/theme",
+                json={
+                    "primary_color": "#abcdef",
+                    "accent_color": "#fedcba",
+                    "background_tint": None,
+                    "mode_override": None,
+                    "font_family": font,
+                    "post_layout": layout,
+                },
+                headers=_auth(client._tok),
+            )
+            assert r.status == 200, (font, layout)
+            body = await r.json()
+            assert body["font_family"] == font
+            assert body["post_layout"] == layout

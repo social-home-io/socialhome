@@ -53,6 +53,7 @@ const SCOPED_HOOKS = new Set([
   '--sh-accent',
   '--sh-bg-space-tint',
   '--sh-post-layout-gap',
+  '--sh-space-font',
   '--sh-on-primary-fill-light',
   '--sh-on-primary-fill-dark',
   '--sh-primary-fill-hover-light',

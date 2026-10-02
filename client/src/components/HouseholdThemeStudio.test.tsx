@@ -61,3 +61,29 @@ describe('HouseholdThemeStudio', () => {
     expect(putTargets).not.toContain('/api/household/features')
   })
 })
+
+describe('HouseholdThemeStudio i18n + household font', () => {
+  it('renders every label through i18n (no raw keys) and offers the app font as Default', async () => {
+    const { HouseholdThemeStudio } = await import('./HouseholdThemeStudio')
+    const { container, getByText } = render(<HouseholdThemeStudio />)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(container.textContent).not.toMatch(/theme\.[a-z_.]+/)
+    for (const label of ['Household appearance', 'Light surface', 'Dark surface', 'Density',
+      'Comfortable', 'Auto (system)', 'Corner radius (12 px)', "Social Home's own font."]) {
+      expect(getByText(label)).toBeTruthy()
+    }
+  })
+
+  it('publishes the saved font to the app-wide household store', async () => {
+    const { householdFont } = await import('@/store/householdTheme')
+    householdFont.value = 'system'
+    const { HouseholdThemeStudio } = await import('./HouseholdThemeStudio')
+    const { container, getByText } = render(<HouseholdThemeStudio />)
+    await new Promise((r) => setTimeout(r, 0))
+    fireEvent.click(container.querySelector<HTMLInputElement>('input[value="rounded"]')!)
+    fireEvent.click(getByText('Save'))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(householdFont.value).toBe('rounded')
+    expect(document.documentElement.style.getPropertyValue('--hh-font')).toContain('Nunito')
+  })
+})

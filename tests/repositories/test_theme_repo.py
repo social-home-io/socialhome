@@ -12,6 +12,7 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.repositories.theme_repo import (
     HouseholdTheme,
     SqliteThemeRepo,
+    ThemeValidationError,
     validate_color,
 )
 
@@ -133,3 +134,34 @@ async def test_upsert_space_coerces_null_font_and_layout_to_default(env):
     )
     assert theme2.font_family == "serif"
     assert theme2.post_layout == "magazine"
+
+
+async def test_upsert_space_null_font_and_layout_reset_an_override(env):
+    """``null`` means "no override" — it resets a stored override to the
+    column default rather than silently keeping the old value."""
+    await env.upsert_space(space_id="sp-1", font_family="mono", post_layout="compact")
+    theme = await env.upsert_space(space_id="sp-1", font_family=None, post_layout=None)
+    assert theme.font_family == "system"
+    assert theme.post_layout == "card"
+
+
+async def test_upsert_space_absent_font_and_layout_keep_the_override(env):
+    await env.upsert_space(space_id="sp-1", font_family="mono", post_layout="compact")
+    theme = await env.upsert_space(space_id="sp-1", primary_color="#010203")
+    assert theme.font_family == "mono"
+    assert theme.post_layout == "compact"
+
+
+async def test_upsert_space_rejects_css_stack_and_writes_nothing(env):
+    with pytest.raises(ThemeValidationError, match="font_family"):
+        await env.upsert_space(
+            space_id="sp-1",
+            primary_color="#010203",
+            font_family="Inter, system-ui, sans-serif",
+        )
+    assert await env.get_space("sp-1") is None
+
+
+async def test_upsert_space_rejects_unknown_layout(env):
+    with pytest.raises(ThemeValidationError, match="post_layout"):
+        await env.upsert_space(space_id="sp-1", post_layout="spacious")

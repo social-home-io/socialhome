@@ -83,5 +83,11 @@
   "connection.retry": "Button in the unreachable banner — reconnects immediately instead of waiting.",
   "connection.reconnected": "Short toast after the connection comes back.",
   "shortcuts.menu_entry": "Sidebar entry that opens the keyboard-shortcuts help dialog.",
-  "shortcuts.typing_note": "Footnote in the shortcuts dialog: '/', 'n' and '?' do nothing while the cursor is in a text field."
+  "shortcuts.typing_note": "Footnote in the shortcuts dialog: '/', 'n' and '?' do nothing while the cursor is in a text field.",
+
+  "theme.save_failed": "Toast after a refused theme save. {error} = the server's reason (English, e.g. 'font_family must be one of: \u2026').",
+  "theme.font.mono": "Name of a monospace font style. Keep short.",
+  "theme.layout.magazine": "Post layout name: roomy, reading-oriented cards. Keep short.",
+  "theme.font.inherit": "Space theme font option: no font override, the space uses the household's font.",
+  "theme.corner_radius": "Slider label. {px} = a number of pixels, 0\u201324."
 }

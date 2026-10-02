@@ -45,6 +45,7 @@ from ..domain.space import (
     SpaceModerationItem,
     SpacePermissionError,
 )
+from ..domain.theme import ThemeValidationError
 from ..domain.timetable import (
     TimetableConflictError,
     TimetableLimitError,
@@ -463,6 +464,11 @@ class BaseView(web.View):
             # the field + the failed rule (never the URL), so the admin who
             # scanned a bad pairing code learns why it was refused.
             return error_response(422, "INVALID_PEER_URL", str(exc))
+        except ThemeValidationError as exc:
+            # Subclasses ValueError — must precede it. The message names
+            # the field + the allowed values (never the submitted value),
+            # so the theme studio can say why a save was refused.
+            return error_response(422, "INVALID_THEME", str(exc))
         except ValueError as exc:
             # §Audit #7: ``str(exc)`` on a ValueError can carry
             # implementation detail (e.g. "Replay detected: msg_id=…"

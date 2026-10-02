@@ -11,6 +11,7 @@ import { usesIngressAuth } from '@/platform'
 import { isGuardian, loadGuardian } from '@/store/guardian'
 import { loadDmUnread } from '@/store/dms'
 import { loadUserPreferences } from '@/store/userPreferences'
+import { loadHouseholdTheme } from '@/store/householdTheme'
 import { pageTitle, pageTitleAvatar } from '@/store/pageTitle'
 import { Avatar } from '@/components/Avatar'
 import { toggles, loadToggles } from '@/components/HouseholdToggles'
@@ -295,6 +296,13 @@ export function App() {
     // kept live via ``user.preferences_changed`` WS frames wired in
     // main.tsx.
     void loadUserPreferences()
+  }, [authed.value])
+
+  // Household font (``--hh-font``) — painted app-wide once signed in.
+  // Gated on ``authed`` (``currentUser``), not the bearer token, so it
+  // also loads under haos ingress where the SPA carries no token.
+  useEffect(() => {
+    if (authed.value) void loadHouseholdTheme()
   }, [authed.value])
 
   // 30 s notifications poll — a belt-and-suspenders fallback for when

@@ -12,7 +12,9 @@
 import { useEffect } from 'preact/hooks'
 import { api } from '@/api'
 import { primaryFillOverrides } from '@/utils/primaryFill'
-import { fontStack } from '@/utils/themeFonts'
+import { BRAND_ACCENT, BRAND_PRIMARY } from '@/utils/themeBrand'
+import { fontOverride } from '@/utils/themeFonts'
+import { DEFAULT_LAYOUT, isLayoutId } from '@/utils/themeLayouts'
 
 interface SpaceTheme {
   primary_color?: string | null
@@ -21,7 +23,7 @@ interface SpaceTheme {
   background_tint?: string | null
   mode_override?: 'light' | 'dark' | null
   font_family?: string | null
-  post_layout?: 'compact' | 'spacious' | null
+  post_layout?: string | null
 }
 
 /** The ``space_themes`` column defaults (migration 0001) — the brand
@@ -29,17 +31,12 @@ interface SpaceTheme {
  *  They mean "no override": pinning them inline on ``<html>`` would force
  *  the LIGHT palette's hearth over the dark theme's lifted one. */
 const DEFAULT_COLORS: Record<string, string> = {
-  '--sh-primary': '#d2542a',
-  '--sh-accent': '#c8902f',
+  '--sh-primary': BRAND_PRIMARY.toLowerCase(),
+  '--sh-accent': BRAND_ACCENT.toLowerCase(),
 }
 
 function isDefault(prop: string, value: string): boolean {
   return DEFAULT_COLORS[prop] === value.trim().toLowerCase()
-}
-
-const POST_LAYOUT_GAP: Record<string, string> = {
-  compact:  'var(--sh-space-xs)',
-  spacious: 'var(--sh-space-lg)',
 }
 
 export function useSpaceTheme(spaceId: string | undefined | null): void {
@@ -59,6 +56,7 @@ export function useSpaceTheme(spaceId: string | undefined | null): void {
       applied.forEach(p => root.style.removeProperty(p))
       applied.clear()
       root.removeAttribute('data-space-theme')
+      root.removeAttribute('data-post-layout')
     }
 
     void (async () => {
@@ -82,11 +80,15 @@ export function useSpaceTheme(spaceId: string | undefined | null): void {
         if (t.accent_color)     apply('--sh-accent',  t.accent_color)
         if (t.background_tint)  apply('--sh-bg-space-tint', t.background_tint)
         // A stored font is a schema id, not CSS; 'system' (the column
-        // default) means "no override" — keep the app's own font.
-        const stack = t.font_family === 'system' ? null : fontStack(t.font_family)
-        if (stack)              apply('--sh-font-family', stack)
-        if (t.post_layout && POST_LAYOUT_GAP[t.post_layout]) {
-          apply('--sh-post-layout-gap', POST_LAYOUT_GAP[t.post_layout])
+        // default) means "no override" — the household font stays.
+        // ``--sh-space-font`` outranks ``--hh-font`` in the body rule.
+        const stack = fontOverride(t.font_family)
+        if (stack)              apply('--sh-space-font', stack)
+        // A layout id (CHECK IN card/compact/magazine) drives the space
+        // feed's CSS via ``data-post-layout``; 'card' is the feed's own look
+        // and anything unknown is ignored.
+        if (isLayoutId(t.post_layout) && t.post_layout !== DEFAULT_LAYOUT) {
+          root.setAttribute('data-post-layout', t.post_layout)
         }
         if (t.mode_override === 'light' || t.mode_override === 'dark') {
           root.style.setProperty('color-scheme', t.mode_override)
