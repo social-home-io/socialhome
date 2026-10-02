@@ -501,6 +501,16 @@ export default function SpaceFeedPage() {
     canContribute(accessLevel(f, feature), viewerRole.value)
   const adminOnly = (feature: AccessFeature) =>
     roleKnown.value && blockedByAdminOnly(accessLevel(f, feature), viewerRole.value)
+  // Why the sticky board is read-only (no add / edit / move, and each
+  // note by someone else carries its own Report): archived, kept to the
+  // admins (§4.3), or a viewer who can't write (a follower). ``null`` →
+  // writable.
+  const stickiesReadOnly = (): string | null => {
+    if (s?.archived) return t('stickies.read_only_archived')
+    if (adminOnly('stickies')) return accessNote('stickies')
+    if (roleKnown.value && !isWriterRole(viewerRole.value)) return t('stickies.read_only_viewer')
+    return null
+  }
   // Edit / Delete on a post: the author, or content authority (owner /
   // admin / moderator) on somebody else's — once the member list said
   // who the viewer is, never for a read-only subscriber, and not where
@@ -938,7 +948,7 @@ export default function SpaceFeedPage() {
       {activeTab.value === 'stickies' && (
         <StickyBoardPage
           spaceId={spaceId}
-          readOnly={adminOnly('stickies') ? accessNote('stickies') : null}
+          readOnly={stickiesReadOnly()}
         />
       )}
 

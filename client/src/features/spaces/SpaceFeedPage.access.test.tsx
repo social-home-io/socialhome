@@ -70,9 +70,13 @@ const ADMIN_ONLY_ALL = {
   calendar_access: 'admin_only',
 }
 
-function wire(role: string, features: Record<string, unknown> = ADMIN_ONLY_ALL) {
+function wire(
+  role: string,
+  features: Record<string, unknown> = ADMIN_ONLY_ALL,
+  extra: Record<string, unknown> = {},
+) {
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features }
+    if (url === '/api/spaces/s1') return { id: 's1', name: 'Trip', features, ...extra }
     if (url === '/api/spaces/s1/members') return [{ user_id: 'u1', role }]
     if (url === '/api/spaces/s1/links') return { links: [] }
     if (url === '/api/spaces/s1/compat') {
@@ -82,9 +86,14 @@ function wire(role: string, features: Record<string, unknown> = ADMIN_ONLY_ALL) 
   })
 }
 
-async function open(tab: string, role: string, features?: Record<string, unknown>) {
+async function open(
+  tab: string,
+  role: string,
+  features?: Record<string, unknown>,
+  extra?: Record<string, unknown>,
+) {
   route.query = tab === 'feed' ? {} : { tab }
-  wire(role, features)
+  wire(role, features, extra)
   const tl = await import('@testing-library/preact')
   tl.cleanup() // a test may open several tabs, one page at a time
   const { default: Page } = await import('./SpaceFeedPage')
@@ -179,4 +188,22 @@ describe('an open space', () => {
     ;({ tl, r } = await open('tasks', 'member', open_))
     await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('true:false'))
   }, 30000)
+})
+
+describe('a sticky board the viewer can only read', () => {
+  const open_ = { todo: true, pages: true, stickies: true, calendar: true }
+
+  it('a follower sees it read-only (so notes carry their own Report)', async () => {
+    const { tl, r } = await open('stickies', 'subscriber', open_)
+    await tl.waitFor(() =>
+      expect(r.getByTestId('sticky-board').textContent)
+        .toBe('You can read these notes but not add or change them.'))
+  }, 20000)
+
+  it('an archived space is read-only even for its owner', async () => {
+    const { tl, r } = await open('stickies', 'owner', open_, { archived: true })
+    await tl.waitFor(() =>
+      expect(r.getByTestId('sticky-board').textContent)
+        .toBe('This space is archived — its sticky notes are read-only.'))
+  }, 20000)
 })
