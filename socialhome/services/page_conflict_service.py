@@ -292,12 +292,14 @@ class PageConflictService:
         if resolution not in ("mine", "theirs", "merged_content"):
             raise ValueError(f"Unknown resolution: {resolution!r}")
 
-        if not await self.has_active_conflict(page_id, space_id=space_id):
-            raise NoActiveConflictError(f"page {page_id!r} has no unresolved conflict")
-
+        # Not-found first: a page id from another space (or the household)
+        # answers 404 like every other scoped page route, never 409.
         page = await self._pages.get_space_page(page_id, space_id=space_id)
         if page is None:
             raise PageNotFoundError(page_id)
+
+        if not await self.has_active_conflict(page_id, space_id=space_id):
+            raise NoActiveConflictError(f"page {page_id!r} has no unresolved conflict")
 
         if resolution == "mine":
             new_body = page.content

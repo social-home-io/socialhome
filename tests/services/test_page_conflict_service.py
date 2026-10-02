@@ -358,7 +358,8 @@ async def test_resolve_conflict_in_another_space_raises(svc):
         remote_body="theirs-version",
         remote_author_user_id="u2",
     )
-    with pytest.raises(NoActiveConflictError):
+    # Not found in that space (→ 404), checked before the conflict state.
+    with pytest.raises(PageNotFoundError):
         await service.resolve_conflict(
             space_id="sp-other",
             page_id=page.id,

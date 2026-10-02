@@ -14,8 +14,8 @@ from ..app_keys import (
     media_signer_key,
     user_repo_key,
 )
-from ..domain.calendar import CalendarEventCopy
-from ..domain.space import SpaceRole
+from ..domain.calendar import CalendarEvent, CalendarEventCopy
+from ..domain.space import SpaceMember, SpaceRole
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
 from ..services.calendar_import_service import (
@@ -293,39 +293,34 @@ class CalendarEventDeleteView(BaseView):
         event post — including events that exist and the user has
         permission to see.
 
-        Space-scoped events check space membership; personal-calendar
-        events fall back to the calendar repo and return 403 if the
-        caller isn't allowed to read that calendar.
+        Space-scoped events are member-only (a non-member gets 404, like
+        an unknown id); personal-calendar events fall back to the
+        calendar repo (household trust rule, §23.60).
         """
         ctx = self.user
         event_id = self.match("id")
         space_cal_svc = self.svc(K.space_cal_service_key)
-        space_id = await _resolve_space_id_for_event(self, event_id)
-        if space_id is not None:
-            space_repo = self.svc(K.space_repo_key)
-            member = await space_repo.get_member(space_id, ctx.user_id)
-            if member is None:
-                return error_response(403, "FORBIDDEN", "Not a space member.")
-            result = await space_cal_svc._repo.get_event(event_id)
-            if result is None:
-                return error_response(404, "NOT_FOUND", "Event not found.")
-            _sid, event = result
+        if await space_cal_svc.resolve_space_id(event_id) is not None:
+            # Same gate as every id-only space-event route: a non-member
+            # gets the "not found" answer, never a 403 oracle.
+            space_id, event, _member = await event_access(self, event_id, ctx.user_id)
             # Space events live in ``space_calendar_events`` and have no
             # household fan-out, so ``copies`` stays empty here (and in
             # every other space-calendar view) by design — don't "fix"
             # this by wiring ``_event_dicts_with_copies`` in.
-            return web.json_response(
-                _sign_payload(self.request, _event_dict(event)),
-            )
+            payload = _event_dict(event)
+            # UI hint: the SPA hides RSVP controls when the caller can't
+            # write (read-only subscriber, archived space). The RSVP
+            # route still enforces it (403).
+            payload["can_rsvp"] = await space_cal_svc.can_write(space_id, ctx.user_id)
+            return web.json_response(_sign_payload(self.request, payload))
         # Fall through to personal-calendar lookup.  ``get_event``
-        # raises ``KeyError`` when the event has been deleted; map it
-        # to 404 so the SPA can show the "isn't here anymore" hint
-        # consistently.
+        # raises ``KeyError`` when the event has been deleted; BaseView
+        # maps it to the same 404 body as the space branch's non-member
+        # answer, so the SPA shows the "isn't here anymore" hint
+        # consistently and the two cases are indistinguishable.
         svc = self.svc(calendar_service_key)
-        try:
-            event = await svc.get_event(event_id)
-        except KeyError:
-            return error_response(404, "NOT_FOUND", "Event not found.")
+        event = await svc.get_event(event_id)
         payload = (await _event_dicts_with_copies(svc, [event]))[0]
         return web.json_response(_sign_payload(self.request, payload))
 
@@ -544,17 +539,42 @@ class CalendarImportPromptView(BaseView):
 
 
 # ── Space-scoped calendar + RSVPs (§23.7) ─────────────────────────────
+#
+# Scope (§24.11): every ``/api/spaces/{id}/calendar/events[/{eid}]``
+# handler checks membership of the PATH space (403 for a non-member,
+# before any feature or id check), honours the per-space ``calendar``
+# feature, and passes the path space into the service — an event id
+# from another space is 404 and nothing changes. Writes additionally
+# require a writable seat (subscribers → 403) in a non-archived space
+# (→ 403) via :meth:`SpaceCalendarService.require_writer`.
 
 
-class SpaceCalendarEventsView(BaseView):
+class _SpaceCalendarBase(BaseView):
+    """Shared membership / feature / writer gate for the space calendar."""
+
+    async def _require_member(
+        self, space_id: str, user_id: str, *, write: bool = False
+    ) -> bool:
+        space_repo = self.svc(K.space_repo_key)
+        if await space_repo.get_member(space_id, user_id) is None:
+            return False
+        await self.require_space_feature(space_id, "calendar")
+        if write:
+            await self.svc(K.space_cal_service_key).require_writer(space_id, user_id)
+        return True
+
+
+class SpaceCalendarEventsView(_SpaceCalendarBase):
     """``GET /api/spaces/{id}/calendar/events`` — list events in a space calendar.
 
     ``POST /api/spaces/{id}/calendar/events`` — create an event in a space calendar.
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        ctx = self.user
         space_id = self.match("id")
+        if not await self._require_member(space_id, ctx.user_id):
+            return error_response(403, "FORBIDDEN", "Not a space member.")
         start = self.request.query.get("start")
         end = self.request.query.get("end")
         if not start or not end:
@@ -563,7 +583,6 @@ class SpaceCalendarEventsView(BaseView):
                 "UNPROCESSABLE",
                 "Query params 'start' and 'end' are required.",
             )
-        await self.require_space_feature(space_id, "calendar")
         space_cal_svc = self.svc(K.space_cal_service_key)
         events = await space_cal_svc.list_events_in_range(
             space_id,
@@ -574,17 +593,10 @@ class SpaceCalendarEventsView(BaseView):
             _sign_payload(self.request, [_event_dict(e) for e in events])
         )
 
-    async def _require_member(self, space_id: str, user_id: str) -> bool:
-        space_repo = self.svc(K.space_repo_key)
-        if await space_repo.get_member(space_id, user_id) is None:
-            return False
-        await self.require_space_feature(space_id, "calendar")
-        return True
-
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         body = await self.body()
         space_cal_svc = self.svc(K.space_cal_service_key)
@@ -615,21 +627,14 @@ class SpaceCalendarEventsView(BaseView):
         )
 
 
-class SpaceCalendarEventDetailView(BaseView):
+class SpaceCalendarEventDetailView(_SpaceCalendarBase):
     """``PATCH`` / ``DELETE /api/spaces/{id}/calendar/events/{eid}``."""
-
-    async def _require_member(self, space_id: str, user_id: str) -> bool:
-        space_repo = self.svc(K.space_repo_key)
-        if await space_repo.get_member(space_id, user_id) is None:
-            return False
-        await self.require_space_feature(space_id, "calendar")
-        return True
 
     async def patch(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
         event_id = self.match("eid")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         space_cal_svc = self.svc(K.space_cal_service_key)
         body = await self.body()
@@ -642,6 +647,7 @@ class SpaceCalendarEventDetailView(BaseView):
             location = body["location"] if "location" in body else UNSET_LOCATION
             event = await space_cal_svc.update_event(
                 event_id,
+                space_id=space_id,
                 summary=body.get("summary") or body.get("title"),
                 start=body.get("start") or body.get("start_at"),
                 end=body.get("end") or body.get("end_at"),
@@ -669,15 +675,19 @@ class SpaceCalendarEventDetailView(BaseView):
         ctx = self.user
         space_id = self.match("id")
         event_id = self.match("eid")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         space_cal_svc = self.svc(K.space_cal_service_key)
-        await space_cal_svc.delete_event(event_id)
+        await space_cal_svc.delete_event(event_id, space_id=space_id)
         return web.json_response({"ok": True})
 
 
 # Back-compat alias — the old name is still used in some tests/imports.
 SpaceCalendarEventDeleteView = SpaceCalendarEventDetailView
+
+
+#: Subscriber-refusal wording for RSVP writes.
+_RSVP_ACTION = "RSVP to events"
 
 
 class CalendarEventRsvpView(BaseView):
@@ -703,16 +713,9 @@ class CalendarEventRsvpView(BaseView):
         occurrence_at = body.get("occurrence_at")
         space_cal_svc = self.svc(K.space_cal_service_key)
 
-        space_id = await _resolve_space_id_for_event(self, event_id)
-        if space_id is None:
-            return error_response(404, "NOT_FOUND", "Event not found.")
-        space_repo = self.svc(K.space_repo_key)
-        member = await space_repo.get_member(space_id, ctx.user_id)
-        if member is None and not await space_repo.is_user_remote_member(
-            space_id, ctx.user_id
-        ):
-            return error_response(403, "FORBIDDEN", "Not a space member.")
-        await self.require_space_feature(space_id, "calendar")
+        space_id, _event, _member = await event_access(
+            self, event_id, ctx.user_id, write=True, action=_RSVP_ACTION
+        )
 
         try:
             await space_cal_svc.rsvp(
@@ -739,16 +742,9 @@ class CalendarEventRsvpView(BaseView):
         occurrence_at = self.request.query.get("occurrence_at")
         space_cal_svc = self.svc(K.space_cal_service_key)
 
-        space_id = await _resolve_space_id_for_event(self, event_id)
-        if space_id is None:
-            return error_response(404, "NOT_FOUND", "Event not found.")
-        space_repo = self.svc(K.space_repo_key)
-        member = await space_repo.get_member(space_id, ctx.user_id)
-        if member is None and not await space_repo.is_user_remote_member(
-            space_id, ctx.user_id
-        ):
-            return error_response(403, "FORBIDDEN", "Not a space member.")
-        await self.require_space_feature(space_id, "calendar")
+        space_id, _event, _member = await event_access(
+            self, event_id, ctx.user_id, write=True, action=_RSVP_ACTION
+        )
 
         try:
             await space_cal_svc.remove_rsvp(
@@ -809,12 +805,40 @@ async def _broadcast_rsvp_counts(
     return web.json_response(body)
 
 
-async def _resolve_space_id_for_event(view, event_id: str) -> str | None:
-    """Return the event's owning space_id, or None if the event is
-    missing. Delegates to :class:`SpaceCalendarService.resolve_space_id`.
+async def event_access(
+    view: BaseView,
+    event_id: str,
+    user_id: str,
+    *,
+    write: bool = False,
+    action: str = "edit the calendar",
+) -> tuple[str, CalendarEvent, SpaceMember]:
+    """Gate for the id-only ``/api/calendars/events/{id}/…`` space-event routes.
+
+    The event's own space (resolved from the row, never a client
+    claim) decides. An unknown event and an event in a space the caller
+    is not a member of are the SAME answer — :class:`KeyError` (→ 404)
+    — so the id-only routes are no existence oracle for other spaces'
+    events. Membership is the local ``space_members`` row only: an
+    accepted invitation is not membership (a member who left or was
+    removed keeps their accepted invitation row). Then the space's
+    ``calendar`` feature (403 ``FEATURE_DISABLED``); ``write`` (RSVP /
+    approval) additionally refuses a read-only subscriber and an
+    archived space (403) via :meth:`SpaceCalendarService.require_writer`,
+    naming ``action`` in the subscriber refusal.
     """
     svc = view.svc(K.space_cal_service_key)
-    return await svc.resolve_space_id(event_id)
+    space_id = await svc.resolve_space_id(event_id)
+    if space_id is None:
+        raise KeyError(f"event {event_id!r} not found")
+    member = await view.svc(K.space_repo_key).get_member(space_id, user_id)
+    if member is None:
+        raise KeyError(f"event {event_id!r} not found")
+    await view.require_space_feature(space_id, "calendar")
+    if write:
+        await svc.require_writer(space_id, user_id, action=action)
+    event = await svc.get_event_in_space(event_id, space_id=space_id)
+    return space_id, event, member
 
 
 class CalendarEventApprovalView(BaseView):
@@ -841,19 +865,11 @@ class CalendarEventApprovalView(BaseView):
             )
 
         space_cal_svc = self.svc(K.space_cal_service_key)
-        space_id = await _resolve_space_id_for_event(self, event_id)
-        if space_id is None:
-            return error_response(404, "NOT_FOUND", "Event not found.")
-        # Approver = event creator OR space admin/owner.
-        space_repo = self.svc(K.space_repo_key)
-        member = await space_repo.get_member(space_id, ctx.user_id)
-        if member is None:
-            return error_response(403, "FORBIDDEN", "Not a space member.")
-        await self.require_space_feature(space_id, "calendar")
-        result = await space_cal_svc._repo.get_event(event_id)
-        if result is None:
-            return error_response(404, "NOT_FOUND", "Event not found.")
-        _sid, event = result
+        # Approver = event creator OR space admin/owner — a member with a
+        # writable seat in a non-archived space.
+        space_id, event, member = await event_access(
+            self, event_id, ctx.user_id, write=True, action="approve RSVPs"
+        )
         is_creator = event.created_by == ctx.user_id
         is_admin = member.role in (SpaceRole.OWNER, SpaceRole.ADMIN)
         if not (is_creator or is_admin):
@@ -903,24 +919,9 @@ class CalendarEventPendingView(BaseView):
         event_id = self.match("id")
         occurrence_at = self.request.query.get("occurrence_at")
         space_cal_svc = self.svc(K.space_cal_service_key)
-        space_id = await _resolve_space_id_for_event(self, event_id)
-        if space_id is None:
-            return error_response(404, "NOT_FOUND", "Event not found.")
-        space_repo = self.svc(K.space_repo_key)
-        member = await space_repo.get_member(space_id, ctx.user_id)
-        if member is None and not await space_repo.is_user_remote_member(
-            space_id, ctx.user_id
-        ):
-            return error_response(403, "FORBIDDEN", "Not a space member.")
-        await self.require_space_feature(space_id, "calendar")
-        result = await space_cal_svc._repo.get_event(event_id)
-        if result is None:
-            return error_response(404, "NOT_FOUND", "Event not found.")
-        _sid, event = result
-        if event.created_by != ctx.user_id and member.role not in (
-            SpaceRole.OWNER,
-            SpaceRole.ADMIN,
-        ):
+        _space_id, event, member = await event_access(self, event_id, ctx.user_id)
+        is_admin = member.role in (SpaceRole.OWNER, SpaceRole.ADMIN)
+        if event.created_by != ctx.user_id and not is_admin:
             return error_response(
                 403,
                 "FORBIDDEN",
@@ -951,26 +952,16 @@ class CalendarEventRemindersView(BaseView):
     rows whose ``fire_at`` window has come due and emits a push.
     """
 
-    async def _ensure_member(self, event_id: str) -> tuple[str, str] | web.Response:
+    async def _ensure_member(self, event_id: str) -> tuple[str, str]:
         ctx = self.user
-        space_id = await _resolve_space_id_for_event(self, event_id)
-        if space_id is None:
-            return error_response(404, "NOT_FOUND", "Event not found.")
-        space_repo = self.svc(K.space_repo_key)
-        member = await space_repo.get_member(space_id, ctx.user_id)
-        if member is None and not await space_repo.is_user_remote_member(
-            space_id, ctx.user_id
-        ):
-            return error_response(403, "FORBIDDEN", "Not a space member.")
-        await self.require_space_feature(space_id, "calendar")
+        # Reminders are the caller's own, never federated — read access
+        # to the event is enough (subscribers may set them too).
+        space_id, _event, _member = await event_access(self, event_id, ctx.user_id)
         return space_id, ctx.user_id
 
     async def get(self) -> web.Response:
         event_id = self.match("id")
-        gate = await self._ensure_member(event_id)
-        if isinstance(gate, web.Response):
-            return gate
-        _space_id, user_id = gate
+        _space_id, user_id = await self._ensure_member(event_id)
         occurrence_at = self.request.query.get("occurrence_at")
         space_cal_svc = self.svc(K.space_cal_service_key)
         reminders = await space_cal_svc.list_reminders(
@@ -994,10 +985,7 @@ class CalendarEventRemindersView(BaseView):
 
     async def post(self) -> web.Response:
         event_id = self.match("id")
-        gate = await self._ensure_member(event_id)
-        if isinstance(gate, web.Response):
-            return gate
-        _space_id, user_id = gate
+        _space_id, user_id = await self._ensure_member(event_id)
         body = await self.body()
         try:
             minutes_before = int(body.get("minutes_before", -1))
@@ -1031,10 +1019,7 @@ class CalendarEventRemindersView(BaseView):
 
     async def delete(self) -> web.Response:
         event_id = self.match("id")
-        gate = await self._ensure_member(event_id)
-        if isinstance(gate, web.Response):
-            return gate
-        _space_id, user_id = gate
+        _space_id, user_id = await self._ensure_member(event_id)
         try:
             minutes_before = int(self.request.query.get("minutes_before", -1))
         except TypeError, ValueError:
@@ -1064,10 +1049,13 @@ class CalendarEventRsvpsView(BaseView):
     """
 
     async def get(self) -> web.Response:
-        self.user  # auth check
+        ctx = self.user
         event_id = self.match("id")
         occurrence_at = self.request.query.get("occurrence_at")
         space_cal_svc = self.svc(K.space_cal_service_key)
+        # Who RSVP'd is space content — members of the event's own
+        # space only (same gate as the event read).
+        await event_access(self, event_id, ctx.user_id)
         rsvps = await space_cal_svc.list_rsvps(
             event_id,
             occurrence_at=occurrence_at,

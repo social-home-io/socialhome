@@ -176,6 +176,7 @@ from .pages import (
     PageVersionView,
     SpacePageCollectionView,
     SpacePageDetailView,
+    SpacePageVersionView,
 )
 from .pairing import (
     AutoPairInboxApproveView,
@@ -948,6 +949,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
     app.router.add_view("/api/spaces/{id}/pages", SpacePageCollectionView)
     app.router.add_view("/api/spaces/{id}/pages/{pid}", SpacePageDetailView)
+    app.router.add_view(
+        "/api/spaces/{id}/pages/{pid}/versions",
+        SpacePageVersionView,
+    )
     app.router.add_view(
         "/api/spaces/{id}/pages/{pid}/resolve-conflict",
         PageConflictView,

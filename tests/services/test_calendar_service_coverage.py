@@ -251,7 +251,7 @@ async def test_space_resolve_happy(env):
 
 async def test_space_update_event_unknown(env):
     with pytest.raises(KeyError):
-        await env.space_svc.update_event("ghost", summary="x")
+        await env.space_svc.update_event("ghost", space_id="sp1", summary="x")
 
 
 async def test_space_update_event_empty_summary(env):
@@ -264,7 +264,7 @@ async def test_space_update_event_empty_summary(env):
         created_by="u1",
     )
     with pytest.raises(ValueError):
-        await env.space_svc.update_event(event.id, summary="   ")
+        await env.space_svc.update_event(event.id, space_id="sp1", summary="   ")
 
 
 async def test_space_update_event_bad_range(env):
@@ -279,6 +279,7 @@ async def test_space_update_event_bad_range(env):
     with pytest.raises(ValueError):
         await env.space_svc.update_event(
             event.id,
+            space_id="sp1",
             start="2026-01-01T02:00:00Z",
             end="2026-01-01T01:00:00Z",
         )
@@ -295,6 +296,7 @@ async def test_space_update_event_full(env):
     )
     updated = await env.space_svc.update_event(
         event.id,
+        space_id="sp1",
         summary="m2",
         all_day=True,
         description="d",

@@ -11,7 +11,9 @@
  * * :class:`CapacityStrip` summary of RSVP counts (Phase C).
  * * Inline RSVP buttons (going / maybe / declined). On capped events
  *   the "going" button reads "Request to join". Past events disable
- *   the buttons with a tooltip.
+ *   the buttons with a tooltip. Hidden entirely when the server says
+ *   the viewer can't RSVP (``can_rsvp: false`` — a read-only
+ *   subscriber, or an archived space).
  * * Status pill — "You're going" / "Pending approval" / "On waitlist
  *   (#3)" — so the user always knows where they stand.
  * * "Add to my calendar" link to ``/api/calendars/events/{id}/export.ics``.
@@ -136,6 +138,10 @@ export function EventPostCard({ eventId }: EventPostCardProps) {
 
   const isCapped = event.capacity != null
   const isCreator = event.created_by === currentUser.value?.user_id
+  // Read-only subscribers (and anyone in an archived space) can't RSVP —
+  // the server answers 403 — so don't offer buttons that can only fail.
+  // ``can_rsvp`` is absent on older servers: keep showing them then.
+  const canRsvp = event.can_rsvp !== false
 
   // RSVP attendance line — populated only when we know at least one
   // response. Capped events lean on CapacityStrip instead; uncapped
@@ -180,7 +186,12 @@ export function EventPostCard({ eventId }: EventPostCardProps) {
         />
       )}
 
-      <CapacityStrip counts={counts} capacity={event.capacity} myStatus={myStatus} />
+      <CapacityStrip
+        counts={counts}
+        capacity={event.capacity}
+        myStatus={myStatus}
+        hideEmpty={!canRsvp}
+      />
       {attendance && (
         <div class="sh-event-card-attendance">{attendance}</div>
       )}
@@ -196,7 +207,10 @@ export function EventPostCard({ eventId }: EventPostCardProps) {
       ) : null}
 
       <div class="sh-event-card-rsvp" role="group" aria-label={t('event.rsvp.aria')}>
-        {RSVP_BUTTONS.map((btn) => (
+        {!canRsvp && (
+          <span class="sh-event-card-rsvp-note">{t('event.rsvp.read_only')}</span>
+        )}
+        {canRsvp && RSVP_BUTTONS.map((btn) => (
           <RsvpButton
             key={btn.status}
             event={event}

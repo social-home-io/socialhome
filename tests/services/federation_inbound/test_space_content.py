@@ -1046,6 +1046,26 @@ async def test_calendar_deleted(repos, handlers):
     assert repos["calendar"].deleted == ["e-1"]
 
 
+async def test_calendar_deleted_publishes_space_scoped_bus_event(bus, repos, handlers):
+    """The local CalendarEventDeleted carries the space so the WS frame
+    fans out to that space's members — never to the whole household."""
+    seen: list = []
+
+    async def _capture(evt):
+        seen.append(evt)
+
+    bus.subscribe(CalendarEventDeleted, _capture)
+    repos["calendar"]._events["e-1"] = ("sp-1", object())
+    await handlers._on_calendar_deleted(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+            {"id": "e-1"},
+            space_id="sp-1",
+        )
+    )
+    assert [(e.event_id, e.space_id) for e in seen] == [("e-1", "sp-1")]
+
+
 async def test_calendar_inbound_publishes_bus_event(bus, repos, handlers):
     """Inbound SPACE_CALENDAR_EVENT_CREATED publishes CalendarEventCreated
     on the local bus so the calendar→feed bridge fires (Phase B)."""

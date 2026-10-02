@@ -280,7 +280,22 @@ posts other households send still render (they cost no fetch here).
 | POST | `/api/pages/{id}/revert` | Revert to earlier version. |
 | POST | `/api/pages/{id}/{delete-request\|delete-approve\|delete-cancel}` | Two-admin delete. |
 | GET / POST / PATCH / DELETE | `/api/spaces/{id}/pages[/{pid}]` | Space-scoped pages. |
+| GET | `/api/spaces/{id}/pages/{pid}/versions` | A space page's edit history (read-only, oldest first; same row shape as `/api/pages/{id}/versions`). Members and subscribers of the path space; non-member 403 → feature 403 → unknown/other-space `pid` 404. Only snapshots recorded under this space. No lock or revert routes exist for space pages. |
 | POST | `/api/spaces/{id}/pages/{pid}/resolve-conflict` | Force-pick in a conflict. Writing members only (not subscribers); acts on that space's page. |
+
+**Scope and permissions.** `/api/pages[/{id}…]` is the **household**
+surface only: every `{id}` route (read, edit, delete, lock, refresh,
+versions, revert, delete-request / approve / cancel) answers **404** for
+a space page id — even for a member of that space — exactly like an
+unknown id, and nothing changes. The space surface
+`/api/spaces/{id}/pages[/{pid}…]` requires membership of the path space
+(**403** for a non-member, checked before any feature or id check) and
+the space's `pages` feature (403 `FEATURE_DISABLED`); a `{pid}` that does
+not belong to space `{id}` — another space's page or a household page —
+is **404**. Writes (`POST`, `PATCH`, `DELETE`, `resolve-conflict`) are
+**403** for read-only subscribers and while the space is **archived**
+(reads keep working). Deleting a space page federates
+`SPACE_PAGE_DELETED` to the space's member households.
 
 **Embedded media URLs.** Page `content` is a markdown body. Any
 `/api/media/{filename}` reference inside it (typically pasted from the
@@ -449,8 +464,8 @@ as the household ones above, minus `/day`: collection (`GET` / `POST`),
 | GET / POST | `/api/calendars` | List / create calendars. |
 | GET / PATCH / DELETE | `/api/calendars/{id}` | CRUD. |
 | GET / POST | `/api/calendars/{id}/events` | List / create events. Body fields: `summary`, `start`, `end`, `all_day`, `description`, `attendees`, `rrule`, `rsvp_enabled`, `cover_url`, `tz`. `start` / `end` are UTC ISO 8601 — the SPA converts the local-time form input via `Intl` before submitting. `tz` is the optional IANA name the event anchors to (e.g. `"Europe/Berlin"`); when absent the server resolves to the creator's `users.tz`, then the household `preferences.tz` row, then `"UTC"`. `attendees` accepts only confirmed-paired-instance user_ids — local household member user_ids are rejected with 422 (coordinate via the calendar selector instead). Authorization: any active household member can create / edit events on any household member's personal calendar. Response carries the resolved `tz` so the SPA can render the event in the host's wall clock with an "≈ HH:MM your time" hint when the viewer's browser zone differs. **All-day events keep their day bounds in the event's `tz`, not in UTC** — the composer submits `00:00` / `23:59` of the authored day converted through `tz`, so an all-day "1 May" authored in `Europe/Zurich` is on the wire as `2026-04-30T22:00:00Z → 2026-05-01T21:59:00Z`. A client MUST read an all-day event's day back in `tz` (falling back to `"UTC"` when absent); reading its UTC components instead shifts the day for every household east or west of UTC and makes a single-day event look like a two-day span. Every event in the response carries `copies` — the **server-authoritative** sibling set of the household fan-out, resolved from `client_event_uuid`: `[{"event_id", "calendar_id", "owner_username"}, …]`, one entry per member calendar the event was shared to. It is **independent of which calendars the caller currently has visible** — that independence is the point: a client that infers the sibling set from its loaded agenda will duplicate rows when editing a shared event. `copies` is `[]` for an event with no `client_event_uuid` (legacy rows, and ICS-imported events whose VEVENT had no `UID`) and for space events (those live in `space_calendar_events` and have no household fan-out); it is `[{self}]` for a uuid'd event that was only written to one calendar. It never contains `remote_invite` mirrors — those carry the *peer's* `client_event_uuid` and are not ours to edit. For a **recurring** event the ids in `copies` are the **stored** row ids, never the synthetic `{id}@{iso}` occurrence ids the range query expands to. `POST` is idempotent per `(calendar_id, client_event_uuid)`: when a local row already exists on that calendar with the same client-minted uuid, the request **updates that row in place** (preserving its `id`, `created_by` and provenance, emitting an *updated* rather than a *created* domain / federation event) instead of minting a second copy of the same event on the same calendar. The status code stays `201`, and the response body is the updated row. This makes a retried fan-out POST — and an edit the client sent as a create — safe; the partial unique index `ux_calendar_events_fanout` is the on-disk backstop. |
-| GET / PATCH / DELETE | `/api/calendars/events/{id}` | CRUD. PATCH treats `cover_url` as tri-state: omitted = leave unchanged, explicit `null` = clear, string = set. `tz` is validated against the IANA database; an unknown name returns 422. PATCH also accepts `client_event_uuid` to attach the event to a shared household group; absent leaves any existing group id untouched. Promoting an event into a group that another local row on the **same calendar** already occupies returns **422** (the partial unique index `ux_calendar_events_fanout` allows one local copy per `(calendar_id, client_event_uuid)`, and two indistinguishable copies of one shared event on one calendar is a client error). GET and PATCH responses carry `copies` with the same shape and guarantees as on `/api/calendars/{id}/events` — the authoritative, visibility-independent fan-out sibling set (`[]` for a uuid-less row; `[]` for a space event, which this route also serves; never `remote_invite` mirrors). |
-| GET | `/api/calendars/events/{id}/rsvps` | List RSVPs. `?occurrence_at=<iso>` (URL-encoded) scopes to one occurrence of a recurring event. |
+| GET / PATCH / DELETE | `/api/calendars/events/{id}` | CRUD. PATCH treats `cover_url` as tri-state: omitted = leave unchanged, explicit `null` = clear, string = set. `tz` is validated against the IANA database; an unknown name returns 422. PATCH also accepts `client_event_uuid` to attach the event to a shared household group; absent leaves any existing group id untouched. Promoting an event into a group that another local row on the **same calendar** already occupies returns **422** (the partial unique index `ux_calendar_events_fanout` allows one local copy per `(calendar_id, client_event_uuid)`, and two indistinguishable copies of one shared event on one calendar is a client error). GET and PATCH responses carry `copies` with the same shape and guarantees as on `/api/calendars/{id}/events` — the authoritative, visibility-independent fan-out sibling set (`[]` for a uuid-less row; `[]` for a space event, which `GET` also serves to members of its space (404 for anyone else); never `remote_invite` mirrors). `PATCH` / `DELETE` act on personal-calendar events only — a space event id is 404. A space event's `GET` response also carries `can_rsvp` (boolean UI hint: `false` for a read-only subscriber or an archived space; the RSVP route enforces it). |
+| GET | `/api/calendars/events/{id}/rsvps` | List RSVPs. Members of the event's space only (404 otherwise, same as an unknown event). `?occurrence_at=<iso>` (URL-encoded) scopes to one occurrence of a recurring event. |
 | POST | `/api/calendars/events/{id}/rsvp` | Set own RSVP. Body: `{"status": "going\|maybe\|declined", "occurrence_at": "<iso>"}`. `occurrence_at` required for recurring events; defaults to `event.start` for non-recurring. |
 | DELETE | `/api/calendars/events/{id}/rsvp` | Clear own RSVP. `?occurrence_at=<iso>` (URL-encoded) required for recurring. |
 | POST | `/api/calendars/events/{id}/approve` | Approve / deny pending request-to-join (capped events, Phase C). Approver = event creator OR space admin. Body: `{"user_id": "<uid>", "action": "approve\|deny", "occurrence_at"?: "<iso>"}`. |
@@ -466,6 +481,34 @@ as the household ones above, minus `/day`: collection (`GET` / `POST`),
 | POST | `/api/calendars/{id}/{import_image\|import_prompt}` | AI-assisted import. |
 | GET | `/api/calendar/{id}/export.ics` | iCal export. |
 | …same under `/api/spaces/{id}/calendar/...` | | Space-scoped variants. Space event create/list also accepts/returns `announce_in_feed` (§23.15, default **false**): when true the event also mirrors to the space feed as a `PostType.EVENT` post; otherwise it lives only in the Calendar tab. |
+
+**Space calendar scope and permissions.** `GET` / `POST
+/api/spaces/{id}/calendar/events` and `PATCH` / `DELETE
+/api/spaces/{id}/calendar/events/{eid}` require membership of the path
+space (**403** for a non-member, checked before the `start`/`end`,
+feature and id checks) and the space's `calendar` feature (403
+`FEATURE_DISABLED`); an `{eid}` that belongs to another space is
+**404** and nothing changes. The id-only routes —
+`GET /api/calendars/events/{id}` (for a space event) and its `rsvp`,
+`rsvps`, `pending`, `reminders`, `approve` and `export.ics` — take the
+space from the event row itself and answer **404** both for an unknown
+id and for an event in a space the caller is not a member of (no
+existence oracle); membership is the caller's `space_members` row (an
+accepted invitation alone is not membership). Then the `calendar`
+feature (403). Writes — create, edit, delete, `rsvp` (`POST` /
+`DELETE`) and `approve` — are **403** for read-only subscribers and while
+the space is **archived**; reads (list, event read, `rsvps`, `pending`,
+`export.ics`) keep working for members and subscribers. Reminders are
+the caller's own and never federate, so any member — subscribers
+included — may set them. The subscription feed
+(`/api/spaces/{id}/calendar/export.ics?token=`) and minting a feed token
+also require the `calendar` feature; revoking a token does not (so a
+leaked token can always be killed). The household `PATCH` / `DELETE
+/api/calendars/events/{id}` only reach personal-calendar rows: a space
+event id there is **404** (edit it under
+`/api/spaces/{id}/calendar/events/{eid}`). Personal calendars keep the
+household trust rule (any active household member may edit any member's
+personal events, §23.60).
 
 ### Stickies, shopping, bazaar, gallery
 

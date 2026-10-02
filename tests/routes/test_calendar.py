@@ -323,7 +323,7 @@ async def test_space_create_event_non_member_403(client):
     assert r.status == 403
 
 
-async def test_rsvp_non_member_403(client):
+async def test_rsvp_non_member_404(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
     r = await client.post(
@@ -342,7 +342,8 @@ async def test_rsvp_non_member_403(client):
         json={"status": "going"},
         headers=outsider,
     )
-    assert r2.status == 403
+    # Non-members get the not-found answer (no existence oracle).
+    assert r2.status == 404
 
 
 async def test_space_event_patch_updates_fields(client):
@@ -445,7 +446,7 @@ async def test_rsvp_delete_clears_response(client):
     assert (await r4.json())["rsvps"] == []
 
 
-async def test_rsvp_delete_non_member_403(client):
+async def test_rsvp_delete_non_member_404(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
     r = await client.post(
@@ -463,7 +464,8 @@ async def test_rsvp_delete_non_member_403(client):
         f"/api/calendars/events/{eid}/rsvp",
         headers=outsider,
     )
-    assert r2.status == 403
+    # Non-members get the not-found answer (no existence oracle).
+    assert r2.status == 404
 
 
 async def test_rsvp_recurring_per_occurrence(client):
@@ -711,7 +713,7 @@ async def test_event_ics_endpoint_returns_vcalendar(client):
     assert "SUMMARY:Birthday" in body
 
 
-async def test_event_ics_non_member_403(client):
+async def test_event_ics_non_member_404(client):
     await _seed_space(client)
     now = datetime.now(timezone.utc)
     r = await client.post(
@@ -729,7 +731,8 @@ async def test_event_ics_non_member_403(client):
         f"/api/calendars/events/{eid}/export.ics",
         headers=outsider,
     )
-    assert r2.status == 403
+    # Non-members get the not-found answer (no existence oracle).
+    assert r2.status == 404
 
 
 async def test_feed_token_lifecycle(client):

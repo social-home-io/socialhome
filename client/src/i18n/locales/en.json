@@ -804,6 +804,7 @@
   "event.rrule.yearly": "yearly",
 
   "event.rsvp.aria": "RSVP",
+  "event.rsvp.read_only": "RSVPs are for members — you're viewing this space read-only.",
   "event.rsvp.going": "Going",
   "event.rsvp.maybe": "Maybe",
   "event.rsvp.declined": "Can't make it",

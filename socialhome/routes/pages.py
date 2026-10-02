@@ -1,4 +1,13 @@
-"""Page routes — /api/pages/* (section 5.2) and space page conflict resolution (section 4.4.4.1)."""
+"""Page routes — /api/pages/* (section 5.2) and space page conflict resolution (section 4.4.4.1).
+
+Scope (§24.11): the household ``/api/pages[/{id}…]`` routes only ever
+act on household pages (the ``pages`` table) — a space page id there is
+404, member or not. The ``/api/spaces/{id}/pages[/{pid}…]`` routes check
+membership of the PATH space (403 before any feature or id check), honour
+the per-space ``pages`` feature, and only reach that space's pages (an id
+from another space or the household is 404). Space writes additionally
+need a writable seat (subscribers → 403) in a non-archived space (→ 403).
+"""
 
 from __future__ import annotations
 
@@ -23,6 +32,7 @@ from ..domain.events import (
     PageEditLockReleased,
     PageUpdated,
 )
+from ..domain.space import SpacePermissionError
 from ..media_signer import (
     MediaUrlSigner,
     sign_media_urls_in_markdown,
@@ -80,6 +90,20 @@ def _page_dict(page, *, signer: MediaUrlSigner | None = None) -> dict:
         "locked_by": page.locked_by,
         "locked_at": page.locked_at,
         "lock_expires_at": page.lock_expires_at,
+    }
+
+
+def _version_dict(v: PageVersion) -> dict:
+    return {
+        "id": v.id,
+        "page_id": v.page_id,
+        "version": v.version,
+        "title": v.title,
+        "content": v.content,
+        "edited_by": v.edited_by,
+        "edited_at": v.edited_at,
+        "space_id": v.space_id,
+        "cover_image_url": v.cover_image_url,
     }
 
 
@@ -152,7 +176,7 @@ class PageDetailView(BaseView):
         self.user  # auth gate
         repo = self.svc(page_repo_key)
         page_id = self.match("id")
-        p = await repo.get(page_id)
+        p = await repo.get_household_page(page_id)
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
         return web.json_response(_signed_page_dict(self.request, p))
@@ -163,7 +187,7 @@ class PageDetailView(BaseView):
         bus = self.svc(event_bus_key)
         page_id = self.match("id")
         body = await self.body()
-        p = await repo.get(page_id)
+        p = await repo.get_household_page(page_id)
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
         # Optimistic-concurrency check — if the caller sends the
@@ -223,11 +247,10 @@ class PageDetailView(BaseView):
         repo = self.svc(page_repo_key)
         bus = self.svc(event_bus_key)
         page_id = self.match("id")
-        p = await repo.get(page_id)
-        if p is None:
+        if await repo.get_household_page(page_id) is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
-        await repo.delete(page_id, space_id=p.space_id)
-        await bus.publish(PageDeleted(page_id=page_id, space_id=p.space_id))
+        await repo.delete(page_id, space_id=None)
+        await bus.publish(PageDeleted(page_id=page_id, space_id=None))
         return web.json_response({"ok": True})
 
 
@@ -237,7 +260,10 @@ class PageLockView(BaseView):
     async def get(self) -> web.Response:
         self.user  # auth gate
         repo = self.svc(page_repo_key)
-        lock = await repo.get_lock(self.match("id"))
+        page_id = self.match("id")
+        if await repo.get_household_page(page_id) is None:
+            return error_response(404, "NOT_FOUND", "Page not found.")
+        lock = await repo.get_lock(page_id)
         return web.json_response(lock)
 
     async def post(self) -> web.Response:
@@ -256,11 +282,10 @@ class PageLockView(BaseView):
         except PageNotFoundError:
             return error_response(404, "NOT_FOUND", "Page not found.")
         lock = await repo.get_lock(page_id)
-        p = await repo.get(page_id)
         await bus.publish(
             PageEditLockAcquired(
                 page_id=page_id,
-                space_id=p.space_id if p else None,
+                space_id=None,
                 locked_by=ctx.user_id,
                 lock_expires_at=(lock or {}).get("lock_expires_at") or "",
             )
@@ -272,14 +297,10 @@ class PageLockView(BaseView):
         repo = self.svc(page_repo_key)
         bus = self.svc(event_bus_key)
         page_id = self.match("id")
-        p = await repo.get(page_id)
+        if await repo.get_household_page(page_id) is None:
+            return error_response(404, "NOT_FOUND", "Page not found.")
         await repo.release_lock(page_id, ctx.user_id)
-        await bus.publish(
-            PageEditLockReleased(
-                page_id=page_id,
-                space_id=p.space_id if p else None,
-            )
-        )
+        await bus.publish(PageEditLockReleased(page_id=page_id, space_id=None))
         return web.json_response({"ok": True})
 
 
@@ -314,23 +335,10 @@ class PageVersionView(BaseView):
         self.user  # auth gate
         repo = self.svc(page_repo_key)
         page_id = self.match("id")
-        versions = await repo.list_versions(page_id)
-        return web.json_response(
-            [
-                {
-                    "id": v.id,
-                    "page_id": v.page_id,
-                    "version": v.version,
-                    "title": v.title,
-                    "content": v.content,
-                    "edited_by": v.edited_by,
-                    "edited_at": v.edited_at,
-                    "space_id": v.space_id,
-                    "cover_image_url": v.cover_image_url,
-                }
-                for v in versions
-            ]
-        )
+        if await repo.get_household_page(page_id) is None:
+            return error_response(404, "NOT_FOUND", "Page not found.")
+        versions = await repo.list_versions(page_id, space_id=None)
+        return web.json_response([_version_dict(v) for v in versions])
 
 
 class PageRevertView(BaseView):
@@ -356,11 +364,15 @@ class PageRevertView(BaseView):
                 "UNPROCESSABLE",
                 "version must be an integer.",
             )
-        current = await repo.get(page_id)
+        current = await repo.get_household_page(page_id)
         if current is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
         target = next(
-            (v for v in await repo.list_versions(page_id) if v.version == version_num),
+            (
+                v
+                for v in await repo.list_versions(page_id, space_id=None)
+                if v.version == version_num
+            ),
             None,
         )
         if target is None:
@@ -376,7 +388,7 @@ class PageRevertView(BaseView):
             last_editor_user_id=ctx.user_id,
             last_edited_at=now_iso,
         )
-        await repo.save(reverted, space_id=reverted.space_id)
+        await repo.save(reverted, space_id=None)
         await bus.publish(
             PageUpdated(
                 page_id=reverted.id,
@@ -395,7 +407,7 @@ class PageDeleteRequestView(BaseView):
         ctx = self.user
         repo = self.svc(page_repo_key)
         page_id = self.match("id")
-        p = await repo.get(page_id)
+        p = await repo.get_household_page(page_id)
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
         await repo.request_delete(page_id, ctx.user_id)
@@ -422,7 +434,7 @@ class PageDeleteApproveView(BaseView):
         repo = self.svc(page_repo_key)
         bus = self.svc(event_bus_key)
         page_id = self.match("id")
-        p = await repo.get(page_id)
+        p = await repo.get_household_page(page_id)
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
         if p.delete_requested_by is None:
@@ -438,8 +450,8 @@ class PageDeleteApproveView(BaseView):
                 "The user who requested deletion cannot approve it.",
             )
         await repo.approve_delete(page_id, ctx.user_id)
-        await repo.delete(page_id, space_id=p.space_id)
-        await bus.publish(PageDeleted(page_id=page_id, space_id=p.space_id))
+        await repo.delete(page_id, space_id=None)
+        await bus.publish(PageDeleted(page_id=page_id, space_id=None))
         return web.json_response({"ok": True, "deleted": True})
 
 
@@ -450,7 +462,7 @@ class PageDeleteCancelView(BaseView):
         ctx = self.user
         repo = self.svc(page_repo_key)
         page_id = self.match("id")
-        p = await repo.get(page_id)
+        p = await repo.get_household_page(page_id)
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
         # Only the requester or an admin can cancel.
@@ -464,21 +476,38 @@ class PageDeleteCancelView(BaseView):
         return web.json_response({"ok": True, "status": "cancelled"})
 
 
-class SpacePageCollectionView(BaseView):
-    """GET/POST /api/spaces/{id}/pages — list or create space pages."""
+class _SpacePagesBase(BaseView):
+    """Shared membership / feature / writer gate for space pages."""
 
     async def _require_space_member(
         self, space_id: str, user_id: str, *, write: bool = False
     ) -> bool:
+        """``False`` (→ 403) unless ``user_id`` is a member of the PATH
+        space; then the space's ``pages`` feature (403
+        ``FEATURE_DISABLED``). ``write`` additionally refuses an
+        archived space (read-only) and a read-only subscriber (403)."""
         space_repo = self.svc(space_repo_key)
         member = await space_repo.get_member(space_id, user_id)
         if member is None:
             return False
         await self.require_space_feature(space_id, "pages")
         if write:
+            space = await space_repo.get(space_id)
+            if space is None or space.dissolved:
+                raise KeyError(f"space {space_id!r} not found")
+            if space.archived:
+                raise SpacePermissionError(
+                    "space is archived (read-only) — unarchive it to make changes",
+                )
             # Subscribers read pages; they never write them.
-            SpaceService._assert_writable_member(member, action="edit pages")
+            SpaceService.assert_writable_member(
+                member, action="edit pages", space=space
+            )
         return True
+
+
+class SpacePageCollectionView(_SpacePagesBase):
+    """GET/POST /api/spaces/{id}/pages — list or create space pages."""
 
     async def get(self) -> web.Response:
         ctx = self.user
@@ -520,21 +549,8 @@ class SpacePageCollectionView(BaseView):
         return web.json_response(_signed_page_dict(self.request, p), status=201)
 
 
-class SpacePageDetailView(BaseView):
+class SpacePageDetailView(_SpacePagesBase):
     """GET/PATCH/DELETE /api/spaces/{id}/pages/{pid}."""
-
-    async def _require_space_member(
-        self, space_id: str, user_id: str, *, write: bool = False
-    ) -> bool:
-        space_repo = self.svc(space_repo_key)
-        member = await space_repo.get_member(space_id, user_id)
-        if member is None:
-            return False
-        await self.require_space_feature(space_id, "pages")
-        if write:
-            # Subscribers read pages; they never write them.
-            SpaceService._assert_writable_member(member, action="edit pages")
-        return True
 
     async def _load(self, space_id: str, page_id: str):
         return await self.svc(page_repo_key).get_space_page(page_id, space_id=space_id)
@@ -616,12 +632,36 @@ class SpacePageDetailView(BaseView):
         p = await self._load(space_id, self.match("pid"))
         if p is None:
             return error_response(404, "NOT_FOUND", "Page not found.")
-        await repo.delete(p.id, space_id=p.space_id)
-        await bus.publish(PageDeleted(page_id=p.id))
+        await repo.delete(p.id, space_id=space_id)
+        # ``space_id`` is what routes the delete to the space's member
+        # households (``PageFederationOutbound`` drops a scope-less one).
+        await bus.publish(PageDeleted(page_id=p.id, space_id=space_id))
         return web.json_response({"ok": True})
 
 
-class PageConflictView(BaseView):
+class SpacePageVersionView(_SpacePagesBase):
+    """GET /api/spaces/{id}/pages/{pid}/versions — a space page's edit history.
+
+    Read-only (no space lock / revert surface). Member-only: a
+    non-member is 403 before the feature (403 ``FEATURE_DISABLED``) and
+    id (404) checks; a ``pid`` that isn't a page of space ``id`` is 404.
+    Only the history recorded under this space is returned.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        space_id = self.match("id")
+        if not await self._require_space_member(space_id, ctx.user_id):
+            return error_response(403, "FORBIDDEN", "Not a space member.")
+        repo = self.svc(page_repo_key)
+        page_id = self.match("pid")
+        if await repo.get_space_page(page_id, space_id=space_id) is None:
+            return error_response(404, "NOT_FOUND", "Page not found.")
+        versions = await repo.list_versions(page_id, space_id=space_id)
+        return web.json_response([_version_dict(v) for v in versions])
+
+
+class PageConflictView(_SpacePagesBase):
     """POST /api/spaces/{id}/pages/{pid}/resolve-conflict (section 4.4.4.1)."""
 
     async def post(self) -> web.Response:
@@ -629,11 +669,8 @@ class PageConflictView(BaseView):
         conflict_svc = self.svc(page_conflict_service_key)
         space_id = self.match("id")
         page_id = self.match("pid")
-        member = await self.svc(space_repo_key).get_member(space_id, ctx.user_id)
-        if member is None:
+        if not await self._require_space_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        await self.require_space_feature(space_id, "pages")
-        SpaceService._assert_writable_member(member, action="edit pages")
         body = await self.body()
         resolution = str(body.get("resolution") or "")
         merged = body.get("content")

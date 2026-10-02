@@ -167,6 +167,7 @@ async def test_source_update_refreshes_mirror(env):
     new_end = new_start + timedelta(hours=3)
     await env.space_cal_svc.update_event(
         event_id,
+        space_id="space-1",
         summary="Movie night (rescheduled)",
         start=new_start.isoformat(),
         end=new_end.isoformat(),
@@ -183,7 +184,7 @@ async def test_source_delete_drops_mirror(env):
     event_id = await _create_space_event(env.space_cal_svc)
     mirror_id = _mint_mirror_id("u-anna", event_id)
     assert await env.cal_repo.get_event(mirror_id) is not None
-    await env.space_cal_svc.delete_event(event_id)
+    await env.space_cal_svc.delete_event(event_id, space_id="space-1")
     assert await env.cal_repo.get_event(mirror_id) is None
 
 
