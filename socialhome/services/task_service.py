@@ -324,6 +324,10 @@ class TaskService(BusPublisherMixin):
     async def list_lists(self) -> list[TaskList]:
         return await self._repo.list_lists()
 
+    async def open_counts(self) -> dict[str, int]:
+        """Open (not done, not archived) tasks per list id; absent = 0."""
+        return await self._repo.open_counts()
+
     async def delete_list(self, list_id: str) -> None:
         result = await self._repo.get_list(list_id)
         if result is None:
@@ -970,6 +974,10 @@ class SpaceTaskService(BusPublisherMixin):
 
     async def list_lists(self, space_id: str) -> list[TaskList]:
         return await self._repo.list_lists(space_id)
+
+    async def open_counts(self, space_id: str) -> dict[str, int]:
+        """Open (not done, not archived) tasks per list id; absent = 0."""
+        return await self._repo.open_counts(space_id)
 
     # ── Tasks ────────────────────────────────────────────────────────────
 

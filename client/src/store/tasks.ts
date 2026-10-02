@@ -13,6 +13,12 @@
  *   fetched again — so the Organize hub's count chip and the Tasks tab
  *   mounting together fetch each URL once. ``force`` skips both.
  *   ``ensure*`` load only what was never loaded.
+ * - **Open count** (the hub's chip) needs no list's tasks: a list never
+ *   loaded counts the roster's server-side ``open_count``; a loaded one
+ *   counts its own rows, which local edits and WS frames keep live. A
+ *   frame about a list that isn't loaded (or a task id not found here)
+ *   can't adjust a server count, so it refetches the roster, debounced
+ *   (``ROSTER_REFRESH_MS``) — a burst of frames costs one GET.
  * - **Edits** are optimistic. A failure rolls back only the fields of
  *   that one row that still hold our optimistic value, so it never
  *   reverts another row's change or a newer WS update.
@@ -100,15 +106,14 @@ export interface TaskStore {
   visibleLists: ReadonlySignal<TaskListEntry[]>
   /** Every loaded task. */
   allTasks: ReadonlySignal<TaskItem[]>
-  /** Not-done tasks across the visible lists, minus pending deletes. */
+  /** Open (not done, not archived) tasks across the visible lists, minus
+   *  pending deletes: a loaded list's own rows, else the roster count. */
   openCount: ReadonlySignal<number>
 
   loadLists(opts?: LoadOpts): Promise<void>
   ensureLists(): Promise<void>
   loadList(listId: string, opts?: LoadOpts): Promise<void>
   ensureList(listId: string): Promise<void>
-  /** Roster + every list — for counts across all lists. */
-  ensureAll(): Promise<void>
   /** Reload the roster and every loaded list (after a reconnect). */
   revalidate(): Promise<void>
 
@@ -148,6 +153,13 @@ export interface TaskStore {
 const FRESH_MS = 2_000
 /** How long a deleted id stays out of late responses / WS echoes. */
 const RECENTLY_GONE_MS = 60_000
+/** Debounce of the roster refetch a frame about an unloaded list asks for. */
+const ROSTER_REFRESH_MS = 300
+
+/** Open = not done and not archived (the server's ``open_count``). */
+function isOpen(task: TaskItem): boolean {
+  return task.status !== 'done' && !task.archived_at
+}
 
 /** ``t()`` with a count: the ``_one`` key for exactly one.
  *  For ``i18n:check``: t('tasks.cleared') t('tasks.cleared_one') */
@@ -191,10 +203,15 @@ export function createTaskStore(spaceId: string | null): TaskStore {
   const allTasks = computed(() => Object.values(tasksByList.value).flat())
   const openCount = computed(() => {
     const hidden = pendingDeletes.value
+    const loaded = loadedListIds.value
     let n = 0
     for (const l of visibleLists.value) {
+      if (!loaded.has(l.id)) {
+        n += l.open_count ?? 0
+        continue
+      }
       for (const task of tasksByList.value[l.id] ?? []) {
-        if (task.status !== 'done' && !hidden.has(task.id)) n++
+        if (isOpen(task) && !hidden.has(task.id)) n++
       }
     }
     return n
@@ -220,6 +237,19 @@ export function createTaskStore(spaceId: string | null): TaskStore {
   const pinOverridden = new Set<string>()
   /** Per-list tail of the move queue. */
   const moveQueue = new Map<string, Promise<unknown>>()
+  let rosterTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** A frame changed a list we hold no rows for: its ``open_count`` is
+   *  stale. Refetch the roster once the burst settles (only if the
+   *  roster was ever loaded — otherwise its first load is fresh). */
+  function scheduleRosterRefresh() {
+    if (!listsLoaded.value) return
+    if (rosterTimer !== null) clearTimeout(rosterTimer)
+    rosterTimer = setTimeout(() => {
+      rosterTimer = null
+      void loadLists({ force: true }).catch(() => { /* next frame / reconnect retries */ })
+    }, ROSTER_REFRESH_MS)
+  }
 
   function markGone(ids: Iterable<string>) {
     const now = Date.now()
@@ -354,11 +384,6 @@ export function createTaskStore(spaceId: string | null): TaskStore {
   function ensureList(listId: string): Promise<void> {
     if (loadedListIds.value.has(listId)) return Promise.resolve()
     return listInflight.get(listId) ?? loadList(listId)
-  }
-
-  async function ensureAll(): Promise<void> {
-    await ensureLists()
-    await Promise.all(lists.value.map(l => ensureList(l.id)))
   }
 
   async function revalidate(): Promise<void> {
@@ -600,17 +625,35 @@ export function createTaskStore(spaceId: string | null): TaskStore {
 
   // ─── WS hooks ─────────────────────────────────────────────────────
 
+  /** Is the list holding ``id`` loaded? (Unknown id → no.) */
+  function inLoadedList(id: string): boolean {
+    const row = findTask(id)
+    return row !== undefined && loadedListIds.value.has(row.list_id)
+  }
+
+  function onTaskUpsert(task: TaskItem) {
+    if (!task?.id) return
+    // A move out of a loaded list into an unloaded one changes the
+    // latter's server count too.
+    if (!loadedListIds.value.has(task.list_id)) scheduleRosterRefresh()
+    upsert(task)
+  }
+
   function onTaskDeleted(id: string) {
+    if (!inLoadedList(id)) scheduleRosterRefresh()
     markGone([id])
     dropTasks(new Set([id]))
   }
 
   function onTaskCompleted(id: string) {
+    if (!inLoadedList(id)) scheduleRosterRefresh()
     mapTask(id, x => ({ ...x, status: 'done' }))
   }
 
   function reset() {
     epoch++
+    if (rosterTimer !== null) clearTimeout(rosterTimer)
+    rosterTimer = null
     listsInflight = null
     listsFetchedAt = 0
     listInflight.clear()
@@ -630,10 +673,10 @@ export function createTaskStore(spaceId: string | null): TaskStore {
   return {
     spaceId, lists, tasksByList, listsLoaded, loadedListIds, activeListId,
     visibleLists, allTasks, openCount,
-    loadLists, ensureLists, loadList, ensureList, ensureAll, revalidate,
+    loadLists, ensureLists, loadList, ensureList, revalidate,
     findTask, createList, renameList, removeList,
     createTask, moveTask, serial, patchTask, setStatus, toggleDone, removeTask, clearDone, deleteTasks,
-    onTaskUpsert: upsert, onTaskDeleted, onTaskCompleted, onListUpsert, onListDeleted,
+    onTaskUpsert, onTaskDeleted, onTaskCompleted, onListUpsert, onListDeleted,
     reset,
   }
 }

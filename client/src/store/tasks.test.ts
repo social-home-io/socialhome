@@ -61,6 +61,12 @@ function deferred<T>() {
 
 const flush = () => new Promise(r => setTimeout(r, 0))
 
+/** Roster + every list's tasks (test setup — the app loads lazily). */
+async function loadAll(s: TaskStore): Promise<void> {
+  await s.ensureLists()
+  await Promise.all(s.lists.value.map(l => s.ensureList(l.id)))
+}
+
 let store: TaskStore
 
 beforeEach(() => {
@@ -78,7 +84,7 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-function serve(lists: { id: string; name: string }[], byList: Record<string, TaskItem[]>) {
+function serve(lists: { id: string; name: string; open_count?: number }[], byList: Record<string, TaskItem[]>) {
   apiGet.mockImplementation(async (url: string) => {
     if (url.endsWith('/tasks/lists')) return lists
     const m = /\/tasks\/lists\/([^/]+)\/tasks$/.exec(url)
@@ -136,13 +142,13 @@ describe('loading', () => {
     expect(apiGet).toHaveBeenCalledTimes(3)
   })
 
-  it('ensureAll loads the roster and every list exactly once', async () => {
+  it('ensureLists / ensureList load the roster and every list exactly once', async () => {
     serve([{ id: 'l1', name: 'A' }, { id: 'l2', name: 'B' }], {
       l1: [task('t1', 'l1'), task('t2', 'l1', 'done')],
       l2: [task('t3', 'l2', 'in_progress')],
     })
-    await Promise.all([store.ensureAll(), store.ensureAll()])
-    await store.ensureAll()
+    await Promise.all([loadAll(store), loadAll(store)])
+    await loadAll(store)
     expect(apiGet.mock.calls.map(c => c[0]).sort()).toEqual([
       '/api/tasks/lists', '/api/tasks/lists/l1/tasks', '/api/tasks/lists/l2/tasks',
     ])
@@ -158,7 +164,7 @@ describe('loading', () => {
 
   it('a reload drops lists that are gone and their tasks', async () => {
     serve([{ id: 'l1', name: 'A' }, { id: 'l2', name: 'B' }], { l1: [], l2: [task('t3', 'l2')] })
-    await store.ensureAll()
+    await loadAll(store)
     serve([{ id: 'l1', name: 'A' }], {})
     await store.loadLists({ force: true })
     expect(store.lists.value.map(l => l.id)).toEqual(['l1'])
@@ -172,7 +178,7 @@ describe('status changes', () => {
     serve([{ id: 'l1', name: 'A' }], {
       l1: [task('t1', 'l1', 'todo'), task('t2', 'l1', 'in_progress'), task('t3', 'l1', 'done')],
     })
-    await store.ensureAll()
+    await loadAll(store)
   })
 
   const statusOf = (id: string) => store.findTask(id)?.status
@@ -252,7 +258,7 @@ describe('status changes', () => {
 describe('creating', () => {
   it('createTask appends the new task; a WS echo does not duplicate it', async () => {
     serve([{ id: 'l1', name: 'A' }], { l1: [] })
-    await store.ensureAll()
+    await loadAll(store)
     apiPost.mockResolvedValue(task('t9', 'l1'))
     await store.createTask('l1', 'Buy milk')
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/lists/l1/tasks', { title: 'Buy milk' })
@@ -285,7 +291,7 @@ describe('deleting with Undo', () => {
     serve([{ id: 'l1', name: 'A' }], {
       l1: [task('t1', 'l1'), task('t2', 'l1', 'done'), task('t3', 'l1', 'done')],
     })
-    await store.ensureAll()
+    await loadAll(store)
   })
 
   const toast = (msg: string) => toasts.value.find(x => x.message === msg)!
@@ -438,13 +444,40 @@ describe('canEditTask', () => {
 })
 
 describe('counts', () => {
-  it('openCount counts not-done tasks across every list', async () => {
+  it('openCount counts not-done, not-archived tasks across every loaded list', async () => {
     serve([{ id: 'l1', name: 'A' }, { id: 'l2', name: 'B' }], {
       l1: [task('t1', 'l1'), task('t2', 'l1', 'done')],
-      l2: [task('t3', 'l2', 'in_progress'), task('t4', 'l2')],
+      l2: [task('t3', 'l2', 'in_progress'), task('t4', 'l2'),
+        task('t5', 'l2', 'todo', { archived_at: '2026-01-01T00:00:00+00:00' })],
     })
-    await store.ensureAll()
+    await loadAll(store)
     expect(store.openCount.value).toBe(3)
+  })
+
+  it('the roster alone gives the count — no list is fetched', async () => {
+    serve([{ id: 'l1', name: 'A', open_count: 2 }, { id: 'l2', name: 'B', open_count: 5 }], {})
+    await store.ensureLists()
+    expect(apiGet.mock.calls.map(c => c[0])).toEqual(['/api/tasks/lists'])
+    expect(store.openCount.value).toBe(7)
+  })
+
+  it('a loaded list counts its own rows (live); the others keep the roster count', async () => {
+    serve([{ id: 'l1', name: 'A', open_count: 2 }, { id: 'l2', name: 'B', open_count: 5 }], {
+      l1: [task('t1', 'l1'), task('t2', 'l1')],
+    })
+    await store.ensureLists()
+    await store.ensureList('l1')
+    expect(store.openCount.value).toBe(7)
+    apiPatch.mockResolvedValue({ ...task('t1', 'l1'), status: 'done' })
+    await store.toggleDone('t1')
+    expect(store.openCount.value).toBe(6)
+  })
+
+  it('a list hidden behind Undo drops out of the count', async () => {
+    serve([{ id: 'l1', name: 'A', open_count: 2 }, { id: 'l2', name: 'B', open_count: 5 }], {})
+    await store.ensureLists()
+    store.removeList(store.lists.value[1])
+    expect(store.openCount.value).toBe(2)
   })
 })
 
@@ -485,9 +518,63 @@ describe('WebSocket routing', () => {
     expect(householdTaskStore.findTask('h1')).toBeUndefined()
   })
 
+  it('frames on a list never loaded refetch the roster once (debounced)', async () => {
+    vi.useFakeTimers()
+    serve([{ id: 'l1', name: 'A', open_count: 1 }], {})
+    await householdTaskStore.ensureLists()
+    expect(householdTaskStore.openCount.value).toBe(1)
+    apiGet.mockClear()
+    serve([{ id: 'l1', name: 'A', open_count: 0 }], {})
+    fire('task.completed', { space_id: null, task_id: 'gone-1' })
+    fire('task.updated', { space_id: null, task: task('x', 'l1', 'done') })
+    fire('task.deleted', { space_id: null, task_id: 'gone-2' })
+    expect(apiGet).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(apiGet.mock.calls.map(c => c[0])).toEqual(['/api/tasks/lists'])
+    expect(householdTaskStore.openCount.value).toBe(0)
+  })
+
+  it('frames on a loaded list update it in place — no roster refetch', async () => {
+    vi.useFakeTimers()
+    serve([{ id: 'l1', name: 'A', open_count: 1 }], { l1: [task('t1', 'l1')] })
+    await householdTaskStore.ensureLists()
+    await householdTaskStore.ensureList('l1')
+    apiGet.mockClear()
+    fire('task.completed', { space_id: null, task_id: 't1' })
+    expect(householdTaskStore.openCount.value).toBe(0)
+    fire('task.created', { space_id: null, task: task('t2', 'l1') })
+    expect(householdTaskStore.openCount.value).toBe(1)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(apiGet).not.toHaveBeenCalled()
+  })
+
+  it('a space store loading or getting frames leaves the household count alone', async () => {
+    vi.useFakeTimers()
+    serve([{ id: 'l1', name: 'A', open_count: 4 }], {})
+    await householdTaskStore.ensureLists()
+    const sp = spaceTaskStore('s1')
+    await sp.ensureLists()
+    apiGet.mockClear()
+    fire('task.created', { space_id: 's1', task: task('st', 'l1') })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(apiGet.mock.calls.map(c => c[0])).toEqual(['/api/spaces/s1/tasks/lists'])
+    expect(householdTaskStore.openCount.value).toBe(4)
+  })
+
+  it('a reconnect refetches the roster count', async () => {
+    serve([{ id: 'l1', name: 'A', open_count: 1 }], {})
+    await householdTaskStore.ensureLists()
+    serve([{ id: 'l1', name: 'A', open_count: 3 }], {})
+    connectionState.value = 'reconnecting'
+    connectionState.value = 'open'
+    await flush()
+    await flush()
+    expect(householdTaskStore.openCount.value).toBe(3)
+  })
+
   it('a reconnect revalidates what was loaded', async () => {
     serve([{ id: 'l1', name: 'A' }], { l1: [task('t1', 'l1')] })
-    await householdTaskStore.ensureAll()
+    await loadAll(householdTaskStore)
     apiGet.mockClear()
     serve([{ id: 'l1', name: 'A' }], { l1: [task('t1', 'l1'), task('t2', 'l1')] })
     connectionState.value = 'reconnecting'
@@ -504,7 +591,7 @@ describe('WebSocket routing', () => {
 describe('reset', () => {
   it('resetTasks forgets the household and every space store', async () => {
     serve([{ id: 'l1', name: 'A' }], { l1: [task('t1', 'l1')] })
-    await householdTaskStore.ensureAll()
+    await loadAll(householdTaskStore)
     householdTaskStore.activeListId.value = 'l1'
     const sp = spaceTaskStore('s1')
     resetTasks()

@@ -313,14 +313,14 @@ unnecessary.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST | `/api/tasks/lists` | List / create task lists. |
+| GET / POST | `/api/tasks/lists` | List / create task lists. Each `GET` row carries `open_count` — its tasks that are not `done` and not archived (one grouped count, so a caller needs no per-list fetch to show totals). |
 | GET / PATCH / DELETE | `/api/tasks/lists/{id}` | CRUD. |
 | POST | `/api/tasks/lists/{id}/reorder` | Reorder tasks in a list — `{"order": [task ids], "moved_id": id}`; each id gets its index as `position`. `moved_id` (required, must be in `order`, else 422) is the card the user dragged: only it must be editable by the caller (see below), else 403 and nothing moves — neighbours whose positions shift as a side effect need no rights, **as long as they keep their current relative order**. An `order` that also rearranges the other cards needs edit rights on each of them (an admin, or their creator), else 403. Duplicate ids in `order` are 422. |
 | GET / POST | `/api/tasks/lists/{id}/tasks` | List / create tasks. `POST` takes `title` plus optional `description`, `due_date`, `assignees`, `status` (so a board column's quick-add files it straight into that column; default `todo`), `priority` and `labels`; the new task is appended at the bottom of its list. |
 | GET / PATCH / DELETE | `/api/tasks/{id}` | CRUD for a single task. |
 | GET / POST / PATCH / DELETE | `/api/tasks/{id}/comments[/{cid}]` | Task comments. |
 | GET / POST / DELETE | `/api/tasks/{id}/attachments[/{aid}]` | Task attachments. |
-| GET / POST | `/api/spaces/{id}/tasks/lists` | List / create a space's task lists. |
+| GET / POST | `/api/spaces/{id}/tasks/lists` | List / create a space's task lists. Each `GET` row carries `open_count` (not done, not archived), as on the household roster. |
 | PATCH / DELETE | `/api/spaces/{id}/tasks/lists/{lid}` | Rename / delete a space task list. |
 | GET / POST | `/api/spaces/{id}/tasks/lists/{lid}/tasks` | List / create tasks in a space task list (same create fields as the household route). |
 | POST | `/api/spaces/{id}/tasks/lists/{lid}/reorder` | Reorder a space list's tasks — same body as the household reorder (`moved_id` required; duplicates are 422; a `moved_id` of another list or space is 404; any writable member may rearrange any card). Writable members only; every moved task federates as `SPACE_TASK_UPDATED`. |

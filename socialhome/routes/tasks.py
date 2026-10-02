@@ -31,6 +31,20 @@ def _task_dict(task) -> dict:
     }
 
 
+def _roster(lists, open_counts: dict[str, int]) -> list[dict]:
+    """The list roster; ``open_count`` (not done, not archived) lets the
+    Organize hub show its count without fetching every list's tasks."""
+    return [
+        {
+            "id": lst.id,
+            "name": lst.name,
+            "created_by": lst.created_by,
+            "open_count": open_counts.get(lst.id, 0),
+        }
+        for lst in lists
+    ]
+
+
 #: Fields a task ``PATCH`` may carry. An absent key is passed as
 #: :data:`UNSET` ("leave alone") so an explicit ``null`` can clear
 #: ``description`` / ``due_date`` / ``priority`` / ``labels``.
@@ -73,12 +87,7 @@ class TaskListCollectionView(BaseView):
         self.user  # auth check
         svc = self.svc(task_service_key)
         lists = await svc.list_lists()
-        return web.json_response(
-            [
-                {"id": lst.id, "name": lst.name, "created_by": lst.created_by}
-                for lst in lists
-            ]
-        )
+        return web.json_response(_roster(lists, await svc.open_counts()))
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -430,12 +439,7 @@ class SpaceTaskListCollectionView(_SpaceTasksBase):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
         lists = await svc.list_lists(space_id)
-        return web.json_response(
-            [
-                {"id": lst.id, "name": lst.name, "created_by": lst.created_by}
-                for lst in lists
-            ]
-        )
+        return web.json_response(_roster(lists, await svc.open_counts(space_id)))
 
     async def post(self) -> web.Response:
         ctx = self.user

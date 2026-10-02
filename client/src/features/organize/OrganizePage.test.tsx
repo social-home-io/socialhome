@@ -3,16 +3,20 @@
  * and the count chips: open tasks across EVERY list (not just the one
  * the Tasks tab has open), household stickies only (never a space
  * board's that happen to sit in the shared sticky signal), shopping
- * minus items hidden behind an Undo toast. Each source is fetched once.
+ * minus items hidden behind an Undo toast. Each source is fetched once:
+ * the task chip reads the roster's ``open_count`` — one GET, never a
+ * fetch per list.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { TaskItem } from '@/types'
 
 const apiGet = vi.fn()
+const apiPatch = vi.fn()
 vi.mock('@/api', () => ({
   api: {
     get: (...a: unknown[]) => apiGet(...a),
-    post: vi.fn(), patch: vi.fn(), put: vi.fn(), delete: vi.fn(),
+    patch: (...a: unknown[]) => apiPatch(...a),
+    post: vi.fn(), put: vi.fn(), delete: vi.fn(),
   },
 }))
 
@@ -40,7 +44,10 @@ const TASKS: Record<string, TaskItem[]> = {
 
 function serve() {
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/tasks/lists') return [{ id: 'l1', name: 'House' }, { id: 'l2', name: 'Garden' }]
+    if (url === '/api/tasks/lists') return [
+      { id: 'l1', name: 'House', open_count: 1 },
+      { id: 'l2', name: 'Garden', open_count: 2 },
+    ]
     const m = /^\/api\/tasks\/lists\/([^/]+)\/tasks$/.exec(url)
     if (m) return TASKS[m[1]] ?? []
     if (url === '/api/stickies') return [{ id: 's1', space_id: null }, { id: 's2', space_id: null }]
@@ -77,6 +84,8 @@ beforeEach(() => {
   vi.doUnmock('@/features/shopping/ShoppingPage')
   vi.doUnmock('@/features/stickies/StickyBoardPage')
   apiGet.mockReset()
+  apiPatch.mockReset()
+  localStorage.clear()
   serve()
 })
 
@@ -111,14 +120,12 @@ describe('OrganizePage', () => {
     expect(t.getByRole('tablist').getAttribute('aria-label')).toBe('Organize sections')
   })
 
-  it('fetches each source once', async () => {
+  it('fetches each source once — the task count is one roster GET, no per-list GETs', async () => {
     stubTabs()
     const t = await mount('/organize')
     await t.waitFor(() => expect(t.tabs()[0]).toBe('Tasks · 3'))
     const urls = apiGet.mock.calls.map(c => c[0] as string).sort()
-    expect(urls.filter(u => u.startsWith('/api/tasks'))).toEqual([
-      '/api/tasks/lists', '/api/tasks/lists/l1/tasks', '/api/tasks/lists/l2/tasks',
-    ])
+    expect(urls.filter(u => u.startsWith('/api/tasks'))).toEqual(['/api/tasks/lists'])
     expect(urls.filter(u => u === '/api/stickies')).toHaveLength(1)
   })
 
@@ -163,13 +170,31 @@ describe('OrganizePage', () => {
     expect(t.getByRole('tablist').getAttribute('aria-label')).toBe(de['organize.label'])
   })
 
-  it('with the real Tasks tab mounted, the tasks are still fetched once each', async () => {
+  it('with the real Tasks tab mounted, only the roster and the open list are fetched', async () => {
     vi.doMock('@/features/shopping/ShoppingPage', () => ({ default: () => <p>shopping-tab</p> }))
     vi.doMock('@/features/stickies/StickyBoardPage', () => ({ default: () => <p>stickies-tab</p> }))
     const t = await mount('/organize')
     await t.waitFor(() => expect(t.getByRole('heading', { level: 2, name: 'House' })).toBeTruthy())
     await t.waitFor(() => expect(t.tabs()[0]).toBe('Tasks · 3'))
     const urls = apiGet.mock.calls.map(c => c[0] as string).filter(u => u.startsWith('/api/tasks')).sort()
-    expect(urls).toEqual(['/api/tasks/lists', '/api/tasks/lists/l1/tasks', '/api/tasks/lists/l2/tasks'])
+    expect(urls).toEqual(['/api/tasks/lists', '/api/tasks/lists/l1/tasks'])
+  })
+
+  it('ticking a task done drops the count at once; ticking it back restores it', async () => {
+    vi.doMock('@/features/shopping/ShoppingPage', () => ({ default: () => <p>shopping-tab</p> }))
+    vi.doMock('@/features/stickies/StickyBoardPage', () => ({ default: () => <p>stickies-tab</p> }))
+    localStorage.setItem('sh-tasks-view:l1', 'list')
+    apiPatch.mockImplementation(async (_url: string, body: { status: TaskItem['status'] }) =>
+      ({ ...task('a', 'l1'), status: body.status }))
+    const t = await mount('/organize')
+    await t.waitFor(() => expect(t.getByRole('checkbox', { name: 'Done: a' })).toBeTruthy())
+    await t.waitFor(() => expect(t.tabs()[0]).toBe('Tasks · 3'))
+    t.fireEvent.click(t.getByRole('checkbox', { name: 'Done: a' }))
+    await t.waitFor(() => expect(t.tabs()[0]).toBe('Tasks · 2'))
+    expect(apiPatch).toHaveBeenCalledWith('/api/tasks/a', { status: 'done' })
+    t.fireEvent.click(t.getByRole('checkbox', { name: 'Done: a' }))
+    await t.waitFor(() => expect(t.tabs()[0]).toBe('Tasks · 3'))
+    const urls = apiGet.mock.calls.map(c => c[0] as string).filter(u => u.startsWith('/api/tasks'))
+    expect(urls.filter(u => u.includes('/l2/'))).toEqual([])
   })
 })
