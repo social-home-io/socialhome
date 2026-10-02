@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from socialhome.domain.federation import (
+    ARCHIVED_ALLOWED_REMOVAL_TYPES,
     DELIVERY_ERROR_QUEUED,
     BroadcastResult,
     DecryptedPayload,
@@ -12,6 +13,7 @@ from socialhome.domain.federation import (
     FederationEventType,
     PAIRING_EVENTS,
     SPACE_READER_EVENT_TYPES,
+    SPACE_SESSION_ALLOWED_EVENT_TYPES,
     SPACE_WRITE_EVENT_TYPES,
     STRUCTURAL_EVENTS,
     is_relay_only,
@@ -243,3 +245,41 @@ def test_not_relay_only_when_delivery_is_as_recent_as_relay():
 def test_not_relay_only_without_any_relay_acceptance():
     assert is_relay_only(None, None) is False
     assert is_relay_only(None, "2026-09-20 10:00:00") is False
+
+
+# ─── Federated moderation (v_43) ────────────────────────────────────────
+
+
+def test_moderation_event_types_round_trip():
+    assert (
+        FederationEventType("space_moderation_submitted")
+        is FederationEventType.SPACE_MODERATION_SUBMITTED
+    )
+    assert (
+        FederationEventType("space_moderation_decided")
+        is FederationEventType.SPACE_MODERATION_DECIDED
+    )
+
+
+def test_a_submission_is_a_space_write_and_a_decision_is_not():
+    """A submission is content (frozen by an archive, refused from a
+    Follower household); a decision is a verdict whose sender the handler
+    checks for content authority, and it must still land in an archived
+    space (a reject works there)."""
+    sub = FederationEventType.SPACE_MODERATION_SUBMITTED
+    dec = FederationEventType.SPACE_MODERATION_DECIDED
+    assert sub in SPACE_WRITE_EVENT_TYPES
+    assert sub not in ARCHIVED_ALLOWED_REMOVAL_TYPES
+    assert dec in SPACE_READER_EVENT_TYPES
+
+
+def test_moderation_events_may_come_from_a_link_joined_household():
+    """A link-joined member submits, and a link-joined moderator decides."""
+    assert (
+        FederationEventType.SPACE_MODERATION_SUBMITTED
+        in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    )
+    assert (
+        FederationEventType.SPACE_MODERATION_DECIDED
+        in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    )

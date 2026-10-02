@@ -177,9 +177,6 @@ class _RecordingSubmitter:
             expires_at=datetime.now(timezone.utc),
         )
 
-    async def require_moderation_supported(self, space, features) -> None:
-        return None
-
 
 class _QueueConsumer(ContentAccessMixin):
     __slots__ = ("_spaces", "_moderation")

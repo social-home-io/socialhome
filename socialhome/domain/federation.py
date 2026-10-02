@@ -254,6 +254,17 @@ class FederationEventType(str, enum.Enum):
     # authored by a moderator seated on the sending household.
     SPACE_TIMETABLE_UPSERTED = "space_timetable_upserted"
     SPACE_TIMETABLE_DELETED = "space_timetable_deleted"
+    # ── Federated moderation (v_43, §4.3 ``MODERATED``). A member's pending
+    # item travels from the submitter's household to the households that may
+    # review it — the host and every household holding a live admin /
+    # moderator seat — one targeted send each over the pairwise session
+    # (never ``broadcast_to_space_members``: a plain member household must
+    # never see pending content). The verdict follows to the host, the
+    # approver households and the submitter's household. Approved content
+    # itself rides the ordinary ``SPACE_*`` event with a ``moderation``
+    # approval block. See ``docs/protocol/moderation.md``.
+    SPACE_MODERATION_SUBMITTED = "space_moderation_submitted"
+    SPACE_MODERATION_DECIDED = "space_moderation_decided"
     # ── Gallery (§23.119) — per-event push complementing the chunked
     # initial sync. Items carry the thumbnail and the full ``url``; both
     # files follow over the media outbox (``SPACE_MEDIA_BLOB``). Albums
@@ -616,6 +627,12 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_TIMETABLE_DELETED,
         #: Moderation reports raised inside the space.
         FederationEventType.SPACE_REPORT,
+        #: Federated moderation (v_43): a link-joined member's submission to
+        #: the reviewers, and a link-joined moderator's verdict. Both are
+        #: re-judged by their handlers (the submitter seated on the sender;
+        #: the decider a content-authority seat on the sender).
+        FederationEventType.SPACE_MODERATION_SUBMITTED,
+        FederationEventType.SPACE_MODERATION_DECIDED,
         # ── Media ──
         #: The bytes ``SPACE_POST_CREATED`` / the gallery referenced by
         #: URL. Without them a member renders broken images.
@@ -767,6 +784,10 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         # ── Shared timetables (admin-authored) ──
         FederationEventType.SPACE_TIMETABLE_UPSERTED,
         FederationEventType.SPACE_TIMETABLE_DELETED,
+        # ── Federated moderation (v_43) ──
+        #: A member's pending item: content, so a Follower household may not
+        #: submit one and an archived space takes none.
+        FederationEventType.SPACE_MODERATION_SUBMITTED,
     }
 )
 
@@ -892,6 +913,13 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: that somebody who can only read still has a way to flag what
         #: they read.
         FederationEventType.SPACE_REPORT,
+        #: A verdict on a pending item (v_43). Not content itself — the
+        #: approved content rides its own ``SPACE_*`` write — and it must
+        #: still land in an archived space (a reject works there). Its
+        #: handler admits it only from a household with content authority,
+        #: naming a decider seated there (``moderates_as``), so a Follower
+        #: household gains nothing by sending one.
+        FederationEventType.SPACE_MODERATION_DECIDED,
     }
 )
 

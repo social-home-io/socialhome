@@ -83,6 +83,36 @@ async def test_list_admin_instances_never_lists_a_moderator_household(repo):
     assert await repo.list_admin_instances("sp1") == []
 
 
+async def test_list_instances_with_roles_picks_live_seats_of_those_roles(repo):
+    """The federated-moderation reviewer set (v_43): every household with a
+    live ``admin`` or ``moderator`` seat, each once — never a member-only
+    household, never one whose only such seat is tombstoned."""
+    for inst, uid, role in (
+        ("i-adm", "u1", SpaceRole.ADMIN.value),
+        ("i-adm", "u2", SpaceRole.MODERATOR.value),
+        ("i-mod", "u3", SpaceRole.MODERATOR.value),
+        ("i-mem", "u4", SpaceRole.MEMBER.value),
+        ("i-sub", "u5", SpaceRole.SUBSCRIBER.value),
+        ("i-gone", "u6", SpaceRole.MODERATOR.value),
+    ):
+        await repo.add(
+            space_id="sp1",
+            instance_id=inst,
+            user_id=uid,
+            user_pk=None,
+            display_name=None,
+            role=role,
+        )
+    await repo.remove("sp1", "i-gone", "u6")
+    got = await repo.list_instances_with_roles(
+        "sp1", frozenset({SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value})
+    )
+    assert sorted(got) == ["i-adm", "i-mod"]
+    # ``list_admin_instances`` is the admin-only form of the same query.
+    assert await repo.list_admin_instances("sp1") == ["i-adm"]
+    assert await repo.list_instances_with_roles("sp1", frozenset()) == []
+
+
 async def test_list_admin_instances_empty_when_no_admins(repo):
     await repo.add(
         space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None

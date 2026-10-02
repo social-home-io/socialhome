@@ -5,16 +5,16 @@ Marked ``@pytest.mark.security``.
 
 The access matrix of ``test_space_content_access.py`` (ADMIN_ONLY on every
 receiver) gets its MODERATED rows here, for a space hosted by this
-household with no remote member households — the only place the queue
-holds features other than posts until federated moderation lands:
+household (federated moderation, v_43, has its own suite in
+``test_space_moderation_federated.py``):
 
 * a member's create → 202 queued, and NO row in the content table;
 * a member's edit of their own item → proceeds;
 * a member's edit / delete of somebody else's item → 202 queued, the row
   unchanged;
 * a moderator (content authority) → proceeds;
-* a space with a remote member household → refused with
-  ``MODERATION_NOT_FEDERATED``, never silently applied.
+* a space with a remote member household → queued the same way (v_43
+  federated moderation), never silently applied.
 
 Every case runs against the REAL application over a real SQLite database
 and compares a snapshot of every content table.
@@ -108,20 +108,24 @@ async def test_a_moderator_proceeds(client, space, feature):
     assert await r.json() == []
 
 
-@pytest.mark.parametrize("feature", ["pages", "tasks", "stickies", "calendar"])
-async def test_a_space_with_remote_households_refuses_rather_than_writes(
+@pytest.mark.parametrize("feature", FEATURES)
+async def test_a_space_with_remote_households_still_queues_never_writes(
     client, space, feature
 ):
+    """v_43: a host with remote member households holds a member's item
+    like any other (202 queued) — the queue federates now, and nothing
+    reaches the content table before review."""
     ids = await _seed_content(client, {"mem": space["owner"]})
     await _set_access(client, feature, "moderated")
     await client._db.enqueue(
         "INSERT INTO space_instances(space_id, instance_id) VALUES(?, 'inst-remote')",
         (SID,),
     )
-    for kind in ("create", "edit", "delete"):
+    # Somebody else's post is content authority's to change, never queued.
+    kinds = ("create",) if feature == "posts" else ("create", "edit", "delete")
+    for kind in kinds:
         for method, path, body in _cases(ids, feature, kind):
             before = await _snapshot(client)
             r = await _send(client, method, path, body, space["mem"])
-            assert r.status == 403, (kind, path, await r.text())
-            assert (await r.json())["error"]["code"] == "MODERATION_NOT_FEDERATED"
+            assert r.status == 202, (kind, path, await r.text())
             assert await _snapshot(client) == before, path

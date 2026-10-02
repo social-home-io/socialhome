@@ -16,7 +16,9 @@ The payload is the shared wire form
 (:func:`socialhome.domain.task.task_to_wire_dict`). ``priority`` and
 ``labels`` (v_40) ride ungated inside the sealed payload: a v_39 receiver
 ignores the unknown keys. So does ``actor_user_id`` (v_42) — who made the
-write, which receivers check against the space's ``tasks`` access level.
+write, which receivers check against the space's ``tasks`` access level —
+and, on a write released from the moderation queue, the ``moderation``
+approval block (v_43, :mod:`.moderation_release`).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..domain.task import TaskList, task_list_to_wire_dict, task_to_wire_dict
 from ..infrastructure.event_bus import EventBus
+from .moderation_release import with_release
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -165,7 +168,8 @@ def _with_actor(
     | TaskListUpdated
     | TaskListDeleted,
 ) -> dict:
-    """``payload`` plus the write's ``actor_user_id`` (v_42), when known."""
+    """``payload`` plus the write's ``actor_user_id`` (v_42), when known,
+    and the approval block of a moderation release (v_43)."""
     if event.actor_user_id:
         payload["actor_user_id"] = event.actor_user_id
-    return payload
+    return with_release(payload)

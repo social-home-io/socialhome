@@ -37,6 +37,7 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..infrastructure.event_bus import EventBus
+from .moderation_release import with_release
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -117,6 +118,9 @@ class BazaarOutbound:
             "step_price": listing.step_price,
             "created_at": listing.created_at,
         }
+        # A listing riding a reviewed post is published by its approval,
+        # which it names (v_43).
+        with_release(payload)
         try:
             await self._federation.broadcast_to_space_members(
                 listing.space_id,

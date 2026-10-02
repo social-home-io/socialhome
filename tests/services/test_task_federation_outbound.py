@@ -18,6 +18,7 @@ from socialhome.domain.events import (
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.task import Task, TaskPriority, TaskStatus
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.moderation_release import release_scope
 from socialhome.services.task_federation_outbound import (
     TaskFederationOutbound,
 )
@@ -230,3 +231,22 @@ async def test_every_write_carries_its_actor(env):
         "u-e",
         "u-f",
     ]
+
+
+async def test_a_moderation_release_carries_the_approval_block(env):
+    """v_43: every write a release emits names the item + approver inside
+    the sealed payload; a plain write never does."""
+    bus, fed = env
+    await bus.publish(TaskCreated(task=_task("t0"), space_id="sp-A"))
+    with release_scope("item-1", "u-mod"):
+        await bus.publish(TaskCreated(task=_task("t1"), space_id="sp-A"))
+        await bus.publish(TaskUpdated(task=_task("t1"), space_id="sp-A"))
+        await bus.publish(TaskDeleted(task_id="t1", list_id="L", space_id="sp-A"))
+        await bus.publish(
+            TaskListCreated(list_id="L2", name="n", space_id="sp-A", created_by="u")
+        )
+        await bus.publish(TaskListUpdated(list_id="L2", name="m", space_id="sp-A"))
+        await bus.publish(TaskListDeleted(list_id="L2", space_id="sp-A"))
+    assert "moderation" not in fed.broadcasts[0][2]
+    block = {"item_id": "item-1", "approved_by": "u-mod"}
+    assert [p.get("moderation") for _s, _t, p in fed.broadcasts[1:]] == [block] * 6

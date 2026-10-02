@@ -37,6 +37,8 @@ from ..domain.space import (
     SpacePermissionError,
 )
 
+from .moderation_release import release_role
+
 if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_moderation_service import ModerationSubmitter
@@ -81,9 +83,12 @@ class ContentAccessMixin:
         if level is SpaceFeatureAccess.OPEN:
             return AccessDecision.PROCEED
         member = await repo.get_member(space.id, actor_user_id)
+        # A release the host applies for a moderator of ANOTHER household:
+        # the queue verified that approver's seat and passes the role.
+        role = member.role if member is not None else release_role(actor_user_id)
         decision = space.features.access_decision(
             feature,
-            role=member.role if member is not None else None,
+            role=role,
             action=action,
             owns_target=owns_target,
         )

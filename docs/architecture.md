@@ -535,7 +535,7 @@ heartbeat — so those tables grew unbounded on a long-running process.
 ### Space moderation queue (§4.3 `moderated`)
 
 `services/space_moderation_service.py` — `SpaceModerationService` owns the
-host-local review queue for every access-levelled feature: submit, list,
+review queue for every access-levelled feature: submit, list,
 the submitter's own items, approve, reject, expire. It is a **registry**:
 each content service registers a `ModerationHandler` per
 `(feature, action)` in `app._build_space_moderation` (`validate` the
@@ -550,8 +550,29 @@ through the content service's normal persist path with `approved_by` (the
 gate then judges the approver), after a conditional claim of the row so
 it is applied once. Posts carry their attachments (poll, schedule poll,
 Bazaar listing) through the queue (`space_post_moderation.py`) so they are
-created with the post. Until federated moderation, features other than
-posts queue only on a host with no remote member households.
+created with the post.
+
+**Federated moderation (v_43).** The queue is held by every household that
+reviews: the submitter's own household, the host, and every household with
+a live admin / moderator seat. `services/space_moderation_federation.py`
+(`SpaceModerationFederation`, bound to the queue in
+`app._build_space_moderation`) sends a new item to those households only —
+one targeted sealed `SPACE_MODERATION_SUBMITTED` per household through
+`send_with_mesh_fallback` (`SPACE_ROUTED`-sealed on the mesh), never
+`broadcast_to_space_members` — and decisions as `SPACE_MODERATION_DECIDED`;
+its inbound handlers run the receiver checks and store items through the
+queue (`store_received`, `apply_decision` — approve beats reject). Any
+reviewer household decides; an approval made off the host is sent to the
+host (`send_release_request`), and only the host applies an item, from its
+own stored copy (`release_remote`): the apply runs inside
+`services/moderation_release.py`'s `release_scope` (a `contextvars` value
+the bus carries to every subscriber, since it awaits them in the
+publishing task), and each content outbound bridge adds the approval block
+via `with_release`. Receivers judge that block with
+`SpaceAuthorship.may_author_approved` — from the host only; a household
+holding the item checks that the release equals it in every applied field
+(`federation/moderation_approval.py`), against its own copy of the row for
+an edit.
 
 ### Database writer (write coalescing)
 

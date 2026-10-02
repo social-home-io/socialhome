@@ -6,7 +6,20 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 42
+    assert fc.OURS == 43
+
+
+def test_federated_moderation_capability_threshold():
+    """v_43 — federated moderation: SPACE_MODERATION_SUBMITTED / _DECIDED
+    and the approval block. Space-scoped: a behind member household can't
+    hold, review or accept reviewed items, so the banner names the gap."""
+    assert fc.FederationCapability.MIN_FOR_FEDERATED_MODERATION == 43
+    assert fc.FederationCapability.MIN_FOR_FEDERATED_MODERATION <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_FEDERATED_MODERATION in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.space_features_missing_below(42) == ["Reviewed across households"]
+    assert fc.features_missing_below(43) == []
 
 
 def test_content_access_enforcement_capability_threshold():
@@ -18,8 +31,11 @@ def test_content_access_enforcement_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.space_features_missing_below(41) == ["Admin-only space features"]
-    assert fc.features_missing_below(42) == []
+    assert fc.space_features_missing_below(41) == [
+        "Admin-only space features",
+        "Reviewed across households",
+    ]
+    assert "Admin-only space features" not in fc.features_missing_below(42)
 
 
 def test_space_moderator_role_capability_threshold():
@@ -34,6 +50,7 @@ def test_space_moderator_role_capability_threshold():
     assert fc.space_features_missing_below(40) == [
         "Space moderators",
         "Admin-only space features",
+        "Reviewed across households",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -51,6 +68,7 @@ def test_task_priority_labels_capability_threshold():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
+        "Reviewed across households",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -108,6 +126,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
+        "Reviewed across households",
     ]
 
 
@@ -127,6 +146,7 @@ def test_moment_origin_signature_capability_threshold():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
+        "Reviewed across households",
     ]
 
 

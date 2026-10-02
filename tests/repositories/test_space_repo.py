@@ -1389,6 +1389,101 @@ async def test_count_pending_space_and_submitter(env):
     assert await env.repo.count_pending("sp-1", submitted_by="uid-carol") == 0
 
 
+async def test_insert_moderation_item_if_absent_keeps_the_first_copy(env):
+    """A federated submission keeps its id everywhere (v_43): a replay or a
+    second delivery of the same id never overwrites the held row."""
+    await env.repo.save(_space())
+    assert await env.repo.insert_moderation_item_if_absent(_mod_item("m1"))
+    second = replace(_mod_item("m1"), payload={"target_id": "t-9"})
+    assert not await env.repo.insert_moderation_item_if_absent(second)
+    got = await env.repo.get_moderation_item("m1")
+    assert got.payload["target_id"] == "t-1"
+
+
+async def test_claim_moderation_item_from_rejected_lets_an_approve_win(env):
+    """Approve beats reject across households: an approval may claim a
+    REJECTED row when the caller allows it; a reject never claims an
+    APPROVED one."""
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    await env.repo.insert_moderation_item(_mod_item("m1"))
+    assert await env.repo.claim_moderation_item(
+        "m1", status=ModerationStatus.REJECTED, reviewed_by="uid-c", reason="no"
+    )
+    # The default (pending only) refuses.
+    assert not await env.repo.claim_moderation_item(
+        "m1", status=ModerationStatus.APPROVED, reviewed_by="uid-b"
+    )
+    assert await env.repo.claim_moderation_item(
+        "m1",
+        status=ModerationStatus.APPROVED,
+        reviewed_by="uid-b",
+        from_statuses=(ModerationStatus.PENDING, ModerationStatus.REJECTED),
+    )
+    got = await env.repo.get_moderation_item("m1")
+    assert got.status is ModerationStatus.APPROVED
+    assert got.reviewed_by == "uid-b"
+    assert got.rejection_reason is None
+    assert not await env.repo.claim_moderation_item(
+        "m1", status=ModerationStatus.REJECTED, reviewed_by="uid-c"
+    )
+
+
+async def test_count_pending_from_instance_counts_that_households_submitters(env):
+    """The per-sender-household cap (v_43) counts pending items whose
+    submitter holds a seat on that household."""
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    for inst, uid in (("h-a", "u-a1"), ("h-a", "u-a2"), ("h-b", "u-b1")):
+        await env.db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES('sp-1', ?, ?, 'member')",
+            (inst, uid),
+        )
+    await env.repo.insert_moderation_item(_mod_item("m1", submitted_by="u-a1"))
+    await env.repo.insert_moderation_item(_mod_item("m2", submitted_by="u-a2"))
+    await env.repo.insert_moderation_item(
+        _mod_item("m3", submitted_by="u-a2", status=ModerationStatus.REJECTED)
+    )
+    await env.repo.insert_moderation_item(_mod_item("m4", submitted_by="u-b1"))
+    assert await env.repo.count_pending_from_instance("sp-1", "h-a") == 2
+    assert await env.repo.count_pending_from_instance("sp-1", "h-b") == 1
+    assert await env.repo.count_pending_from_instance("sp-1", "h-x") == 0
+
+
+async def test_a_tombstone_is_filled_counted_and_purged(env):
+    """Early-decision tombstones (v_43): a late submission fills the
+    content and keeps the decided status; they are counted per deciding
+    household and purged once stale."""
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    tomb = replace(
+        _mod_item("m1"),
+        feature="",
+        action="",
+        submitted_by="",
+        payload={},
+        current_snapshot='{"tombstone_from": "h-c"}',
+        status=ModerationStatus.REJECTED,
+        reviewed_at=datetime.now(timezone.utc) - timedelta(days=20),
+    )
+    assert await env.repo.insert_moderation_item_if_absent(tomb)
+    assert await env.repo.count_moderation_tombstones("h-c") == 1
+    assert await env.repo.count_moderation_tombstones("h-x") == 0
+    assert await env.repo.fill_moderation_tombstone(_mod_item("m1"))
+    got = await env.repo.get_moderation_item("m1")
+    assert (got.feature, got.status) == ("tasks", ModerationStatus.REJECTED)
+    assert not await env.repo.fill_moderation_tombstone(_mod_item("m1"))
+    assert await env.repo.count_moderation_tombstones("h-c") == 0
+    stale = replace(tomb, id="m2")
+    await env.repo.insert_moderation_item_if_absent(stale)
+    assert await env.repo.delete_stale_tombstones(datetime.now(timezone.utc)) == 1
+    assert await env.repo.get_moderation_item("m1") is not None
+
+
 async def test_list_moderation_for_submitter_is_own_only(env):
     await env.repo.save(_space())
     await env.repo.insert_moderation_item(_mod_item("m1"))

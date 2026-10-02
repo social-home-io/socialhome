@@ -71,6 +71,22 @@ describe('ApiError — friendly-detail unwrap', () => {
     }
   })
 
+  it('turns a 409 HOST_TOO_OLD into the translated "host needs an update" toast', async () => {
+    // v_43: a member household can't submit for review while its space's
+    // host is too old to hold the item — every write surface toasts it.
+    stubFetch(409, { error: { code: 'HOST_TOO_OLD', detail: 'raw detail' } })
+    try {
+      await api.post('/api/spaces/sp-1/stickies', { content: 'x' })
+      expect.fail('should have thrown')
+    } catch (e) {
+      const err = e as ApiError
+      expect(err.code).toBe('HOST_TOO_OLD')
+      expect(err.message).toBe(
+        "This space's host household needs an update before your changes can be reviewed.",
+      )
+    }
+  })
+
   it('falls back to "API <status>: <path>" when the body is not the canonical shape', async () => {
     stubFetch(502, '<html>Bad Gateway</html>')
     try {

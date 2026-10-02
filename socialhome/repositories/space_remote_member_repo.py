@@ -97,6 +97,10 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
 
     async def list_admin_instances(self, space_id: str) -> list[str]: ...
 
+    async def list_instances_with_roles(
+        self, space_id: str, roles: frozenset[str]
+    ) -> list[str]: ...
+
     async def list_for_user(
         self,
         instance_id: str,
@@ -331,10 +335,28 @@ class SqliteSpaceRemoteMemberRepo:
         distributed to every current remote *admin* household. A
         household with several admins appears once.
         """
+        return await self.list_instances_with_roles(
+            space_id, frozenset({SpaceRole.ADMIN.value})
+        )
+
+    async def list_instances_with_roles(
+        self, space_id: str, roles: frozenset[str]
+    ) -> list[str]:
+        """DISTINCT instance_ids holding a LIVE seat with one of ``roles``.
+
+        The federated-moderation reviewer set (v_43, ``admin`` +
+        ``moderator``) and the admin-only seed share above. Tombstoned
+        seats never count; an empty ``roles`` matches nothing.
+        """
+        wanted = sorted(roles)
+        if not wanted:
+            return []
+        marks = ",".join("?" for _ in wanted)
         rows = await self._db.fetchall(
             "SELECT DISTINCT instance_id FROM space_remote_members "
-            "WHERE space_id=? AND role='admin' AND tombstoned=0",
-            (space_id,),
+            f"WHERE space_id=? AND role IN ({marks}) AND tombstoned=0 "
+            "ORDER BY instance_id",
+            (space_id, *wanted),
         )
         return [r["instance_id"] for r in rows_to_dicts(rows)]
 

@@ -656,7 +656,26 @@ from __future__ import annotations
 #:   own people write locally (and its writes reach every member by sync),
 #:   raising a level while a member household is below v_42 answers 409
 #:   ``PEERS_TOO_OLD`` until the admin applies it anyway (``force``).
-OURS: int = 42
+#: * **v_43** (2026-10-02) — federated moderation (§4.3 ``MODERATED`` across
+#:   households). New event types
+#:   :data:`FederationEventType.SPACE_MODERATION_SUBMITTED` (a member's
+#:   pending item, sent per target over the pairwise session to the host and
+#:   the households holding a live admin / moderator seat — never to a plain
+#:   member household, never broadcast) and
+#:   :data:`FederationEventType.SPACE_MODERATION_DECIDED` (approved /
+#:   rejected, to the host, the approver households and the submitter's
+#:   household). Any approver household applies an approved item through
+#:   its normal persist path; the ordinary ``SPACE_*`` content event carries
+#:   ``moderation: {item_id, approved_by}`` inside the sealed payload, and
+#:   receivers accept it under ``MODERATED`` from a household with content
+#:   authority (``SpaceAuthorship.may_author_approved``). **Gated, no
+#:   fallback**: an approver household below v_43 is not sent submissions; a
+#:   host below v_43 makes a stub's submit fail 409 ``HOST_TOO_OLD``; setting
+#:   a feature to ``MODERATED`` while a member household is below v_43
+#:   answers 409 ``PEERS_TOO_OLD`` unless forced. A v_42 receiver refuses a
+#:   non-host approval (it never saw the block) — content approved off the
+#:   host reaches only v_43 households.
+OURS: int = 43
 
 
 class FederationCapability:
@@ -1030,6 +1049,15 @@ class FederationCapability:
     #: is below it answers 409 ``PEERS_TOO_OLD`` unless forced.
     MIN_FOR_CONTENT_ACCESS_ENFORCEMENT = 42
 
+    #: Minimum proto_version that holds and reviews moderation items for
+    #: other households (v_43): ``SPACE_MODERATION_SUBMITTED`` /
+    #: ``SPACE_MODERATION_DECIDED`` and the content events' ``moderation``
+    #: approval block. Submissions skip an approver household below it; a
+    #: host below it refuses a stub's submit (409 ``HOST_TOO_OLD``); a level
+    #: newly set to ``MODERATED`` while a member household is below it
+    #: answers 409 ``PEERS_TOO_OLD`` unless forced.
+    MIN_FOR_FEDERATED_MODERATION = 43
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1154,6 +1182,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT,
         "Admin-only space features",
     ),
+    (
+        FederationCapability.MIN_FOR_FEDERATED_MODERATION,
+        "Reviewed across households",
+    ),
 ]
 
 
@@ -1221,6 +1253,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS,
         FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
         FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT,
+        FederationCapability.MIN_FOR_FEDERATED_MODERATION,
     }
 )
 

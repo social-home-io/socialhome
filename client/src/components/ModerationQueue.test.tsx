@@ -246,6 +246,34 @@ describe('ModerationQueue — every feature (§4.3 Reviewed)', () => {
     expect(post).toHaveBeenNthCalledWith(2, '/api/spaces/sp-1/moderation/item-1/approve', { force: true })
   })
 
+  it('an approve on a member household reads "publishing" until the host has it', async () => {
+    const { ApiError } = await vi.importActual<typeof import('@/api')>('@/api')
+    const get = vi.fn(async () => [item({ preview: { title: 'x' } })])
+    const post = vi.fn().mockResolvedValue({ status: 'publishing', complete: true })
+    const toast = vi.fn()
+    vi.doMock('./Toast', () => ({ showToast: toast }))
+    vi.doMock('@/api', () => ({ ApiError, api: { get, post } }))
+    const { ModerationQueue } = await import('./ModerationQueue')
+    const view = render(<ModerationQueue spaceId="sp-1" />)
+    fireEvent.click(await view.findByText('Approve'))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      "Approved — the space's host publishes it", 'success',
+    ))
+    expect(view.getByRole('status').textContent).toContain('Approved — publishing…')
+    expect(view.queryByText('Approve')).toBeNull()
+    expect(view.queryByText('Reject')).toBeNull()
+  })
+
+  it('an item already sent for publishing shows the state, not the buttons', async () => {
+    const { ApiError } = await vi.importActual<typeof import('@/api')>('@/api')
+    const get = vi.fn(async () => [item({ preview: { title: 'x' }, publishing: true })])
+    vi.doMock('@/api', () => ({ ApiError, api: { get, post: vi.fn() } }))
+    const { ModerationQueue } = await import('./ModerationQueue')
+    const view = render(<ModerationQueue spaceId="sp-1" />)
+    expect(await view.findByText('Approved — publishing…')).toBeTruthy()
+    expect(view.queryByText('Approve')).toBeNull()
+  })
+
   it('an incomplete approve (published, attachment failed) retries once to finish it', async () => {
     const { ApiError } = await vi.importActual<typeof import('@/api')>('@/api')
     const get = vi.fn(async () => [item({ preview: { title: 'x' }, snapshot: { title: 'y' } })])

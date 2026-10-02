@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -673,3 +675,20 @@ async def test_a_raised_proto_version_is_announced_on_the_bus(bus, repo, handler
     assert [(e.instance_id, e.old_version, e.new_version) for e in seen] == [
         ("peer-a", 1, 32)
     ]
+
+
+async def test_an_advertised_downgrade_never_lowers_the_version(repo, handlers, caplog):
+    """``proto_version`` is a high-water mark: every security gate keyed on
+    it (receiver fallbacks for older senders) must not be re-opened by a
+    household that simply advertises an older version again."""
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    for version in (43, 42):
+        with caplog.at_level(logging.WARNING):
+            await handlers._on_capabilities_updated(
+                _event(
+                    FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+                    {"proto_version": version},
+                )
+            )
+    assert repo.instances["peer-a"].proto_version == 43
+    assert any("high-water" in r.getMessage() for r in caplog.records)

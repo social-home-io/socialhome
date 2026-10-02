@@ -19,6 +19,7 @@ from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.bazaar_outbound import BazaarOutbound
+from socialhome.services.moderation_release import release_scope
 
 
 def _make_listing(**overrides) -> BazaarListing:
@@ -503,3 +504,35 @@ async def test_a_settlement_is_announced_only_by_the_sellers_household(
         ),
     )
     federation_service.broadcast_to_space_members.assert_awaited_once()
+
+
+async def test_a_listing_released_with_its_post_carries_the_approval_block(
+    federation_service,
+    media_sync,
+    federation_repo,
+):
+    """v_43: a listing that rode a reviewed post is published by the
+    approval — it names the release so receivers accept it for the seller."""
+    bus = EventBus()
+    bazaar_repo = MagicMock()
+    bazaar_repo.get_listing = AsyncMock(return_value=_make_listing())
+    BazaarOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        bazaar_repo=bazaar_repo,
+        media_sync=media_sync,
+        federation_repo=federation_repo,
+    )
+    with release_scope("item-1", "u-mod"):
+        await bus.publish(
+            BazaarListingCreated(
+                listing_post_id="bzr-1",
+                space_id="sp-1",
+                seller_user_id="u-seller",
+                mode="fixed",
+                title="Vintage chair",
+                occurred_at=datetime.fromisoformat("2026-05-23T10:00:00+00:00"),
+            ),
+        )
+    payload = federation_service.broadcast_to_space_members.await_args.args[2]
+    assert payload["moderation"] == {"item_id": "item-1", "approved_by": "u-mod"}

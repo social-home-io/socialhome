@@ -396,7 +396,20 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (42 since ADMIN_ONLY feature access).
+   ``OURS`` (43 since federated moderation).
+
+9c. ``federated-moderation`` (v_43 "Reviewed" across households) — **b**
+   hosts a fresh "Reviewed club" with **a**'s, **c**'s and **d**'s admins as
+   remote members, promotes **c**'s to ``moderator`` and sets
+   ``tasks_access`` to ``moderated``. Alice's task on **a** answers 202 and
+   reaches only **b** and **c** (``SPACE_MODERATION_SUBMITTED``, targeted);
+   both Moderation tabs list it. Carol approves **on c** (no ``NOT_HOST``):
+   **c** answers ``publishing`` and hands the approval to the host **b**,
+   which applies the task from its own copy and federates
+   ``SPACE_TASK_CREATED`` as Alice's with the approval block. **a**, **b**, **c**
+   and **d** all hold the task created by Alice, **a**'s own queue row reads
+   ``approved``, and **d** — a plain member household — holds no queue row
+   for the item and its log never names it.
 
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is
@@ -428,8 +441,8 @@ calendar → verify → relay-pair → visibility → invite-redeem →
 invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
-app-session → remote-invite-decline → group-dm → replay → unpair →
-unpair-offline`` in that order.
+app-session → remote-invite-decline → group-dm → federated-moderation →
+replay → unpair → unpair-offline`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-space-no-subscribers`` / ``gfs-down``)

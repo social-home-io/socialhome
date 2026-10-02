@@ -41,6 +41,7 @@ from ..domain.federation import FederationEventType
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
+from .moderation_release import current_release, with_release
 from .space_public_author import build_signed_author_inner
 
 if TYPE_CHECKING:
@@ -157,16 +158,30 @@ class SpacePostOutbound:
         # ends up with two feed cards for one calendar event. Skip the
         # broadcast — the calendar event is the source of truth on the
         # wire and the bridge is the source of truth in each peer's DB.
-        if post.linked_event_id is not None:
+        #
+        # The one linked post that IS federated: an announce card released
+        # from the moderation queue (v_43). No household's bridge mints that
+        # card (its creator could not post straight away), so the approval
+        # is the only source of it — it carries the event link. A bridge
+        # card minted while an approved EVENT is applied stays local like
+        # any other (it has no ``approved_by``).
+        release = current_release()
+        if post.linked_event_id is not None and (
+            release is None or event.approved_by is None
+        ):
             return
         payload: dict = {
             "id": post.id,
             "space_id": event.space_id,
             "author": post.author,
             # v_42: who made the write — receivers check it against the
-            # space's ``posts`` access level. A create's actor is its author,
-            # or the moderator / admin who released it from the queue.
-            "actor_user_id": event.approved_by or post.author,
+            # space's ``posts`` access level. A create's actor is its author
+            # — a release from the moderation queue too (v_43: the approver
+            # is named in the approval block instead); a v_42 host's release
+            # named the approver here.
+            "actor_user_id": (
+                post.author if release is not None else event.approved_by or post.author
+            ),
             "type": post.type.value,
             "content": post.content,
             "media_url": post.media_url,
@@ -188,6 +203,8 @@ class SpacePostOutbound:
         # receivers ignore the key and show the post without a card.
         if post.link_preview is not None:
             payload["link_preview"] = link_preview_to_dict(post.link_preview)
+        if post.linked_event_id is not None:
+            payload["linked_event_id"] = post.linked_event_id
         if post.file_meta is not None:
             payload["file_meta"] = {
                 "url": post.file_meta.url,
@@ -230,6 +247,7 @@ class SpacePostOutbound:
                     # so its signed bytes stay v_25-compatible.
                     author_identity_anchor=author.identity_anchor,
                 )
+        with_release(payload)
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,

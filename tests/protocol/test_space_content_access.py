@@ -375,21 +375,33 @@ async def test_moderated_refuses_an_actorless_member_household(access_env, featu
     assert after != before
 
 
-async def test_moderated_posts_keep_todays_behaviour_on_receivers(access_env):
-    """Posts queue on the host only: a member household's post still lands,
-    but its named actor is still bound to the sender."""
+async def test_moderated_posts_refuse_a_v42_member_households_direct_post(access_env):
+    """No household's plain member posts past review — not even one whose
+    household advertises v_42 (C1: an advertised version proves nothing;
+    the level could only be set with every household on v_43 or forced)."""
     app, db = access_env
     await _seed_owned_rows(db)
     await _set_level(db, "posts", "moderated")
     before, after = await _send(app, db, "posts", "create", AUTHOR, "u-a")
-    assert after != before
-    event_type, payload = _write("posts", "create", "u-a")
-    payload["id"] = "post-forged-actor"
-    before = await _snapshot(db)
-    await _deliver(
-        app, event_type, {**payload, "actor_user_id": "u-adm"}, sender=AUTHOR
-    )
-    assert await _snapshot(db) == before
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    ("sender", "actor", "lands"),
+    [(AUTHOR, "u-a", False), (MOD, "u-mod", True), (ADMIN, "u-adm", True)],
+)
+async def test_moderated_posts_from_a_v43_household_need_review(
+    access_env, sender, actor, lands
+):
+    """v_43: a member household submits its member's post for review, so a
+    plain member's post sent straight on is refused like any other
+    feature's; content authority still posts directly."""
+    app, db = access_env
+    await _seed_owned_rows(db)
+    await _set_level(db, "posts", "moderated")
+    await _set_version(db, sender, 43)
+    before, after = await _send(app, db, "posts", "create", sender, actor)
+    assert (after != before) is lands
 
 
 async def test_moderated_an_assignee_moves_their_task_but_not_its_title(access_env):

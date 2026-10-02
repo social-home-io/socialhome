@@ -34,8 +34,7 @@ from ..domain.space import (
     ModerationAlreadyDecidedError,
     ModerationExpiredError,
     ModerationInProgressError,
-    ModerationNotFederatedError,
-    ModerationNotHostError,
+    HostTooOldError,
     ModerationPayloadTooLargeError,
     ModerationQueueFullError,
     ModerationStaleError,
@@ -248,24 +247,18 @@ class BaseView(web.View):
             return error_response(
                 409, "IN_PROGRESS", "This submission is being approved right now."
             )
-        except ModerationNotHostError:
+        except HostTooOldError:
             return error_response(
-                409, "NOT_HOST", "Only the space's host household reviews submissions."
+                409,
+                "HOST_TOO_OLD",
+                "The space's host household must be updated before this can "
+                "be submitted for review.",
             )
         except ModerationUnavailableError:
             return error_response(
                 409,
                 "FEATURE_UNAVAILABLE",
                 "This feature is off or the space is archived.",
-            )
-        except ModerationNotFederatedError as exc:
-            # A SpacePermissionError subclass — must precede it.
-            return error_response(
-                exc.http_status,
-                "MODERATION_NOT_FEDERATED",
-                "Review is not available here for spaces shared with other "
-                "households yet.",
-                extra={"feature": exc.feature},
             )
         except (
             PageNotFoundError,

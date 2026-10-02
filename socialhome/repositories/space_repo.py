@@ -138,6 +138,9 @@ class AbstractSpaceRepo(Protocol):
 
     # ── Moderation queue ──────────────────────────────────────────────
     async def insert_moderation_item(self, item: SpaceModerationItem) -> None: ...
+    async def insert_moderation_item_if_absent(
+        self, item: SpaceModerationItem
+    ) -> bool: ...
     async def list_moderation_queue(
         self,
         space_id: str,
@@ -156,12 +159,25 @@ class AbstractSpaceRepo(Protocol):
         status: ModerationStatus,
         reviewed_by: str | None,
         reason: str | None = None,
+        from_statuses: tuple[ModerationStatus, ...] = (ModerationStatus.PENDING,),
     ) -> bool: ...
     async def release_moderation_item(
         self, item_id: str, *, claimed_status: ModerationStatus
     ) -> bool: ...
     async def count_pending(
         self, space_id: str, *, submitted_by: str | None = None
+    ) -> int: ...
+    async def count_pending_from_instance(
+        self, space_id: str, instance_id: str
+    ) -> int: ...
+    async def mark_release_requested(
+        self, item_id: str, *, reviewed_by: str
+    ) -> bool: ...
+    async def fill_moderation_tombstone(self, item: SpaceModerationItem) -> bool: ...
+    async def count_moderation_tombstones(self, from_instance: str) -> int: ...
+    async def delete_stale_tombstones(self, before: datetime) -> int: ...
+    async def drop_pending_from_others(
+        self, space_id: str, *, keep_submitters: frozenset[str]
     ) -> int: ...
     async def list_moderation_for_submitter(
         self,
@@ -1147,30 +1163,21 @@ class SqliteSpaceRepo:
         item: SpaceModerationItem,
     ) -> None:
         await self._db.enqueue(
-            """
-            INSERT INTO space_moderation_queue(
-                id, space_id, feature, action, submitted_by,
-                payload_json, current_snapshot,
-                submitted_at, expires_at, status,
-                reviewed_by, reviewed_at, rejection_reason
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                item.id,
-                item.space_id,
-                item.feature,
-                item.action,
-                item.submitted_by,
-                dump_json(item.payload),
-                item.current_snapshot,
-                _iso_ts(item.submitted_at),
-                _iso_ts(item.expires_at),
-                item.status.value,
-                item.reviewed_by,
-                _iso_ts(item.reviewed_at),
-                item.rejection_reason,
-            ),
+            "INSERT INTO" + _MODERATION_INSERT, _moderation_insert_params(item)
         )
+
+    async def insert_moderation_item_if_absent(
+        self,
+        item: SpaceModerationItem,
+    ) -> bool:
+        """Store a federated submission (v_43) unless its id is held already
+        — True when this call stored it. A replayed or re-delivered item
+        never overwrites the first copy (its status, its content)."""
+        changed = await self._db.enqueue_rowcount(
+            "INSERT OR IGNORE INTO" + _MODERATION_INSERT,
+            _moderation_insert_params(item),
+        )
+        return changed > 0
 
     async def list_moderation_queue(
         self,
@@ -1182,7 +1189,7 @@ class SqliteSpaceRepo:
         if status is None:
             rows = await self._db.fetchall(
                 "SELECT * FROM space_moderation_queue WHERE space_id=? "
-                "ORDER BY submitted_at DESC LIMIT ?",
+                "AND feature != '' ORDER BY submitted_at DESC LIMIT ?",
                 (space_id, int(limit)),
             )
         else:
@@ -1211,16 +1218,24 @@ class SqliteSpaceRepo:
         status: ModerationStatus,
         reviewed_by: str | None,
         reason: str | None = None,
+        from_statuses: tuple[ModerationStatus, ...] = (ModerationStatus.PENDING,),
     ) -> bool:
-        """Move a PENDING item to ``status`` — True only for the one caller
-        whose conditional UPDATE won. Two moderators approving at once
-        (or an approve racing the expiry sweep) leave exactly one winner,
-        so the content is persisted once."""
+        """Move an item in one of ``from_statuses`` (default: PENDING) to
+        ``status`` — True only for the one caller whose conditional UPDATE
+        won. Two moderators approving at once (or an approve racing the
+        expiry sweep) leave exactly one winner, so the content is persisted
+        once. A federated approval (v_43) also claims a REJECTED row —
+        approve beats reject, so every household converges on the content
+        that was published."""
+        allowed = sorted({s.value for s in from_statuses})
+        if not allowed:
+            return False
+        marks = ",".join("?" for _ in allowed)
         changed = await self._db.enqueue_rowcount(
-            """
+            f"""
             UPDATE space_moderation_queue
                SET status=?, reviewed_by=?, reviewed_at=?, rejection_reason=?
-             WHERE id=? AND status='pending'
+             WHERE id=? AND status IN ({marks})
             """,
             (
                 status.value,
@@ -1228,6 +1243,7 @@ class SqliteSpaceRepo:
                 datetime.now(timezone.utc).isoformat(),
                 reason,
                 item_id,
+                *allowed,
             ),
         )
         return changed > 0
@@ -1266,6 +1282,83 @@ class SqliteSpaceRepo:
                 (space_id, submitted_by),
             )
         return int(row["n"]) if row is not None else 0
+
+    async def count_pending_from_instance(self, space_id: str, instance_id: str) -> int:
+        """Pending items whose submitter holds a seat (any) on
+        ``instance_id`` in this space — the per-sender-household cap on
+        federated submissions (v_43)."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM space_moderation_queue q "
+            "WHERE q.space_id=? AND q.status='pending' AND q.submitted_by IN ("
+            "SELECT m.user_id FROM space_remote_members m "
+            "WHERE m.space_id=? AND m.instance_id=?)",
+            (space_id, space_id, instance_id),
+        )
+        return int(row["n"]) if row is not None else 0
+
+    async def mark_release_requested(self, item_id: str, *, reviewed_by: str) -> bool:
+        """Note on a PENDING item that this reviewer household approved it
+        and asked the host to publish it (v_43) — it stays pending until the
+        host's decision arrives."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE space_moderation_queue SET reviewed_by=?, reviewed_at=? "
+            "WHERE id=? AND status='pending'",
+            (reviewed_by, datetime.now(timezone.utc).isoformat(), item_id),
+        )
+        return changed > 0
+
+    async def fill_moderation_tombstone(self, item: SpaceModerationItem) -> bool:
+        """Give a decision tombstone (an early decision, v_43) the content of
+        the submission that arrived late. Its decided status stays."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE space_moderation_queue SET feature=?, action=?, "
+            "submitted_by=?, payload_json=?, current_snapshot=?, "
+            "submitted_at=?, expires_at=? WHERE id=? AND space_id=? AND feature=''",
+            (
+                item.feature,
+                item.action,
+                item.submitted_by,
+                dump_json(item.payload),
+                item.current_snapshot,
+                _iso_ts(item.submitted_at),
+                _iso_ts(item.expires_at),
+                item.id,
+                item.space_id,
+            ),
+        )
+        return changed > 0
+
+    async def count_moderation_tombstones(self, from_instance: str) -> int:
+        """Contentless decision tombstones a household's decisions left."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM space_moderation_queue WHERE feature='' "
+            "AND json_extract(current_snapshot, '$.tombstone_from')=?",
+            (from_instance,),
+        )
+        return int(row["n"]) if row is not None else 0
+
+    async def delete_stale_tombstones(self, before: datetime) -> int:
+        """Drop contentless tombstones decided before ``before``."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM space_moderation_queue WHERE feature='' "
+            "AND COALESCE(reviewed_at, submitted_at) < ?",
+            (before.isoformat(),),
+        )
+
+    async def drop_pending_from_others(
+        self, space_id: str, *, keep_submitters: frozenset[str]
+    ) -> int:
+        """Expire every pending item of ``space_id`` NOT submitted by one of
+        ``keep_submitters`` and NULL its content — a household that no
+        longer reviews the space holds nobody else's pending words."""
+        keep = sorted(keep_submitters)
+        marks = ",".join("?" for _ in keep) or "''"
+        return await self._db.enqueue_rowcount(
+            "UPDATE space_moderation_queue SET status='expired', "
+            "payload_json=NULL, current_snapshot=NULL, reviewed_at=? "
+            f"WHERE space_id=? AND status='pending' AND submitted_by NOT IN ({marks})",
+            (datetime.now(timezone.utc).isoformat(), space_id, *keep),
+        )
 
     async def list_moderation_for_submitter(
         self,
@@ -2083,6 +2176,34 @@ def _parse_ts(value) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+#: The column list + placeholders of a moderation-queue insert (after
+#: ``INSERT INTO`` / ``INSERT OR IGNORE INTO``).
+_MODERATION_INSERT = """ space_moderation_queue(
+    id, space_id, feature, action, submitted_by,
+    payload_json, current_snapshot,
+    submitted_at, expires_at, status,
+    reviewed_by, reviewed_at, rejection_reason
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+
+def _moderation_insert_params(item: SpaceModerationItem) -> tuple:
+    return (
+        item.id,
+        item.space_id,
+        item.feature,
+        item.action,
+        item.submitted_by,
+        dump_json(item.payload),
+        item.current_snapshot,
+        _iso_ts(item.submitted_at),
+        _iso_ts(item.expires_at),
+        item.status.value,
+        item.reviewed_by,
+        _iso_ts(item.reviewed_at),
+        item.rejection_reason,
+    )
 
 
 def _moderation_items(rows) -> list[SpaceModerationItem]:

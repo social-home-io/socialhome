@@ -840,6 +840,48 @@ class SpaceModerationItem:
     rejection_reason: str | None = None
 
 
+#: The key of the approval block inside a sealed ``SPACE_*`` content payload
+#: (v_43): ``{"item_id": …, "approved_by": …}``. Present only on content an
+#: approver household released from the moderation queue.
+MODERATION_BLOCK_KEY = "moderation"
+
+#: Bounds on the block's fields (an item id is a uuid4 hex; a user id is a
+#: derived hex id — both far shorter).
+_MAX_ITEM_ID = 64
+_MAX_USER_ID = 128
+
+
+@dataclass(slots=True, frozen=True)
+class ModerationApproval:
+    """Who released a queue item: the approval block content carries (v_43).
+
+    Not a signature — the receiver re-derives every claim from what it
+    already holds (the sender's seats, its own queue row): see
+    ``SpaceAuthorship.may_author_approved``.
+    """
+
+    item_id: str
+    approved_by: str
+
+    def to_wire(self) -> dict[str, str]:
+        return {"item_id": self.item_id, "approved_by": self.approved_by}
+
+    @classmethod
+    def from_wire(cls, raw: object) -> "ModerationApproval | None":
+        """The block of a payload, ``None`` when absent or malformed."""
+        if not isinstance(raw, dict):
+            return None
+        item_id = raw.get("item_id")
+        approved_by = raw.get("approved_by")
+        if not isinstance(item_id, str) or not isinstance(approved_by, str):
+            return None
+        if not item_id or not approved_by:
+            return None
+        if len(item_id) > _MAX_ITEM_ID or len(approved_by) > _MAX_USER_ID:
+            return None
+        return cls(item_id=item_id, approved_by=approved_by)
+
+
 # ─── Signed config events (§4.3) ──────────────────────────────────────────
 
 
@@ -980,20 +1022,17 @@ class ContentQueuedForReview(Exception):
         self.item = item
 
 
-class ModerationNotFederatedError(SpacePermissionError):
-    """``MODERATED`` for a feature other than posts needs the queue on the
-    space's host with no remote member households (until federated
-    moderation lands). The config API answers 422, a write that would queue
-    on a household that cannot hold the queue 403 — code
-    ``MODERATION_NOT_FEDERATED`` either way, never a silent PROCEED."""
+class HostTooOldError(Exception):
+    """A member household's submission for review needs the space's host to
+    hold moderation items for other households (v_43); a host below it
+    cannot. 409 ``HOST_TOO_OLD`` — nothing is stored or sent."""
 
-    def __init__(self, feature: str, *, http_status: int = 422) -> None:
+    def __init__(self, host_instance_id: str) -> None:
         super().__init__(
-            f"review for {feature} is not available in spaces shared with "
-            "other households yet"
+            "the space's host household must be updated before members of "
+            "other households can submit for review"
         )
-        self.feature = feature
-        self.http_status = http_status
+        self.host_instance_id = host_instance_id
 
 
 class ModerationQueueFullError(Exception):
@@ -1029,11 +1068,6 @@ class ModerationExpiredError(ModerationTargetGoneError):
 class ModerationInProgressError(Exception):
     """Another approve (or resume) of the same item is still running here:
     409 ``IN_PROGRESS`` instead of a second, racing apply."""
-
-
-class ModerationNotHostError(Exception):
-    """The moderation queue is the host household's: an approve anywhere
-    else is refused before any work (409 ``NOT_HOST``)."""
 
 
 class ModerationUnavailableError(Exception):

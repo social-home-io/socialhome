@@ -12,6 +12,7 @@ import pytest
 from socialhome.domain.events import PageCreated, PageDeleted, PageUpdated
 from socialhome.domain.federation import FederationEventType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.moderation_release import release_scope
 from socialhome.services.page_federation_outbound import (
     PageFederationOutbound,
 )
@@ -150,3 +151,17 @@ async def test_every_write_carries_its_actor(env):
     ]
     # A create also names its creator, so a receiver attributes the row.
     assert fed.broadcasts[0][2]["created_by"] == "u-a"
+
+
+async def test_a_moderation_release_carries_the_approval_block(env):
+    bus, fed = env
+    with release_scope("item-1", "u-mod"):
+        await bus.publish(
+            PageCreated(page_id="p1", space_id="sp", title="T", content="b")
+        )
+        await bus.publish(
+            PageUpdated(page_id="p1", space_id="sp", title="T", content="c")
+        )
+        await bus.publish(PageDeleted(page_id="p1", space_id="sp"))
+    block = {"item_id": "item-1", "approved_by": "u-mod"}
+    assert [p.get("moderation") for _s, _t, p in fed.broadcasts] == [block] * 3

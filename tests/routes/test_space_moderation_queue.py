@@ -576,19 +576,33 @@ async def test_calendar_announce_queues_its_card(client, space):
 # ── Where the queue may live (local-only until federated moderation) ──────
 
 
-async def test_config_refuses_review_with_remote_households(client, space):
-    r = await client.get(f"/api/spaces/{SID}", headers=space["owner"])
-    assert (await r.json())["has_remote_households"] is False
-    r = await client.patch(
-        f"/api/spaces/{SID}",
-        json={"features": {"pages_access": "moderated"}},
-        headers=space["owner"],
-    )
-    assert r.status == 200, await r.text()
+async def _remote_household(client, instance_id: str, version: int) -> None:
+    """A paired member household that advertised ``version``."""
     await client._db.enqueue(
-        "INSERT INTO space_instances(space_id, instance_id) VALUES(?, 'inst-remote')",
-        (SID,),
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source, proto_version, capabilities_seen_at)"
+        " VALUES(?, ?, ?, '00', '00', ?, ?, 'confirmed', 'manual', ?,"
+        " '2026-06-01T00:00:00+00:00')",
+        (
+            instance_id,
+            instance_id,
+            "ab" * 32,
+            f"https://{instance_id}/inbox/x",
+            f"{instance_id}_local",
+            version,
+        ),
     )
+    await client._db.enqueue(
+        "INSERT INTO space_instances(space_id, instance_id) VALUES(?, ?)",
+        (SID, instance_id),
+    )
+
+
+async def test_reviewed_with_remote_households_needs_them_on_v43(client, space):
+    """v_43: "Reviewed" works with members on other households — a household
+    below v_43 is named (409 PEERS_TOO_OLD) until the admin applies anyway."""
+    await _remote_household(client, "inst-old", 42)
     r = await client.get(f"/api/spaces/{SID}", headers=space["owner"])
     assert (await r.json())["has_remote_households"] is True
     r = await client.patch(
@@ -596,24 +610,46 @@ async def test_config_refuses_review_with_remote_households(client, space):
         json={"features": {"tasks_access": "moderated"}},
         headers=space["owner"],
     )
-    assert r.status == 422, await r.text()
+    assert r.status == 409, await r.text()
     err = (await r.json())["error"]
-    assert err["code"] == "MODERATION_NOT_FEDERATED" and err["feature"] == "tasks"
-    # Posts keep their older behaviour.
+    assert err["code"] == "PEERS_TOO_OLD"
+    assert [h["instance_id"] for h in err["households"]] == ["inst-old"]
     r = await client.patch(
         f"/api/spaces/{SID}",
-        json={"features": {"posts_access": "moderated"}},
+        json={"features": {"tasks_access": "moderated"}, "force": True},
         headers=space["owner"],
     )
     assert r.status == 200, await r.text()
-    # A write that would queue now (pages was set earlier) is refused, not
-    # silently applied.
+    await client._db.enqueue(
+        "UPDATE remote_instances SET proto_version=43 WHERE id='inst-old'"
+    )
+    r = await client.patch(
+        f"/api/spaces/{SID}",
+        json={"features": {"pages_access": "moderated"}},
+        headers=space["owner"],
+    )
+    assert r.status == 200, await r.text()
+    # A member's write now queues on the host (no remote reviewer seats).
     r = await client.post(
         f"/api/spaces/{SID}/pages", json={"title": "x"}, headers=space["mem"]
     )
-    assert r.status == 403
-    assert (await r.json())["error"]["code"] == "MODERATION_NOT_FEDERATED"
+    assert r.status == 202, await r.text()
     assert await client._db.fetchall("SELECT * FROM space_pages") == []
+
+
+async def test_a_stub_submit_with_a_host_below_v43_is_409_host_too_old(client, space):
+    await _set_access(client, "stickies", "moderated")
+    await _remote_household(client, "inst-host-old", 42)
+    await client._db.enqueue(
+        "UPDATE spaces SET owner_instance_id='inst-host-old' WHERE id=?", (SID,)
+    )
+    r = await client.post(
+        f"/api/spaces/{SID}/stickies", json={"content": "x"}, headers=space["mem"]
+    )
+    assert r.status == 409, await r.text()
+    assert (await r.json())["error"]["code"] == "HOST_TOO_OLD"
+    assert await client._db.fetchall("SELECT * FROM space_moderation_queue") == []
+    assert await client._db.fetchall("SELECT * FROM stickies") == []
 
 
 async def test_moderation_service_is_wired(client):
@@ -733,7 +769,10 @@ async def test_approve_after_expiry_is_410_expired(client, space):
     assert await client._db.fetchall("SELECT * FROM stickies") == []
 
 
-async def test_approve_on_a_stub_is_409_not_host(client, space):
+async def test_a_moderator_on_a_stub_approves_and_the_host_publishes(client, space):
+    """v_43: the Moderation tab works off the host (no more 409 NOT_HOST) —
+    the approval is handed to the host, which publishes the item; nothing
+    is applied here, and the item reads "publishing" meanwhile."""
     await _set_access(client, "stickies", "moderated")
     r = await client.post(
         f"/api/spaces/{SID}/stickies", json={"content": "x"}, headers=space["mem"]
@@ -745,8 +784,12 @@ async def test_approve_on_a_stub_is_409_not_host(client, space):
     r = await client.post(
         f"/api/spaces/{SID}/moderation/{item_id}/approve", json={}, headers=space["mod"]
     )
-    assert r.status == 409
-    assert (await r.json())["error"]["code"] == "NOT_HOST"
+    assert r.status == 200, await r.text()
+    assert (await r.json())["status"] == "publishing"
+    assert await client._db.fetchall("SELECT content FROM stickies", ()) == []
+    r = await client.get(f"/api/spaces/{SID}/moderation", headers=space["mod"])
+    (item,) = await r.json()
+    assert item["status"] == "pending" and item["publishing"] is True
 
 
 # ── Round 2: racing resumes / approves (review N1) and checks (N2) ─────────

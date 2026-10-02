@@ -5,11 +5,13 @@ from __future__ import annotations
 import pytest
 
 from socialhome.domain.events import (
+    SchedulePollCreated,
     SchedulePollFinalized,
     SchedulePollResponded,
 )
 from socialhome.domain.federation import FederationEventType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.moderation_release import release_scope
 from socialhome.services.schedule_federation_outbound import (
     ScheduleFederationOutbound,
 )
@@ -138,3 +140,21 @@ async def test_household_schedule_created_not_federated(env):
         ),
     )
     assert fed.broadcasts == []
+
+
+async def test_a_released_schedule_carries_the_approval_block(env):
+    bus, fed = env
+    with release_scope("item-1", "u-mod"):
+        await bus.publish(
+            SchedulePollCreated(
+                post_id="p1",
+                title="Picnic?",
+                deadline=None,
+                slots=(),
+                space_id="sp-A",
+            ),
+        )
+    assert fed.broadcasts[0][2]["moderation"] == {
+        "item_id": "item-1",
+        "approved_by": "u-mod",
+    }

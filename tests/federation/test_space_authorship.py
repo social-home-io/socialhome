@@ -9,11 +9,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.space import (
+    ContentAction,
+    ModerationStatus,
+    SpaceFeatureAccess,
+    SpaceFeatures,
+    SpaceModerationItem,
+)
 from socialhome.domain.user import SYSTEM_AUTHOR
 from socialhome.federation.space_authorship import SpaceAuthorship
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
@@ -866,3 +874,256 @@ async def test_an_actor_whose_seat_has_not_arrived_is_held():
         row_owner="",
     )
     assert pending.held == ["u-new"]
+
+
+# ── may_author_approved: content released from the moderation queue (v_43) ──
+
+MOD_HOUSE = "inst-mod"
+_APPROVAL = {"item_id": "item-1", "approved_by": "u-mod"}
+
+
+class _ModSpaces(_Spaces):
+    """``_Spaces`` plus local seats, the queue and a features block."""
+
+    def __init__(self, *, level="moderated", members=None, items=None, banned=()):
+        super().__init__(
+            {
+                SPACE: SimpleNamespace(
+                    owner_instance_id=HOST,
+                    features=SpaceFeatures(tasks_access=SpaceFeatureAccess(level)),
+                )
+            },
+            banned=banned,
+        )
+        self.members = dict(members or {})
+        self.items = dict(items or {})
+
+    async def get_member(self, space_id, user_id):
+        role = self.members.get(user_id)
+        return SimpleNamespace(role=role) if role else None
+
+    async def get_moderation_item(self, item_id):
+        return self.items.get(item_id)
+
+
+def _queued(**over):
+    base = dict(
+        id="item-1",
+        space_id=SPACE,
+        feature="tasks",
+        action="create",
+        submitted_by="u-author",
+        payload={
+            "entity": "list",
+            "target_id": "list-1",
+            "name": "Groceries",
+        },
+        current_snapshot=None,
+        submitted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 1, 8, tzinfo=timezone.utc),
+        status=ModerationStatus.PENDING,
+    )
+    base.update(over)
+    return SpaceModerationItem(**base)
+
+
+def _released(sender, *, author="u-author", name="Groceries", approval=_APPROVAL):
+    payload = {"id": "list-1", "name": name, "created_by": author}
+    if approval is not None:
+        payload["moderation"] = dict(approval)
+    return FederationEvent(
+        msg_id="m",
+        event_type=FederationEventType.SPACE_TASK_LIST_CREATED,
+        from_instance=sender,
+        to_instance="us",
+        timestamp="2026-01-01T00:00:00+00:00",
+        payload=payload,
+        space_id=SPACE,
+    )
+
+
+def _mod_auth(*, rows=None, local=frozenset(), **spaces):
+    return SpaceAuthorship(
+        space_repo=_ModSpaces(**spaces),
+        remote_member_repo=_Seats(
+            rows
+            if rows is not None
+            else [
+                _seat(AUTHOR_HOUSE, "u-author"),
+                _seat(OTHER_HOUSE, "u-other"),
+                _seat(MOD_HOUSE, "u-mod", role="moderator"),
+                _seat(ADMIN_HOUSE, "u-admin", role="admin"),
+                _seat(HOST, "u-host"),
+            ]
+        ),
+        user_repo=_Users(set(local)),
+    )
+
+
+async def test_the_host_releases_a_remote_members_item() -> None:
+    a = _mod_auth()
+    assert await a.may_author_approved(_released(HOST), SPACE, "u-author")
+    # ``may_author`` takes the release in place of the author's own seat.
+    assert await a.may_author(_released(HOST), SPACE, "u-author")
+
+
+async def test_a_release_from_a_moderator_household_is_refused() -> None:
+    """I2: only the host applies a queue item — a household with a real
+    moderator seat cannot publish a release, made up or not."""
+    a = _mod_auth()
+    assert not await a.may_author_approved(_released(MOD_HOUSE), SPACE, "u-author")
+    assert not await a.may_author(_released(MOD_HOUSE), SPACE, "u-author")
+
+
+async def test_the_host_naming_a_plain_member_as_approver_is_refused() -> None:
+    a = _mod_auth()
+    ev = _released(HOST, approval={"item_id": "item-1", "approved_by": "u-other"})
+    assert not await a.may_author_approved(ev, SPACE, "u-author")
+
+
+async def test_a_release_from_a_member_household_is_refused() -> None:
+    a = _mod_auth()
+    ev = _released(
+        OTHER_HOUSE, approval={"item_id": "item-1", "approved_by": "u-other"}
+    )
+    assert not await a.may_author_approved(ev, SPACE, "u-author")
+    assert not await a.may_author(ev, SPACE, "u-author")
+
+
+async def test_a_release_naming_another_households_moderator_is_refused() -> None:
+    a = _mod_auth()
+    assert not await a.may_author_approved(_released(ADMIN_HOUSE), SPACE, "u-author")
+
+
+async def test_a_release_naming_another_households_admin_is_refused() -> None:
+    a = _mod_auth()
+    ev = _released(MOD_HOUSE, approval={"item_id": "item-1", "approved_by": "u-admin"})
+    assert not await a.may_author_approved(ev, SPACE, "u-author")
+
+
+async def test_a_demoted_moderators_release_is_refused() -> None:
+    a = _mod_auth(
+        rows=[_seat(AUTHOR_HOUSE, "u-author"), _seat(MOD_HOUSE, "u-mod")],
+    )
+    assert not await a.may_author_approved(_released(HOST), SPACE, "u-author")
+
+
+async def test_a_release_for_somebody_who_cannot_write_is_refused() -> None:
+    for rows in (
+        [_seat(MOD_HOUSE, "u-mod", role="moderator")],
+        [
+            _seat(MOD_HOUSE, "u-mod", role="moderator"),
+            _seat(AUTHOR_HOUSE, "u-author", tombstoned=True),
+        ],
+        [
+            _seat(MOD_HOUSE, "u-mod", role="moderator"),
+            _seat(AUTHOR_HOUSE, "u-author", role="subscriber"),
+        ],
+    ):
+        a = _mod_auth(rows=rows)
+        assert not await a.may_author_approved(_released(HOST), SPACE, "u-author"), rows
+    banned = _mod_auth(banned=[(SPACE, "u-author")])
+    assert not await banned.may_author_approved(_released(HOST), SPACE, "u-author")
+
+
+async def test_our_local_user_needs_our_own_matching_queue_row() -> None:
+    """No household can author as one of OUR people unless we hold the very
+    item it releases — same submitter, same target, same content."""
+    rows = [_seat(MOD_HOUSE, "u-mod", role="moderator")]
+    local = {"u-author"}
+    members = {"u-author": "member"}
+    without = _mod_auth(rows=rows, local=local, members=members)
+    assert not await without.may_author_approved(_released(HOST), SPACE, "u-author")
+    held = _mod_auth(
+        rows=rows, local=local, members=members, items={"item-1": _queued()}
+    )
+    assert await held.may_author_approved(_released(HOST), SPACE, "u-author")
+    # Different words than the item proposed.
+    assert not await held.may_author_approved(
+        _released(HOST, name="Free beer"), SPACE, "u-author"
+    )
+    for item in (
+        _queued(submitted_by="u-else"),
+        _queued(space_id="sp-other"),
+        _queued(feature="pages"),
+        _queued(status=ModerationStatus.EXPIRED),
+        _queued(payload={}),
+    ):
+        a = _mod_auth(rows=rows, local=local, members=members, items={"item-1": item})
+        assert not await a.may_author_approved(_released(HOST), SPACE, "u-author"), item
+    # Approve beats reject: a row we rejected still takes the release.
+    rejected = _mod_auth(
+        rows=rows,
+        local=local,
+        members=members,
+        items={"item-1": _queued(status=ModerationStatus.REJECTED)},
+    )
+    assert await rejected.may_author_approved(_released(HOST), SPACE, "u-author")
+    # A local seat that cannot write takes nothing.
+    reader = _mod_auth(
+        rows=rows,
+        local=local,
+        members={"u-author": "subscriber"},
+        items={"item-1": _queued()},
+    )
+    assert not await reader.may_author_approved(_released(HOST), SPACE, "u-author")
+
+
+async def test_a_held_row_must_match_even_for_a_remote_author() -> None:
+    a = _mod_auth(items={"item-1": _queued()})
+    assert await a.may_author_approved(_released(HOST), SPACE, "u-author")
+    assert not await a.may_author_approved(
+        _released(HOST, name="Other"), SPACE, "u-author"
+    )
+
+
+async def test_admin_only_takes_a_release_from_an_admin_only() -> None:
+    mod = _mod_auth(level="admin_only")
+    assert not await mod.may_author_approved(_released(HOST), SPACE, "u-author")
+    admin = _mod_auth(level="admin_only")
+    ev = _released(HOST, approval={"item_id": "item-1", "approved_by": "u-admin"})
+    assert await admin.may_author_approved(ev, SPACE, "u-author")
+
+
+async def test_a_block_on_an_unreviewable_event_releases_nothing() -> None:
+    a = _mod_auth()
+    ev = FederationEvent(
+        msg_id="m",
+        event_type=FederationEventType.SPACE_COMMENT_CREATED,
+        from_instance=MOD_HOUSE,
+        to_instance="us",
+        timestamp="2026-01-01T00:00:00+00:00",
+        payload={"id": "c-1", "author": "u-author", "moderation": dict(_APPROVAL)},
+        space_id=SPACE,
+    )
+    assert not await a.may_author_approved(ev, SPACE, "u-author")
+    assert not await a.may_author_approved(
+        _released(HOST, approval={"item_id": 3}), SPACE, "u-author"
+    )
+
+
+async def test_access_admits_takes_a_valid_release_under_moderated() -> None:
+    a = _mod_auth()
+    ev = _released(HOST)
+    ev.payload["actor_user_id"] = "u-author"
+    assert await a.access_admits(
+        ev, SPACE, "tasks", ContentAction.CREATE, actor="u-author", row_owner="u-author"
+    )
+    plain = _released(MOD_HOUSE, approval=None)
+    assert not await a.access_admits(
+        plain,
+        SPACE,
+        "tasks",
+        ContentAction.CREATE,
+        actor="u-author",
+        row_owner="u-author",
+    )
+    # An approval naming one actor while the payload names a third is refused.
+    assert not await a.access_admits(
+        ev, SPACE, "tasks", ContentAction.CREATE, actor="u-other", row_owner="u-author"
+    )
+    # An edit of somebody else's row, released: the actor is the submitter.
+    edit = _released(HOST)
+    assert await a.access_admits(
+        edit, SPACE, "tasks", ContentAction.EDIT, actor="u-author", row_owner="u-host"
+    )
