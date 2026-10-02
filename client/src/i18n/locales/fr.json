@@ -1021,5 +1021,18 @@
   "space.feature.timetable": "Emploi du temps",
   "space.feature.timetable_sub": "Un emploi du temps hebdomadaire partagé, p. ex. celui d’une classe",
   "timetable.space.pinned_household_off": "Les emplois du temps sont désactivés pour ton foyer, les emplois du temps épinglés n’apparaîtront donc pas sur l’accueil",
-  "timetable.space.pin_short": "Accueil"
+  "timetable.space.pin_short": "Accueil",
+  "space.role.owner": "Propriétaire",
+  "space.role.admin": "Admin",
+  "space.role.moderator": "Modérateur",
+  "space.role.member": "Membre",
+  "space.role.subscriber": "Abonné",
+  "space.member.role_heading": "Rôle",
+  "space.member.make_admin": "Nommer admin",
+  "space.member.make_moderator": "Nommer modérateur",
+  "space.member.make_member": "Repasser membre",
+  "space.member.role_changed": "Rôle changé en {role}",
+  "space.member.role_change_failed": "Impossible de changer le rôle. Réessayez.",
+  "space.member.role_upgrade_required": "Son foyer doit mettre à jour Social Home avant de pouvoir devenir modérateur.",
+  "space.member.role_change_forbidden": "Vous ne pouvez pas attribuer ce rôle."
 }

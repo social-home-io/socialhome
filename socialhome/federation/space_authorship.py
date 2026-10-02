@@ -17,7 +17,7 @@ is a member of this space *on the household that signed the envelope*.
 No new key, table or field — the same lookup the
 ``SPACE_MEMBER_PROFILE_UPDATED`` handler uses.
 
-Five rules, picked per event family by the handlers:
+Rules, picked per event family by the handlers:
 
 * :meth:`acts_for` — strict: the named user is seated on the sender.
   Personal actions (a vote, an RSVP, a schedule answer, a bid) and the
@@ -33,23 +33,35 @@ Five rules, picked per event family by the handlers:
   originate here.
 * :meth:`writes_here` — the collaborative families (pages, stickies,
   calendar events), which any member may edit or delete locally: any
-  writer household, the row's attribution untouched (the repo upserts
-  never rewrite ``created_by`` / ``author``).
-* :meth:`moderates_as` — moderator-only content (timetables): the named
-  editor holds a live ``admin`` seat on the sender, or — from the host, the
-  roster authority — a live writer seat on the host (the owner is mirrored
-  as a member) or a relayed remote user's live ``admin`` seat.
+  writer household (``member`` / ``moderator`` / ``admin``), the row's
+  attribution untouched (the repo upserts never rewrite ``created_by`` /
+  ``author``).
+* Two authority tiers, mirroring ``SETTINGS_AUTHORITY_ROLES`` and
+  ``CONTENT_AUTHORITY_ROLES`` (v_41):
+
+  * **settings** — :meth:`is_admin_household` (the host, or a live
+    ``admin`` seat on the sender) and its per-user form :meth:`admin_as`.
+    Zones and timetables. A ``moderator`` seat never passes.
+  * **content** — :meth:`has_content_authority` (the host, or a live
+    ``admin`` or ``moderator`` seat) and its per-user form
+    :meth:`moderates_as`. Moderation edits / deletes of others' content,
+    a moderated post's re-edit, gallery tombstones, RSVP overrides.
+
+  Both per-user forms share :meth:`_seated_as`: the named user holds the
+  seat on the sender, or — from the host, the roster authority — a live
+  writer seat on the host (the owner is mirrored as a member) or a
+  relayed remote user's live seat of the tier.
 * :meth:`may_mutate` — edits / deletes of an owned row: :meth:`acts_for`
-  for the row's owner, or a **moderator** household — the host, or a
-  household holding a live ``admin`` seat. That is the federated form of
-  the local "author or space admin" rule (``SpaceService.delete_post``,
-  ``edit_comment``, ``GalleryService.delete_item`` …); moderation deletes
-  ride the same ``*_DELETED`` events, so without it a moderated post would
-  disappear everywhere except on the households that did not moderate it.
+  for the row's owner, or a household with **content authority**. That is
+  the federated form of the local "author or space moderator" rule
+  (``SpaceService.delete_post``, ``edit_comment``,
+  ``GalleryService.delete_item`` …); moderation deletes ride the same
+  ``*_DELETED`` events, so without it a moderated post would disappear
+  everywhere except on the households that did not moderate it.
 
 The bot bridge posts under the shared :data:`SYSTEM_AUTHOR` identity,
 which is no member at all: any writer household may create such a row
-(nobody is impersonated), and only a moderator may change one.
+(nobody is impersonated), and only content authority may change one.
 """
 
 from __future__ import annotations
@@ -57,7 +69,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ..domain.space import SpaceRole
+from ..domain.space import (
+    CONTENT_AUTHORITY_ROLES,
+    SETTINGS_AUTHORITY_ROLES,
+    WRITER_ROLES,
+    SpaceRole,
+)
 from ..domain.user import SYSTEM_AUTHOR
 
 if TYPE_CHECKING:
@@ -71,9 +88,18 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: Seats that write — the same set as the §24.11 follower gate.
-_WRITER_ROLES: frozenset[str] = frozenset(
-    {SpaceRole.MEMBER.value, SpaceRole.ADMIN.value}
+#: Seats that write — the same set as the §24.11 follower gate. A remote
+#: seat is never ``owner``; the set is :data:`WRITER_ROLES` as strings.
+_WRITER_ROLES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
+
+#: Settings authority on a remote seat: ``admin`` only (never ``moderator``).
+_ADMIN_SEATS: frozenset[str] = frozenset(
+    r.value for r in SETTINGS_AUTHORITY_ROLES if r is not SpaceRole.OWNER
+)
+
+#: Content authority on a remote seat: ``admin`` or ``moderator``.
+_CONTENT_SEATS: frozenset[str] = frozenset(
+    r.value for r in CONTENT_AUTHORITY_ROLES if r is not SpaceRole.OWNER
 )
 
 
@@ -126,8 +152,27 @@ class SpaceAuthorship:
         space = await self._spaces.get(space_id)
         return space is not None and space.owner_instance_id == sender
 
-    async def is_moderator(self, event: "FederationEvent", space_id: str) -> bool:
-        """The host, or a household holding a live ``admin`` seat here."""
+    async def is_admin_household(self, event: "FederationEvent", space_id: str) -> bool:
+        """The host, or a household holding a live ``admin`` seat here.
+
+        Settings authority (zones, timetables): a ``moderator`` seat does
+        NOT count — see :meth:`has_content_authority`.
+        """
+        return await self._sender_holds(event, space_id, _ADMIN_SEATS)
+
+    async def has_content_authority(
+        self, event: "FederationEvent", space_id: str
+    ) -> bool:
+        """The host, or a household holding a live ``admin`` or
+        ``moderator`` seat here — may act on other people's content."""
+        return await self._sender_holds(event, space_id, _CONTENT_SEATS)
+
+    async def _sender_holds(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        roles: frozenset[str],
+    ) -> bool:
         if await self.is_host(event, space_id):
             return True
         sender = str(event.from_instance or "")
@@ -136,7 +181,21 @@ class SpaceAuthorship:
         seats = await self._seats.list_for_instance(
             space_id, sender, include_tombstoned=False
         )
-        return any(s.role == SpaceRole.ADMIN.value for s in seats)
+        return any(s.role in roles for s in seats)
+
+    async def admin_as(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        user_id: str,
+    ) -> bool:
+        """May the sender record an admin-only write as ``user_id``?
+
+        The per-user form of :meth:`is_admin_household`, for content only a
+        space owner / admin may change (timetables). A ``moderator`` seat
+        never passes. See :meth:`_seated_as` for the rules.
+        """
+        return await self._seated_as(event, space_id, user_id, _ADMIN_SEATS)
 
     async def moderates_as(
         self,
@@ -144,18 +203,29 @@ class SpaceAuthorship:
         space_id: str,
         user_id: str,
     ) -> bool:
-        """May the sender record a moderator-only write as ``user_id``?
+        """May the sender record a content-authority write as ``user_id``?
 
-        The per-user form of :meth:`is_moderator`, for content only a space
-        owner / admin may change (timetables):
+        The per-user form of :meth:`has_content_authority`: like
+        :meth:`admin_as`, but a live ``moderator`` seat passes too.
+        """
+        return await self._seated_as(event, space_id, user_id, _CONTENT_SEATS)
 
-        * sent by a **non-host** household: ``user_id`` holds a live
-          ``admin`` seat on that household — an admin household cannot pass
+    async def _seated_as(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        user_id: str,
+        roles: frozenset[str],
+    ) -> bool:
+        """``user_id`` holds one of ``roles`` as the sender records it.
+
+        * sent by a **non-host** household: ``user_id`` holds a live seat
+          in ``roles`` on that household — an admin household cannot pass
           off its plain member's edit, and nobody names another household's
-          admin;
-        * sent by the **host**: ``user_id`` holds a live writer seat
-          (``member`` / ``admin``) on the host, or the host relays a remote
-          user whose own live seat is ``admin``.
+          admin / moderator;
+        * sent by the **host**: ``user_id`` holds a live writer seat on the
+          host, or the host relays a remote user whose own live seat is in
+          ``roles``.
 
         Why a host-seated *member* passes: the roster wire mirrors the
         space's owner as a plain ``member`` seat (a remote seat has no owner
@@ -164,11 +234,11 @@ class SpaceAuthorship:
         admin seat would refuse the owner's (the teacher's) every live edit
         there. It costs nothing: the host is the roster authority and could
         authority-sign any of its users into an ``admin`` seat anyway, and an
-        honest host never emits a plain member's edit — its local
-        ``SpaceTimetableScope`` refuses one.
+        honest host never emits a plain member's edit — its local guards
+        refuse one.
 
         Followers, removed (tombstoned) seats, banned, blank and local
-        users, and the shared bot identity, moderate nothing.
+        users, and the shared bot identity, hold nothing.
         """
         if not user_id or user_id == SYSTEM_AUTHOR or not space_id:
             return False
@@ -182,23 +252,25 @@ class SpaceAuthorship:
         seat = await self._seats.get(space_id, sender, user_id)
         is_host = await self.is_host(event, space_id)
         if seat is not None:
-            if seat.role == SpaceRole.ADMIN.value:
+            if seat.role in roles:
                 return True
             return is_host and seat.role in _WRITER_ROLES
         if not is_host:
             return False
-        # The host relaying a remote user: a live admin seat on the user's
-        # own household (keyed on (space, user) — a user has one household).
+        # The host relaying a remote user: a live seat in ``roles`` on the
+        # user's own household (keyed on (space, user) — a user has one
+        # household).
         row = await self._seats.get_including_tombstones(space_id, "", user_id)
         return (
             row is not None
             and not row.tombstoned
             and row.instance_id != sender
-            and row.role == SpaceRole.ADMIN.value
+            and row.role in roles
         )
 
     async def writes_here(self, event: "FederationEvent", space_id: str) -> bool:
-        """The host, or a household holding a live ``member`` / ``admin`` seat.
+        """The host, or a household holding a live writer seat (``member`` /
+        ``moderator`` / ``admin``).
 
         The rule for the collaborative families (pages, stickies, calendar
         events — any member may edit or delete them locally). It repeats the
@@ -268,13 +340,23 @@ class SpaceAuthorship:
         event: "FederationEvent",
         space_id: str,
         owner_user_id: str,
+        *,
+        settings: bool = False,
     ) -> bool:
-        """May the sender edit / delete a row owned by ``owner_user_id``?"""
+        """May the sender edit / delete a row owned by ``owner_user_id``?
+
+        The row's owner, or content authority (host / admin / moderator).
+        ``settings=True`` raises the bar for a non-owner to settings
+        authority (host / admin) — a whole gallery album, which the local
+        service also keeps from a moderator.
+        """
         if owner_user_id != SYSTEM_AUTHOR and await self.acts_for(
             event, space_id, owner_user_id, any_role=True
         ):
             return True
-        return await self.is_moderator(event, space_id)
+        if settings:
+            return await self.is_admin_household(event, space_id)
+        return await self.has_content_authority(event, space_id)
 
     async def hold_or_refuse(
         self,

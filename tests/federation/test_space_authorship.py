@@ -243,7 +243,7 @@ async def test_a_tombstoned_admin_seat_is_no_moderator() -> None:
         ),
         user_repo=_Users(set()),
     )
-    assert not await a.is_moderator(_ev(ADMIN_HOUSE), SPACE)
+    assert not await a.is_admin_household(_ev(ADMIN_HOUSE), SPACE)
 
 
 # ── logging ──────────────────────────────────────────────────────────
@@ -368,17 +368,17 @@ async def test_without_a_buffer_an_unknown_user_is_refused(
     assert "refusing the write" in caplog.text
 
 
-# ── moderates_as: moderator-only content (zones' rule, per user) ─────
+# ── admin_as: moderator-only content (zones' rule, per user) ─────
 
 
 async def test_an_admin_seated_on_the_sender_moderates_as_themself(
     authorship,
 ) -> None:
-    assert await authorship.moderates_as(_ev(ADMIN_HOUSE), SPACE, "u-admin")
+    assert await authorship.admin_as(_ev(ADMIN_HOUSE), SPACE, "u-admin")
 
 
 async def test_a_plain_member_does_not_moderate(authorship) -> None:
-    assert not await authorship.moderates_as(_ev(AUTHOR_HOUSE), SPACE, "u-author")
+    assert not await authorship.admin_as(_ev(AUTHOR_HOUSE), SPACE, "u-author")
 
 
 async def test_an_admin_household_cannot_moderate_as_its_plain_member() -> None:
@@ -390,12 +390,12 @@ async def test_an_admin_household_cannot_moderate_as_its_plain_member() -> None:
         ),
         user_repo=_Users(set()),
     )
-    assert not await a.moderates_as(_ev(ADMIN_HOUSE), SPACE, "u-kid")
+    assert not await a.admin_as(_ev(ADMIN_HOUSE), SPACE, "u-kid")
 
 
 async def test_nobody_moderates_as_somebody_elses_admin(authorship) -> None:
     for sender in (AUTHOR_HOUSE, OTHER_HOUSE):
-        assert not await authorship.moderates_as(_ev(sender), SPACE, "u-admin")
+        assert not await authorship.admin_as(_ev(sender), SPACE, "u-admin")
 
 
 async def test_the_host_records_its_writers_and_relays_live_admins() -> None:
@@ -420,7 +420,7 @@ async def test_the_host_records_its_writers_and_relays_live_admins() -> None:
         user_repo=_Users({"u-local"}),
     )
     for user in ("u-owner", "u-host-admin", "u-admin"):
-        assert await a.moderates_as(_ev(HOST), SPACE, user), user
+        assert await a.admin_as(_ev(HOST), SPACE, user), user
     for user in (
         "u-host-sub",
         "u-host-gone",
@@ -430,9 +430,9 @@ async def test_the_host_records_its_writers_and_relays_live_admins() -> None:
         "u-local",
         "u-nobody",
     ):
-        assert not await a.moderates_as(_ev(HOST), SPACE, user), user
+        assert not await a.admin_as(_ev(HOST), SPACE, user), user
     # A non-host household gets no such latitude for its plain members.
-    assert not await a.moderates_as(_ev(AUTHOR_HOUSE), SPACE, "u-author")
+    assert not await a.admin_as(_ev(AUTHOR_HOUSE), SPACE, "u-author")
 
 
 async def test_blank_system_removed_and_banned_editors_never_moderate() -> None:
@@ -449,5 +449,112 @@ async def test_blank_system_removed_and_banned_editors_never_moderate() -> None:
         user_repo=_Users(set()),
     )
     for user in ("", SYSTEM_AUTHOR, "u-old", "u-bad"):
-        assert not await a.moderates_as(_ev(ADMIN_HOUSE), SPACE, user)
-    assert not await a.moderates_as(_ev(""), SPACE, "u-bad")
+        assert not await a.admin_as(_ev(ADMIN_HOUSE), SPACE, user)
+    assert not await a.admin_as(_ev(""), SPACE, "u-bad")
+
+
+# ── v_41 moderator seats: content authority, never settings authority ──
+
+MOD_HOUSE = "inst-mod"
+
+
+def _mod_authorship(*extra: SpaceRemoteMember) -> SpaceAuthorship:
+    return SpaceAuthorship(
+        space_repo=_Spaces({SPACE: _Space(owner_instance_id=HOST)}),
+        remote_member_repo=_Seats(
+            [
+                _seat(MOD_HOUSE, "u-mod", role="moderator"),
+                _seat(MOD_HOUSE, "u-kid"),
+                _seat(ADMIN_HOUSE, "u-admin", role="admin"),
+                _seat(AUTHOR_HOUSE, "u-author"),
+                _seat(HOST, "u-host-mod", role="moderator"),
+                *extra,
+            ]
+        ),
+        user_repo=_Users({"u-local"}),
+    )
+
+
+async def test_a_moderator_household_has_content_authority_but_is_no_admin_household():
+    a = _mod_authorship()
+    assert await a.has_content_authority(_ev(MOD_HOUSE), SPACE)
+    assert not await a.is_admin_household(_ev(MOD_HOUSE), SPACE)
+
+
+async def test_content_authority_holders():
+    a = _mod_authorship()
+    assert await a.has_content_authority(_ev(HOST), SPACE)
+    assert await a.has_content_authority(_ev(ADMIN_HOUSE), SPACE)
+    assert not await a.has_content_authority(_ev(AUTHOR_HOUSE), SPACE)
+    assert not await a.has_content_authority(_ev(""), SPACE)
+
+
+async def test_a_tombstoned_moderator_seat_has_no_content_authority():
+    a = SpaceAuthorship(
+        space_repo=_Spaces({SPACE: _Space(owner_instance_id=HOST)}),
+        remote_member_repo=_Seats(
+            [_seat(MOD_HOUSE, "u-mod", role="moderator", tombstoned=True)]
+        ),
+        user_repo=_Users(set()),
+    )
+    assert not await a.has_content_authority(_ev(MOD_HOUSE), SPACE)
+
+
+async def test_a_moderator_household_may_mutate_others_rows():
+    """Moderation edits / deletes ride ``may_mutate`` — content authority."""
+    a = _mod_authorship()
+    assert await a.may_mutate(_ev(MOD_HOUSE), SPACE, "u-author")
+    assert await a.may_mutate(_ev(MOD_HOUSE), SPACE, SYSTEM_AUTHOR)
+    assert not await a.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-kid")
+
+
+async def test_a_moderator_writes_and_acts_for_themself():
+    a = _mod_authorship()
+    assert await a.acts_for(_ev(MOD_HOUSE), SPACE, "u-mod")
+    assert await a.may_author(_ev(MOD_HOUSE), SPACE, "u-mod")
+    assert await a.writes_here(_ev(MOD_HOUSE), SPACE)
+
+
+async def test_a_moderator_is_never_admin_as():
+    """Zones / timetables stay settings authority: a moderator seat, on its
+    own household or relayed by the host, never passes ``admin_as``."""
+    a = _mod_authorship()
+    assert not await a.admin_as(_ev(MOD_HOUSE), SPACE, "u-mod")
+    assert not await a.admin_as(_ev(HOST), SPACE, "u-mod")
+
+
+async def test_moderates_as_admits_admin_and_moderator_seats():
+    a = _mod_authorship()
+    assert await a.moderates_as(_ev(MOD_HOUSE), SPACE, "u-mod")
+    assert await a.moderates_as(_ev(ADMIN_HOUSE), SPACE, "u-admin")
+    # The host relays a remote moderator, and records its own seats.
+    assert await a.moderates_as(_ev(HOST), SPACE, "u-mod")
+    assert await a.moderates_as(_ev(HOST), SPACE, "u-host-mod")
+    # A moderator household's plain member, someone else's moderator, a
+    # remote plain member relayed by the host: no.
+    assert not await a.moderates_as(_ev(MOD_HOUSE), SPACE, "u-kid")
+    assert not await a.moderates_as(_ev(AUTHOR_HOUSE), SPACE, "u-mod")
+    assert not await a.moderates_as(_ev(HOST), SPACE, "u-author")
+    assert not await a.moderates_as(_ev(MOD_HOUSE), SPACE, "u-local")
+    assert not await a.moderates_as(_ev(MOD_HOUSE), SPACE, SYSTEM_AUTHOR)
+
+
+async def test_moderates_as_refuses_a_banned_moderator():
+    a = SpaceAuthorship(
+        space_repo=_Spaces(
+            {SPACE: _Space(owner_instance_id=HOST)}, banned={(SPACE, "u-mod")}
+        ),
+        remote_member_repo=_Seats([_seat(MOD_HOUSE, "u-mod", role="moderator")]),
+        user_repo=_Users(set()),
+    )
+    assert not await a.moderates_as(_ev(MOD_HOUSE), SPACE, "u-mod")
+
+
+async def test_settings_tier_may_mutate_refuses_a_moderator():
+    """``may_mutate(settings=True)`` — whole-album edits: the owner's
+    household or settings authority, never a moderator seat."""
+    a = _mod_authorship()
+    assert not await a.may_mutate(_ev(MOD_HOUSE), SPACE, "u-author", settings=True)
+    assert await a.may_mutate(_ev(ADMIN_HOUSE), SPACE, "u-author", settings=True)
+    assert await a.may_mutate(_ev(HOST), SPACE, "u-author", settings=True)
+    assert await a.may_mutate(_ev(AUTHOR_HOUSE), SPACE, "u-author", settings=True)

@@ -973,7 +973,12 @@ class SqliteSpaceRepo:
         user_id: str,
         role: str,
     ) -> None:
-        if role not in ("owner", "admin", "member"):
+        if role not in (
+            SpaceRole.OWNER,
+            SpaceRole.ADMIN,
+            SpaceRole.MODERATOR,
+            SpaceRole.MEMBER,
+        ):
             raise ValueError(f"invalid role {role!r}")
         await self._db.enqueue(
             "UPDATE space_members SET role=? WHERE space_id=? AND user_id=?",

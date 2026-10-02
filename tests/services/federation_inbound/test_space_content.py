@@ -78,7 +78,7 @@ class _AllowAuthorship:
         self.calls.append(("may_author", space_id, user_id))
         return self.answer
 
-    async def may_mutate(self, event, space_id, owner_user_id):
+    async def may_mutate(self, event, space_id, owner_user_id, *, settings=False):
         self.calls.append(("may_mutate", space_id, owner_user_id))
         return self.answer
 
@@ -86,8 +86,12 @@ class _AllowAuthorship:
         self.calls.append(("writes_here", space_id, ""))
         return self.answer
 
-    async def is_moderator(self, event, space_id):
-        self.calls.append(("is_moderator", space_id, ""))
+    async def is_admin_household(self, event, space_id):
+        self.calls.append(("is_admin_household", space_id, ""))
+        return self.answer
+
+    async def has_content_authority(self, event, space_id):
+        self.calls.append(("has_content_authority", space_id, ""))
         return self.answer
 
     def log_refusal(self, event, *, space_id, what, row_id, user_id):
@@ -3288,11 +3292,11 @@ _BOUND = [
     (
         "_on_zone_upserted",
         {"zone_id": "z", "name": "Z", "latitude": 1, "longitude": 1, "radius_m": 9},
-        "is_moderator",
+        "is_admin_household",
         "",
         None,
     ),
-    ("_on_zone_deleted", {"zone_id": "z"}, "is_moderator", "", ("zones", "z")),
+    ("_on_zone_deleted", {"zone_id": "z"}, "is_admin_household", "", ("zones", "z")),
     (
         "_on_bazaar_listing_created",
         {

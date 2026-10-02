@@ -27,8 +27,10 @@ export interface SpaceTabFeatures {
 /** What the Calendar tab shows. */
 export type CalendarMode = 'events' | 'timetable'
 
+/** ``canModerate`` — the viewer holds content authority (owner / admin /
+ *  moderator) and so works the Moderation tab. */
 export function visibleSpaceTabs(
-  f: SpaceTabFeatures | undefined, canAdmin: boolean,
+  f: SpaceTabFeatures | undefined, canModerate: boolean,
 ): SpaceTab[] {
   return [
     'feed', 'members',
@@ -39,7 +41,7 @@ export function visibleSpaceTabs(
     ...((f?.gallery ?? true) ? (['gallery'] as const) : []),
     ...((f?.bazaar ?? true) ? (['bazaar'] as const) : []),
     ...(f?.location ? (['map'] as const) : []),
-    ...(canAdmin ? (['moderation'] as const) : []),
+    ...(canModerate ? (['moderation'] as const) : []),
   ]
 }
 

@@ -21,6 +21,7 @@
  * lapses, and a Revoke. Minting and auditing are the same job, so they
  * live behind the same door rather than in a separate settings tab.
  */
+import type { SpaceRole } from '@/features/spaces/spaceRoles'
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { api, ApiError } from '@/api'
@@ -40,8 +41,9 @@ import { confirmDialog } from './confirm'
 export type InviteRole = 'member' | 'subscriber' | 'admin'
 
 /** Viewer's own role in the space — decides which roles they may hand
- *  out. Only the owner can mint an admin link. */
-type ViewerRole = 'owner' | 'admin' | 'member' | 'subscriber' | undefined
+ *  out. Only the owner can mint an admin link; a moderator mints none
+ *  (invites are settings authority). Nobody mints a moderator link. */
+type ViewerRole = SpaceRole | undefined
 
 interface InviteGfsRef {
   /** Local connection-server id the link was published through. */

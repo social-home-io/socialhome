@@ -15,7 +15,8 @@ import { Spinner } from './Spinner'
 import { Button } from './Button'
 import { showToast } from './Toast'
 import { AliasDialog, openAliasDialog } from './AliasDialog'
-import { openMemberActions, MemberActionSheet } from './MemberActionSheet'
+import { openMemberActions, MemberActionSheet, roleLabel } from './MemberActionSheet'
+import { hasSettingsAuthority, type SpaceRole } from '@/features/spaces/spaceRoles'
 import {
   SpaceProfileDialog,
   openSpaceProfileDialog,
@@ -86,21 +87,22 @@ interface Props {
   /** Viewer's role in this space — drives whether admin actions render.
    *  ``'subscriber'`` appears when the caller is a read-only subscriber
    *  (see :class:`SpaceService.subscribe_to_space`); no admin actions
-   *  render for that role. */
-  viewerRole?: 'owner' | 'admin' | 'member' | 'subscriber'
+   *  render for that role, nor for a ``'moderator'`` (content authority
+   *  only — member management is settings authority). */
+  viewerRole?: SpaceRole
 }
 
 export function SpaceMemberList({ spaceId, viewerRole }: Props) {
   const reload = () => {
     loading.value = true
     const p1 = api.get(`/api/spaces/${spaceId}/members`)
-    const p2 = viewerRole === 'owner' || viewerRole === 'admin'
+    const p2 = hasSettingsAuthority(viewerRole)
       ? api.get(`/api/spaces/${spaceId}/bans`).catch(() => [] as Ban[])
       : Promise.resolve([] as Ban[])
     Promise.all([p1, p2]).then(([mems, bansList]) => {
       members.value = mems as Member[]
       bans.value = bansList as Ban[]
-      canManage.value = viewerRole === 'owner' || viewerRole === 'admin'
+      canManage.value = hasSettingsAuthority(viewerRole)
       loading.value = false
     })
   }
@@ -161,8 +163,9 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
   if (loading.value) return <Spinner />
 
   const roleBadge = (role: string) => {
-    if (role === 'owner') return <span class="sh-badge sh-badge--owner">Owner</span>
-    if (role === 'admin') return <span class="sh-badge sh-badge--admin">Admin</span>
+    if (role === 'owner' || role === 'admin' || role === 'moderator') {
+      return <span class={`sh-badge sh-badge--${role}`}>{roleLabel(role)}</span>
+    }
     return null
   }
 
@@ -347,7 +350,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                   type="button"
                   aria-label={`Manage ${r.name}`}
                   onClick={() => openMemberActions(
-                    spaceId, m.user_id, m.role, m.instance_id ?? null,
+                    spaceId, m.user_id, m.role, m.instance_id ?? null, viewerRole,
                   )}
                 >
                   ···

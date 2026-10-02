@@ -2,6 +2,9 @@
 
 import uuid as _uuid
 from datetime import datetime, timezone, timedelta
+
+import pytest
+
 from .conftest import _auth
 
 
@@ -683,6 +686,62 @@ async def test_deny_clears_request(client):
     assert r2.status == 200
     counts = (await r2.json())["counts"]
     assert counts["requested"] == 0
+
+
+async def _seed_third_member(client, *, role):
+    from socialhome.auth import sha256_token_hash
+
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) "
+        "VALUES('cara', 'uid-cara', 'Cara', 0)",
+    )
+    raw = "cara-tok"
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
+        "VALUES('to-cara', 'uid-cara', 't', ?)",
+        (sha256_token_hash(raw),),
+    )
+    await client._db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-cal', ?, ?)",
+        ("uid-cara", role),
+    )
+    return {"Authorization": f"Bearer {raw}"}
+
+
+@pytest.mark.parametrize(("role", "status"), [("moderator", 200), ("member", 403)])
+async def test_rsvp_approval_of_others_events_is_content_authority(
+    client, role, status
+):
+    """Approving a request on somebody else's event is moderation: a
+    moderator may list and decide it, a plain member may not."""
+    await _seed_space(client)
+    bob = await _seed_outsider_member(client)
+    cara = await _seed_third_member(client, role=role)
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={
+            "summary": "Tiny",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "capacity": 5,
+        },
+        headers=_auth(client._tok),
+    )
+    eid = (await r.json())["id"]
+    await client.post(
+        f"/api/calendars/events/{eid}/rsvp",
+        json={"status": "going"},
+        headers=bob,
+    )
+    listed = await client.get(f"/api/calendars/events/{eid}/pending", headers=cara)
+    assert listed.status == status
+    decided = await client.post(
+        f"/api/calendars/events/{eid}/approve",
+        json={"user_id": "uid-bob", "action": "approve"},
+        headers=cara,
+    )
+    assert decided.status == status
 
 
 # ─── Phase F: iCal export ───────────────────────────────────────────────────

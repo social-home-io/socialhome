@@ -888,16 +888,16 @@ class SpaceSyncReceiver:
                     return False
                 return await self._anchor_author_ok(event, space_id, post_id)
             case "space_zones":
-                return await auth.is_moderator(event, space_id)
+                return await auth.is_admin_household(event, space_id)
             case "timetables":
                 # Moderator-only, per user, like the live event: the
                 # household moderates and the recorded editor is its admin;
                 # a timetable new here also names a creator it speaks for.
                 if self._timetable_repo is None or not rid:
                     return False
-                if not await auth.is_moderator(event, space_id):
+                if not await auth.is_admin_household(event, space_id):
                     return False
-                if not await auth.moderates_as(
+                if not await auth.admin_as(
                     event, space_id, str(r.get("updated_by") or "")
                 ):
                     return False

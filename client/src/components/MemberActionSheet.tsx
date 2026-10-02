@@ -1,8 +1,16 @@
 /**
  * MemberActionSheet — role/ban actions on space members (§23.98).
+ *
+ * The role picker offers exactly what :func:`roleChangeOptions` allows
+ * the viewer (the server's ``role_change_allowed`` matrix): the owner
+ * sets admin / moderator / member, an admin moves a seat only between
+ * member and moderator. A refused change shows the server's reason in
+ * the sheet (e.g. "household must upgrade") instead of closing it.
  */
 import { signal } from '@preact/signals'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
+import { t } from '@/i18n/i18n'
+import { parseSpaceRole, roleChangeOptions, type SpaceRole } from '@/features/spaces/spaceRoles'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -12,24 +20,53 @@ const open = signal(false)
 const memberUserId = signal('')
 const memberRole = signal('')
 const memberInstanceId = signal<string | null>(null)
+const actorRole = signal<SpaceRole | undefined>(undefined)
 const spaceId = signal('')
 const showBanConfirm = signal(false)
+const roleError = signal<string | null>(null)
+const roleBusy = signal(false)
 
 export function openMemberActions(
   sid: string,
   userId: string,
   role: string,
   instanceId: string | null = null,
+  viewerRole?: SpaceRole,
 ) {
   spaceId.value = sid
   memberUserId.value = userId
   memberRole.value = role
   memberInstanceId.value = instanceId
+  actorRole.value = viewerRole
+  roleError.value = null
+  roleBusy.value = false
   open.value = true
 }
 
+const ROLE_OPTION_KEY: Record<SpaceRole, string> = {
+  owner: 'space.role.owner',
+  admin: 'space.member.make_admin',
+  moderator: 'space.member.make_moderator',
+  member: 'space.member.make_member',
+  subscriber: 'space.member.make_member',
+}
+
+/** Translated copy for a refused role change, keyed on the API code. */
+function roleErrorCopy(e: unknown): string {
+  const code = e instanceof ApiError ? e.code : null
+  if (code === 'HOUSEHOLD_UPGRADE_REQUIRED') return t('space.member.role_upgrade_required')
+  if (code === 'FORBIDDEN') return t('space.member.role_change_forbidden')
+  return t('space.member.role_change_failed')
+}
+
+export function roleLabel(role: SpaceRole): string {
+  return t(`space.role.${role}`)
+}
+
 export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
-  const setRole = async (role: string) => {
+  const setRole = async (role: SpaceRole) => {
+    roleError.value = null
+    roleBusy.value = true
     try {
       const path = memberInstanceId.value
         // #114: a remote member's role lives in space_remote_members,
@@ -38,10 +75,19 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
         ? `/api/spaces/${spaceId.value}/remote-members/${memberInstanceId.value}/${memberUserId.value}`
         : `/api/spaces/${spaceId.value}/members/${memberUserId.value}`
       await api.patch(path, { role })
-      showToast(`Role changed to ${role}`, 'success')
+      showToast(t('space.member.role_changed', { role: roleLabel(role) }), 'success')
       open.value = false; onUpdate()
-    } catch (e: any) { showToast(e.message || 'Failed', 'error') }
+    } catch (e: unknown) {
+      // Keep the sheet open with the reason — "household must upgrade"
+      // is actionable, a toast that vanishes is not. Mapped by the stable
+      // error code to translated copy; the server's English sentence is
+      // never shown.
+      roleError.value = roleErrorCopy(e)
+    } finally {
+      roleBusy.value = false
+    }
   }
+  const roleOptions = roleChangeOptions(actorRole.value, parseSpaceRole(memberRole.value))
 
   const ban = async () => {
     try {
@@ -76,11 +122,25 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
     <>
       <Modal open={open.value} onClose={() => open.value = false} title="Member Actions">
         <div class="sh-member-actions">
-          {memberRole.value !== 'admin' && (
-            <Button variant="secondary" onClick={() => setRole('admin')}>Promote to admin</Button>
-          )}
-          {memberRole.value === 'admin' && (
-            <Button variant="secondary" onClick={() => setRole('member')}>Demote to member</Button>
+          {roleOptions.length > 0 && (
+            <div class="sh-member-actions-roles" role="group"
+                 aria-label={t('space.member.role_heading')}>
+              <span class="sh-member-actions-label">{t('space.member.role_heading')}</span>
+              {roleOptions.map(r => (
+                <Button
+                  key={r}
+                  variant="secondary"
+                  data-role-option={r}
+                  disabled={roleBusy.value}
+                  onClick={() => setRole(r)}
+                >
+                  {t(ROLE_OPTION_KEY[r])}
+                </Button>
+              ))}
+              {roleError.value && (
+                <p class="sh-member-actions-error" role="alert">{roleError.value}</p>
+              )}
+            </div>
           )}
           <Button variant="secondary" onClick={remove}>Remove from space</Button>
           {canBan && (

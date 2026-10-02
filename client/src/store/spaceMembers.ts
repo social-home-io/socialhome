@@ -11,6 +11,7 @@ import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import type { SpaceMemberProfile } from '@/types'
 import { HERE_TOKEN, mentionTokenSet } from '@/utils/mentions'
+import { parseSpaceRole, type SpaceRole } from '@/features/spaces/spaceRoles'
 
 export const spaceMembers = signal<Record<string, Map<string, SpaceMemberProfile>>>({})
 
@@ -29,6 +30,14 @@ export async function loadSpaceMembers(spaceId: string): Promise<void> {
   } catch {
     loaded.delete(spaceId)
   }
+}
+
+/** The viewer's role in ``spaceId`` from the member cache (``undefined``
+ *  until it loads). UI hint only — the server re-checks every action. */
+export function viewerSpaceRole(spaceId: string | null | undefined): SpaceRole | undefined {
+  const me = currentUser.value?.user_id
+  if (!spaceId || !me) return undefined
+  return parseSpaceRole(spaceMembers.value[spaceId]?.get(me)?.role)
 }
 
 export interface SpaceMentionRender {

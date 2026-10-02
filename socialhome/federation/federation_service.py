@@ -1896,8 +1896,21 @@ class FederationService:
         *,
         min_proto_version: int | None = None,
         relay_payload: dict | None = None,
+        legacy_payload: dict | None = None,
+        legacy_below: int | None = None,
     ) -> BroadcastResult:
         """Fan out to every member household of ``space_id``.
+
+        ``legacy_payload`` + ``legacy_below``, when both given, send
+        ``legacy_payload`` INSTEAD of ``payload`` to a member household whose
+        advertised ``proto_version`` is below ``legacy_below`` (or that has
+        advertised none — :meth:`peer_supports`' conservative default). For a
+        field an older receiver would mis-handle rather than ignore: the v_41
+        ``moderator`` role ships as ``member`` to a v_40 household, which
+        drops roles it does not know. Only for payloads that are not signed
+        as a whole (the per-peer envelope signature still covers whichever
+        variant a peer gets). ``relay_payload`` takes precedence for a relay
+        seat — callers never combine them today.
 
         ``relay_payload``, when given, is sent INSTEAD of ``payload`` to a
         member seated from an invite link (``InstanceSource.SPACE_SESSION``):
@@ -1947,6 +1960,12 @@ class FederationService:
                 # Below threshold — silently skip. Best-effort path.
                 continue
             peer_payload = payload
+            if (
+                legacy_payload is not None
+                and legacy_below is not None
+                and not await self.peer_supports(iid, min_version=legacy_below)
+            ):
+                peer_payload = legacy_payload
             if relay_payload is not None:
                 instance = await self._federation_repo.get_instance(iid)
                 if (

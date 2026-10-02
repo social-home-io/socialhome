@@ -26,6 +26,7 @@ from socialhome.federation.owner_bound_id import (
     check_owner_bound_id,
 )
 from socialhome.domain.space import (
+    HouseholdUpgradeRequiredError,
     JoinMode,
     Space,
     SpaceFeatureAccess,
@@ -3669,6 +3670,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Creator-bound content ids",
         "Space timetables",
         "Task priority and labels",
+        "Space moderators",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3693,6 +3695,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Creator-bound content ids",
         "Space timetables",
         "Task priority and labels",
+        "Space moderators",
     )
 
 
@@ -3729,6 +3732,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Creator-bound content ids",
         "Space timetables",
         "Task priority and labels",
+        "Space moderators",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3780,6 +3784,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Creator-bound content ids",
         "Space timetables",
         "Task priority and labels",
+        "Space moderators",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -6954,6 +6959,35 @@ async def test_approving_an_elevation_promotes_the_member_to_admin(stack):
     assert await stack.space_repo.list_pending_join_requests(space.id) == []
 
 
+async def test_a_non_owner_admin_cannot_consume_an_admin_elevation(stack):
+    """M6a — only the owner makes an admin, so a plain admin's approve is
+    refused BEFORE the request is touched: it stays pending for the owner,
+    and the applicant keeps their seat."""
+    _a = await stack.provision_user("anna")
+    olga = await stack.provision_user("olga")
+    b = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=olga.user_id
+    )
+    await stack.space_svc.set_role(
+        space.id, actor_username="anna", user_id=olga.user_id, role="admin"
+    )
+    tok = await stack.space_repo.create_invite_token(
+        space.id, "uid-anna", uses=1, role="admin"
+    )
+    await stack.space_svc.accept_invite_token(tok, user_id=b.user_id)
+    (elev,) = await stack.space_repo.list_pending_join_requests(space.id)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.approve_join_request(elev["id"], actor_username="olga")
+    still = await stack.space_repo.list_pending_join_requests(space.id)
+    assert [r["id"] for r in still] == [elev["id"]]
+    assert (await stack.space_repo.get_member(space.id, b.user_id)).role == "member"
+    # The owner can still approve it.
+    await stack.space_svc.approve_join_request(elev["id"], actor_username="anna")
+    assert (await stack.space_repo.get_member(space.id, b.user_id)).role == "admin"
+
+
 async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
     """A household met through an invite link over a connection server
     (``InstanceSource.SPACE_SESSION``) never receives the signing seed, even
@@ -7530,3 +7564,486 @@ async def test_space_post_edit_drops_the_card_when_the_link_changes(stack):
         p.id, editor_user_id=a.user_id, new_content="never mind"
     )
     assert gone.link_preview is None
+
+
+# ─── v_41 moderator seat: content authority without settings authority ──
+
+
+async def _space_with_roles(stack):
+    """anna (owner), olga (admin), mo (moderator), bob (member)."""
+    users = {}
+    for name in ("anna", "olga", "mo", "bob"):
+        users[name] = await stack.provision_user(name)
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    for name in ("olga", "mo", "bob"):
+        await stack.space_svc.add_member(
+            space.id, actor_username="anna", user_id=users[name].user_id
+        )
+    await stack.space_svc.set_role(
+        space.id, actor_username="anna", user_id=users["olga"].user_id, role="admin"
+    )
+    await stack.space_svc.set_role(
+        space.id,
+        actor_username="anna",
+        user_id=users["mo"].user_id,
+        role="moderator",
+    )
+    return space, users
+
+
+async def _moderated(stack, space):
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+
+
+async def test_moderator_works_the_moderation_queue(stack):
+    from socialhome.domain.space import ModerationStatus
+
+    space, u = await _space_with_roles(stack)
+    await _moderated(stack, space)
+    for content in ("one", "two"):
+        await stack.space_svc.create_post(
+            space.id,
+            author_user_id=u["bob"].user_id,
+            type=PostType.TEXT,
+            content=content,
+        )
+    pending = await stack.space_svc.list_pending_moderation(
+        space.id, actor_username="mo"
+    )
+    assert len(pending) == 2
+    approved = await stack.space_svc.approve_moderation_item(
+        space.id, pending[0].id, actor_username="mo"
+    )
+    assert approved.author == u["bob"].user_id
+    await stack.space_svc.reject_moderation_item(
+        space.id, pending[1].id, actor_username="mo", reason="no"
+    )
+    item = await stack.space_repo.get_moderation_item(pending[0].id)
+    assert item.status is ModerationStatus.APPROVED
+    assert item.reviewed_by == u["mo"].user_id
+
+
+async def test_a_member_still_cannot_work_the_queue(stack):
+    space, _u = await _space_with_roles(stack)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.list_pending_moderation(space.id, actor_username="bob")
+
+
+async def test_moderator_bypasses_moderated_but_not_admin_only(stack):
+    space, u = await _space_with_roles(stack)
+    await _moderated(stack, space)
+    post = await stack.space_svc.create_post(
+        space.id,
+        author_user_id=u["mo"].user_id,
+        type=PostType.TEXT,
+        content="straight through",
+    )
+    assert post is not None
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY),
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.create_post(
+            space.id,
+            author_user_id=u["mo"].user_id,
+            type=PostType.TEXT,
+            content="admin only",
+        )
+
+
+async def test_moderator_edits_and_deletes_others_posts_and_comments(stack):
+    space, u = await _space_with_roles(stack)
+    post = await stack.space_svc.create_post(
+        space.id,
+        author_user_id=u["bob"].user_id,
+        type=PostType.TEXT,
+        content="original",
+    )
+    edited = await stack.space_svc.edit_post(
+        post.id, editor_user_id=u["mo"].user_id, new_content="tidied"
+    )
+    assert edited.content == "tidied"
+    comment = await stack.space_svc.add_comment(
+        post.id, author_user_id=u["bob"].user_id, content="hi"
+    )
+    await stack.space_svc.edit_comment(
+        comment.id, editor_user_id=u["mo"].user_id, new_content="hello"
+    )
+    await stack.space_svc.delete_comment(comment.id, actor_user_id=u["mo"].user_id)
+    await stack.space_svc.delete_post(post.id, actor_user_id=u["mo"].user_id)
+    got = await stack.space_post_repo.get(post.id)
+    assert got[1].deleted
+    assert got[1].moderated
+
+
+async def test_a_member_cannot_edit_or_delete_others_posts(stack):
+    space, u = await _space_with_roles(stack)
+    post = await stack.space_svc.create_post(
+        space.id,
+        author_user_id=u["mo"].user_id,
+        type=PostType.TEXT,
+        content="mine",
+    )
+    with pytest.raises(PermissionError):
+        await stack.space_svc.edit_post(
+            post.id, editor_user_id=u["bob"].user_id, new_content="x"
+        )
+    with pytest.raises(PermissionError):
+        await stack.space_svc.delete_post(post.id, actor_user_id=u["bob"].user_id)
+
+
+async def test_moderator_holds_no_settings_power(stack):
+    """Config, members, roles, invites, bans, kicks — every settings guard
+    refuses a moderator."""
+    space, u = await _space_with_roles(stack)
+    bob = u["bob"].user_id
+    attempts = [
+        stack.space_svc.update_config(space.id, actor_username="mo", name="Mine"),
+        stack.space_svc.set_role(
+            space.id, actor_username="mo", user_id=bob, role="moderator"
+        ),
+        stack.space_svc.create_invite_token(space.id, actor_username="mo"),
+        stack.space_svc.ban(space.id, actor_username="mo", user_id=bob),
+        stack.space_svc.remove_member(space.id, actor_username="mo", user_id=bob),
+        stack.space_svc.archive_space(space.id, actor_username="mo"),
+    ]
+    for attempt in attempts:
+        with pytest.raises(SpacePermissionError):
+            await attempt
+    assert (await stack.space_repo.get(space.id)).name == "S"
+    assert (await stack.space_repo.get_member(space.id, bob)).role == "member"
+
+
+async def test_admin_moves_a_member_between_member_and_moderator(stack):
+    space, u = await _space_with_roles(stack)
+    bob = u["bob"].user_id
+    await stack.space_svc.set_role(
+        space.id, actor_username="olga", user_id=bob, role="moderator"
+    )
+    assert (await stack.space_repo.get_member(space.id, bob)).role == "moderator"
+    await stack.space_svc.set_role(
+        space.id, actor_username="olga", user_id=bob, role="member"
+    )
+    assert (await stack.space_repo.get_member(space.id, bob)).role == "member"
+
+
+@pytest.mark.parametrize(
+    ("target", "role"),
+    [
+        ("bob", "admin"),  # an admin cannot make an admin
+        ("mo", "admin"),
+        ("olga", "member"),  # nor touch another admin
+        ("olga", "moderator"),
+        ("anna", "member"),  # nor the owner
+    ],
+)
+async def test_admin_role_changes_outside_the_matrix_are_refused(stack, target, role):
+    space, u = await _space_with_roles(stack)
+    before = (await stack.space_repo.get_member(space.id, u[target].user_id)).role
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_role(
+            space.id, actor_username="olga", user_id=u[target].user_id, role=role
+        )
+    assert (
+        await stack.space_repo.get_member(space.id, u[target].user_id)
+    ).role == before
+
+
+async def test_owner_sets_every_assignable_role(stack):
+    space, u = await _space_with_roles(stack)
+    bob = u["bob"].user_id
+    for role in ("moderator", "admin", "member"):
+        await stack.space_svc.set_role(
+            space.id, actor_username="anna", user_id=bob, role=role
+        )
+        assert (await stack.space_repo.get_member(space.id, bob)).role == role
+
+
+async def test_role_change_publishes_the_role_on_the_config_event(stack):
+    space, u = await _space_with_roles(stack)
+    seen: list[SpaceConfigChanged] = []
+
+    async def _grab(evt):
+        seen.append(evt)
+
+    stack.bus.subscribe(SpaceConfigChanged, _grab)
+    await stack.space_svc.set_role(
+        space.id, actor_username="olga", user_id=u["bob"].user_id, role="moderator"
+    )
+    assert [(e.event_type, e.payload["role"]) for e in seen] == [
+        ("role_changed", "moderator")
+    ]
+
+
+async def test_role_change_event_types_name_what_happened(stack):
+    """M6c — admin granted / admin revoked only when the admin seat moves;
+    member ↔ moderator is ``role_changed`` (local bus only, never wire)."""
+    space, u = await _space_with_roles(stack)
+    seen: list[SpaceConfigChanged] = []
+
+    async def _grab(evt):
+        seen.append(evt)
+
+    stack.bus.subscribe(SpaceConfigChanged, _grab)
+    bob = u["bob"].user_id
+    for role in ("moderator", "admin", "moderator", "member"):
+        await stack.space_svc.set_role(
+            space.id, actor_username="anna", user_id=bob, role=role
+        )
+    assert [e.event_type for e in seen] == [
+        "role_changed",
+        "admin_granted",
+        "admin_revoked",
+        "role_changed",
+    ]
+
+
+async def test_role_changes_happen_on_the_host_only(stack):
+    """There is no forward path for role changes yet: on a stub (a space
+    hosted elsewhere) the matrix would let an admin rewrite a local role the
+    host never learns, so it is refused outright."""
+    space, u = await _space_with_roles(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id=? WHERE id=?",
+        ("some-other-household", space.id),
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_role(
+            space.id,
+            actor_username="olga",
+            user_id=u["bob"].user_id,
+            role="moderator",
+        )
+
+
+async def test_invite_links_never_seat_a_moderator(stack):
+    """Nobody joins as a moderator — it is granted by promotion."""
+    space, _u = await _space_with_roles(stack)
+    with pytest.raises(ValueError):
+        await stack.space_svc.create_invite_token(
+            space.id, actor_username="anna", role="moderator"
+        )
+
+
+async def test_moderator_roster_gossip_is_gated_on_v30(stack):
+    """A ``moderator`` role is coerced down to ``member`` by every v_30+
+    receiver (``mirrorable_remote_role``) but would raise out of a sub-v_30
+    receiver's role CHECK and lose the roster event — so it rides the same
+    floor as a ``subscriber``."""
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    space, u = await _space_with_roles(stack)
+    fed = _roster_gossip_fed()
+    stack.space_svc._federation = fed
+    await stack.space_svc.set_role(
+        space.id, actor_username="anna", user_id=u["bob"].user_id, role="moderator"
+    )
+    [joined] = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_JOINED)
+    assert joined.args[2]["role"] == "moderator"
+    assert (
+        joined.kwargs["min_proto_version"]
+        == FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE
+    )
+
+
+# ── remote seats ──
+
+
+async def _remote_seat_space(stack, *, supports=True):
+    """anna (owner) + olga (local admin), remote ru1@peer-x (member)."""
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    await stack.provision_user("anna")
+    olga = await stack.provision_user("olga")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=olga.user_id
+    )
+    await stack.space_svc.set_role(
+        space.id, actor_username="anna", user_id=olga.user_id, role="admin"
+    )
+    fed = _roster_gossip_fed()
+
+    async def _supports(iid, *, min_version):
+        if min_version >= FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE:
+            return supports
+        return True
+
+    fed.peer_supports = AsyncMock(side_effect=_supports)
+    stack.space_svc._federation = fed
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru1",
+        user_pk=None,
+        display_name="R",
+    )
+    return space, fed, remote
+
+
+async def test_admin_promotes_a_remote_member_to_moderator(stack):
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    space, fed, remote = await _remote_seat_space(stack)
+    await stack.space_svc.set_remote_member_role(
+        space.id,
+        actor_username="olga",
+        instance_id="peer-x",
+        user_id="ru1",
+        role="moderator",
+    )
+    assert (await remote.get(space.id, "peer-x", "ru1")).role == "moderator"
+    [changed] = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_ROLE_CHANGED)
+    assert changed.args[2]["role"] == "moderator"
+    # A v_40 household drops an unknown role, so it gets ``member`` instead —
+    # never left believing a demoted admin is still an admin.
+    assert changed.kwargs["legacy_payload"]["role"] == "member"
+    assert {
+        k: v for k, v in changed.kwargs["legacy_payload"].items() if k != "role"
+    } == {k: v for k, v in changed.args[2].items() if k != "role"}
+    assert (
+        changed.kwargs["legacy_below"]
+        == FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE
+    )
+    # A moderator is never sent the delegated signing seed.
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_an_admin_role_change_carries_no_legacy_payload(stack):
+    from socialhome.domain.federation import FederationEventType
+
+    space, fed, _remote = await _remote_seat_space(stack)
+    await stack.space_svc.set_remote_member_role(
+        space.id,
+        actor_username="anna",
+        instance_id="peer-x",
+        user_id="ru1",
+        role="admin",
+    )
+    [changed] = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_ROLE_CHANGED)
+    assert changed.kwargs.get("legacy_payload") is None
+
+
+async def test_promoting_a_user_whose_household_is_behind_is_refused(stack):
+    space, fed, remote = await _remote_seat_space(stack, supports=False)
+    with pytest.raises(HouseholdUpgradeRequiredError, match="upgrade"):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="anna",
+            instance_id="peer-x",
+            user_id="ru1",
+            role="moderator",
+        )
+    assert (await remote.get(space.id, "peer-x", "ru1")).role == "member"
+    fed.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_admin_cannot_make_a_remote_admin(stack):
+    space, _fed, remote = await _remote_seat_space(stack)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="olga",
+            instance_id="peer-x",
+            user_id="ru1",
+            role="admin",
+        )
+    assert (await remote.get(space.id, "peer-x", "ru1")).role == "member"
+
+
+async def test_a_remote_role_outside_the_vocabulary_is_rejected(stack):
+    space, _fed, _remote = await _remote_seat_space(stack)
+    with pytest.raises(ValueError):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="anna",
+            instance_id="peer-x",
+            user_id="ru1",
+            role="owner",
+        )
+
+
+async def test_remote_moderator_cannot_drive_a_remote_admin_action(stack):
+    """``apply_remote_admin_action`` stays role-EXACT on ``admin``."""
+    from socialhome.domain.space import RemoteAdminOutcome
+
+    space = await _host_space_with_remote_admin(stack, delegation=True, admin=False)
+    await stack.space_svc._remote_members.set_role(
+        space.id, "instance-A", "u-admin", SpaceRole.MODERATOR
+    )
+    outcome = await stack.space_svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        action="update_config",
+        params={"name": "Hacked"},
+    )
+    assert outcome is RemoteAdminOutcome.DROPPED
+    assert (await stack.space_repo.get(space.id)).name == "S"
+
+
+async def test_remote_moderator_cannot_kick(stack):
+    space = await _host_space_with_remote_admin(stack, delegation=True, admin=False)
+    await stack.space_svc._remote_members.set_role(
+        space.id, "instance-A", "u-admin", SpaceRole.MODERATOR
+    )
+    victim = await stack.provision_user("victim")
+    await stack.space_svc.add_member(
+        space.id, actor_username="alicehost", user_id=victim.user_id
+    )
+    await stack.space_svc.apply_remote_admin_kick(
+        space.id,
+        actor_instance_id="instance-A",
+        actor_user_id="u-admin",
+        target_user_id=victim.user_id,
+    )
+    assert await stack.space_repo.get_member(space.id, victim.user_id) is not None
+
+
+async def test_a_moderator_kick_reaches_a_v25_peer(stack):
+    """A removal must reach every roster-gossip peer (v_23+): a LEFT for a
+    moderator is signed as ``member`` (storable everywhere) and is NOT
+    floored at v_30 the way a moderator JOINED is."""
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    space, u = await _space_with_roles(stack)
+    fed = _roster_gossip_fed()
+    stack.space_svc._federation = fed
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=u["mo"].user_id
+    )
+    [left] = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_LEFT)
+    assert left.args[2]["role"] == "member"
+    floor = left.kwargs["min_proto_version"]
+    assert floor == FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP
+    assert floor <= 25
+
+
+async def test_a_remote_moderator_kick_reaches_a_v25_peer(stack):
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    space, fed, remote = await _remote_seat_space(stack)
+    await remote.set_role(space.id, "peer-x", "ru1", "moderator")
+    stack.space_svc._federation_repo = AsyncMock()
+    await stack.space_svc.remove_remote_member(
+        space.id, actor_username="anna", instance_id="peer-x", user_id="ru1"
+    )
+    lefts = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_LEFT)
+    assert lefts, "no LEFT gossip"
+    for left in lefts:
+        assert left.args[2]["role"] == "member"
+        assert (
+            left.kwargs["min_proto_version"]
+            == FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP
+        )

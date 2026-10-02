@@ -332,6 +332,29 @@ async def test_subscriber_gossip_is_mirrored_as_a_follower_seat(handler):
     )
 
 
+async def test_moderator_gossip_is_mirrored_as_a_moderator_seat(handler):
+    """v_41 — ``moderator`` is a real remote seat (migration 0065)."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-mod",
+        "instance_id": "inst-mod",
+        "role": "moderator",
+        "member_version": 5,
+    }
+    ev = _event("SPACE_MEMBER_JOINED", payload, from_instance="inst-mod")
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload)),
+    ):
+        await handler.h._on_space_member_joined(ev)
+
+    assert (
+        handler.remote_members.apply_member_event.await_args.kwargs["role"]
+        == "moderator"
+    )
+
+
 async def test_out_of_vocabulary_gossip_role_keeps_the_mutation(handler):
     """A role this household's CHECK rejects — ``owner`` (the host ships
     the raw ``space_members.role``), or one from a future version — used
@@ -1599,6 +1622,27 @@ async def test_accept_never_raises_an_existing_follower_seat(handler):
     handler.remote_members.add.assert_not_awaited()
 
 
+@pytest.mark.parametrize("role", [SpaceRole.MODERATOR.value, SpaceRole.ADMIN.value])
+async def test_accept_never_demotes_a_moderator_or_admin_seat(handler, role):
+    """The ``live_seat.role != MEMBER`` guard also keeps an accept from
+    re-seating a v_41 moderator (or an admin) as a plain member — a stale
+    ticket must not quietly strip content authority."""
+    from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
+
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(10)
+    handler.remote_members.get = AsyncMock(
+        return_value=SpaceRemoteMember(
+            space_id="sp-a", instance_id="peer-1", user_id="u1", role=role
+        ),
+    )
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1"},
+    )
+    await handler.h._on_accept(ev)
+    handler.remote_members.add.assert_not_awaited()
+
+
 async def test_decline_from_another_household_is_refused(handler):
     """A token is not a capability: a third party must not be able to
     cancel somebody else's pending invitation."""
@@ -1675,6 +1719,21 @@ async def test_space_location_updated_refuses_a_subscriber_seat():
     )
     await h._on_space_location_updated(ev)
     locations.upsert.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "role",
+    [SpaceRole.MEMBER.value, SpaceRole.MODERATOR.value, SpaceRole.ADMIN.value],
+)
+async def test_space_location_updated_accepts_every_writer_seat(role):
+    """A ``moderator`` (v_41) shares a location like any member."""
+    h, locations, _ = await _location_handler(role)
+    ev = _event(
+        "SPACE_LOCATION_UPDATED",
+        {"space_id": "sp-a", "user_id": "u1", "mode": "gps", "lat": 1.0, "lon": 2.0},
+    )
+    await h._on_space_location_updated(ev)
+    locations.upsert.assert_awaited_once()
 
 
 async def test_space_location_updated_pins_the_routing_space_id():

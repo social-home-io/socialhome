@@ -912,3 +912,65 @@ def test_catchup_media_includes_the_link_preview_image():
         link_preview=LinkPreview(url="https://example.com/", title="T"),
     )
     assert SpaceSyncService._post_media_urls(no_image) == []
+
+
+# ─── v_41: a pre-moderator requester gets ``member`` for a moderator ────
+
+
+def _members_provider(encoder):
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    exporters = {
+        "members": _FakeExporter(
+            "members",
+            [
+                {"user_id": "u-mod", "role": "moderator"},
+                {"user_id": "u-adm", "role": "admin"},
+            ],
+        ),
+    }
+    return SpaceSyncService(builder=builder, exporters=exporters, sig_suite="ed25519")
+
+
+def _member_roles(session) -> dict[str, str]:
+    import base64
+
+    roles: dict[str, str] = {}
+    for raw in session.rtc.sent:
+        env = orjson.loads(raw)
+        if env["resource"] != "members":
+            continue
+        plain = base64.urlsafe_b64decode(env["encrypted_payload"])
+        for r in orjson.loads(plain)["records"]:
+            roles[r["user_id"]] = r["role"]
+    return roles
+
+
+@pytest.mark.parametrize(
+    ("supports", "expected"),
+    [(True, "moderator"), (False, "member")],
+)
+async def test_members_stream_degrades_moderator_for_a_v40_requester(
+    encoder, supports, expected
+):
+    """A v_40 receiver's ``space_members.role`` CHECK rejects ``moderator``
+    and the whole members chunk with it — so a requester below v_41 is
+    streamed the role it knows that grants no more."""
+    from unittest.mock import AsyncMock
+
+    svc = _members_provider(encoder)
+    federation = AsyncMock()
+    federation.peer_supports = AsyncMock(return_value=supports)
+    svc.attach_federation(federation)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    assert _member_roles(session) == {"u-mod": expected, "u-adm": "admin"}
+    session2 = _FakeSession()
+    await svc.stream_request_more(session2, {"resource": "members"})
+    assert _member_roles(session2) == {"u-mod": expected, "u-adm": "admin"}
+
+
+async def test_members_stream_without_federation_degrades_conservatively(encoder):
+    svc = _members_provider(encoder)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    assert _member_roles(session)["u-mod"] == "member"

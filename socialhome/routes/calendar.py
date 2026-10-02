@@ -15,7 +15,7 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.calendar import CalendarEvent, CalendarEventCopy
-from ..domain.space import SpaceMember, SpaceRole
+from ..domain.space import CONTENT_AUTHORITY_ROLES, SpaceMember
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
 from ..services.calendar_import_service import (
@@ -847,7 +847,7 @@ class CalendarEventApprovalView(BaseView):
     Phase C: approve or deny a member's pending request-to-join on a
     capped event. Body: ``{"user_id": str, "occurrence_at"?: str,
     "action": "approve" | "deny"}``. Approver gate: caller must be the
-    event creator OR a space admin/owner.
+    event creator OR a space owner / admin / moderator.
     """
 
     async def post(self) -> web.Response:
@@ -865,18 +865,19 @@ class CalendarEventApprovalView(BaseView):
             )
 
         space_cal_svc = self.svc(K.space_cal_service_key)
-        # Approver = event creator OR space admin/owner — a member with a
-        # writable seat in a non-archived space.
+        # Approver = event creator OR content authority (owner / admin /
+        # moderator) — deciding on somebody else's event is moderation; a
+        # member with a writable seat in a non-archived space.
         space_id, event, member = await event_access(
             self, event_id, ctx.user_id, write=True, action="approve RSVPs"
         )
         is_creator = event.created_by == ctx.user_id
-        is_admin = member.role in (SpaceRole.OWNER, SpaceRole.ADMIN)
-        if not (is_creator or is_admin):
+        is_moderator = member.role in CONTENT_AUTHORITY_ROLES
+        if not (is_creator or is_moderator):
             return error_response(
                 403,
                 "FORBIDDEN",
-                "Only the event creator or a space admin can approve.",
+                "Only the event creator or a space moderator can approve.",
             )
 
         try:
@@ -920,12 +921,13 @@ class CalendarEventPendingView(BaseView):
         occurrence_at = self.request.query.get("occurrence_at")
         space_cal_svc = self.svc(K.space_cal_service_key)
         _space_id, event, member = await event_access(self, event_id, ctx.user_id)
-        is_admin = member.role in (SpaceRole.OWNER, SpaceRole.ADMIN)
-        if event.created_by != ctx.user_id and not is_admin:
+        is_moderator = member.role in CONTENT_AUTHORITY_ROLES
+        if event.created_by != ctx.user_id and not is_moderator:
             return error_response(
                 403,
                 "FORBIDDEN",
-                "Only the event creator or a space admin can list pending requests.",
+                "Only the event creator or a space moderator can list pending "
+                "requests.",
             )
         pending = await space_cal_svc.list_pending(
             event_id,

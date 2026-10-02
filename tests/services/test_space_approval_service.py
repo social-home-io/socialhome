@@ -824,3 +824,37 @@ async def test_protected_approval_of_an_unknown_proposal_fails_closed(stack):
         await stack.approvals.vote(
             space.id, "not-mirrored-yet", actor_username="kid", approve=True
         )
+
+
+# ── v_41 moderators are not in the electorate ─────────────────────────
+
+
+async def test_moderators_neither_vote_nor_count_toward_the_majority(stack):
+    """A moderator (local or remote) holds content authority only: they
+    may not propose / vote, and the solo owner still executes at once."""
+    space = await _space(stack)
+    mo = await _user(stack, "mo")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id,
+            user_id=mo.user_id,
+            role=SpaceRole.MODERATOR,
+            joined_at="2026-06-01T00:00:00+00:00",
+        )
+    )
+    await stack.remote.add(
+        space_id=space.id,
+        instance_id="peer-mod",
+        user_id="ru-mod",
+        user_pk=None,
+        display_name=None,
+        role=SpaceRole.MODERATOR.value,
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.approvals.propose(
+            space.id, actor_username="mo", action=ProposalAction.DISSOLVE
+        )
+    view = await stack.approvals.propose(
+        space.id, actor_username="alice", action=ProposalAction.DISSOLVE
+    )
+    assert view["status"] == ProposalStatus.EXECUTED.value

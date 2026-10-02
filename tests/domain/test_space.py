@@ -5,7 +5,10 @@ from __future__ import annotations
 import pytest
 
 from socialhome.domain.space import (
+    CONTENT_AUTHORITY_ROLES,
     MIRRORABLE_REMOTE_ROLES,
+    SETTINGS_AUTHORITY_ROLES,
+    WRITER_ROLES,
     HouseholdFeatures,
     JoinMode,
     RemoteAdminOutcome,
@@ -16,6 +19,7 @@ from socialhome.domain.space import (
     SpaceRole,
     mirrorable_remote_role,
     normalize_join_mode,
+    role_change_allowed,
     normalize_min_age,
     normalize_retention_exempt_types,
 )
@@ -158,6 +162,21 @@ def test_space_features_access_decision():
     assert f2.access_decision("posts", is_admin=False) == "deny"
 
 
+def test_a_moderator_bypasses_moderated_but_not_admin_only():
+    """Content authority skips the queue for one's own post; an
+    ``ADMIN_ONLY`` feature stays owner / admin only."""
+    moderated = SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED)
+    assert (
+        moderated.access_decision("posts", is_admin=False, is_moderator=True)
+        == "proceed"
+    )
+    admin_only = SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY)
+    assert (
+        admin_only.access_decision("posts", is_admin=False, is_moderator=True) == "deny"
+    )
+    assert admin_only.access_decision("posts", is_admin=True) == "proceed"
+
+
 def test_space_features_with_allowed_post_types():
     """with_allowed_post_types normalises and stores the set; empty set raises ValueError."""
     f = SpaceFeatures()
@@ -273,10 +292,10 @@ def test_normalize_join_mode_accepts_the_enum_member():
 # ─── mirrorable_remote_role ──────────────────────────────────────────────
 
 
-def test_mirrorable_remote_roles_are_the_three_remote_seats():
+def test_mirrorable_remote_roles_are_the_four_remote_seats():
     """The ``space_remote_members.role`` CHECK, in code. ``owner`` is
     absent: ownership is local-only and has no remote row shape."""
-    assert MIRRORABLE_REMOTE_ROLES == {"member", "admin", "subscriber"}
+    assert MIRRORABLE_REMOTE_ROLES == {"member", "admin", "moderator", "subscriber"}
 
 
 def test_a_real_remote_role_passes_through():
@@ -340,3 +359,81 @@ def test_retention_exempt_types_dedupes_strips_and_sorts():
 
 def test_retention_exempt_types_none_is_empty():
     assert normalize_retention_exempt_types(None, strict=True) == ()
+
+
+# ─── Role authority sets + the promotion matrix ───────────────────────────
+
+_O, _A, _MOD, _M, _S = (
+    SpaceRole.OWNER,
+    SpaceRole.ADMIN,
+    SpaceRole.MODERATOR,
+    SpaceRole.MEMBER,
+    SpaceRole.SUBSCRIBER,
+)
+
+
+def test_moderator_role_value():
+    assert SpaceRole.MODERATOR.value == "moderator"
+    assert [r.value for r in SpaceRole] == [
+        "owner",
+        "admin",
+        "moderator",
+        "member",
+        "subscriber",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("role", "settings", "content", "writer"),
+    [
+        (_O, True, True, True),
+        (_A, True, True, True),
+        (_MOD, False, True, True),
+        (_M, False, False, True),
+        (_S, False, False, False),
+    ],
+)
+def test_role_authority_matrix(role, settings, content, writer):
+    """The three sets are the only in-code authority: a moderator has
+    content authority and writes, but holds no settings power."""
+    assert (role in SETTINGS_AUTHORITY_ROLES) is settings
+    assert (role in CONTENT_AUTHORITY_ROLES) is content
+    assert (role in WRITER_ROLES) is writer
+    # The sets hold plain strings too (wire / row values compare equal).
+    assert (role.value in CONTENT_AUTHORITY_ROLES) is content
+
+
+def test_authority_sets_nest():
+    assert SETTINGS_AUTHORITY_ROLES < CONTENT_AUTHORITY_ROLES < WRITER_ROLES
+
+
+def test_moderator_is_mirrorable_but_owner_is_not():
+    assert mirrorable_remote_role("moderator") == "moderator"
+    assert mirrorable_remote_role("owner") == "member"
+
+
+_ALLOWED: set[tuple[SpaceRole, SpaceRole, SpaceRole]] = {
+    # The owner sets admin / moderator / member on any non-owner seat.
+    *((_O, cur, new) for cur in (_A, _MOD, _M, _S) for new in (_A, _MOD, _M)),
+    # An admin moves a seat only between member and moderator.
+    *((_A, cur, new) for cur in (_MOD, _M) for new in (_MOD, _M)),
+}
+
+
+@pytest.mark.parametrize("actor", list(SpaceRole))
+@pytest.mark.parametrize("current", list(SpaceRole))
+@pytest.mark.parametrize("new", list(SpaceRole))
+def test_role_change_matrix(actor, current, new):
+    """Exhaustive 5x5x5 matrix. Nobody assigns ``owner`` (transfer does);
+    nobody demotes the owner; an admin can't touch another admin or
+    make one; moderators, members and subscribers change no roles."""
+    expected = (actor, current, new) in _ALLOWED
+    assert role_change_allowed(actor, current, new) is expected
+    # Plain strings (route / row values) give the same answer.
+    assert role_change_allowed(actor.value, current.value, new.value) is expected
+
+
+def test_role_change_rejects_unknown_roles():
+    assert role_change_allowed("owner", "member", "overlord") is False
+    assert role_change_allowed("overlord", "member", "moderator") is False
+    assert role_change_allowed("owner", "overlord", "member") is False

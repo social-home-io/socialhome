@@ -8,6 +8,7 @@
  * one doesn't echo into the other when both are on screen at the
  * same time. Edit uses local component state (multiple can coexist).
  */
+import { canModerate } from '@/features/spaces/spaceRoles'
 import { signal, type Signal } from '@preact/signals'
 import { useRef, useState } from 'preact/hooks'
 import { Avatar } from './Avatar'
@@ -28,7 +29,7 @@ import {
 } from './MentionAutocomplete'
 import { TypingIndicator, sendTyping } from './TypingIndicator'
 import { currentUser } from '@/store/auth'
-import { spaceMentionRender } from '@/store/spaceMembers'
+import { spaceMentionRender, viewerSpaceRole } from '@/store/spaceMembers'
 import { splitMentions } from '@/utils/mentions'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { Comment } from '@/types'
@@ -270,8 +271,14 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
   const [menuOpen, setMenuOpen] = useState(false)
 
   const isMine = currentUser.value?.user_id === comment.author
-  const canDelete = !!onDelete && (isMine || currentUser.value?.is_admin)
-  const canEdit = !!onEdit && isMine && comment.type === 'text'
+  // In a space, acting on somebody else's comment is content authority
+  // (owner / admin / moderator, from the viewer's SPACE role); on the
+  // household feed it stays the household admin's delete.
+  const moderates = spaceId
+    ? canModerate(viewerSpaceRole(spaceId))
+    : !!currentUser.value?.is_admin
+  const canDelete = !!onDelete && (isMine || moderates)
+  const canEdit = !!onEdit && comment.type === 'text' && (isMine || (!!spaceId && moderates))
 
   const authorName = resolveDisplayName(spaceId, comment.author, comment.author)
   const avatarUrl = resolveAvatar(spaceId, comment.author, null)

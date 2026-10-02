@@ -1026,6 +1026,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   white-space: nowrap;
 }
 .sh-badge--admin { background: color-mix(in srgb, var(--sh-primary) 15%, transparent); color: var(--sh-primary-text); border-color: transparent; }
+.sh-badge--moderator { background: color-mix(in srgb, var(--sh-success) 15%, transparent); color: var(--sh-success); border-color: transparent; }
 .sh-badge--success { background: color-mix(in srgb, var(--sh-success) 15%, transparent); color: var(--sh-success); border-color: transparent; }
 .sh-badge--danger { background: color-mix(in srgb, var(--sh-danger) 15%, transparent); color: var(--sh-danger-on-soft); border-color: transparent; }
 .sh-badge--peer, .sh-badge--owner { background: color-mix(in srgb, var(--sh-warning) 15%, transparent); color: var(--sh-warning); border-color: transparent; }
@@ -9492,6 +9493,8 @@ hr {
 .sh-member-row:last-child { border-bottom: none; }
 .sh-member-row--owner      { border-left-color: var(--sh-primary); }
 .sh-member-row--admin      { border-left-color: var(--sh-warning); }
+/* Between admin (warning) and member (success): content authority, no settings. */
+.sh-member-row--moderator  { border-left-color: color-mix(in srgb, var(--sh-warning) 50%, var(--sh-success)); }
 .sh-member-row--member     { border-left-color: var(--sh-success); }
 .sh-member-row--subscriber { border-left-color: var(--sh-text-muted); }
 .sh-member-row--banned     { opacity: 0.5; background: color-mix(in srgb, var(--sh-danger) 4%, transparent); border-left-color: var(--sh-danger); }
@@ -9499,6 +9502,10 @@ hr {
   background: color-mix(in srgb, var(--sh-primary) 6%, transparent);
 }
 .sh-member-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* Role / "you" chips hug their label instead of stretching across the
+ * column-flex info block. */
+.sh-member-info > .sh-badge,
+.sh-member-info > .sh-member-me-chip { align-self: flex-start; }
 .sh-member-name { font-weight: 600; }
 /* Joined date sits on its own line under the name + chips so a long
  * display name doesn't push the date off the row (or worse, collide
@@ -9516,7 +9523,32 @@ hr {
   font-weight: 700;
   align-self: flex-start;
 }
-.sh-member-actions { display: flex; gap: var(--sh-space-xs); }
+.sh-member-actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+/* Role picker (owner: admin / moderator / member; admin: member ↔ moderator).
+ * Its own full-width row above Remove / Ban so the choices read as one
+ * group and wrap cleanly on a phone. */
+.sh-member-actions-roles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  flex-basis: 100%;
+  padding-bottom: var(--sh-space-xs);
+  border-bottom: 1px solid var(--sh-border);
+  margin-bottom: var(--sh-space-xs);
+}
+.sh-member-actions-label {
+  flex-basis: 100%;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+  color: var(--sh-text-muted);
+}
+.sh-member-actions-error {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-danger);
+}
 
 /* ── Personal nickname (§4.1.6) ─────────────────────────────────────── */
 /* Subtle pencil glyph on member rows that opens the alias dialog. The

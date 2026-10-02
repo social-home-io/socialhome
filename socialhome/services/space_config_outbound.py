@@ -60,6 +60,7 @@ log = logging.getLogger(__name__)
 _ROSTER_EVENT_TYPES = {
     SpaceConfigEventType.ADMIN_GRANTED.value,
     SpaceConfigEventType.ADMIN_REVOKED.value,
+    SpaceConfigEventType.ROLE_CHANGED.value,
     SpaceConfigEventType.MEMBER_BANNED.value,
     SpaceConfigEventType.MEMBER_UNBANNED.value,
 }

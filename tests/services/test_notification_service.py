@@ -484,6 +484,44 @@ async def test_moderation_queued_notifies_admins(stack):
     assert any("pending review" in n.title for n in anna_n)
 
 
+async def test_moderation_queued_notifies_moderators_but_not_members(stack):
+    """v_41 — moderators work the queue, so they are told about it; a plain
+    member is not."""
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.space_service import SpaceService
+    from socialhome.domain.space import SpaceFeatures, SpaceFeatureAccess
+
+    await stack.provision_user("anna")
+    mo = await stack.provision_user("mo")
+    b = await stack.provision_user("bob")
+    c = await stack.provision_user("cara")
+    space_svc = SpaceService(
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="anna", name="Mod")
+    for u in (mo, b, c):
+        await space_svc.add_member(space.id, actor_username="anna", user_id=u.user_id)
+    await space_svc.set_role(
+        space.id, actor_username="anna", user_id=mo.user_id, role="moderator"
+    )
+    await space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+    await space_svc.create_post(
+        space.id, author_user_id=b.user_id, type=PostType.TEXT, content="pending"
+    )
+    mo_n = await stack.notif_repo.list(mo.user_id, limit=50)
+    cara_n = await stack.notif_repo.list(c.user_id, limit=50)
+    assert any("pending review" in n.title for n in mo_n)
+    assert not any("pending review" in n.title for n in cara_n)
+
+
 async def test_task_deadline_notifies_assignees(stack):
     """TaskDeadlineDue notifies all assignees."""
     from datetime import date

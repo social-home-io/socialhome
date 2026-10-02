@@ -15,8 +15,16 @@ Permissions enforced here (route layer never duplicates them):
 
 * ``_require_member(space_id, user_id)`` for any read or member-level
   mutation.
-* ``_require_admin_or_owner`` for config updates, bans, invites.
+* ``_require_admin_or_owner`` — **settings authority**
+  (``SETTINGS_AUTHORITY_ROLES``: owner / admin) — for config updates,
+  bans, invites, members and roles.
+* ``_require_content_authority`` — **content authority**
+  (``CONTENT_AUTHORITY_ROLES``: owner / admin / moderator) — for the
+  moderation queue and edits / deletes of other people's posts and
+  comments.
 * ``_require_owner`` for dissolve + ownership transfer.
+* Role changes follow :func:`role_change_allowed` (owner: admin /
+  moderator / member; admin: member ↔ moderator only).
 
 Polls, tasks, pages and calendar events on a space are delegated to their
 own sibling services. The space-posts code here deliberately stops short
@@ -117,6 +125,9 @@ from ..domain.space import (
     PUBLIC_SPACE_TIERS,
     SPACE_CATEGORIES,
     JoinMode,
+    CONTENT_AUTHORITY_ROLES,
+    SETTINGS_AUTHORITY_ROLES,
+    HouseholdUpgradeRequiredError,
     ModerationAlreadyDecidedError,
     ModerationStatus,
     PublicSpaceLimitError,
@@ -131,6 +142,8 @@ from ..domain.space import (
     SpaceType,
     mirrorable_remote_role,
     normalize_category,
+    role_change_allowed,
+    role_change_event_type,
     normalize_min_age,
     normalize_retention_exempt_types,
 )
@@ -160,6 +173,12 @@ from .space_mentions import SpaceMentionResolver
 
 
 log = logging.getLogger(__name__)
+
+#: Roles :meth:`SpaceService.set_remote_member_role` may assign. ``owner`` is
+#: local-only; ``subscriber`` is seated by a Follower link, not a promotion.
+_REMOTE_ASSIGNABLE_ROLES: frozenset[SpaceRole] = frozenset(
+    {SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER}
+)
 
 
 #: Sentinel for ``update_member_profile`` partial-patch kwargs.
@@ -1462,6 +1481,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         # older version that receivers drop as stale (a demotion or kick
         # between a joiner's invitation and its accept would never reach
         # the joiner).
+        # v_41 — a removal must reach EVERY roster-gossip household, so a
+        # moderator's LEFT is signed as ``member`` (storable on any v_23+
+        # receiver; a tombstone's role grants nothing) instead of being
+        # floored at v_30 like a moderator JOINED below. Otherwise a v_23–
+        # v_29 household would keep the removed moderator's seat forever.
+        if tombstoned and str(role) == SpaceRole.MODERATOR.value:
+            role = SpaceRole.MEMBER.value
         if (
             self._remote_members is not None
             and instance_id
@@ -1516,8 +1542,17 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         # ``member_version``. So a follower's roster event is simply not sent
         # to a sub-v_30 household: it keeps the pre-v_30 view (no follower in
         # its mirror) instead of losing the event that carried one.
+        #
+        # v_41 — a ``moderator`` role rides the same floor: every v_30+
+        # receiver coerces an unknown role DOWN to ``member``
+        # (``mirrorable_remote_role`` shipped in v_30), which is the safe
+        # degraded view, while a sub-v_30 receiver's CHECK would reject it
+        # exactly like a subscriber. The payload is authority-signed, so it
+        # cannot be rewritten per peer.
+        # (Only a JOINED carries ``moderator`` — a LEFT was rewritten to
+        # ``member`` above.)
         min_version = FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP
-        if str(role) == SpaceRole.SUBSCRIBER.value:
+        if str(role) in (SpaceRole.SUBSCRIBER.value, SpaceRole.MODERATOR.value):
             min_version = FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE
         try:
             await self._federation.broadcast_to_space_members(
@@ -2339,22 +2374,29 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         user_id: str,
         role: str,
     ) -> None:
-        """Only the owner can promote/demote admins. Owner cannot be demoted."""
+        """Change a local member's role per :func:`role_change_allowed`.
+
+        The owner sets ``admin`` / ``moderator`` / ``member``; an admin
+        moves a target only between ``member`` and ``moderator``. The owner
+        cannot be demoted, and ``owner`` is assigned only by
+        :meth:`transfer_ownership`.
+        """
         space = await self._require_space(space_id)
-        await self._require_owner(space, actor_username)
         if role == SpaceRole.OWNER:
             raise ValueError("use transfer_ownership to assign owner role")
+        actor = await self._require_admin_or_owner(space, actor_username)
+        self._require_role_host(space)
         target = await self._spaces.get_member(space_id, user_id)
         if target is None:
             raise KeyError(f"user {user_id!r} is not a member")
         if target.role == SpaceRole.OWNER:
             raise SpacePermissionError("cannot demote the owner")
+        if not role_change_allowed(actor.role, target.role, role):
+            raise SpacePermissionError(
+                f"a space {actor.role} cannot change a {target.role} to {role}",
+            )
         await self._spaces.set_role(space_id, user_id, role)
-        evt = (
-            SpaceConfigEventType.ADMIN_GRANTED
-            if role == SpaceRole.ADMIN
-            else SpaceConfigEventType.ADMIN_REVOKED
-        )
+        evt = role_change_event_type(target.role, role)
         # A role change is a ROSTER mutation, not a config edit — it must NOT
         # advance config_sequence (that lagged member stubs and collided
         # offline-of-owner config edits). The roster effect federates via
@@ -2734,13 +2776,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         user_id: str,
         role: str,
     ) -> None:
-        """Cross-household admin promotion (#114, PR #434).
+        """Cross-household role change (#114, PR #434; moderator v_41).
 
-        Only the owner can promote/demote admins (mirrors
-        :meth:`set_role` for local members). Updates the host's
-        ``space_remote_members.role`` and broadcasts
-        ``SPACE_MEMBER_ROLE_CHANGED`` to every member household so
-        each household's local view of the roster stays in sync.
+        Same matrix as :meth:`set_role` (:func:`role_change_allowed`): the
+        owner sets ``admin`` / ``moderator`` / ``member``, an admin moves a
+        target only between ``member`` and ``moderator``. Updates the
+        host's ``space_remote_members.role`` and broadcasts
+        ``SPACE_MEMBER_ROLE_CHANGED`` to every member household so each
+        household's local view of the roster stays in sync — households
+        below v_41 get ``role: "member"`` for a moderator, since they drop a
+        role they don't know (a demoted admin would otherwise stay admin
+        there).
+
+        Promoting to ``moderator`` a user whose HOME household is below
+        v_41 is refused: their own household could not store the seat, so
+        they would hold an authority they can't see or use.
 
         Owner role is not assignable to a remote member — ownership
         carries local-only privileges (dissolve, ownership transfer)
@@ -2748,12 +2798,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         """
         if self._federation is None or self._remote_members is None:
             raise RuntimeError("federation not attached")
-        if role not in (SpaceRole.ADMIN, SpaceRole.MEMBER):
+        if role not in _REMOTE_ASSIGNABLE_ROLES:
             raise ValueError(
-                f"remote member role must be 'admin' or 'member', got {role!r}",
+                "remote member role must be 'admin', 'moderator' or 'member', "
+                f"got {role!r}",
             )
         space = await self._require_space(space_id)
-        await self._require_owner(space, actor_username)
+        actor = await self._require_admin_or_owner(space, actor_username)
+        self._require_role_host(space)
         target = await self._remote_members.get(space_id, instance_id, user_id)
         if target is None:
             raise KeyError(
@@ -2761,12 +2813,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             )
         if target.role == role:
             return
+        if not role_change_allowed(actor.role, target.role, role):
+            raise SpacePermissionError(
+                f"a space {actor.role} cannot change a {target.role} to {role}",
+            )
+        if role == SpaceRole.MODERATOR and not await self._federation.peer_supports(
+            instance_id,
+            min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+        ):
+            raise HouseholdUpgradeRequiredError(
+                "this member's household must upgrade before they can be a moderator",
+            )
         await self._remote_members.set_role(space_id, instance_id, user_id, role)
-        evt = (
-            SpaceConfigEventType.ADMIN_GRANTED
-            if role == SpaceRole.ADMIN
-            else SpaceConfigEventType.ADMIN_REVOKED
-        )
+        evt = role_change_event_type(target.role, role)
         # A role change is a ROSTER mutation, not a config edit — it must NOT
         # advance config_sequence. The roster effect federates via
         # _emit_member_roster_gossip below (roster_sequence); the local bus
@@ -2783,15 +2842,27 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
                 sequence=space.config_sequence,
             )
         )
+        role_payload = {
+            "space_id": space_id,
+            "user_id": user_id,
+            "instance_id": instance_id,
+            "role": role,
+        }
+        # v_41 — a pre-moderator household drops an unknown role on this
+        # event, so it would keep whatever it held (an admin being demoted
+        # to moderator would stay admin there). Send it the closest role it
+        # knows that grants no more: ``member``.
+        legacy = (
+            {**role_payload, "role": SpaceRole.MEMBER.value}
+            if role == SpaceRole.MODERATOR
+            else None
+        )
         broadcast = await self._federation.broadcast_to_space_members(
             space_id,
             FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
-            {
-                "space_id": space_id,
-                "user_id": user_id,
-                "instance_id": instance_id,
-                "role": role,
-            },
+            role_payload,
+            legacy_payload=legacy,
+            legacy_below=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
         )
         # Only TERMINAL failures are worth a WARNING. A direct-peer failure
         # (``DELIVERY_ERROR_QUEUED``) was parked in the durable outbox by
@@ -2981,7 +3052,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         if member.user_id == actor_user_id:
             return
         actor = await self._spaces.get_member(space_id, actor_user_id)
-        if actor is None or actor.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
+        if actor is None or actor.role not in SETTINGS_AUTHORITY_ROLES:
             raise PermissionError(
                 "only the member or a space admin may change this profile",
             )
@@ -3207,6 +3278,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             raise ValueError(f"unknown invite role {role!r}") from None
         if seat is SpaceRole.OWNER:
             raise ValueError("owner cannot be granted by an invite link")
+        if seat is SpaceRole.MODERATOR:
+            # Nobody joins as a moderator: it is granted by promotion, and
+            # neither the ``space_invite_tokens.role`` CHECK nor a remote
+            # redeem (``SEATABLE_REMOTE_ROLES``) admits it.
+            raise ValueError("moderator is granted by promotion, not an invite link")
         await self._require_admin_or_owner(space, actor_username)
         if seat is SpaceRole.ADMIN:
             # An admin minting an admin link would be self-service
@@ -4252,16 +4328,34 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         if row is None:
             raise KeyError(f"join request {request_id!r} not found")
         space = await self._require_space(row["space_id"])
-        await self._require_admin_or_owner(space, actor_username)
+        actor_member = await self._require_admin_or_owner(space, actor_username)
         remote_instance = row.get("remote_applicant_instance_id")
         # An admin/mod elevation (the applicant is ALREADY a member; an
         # admin link filed this). Approving is the owner's click that runs
         # the existing owner-only promote — ``set_role`` for a local member,
         # ``set_remote_member_role`` for a §D2 one (which federates the
-        # role change and the signing-seed share). ``set_role`` re-checks
-        # owner, so an admin who is not the owner cannot approve an admin
-        # grant here either.
+        # role change and the signing-seed share). Both re-check the
+        # ``role_change_allowed`` matrix, under which only the owner makes
+        # an admin, so an admin who is not the owner cannot approve an admin
+        # grant here either — and that is checked BEFORE the request is
+        # marked approved, so a refused click does not consume it.
         if row.get("requested_role") == SpaceRole.ADMIN.value:
+            self._require_role_host(space)
+            if remote_instance:
+                seat = (
+                    await self._remote_members.get(
+                        row["space_id"], remote_instance, row["user_id"]
+                    )
+                    if self._remote_members is not None
+                    else None
+                )
+            else:
+                seat = await self._spaces.get_member(row["space_id"], row["user_id"])
+            current = seat.role if seat is not None else SpaceRole.MEMBER.value
+            if not role_change_allowed(actor_member.role, current, SpaceRole.ADMIN):
+                raise SpacePermissionError(
+                    "only the space owner can approve an admin grant",
+                )
             await self._spaces.update_join_request_status(
                 request_id,
                 "approved",
@@ -4564,7 +4658,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
             location,
             image_urls_tuple,
         )
-        is_admin = member.role in (SpaceRole.OWNER, SpaceRole.ADMIN)
+        is_admin = member.role in SETTINGS_AUTHORITY_ROLES
+        is_moderator = member.role in CONTENT_AUTHORITY_ROLES
         is_host = (
             self._own_instance_id is not None
             and space.owner_instance_id == self._own_instance_id
@@ -4576,7 +4671,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         # federated to the host's admins). The host applies its own policy to content
         # it hosts. On a stub, proceed.
         decision = (
-            space.features.access_decision("posts", is_admin=is_admin)
+            space.features.access_decision(
+                "posts", is_admin=is_admin, is_moderator=is_moderator
+            )
             if is_host
             else "allow"
         )
@@ -4722,9 +4819,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         *,
         actor_username: str,
     ) -> list[SpaceModerationItem]:
-        """List pending queue items (admin-only)."""
+        """List pending queue items (content authority)."""
         space = await self._require_space(space_id)
-        await self._require_admin_or_owner(space, actor_username)
+        await self._require_content_authority(space, actor_username)
         return await self._spaces.list_moderation_queue(
             space_id,
             status=ModerationStatus.PENDING,
@@ -4742,7 +4839,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         item is not in ``PENDING`` status.
         """
         space = await self._require_space(space_id)
-        actor = await self._require_admin_or_owner(space, actor_username)
+        actor = await self._require_content_authority(space, actor_username)
         item = await self._spaces.get_moderation_item(item_id)
         if item is None or item.space_id != space_id:
             raise KeyError(f"moderation item {item_id!r} not found")
@@ -4777,7 +4874,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
     ) -> None:
         """Reject a queued item; item status becomes REJECTED."""
         space = await self._require_space(space_id)
-        actor = await self._require_admin_or_owner(space, actor_username)
+        actor = await self._require_content_authority(space, actor_username)
         item = await self._spaces.get_moderation_item(item_id)
         if item is None or item.space_id != space_id:
             raise KeyError(f"moderation item {item_id!r} not found")
@@ -4817,13 +4914,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         # Verifies space exists + is writable (not archived) — raises if not.
         await self._require_writable_space(space_id)
         if post.author != editor_user_id:
-            # Admin override
+            # Content-authority override (owner / admin / moderator)
             editor = await self._users.get_by_user_id(editor_user_id)
             if editor is None:
                 raise PermissionError("not authorised")
             member = await self._spaces.get_member(space_id, editor_user_id)
-            if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
-                raise PermissionError("only the author or a space admin can edit")
+            if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
+                raise PermissionError(
+                    "only the author or a space moderator can edit",
+                )
         _validate_text_length(new_content, limit=MAX_POST_LENGTH)
         await self._posts.edit(
             post_id,
@@ -4874,10 +4973,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         ]
         moderated_by: str | None = None
         if post.author != actor_user_id:
-            # Moderation path — actor must be admin/owner
+            # Moderation path — actor needs content authority
             member = await self._spaces.get_member(space_id, actor_user_id)
-            if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
-                raise PermissionError("only the author or a space admin can delete")
+            if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
+                raise PermissionError(
+                    "only the author or a space moderator can delete",
+                )
             moderated_by = actor_user_id
         await self._posts.soft_delete(
             post_id, space_id=space_id, moderated_by=moderated_by
@@ -5025,7 +5126,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         editor_user_id: str,
         new_content: str,
     ) -> Comment:
-        """Edit a space comment's body. Author-or-space-admin only."""
+        """Edit a space comment's body. Author or content authority only."""
         comment = await self._posts.get_comment(comment_id)
         if comment is None or comment.deleted:
             raise KeyError(f"comment {comment_id!r} not found")
@@ -5038,9 +5139,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         await self._require_writable_space(space_id)
         if comment.author != editor_user_id:
             member = await self._spaces.get_member(space_id, editor_user_id)
-            if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
+            if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
                 raise PermissionError(
-                    "only the author or a space admin can edit this comment",
+                    "only the author or a space moderator can edit this comment",
                 )
         _validate_text_length(new_content, limit=MAX_COMMENT_LENGTH)
         if not new_content.strip():
@@ -5081,9 +5182,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         space_id, _post = got
         if comment.author != actor_user_id:
             member = await self._spaces.get_member(space_id, actor_user_id)
-            if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
+            if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
                 raise PermissionError(
-                    "only the author or a space admin can delete this comment"
+                    "only the author or a space moderator can delete this comment"
                 )
         await self._posts.soft_delete_comment(comment_id, space_id=space_id)
         await self._posts.decrement_comment_count(comment.post_id, space_id=space_id)
@@ -5492,12 +5593,27 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         space: Space,
         actor_username: str,
     ) -> SpaceMember:
+        """Settings authority: owner / admin. A moderator is refused."""
         actor = await self._actor_or_raise(actor_username)
         return await self._role_or_raise(
             space.id,
             actor.user_id,
-            (SpaceRole.OWNER, SpaceRole.ADMIN),
+            SETTINGS_AUTHORITY_ROLES,
             message="admin or owner required",
+        )
+
+    async def _require_content_authority(
+        self,
+        space: Space,
+        actor_username: str,
+    ) -> SpaceMember:
+        """Content authority: owner / admin / moderator."""
+        actor = await self._actor_or_raise(actor_username)
+        return await self._role_or_raise(
+            space.id,
+            actor.user_id,
+            CONTENT_AUTHORITY_ROLES,
+            message="owner, admin or moderator required",
         )
 
     async def on_account_protected(self, user_id: str) -> None:
@@ -5523,6 +5639,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin):
         """Whether the space's local owner is a protected account (§CP.R)."""
         owner = await self._users.get(space.owner_username)
         return owner is not None and await self._is_protected(owner.user_id)
+
+    def _require_role_host(self, space: Space) -> None:
+        """Role changes are made on the space's host household.
+
+        There is no forward path for a role change from a member stub, and
+        the roster mirror every household trusts is the host's — a role
+        rewritten on a stub would be a local fiction the host never learns.
+        """
+        if (
+            self._own_instance_id is not None
+            and space.owner_instance_id != self._own_instance_id
+        ):
+            raise SpacePermissionError(
+                "roles are changed on the household that hosts this space",
+            )
 
     async def _require_owner(
         self,

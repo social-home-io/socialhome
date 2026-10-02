@@ -5,8 +5,8 @@ import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
-import { instanceConfig } from '@/store/instance'
 import { loadHouseholdUsers } from '@/store/householdUsers'
+import { instanceConfig } from '@/store/instance'
 import { loadSpaceMembers, setSpaceHereAllowed } from '@/store/spaceMembers'
 import { useTitle } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
@@ -34,6 +34,13 @@ import { SpaceSubHeader, type SpaceTab } from '@/components/SpaceSubHeader'
 import { SpaceTasksTab } from './SpaceTasksTab'
 import { SpaceCalendarHost } from './SpaceCalendarHost'
 import { calendarTabLabel, parseSpaceTab, visibleSpaceTabs } from './spaceTabs'
+import {
+  canModerate as roleCanModerate,
+  hasSettingsAuthority,
+  isWriterRole,
+  parseSpaceRole,
+  type SpaceRole,
+} from './spaceRoles'
 import { SpaceBazaarTab } from './SpaceBazaarTab'
 import StickyBoardPage from '@/features/stickies/StickyBoardPage'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
@@ -144,9 +151,7 @@ const spaceCalView = signal<CalendarViewMode>('month')
  *  per covered day, so an event-id key would expand every one of them
  *  at once. */
 const selectedSpaceEventId = signal<string | null>(null)
-const viewerRole = signal<
-  'owner' | 'admin' | 'member' | 'subscriber' | undefined
->(undefined)
+const viewerRole = signal<SpaceRole | undefined>(undefined)
 const spaceDetail = signal<SpaceDetail | null>(null)
 /** The member list answered (or failed) — until then ``viewerRole`` is
  *  unknown, not "no role". */
@@ -172,13 +177,7 @@ async function loadSpaceHeader(spaceId: string) {
         .then((members: { user_id: string; role: string }[]) => {
           memberCount.value = members.length
           const mine = members.find(m => m.user_id === me)
-          viewerRole.value = (
-            mine
-            && (mine.role === 'owner' || mine.role === 'admin'
-                || mine.role === 'member' || mine.role === 'subscriber')
-          )
-            ? mine.role
-            : undefined
+          viewerRole.value = mine ? parseSpaceRole(mine.role) : undefined
           roleKnown.value = true
         })
         .catch(() => { roleKnown.value = true /* keep the last role */ })
@@ -391,29 +390,28 @@ export default function SpaceFeedPage() {
   if (loading.value) return <Spinner />
 
   // §D1b — a stub of a remote-hosted space looks like a normal row
-  // locally, but the admin gestures (Settings, ban, role-change…)
-  // mutate state owned by the host instance and would silently
-  // diverge from the canonical copy. Suppress those affordances
-  // when ``owner_instance_id`` doesn't match our own — the viewer
-  // can still post and read; they just can't pretend to be the
-  // host's admin from here.
+  // locally, but its moderation queue lives on the host: posts_access is
+  // host-authoritative, so a stub's queue is always empty until federated
+  // moderation lands (follow-up). Show the Moderation tab on the host only.
   const isRemoteSpace = !!(
     spaceDetail.value?.owner_instance_id
     && instanceConfig.value?.instance_id
     && spaceDetail.value.owner_instance_id !== instanceConfig.value.instance_id
   )
-  const canAdmin = !isRemoteSpace
-    && (viewerRole.value === 'owner' || viewerRole.value === 'admin')
+  // Content authority (owner / admin / moderator, v_41): acting on other
+  // people's posts, and — on the host — the moderation queue. No settings
+  // power rides along with it; the server re-checks every action.
+  const canModerate = roleCanModerate(viewerRole.value)
+  const canModerateQueue = canModerate && !isRemoteSpace
   const s = spaceDetail.value
 
   // Per-space feature toggles hide their tab when off (``spaceTabs``).
   const f = s?.features
-  const visibleTabs: readonly SpaceTab[] = visibleSpaceTabs(f, canAdmin)
+  const visibleTabs: readonly SpaceTab[] = visibleSpaceTabs(f, canModerateQueue)
   // Space timetables: owners / admins edit, everyone else reads. The
   // server's role check is the authority (a remote-hosted space's
   // admin edits too — the host verifies it); an archive is read-only.
-  const canEditTimetable = !s?.archived
-    && (viewerRole.value === 'owner' || viewerRole.value === 'admin')
+  const canEditTimetable = !s?.archived && hasSettingsAuthority(viewerRole.value)
 
   return (
     <div class="sh-space-feed sh-space-scope">
@@ -432,12 +430,11 @@ export default function SpaceFeedPage() {
               <SpaceNotifPrefsMenu spaceId={spaceId} />
             )}
             {/* Every full member can open space settings — the page itself
-             *  gates what's shown: a non-admin sees only their own surface
-             *  (Bots), a remote admin sees the forwarding-capable tabs, a
-             *  local admin sees the full hub. Subscribers (read-only) don't. */}
-            {(viewerRole.value === 'owner' ||
-              viewerRole.value === 'admin' ||
-              viewerRole.value === 'member') && (
+             *  gates what's shown: a non-admin (member or moderator) sees
+             *  only their own surface (Bots), a remote admin sees the
+             *  forwarding-capable tabs, a local admin sees the full hub.
+             *  Subscribers (read-only) don't. */}
+            {isWriterRole(viewerRole.value) && (
               <a href={`/spaces/${spaceId}/settings`}
                  class="sh-space-settings-btn"
                  aria-label="Space settings">
@@ -450,14 +447,11 @@ export default function SpaceFeedPage() {
       {s && (
         <SpaceProposalsBanner
           spaceId={spaceId}
-          canVote={
-            viewerRole.value === 'owner' || viewerRole.value === 'admin'
-          }
+          canVote={hasSettingsAuthority(viewerRole.value)}
           isOwner={viewerRole.value === 'owner'}
         />
       )}
-      {s &&
-        (viewerRole.value === 'owner' || viewerRole.value === 'admin') && (
+      {s && hasSettingsAuthority(viewerRole.value) && (
           <SpaceVersionBanner spaceId={spaceId} />
         )}
       {s && <SpaceLinksStrip spaceId={spaceId} />}
@@ -597,7 +591,11 @@ export default function SpaceFeedPage() {
                 post={post}
                 onReact={(emoji) => handleReact(post.id, emoji)}
                 onComment={() => openCommentOverlay(post, spaceId)}
-                onDelete={() => handleDelete(post.id)}
+                // The author, or content authority (owner / admin /
+                // moderator) acting on somebody else's post.
+                onDelete={post.author === currentUser.value?.user_id || canModerate
+                  ? () => handleDelete(post.id)
+                  : undefined}
                 spaceId={spaceId}
                 surface="space"
               />
@@ -608,7 +606,7 @@ export default function SpaceFeedPage() {
 
       {activeTab.value === 'members' && (
         <>
-          {(viewerRole.value === 'owner' || viewerRole.value === 'admin') && (
+          {hasSettingsAuthority(viewerRole.value) && (
             <JoinRequestList spaceId={spaceId} />
           )}
           <SpaceMemberList spaceId={spaceId} viewerRole={viewerRole.value} />
@@ -791,10 +789,7 @@ export default function SpaceFeedPage() {
           spaceId={spaceId}
           // Unknown until the member list answers: the tab waits rather
           // than flashing locked cards at a member.
-          writable={roleKnown.value
-            ? viewerRole.value === 'owner' || viewerRole.value === 'admin'
-              || viewerRole.value === 'member'
-            : undefined}
+          writable={roleKnown.value ? isWriterRole(viewerRole.value) : undefined}
           archived={!!s?.archived}
         />
       )}
@@ -822,7 +817,7 @@ export default function SpaceFeedPage() {
         />
       )}
 
-      {activeTab.value === 'moderation' && canAdmin && (
+      {activeTab.value === 'moderation' && canModerateQueue && (
         <ModerationQueue spaceId={spaceId} />
       )}
     </div>

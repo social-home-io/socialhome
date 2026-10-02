@@ -59,7 +59,7 @@ from ..domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from ..domain.space import SpaceRole
+from ..domain.space import WRITER_ROLES, SpaceRole
 from .space_scope import archive_refusal
 
 if TYPE_CHECKING:
@@ -717,12 +717,10 @@ def make_check_deprovisioned_author(*, user_repo) -> InboundStep:
 #: everything else it holds (``subscriber`` seats, tombstoned seats) does
 #: not add up to write authority. ``owner`` is absent on purpose — the
 #: ``space_remote_members.role`` CHECK has never admitted it (ownership is
-#: local-only), so a row carrying it is a row that cannot exist.
+#: local-only), so a row carrying it is a row that cannot exist. Derived
+#: from :data:`WRITER_ROLES` so a ``moderator`` seat (v_41) writes too.
 _WRITER_ROLES: frozenset[str] = frozenset(
-    {
-        SpaceRole.MEMBER.value,
-        SpaceRole.ADMIN.value,
-    }
+    r.value for r in WRITER_ROLES if r is not SpaceRole.OWNER
 )
 
 #: Early-response body for a refused write. ``status: ok`` on purpose: the

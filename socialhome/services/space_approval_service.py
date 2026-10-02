@@ -40,6 +40,7 @@ from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import (
     PUBLIC_SPACE_TIERS,
     SpacePermissionError,
+    SETTINGS_AUTHORITY_ROLES,
     SpaceRole,
     SpaceType,
 )
@@ -561,7 +562,7 @@ class SpaceApprovalService(ProtectionGateMixin):
         keys: set[tuple[str, str]] = set()
         own = self._own_instance_id or ""
         for m in await self._spaces.list_members(space_id):
-            if m.role in (SpaceRole.OWNER, SpaceRole.ADMIN):
+            if m.role in SETTINGS_AUTHORITY_ROLES:
                 keys.add((own, m.user_id))
         for rm in await self._remote_members.list_for_space(space_id):
             if rm.role == SpaceRole.ADMIN:
@@ -598,7 +599,7 @@ class SpaceApprovalService(ProtectionGateMixin):
         if actor is None:
             raise KeyError(f"actor {actor_username!r} not found")
         member = await self._spaces.get_member(space_id, actor.user_id)
-        if member is None or member.role not in (SpaceRole.OWNER, SpaceRole.ADMIN):
+        if member is None or member.role not in SETTINGS_AUTHORITY_ROLES:
             raise SpacePermissionError("only an admin can propose or vote")
         return actor
 

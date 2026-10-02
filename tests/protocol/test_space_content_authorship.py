@@ -19,7 +19,12 @@ envelope. The rule per event family (see ``federation/space_authorship.py``):
   accept an offer) — strictly the named user's own household;
 * **collaborative** (pages, stickies, calendar events — any member may edit
   them locally) — any writer household, attribution preserved;
-* **zones** — moderators only (the local service is admin-only).
+* **zones / timetables** — settings authority only: the host or an
+  ``admin`` seat; a v_41 ``moderator`` seat is refused like a member;
+* **moderation** (others' edits / deletes, a moderation-held post, a bot
+  post, RSVP approvals, gallery item deletes) — content authority: the
+  host, an ``admin`` or a ``moderator`` seat. Renaming / deleting someone
+  else's whole gallery album stays settings authority.
 
 Every case runs against the REAL application registry over a real SQLite
 database and compares a snapshot of every content table: a refused case
@@ -82,6 +87,7 @@ HOST = "the-host"  # hosts SP; its own member u-h is mirrored here
 AUTHOR = "house-author"  # u-a's household — every seeded row is u-a's
 OTHER = "house-other"  # a member household, seated as u-o
 ADMIN = "house-admin"  # a household holding a live admin seat (u-adm)
+MOD = "house-mod"  # a household holding a live moderator seat (u-mod, v_41)
 STRANGER = "house-stranger"  # a household with no seat in SP at all
 THIRD = "house-third"  # a member household uninvolved in the row (u-t)
 LOCAL_USER = "u-local"  # one of OUR users — a remote household never acts for it
@@ -146,6 +152,7 @@ _SEED = [
             (AUTHOR, "u-w", "member"),
             (OTHER, "u-o", "member"),
             (ADMIN, "u-adm", "admin"),
+            (MOD, "u-mod", "moderator"),
             (THIRD, "u-t", "member"),
             (AUTHOR, "u-sub", "subscriber"),
         )
@@ -347,14 +354,14 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         "post as u-a",
         {"id": "post-new", "author": "u-a", "type": "text", "content": "x"},
         (AUTHOR, HOST),
-        (OTHER, ADMIN, STRANGER),
+        (OTHER, ADMIN, STRANGER, MOD),
     ),
     (
         FET.SPACE_POST_CREATED,
         "post as our local user",
         {"id": "post-new", "author": LOCAL_USER, "type": "text", "content": "x"},
         (),
-        (AUTHOR, OTHER, ADMIN, HOST),
+        (AUTHOR, OTHER, ADMIN, HOST, MOD),
     ),
     (
         FET.SPACE_POST_CREATED,
@@ -367,7 +374,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         FET.SPACE_POST_CREATED,
         "re-create u-a's post as u-a",
         {"id": "post-a", "author": "u-a", "type": "text", "content": "hijack"},
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
         (OTHER, STRANGER),
     ),
     (
@@ -379,7 +386,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "type": "text",
             "content": "rewritten",
         },
-        (ADMIN, HOST),
+        (ADMIN, HOST, MOD),
         (OTHER, AUTHOR, STRANGER),
     ),
     (
@@ -387,13 +394,13 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         "re-send a deleted post",
         {"id": "post-del", "author": "u-a", "type": "text", "content": "back"},
         (),
-        (AUTHOR, ADMIN, HOST, OTHER),
+        (AUTHOR, ADMIN, HOST, OTHER, MOD),
     ),
     (
         FET.SPACE_POST_CREATED,
         "re-send a moderation-held post",
         {"id": "post-mod", "author": "u-a", "type": "text", "content": "unheld"},
-        (ADMIN, HOST),
+        (ADMIN, HOST, MOD),
         (AUTHOR, OTHER),
     ),
     (
@@ -407,63 +414,63 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "content": "x",
         },
         (AUTHOR, HOST),
-        (OTHER, ADMIN, STRANGER),
+        (OTHER, ADMIN, STRANGER, MOD),
     ),
     (
         FET.SPACE_TASK_CREATED,
         "task by u-a",
         {"id": "task-new", "list_id": "list-a", "title": "x", "created_by": "u-a"},
         (AUTHOR, HOST),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.SPACE_TASK_LIST_CREATED,
         "task list by u-a",
         {"id": _LIST_A, "name": "N", "created_by": "u-a"},
         (AUTHOR, HOST),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.SPACE_PAGE_CREATED,
         "page by u-a",
         {"id": "page-new", "title": "x", "created_by": "u-a"},
         (AUTHOR, HOST),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.SPACE_STICKY_CREATED,
         "sticky by u-a",
         {"id": "sticky-new", "author": "u-a", "content": "x"},
         (AUTHOR, HOST),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.SPACE_CALENDAR_EVENT_CREATED,
         "event by u-a",
         {"id": "ev-new", "summary": "x", "created_by": "u-a", **_CAL},
         (AUTHOR, HOST),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.SPACE_GALLERY_ITEM_CREATED,
         "upload by u-g",
         {"id": "gi-new", "album_id": "album-a", "uploaded_by": "u-g"},
         (AUTHOR, HOST),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.SPACE_GALLERY_ALBUM_CREATED,
         "album by u-g",
         {"id": "album-new", "owner_user_id": "u-g", "name": "Trip"},
         (AUTHOR, HOST),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.SPACE_GALLERY_ALBUM_CREATED,
         "album by our local user",
         {"id": "album-new", "owner_user_id": LOCAL_USER, "name": "Trip"},
         (),
-        (AUTHOR, HOST, ADMIN),
+        (AUTHOR, HOST, ADMIN, MOD),
     ),
     (
         FET.BAZAAR_LISTING_CREATED,
@@ -477,7 +484,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "end_time": _FAR,
         },
         (AUTHOR,),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.BAZAAR_LISTING_CREATED,
@@ -516,7 +523,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "slots": [{"id": "slot-new", "slot_date": "2026-08-01"}],
         },
         (AUTHOR,),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     # ── Personal actions: strictly the named user's own household ──
     (
@@ -524,7 +531,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         "vote as u-a",
         {"post_id": "post-a", "option_id": "opt-a", "voter_user_id": "u-a"},
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     (
         FET.SPACE_RSVP_UPDATED,
@@ -537,7 +544,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "updated_at": _NOW,
         },
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     (
         FET.SPACE_RSVP_UPDATED,
@@ -550,7 +557,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "updated_at": _NOW,
         },
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     (
         FET.SPACE_RSVP_DELETED,
@@ -562,7 +569,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "updated_at": _NOW,
         },
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     # The organiser settles somebody else's request (approve / deny), and
     # any writer household promotes a waitlisted member into a free seat —
@@ -577,7 +584,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "occurrence_at": _OCC,
             "updated_at": _NOW,
         },
-        (AUTHOR, ADMIN, HOST, OTHER),
+        (AUTHOR, ADMIN, HOST, OTHER, MOD),
         (THIRD, STRANGER),
     ),
     (
@@ -589,7 +596,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "occurrence_at": _OCC,
             "updated_at": _NOW,
         },
-        (AUTHOR, ADMIN, OTHER),
+        (AUTHOR, ADMIN, OTHER, MOD),
         (THIRD,),
     ),
     (
@@ -616,14 +623,14 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "updated_at": _NOW,
         },
         (AUTHOR,),
-        (THIRD, ADMIN, HOST),
+        (THIRD, ADMIN, HOST, MOD),
     ),
     (
         FET.SPACE_SCHEDULE_RESPONSE_UPDATED,
         "answer as u-a",
         {"slot_id": "slot-a", "user_id": "u-a", "response": "yes"},
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     (
         FET.BAZAAR_BID_PLACED,
@@ -635,7 +642,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "amount": 60,
         },
         (OTHER,),
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
     ),
     # ── Owner-only state changes ──
     (
@@ -643,21 +650,21 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         "close u-a's poll",
         {"post_id": "post-a"},
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     (
         FET.SPACE_SCHEDULE_FINALIZED,
         "finalise u-a's schedule",
         {"post_id": "post-a", "slot_id": "slot-a"},
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     (
         FET.BAZAAR_LISTING_UPDATED,
         "cancel u-a's listing",
         {"post_id": "post-a-listing", "status": "cancelled"},
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     (
         FET.BAZAAR_LISTING_UPDATED,
@@ -669,98 +676,98 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "winning_price": 50,
         },
         (AUTHOR,),
-        (OTHER, ADMIN),
+        (OTHER, ADMIN, MOD),
     ),
     (
         FET.BAZAAR_OFFER_ACCEPTED,
         "accept an offer on u-a's listing",
         {"bid_id": "bid-o"},
         (AUTHOR,),
-        (OTHER, ADMIN, HOST),
+        (OTHER, ADMIN, HOST, MOD),
     ),
     # ── Owned rows: the owner's household or a moderator ──
     (
         FET.SPACE_POST_UPDATED,
         "edit u-a's post",
         {"id": "post-a", "content": "edited"},
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
         (OTHER, STRANGER),
     ),
     (
         FET.SPACE_POST_UPDATED,
         "edit our local user's post",
         {"id": "post-l", "content": "edited"},
-        (ADMIN, HOST),
+        (ADMIN, HOST, MOD),
         (AUTHOR, OTHER),
     ),
     (
         FET.SPACE_POST_DELETED,
         "delete u-a's post",
         {"post_id": "post-a"},
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
         (OTHER, STRANGER),
     ),
     (
         FET.SPACE_POST_DELETED,
         "delete our local user's post",
         {"post_id": "post-l"},
-        (ADMIN, HOST),
+        (ADMIN, HOST, MOD),
         (AUTHOR, OTHER),
     ),
     (
         FET.SPACE_COMMENT_UPDATED,
         "edit u-a's comment",
         {"id": "cmt-a", "content": "edited"},
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
         (OTHER,),
     ),
     (
         FET.SPACE_COMMENT_DELETED,
         "delete u-a's comment",
         {"comment_id": "cmt-a", "post_id": "post-a"},
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
         (OTHER,),
     ),
     (
         FET.SPACE_COMMENT_DELETED,
         "delete our local user's comment",
         {"comment_id": "cmt-l", "post_id": "post-l"},
-        (ADMIN,),
+        (ADMIN, MOD),
         (AUTHOR, OTHER),
     ),
     (
         FET.SPACE_TASK_UPDATED,
         "edit u-a's task",
         {"id": "task-a", "list_id": "list-a", "title": "edited", "created_by": "u-o"},
-        (AUTHOR, OTHER, ADMIN, HOST),
+        (AUTHOR, OTHER, ADMIN, HOST, MOD),
         (STRANGER,),
     ),
     (
         FET.SPACE_TASK_DELETED,
         "delete u-a's task",
         {"id": "task-a"},
-        (AUTHOR, OTHER, ADMIN, HOST),
+        (AUTHOR, OTHER, ADMIN, HOST, MOD),
         (STRANGER,),
     ),
     (
         FET.SPACE_TASK_LIST_UPDATED,
         "rename u-a's task list",
         {"id": "list-a", "name": "Renamed"},
-        (AUTHOR, OTHER, ADMIN, HOST),
+        (AUTHOR, OTHER, ADMIN, HOST, MOD),
         (STRANGER,),
     ),
     (
         FET.SPACE_TASK_LIST_DELETED,
         "delete u-a's task list",
         {"id": "list-a"},
-        (AUTHOR, OTHER, ADMIN, HOST),
+        (AUTHOR, OTHER, ADMIN, HOST, MOD),
         (STRANGER,),
     ),
     (
         FET.SPACE_GALLERY_ITEM_DELETED,
         "delete u-g's upload",
         {"id": "gi-a"},
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
         (OTHER,),
     ),
     (
@@ -768,28 +775,28 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         "rename u-g's album",
         {"id": "album-g", "name": "Renamed"},
         (AUTHOR, ADMIN, HOST),
-        (OTHER, STRANGER),
+        (OTHER, STRANGER, MOD),
     ),
     (
         FET.SPACE_GALLERY_ALBUM_UPDATED,
         "rename our local user's album",
         {"id": "album-a", "name": "Renamed"},
         (ADMIN, HOST),
-        (AUTHOR, OTHER),
+        (AUTHOR, OTHER, MOD),
     ),
     (
         FET.SPACE_GALLERY_ALBUM_DELETED,
         "delete u-g's album",
         {"id": "album-g"},
         (AUTHOR, ADMIN, HOST),
-        (OTHER, STRANGER),
+        (OTHER, STRANGER, MOD),
     ),
     # ── Collaborative rows: any writer household; attribution is kept ──
     (
         FET.SPACE_PAGE_UPDATED,
         "edit u-a's page",
         {"id": "page-a", "title": "edited", "created_by": "u-o"},
-        (AUTHOR, OTHER, ADMIN),
+        (AUTHOR, OTHER, ADMIN, MOD),
         (STRANGER,),
     ),
     (
@@ -839,7 +846,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "radius_m": 100,
         },
         (ADMIN, HOST),
-        (AUTHOR, OTHER),
+        (AUTHOR, OTHER, MOD),
     ),
     (
         FET.SPACE_ZONE_UPSERTED,
@@ -853,14 +860,14 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             "created_by": "u-adm",
         },
         (ADMIN,),
-        (AUTHOR, OTHER),
+        (AUTHOR, OTHER, MOD),
     ),
     (
         FET.SPACE_ZONE_DELETED,
         "delete the zone",
         {"zone_id": "zone-a"},
         (ADMIN, HOST),
-        (AUTHOR, OTHER),
+        (AUTHOR, OTHER, MOD),
     ),
     # ── Timetables: moderators only, recorded as a moderator of the sender ──
     (
@@ -868,7 +875,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         "edit the timetable as u-adm",
         {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by="u-adm")},
         (ADMIN, HOST),
-        (AUTHOR, OTHER, THIRD, STRANGER),
+        (AUTHOR, OTHER, THIRD, STRANGER, MOD),
     ),
     (
         FET.SPACE_TIMETABLE_UPSERTED,
@@ -877,21 +884,21 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         "edit the timetable as a plain member",
         {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by="u-a")},
         (),
-        (AUTHOR, ADMIN, OTHER, HOST),
+        (AUTHOR, ADMIN, OTHER, HOST, MOD),
     ),
     (
         FET.SPACE_TIMETABLE_UPSERTED,
         "edit the timetable as a follower",
         {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by="u-sub")},
         (),
-        (AUTHOR, ADMIN, OTHER),
+        (AUTHOR, ADMIN, OTHER, MOD),
     ),
     (
         FET.SPACE_TIMETABLE_UPSERTED,
         "edit the timetable as our local user",
         {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by=LOCAL_USER)},
         (),
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
     ),
     (
         FET.SPACE_TIMETABLE_UPSERTED,
@@ -902,7 +909,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             )
         },
         (ADMIN, HOST),
-        (AUTHOR, OTHER, STRANGER),
+        (AUTHOR, OTHER, STRANGER, MOD),
     ),
     (
         FET.SPACE_TIMETABLE_UPSERTED,
@@ -913,7 +920,7 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             )
         },
         (),
-        (ADMIN, HOST, AUTHOR),
+        (ADMIN, HOST, AUTHOR, MOD),
     ),
     (
         FET.SPACE_TIMETABLE_UPSERTED,
@@ -924,21 +931,30 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
             )
         },
         (),
-        (ADMIN, HOST),
+        (ADMIN, HOST, MOD),
     ),
     (
         FET.SPACE_TIMETABLE_DELETED,
         "delete the timetable as u-adm",
         {"timetable_id": _TT_A, "deleted_by": "u-adm", "deleted_at": _NOW},
         (ADMIN, HOST),
-        (AUTHOR, OTHER, STRANGER),
+        (AUTHOR, OTHER, STRANGER, MOD),
+    ),
+    (
+        FET.SPACE_TIMETABLE_UPSERTED,
+        # A moderator holds content authority only: never a timetable
+        # editor, on its own household or relayed by the host.
+        "edit the timetable as a moderator",
+        {"timetable": timetable_wire(_TT_A, created_by="u-adm", updated_by="u-mod")},
+        (),
+        (MOD, HOST, ADMIN),
     ),
     (
         FET.SPACE_TIMETABLE_DELETED,
         "delete the timetable as a plain member",
         {"timetable_id": _TT_A, "deleted_by": "u-a", "deleted_at": _NOW},
         (),
-        (AUTHOR, ADMIN, HOST),
+        (AUTHOR, ADMIN, HOST, MOD),
     ),
 ]
 
@@ -1896,3 +1912,18 @@ def test_every_sync_resource_has_an_authorship_case():
     expected = set(ALLOWED_RESOURCES) - _SYNC_NOT_WRITTEN.keys()
     assert not expected - covered, sorted(expected - covered)
     assert not expected - refused, sorted(expected - refused)
+
+
+async def test_a_moderator_household_cannot_pre_delete_someone_elses_album(env):
+    """M4 — a whole album is settings authority: a moderator household's
+    delete of an album not held yet is not remembered either."""
+    app, db = env
+    album_id = _bound_album("u-g")
+    await _deliver(app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": album_id}, sender=MOD)
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": album_id, "owner_user_id": "u-g", "name": "Trip"},
+        sender=AUTHOR,
+    )
+    assert await _album_owner(db, album_id) == "u-g"
