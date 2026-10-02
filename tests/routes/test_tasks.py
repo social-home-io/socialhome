@@ -669,3 +669,57 @@ async def test_overlong_or_invisible_text_is_422(client):
         "/api/tasks/lists", json={"name": "N" * 101}, headers=_auth(client._tok)
     )
     assert r.status == 422
+
+
+async def test_task_list_roster_carries_open_count(client):
+    """GET /api/tasks/lists: each list's open (not done, not archived) count."""
+    h = _auth(client._tok)
+    a = (
+        await (
+            await client.post("/api/tasks/lists", json={"name": "A"}, headers=h)
+        ).json()
+    )["id"]
+    b = (
+        await (
+            await client.post("/api/tasks/lists", json={"name": "B"}, headers=h)
+        ).json()
+    )["id"]
+    ids = []
+    for title, status in (
+        ("t1", "todo"),
+        ("t2", "in_progress"),
+        ("t3", "done"),
+        ("t4", "todo"),
+    ):
+        r = await client.post(
+            f"/api/tasks/lists/{a}/tasks",
+            json={"title": title, "status": status},
+            headers=h,
+        )
+        assert r.status == 201
+        ids.append((await r.json())["id"])
+    assert (await client.post(f"/api/tasks/{ids[3]}/archive", headers=h)).status == 200
+    r = await client.get("/api/tasks/lists", headers=h)
+    assert r.status == 200
+    counts = {row["id"]: row["open_count"] for row in await r.json()}
+    assert counts == {a: 2, b: 0}
+
+
+async def test_space_task_list_roster_carries_open_count(client):
+    """GET /api/spaces/{id}/tasks/lists carries ``open_count`` too."""
+    await _seed_space_with_member(client, "sp-oc", client._uid, "owner")
+    h = _auth(client._tok)
+    base = "/api/spaces/sp-oc/tasks"
+    lid = (
+        await (await client.post(f"{base}/lists", json={"name": "L"}, headers=h)).json()
+    )["id"]
+    for status in ("todo", "done", "in_progress"):
+        r = await client.post(
+            f"{base}/lists/{lid}/tasks",
+            json={"title": status, "status": status},
+            headers=h,
+        )
+        assert r.status == 201
+    r = await client.get(f"{base}/lists", headers=h)
+    assert r.status == 200
+    assert [(row["id"], row["open_count"]) for row in await r.json()] == [(lid, 2)]

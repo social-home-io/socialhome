@@ -116,6 +116,7 @@ class AbstractTaskRepo(Protocol):
     async def save_list(self, list_: TaskList) -> TaskList: ...
     async def get_list(self, list_id: str) -> TaskList | None: ...
     async def list_lists(self) -> list[TaskList]: ...
+    async def open_counts(self) -> dict[str, int]: ...
     async def delete_list(self, list_id: str) -> None: ...
 
     async def save(self, task: Task) -> Task: ...
@@ -193,6 +194,18 @@ class SqliteTaskRepo:
             "SELECT * FROM task_lists ORDER BY created_at",
         )
         return [_row_to_list(d) for d in rows_to_dicts(rows)]
+
+    async def open_counts(self) -> dict[str, int]:
+        """Open tasks (not done, not archived) per list, in one query.
+
+        A list with no open task is absent from the map.
+        """
+        rows = await self._db.fetchall(
+            "SELECT list_id, COUNT(*) AS n FROM tasks"
+            " WHERE status != ? AND archived_at IS NULL GROUP BY list_id",
+            (TaskStatus.DONE.value,),
+        )
+        return {d["list_id"]: int(d["n"]) for d in rows_to_dicts(rows)}
 
     async def delete_list(self, list_id: str) -> None:
         await self._db.enqueue(
@@ -449,6 +462,7 @@ class AbstractSpaceTaskRepo(Protocol):
     async def save_list(self, list_: TaskList, *, space_id: str) -> bool: ...
     async def get_list(self, list_id: str) -> tuple[str, TaskList] | None: ...
     async def list_lists(self, space_id: str) -> list[TaskList]: ...
+    async def open_counts(self, space_id: str) -> dict[str, int]: ...
     async def list_lists_since(
         self, space_id: str, since: str, *, limit: int = 500
     ) -> list[TaskList]: ...
@@ -520,6 +534,18 @@ class SqliteSpaceTaskRepo:
             (space_id,),
         )
         return [_row_to_list(d) for d in rows_to_dicts(rows)]
+
+    async def open_counts(self, space_id: str) -> dict[str, int]:
+        """Open tasks (not done, not archived) per list of ``space_id``,
+        in one query. A list with no open task is absent from the map.
+        """
+        rows = await self._db.fetchall(
+            "SELECT list_id, COUNT(*) AS n FROM space_tasks"
+            " WHERE space_id=? AND status != ? AND archived_at IS NULL"
+            " GROUP BY list_id",
+            (space_id, TaskStatus.DONE.value),
+        )
+        return {d["list_id"]: int(d["n"]) for d in rows_to_dicts(rows)}
 
     async def list_lists_since(
         self, space_id: str, since: str, *, limit: int = 500

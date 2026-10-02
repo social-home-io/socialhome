@@ -479,3 +479,42 @@ async def test_space_list_lists_since_includes_the_same_second(env):
     )
     got = await env.space_repo.list_lists_since("sp-1", "2026-06-01T10:00:00.400+00:00")
     assert [lst.id for lst in got] == ["sl-same"]
+
+
+# ── Open counts (Organize hub chip) ──────────────────────────────────────
+
+
+async def _archive(env, table: str, task_id: str) -> None:
+    await env.db.enqueue(
+        f"UPDATE {table} SET archived_at=? WHERE id=?",
+        (datetime.now(timezone.utc).isoformat(), task_id),
+    )
+
+
+async def test_open_counts_empty_and_mixed(env):
+    """One grouped count per list: not done, not archived; empty lists absent."""
+    assert await env.repo.open_counts() == {}
+    await env.repo.save_list(_list_("l-empty", "Empty"))
+    await env.repo.save_list(_list_("l-mixed", "Mixed"))
+    await env.repo.save_list(_list_("l-done", "Done"))
+    await env.repo.save(_task("m1", "l-mixed", status=TaskStatus.TODO))
+    await env.repo.save(_task("m2", "l-mixed", status=TaskStatus.IN_PROGRESS))
+    await env.repo.save(_task("m3", "l-mixed", status=TaskStatus.DONE))
+    await env.repo.save(_task("m4", "l-mixed", status=TaskStatus.TODO))
+    await _archive(env, "tasks", "m4")
+    await env.repo.save(_task("d1", "l-done", status=TaskStatus.DONE))
+    assert await env.repo.open_counts() == {"l-mixed": 2}
+
+
+async def test_space_open_counts_are_scoped_to_the_space(two_spaces):
+    """The space count groups by list inside one space only."""
+    env = two_spaces
+    assert await env.space_repo.open_counts("sp-1") == {"l-1": 1}
+    assert await env.space_repo.open_counts("sp-2") == {"l-2": 1}
+    await env.space_repo.save(
+        _task("t-1b", "l-1", status=TaskStatus.DONE), space_id="sp-1"
+    )
+    await env.space_repo.save(_task("t-1c", "l-1"), space_id="sp-1")
+    await _archive(env, "space_tasks", "t-1c")
+    assert await env.space_repo.open_counts("sp-1") == {"l-1": 1}
+    assert await env.space_repo.open_counts("sp-none") == {}

@@ -13,8 +13,9 @@
  * right tab. The count chips ("Tasks · 3", "Shopping · 4",
  * "Stickies · 2") read the stores, so they track WS updates:
  *
- * - tasks: open tasks across EVERY household list (``ensureAll``), not
- *   just the list the Tasks tab has open;
+ * - tasks: open tasks across EVERY household list, not just the one
+ *   the Tasks tab has open — from the roster's ``open_count`` (one GET;
+ *   no list's tasks are fetched for it), live via the store;
  * - shopping: unbought items, minus rows hidden behind an Undo toast;
  * - stickies: the household store's notes (minus pending deletes) —
  *   space boards have stores of their own.
@@ -58,7 +59,7 @@ export default function OrganizePage() {
   // failure is silent here: the chip shows no count, the tab its error.
   useEffect(() => {
     ensureShopping().catch(() => { /* the Shopping tab reports it */ })
-    householdTaskStore.ensureAll().catch(() => { /* the Tasks tab reports it */ })
+    householdTaskStore.ensureLists().catch(() => { /* the Tasks tab reports it */ })
     householdStickyStore.ensure().catch(() => { /* the Stickies tab reports it */ })
   }, [])
 

@@ -655,6 +655,9 @@ export interface TaskItem {
   priority?: TaskPriority | null
   /** Free-form tags, ≤ 10 × ≤ 32 chars, de-duplicated case-insensitively. */
   labels?: string[]
+  /** Set when the task was archived (soft-hidden); archived tasks are
+   *  not counted as open. */
+  archived_at?: string | null
 }
 
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent'
@@ -663,6 +666,10 @@ export interface TaskListEntry {
   id: string
   name: string
   created_by?: string
+  /** Open (not done, not archived) tasks, counted by the server when the
+   *  roster was fetched — the Organize hub's chip for lists it never
+   *  loaded. Absent on a list created since (it has none). */
+  open_count?: number
 }
 
 export interface DirectoryEntry {
