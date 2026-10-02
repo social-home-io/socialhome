@@ -11,6 +11,8 @@
  */
 import { useEffect } from 'preact/hooks'
 import { api } from '@/api'
+import { primaryFillOverrides } from '@/utils/primaryFill'
+import { fontStack } from '@/utils/themeFonts'
 
 interface SpaceTheme {
   primary_color?: string | null
@@ -65,10 +67,24 @@ export function useSpaceTheme(spaceId: string | undefined | null): void {
           `/api/spaces/${spaceId}/theme`,
         ) as SpaceTheme
         if (stopped) return
-        if (t.primary_color)    apply('--sh-primary', t.primary_color)
+        // Checked here, not only inside apply(): the brand default means
+        // "no override", so the per-theme on-fill props below must not be
+        // pinned either — the CSS defaults already pair the brand hearth.
+        if (t.primary_color && !isDefault('--sh-primary', t.primary_color)) {
+          apply('--sh-primary', t.primary_color)
+          // Text on a filled primary must still read on a custom
+          // (often mid-tone) colour: per-theme ink + hover, read by
+          // the matching theme block in tokens.css.
+          for (const [prop, value] of Object.entries(primaryFillOverrides(t.primary_color))) {
+            apply(prop, value)
+          }
+        }
         if (t.accent_color)     apply('--sh-accent',  t.accent_color)
         if (t.background_tint)  apply('--sh-bg-space-tint', t.background_tint)
-        if (t.font_family)      apply('--sh-font-family', t.font_family)
+        // A stored font is a schema id, not CSS; 'system' (the column
+        // default) means "no override" — keep the app's own font.
+        const stack = t.font_family === 'system' ? null : fontStack(t.font_family)
+        if (stack)              apply('--sh-font-family', stack)
         if (t.post_layout && POST_LAYOUT_GAP[t.post_layout]) {
           apply('--sh-post-layout-gap', POST_LAYOUT_GAP[t.post_layout])
         }

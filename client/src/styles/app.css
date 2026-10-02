@@ -545,7 +545,7 @@ a:focus:not(:focus-visible) { outline: none; }
   padding: 0 4px;
   border-radius: var(--sh-radius-full);
   background: var(--sh-primary-fill);
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   font-size: 0.62rem;
   font-weight: 700;
   line-height: 16px;
@@ -662,15 +662,15 @@ a:focus:not(:focus-visible) { outline: none; }
 
 .sh-btn--primary {
   background: var(--sh-primary-fill);
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
   border-color: transparent;
   box-shadow:
     0 1px 0 rgba(0, 0, 0, 0.12),
     0 8px 22px -12px color-mix(in srgb, var(--sh-primary) 70%, black);
 }
 .sh-btn--primary:not(:disabled):hover {
-  background: var(--sh-primary-hover);
-  color: var(--sh-bg);
+  background: var(--sh-primary-fill-hover);
+  color: var(--sh-on-primary-fill);
 }
 
 .sh-btn--secondary {
@@ -685,7 +685,7 @@ a:focus:not(:focus-visible) { outline: none; }
 
 .sh-btn--danger {
   background: var(--sh-danger);
-  color: var(--sh-bg);
+  color: var(--sh-on-danger-fill);
   border-color: transparent;
   box-shadow:
     0 1px 0 rgba(0, 0, 0, 0.12),
@@ -693,7 +693,7 @@ a:focus:not(:focus-visible) { outline: none; }
 }
 .sh-btn--danger:not(:disabled):hover {
   background: var(--sh-danger-hover);
-  color: var(--sh-bg);
+  color: var(--sh-on-danger-fill);
 }
 
 /* Ghost — like the website's ``.btn--ghost``: inset 1.5px hairline,
@@ -716,7 +716,7 @@ a:focus:not(:focus-visible) { outline: none; }
  * three solid-fill variants feel like siblings. */
 .sh-btn--moss {
   background: var(--sh-success);
-  color: var(--sh-bg);
+  color: var(--sh-on-success-fill);
   border-color: transparent;
   box-shadow:
     0 1px 0 rgba(0, 0, 0, 0.12),
@@ -724,12 +724,12 @@ a:focus:not(:focus-visible) { outline: none; }
 }
 .sh-btn--moss:not(:disabled):hover {
   background: color-mix(in srgb, var(--sh-success) 88%, black);
-  color: var(--sh-bg);
+  color: var(--sh-on-success-fill);
 }
 
 .sh-btn--honey {
   background: var(--sh-warning);
-  color: var(--sh-text);
+  color: var(--sh-on-warning-fill);
   border-color: transparent;
   box-shadow:
     0 1px 0 rgba(0, 0, 0, 0.12),
@@ -737,7 +737,7 @@ a:focus:not(:focus-visible) { outline: none; }
 }
 .sh-btn--honey:not(:disabled):hover {
   background: color-mix(in srgb, var(--sh-warning) 88%, black);
-  color: var(--sh-text);
+  color: var(--sh-on-warning-fill);
 }
 
 /* ``.sh-icon-btn`` is defined once, with ``.sh-attach-btn`` (Messages
@@ -1027,7 +1027,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-badge--admin { background: color-mix(in srgb, var(--sh-primary) 15%, transparent); color: var(--sh-primary-text); border-color: transparent; }
 .sh-badge--success { background: color-mix(in srgb, var(--sh-success) 15%, transparent); color: var(--sh-success); border-color: transparent; }
-.sh-badge--danger { background: color-mix(in srgb, var(--sh-danger) 15%, transparent); color: var(--sh-danger); border-color: transparent; }
+.sh-badge--danger { background: color-mix(in srgb, var(--sh-danger) 15%, transparent); color: var(--sh-danger-on-soft); border-color: transparent; }
 .sh-badge--peer, .sh-badge--owner { background: color-mix(in srgb, var(--sh-warning) 15%, transparent); color: var(--sh-warning); border-color: transparent; }
 
 /* Chips — cream pill on a warm hairline by default; active state
@@ -1086,8 +1086,8 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   width: 40px;
   height: 40px;
   border-radius: var(--sh-radius-full);
-  background: linear-gradient(135deg, var(--sh-primary-fill), var(--sh-primary-hover));
-  color: #fff;
+  background: linear-gradient(135deg, var(--sh-primary-fill), var(--sh-primary-fill-hover));
+  color: var(--sh-on-primary-fill);
   font-weight: 600;
   font-size: var(--sh-font-size-sm);
   flex-shrink: 0;
@@ -1341,7 +1341,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-comment-overlay-backdrop {
   position: fixed;
   inset: 0;
-  background: var(--sh-modal-backdrop);
+  background: var(--sh-scrim);
   backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
@@ -1380,7 +1380,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   transform: translateX(-50%) rotate(-1.5deg);
   width: 96px;
   height: 18px;
-  background: var(--sh-tape-1, color-mix(in srgb, var(--sh-primary) 35%, transparent));
+  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
   border-radius: 2px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   pointer-events: none;
@@ -1544,7 +1544,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-update-banner__msg {
   flex: 1 1 auto;
   font-size: 0.95rem;
-  color: var(--sh-fg);
+  color: var(--sh-text);
 }
 .sh-update-banner__btn {
   flex-shrink: 0;
@@ -1556,18 +1556,18 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-update-banner__btn--primary {
   background: var(--sh-primary-fill);
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
   font-weight: 600;
 }
 .sh-update-banner__btn--primary:hover {
-  background: var(--sh-primary-hover, var(--sh-primary));
+  background: var(--sh-primary-fill-hover);
 }
 .sh-update-banner__btn--ghost {
   background: transparent;
-  color: var(--sh-fg-secondary);
+  color: var(--sh-text-muted);
 }
 .sh-update-banner__btn--ghost:hover {
-  color: var(--sh-fg);
+  color: var(--sh-text);
 }
 
 /* Toasts */
@@ -1880,7 +1880,7 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
       var(--sh-skeleton-highlight) 50%,
       transparent 100%
     ),
-    var(--sh-bg-tertiary, #e8e0d4);
+    var(--sh-bg-tertiary);
   background-size: 200% 100%, 100% 100%;
   background-position: -150% 0, 0 0;
   border-radius: var(--sh-radius-sm);
@@ -2646,7 +2646,7 @@ button.sh-friends-member-chip:not(:disabled):hover {
   gap: var(--sh-space-sm);
   padding: var(--sh-space-sm) var(--sh-space-md);
   border-radius: var(--sh-radius-md);
-  background: var(--sh-surface-2, color-mix(in srgb, var(--sh-text) 5%, transparent));
+  background: color-mix(in srgb, var(--sh-text) 5%, transparent);
   cursor: pointer;
   font-weight: 600;
 }
@@ -2654,13 +2654,13 @@ button.sh-friends-member-chip:not(:disabled):hover {
 .sh-bots-disabled-banner {
   padding: var(--sh-space-sm) var(--sh-space-md);
   border-radius: var(--sh-radius-md);
-  background: color-mix(in srgb, var(--sh-warning, #b77d00) 10%, transparent);
-  color: var(--sh-warning, #b77d00);
+  background: color-mix(in srgb, var(--sh-warning) 10%, transparent);
+  color: var(--sh-warning);
   font-size: var(--sh-font-size-sm);
 }
 
 .sh-bots-section {
-  border-top: 1px solid var(--sh-divider, color-mix(in srgb, var(--sh-text) 10%, transparent));
+  border-top: 1px solid color-mix(in srgb, var(--sh-text) 10%, transparent);
   padding-top: var(--sh-space-md);
 }
 .sh-bots-section h3 { margin: 0 0 4px; }
@@ -2687,7 +2687,7 @@ button.sh-friends-member-chip:not(:disabled):hover {
   gap: var(--sh-space-sm);
   padding: var(--sh-space-sm);
   border-radius: var(--sh-radius-md);
-  background: var(--sh-surface-2, color-mix(in srgb, var(--sh-text) 4%, transparent));
+  background: color-mix(in srgb, var(--sh-text) 4%, transparent);
 }
 .sh-bot-row__meta { flex: 1; min-width: 0; }
 .sh-bot-row__name { font-weight: 600; }
@@ -2707,14 +2707,14 @@ button.sh-friends-member-chip:not(:disabled):hover {
 
 .sh-bots-create-panel {
   padding-top: var(--sh-space-md);
-  border-top: 1px solid var(--sh-divider, color-mix(in srgb, var(--sh-text) 10%, transparent));
+  border-top: 1px solid color-mix(in srgb, var(--sh-text) 10%, transparent);
 }
 .sh-bot-create {
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-sm);
   padding: var(--sh-space-md);
-  background: var(--sh-surface-2, color-mix(in srgb, var(--sh-text) 4%, transparent));
+  background: color-mix(in srgb, var(--sh-text) 4%, transparent);
   border-radius: var(--sh-radius-md);
 }
 .sh-bot-create h3 { margin: 0 0 var(--sh-space-xs); }
@@ -2725,7 +2725,7 @@ button.sh-friends-member-chip:not(:disabled):hover {
   border-radius: var(--sh-radius-sm);
   border: 1px solid color-mix(in srgb, var(--sh-text) 20%, transparent);
   font: inherit;
-  background: var(--sh-surface, transparent);
+  background: var(--sh-bg);
   color: var(--sh-text);
 }
 .sh-bot-create__scope {
@@ -2764,7 +2764,7 @@ button.sh-friends-member-chip:not(:disabled):hover {
   display: flex;
   gap: var(--sh-space-sm);
   align-items: center;
-  background: var(--sh-surface, transparent);
+  background: var(--sh-bg);
   padding: var(--sh-space-sm);
   border-radius: var(--sh-radius-sm);
   border: 1px dashed color-mix(in srgb, var(--sh-primary) 40%, transparent);
@@ -2772,7 +2772,7 @@ button.sh-friends-member-chip:not(:disabled):hover {
 }
 .sh-bot-reveal__token code {
   flex: 1;
-  font-family: var(--sh-font-mono, ui-monospace, monospace);
+  font-family: var(--sh-font-family-mono);
   font-size: var(--sh-font-size-sm);
   overflow-wrap: anywhere;
   user-select: all;
@@ -3441,9 +3441,10 @@ button.sh-friends-member-chip:not(:disabled):hover {
   flex-shrink: 0;
 }
 .sh-type-btn:hover { background: var(--sh-bg); }
-.sh-type-btn--active {
+.sh-type-btn--active,
+.sh-type-btn--active:hover {
   background: var(--sh-primary-fill);
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   box-shadow: var(--sh-shadow-sm);
 }
 /* Composer textarea — the moment the user is about to share with the
@@ -3898,9 +3899,9 @@ button.sh-friends-member-chip:not(:disabled):hover {
   flex-shrink: 0;
 }
 .sh-newdm-row--checked .sh-newdm-check {
-  background: var(--sh-primary);
-  border-color: var(--sh-primary);
-  color: var(--sh-bg);
+  background: var(--sh-primary-fill);
+  border-color: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
 }
 
 .sh-thread {
@@ -4099,10 +4100,10 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-message--mine .sh-dm-location .sh-muted,
 .sh-message--mine .sh-dm-location-unreadable {
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--sh-on-primary-fill);
 }
 .sh-message--mine .sh-dm-location .sh-location-map {
-  border-color: rgba(255, 255, 255, 0.35);
+  border-color: color-mix(in srgb, var(--sh-on-primary-fill) 35%, transparent);
 }
 /* Pre-send attachment preview. Sits above the composer between the
  * reply-quote chip (if any) and the input row so the user can
@@ -4435,9 +4436,9 @@ body.sh-dm-thread-open .sh-messages {
   /* Mine bubbles have a warm primary background; the failure
    * footnote shifts to a paper-tinted backdrop so the contrast
    * still reads as "warning" without fighting the bubble fill. */
-  background: rgba(255, 255, 255, 0.18);
-  border-color: rgba(255, 255, 255, 0.32);
-  color: rgba(255, 255, 255, 0.92);
+  background: var(--sh-primary-fill-hover);
+  border-color: color-mix(in srgb, var(--sh-on-primary-fill) 32%, transparent);
+  color: var(--sh-on-primary-fill);
 }
 .sh-message-media--pending {
   /* Cross-household preview-now state: the bubble shows the small
@@ -4468,8 +4469,8 @@ body.sh-dm-thread-open .sh-messages {
   max-width: 100%;
 }
 .sh-message--mine .sh-message-file {
-  background: color-mix(in srgb, var(--sh-bg) 30%, transparent);
-  border-color: color-mix(in srgb, var(--sh-bg) 40%, transparent);
+  background: var(--sh-primary-fill-hover);
+  border-color: color-mix(in srgb, var(--sh-on-primary-fill) 32%, transparent);
 }
 .sh-message-file__glyph {
   font-size: 1.4rem;
@@ -4592,8 +4593,8 @@ body.sh-dm-thread-open .sh-messages {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--sh-primary);
-  color: var(--sh-bg);
+  background: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
   font-size: 1.1rem;
   line-height: 1;
   cursor: pointer;
@@ -4602,13 +4603,14 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-thread > .sh-composer > .sh-composer-mic:hover:not(:disabled),
 .sh-thread > .sh-composer > .sh-composer-mic:focus-visible {
-  background: color-mix(in srgb, var(--sh-primary) 85%, black);
+  background: var(--sh-primary-fill-hover);
   outline: none;
 }
 .sh-thread > .sh-composer > .sh-composer-mic[aria-pressed="true"] {
   /* Recording state — feedback when the user is holding the button.
    * Subtle pulse so the cue is felt even at a glance. */
   background: var(--sh-success);
+  color: var(--sh-on-success-fill);
   animation: sh-mic-pulse 1.2s ease-in-out infinite;
 }
 @keyframes sh-mic-pulse {
@@ -4758,7 +4760,7 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-thread-mute__item:hover:not(:disabled),
 .sh-thread-mute__item:focus-visible {
-  background: var(--sh-surface-2, var(--sh-bg-secondary));
+  background: var(--sh-bg-secondary);
 }
 .sh-thread-mute__check {
   display: inline-block;
@@ -4911,7 +4913,7 @@ body.sh-dm-thread-open .sh-messages {
   padding: 8px 14px;
   font-size: var(--sh-font-size-sm);
   font-weight: 600;
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
   background: var(--sh-primary-fill);
   border: none;
   border-radius: 999px;
@@ -4922,10 +4924,10 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-dm-jump-down:hover {
   transform: translateY(-1px);
-  background: color-mix(in srgb, var(--sh-primary) 85%, black);
+  background: var(--sh-primary-fill-hover);
 }
 .sh-dm-jump-down__count {
-  background: rgba(255, 255, 255, 0.22);
+  background: var(--sh-primary-fill-hover);
   border-radius: 999px;
   padding: 0 6px;
   min-width: 18px;
@@ -4980,15 +4982,15 @@ body.sh-dm-thread-open .sh-messages {
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 .sh-message--mine {
-  background: linear-gradient(135deg, var(--sh-primary-fill), var(--sh-primary-hover));
+  background: linear-gradient(135deg, var(--sh-primary-fill), var(--sh-primary-fill-hover));
   border-color: transparent;
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
   align-self: flex-end;
   border-bottom-left-radius: 18px;
   border-bottom-right-radius: 6px;
 }
-.sh-message--mine strong { color: rgba(255, 255, 255, 0.85); }
-.sh-message--mine a { color: var(--sh-bg); text-decoration: underline; }
+.sh-message--mine strong { color: var(--sh-on-primary-fill); }
+.sh-message--mine a { color: var(--sh-on-primary-fill); text-decoration: underline; }
 .sh-message strong {
   display: block;
   font: 600 calc(var(--sh-font-size-xs) - 1px) / 1
@@ -5008,22 +5010,24 @@ body.sh-dm-thread-open .sh-messages {
   margin-top: 4px;
   align-items: center;
 }
-.sh-message--mine .sh-message-meta { color: rgba(255,255,255,0.75); justify-content: flex-end; }
+.sh-message--mine .sh-message-meta { color: var(--sh-on-primary-fill); justify-content: flex-end; }
 /* Per-bubble send-failure glyph. Shows ⚠ in the sender's bubble
    when the background ``POST`` failed — the optimistic bubble keeps
    the content visible so the user can still see what didn't ship.
    ``cursor: help`` because the hover text is the primary affordance
    (a toast also fires for accessibility). */
 .sh-message-send-failed {
-  color: var(--sh-warning, #d97706);
+  color: var(--sh-warning);
   font-size: 0.95rem;
   cursor: help;
   line-height: 1;
 }
 .sh-message--mine .sh-message-send-failed {
-  /* On the tinted ``mine`` bubble the warning needs a brighter tone
-     so it pops against the terracotta gradient. */
-  color: #ffd25a;
+  /* On the ``mine`` fill the warning takes the bubble's own ink (any
+     yellow / red tone fails on some primary in some theme); the ⚠
+     glyph and the copy carry the meaning. */
+  color: var(--sh-on-primary-fill);
+  font-weight: 600;
 }
 
 /* Same-author bubble grouping.
@@ -5112,12 +5116,16 @@ body.sh-dm-thread-open .sh-messages {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Inside my own bubble: text takes the bubble ink, and nested chips
+ * (quote, reactions, file, failure note) sit on the HOVER fill — which
+ * moves away from the ink — so they read at ≥ the bubble's own
+ * contrast; tinting toward the ink would drop below AA. */
 .sh-message--mine .sh-message-quote {
-  background: rgba(255, 255, 255, 0.18);
-  border-left-color: rgba(255, 255, 255, 0.6);
+  background: var(--sh-primary-fill-hover);
+  border-left-color: color-mix(in srgb, var(--sh-on-primary-fill) 60%, transparent);
 }
-.sh-message--mine .sh-message-quote-author { color: rgba(255, 255, 255, 0.95); }
-.sh-message--mine .sh-message-quote-body   { color: rgba(255, 255, 255, 0.8); }
+.sh-message--mine .sh-message-quote-author { color: var(--sh-on-primary-fill); }
+.sh-message--mine .sh-message-quote-body   { color: var(--sh-on-primary-fill); }
 
 /* Reply button — small, hover-revealed glyph that sits just outside
  * the bubble on desktop. Shifts to the inside opposite the meta on
@@ -5160,9 +5168,9 @@ body.sh-dm-thread-open .sh-messages {
 .sh-message-react-btn:focus { opacity: 1; }
 .sh-message-reply-btn:hover,
 .sh-message-react-btn:hover {
-  background: var(--sh-primary);
-  color: var(--sh-bg);
-  border-color: var(--sh-primary);
+  background: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
+  border-color: var(--sh-primary-fill);
 }
 /* Own bubbles sit on the right edge of the column — flip the chips
  * to the left side and mirror the ordering (reply closer to the
@@ -5275,14 +5283,14 @@ body.sh-dm-thread-open .sh-messages {
   font-size: var(--sh-font-size-xs);
 }
 .sh-message--mine .sh-reaction-chip {
-  background: rgba(255, 255, 255, 0.18);
-  border-color: rgba(255, 255, 255, 0.4);
-  color: rgba(255, 255, 255, 0.95);
+  background: var(--sh-primary-fill-hover);
+  border-color: color-mix(in srgb, var(--sh-on-primary-fill) 40%, transparent);
+  color: var(--sh-on-primary-fill);
 }
-.sh-message--mine .sh-reaction-chip__count { color: rgba(255, 255, 255, 0.75); }
+.sh-message--mine .sh-reaction-chip__count { color: var(--sh-on-primary-fill); }
 .sh-message--mine .sh-reaction-chip--mine {
-  background: rgba(255, 255, 255, 0.32);
-  border-color: rgba(255, 255, 255, 0.8);
+  background: var(--sh-primary-fill-hover);
+  border-color: var(--sh-on-primary-fill);
 }
 
 /* Long-press context sheet — bottom-sheet on touch, centred card
@@ -5334,7 +5342,7 @@ body.sh-dm-thread-open .sh-messages {
   align-items: center;
   justify-content: center;
   font-size: 1.4rem;
-  background: var(--sh-surface, var(--sh-bg-alt, #f7f3ee));
+  background: var(--sh-bg-secondary);
   border: 1px solid var(--sh-border);
   border-radius: 999px;
   cursor: pointer;
@@ -5367,10 +5375,10 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-context-sheet__action:hover,
 .sh-context-sheet__action:focus-visible {
-  background: var(--sh-surface, var(--sh-bg-alt, #f7f3ee));
+  background: var(--sh-bg-secondary);
 }
 .sh-context-sheet__action--destructive {
-  color: var(--sh-danger, #c0392b);
+  color: var(--sh-danger);
 }
 .sh-context-sheet__action > span:first-child {
   font-size: 1.2rem;
@@ -5468,9 +5476,9 @@ body.sh-dm-thread-open .sh-messages {
 .sh-receipt--sent      { color: var(--sh-text-muted); }
 .sh-receipt--delivered { color: var(--sh-text-muted); }
 .sh-receipt--read      { color: var(--sh-primary-text); font-weight: 700; }
-.sh-message--mine .sh-receipt--read      { color: #F1D9CA; }   /* hearth-tint on hearth gradient */
-.sh-message--mine .sh-receipt--delivered { color: rgba(255,255,255,0.7); }
-.sh-message--mine .sh-receipt--sent      { color: rgba(255,255,255,0.5); }
+.sh-message--mine .sh-receipt--read      { color: var(--sh-on-primary-fill); }   /* full ink + the bold weight */
+.sh-message--mine .sh-receipt--delivered { color: var(--sh-on-primary-fill); }
+.sh-message--mine .sh-receipt--sent      { color: color-mix(in srgb, var(--sh-on-primary-fill) 80%, transparent); }
 
 /* Typing indicator — default (inline pill) shape used by comment
  * threads. The bubble variant below sits at the bottom of a DM
@@ -6144,7 +6152,7 @@ body.sh-dm-thread-open .sh-messages {
  * inherits text colour from the surrounding card but underlines on
  * hover so it reads as tap-actionable without screaming about it. */
 .sh-event-location-row {
-  margin: 0 0 var(--sh-space-2);
+  margin: 0 0 var(--sh-space-sm);
 }
 .sh-event-location,
 .sh-event-card-location-link {
@@ -6467,7 +6475,7 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-task-pin--overdue {
   background: var(--sh-primary-fill);
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
 }
 
 /* Status-grouped sections in the task list. Same shape as the
@@ -6884,7 +6892,7 @@ body.sh-dm-thread-open .sh-messages {
 }
 .sh-call-picker-meta {
   font-size: 0.85rem;
-  color: var(--sh-text-secondary, currentColor);
+  color: var(--sh-text-muted);
   opacity: 0.8;
 }
 @media (max-width: 480px) {
@@ -7821,13 +7829,13 @@ button.sh-shopping-item__text:focus-visible {
   border-color: var(--sh-primary);
 }
 .sh-store-manager__action--danger {
-  color: var(--sh-danger, #ef4444);
-  border-color: color-mix(in srgb, var(--sh-danger, #ef4444) 30%, transparent);
+  color: var(--sh-danger);
+  border-color: color-mix(in srgb, var(--sh-danger) 30%, transparent);
 }
 .sh-store-manager__action--danger:hover {
-  background: color-mix(in srgb, var(--sh-danger, #ef4444) 10%, transparent);
-  color: var(--sh-danger, #ef4444);
-  border-color: var(--sh-danger, #ef4444);
+  background: color-mix(in srgb, var(--sh-danger) 10%, transparent);
+  color: var(--sh-danger-on-soft);
+  border-color: var(--sh-danger);
 }
 .sh-store-manager__edit,
 .sh-store-manager__add {
@@ -7980,7 +7988,7 @@ button.sh-shopping-item__text:focus-visible {
 .sh-page-editor-status--idle    { color: var(--sh-text-muted); }
 .sh-page-editor-status--saving  { color: var(--sh-text-muted); background: var(--sh-bg-secondary); }
 .sh-page-editor-status--saved   { color: var(--sh-success); background: color-mix(in srgb, var(--sh-success) 15%, transparent); }
-.sh-page-editor-status--error   { color: var(--sh-danger);  background: color-mix(in srgb, var(--sh-danger)  15%, transparent); cursor: pointer; }
+.sh-page-editor-status--error   { color: var(--sh-danger-on-soft);  background: color-mix(in srgb, var(--sh-danger)  15%, transparent); cursor: pointer; }
 .sh-page-editor-mobile-tabs {
   display: none;
   gap: var(--sh-space-xs);
@@ -7997,7 +8005,7 @@ button.sh-shopping-item__text:focus-visible {
 }
 .sh-page-editor-mobile-tabs button[aria-pressed="true"] {
   background: var(--sh-primary-fill);
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   border-color: var(--sh-primary-fill);
 }
 @media (max-width: 768px) {
@@ -8064,7 +8072,7 @@ button.sh-shopping-item__text:focus-visible {
   overflow-y: auto;
 }
 .sh-diff-add  { background: color-mix(in srgb, var(--sh-success) 18%, transparent); color: var(--sh-success); }
-.sh-diff-del  { background: color-mix(in srgb, var(--sh-danger)  18%, transparent); color: var(--sh-danger); text-decoration: line-through; }
+.sh-diff-del  { background: color-mix(in srgb, var(--sh-danger)  18%, transparent); color: var(--sh-danger-on-soft); text-decoration: line-through; }
 .sh-diff-same { color: var(--sh-text-muted); }
 
 /* Pages — TOC rail */
@@ -8471,7 +8479,7 @@ button.sh-shopping-item__text:focus-visible {
   padding: 0 6px;
   border-radius: var(--sh-radius-full);
   background: var(--sh-danger);
-  color: #fff;
+  color: var(--sh-on-danger-fill);
   font-size: var(--sh-font-size-xs);
   font-weight: 700;
   text-align: center;
@@ -8879,9 +8887,9 @@ button.sh-shopping-item__text:focus-visible {
   color: #fff;
   border: 2px solid var(--sh-bg);
 }
-.sh-onboard-avatar--a { background: var(--sh-primary-fill); }
-.sh-onboard-avatar--b { background: var(--sh-success); }
-.sh-onboard-avatar--c { background: var(--sh-warning); }
+.sh-onboard-avatar--a { background: var(--sh-primary-fill); color: var(--sh-on-primary-fill); }
+.sh-onboard-avatar--b { background: var(--sh-success); color: var(--sh-on-success-fill); }
+.sh-onboard-avatar--c { background: var(--sh-warning); color: var(--sh-on-warning-fill); }
 .sh-onboard-avatars-more {
   margin-left: 2px;
   font-size: 0.78rem;
@@ -9244,11 +9252,11 @@ hr {
   aspect-ratio: 1;
   border-radius: var(--sh-radius-md);
   background:
-    linear-gradient(135deg, var(--sh-primary), var(--sh-primary-hover));
+    linear-gradient(135deg, var(--sh-primary-fill), var(--sh-primary-fill-hover));
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   font-size: 2rem;
   flex-shrink: 0;
   overflow: hidden;
@@ -9501,7 +9509,7 @@ hr {
   font-size: var(--sh-font-size-xs);
   padding: 2px 8px;
   background: var(--sh-primary-fill);
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   border-radius: var(--sh-radius-full);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -9519,7 +9527,7 @@ hr {
   width: 28px; height: 28px;
   display: inline-flex; align-items: center; justify-content: center;
   background: transparent; border: none; cursor: pointer;
-  color: var(--sh-muted); border-radius: var(--sh-radius-md);
+  color: var(--sh-text-muted); border-radius: var(--sh-radius-md);
   font-size: 14px; line-height: 1; padding: 0;
   opacity: 0;
   transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
@@ -9528,7 +9536,7 @@ hr {
 .sh-member-rename-btn:focus-visible { opacity: 1; }
 .sh-member-rename-btn:hover,
 .sh-member-rename-btn:focus-visible {
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
   color: var(--sh-text);
 }
 @media (hover: none) {
@@ -9548,7 +9556,7 @@ hr {
 }
 .sh-member-original-name {
   font-size: var(--sh-font-size-xs);
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
 }
 /* Federated-peer marker (§D1b) — distinguishes remote members from
  * local ones in the roster so the admin who invited them knows
@@ -9577,7 +9585,7 @@ hr {
   font-size: var(--sh-font-size-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
   font-weight: 700;
 }
 .sh-alias-dialog-input {
@@ -9597,7 +9605,7 @@ hr {
 .sh-alias-dialog-help {
   margin: 0;
   font-size: var(--sh-font-size-xs);
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
   line-height: 1.4;
 }
 .sh-alias-dialog-actions {
@@ -9745,8 +9753,8 @@ hr {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--sh-primary);
-  color: var(--sh-bg);
+  background: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
   border: 2px solid var(--sh-bg);
   border-radius: var(--sh-radius-full);
   box-shadow: var(--sh-shadow-sm);
@@ -10082,7 +10090,7 @@ hr {
 }
 .sh-setup-pw-toggle:hover,
 .sh-setup-pw-toggle:focus-visible {
-  background: var(--sh-surface-hover, color-mix(in srgb, var(--sh-text) 8%, transparent));
+  background: color-mix(in srgb, var(--sh-text) 8%, transparent);
   color: var(--sh-text);
 }
 .sh-setup-pw-toggle:focus-visible {
@@ -10383,6 +10391,7 @@ hr {
 .sh-incall-controls button.sh-hangup {
   background: var(--sh-danger);
   border-color: var(--sh-danger);
+  color: var(--sh-on-danger-fill);
   width: 68px; height: 68px;
 }
 .sh-incall-controls .sh-hangup:hover { background: var(--sh-danger-hover); }
@@ -10483,7 +10492,7 @@ hr {
 }
 .sh-q-good, .sh-incall-quality.sh-q-good { background: color-mix(in srgb, var(--sh-success) 22%, transparent); color: var(--sh-success); }
 .sh-q-fair, .sh-incall-quality.sh-q-fair { background: color-mix(in srgb, var(--sh-warning) 22%, transparent); color: var(--sh-warning); }
-.sh-q-poor, .sh-incall-quality.sh-q-poor { background: color-mix(in srgb, var(--sh-danger) 22%, transparent); color: var(--sh-danger); }
+.sh-q-poor, .sh-incall-quality.sh-q-poor { background: color-mix(in srgb, var(--sh-danger) 22%, transparent); color: var(--sh-danger-on-soft); }
 
 /* Incoming-call overlay */
 .sh-incoming-overlay {
@@ -10535,8 +10544,8 @@ hr {
   cursor: pointer;
   transition: transform var(--sh-transition-fast);
 }
-.sh-accept { background: var(--sh-success); }
-.sh-decline { background: var(--sh-danger); }
+.sh-accept { background: var(--sh-success); color: var(--sh-on-success-fill); }
+.sh-decline { background: var(--sh-danger); color: var(--sh-on-danger-fill); }
 .sh-accept:hover, .sh-decline:hover { transform: scale(1.08); }
 
 /* Dashboard + widgets */
@@ -10640,7 +10649,7 @@ hr {
   flex-direction: column;
   gap: var(--sh-space-sm);
   padding: var(--sh-space-md) var(--sh-space-lg);
-  background: var(--sh-bg-elev-1, var(--sh-bg-secondary));
+  background: var(--sh-bg-secondary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), 0 6px 18px -10px rgba(0, 0, 0, 0.06);
@@ -11168,7 +11177,7 @@ a.sh-welcome-card:hover {
   background: repeating-linear-gradient(180deg, var(--tt-edge) 0 3px, transparent 3px 6px);
 }
 .sh-schedule__row.is-cancelled .sh-schedule__icon { opacity: 0.55; filter: grayscale(1); }
-.sh-schedule__row.is-changed .sh-schedule__bar { box-shadow: 0 0 0 2px var(--sh-bg-elev-1, var(--sh-bg-secondary)), 0 0 0 3px var(--tt-edge); }
+.sh-schedule__row.is-changed .sh-schedule__bar { box-shadow: 0 0 0 2px var(--sh-bg-secondary), 0 0 0 3px var(--tt-edge); }
 .sh-schedule__row.is-past > :not(.sr-only),
 .sh-schedule__row.is-past .sh-schedule__link > :not(.sr-only) { opacity: 0.5; }
 .sh-schedule__row.is-current .sh-schedule__name { font-weight: 700; }
@@ -11209,13 +11218,12 @@ a.sh-welcome-card:hover {
   padding: 1px 6px;
   border-radius: var(--sh-radius-full);
   background: var(--sh-primary-fill);
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   font-size: var(--sh-font-size-xs);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.4;
 }
-.sh-theme-dark .sh-schedule__now-time { color: #1b0f0a; }
 .sh-schedule__now + .sh-schedule__row { border-top-color: transparent; }
 .sh-schedule__links {
   display: flex;
@@ -11544,7 +11552,7 @@ a.sh-welcome-card:hover {
   place-items: center;
   font-size: 1.05rem;
   line-height: 1;
-  background: var(--sh-bg-tertiary, #efe7da);
+  background: var(--sh-bg-tertiary);
   flex-shrink: 0;
 }
 .sh-space-subheader-meta {
@@ -11737,12 +11745,12 @@ a.sh-welcome-card:hover {
   transition: background var(--sh-transition-fast);
 }
 .sh-space-tabs-overflow__item:hover {
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
 }
 .sh-space-tabs-overflow__item:focus-visible {
   outline: 2px solid var(--sh-primary);
   outline-offset: -2px;
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
 }
 .sh-space-tabs-overflow__item--active {
   font-weight: 600;
@@ -11881,7 +11889,7 @@ a.sh-welcome-card:hover {
   cursor: pointer;
 }
 .sh-notif-prefs-menu__item:hover:not(:disabled) {
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
 }
 .sh-notif-prefs-menu__item--active {
   font-weight: 600;
@@ -11916,7 +11924,7 @@ a.sh-welcome-card:hover {
   gap: var(--sh-space-xs);
   align-items: center;
   padding: 8px;
-  background: var(--sh-surface-1);
+  background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
 }
@@ -11924,7 +11932,7 @@ a.sh-welcome-card:hover {
   padding: 6px 10px;
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-sm);
-  background: var(--sh-surface-0);
+  background: var(--sh-bg);
   color: var(--sh-text);
   font-size: var(--sh-font-size-sm);
 }
@@ -11932,19 +11940,33 @@ a.sh-welcome-card:hover {
   display: flex;
   gap: 4px;
 }
+/* Phones: label + the three row actions on the first line, the URL on
+ * its own full-width line — the desktop 120 + 200 px + actions grid is
+ * wider than a 390 px screen. Inputs grow to a 40 px tap target. */
+@media (max-width: 560px) {
+  .sh-space-links-editor__row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "label actions" "url url";
+  }
+  .sh-space-links-editor__label { grid-area: label; }
+  .sh-space-links-editor__url { grid-area: url; }
+  .sh-space-links-editor__actions { grid-area: actions; }
+  .sh-space-links-editor__row input,
+  .sh-space-links-editor__create input { min-height: 40px; min-width: 0; }
+}
 .sh-space-links-editor .sh-icon-btn--danger {
-  color: var(--sh-error);
+  color: var(--sh-danger);
 }
 .sh-space-links-editor .sh-icon-btn--danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--sh-error) 15%, transparent);
-  color: var(--sh-error);
+  background: color-mix(in srgb, var(--sh-danger) 15%, transparent);
+  color: var(--sh-danger-on-soft);
 }
 .sh-space-links-editor__create {
   display: grid;
   gap: var(--sh-space-xs);
   margin-top: var(--sh-space-md);
   padding: var(--sh-space-sm);
-  background: var(--sh-surface-1);
+  background: var(--sh-bg-tertiary);
   border: 1px dashed var(--sh-border);
   border-radius: var(--sh-radius-md);
 }
@@ -11952,13 +11974,13 @@ a.sh-welcome-card:hover {
   margin: 0;
   font-size: var(--sh-font-size-sm);
   font-weight: 600;
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
 }
 .sh-space-links-editor__create input {
   padding: 8px 10px;
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-sm);
-  background: var(--sh-surface-0);
+  background: var(--sh-bg);
   color: var(--sh-text);
 }
 
@@ -12009,8 +12031,8 @@ a.sh-welcome-card:hover {
   place-items: center;
   font-size: 2.2rem;
   line-height: 1;
-  background: var(--sh-bg-secondary, #fff);
-  border: 3px solid var(--sh-bg, #fff);
+  background: var(--sh-bg-secondary);
+  border: 3px solid var(--sh-bg);
   box-shadow: var(--sh-shadow-sm);
   color: var(--sh-primary-text);
   overflow: hidden;
@@ -12057,7 +12079,7 @@ a.sh-welcome-card:hover {
 }
 .sh-space-hero-members {
   font-size: var(--sh-font-size-sm);
-  color: var(--sh-text-muted, #6b6b6b);
+  color: var(--sh-text-muted);
 }
 .sh-space-hero-about {
   padding: var(--sh-space-sm) var(--sh-space-md) 0;
@@ -12276,7 +12298,7 @@ a.sh-welcome-card:hover {
 }
 .sh-pairing-step--done .sh-pairing-step-dot {
   background: var(--sh-success);
-  color: #fff;
+  color: var(--sh-on-success-fill);
   border-color: var(--sh-success);
 }
 .sh-pairing-step--active {
@@ -12285,7 +12307,7 @@ a.sh-welcome-card:hover {
 }
 .sh-pairing-step--active .sh-pairing-step-dot {
   background: var(--sh-primary-fill);
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   border-color: var(--sh-primary-fill);
 }
 
@@ -12366,7 +12388,7 @@ a.sh-welcome-card:hover {
 }
 .sh-pairing-success-burst span {
   font-size: 2.5rem;
-  color: #fff;
+  color: var(--sh-on-success-fill);
   font-weight: 800;
 }
 @keyframes sh-burst {
@@ -12398,7 +12420,7 @@ a.sh-welcome-card:hover {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--sh-space-xxs);
+  gap: calc(var(--sh-space-xs) / 2);
   padding: var(--sh-space-md);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
@@ -12416,7 +12438,7 @@ a.sh-welcome-card:hover {
 .sh-pairing-role-icon { font-size: 2rem; line-height: 1; }
 .sh-pairing-role-title { font-weight: 600; }
 .sh-pairing-role-hint {
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
   font-size: var(--sh-font-size-xs);
   line-height: 1.35;
 }
@@ -12489,7 +12511,7 @@ a.sh-welcome-card:hover {
 }
 .sh-pairing-code-string {
   display: block;
-  font-family: var(--sh-font-mono, monospace);
+  font-family: var(--sh-font-family-mono);
   font-size: var(--sh-font-size-xs);
   background: var(--sh-bg);
   border: 1px solid var(--sh-border);
@@ -12535,7 +12557,7 @@ a.sh-welcome-card:hover {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--sh-space-xxs);
+  gap: calc(var(--sh-space-xs) / 2);
   padding: var(--sh-space-sm) var(--sh-space-xs);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);
@@ -12579,7 +12601,7 @@ a.sh-welcome-card:hover {
 }
 .sh-radio-card-group__legend {
   padding: 0;
-  margin-bottom: var(--sh-space-xxs);
+  margin-bottom: calc(var(--sh-space-xs) / 2);
   font-weight: 600;
   font-size: var(--sh-font-size-sm);
 }
@@ -12696,7 +12718,7 @@ a.sh-welcome-card:hover {
   align-items: center;
   gap: var(--sh-space-xs);
   padding: var(--sh-space-md);
-  background: var(--sh-warning-soft, color-mix(in srgb, var(--sh-warning) 10%, transparent));
+  background: color-mix(in srgb, var(--sh-warning) 10%, transparent);
   border-radius: var(--sh-radius-md);
   text-align: center;
   width: 100%;
@@ -12719,7 +12741,7 @@ a.sh-welcome-card:hover {
   padding: var(--sh-space-xs) var(--sh-space-sm);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
-  font-family: var(--sh-font-mono, monospace);
+  font-family: var(--sh-font-family-mono);
   font-size: var(--sh-font-size-xs);
   resize: vertical;
 }
@@ -12752,7 +12774,7 @@ a.sh-welcome-card:hover {
   background: var(--sh-primary-soft);
   border: 1px solid color-mix(in srgb, var(--sh-primary) 30%, transparent);
   border-radius: var(--sh-radius-md);
-  font-family: var(--sh-font-mono, monospace);
+  font-family: var(--sh-font-family-mono);
 }
 
 /* ───── Incoming auto-pair inbox ────────────────────────────────── */
@@ -13127,7 +13149,7 @@ a.sh-welcome-card:hover {
   border-radius: var(--sh-radius-full);
   font-weight: 700;
 }
-.sh-bazaar-tile-badge--sold { background: var(--sh-success); }
+.sh-bazaar-tile-badge--sold { background: var(--sh-success); color: var(--sh-on-success-fill); }
 .sh-bazaar-tile-badge--expired,
 .sh-bazaar-tile-badge--cancelled {
   background: var(--sh-text-muted);
@@ -13338,17 +13360,17 @@ a.sh-welcome-card:hover {
   padding: 0;
   background: transparent;
   border: none;
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
   cursor: pointer;
   transition: color var(--sh-transition-fast),
               transform var(--sh-transition-fast);
 }
 .sh-save-listing-btn:hover:not(:disabled) {
-  color: var(--sh-error);
+  color: var(--sh-danger);
   transform: scale(1.1);
 }
 .sh-save-listing-btn--on {
-  color: var(--sh-error);
+  color: var(--sh-danger);
 }
 .sh-save-listing-btn:disabled {
   cursor: default;
@@ -13410,7 +13432,7 @@ a.sh-welcome-card:hover {
 .sh-bazaar-offers-own--withdrawn {
   background: var(--sh-bg-secondary);
   border-color: var(--sh-border);
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
 }
 .sh-bazaar-offers-status-pill {
   display: inline-block;
@@ -13419,16 +13441,16 @@ a.sh-welcome-card:hover {
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
   text-transform: capitalize;
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
   color: var(--sh-text);
 }
 .sh-bazaar-offers-status-pill--accepted {
-  background: color-mix(in srgb, var(--sh-success, #2da44e) 20%, transparent);
-  color: var(--sh-success, #2da44e);
+  background: color-mix(in srgb, var(--sh-success) 20%, transparent);
+  color: var(--sh-success);
 }
 .sh-bazaar-offers-status-pill--rejected,
 .sh-bazaar-offers-status-pill--withdrawn {
-  background: color-mix(in srgb, var(--sh-muted) 20%, transparent);
+  background: color-mix(in srgb, var(--sh-text-muted) 20%, transparent);
 }
 .sh-bazaar-offers-status-pill--pending {
   background: color-mix(in srgb, var(--sh-warning) 20%, transparent);
@@ -13678,7 +13700,7 @@ a.sh-welcome-card:hover {
   transition: color var(--sh-transition-fast), background var(--sh-transition-fast);
 }
 .sh-poll-remove:hover:not(:disabled) {
-  color: var(--sh-danger);
+  color: var(--sh-danger-on-soft);
   background: color-mix(in srgb, var(--sh-danger) 10%, transparent);
 }
 .sh-poll-remove:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -13827,17 +13849,19 @@ a.sh-welcome-card:hover {
 .sh-schedule-btn:active:not(:disabled) { transform: translateY(0); }
 .sh-schedule-btn--active {
   background: var(--sh-primary-fill);
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   border-color: var(--sh-primary-fill);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-primary) 25%, transparent);
 }
 .sh-schedule-btn--active[data-a="yes"] {
   background: var(--sh-success);
+  color: var(--sh-on-success-fill);
   border-color: var(--sh-success);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-success) 25%, transparent);
 }
 .sh-schedule-btn--active[data-a="no"] {
   background: var(--sh-danger);
+  color: var(--sh-on-danger-fill);
   border-color: var(--sh-danger);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sh-danger) 25%, transparent);
 }
@@ -14132,8 +14156,8 @@ a.sh-link-preview-link:focus-visible {
 .sh-location-picker-error {
   padding: var(--sh-space-sm) var(--sh-space-md);
   border-radius: var(--sh-radius-md);
-  border: 1px solid color-mix(in srgb, var(--sh-danger, #dc2626) 45%, transparent);
-  background: color-mix(in srgb, var(--sh-danger, #dc2626) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sh-danger) 45%, transparent);
+  background: color-mix(in srgb, var(--sh-danger) 10%, transparent);
   font-size: var(--sh-font-size-sm);
 }
 /* Pick mode: the map is the control — a crosshair says "tap here". */
@@ -14262,8 +14286,8 @@ a.sh-link-preview-link:focus-visible {
   unicode-bidi: plaintext;
 }
 .sh-mention--self {
-  background: var(--sh-primary-hover);
-  color: var(--sh-bg);
+  background: var(--sh-primary-fill-hover);
+  color: var(--sh-on-primary-fill);
 }
 .sh-mention--here {
   background: var(--sh-warning);
@@ -15049,7 +15073,7 @@ a.sh-link-preview-link:focus-visible {
   flex: 0 0 auto;
 }
 .sh-federation-public-url__copy:hover {
-  background: var(--sh-surface-hover, color-mix(in srgb, var(--sh-text) 8%, transparent));
+  background: color-mix(in srgb, var(--sh-text) 8%, transparent);
   border-color: var(--sh-border);
 }
 /* Pending-review hint shown in place of the public link while a GFS
@@ -15103,8 +15127,8 @@ a.sh-link-preview-link:focus-visible {
   border-radius: 999px;
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
-  background: color-mix(in srgb, var(--sh-danger, #b3261e) 14%, transparent);
-  color: var(--sh-danger, #b3261e);
+  background: color-mix(in srgb, var(--sh-danger) 14%, transparent);
+  color: var(--sh-danger-on-soft);
 }
 .sh-security { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
 .sh-security > h3, .sh-security > p { margin: 0; }
@@ -15285,7 +15309,7 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-invite-artifact-label {
   font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-secondary);
+  color: var(--sh-text-muted);
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -15342,7 +15366,7 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-invite-fieldset legend {
   font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-secondary);
+  color: var(--sh-text-muted);
   font-weight: 600;
   padding: 0 var(--sh-space-xs);
 }
@@ -15373,7 +15397,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-invite-role__hint {
   grid-area: hint;
   font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-secondary);
+  color: var(--sh-text-muted);
 }
 .sh-invite-publish {
   display: flex;
@@ -15480,7 +15504,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-voice-btn--recording {
   background: color-mix(in srgb, var(--sh-danger) 14%, var(--sh-bg));
   border-color: color-mix(in srgb, var(--sh-danger) 50%, var(--sh-border));
-  color: var(--sh-danger);
+  color: var(--sh-danger-on-soft);
   /* Stretch the pill so the elapsed-time label has room. */
   width: auto;
   padding: 0 var(--sh-space-md);
@@ -15533,7 +15557,7 @@ a.sh-link-preview-link:focus-visible {
   font-size: 0.9rem;
   color: inherit;
 }
-.sh-voice-locked__btn--cancel { color: var(--sh-fg-secondary); }
+.sh-voice-locked__btn--cancel { color: var(--sh-text-muted); }
 .sh-voice-locked__btn--send { color: var(--sh-primary-text); font-weight: 600; }
 
 /* Voice-note bubble: inline ``<audio controls>`` + transcript line. */
@@ -15575,7 +15599,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-error-state {
   padding: var(--sh-space-lg);
   text-align: center;
-  color: var(--sh-danger);
+  color: var(--sh-danger-on-soft);
   background: color-mix(in srgb, var(--sh-danger) 8%, var(--sh-bg));
   border: 1px solid color-mix(in srgb, var(--sh-danger) 25%, var(--sh-border));
   border-radius: var(--sh-radius-lg);
@@ -15604,7 +15628,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-location-map__empty {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
-  background: color-mix(in srgb, var(--sh-surface) 92%, transparent);
+  background: color-mix(in srgb, var(--sh-bg) 92%, transparent);
   pointer-events: none;
   font-size: var(--sh-font-size-sm);
 }
@@ -15626,10 +15650,10 @@ a.sh-link-preview-link:focus-visible {
   display: flex; align-items: center; justify-content: center;
   text-align: center;
   padding: var(--sh-space-sm);
-  background: color-mix(in srgb, var(--sh-surface) 92%, transparent);
+  background: color-mix(in srgb, var(--sh-bg) 92%, transparent);
   pointer-events: none;
   font-size: var(--sh-font-size-sm);
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
   /* Above Leaflet's own layers (zoom control sits at 1000), which
    * would otherwise paint through this semi-transparent overlay. The
    * isolated parent keeps this number local — it never competes with
@@ -15641,7 +15665,9 @@ a.sh-link-preview-link:focus-visible {
   border-radius: 50%;
   border: 3px solid #22c55e;
   background: var(--sh-bg);
-  color: white;
+  /* Initials sit on the paper disc: ink, not white (white on the light
+     paper was invisible). */
+  color: var(--sh-text);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
   display: flex; align-items: center; justify-content: center;
   overflow: hidden;
@@ -15664,7 +15690,7 @@ a.sh-link-preview-link:focus-visible {
   display: flex; justify-content: space-between; align-items: center;
   padding: var(--sh-space-xs) var(--sh-space-sm);
   font-size: var(--sh-font-size-xs);
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
 }
 .sh-space-location {
   display: flex; flex-direction: column; gap: var(--sh-space-xs);
@@ -15707,12 +15733,12 @@ a.sh-link-preview-link:focus-visible {
   transition: background-color 120ms, border-color 120ms;
 }
 .sh-locale-option:hover {
-  background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-surface));
+  background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg));
 }
 .sh-locale-option--active,
 .sh-locale-option--active:hover {
   background: var(--sh-primary-fill);
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
   border-color: var(--sh-primary-fill);
 }
 /* ChipRadioGroup option ``swatch``: a colour dot before the label
@@ -15752,7 +15778,7 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-admin-stats dt {
   font-weight: 500;
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
 }
 .sh-admin-stats dd { margin: 0; }
 .sh-admin-progress {
@@ -15812,7 +15838,7 @@ a.sh-link-preview-link:focus-visible {
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-sm);
   padding: var(--sh-space-xs) var(--sh-space-sm);
-  color: var(--sh-muted);
+  color: var(--sh-text-muted);
   cursor: pointer;
   font: inherit;
 }
@@ -15845,7 +15871,7 @@ a.sh-link-preview-link:focus-visible {
   padding: var(--sh-space-sm) var(--sh-space-md);
   background: transparent; border: none;
   border-bottom: 3px solid transparent;
-  color: var(--sh-muted); font-weight: 500;
+  color: var(--sh-text-muted); font-weight: 500;
   cursor: pointer; white-space: nowrap;
   transition: color 120ms, border-color 120ms;
 }
@@ -16076,7 +16102,7 @@ a.sh-link-preview-link:focus-visible {
   border-radius: var(--sh-radius-full);
   border: 1px solid var(--sh-border);
   background: transparent;
-  color: var(--sh-fg);
+  color: var(--sh-text);
   font-size: var(--sh-font-size-xs);
   font-weight: 500;
   cursor: pointer;
@@ -16098,13 +16124,13 @@ a.sh-link-preview-link:focus-visible {
 .sh-subscribe-btn--on {
   background: color-mix(in srgb, var(--sh-primary) 14%, transparent);
   border-color: var(--sh-primary);
-  color: var(--sh-primary-text);
+  color: var(--sh-primary-on-soft);
 }
 .sh-subscribe-btn--on:hover:not(:disabled) {
   /* Hover over an "on" button hints at unsubscription. */
   background: color-mix(in srgb, var(--sh-danger) 10%, transparent);
   border-color: var(--sh-danger);
-  color: var(--sh-danger);
+  color: var(--sh-danger-on-soft);
 }
 
 /* "🔔 Subscribed" pill on the card header — a visual badge so the
@@ -16152,7 +16178,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-spaces-section__title {
   font-size: var(--sh-font-size-sm);
   font-weight: 600;
-  color: var(--sh-muted-fg, var(--sh-fg));
+  color: var(--sh-text-muted);
   margin: 0 0 var(--sh-space-xs) 0;
   display: flex; align-items: baseline; gap: var(--sh-space-xs);
 }
@@ -16217,8 +16243,8 @@ a.sh-link-preview-link:focus-visible {
   gap: var(--sh-space-sm);
   padding: var(--sh-space-md);
   border-radius: var(--sh-radius-md);
-  background: color-mix(in srgb, var(--sh-warning, #c47f17) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--sh-warning, #c47f17) 38%, transparent);
+  background: color-mix(in srgb, var(--sh-warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sh-warning) 38%, transparent);
 }
 .sh-proposal-banner__body {
   display: flex;
@@ -16374,8 +16400,8 @@ a.sh-link-preview-link:focus-visible {
   color: #854d0e;
 }
 .sh-join-mode-chip--invite {
-  background: color-mix(in srgb, var(--sh-muted) 18%, transparent);
-  color: var(--sh-muted);
+  background: color-mix(in srgb, var(--sh-text-muted) 18%, transparent);
+  color: var(--sh-text-muted);
 }
 /* Readability, not membership: shown whenever the space takes no followers.
    Slate-blue so it reads as a separate statement from the join-mode chip
@@ -16438,8 +16464,8 @@ a.sh-link-preview-link:focus-visible {
   padding: var(--sh-space-md);
   background: linear-gradient(
     135deg,
-    color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 10%, var(--sh-surface)) 0%,
-    color-mix(in srgb, var(--sh-primary) 10%, var(--sh-surface)) 100%
+    color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 10%, var(--sh-bg)) 0%,
+    color-mix(in srgb, var(--sh-primary) 10%, var(--sh-bg)) 100%
   );
   border: 1px solid color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 25%, var(--sh-border));
   border-radius: var(--sh-radius-lg);
@@ -16544,7 +16570,7 @@ a.sh-link-preview-link:focus-visible {
 }
 .sh-remote-invite-row__meta {
   font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-secondary);
+  color: var(--sh-text-muted);
 }
 .sh-remote-invite-picker__empty {
   padding: var(--sh-space-md);
@@ -16645,14 +16671,14 @@ a.sh-link-preview-link:focus-visible {
   border-radius: var(--sh-radius-md);
   border: 1px solid var(--sh-border);
   margin-bottom: var(--sh-space-sm);
-  background: var(--sh-bg-soft);
+  background: var(--sh-bg-tertiary);
 }
 .sh-sharing-chip--on {
   background: rgba(34, 197, 94, 0.10);
   border-color: rgba(34, 197, 94, 0.30);
 }
 .sh-sharing-chip--off {
-  background: var(--sh-bg-soft);
+  background: var(--sh-bg-tertiary);
   border-color: var(--sh-border);
   color: var(--sh-text-muted);
 }
@@ -16940,10 +16966,10 @@ a.sh-link-preview-link:focus-visible {
               border-color var(--sh-transition-fast);
 }
 .sh-mode-option:hover {
-  background: var(--sh-bg-soft);
+  background: var(--sh-bg-tertiary);
 }
 .sh-mode-option--selected {
-  background: var(--sh-bg-soft);
+  background: var(--sh-bg-tertiary);
   border-color: var(--sh-border);
 }
 .sh-mode-option__body {
@@ -17056,7 +17082,7 @@ a.sh-link-preview-link:focus-visible {
   border-radius: var(--sh-radius-md);
   padding: var(--sh-space-md);
   margin-top: var(--sh-space-sm);
-  background: var(--sh-bg-subtle, #f7f8fa);
+  background: var(--sh-bg-secondary);
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-sm);
@@ -17172,9 +17198,9 @@ a.sh-link-preview-link:focus-visible {
   height: 7rem;
   background: linear-gradient(
     90deg,
-    var(--sh-bg-subtle, #f7f8fa) 0%,
+    var(--sh-bg-secondary) 0%,
     rgba(0, 0, 0, 0.04) 50%,
-    var(--sh-bg-subtle, #f7f8fa) 100%
+    var(--sh-bg-secondary) 100%
   );
   background-size: 200% 100%;
   animation: sh-event-card-shimmer 1.4s ease-in-out infinite;
@@ -17265,7 +17291,7 @@ a.sh-link-preview-link:focus-visible {
   border-radius: 999px;
   font-size: 0.85em;
   font-weight: 500;
-  background: var(--sh-bg-subtle, #f0f1f3);
+  background: var(--sh-border);
   color: var(--sh-text);
 }
 .sh-event-status-pill--going {
@@ -17431,7 +17457,7 @@ a.sh-link-preview-link:focus-visible {
   justify-content: space-between;
   gap: var(--sh-space-md);
   padding: var(--sh-space-xs) var(--sh-space-sm);
-  background: var(--sh-bg-subtle, #f7f8fa);
+  background: var(--sh-bg-secondary);
   border-radius: var(--sh-radius-sm);
 }
 .sh-host-queue-who {
@@ -17462,7 +17488,7 @@ a.sh-link-preview-link:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--sh-bg-emphasis, #e2e8f0);
+  background: var(--sh-border);
   color: var(--sh-text);
   font-weight: 600;
   border-radius: 999px;
@@ -17516,7 +17542,7 @@ a.sh-link-preview-link:focus-visible {
   padding: 0;
 }
 .sh-reminder-remove:hover {
-  color: var(--sh-danger, #dc2626);
+  color: var(--sh-danger);
 }
 .sh-reminder-presets {
   display: flex;
@@ -17533,11 +17559,11 @@ a.sh-link-preview-link:focus-visible {
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 .sh-reminder-chip:hover {
-  background: var(--sh-bg-subtle, #f7f8fa);
+  background: var(--sh-bg-secondary);
 }
 .sh-reminder-chip--active {
   background: var(--sh-primary-soft, rgba(33, 150, 243, 0.12));
-  border-color: var(--sh-primary, #D2542A);
+  border-color: var(--sh-primary);
   color: var(--sh-primary-text);
   font-weight: 500;
 }
@@ -17590,7 +17616,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-subscribe-path {
   display: block;
   margin-top: var(--sh-space-xs);
-  font-family: var(--sh-font-mono, ui-monospace, monospace);
+  font-family: var(--sh-font-family-mono);
   font-size: var(--sh-font-size-sm);
   overflow-wrap: anywhere;
 }
@@ -17658,7 +17684,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-secret-reveal__value code {
   flex: 1;
   min-width: 0;
-  font-family: var(--sh-font-mono, ui-monospace, monospace);
+  font-family: var(--sh-font-family-mono);
   font-size: var(--sh-font-size-sm);
   overflow-wrap: anywhere;
   user-select: all;
@@ -17757,7 +17783,7 @@ a.sh-btn--ghost {
   transition: background 0.12s ease;
 }
 a.sh-btn--ghost:hover {
-  background: var(--sh-bg-subtle, #f7f8fa);
+  background: var(--sh-bg-secondary);
 }
 
 /* Mobile: collapse the action rows into a stack so the buttons don't
@@ -17863,7 +17889,7 @@ a.sh-btn--ghost:hover {
 }
 .sh-highlight-viewer-overflow {
   background: none;
-  border: 1px solid var(--sh-border-muted, var(--sh-border));
+  border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-full);
   width: 28px;
   height: 28px;
@@ -17983,7 +18009,7 @@ a.sh-btn--ghost:hover {
 .sh-highlight-row-unseen {
   margin-left: auto;
   background: var(--sh-primary-fill);
-  color: #fff;
+  color: var(--sh-on-primary-fill);
   border-radius: var(--sh-radius-full);
   min-width: 24px;
   height: 24px;
@@ -18216,7 +18242,7 @@ a.sh-btn--ghost:hover {
   border-radius: var(--sh-radius-sm);
 }
 .sh-seenby-row:hover {
-  background: var(--sh-surface-hover, rgba(0, 0, 0, 0.04));
+  background: color-mix(in srgb, var(--sh-text) 6%, transparent);
 }
 .sh-seenby-name {
   flex: 1;
@@ -18996,7 +19022,7 @@ a.sh-btn--ghost:hover {
   font-size: 0.875rem;
 }
 .sh-momentum-trending-hint code {
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
   padding: 1px 6px;
   border-radius: 4px;
   font-size: 0.85em;
@@ -19033,14 +19059,14 @@ a.sh-btn--ghost:hover {
   gap: 0.35rem;
   padding: 0.25rem 0.65rem;
   border-radius: 999px;
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
   color: var(--sh-text);
   font-size: 0.875rem;
   text-decoration: none;
   border: 1px solid transparent;
 }
 .sh-momentum-chip:hover {
-  background: var(--sh-surface-3);
+  background: var(--sh-border);
 }
 .sh-momentum-chip:focus-visible,
 .sh-hashtag:focus-visible {
@@ -19048,7 +19074,7 @@ a.sh-btn--ghost:hover {
   outline-offset: 2px;
 }
 .sh-momentum-chip--active {
-  background: var(--sh-accent-soft, var(--sh-surface-3));
+  background: var(--sh-border);
   border-color: var(--sh-accent, currentColor);
   color: var(--sh-accent, currentColor);
   font-weight: 600;
@@ -19065,7 +19091,7 @@ a.sh-btn--ghost:hover {
   gap: var(--sh-space-sm);
   padding: var(--sh-space-xs) var(--sh-space-sm);
   margin: var(--sh-space-sm) 0;
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
   border-radius: var(--sh-radius-sm);
   font-size: 0.875rem;
 }
@@ -19204,7 +19230,7 @@ a.sh-btn--ghost:hover {
 .sh-highlight-publish-url {
   display: block;
   padding: var(--sh-space-xs) var(--sh-space-sm);
-  background: var(--sh-surface-2);
+  background: var(--sh-bg-secondary);
   border-radius: var(--sh-radius-sm);
   word-break: break-all;
   font-size: 0.85rem;
@@ -19283,7 +19309,7 @@ a.sh-btn--ghost:hover {
 .sh-connection-alias {
   display: flex;
   flex-direction: column;
-  gap: var(--sh-space-xxs);
+  gap: calc(var(--sh-space-xs) / 2);
 }
 .sh-connection-alias__label {
   font-size: var(--sh-font-size-xs);
@@ -19388,7 +19414,7 @@ a.sh-btn--ghost:hover {
 .sh-app-card__menu { flex-shrink: 0; }
 .sh-app-menu { min-width: 200px; }
 .sh-app-menu__label {
-  padding: var(--sh-space-xs) var(--sh-space-md) var(--sh-space-xxs);
+  padding: var(--sh-space-xs) var(--sh-space-md) calc(var(--sh-space-xs) / 2);
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
   color: var(--sh-text-muted);
@@ -19398,7 +19424,7 @@ a.sh-btn--ghost:hover {
 .sh-app-menu__sep {
   height: 1px;
   background: var(--sh-border);
-  margin: var(--sh-space-xxs) 0;
+  margin: calc(var(--sh-space-xs) / 2) 0;
 }
 .sh-app-menu__radio {
   display: flex;
@@ -19409,7 +19435,7 @@ a.sh-btn--ghost:hover {
 .sh-app-card__caps {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--sh-space-xxs);
+  gap: calc(var(--sh-space-xs) / 2);
   margin-top: var(--sh-space-xs);
 }
 .sh-app-card__actions {
@@ -19454,9 +19480,9 @@ a.sh-btn--ghost:hover {
   color: var(--sh-text-muted);
 }
 .sh-chip--update {
-  background: color-mix(in srgb, var(--sh-warning, #f59e0b) 15%, transparent);
-  color: color-mix(in srgb, var(--sh-warning, #f59e0b) 80%, var(--sh-text));
-  border-color: color-mix(in srgb, var(--sh-warning, #f59e0b) 35%, transparent);
+  background: color-mix(in srgb, var(--sh-warning) 15%, transparent);
+  color: color-mix(in srgb, var(--sh-warning) 80%, var(--sh-text));
+  border-color: color-mix(in srgb, var(--sh-warning) 35%, transparent);
 }
 .sh-app-card__update-row {
   display: flex;
@@ -20246,7 +20272,7 @@ a.sh-btn--ghost:hover {
 .sh-timetable-day__chip.is-on {
   background: var(--sh-primary-fill);
   border-color: var(--sh-primary-fill);
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
 }
 .sh-timetable-day__chip.is-on.is-today::after { background: var(--sh-bg); }
 .sh-timetable-day__chip:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
@@ -20353,7 +20379,7 @@ a.sh-btn--ghost:hover {
   font-weight: 600;
   cursor: pointer;
 }
-.sh-timetable-days__day.is-on { background: var(--sh-primary-fill); border-color: var(--sh-primary-fill); color: var(--sh-bg); }
+.sh-timetable-days__day.is-on { background: var(--sh-primary-fill); border-color: var(--sh-primary-fill); color: var(--sh-on-primary-fill); }
 .sh-timetable-days__day:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
 .sh-people-picker__person {
   display: inline-flex;
@@ -20611,7 +20637,7 @@ a.sh-btn--ghost:hover {
 .sh-timetable-toggle--brush.is-on {
   background: var(--sh-primary-fill);
   border-color: var(--sh-primary-fill);
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
 }
 .sh-timetable-modebar {
   display: flex;
@@ -20720,7 +20746,7 @@ a.sh-btn--ghost:hover {
   letter-spacing: 0.01em;
   pointer-events: none;
 }
-.sh-timetable-badge--cancelled { background: var(--sh-danger); color: #fff; }
+.sh-timetable-badge--cancelled { background: var(--sh-danger); color: var(--sh-on-danger-fill); }
 .sh-timetable-badge--added { background: var(--tt-fg); color: var(--tt-bg); }
 .sh-timetable-block--added { box-shadow: inset 0 0 0 2px var(--tt-edge); }
 .sh-timetable-block--inert { cursor: not-allowed; }
@@ -21256,7 +21282,7 @@ a.sh-btn--ghost:hover {
 .sh-check-toggle--checked:hover:not(:disabled) .sh-check-toggle__dot {
   background: var(--sh-primary-fill);
   border-color: var(--sh-primary-fill);
-  color: var(--sh-bg);
+  color: var(--sh-on-primary-fill);
 }
 
 /* RowActionButton — on the .sh-icon-btn base, sized for a list row. */
@@ -21275,7 +21301,7 @@ a.sh-btn--ghost:hover {
 }
 .sh-row-action--danger:hover:not(:disabled) {
   background: color-mix(in srgb, var(--sh-danger) 14%, transparent);
-  color: var(--sh-danger);
+  color: var(--sh-danger-on-soft);
 }
 /* Reveal contract: the row carries ``.sh-row-reveal-host``
  * (``ROW_REVEAL_HOST``); its ``reveal`` actions show on hover / focus. */
