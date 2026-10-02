@@ -256,6 +256,13 @@ Same route shapes as the household feed, prefixed by `/api/spaces/{id}/`:
 /api/spaces/{id}/posts/{pid}/comments[/{cid}]
 ```
 
+`PATCH {content}` / `DELETE /api/spaces/{id}/posts/{pid}` edit / soft-delete
+a post of the **path** space only (§24.11): a `{pid}` that belongs to
+another space is **404** and nothing changes, whatever the caller's role in
+either space. Edit / delete is the author's, or content authority's
+(owner / admin / moderator) on somebody else's post; `PATCH` answers
+`{id, content, edited_at}`, `DELETE` 204.
+
 `POST /api/spaces/{id}/posts` accepts the same body as the household
 endpoint, including `{type: "location", location: {lat, lon, label?}}`.
 Space-scoped location posts ride on the existing
@@ -286,13 +293,13 @@ posts other households send still render (they cost no fetch here).
 | Method | Path | Purpose |
 |---|---|---|
 | GET / POST | `/api/pages` | Household-level pages. |
-| GET / PATCH / DELETE | `/api/pages/{id}` | CRUD. |
+| GET / PATCH / DELETE | `/api/pages/{id}` | CRUD. `PATCH` takes an optional `base_updated_at` (the `updated_at` the editor loaded): a mismatch is `409 {error: "stale_update", current}` and changes nothing. A successful `PATCH` answers with the **stored** row, so its `updated_at` is exactly the `base_updated_at` for the editor's next save. |
 | POST | `/api/pages/{id}/lock` | Acquire 5-minute edit lock. |
 | POST | `/api/pages/{id}/lock/refresh` | Extend lock. |
 | GET | `/api/pages/{id}/versions` | Version history. |
 | POST | `/api/pages/{id}/revert` | Revert to earlier version. |
 | POST | `/api/pages/{id}/{delete-request\|delete-approve\|delete-cancel}` | Two-admin delete. |
-| GET / POST / PATCH / DELETE | `/api/spaces/{id}/pages[/{pid}]` | Space-scoped pages. |
+| GET / POST / PATCH / DELETE | `/api/spaces/{id}/pages[/{pid}]` | Space-scoped pages. `PATCH` has the same `base_updated_at` → `409 stale_update` check and answers with the stored row, like `/api/pages/{id}`. |
 | GET | `/api/spaces/{id}/pages/{pid}/versions` | A space page's edit history (read-only, oldest first; same row shape as `/api/pages/{id}/versions`). Members and subscribers of the path space; non-member 403 → feature 403 → unknown/other-space `pid` 404. Only snapshots recorded under this space. No lock or revert routes exist for space pages. |
 | POST | `/api/spaces/{id}/pages/{pid}/resolve-conflict` | Force-pick in a conflict. Writing members only (not subscribers); acts on that space's page. |
 
@@ -493,7 +500,7 @@ as the household ones above, minus `/day`: collection (`GET` / `POST`),
 | POST | `/api/calendars/{id}/import_ics` | Upload iCal. Body is raw `text/calendar` bytes or JSON `{ics}`; capped at 1 MiB by the request-size limit. All-or-nothing: `422 ICS_PARSE_ERROR` (with the parser's reason) when any VEVENT lacks `SUMMARY`/`DTSTART` or the file holds none, else `201 {events: [...], created, updated}`. Re-importing updates instead of duplicating: each VEVENT is keyed on its `UID` (+ `RECURRENCE-ID`, so a series and its overrides stay separate) into a stable `client_event_uuid`, and an event whose key already exists on that calendar is overwritten from the file (summary, times, description, location, rrule) through the idempotent `POST …/events` path (same authorization as editing it); fields a file cannot carry — attendees, `rsvp_enabled`, `cover_url` — keep their stored values. `created` / `updated` count the new vs. updated-in-place rows. A VEVENT without `UID` is always added; events removed from the file are left on the calendar (import is not a sync). |
 | POST | `/api/calendars/{id}/{import_image\|import_prompt}` | AI-assisted import. |
 | GET | `/api/calendar/{id}/export.ics` | iCal export. |
-| …same under `/api/spaces/{id}/calendar/...` | | Space-scoped variants. Space event create/list also accepts/returns `announce_in_feed` (§23.15, default **false**): when true the event also mirrors to the space feed as a `PostType.EVENT` post; otherwise it lives only in the Calendar tab. |
+| …same under `/api/spaces/{id}/calendar/...` | | Space-scoped variants. Space event create/list also accepts/returns `announce_in_feed` (§23.15, default **false**): when true the event also mirrors to the space feed as a `PostType.EVENT` post; otherwise it lives only in the Calendar tab. Each row of the space list (`GET /api/spaces/{id}/calendar/events`) carries `can_edit` — the same boolean UI hint as on `GET /api/calendars/events/{id}`: whether the caller may edit / delete that event (a writable seat in a non-archived space that the `calendar_access` level lets in; `true` under `moderated` for a member's change to somebody else's event, which queues). The `PATCH` / `DELETE` routes enforce it. |
 
 **Announcement dropped (§4.3).** A `POST /api/spaces/{id}/calendar/events`
 with `announce_in_feed: true` whose creator the space's `posts_access`

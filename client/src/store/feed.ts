@@ -7,6 +7,19 @@ export const posts        = signal<FeedPost[]>([])
 export const feedLoading  = signal(false)
 export const feedHasMore  = signal(true)
 
+/** Apply an edit (the PATCH answer or a ``post.edited`` frame) to a
+ *  loaded post: only the text, ``edited_at`` and the link card change —
+ *  the rest (comment count, latest comment, reactions) is per-viewer
+ *  state an edit doesn't touch, and a broadcast frame may not carry it. */
+export function mergePostEdit(post: FeedPost, edited: FeedPost): FeedPost {
+  return {
+    ...post,
+    content: edited.content,
+    edited_at: edited.edited_at,
+    link_preview: edited.link_preview,
+  }
+}
+
 export async function loadFeed(before?: string) {
   feedLoading.value = true
   const data = await api.get(`/api/feed${before ? `?before=${before}` : ''}`)
@@ -33,7 +46,7 @@ export function wireFeedWs(): void {
   ws.on('post.edited', (e) => {
     const post = (e.data as { post?: FeedPost }).post
     if (!post) return
-    posts.value = posts.value.map((p) => (p.id === post.id ? post : p))
+    posts.value = posts.value.map((p) => (p.id === post.id ? mergePostEdit(p, post) : p))
   })
   ws.on('post.reaction_changed', (e) => {
     const post = (e.data as { post?: FeedPost }).post

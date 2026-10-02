@@ -612,9 +612,11 @@ export interface CalendarEvent {
    *  or an archived space). A UI hint — the RSVP route enforces it.
    *  Absent elsewhere; treat absent as "may RSVP". */
   can_rsvp?: boolean
-  /** Space events via ``GET /api/calendars/events/{id}`` only: whether
-   *  the caller may edit it (the calendar's access level, §4.3). Absent
-   *  → leave the creator's Edit as it was. */
+  /** Space events via ``GET /api/calendars/events/{id}`` and each row
+   *  of ``GET /api/spaces/{id}/calendar/events``: whether the caller may
+   *  edit / delete it (a writable seat + the calendar's access level,
+   *  §4.3). Absent → leave the creator's Edit as it was; the space
+   *  agenda offers Delete only on ``true``. */
   can_edit?: boolean
   /** SPA-only group key, set by :func:`groupSharedEvents`. The composer
    *  fans out a multi-attendee event as one ``POST`` per picked

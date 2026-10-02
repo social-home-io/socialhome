@@ -4936,17 +4936,30 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         mention that member so it resolves uniquely (``GET .../members``)."""
         return await self._mentions().tokens(space_id)
 
+    async def _post_in_space(
+        self, post_id: str, space_id: str | None
+    ) -> tuple[str, Post]:
+        """``(space_id, post)`` for ``post_id`` — :class:`KeyError` when it
+        doesn't exist, or lives in another space than ``space_id`` (when
+        given). An id says nothing about its space, so a by-id write under
+        ``/api/spaces/{id}/…`` must refuse a row of a different space."""
+        got = await self._posts.get(post_id)
+        if got is None or (space_id is not None and got[0] != space_id):
+            raise KeyError(f"space post {post_id!r} not found in this space")
+        return got
+
     async def edit_post(
         self,
         post_id: str,
         *,
         editor_user_id: str,
         new_content: str,
+        space_id: str | None = None,
     ) -> Post:
-        got = await self._posts.get(post_id)
-        if got is None:
-            raise KeyError(f"space post {post_id!r} not found")
-        space_id, post = got
+        """Replace a space post's text. ``space_id`` — the route's PATH
+        space (§24.11): a post of another space is :class:`KeyError`
+        (→ 404, never 403, so the answer confirms nothing) and unchanged."""
+        space_id, post = await self._post_in_space(post_id, space_id)
         if post.deleted:
             raise KeyError("post already deleted")
         # Verifies space exists + is writable (not archived) — raises if not.
@@ -5003,11 +5016,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         post_id: str,
         *,
         actor_user_id: str,
+        space_id: str | None = None,
     ) -> None:
-        got = await self._posts.get(post_id)
-        if got is None:
-            raise KeyError(f"space post {post_id!r} not found")
-        space_id, post = got
+        """Soft-delete a space post. ``space_id`` scopes it to the route's
+        PATH space like :meth:`edit_post` (another space's post → 404)."""
+        space_id, post = await self._post_in_space(post_id, space_id)
         if post.deleted:
             return
         # Capture media URLs before soft_delete nulls them; unlinked after

@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: Longest page title (household and space pages) — the SPA's input cap.
+MAX_PAGE_TITLE_LENGTH = 200
+
 
 @dataclass(slots=True, frozen=True)
 class Page:

@@ -2278,6 +2278,10 @@ class SpacePostItemView(BaseView):
     Without this view, the SPA's ``api.delete('/api/spaces/.../posts/...')``
     hit aiohttp's routing-layer 404 (no handler invoked, no server log),
     and ``handleDelete``'s async-fn rejection was silently swallowed.
+
+    Scope (§24.11): both act only on a post of the PATH space — a post id
+    of another space is 404 and unchanged, whatever the caller's role
+    there (the service checks authority on the post's own space).
     """
 
     async def patch(self) -> web.Response:
@@ -2297,6 +2301,7 @@ class SpacePostItemView(BaseView):
                 post_id,
                 editor_user_id=ctx.user_id,
                 new_content=new_content,
+                space_id=self.match("id"),
             )
         except KeyError:
             return error_response(404, "NOT_FOUND", "Post not found.")
@@ -2315,7 +2320,9 @@ class SpacePostItemView(BaseView):
         svc = self.svc(space_service_key)
         post_id = self.match("post_id")
         try:
-            await svc.delete_post(post_id, actor_user_id=ctx.user_id)
+            await svc.delete_post(
+                post_id, actor_user_id=ctx.user_id, space_id=self.match("id")
+            )
         except KeyError:
             return error_response(404, "NOT_FOUND", "Post not found.")
         except PermissionError as exc:

@@ -8051,6 +8051,11 @@ button.sh-shopping-item__text:focus-visible {
   padding: var(--sh-space-md);
 }
 .sh-history-entry {
+  display: block;
+  width: 100%;
+  text-align: start;
+  font: inherit;
+  color: inherit;
   padding: var(--sh-space-sm);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
@@ -22503,4 +22508,49 @@ body.sh-board-dragging * {
     transform: translate(-50%, -50%);
   }
   .sh-task-label--removable, .sh-labels-input__suggest .sh-task-label { overflow: visible; }
+}
+
+/* ── Inline post edit (PostCard) ───────────────────────────────────── */
+.sh-post-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-post-edit-input {
+  width: 100%;
+  min-height: 5rem;
+  box-sizing: border-box;
+  padding: var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+.sh-post-edit-input:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 1px;
+}
+.sh-post-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--sh-space-sm);
+}
+
+/* ── Page editor: held-for-review note (§4.3 "Reviewed") ───────────── */
+.sh-page-review-note {
+  margin: var(--sh-space-xs) 0 var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+}
+button.sh-page-editor-status {
+  border: none;
+  font-family: inherit;
+  min-height: 36px;
 }

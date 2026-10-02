@@ -412,3 +412,30 @@ async def test_lock_and_delete_request_ignore_space_pages(env):
         (sp_page.id,),
     )
     assert tuple(row) == (None, None, None)
+
+
+@pytest.mark.parametrize("sid", ["space-a", None])
+async def test_page_update_stores_the_writers_updated_at(scoped, sid):
+    """An update keeps the stamp the writer passed — one tz-aware ISO shape
+    for the column, and exactly what the editor's next ``base_updated_at``
+    has to match (``datetime('now')`` used to overwrite it, naive). An
+    empty stamp becomes now, tz-aware."""
+    from dataclasses import replace
+
+    pid = "pg-a" if sid else "pg-hh"
+    table = "space_pages" if sid else "pages"
+    page = (
+        await scoped.page_repo.get_space_page(pid, space_id=sid)
+        if sid
+        else await scoped.page_repo.get_household_page(pid)
+    )
+    stamp = "2026-02-03T04:05:06.123456+00:00"
+    assert await scoped.page_repo.save(
+        replace(page, content="v2", updated_at=stamp), space_id=sid
+    )
+    assert (await _page_row(scoped, table, pid))["updated_at"] == stamp
+    assert await scoped.page_repo.save(
+        replace(page, content="v3", updated_at=""), space_id=sid
+    )
+    stored = (await _page_row(scoped, table, pid))["updated_at"]
+    assert datetime.fromisoformat(stored).tzinfo is not None

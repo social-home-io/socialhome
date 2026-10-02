@@ -594,9 +594,14 @@ class SpaceCalendarEventsView(_SpaceCalendarBase):
             start=start,
             end=end,
         )
-        return web.json_response(
-            _sign_payload(self.request, [_event_dict(e) for e in events])
-        )
+        # UI hint per row: may the caller edit / delete it (the calendar's
+        # access level, §4.3)? The write routes re-check.
+        hints = await space_cal_svc.can_edit_events(space_id, ctx.user_id, events)
+        rows = [
+            {**_event_dict(e), "can_edit": allowed}
+            for e, allowed in zip(events, hints, strict=True)
+        ]
+        return web.json_response(_sign_payload(self.request, rows))
 
     async def post(self) -> web.Response:
         ctx = self.user

@@ -145,7 +145,15 @@ class SqlitePageRepo:
         the household ``pages`` table, otherwise ``space_pages``) and
         which rows may be updated. An id that already belongs to
         another space is refused: ``False`` means nothing was written.
+
+        ``updated_at`` is the page's own (the writer stamps it — a local
+        edit with ``datetime.now(timezone.utc).isoformat()``, a mirrored
+        one with the sender's), on insert and update alike, so the column
+        keeps one tz-aware ISO-8601 shape and the value an editor reads
+        back is exactly what its next ``base_updated_at`` must match. An
+        empty one is stamped now.
         """
+        stamp = page.updated_at or datetime.now(timezone.utc).isoformat()
         if space_id is None:
             n = await self._db.enqueue_rowcount(
                 """
@@ -165,7 +173,7 @@ class SqlitePageRepo:
                     title=excluded.title,
                     content=excluded.content,
                     cover_image_url=excluded.cover_image_url,
-                    updated_at=datetime('now'),
+                    updated_at=excluded.updated_at,
                     last_editor_user_id=excluded.last_editor_user_id,
                     last_edited_at=excluded.last_edited_at
                 """,
@@ -176,7 +184,7 @@ class SqlitePageRepo:
                     page.cover_image_url,
                     page.created_by,
                     page.created_at,
-                    page.updated_at,
+                    stamp,
                     page.last_editor_user_id,
                     page.last_edited_at,
                     page.locked_by,
@@ -207,7 +215,7 @@ class SqlitePageRepo:
                     title=excluded.title,
                     content=excluded.content,
                     cover_image_url=excluded.cover_image_url,
-                    updated_at=datetime('now'),
+                    updated_at=excluded.updated_at,
                     last_editor_user_id=excluded.last_editor_user_id,
                     last_edited_at=excluded.last_edited_at
                 WHERE space_pages.space_id = excluded.space_id
@@ -220,7 +228,7 @@ class SqlitePageRepo:
                     page.cover_image_url,
                     page.created_by,
                     page.created_at,
-                    page.updated_at,
+                    stamp,
                     page.last_editor_user_id,
                     page.last_edited_at,
                     page.locked_by,
@@ -302,9 +310,9 @@ class SqlitePageRepo:
         on long-offline catch-up. ``updated_at`` (not ``created_at``) is
         the cursor so renamed/edited pages get re-emitted too.
 
-        Shape trap: ``updated_at`` is mixed — created rows carry the
-        Python tz-aware ISO shape, later edits overwrite it with SQLite's
-        naive ``datetime('now')``. The only caller today passes the
+        Shape trap: every write now stamps the tz-aware ISO shape, but a
+        row last edited before that still holds SQLite's naive
+        ``datetime('now')``. The only caller today passes the
         ``1970-01-01T00:00:00+00:00`` epoch cursor, whose year digits
         decide the comparison long before the separator does, so the raw
         ``>`` is safe. A real (non-epoch) ``since`` must wrap both sides

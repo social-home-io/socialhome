@@ -1,24 +1,34 @@
 /**
  * PageHistoryDrawer — right-side drawer showing edit history + diff.
  *
- * Fetches ``GET /api/pages/{id}/versions`` (newest first after sort),
+ * Fetches ``versionsUrl`` (``/api/pages/{id}/versions`` or
+ * ``/api/spaces/{sid}/pages/{pid}/versions``; newest first after sort),
  * renders a per-entry card with editor + timestamp, and shows an inline
  * line-level diff between the selected version and the current page
- * body. Admins get a "Restore" button that POSTs ``/revert``.
+ * body. With a ``revertUrl`` (household admins) a "Restore" button POSTs
+ * it; space pages have no revert route, so their history is read-only.
  *
  * The diff is a small local LCS — O(n·m) on line counts. Fine for
  * Markdown pages (spec §2627 caps body at 4000 chars, so < ~100 lines).
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
-import { currentUser } from '@/store/auth'
+import { t } from '@/i18n/i18n'
+import { normaliseTimestamp } from '@/utils/relativeTime'
 import { Button } from './Button'
 import { showToast } from './Toast'
 import type { PageVersion } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 
 interface Props {
-  pageId: string
+  /** ``GET`` — the page's versions. */
+  versionsUrl: string
+  /** ``POST {version}`` restores one; ``null`` → read-only history. */
+  revertUrl: string | null
+  /** Shown instead of the Restore button when ``revertUrl`` is null. */
+  revertNote: string
+  /** An editor's name (``edited_by`` is a user id). */
+  nameOf: (uid: string) => string
   currentContent: string
   open: boolean
   onClose: () => void
@@ -54,39 +64,39 @@ function diffLines(a: string, b: string): DiffLine[] {
 }
 
 export function PageHistoryDrawer(
-  { pageId, currentContent, open, onClose, onRestored }: Props,
+  { versionsUrl, revertUrl, revertNote, nameOf, currentContent, open, onClose, onRestored }: Props,
 ) {
   const [versions, setVersions] = useState<PageVersion[]>([])
   const [selected, setSelected] = useState<PageVersion | null>(null)
   const [busy, setBusy] = useState(false)
-  const isAdmin = currentUser.value?.is_admin ?? false
 
   useEffect(() => {
     if (!open) return
-    void api.get(`/api/pages/${pageId}/versions`).then((rows: PageVersion[]) => {
+    void api.get(versionsUrl).then((rows: PageVersion[]) => {
       const sorted = [...rows].sort((x, y) => y.version - x.version)
       setVersions(sorted)
       setSelected(sorted[0] ?? null)
     }).catch(() => {
-      showToast('Could not load history', 'error')
+      showToast(t('pages.history.load_failed'), 'error')
     })
-  }, [open, pageId])
+  }, [open, versionsUrl])
 
   if (!open) return null
 
   const restore = async () => {
-    if (!selected || busy) return
-    if (!await confirmDialog(`Restore version ${selected.version}? The current body will be snapshotted first.`, { destructive: true })) return
+    if (!selected || busy || !revertUrl) return
+    const version = String(selected.version)
+    if (!await confirmDialog(t('pages.history.restore_confirm', { version }), { destructive: true })) return
     setBusy(true)
     try {
       const resp = await api.post(
-        `/api/pages/${pageId}/revert`, { version: selected.version },
+        revertUrl, { version: selected.version },
       ) as { content: string }
-      showToast(`Restored to version ${selected.version}`, 'success')
+      showToast(t('pages.history.restored', { version }), 'success')
       onRestored(resp.content ?? selected.content)
       onClose()
     } catch (err: unknown) {
-      showToast(`Restore failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('pages.history.restore_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     } finally {
       setBusy(false)
     }
@@ -95,22 +105,24 @@ export function PageHistoryDrawer(
   const rows = selected ? diffLines(selected.content, currentContent) : []
 
   return (
-    <aside class="sh-history-drawer" role="dialog" aria-label="Edit history">
+    <aside class="sh-history-drawer" role="dialog" aria-label={t('pages.history.title')}>
       <div class="sh-history-drawer-header">
-        <h3 style={{ margin: 0 }}>Edit history</h3>
+        <h3 style={{ margin: 0 }}>{t('pages.history.title')}</h3>
         <button
           type="button" class="sh-modal-close"
-          aria-label="Close history" onClick={onClose}
+          aria-label={t('pages.history.close')} onClick={onClose}
         >×</button>
       </div>
       <div class="sh-history-drawer-body">
         {versions.length === 0 && (
-          <p class="sh-muted">No prior edits. Versions appear here after the first save.</p>
+          <p class="sh-muted">{t('pages.history.empty')}</p>
         )}
         {versions.map(v => (
-          <div
+          <button
+            type="button"
             key={v.id}
             class={`sh-history-entry ${selected?.id === v.id ? 'sh-history-entry--active' : ''}`}
+            aria-pressed={selected?.id === v.id}
             onClick={() => setSelected(v)}
           >
             <div>
@@ -119,18 +131,20 @@ export function PageHistoryDrawer(
               <span class="sh-muted">{v.title}</span>
             </div>
             <div class="sh-history-entry-meta">
-              <span>{v.edited_by}</span>
+              <span>{nameOf(v.edited_by)}</span>
               <span>·</span>
-              <span>{new Date(v.edited_at).toLocaleString()}</span>
+              <span>{new Date(normaliseTimestamp(v.edited_at)).toLocaleString()}</span>
             </div>
-          </div>
+          </button>
         ))}
 
         {selected && (
           <>
-            <h4 style={{ marginTop: '1rem' }}>Diff: v{selected.version} → current</h4>
-            <div class="sh-history-diff" aria-label="Version diff">
-              {rows.length === 0 && <em class="sh-muted">No changes.</em>}
+            <h4 style={{ marginTop: '1rem' }}>
+              {t('pages.history.diff_heading', { version: String(selected.version) })}
+            </h4>
+            <div class="sh-history-diff" aria-label={t('pages.history.diff_label')}>
+              {rows.length === 0 && <em class="sh-muted">{t('pages.history.no_changes')}</em>}
               {rows.map((r, idx) => (
                 <div
                   key={idx}
@@ -141,16 +155,15 @@ export function PageHistoryDrawer(
                 </div>
               ))}
             </div>
-            {isAdmin && (
+            {revertUrl ? (
               <div class="sh-form-actions" style={{ marginTop: '0.75rem' }}>
                 <Button variant="primary" loading={busy} onClick={restore}>
-                  Restore this version
+                  {t('pages.history.restore')}
                 </Button>
               </div>
-            )}
-            {!isAdmin && (
+            ) : (
               <p class="sh-muted" style={{ marginTop: '0.75rem' }}>
-                Only household admins can restore an older version.
+                {revertNote}
               </p>
             )}
           </>

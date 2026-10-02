@@ -1580,19 +1580,33 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
     ) -> bool:
         """Whether :meth:`update_event` would let ``user_id`` change
         ``event`` — a UI hint (the edit control); the write re-checks."""
-        if not await self.can_write(space_id, user_id):
-            return False
-        try:
-            await self._gate(
-                space_id,
-                user_id,
-                "calendar",
-                ContentAction.EDIT,
-                event.created_by == user_id,
-            )
-        except SpacePermissionError:
-            return False
-        return True
+        (allowed,) = await self.can_edit_events(space_id, user_id, [event])
+        return allowed
+
+    async def can_edit_events(
+        self, space_id: str, user_id: str, events: Sequence[CalendarEvent]
+    ) -> list[bool]:
+        """:meth:`can_edit_event` for each of ``events``, in order — the
+        edit / delete hint of a whole listing. One writer check and at most
+        two access-level checks (the caller's own events, and everybody
+        else's): the decision only depends on ownership. A held-for-review
+        change (§4.3 "Reviewed") counts as allowed — the write queues."""
+        if not events or not await self.can_write(space_id, user_id):
+            return [False] * len(events)
+        by_ownership: dict[bool, bool] = {}
+        hints: list[bool] = []
+        for event in events:
+            own = event.created_by == user_id
+            if own not in by_ownership:
+                try:
+                    await self._gate(
+                        space_id, user_id, "calendar", ContentAction.EDIT, own
+                    )
+                    by_ownership[own] = True
+                except SpacePermissionError:
+                    by_ownership[own] = False
+            hints.append(by_ownership[own])
+        return hints
 
     def _spaces_or_raise(self) -> AbstractSpaceRepo:
         # Fail closed: a write gate without the space repo can't decide.

@@ -2969,3 +2969,36 @@ async def test_an_event_released_for_a_remote_creator_rsvps_nobody(space_cal_env
         )
     assert await env.space_cal_svc.list_rsvps(event.id) == []
     assert not [c for c in fed.calls if "rsvp" in c[1].value]
+
+
+async def test_can_edit_events_hints_each_row_by_ownership(env):
+    """``can_edit_events``: one hint per event, in order — under ADMIN_ONLY
+    only the owner / admins, under MODERATED every writer (a change to
+    somebody else's event queues), never a subscriber; empty in → empty
+    out."""
+    svc, ev, now = await _admin_only_calendar(env)
+    await env.db.enqueue("UPDATE spaces SET calendar_access='open' WHERE id='cal-ao'")
+    admins = await svc.create_event(
+        space_id="cal-ao",
+        summary="Admin's",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-admin",
+    )
+    await env.db.enqueue(
+        "UPDATE spaces SET calendar_access='admin_only' WHERE id='cal-ao'"
+    )
+    events = [ev, admins]
+    assert await svc.can_edit_events("cal-ao", "u-member", events) == [False, False]
+    assert await svc.can_edit_events("cal-ao", "u-mod", events) == [False, False]
+    assert await svc.can_edit_events("cal-ao", "u-admin", events) == [True, True]
+    assert await svc.can_edit_event("cal-ao", "u-owner", ev) is True
+    await env.db.enqueue(
+        "UPDATE spaces SET calendar_access='moderated' WHERE id='cal-ao'"
+    )
+    assert await svc.can_edit_events("cal-ao", "u-member", events) == [True, True]
+    await env.db.enqueue(
+        "UPDATE space_members SET role='subscriber' WHERE user_id='u-member'"
+    )
+    assert await svc.can_edit_events("cal-ao", "u-member", events) == [False, False]
+    assert await svc.can_edit_events("cal-ao", "u-admin", []) == []
