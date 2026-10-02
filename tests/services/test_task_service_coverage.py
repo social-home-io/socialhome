@@ -353,7 +353,9 @@ async def test_space_task_service_full_crud(env):
     assert any(isinstance(e, TaskListCreated) for e in env.events)
 
     env.events.clear()
-    renamed = await env.space_task_svc.rename_list(lst.id, space_id="sp1", name="L2")
+    renamed = await env.space_task_svc.rename_list(
+        lst.id, space_id="sp1", name="L2", actor_user_id="u-test"
+    )
     assert renamed.name == "L2"
     assert any(isinstance(e, TaskListUpdated) for e in env.events)
 
@@ -417,11 +419,13 @@ async def test_space_task_service_full_crud(env):
 
     # Delete task + list.
     env.events.clear()
-    await env.space_task_svc.delete_task(task.id, space_id="sp1")
+    await env.space_task_svc.delete_task(
+        task.id, space_id="sp1", actor_user_id="u-test"
+    )
     assert any(isinstance(e, TaskDeleted) for e in env.events)
 
     env.events.clear()
-    await env.space_task_svc.delete_list(lst.id, space_id="sp1")
+    await env.space_task_svc.delete_list(lst.id, space_id="sp1", actor_user_id="u-test")
     assert any(isinstance(e, TaskListDeleted) for e in env.events)
 
 
@@ -437,17 +441,23 @@ async def test_space_task_service_update_missing_raises(env):
 
 async def test_space_task_service_delete_missing_raises(env):
     with pytest.raises(KeyError):
-        await env.space_task_svc.delete_task("missing", space_id="sp1")
+        await env.space_task_svc.delete_task(
+            "missing", space_id="sp1", actor_user_id="u-test"
+        )
 
 
 async def test_space_task_service_rename_missing_raises(env):
     with pytest.raises(KeyError):
-        await env.space_task_svc.rename_list("missing", space_id="sp1", name="X")
+        await env.space_task_svc.rename_list(
+            "missing", space_id="sp1", name="X", actor_user_id="u-test"
+        )
 
 
 async def test_space_task_service_delete_list_missing_raises(env):
     with pytest.raises(KeyError):
-        await env.space_task_svc.delete_list("missing", space_id="sp1")
+        await env.space_task_svc.delete_list(
+            "missing", space_id="sp1", actor_user_id="u-test"
+        )
 
 
 async def test_space_task_service_create_task_bad_due_date_raises(env):

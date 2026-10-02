@@ -19,6 +19,7 @@ import { BazaarSkeleton } from '@/components/Skeleton'
 import { BazaarPostBody } from '@/components/BazaarPostBody'
 import { BazaarCard } from '@/features/bazaar/BazaarPage'
 import { BazaarCreateDialog, openBazaarCreate } from '@/components/BazaarCreateDialog'
+import { AccessNote } from './AccessNote'
 import type { BazaarListing } from '@/types'
 
 const listings = signal<BazaarListing[]>([])
@@ -38,7 +39,12 @@ export async function loadSpaceBazaar(spaceId: string) {
   }
 }
 
-export function SpaceBazaarTab({ spaceId }: { spaceId: string }) {
+export function SpaceBazaarTab({ spaceId, canSell = true }: {
+  spaceId: string
+  /** False while the space keeps posts to its admins for the viewer
+   *  (``posts_access`` ADMIN_ONLY, §4.3): a listing is a post. */
+  canSell?: boolean
+}) {
   useEffect(() => {
     selected.value = null
     void loadSpaceBazaar(spaceId)
@@ -79,10 +85,11 @@ export function SpaceBazaarTab({ spaceId }: { spaceId: string }) {
         <p class="sh-muted" style={{ margin: 0 }}>
           Items members are sharing or selling in this space.
         </p>
-        {!isRestricted('bazaar') && (
+        {canSell && !isRestricted('bazaar') && (
           <Button onClick={() => openBazaarCreate(spaceId)}>+ New listing</Button>
         )}
       </div>
+      {!canSell && <AccessNote feature="posts" />}
       {isRestricted('bazaar') && <ProtectedNotice capability="bazaar" />}
       {loading.value ? (
         <BazaarSkeleton />
@@ -90,11 +97,13 @@ export function SpaceBazaarTab({ spaceId }: { spaceId: string }) {
         <div class="sh-empty-state">
           <div aria-hidden="true">🛍</div>
           <h3>Nothing listed yet</h3>
-          <p class="sh-muted">
-            Be the first to list something. New listings stay in this tab —
-            tick “Also announce in the space feed” if you want a feed post too.
-          </p>
-          {!isRestricted('bazaar') && (
+          {canSell && (
+            <p class="sh-muted">
+              Be the first to list something. New listings stay in this tab —
+              tick “Also announce in the space feed” if you want a feed post too.
+            </p>
+          )}
+          {canSell && !isRestricted('bazaar') && (
             <Button onClick={() => openBazaarCreate(spaceId)}>+ New listing</Button>
           )}
         </div>

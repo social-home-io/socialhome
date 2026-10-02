@@ -42,7 +42,7 @@ from ....domain.post import (
     PostType,
 )
 from ....domain.gallery import GalleryAlbum, GalleryItem
-from ....domain.space import SpaceMember, SpaceZone
+from ....domain.space import ContentAction, SpaceMember, SpaceZone
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
 from ....domain.events import TimetableSaved
@@ -732,7 +732,10 @@ class SpaceSyncReceiver:
         (``federation/space_authorship.py``): it may only **add** rows
         (never overwrite one we hold, whose author, content and moderation
         state stand), each attributed to a member seated on it; the roster
-        and bans are the host's alone, and zones a moderator's.
+        and bans are the host's alone, and zones a moderator's. A record of
+        an access-levelled feature (posts, pages, tasks, stickies, calendar)
+        must also pass the space's level for its creator — an ``ADMIN_ONLY``
+        feature takes only an admin's rows from a member household (§4.3).
 
         Content into a space that is **archived** here is refused first,
         from any provider :func:`~socialhome.federation.space_scope
@@ -796,6 +799,34 @@ class SpaceSyncReceiver:
         return admitted
 
     async def _admit_record(
+        self,
+        resource: str,
+        space_id: str,
+        r: dict[str, Any],
+        event: FederationEvent,
+    ) -> bool:
+        """The live-event rules for one record: its authorship, then — for
+        the access-levelled features — the space's level for its creator
+        (§4.3, v_42; e.g. a member household cannot stream a page into an
+        ``ADMIN_ONLY`` wiki that it could not have sent live)."""
+        if not await self._authored_record(resource, space_id, r, event):
+            return False
+        access = _ACCESS_FEATURE_OF.get(resource)
+        if access is None:
+            return True
+        feature, creator_keys = access
+        creator = next((str(r[k]) for k in creator_keys if r.get(k)), None)
+        assert self._authorship is not None
+        return await self._authorship.access_admits(
+            event,
+            space_id,
+            feature,
+            ContentAction.CREATE,
+            actor=creator,
+            row_owner=creator or "",
+        )
+
+    async def _authored_record(
         self,
         resource: str,
         space_id: str,
@@ -1040,6 +1071,20 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "pages": (SPACE_PAGE_KIND, ("created_by",)),
     "stickies": (SPACE_STICKY_KIND, ("author", "created_by")),
     "timetables": (SPACE_TIMETABLE_KIND, ("created_by",)),
+}
+
+
+#: Sync resources carrying an access-levelled feature (§4.3): resource →
+#: (feature, the record keys naming its creator, in order). A member
+#: household only ever ADDS rows by sync, so each is a ``CREATE``.
+_ACCESS_FEATURE_OF: dict[str, tuple[str, tuple[str, ...]]] = {
+    "posts": ("posts", ("author",)),
+    "task_lists": ("tasks", ("created_by",)),
+    "tasks": ("tasks", ("created_by",)),
+    "tasks_archived": ("tasks", ("created_by",)),
+    "pages": ("pages", ("created_by",)),
+    "stickies": ("stickies", ("author", "created_by")),
+    "calendar": ("calendar", ("created_by",)),
 }
 
 

@@ -4,7 +4,9 @@ Spec §23.53: "once the organiser picks the winning slot, the chosen
 time should land on the space calendar so members can see it alongside
 other events." We subscribe to :class:`SchedulePollFinalized` and call
 :class:`SpaceCalendarService.create_event` — but only if the owning
-household has the ``calendar`` feature enabled. Household-scoped
+household has the ``calendar`` feature enabled and the space's
+``calendar`` access level lets the organiser add events (an ADMIN_ONLY
+calendar refuses a member's, which is skipped). Household-scoped
 polls (``space_id is None``) fall through: they're turned into a
 personal calendar entry by other code paths (calendar import etc.).
 
@@ -21,6 +23,7 @@ from typing import TYPE_CHECKING
 from ..domain.events import SchedulePollFinalized
 from ..infrastructure.event_bus import EventBus
 from ..domain.preferences import FeatureDisabledError
+from ..domain.space import AccessAdminOnlyError
 from ..services.preferences_service import PreferencesService
 
 if TYPE_CHECKING:
@@ -78,6 +81,14 @@ class ScheduleCalendarBridge:
                 description=f"From schedule poll {event.post_id}",
                 all_day=event.start_time is None,
                 attendees=(),
+            )
+        except AccessAdminOnlyError:
+            # The space's calendar is ADMIN_ONLY and the organiser isn't an
+            # admin: the poll still finalises, the slot just isn't added.
+            log.debug(
+                "schedule→calendar: calendar is admin-only in %s, skipping %s",
+                event.space_id,
+                event.post_id,
             )
         except Exception as exc:  # pragma: no cover — defensive
             log.warning(

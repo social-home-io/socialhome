@@ -313,6 +313,11 @@ class CalendarEventDeleteView(BaseView):
             # write (read-only subscriber, archived space). The RSVP
             # route still enforces it (403).
             payload["can_rsvp"] = await space_cal_svc.can_write(space_id, ctx.user_id)
+            # UI hint: the event post card offers "Edit" only when the
+            # calendar's access level lets the caller change it (§4.3).
+            payload["can_edit"] = await space_cal_svc.can_edit_event(
+                space_id, ctx.user_id, event
+            )
             return web.json_response(_sign_payload(self.request, payload))
         # Fall through to personal-calendar lookup.  ``get_event``
         # raises ``KeyError`` when the event has been deleted; BaseView
@@ -622,9 +627,15 @@ class SpaceCalendarEventsView(_SpaceCalendarBase):
         # Service publishes CalendarEventCreated internally — don't
         # double-publish (previous route called bus.publish again,
         # double-firing HA bridge + WS).
-        return web.json_response(
-            _sign_payload(self.request, _event_dict(event)), status=201
-        )
+        payload = _event_dict(event)
+        if bool(body.get("announce_in_feed", False)) and not event.announce_in_feed:
+            # Saved, but the feed card was dropped (§4.3 posts level): tell
+            # the creator why, so the SPA can say so.
+            payload["announce_suppressed"] = True
+            payload[
+                "announce_suppressed_reason"
+            ] = await space_cal_svc.announce_refusal(space_id, ctx.user_id)
+        return web.json_response(_sign_payload(self.request, payload), status=201)
 
 
 class SpaceCalendarEventDetailView(_SpaceCalendarBase):
@@ -648,6 +659,7 @@ class SpaceCalendarEventDetailView(_SpaceCalendarBase):
             event = await space_cal_svc.update_event(
                 event_id,
                 space_id=space_id,
+                actor_user_id=ctx.user_id,
                 summary=body.get("summary") or body.get("title"),
                 start=body.get("start") or body.get("start_at"),
                 end=body.get("end") or body.get("end_at"),
@@ -678,7 +690,9 @@ class SpaceCalendarEventDetailView(_SpaceCalendarBase):
         if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         space_cal_svc = self.svc(K.space_cal_service_key)
-        await space_cal_svc.delete_event(event_id, space_id=space_id)
+        await space_cal_svc.delete_event(
+            event_id, space_id=space_id, actor_user_id=ctx.user_id
+        )
         return web.json_response({"ok": True})
 
 

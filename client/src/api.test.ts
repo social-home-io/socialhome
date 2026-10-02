@@ -50,6 +50,27 @@ describe('ApiError — friendly-detail unwrap', () => {
     }
   })
 
+  it('turns a 403 ACCESS_ADMIN_ONLY into the translated "only admins" note', async () => {
+    // Every surface toasts ``err.message`` — so an ADMIN_ONLY refusal of a
+    // page / task / sticky / event / post write reads the same everywhere.
+    stubFetch(403, {
+      error: {
+        code: 'ACCESS_ADMIN_ONLY',
+        detail: 'Only space admins can change this here.',
+        feature: 'pages',
+      },
+    })
+    try {
+      await api.post('/api/spaces/sp-1/pages', { title: 'x' })
+      expect.fail('should have thrown')
+    } catch (e) {
+      const err = e as ApiError
+      expect(err.code).toBe('ACCESS_ADMIN_ONLY')
+      expect(err.extra.feature).toBe('pages')
+      expect(err.message).toBe('Only admins can add or edit pages here.')
+    }
+  })
+
   it('falls back to "API <status>: <path>" when the body is not the canonical shape', async () => {
     stubFetch(502, '<html>Bad Gateway</html>')
     try {

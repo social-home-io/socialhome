@@ -65,6 +65,10 @@ class PostEdited(DomainEvent):
     #: after receiving SPACE_POST_UPDATED. See ``SpacePostCreated``
     #: for the loop-prevention rationale.
     origin_instance_id: str | None = None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     #: Space posts only: the @-mentions this edit newly ADDS (in the new
     #: content, not in the old — :func:`~socialhome.domain.mention.mentions_added`),
     #: resolved on this household's own member view. Only these people are
@@ -77,6 +81,10 @@ class PostDeleted(DomainEvent):
     """Soft-delete — content cleared, node retained."""
 
     post_id: str
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
     #: ``None`` for household-feed deletes, ``space_id`` for space
     #: post deletes — same gate as :class:`PostEdited`.
@@ -389,6 +397,10 @@ class TaskCreated(DomainEvent):
     task: "Task"
     space_id: str | None = None
     origin_instance_id: str | None = None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -401,6 +413,10 @@ class TaskUpdated(DomainEvent):
     task: "Task"
     space_id: str | None = None
     origin_instance_id: str | None = None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -413,6 +429,10 @@ class TaskDeleted(DomainEvent):
     list_id: str
     space_id: str | None = None
     origin_instance_id: str | None = None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -464,6 +484,10 @@ class TaskListCreated(DomainEvent):
     space_id: str | None = None
     created_by: str = ""
     origin_instance_id: str | None = None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -476,6 +500,10 @@ class TaskListUpdated(DomainEvent):
     name: str
     space_id: str | None = None
     origin_instance_id: str | None = None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -487,6 +515,10 @@ class TaskListDeleted(DomainEvent):
     list_id: str
     space_id: str | None = None
     origin_instance_id: str | None = None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1579,6 +1611,10 @@ class PageCreated(DomainEvent):
     space_id: str | None
     title: str
     content: str
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1588,6 +1624,10 @@ class PageUpdated(DomainEvent):
     space_id: str | None
     title: str
     content: str
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1595,6 +1635,10 @@ class PageUpdated(DomainEvent):
 class PageDeleted(DomainEvent):
     page_id: str
     space_id: str | None = None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1658,6 +1702,10 @@ class StickyCreated(DomainEvent):
     color: str
     position_x: float
     position_y: float
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1671,6 +1719,10 @@ class StickyUpdated(DomainEvent):
     color: str
     position_x: float
     position_y: float
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1681,6 +1733,10 @@ class StickyDeleted(DomainEvent):
 
     sticky_id: str
     space_id: str | None
+    #: The user who made this write (v_42) — federated inside the sealed
+    #: payload so receivers judge it against the space's access level.
+    #: Empty for a write applied from a peer, or one nobody made.
+    actor_user_id: str = ""
     occurred_at: datetime = field(default_factory=_now)
 
 

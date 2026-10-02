@@ -242,7 +242,7 @@ export function EventPostCard({ eventId }: EventPostCardProps) {
           eventId={event.id}
           showIcsItem={false}
         >
-          {isCreator && (
+          {isCreator && event.can_edit !== false && (
             <button
               type="button"
               role="menuitem"

@@ -357,6 +357,9 @@ export interface Space {
   owner_instance_id?: string
 }
 
+/** A space feature's access level (``SpaceFeatureAccess`` server-side). */
+export type SpaceAccessLevel = 'open' | 'moderated' | 'admin_only'
+
 export interface SpaceFeatures {
   calendar: boolean
   /** A shared weekly timetable (e.g. a class schedule) in the Calendar
@@ -385,7 +388,14 @@ export interface SpaceFeatures {
   /** Per-space Bazaar tab (§23.15). When false the marketplace tab is
    *  hidden and new listings are rejected; existing listings remain. */
   bazaar?: boolean
-  posts_access: 'open' | 'moderated' | 'admin_only'
+  /** Per-feature access levels (§4.3): who may create / edit / delete.
+   *  ``admin_only`` → owners and admins; ``moderated`` queues members'
+   *  posts for review (posts only today). Absent on an older host → open. */
+  posts_access: SpaceAccessLevel
+  pages_access?: SpaceAccessLevel
+  tasks_access?: SpaceAccessLevel
+  stickies_access?: SpaceAccessLevel
+  calendar_access?: SpaceAccessLevel
   /** Admin opt-in: may strangers follow this space read-only at all?
    *  This — not `join_mode` — is what makes a public / global space
    *  publicly readable. Off by default: nothing is relayed, no content
@@ -600,6 +610,10 @@ export interface CalendarEvent {
    *  or an archived space). A UI hint — the RSVP route enforces it.
    *  Absent elsewhere; treat absent as "may RSVP". */
   can_rsvp?: boolean
+  /** Space events via ``GET /api/calendars/events/{id}`` only: whether
+   *  the caller may edit it (the calendar's access level, §4.3). Absent
+   *  → leave the creator's Edit as it was. */
+  can_edit?: boolean
   /** SPA-only group key, set by :func:`groupSharedEvents`. The composer
    *  fans out a multi-attendee event as one ``POST`` per picked
    *  calendar, which lands as N rows in the DB with the same

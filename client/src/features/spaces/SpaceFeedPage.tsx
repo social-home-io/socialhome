@@ -35,12 +35,15 @@ import { SpaceTasksTab } from './SpaceTasksTab'
 import { SpaceCalendarHost } from './SpaceCalendarHost'
 import { calendarTabLabel, parseSpaceTab, visibleSpaceTabs } from './spaceTabs'
 import {
+  canContribute,
   canModerate as roleCanModerate,
   hasSettingsAuthority,
   isWriterRole,
   parseSpaceRole,
   type SpaceRole,
 } from './spaceRoles'
+import { AccessNote } from './AccessNote'
+import { accessLevel, accessNote, blockedByAdminOnly, type AccessFeature } from './spaceAccess'
 import { SpaceBazaarTab } from './SpaceBazaarTab'
 import StickyBoardPage from '@/features/stickies/StickyBoardPage'
 import { useSpaceTheme } from '@/hooks/useSpaceTheme'
@@ -390,8 +393,8 @@ export default function SpaceFeedPage() {
   if (loading.value) return <Spinner />
 
   // §D1b — a stub of a remote-hosted space looks like a normal row
-  // locally, but its moderation queue lives on the host: posts_access is
-  // host-authoritative, so a stub's queue is always empty until federated
+  // locally, but its moderation queue lives on the host (a MODERATED post
+  // queues there), so a stub's queue is always empty until federated
   // moderation lands (follow-up). Show the Moderation tab on the host only.
   const isRemoteSpace = !!(
     spaceDetail.value?.owner_instance_id
@@ -412,6 +415,14 @@ export default function SpaceFeedPage() {
   // server's role check is the authority (a remote-hosted space's
   // admin edits too — the host verifies it); an archive is read-only.
   const canEditTimetable = !s?.archived && hasSettingsAuthority(viewerRole.value)
+  // §4.3 per-feature access levels: may the viewer create / edit there?
+  // ``adminOnly`` is the case worth a note — a member or moderator in an
+  // ADMIN_ONLY feature (a subscriber reads everywhere anyway). The server
+  // refuses the writes regardless (403 ACCESS_ADMIN_ONLY).
+  const canWrite = (feature: AccessFeature) =>
+    canContribute(accessLevel(f, feature), viewerRole.value)
+  const adminOnly = (feature: AccessFeature) =>
+    roleKnown.value && blockedByAdminOnly(accessLevel(f, feature), viewerRole.value)
 
   return (
     <div class="sh-space-feed sh-space-scope">
@@ -556,6 +567,8 @@ export default function SpaceFeedPage() {
                 </p>
               </div>
             </div>
+          ) : adminOnly('posts') ? (
+            <AccessNote feature="posts" />
           ) : (
             <Composer onSubmit={handleSubmit} context="Space" spaceId={spaceId}
               allowedTypes={spaceDetail.value?.features?.allowed_post_types}
@@ -572,7 +585,7 @@ export default function SpaceFeedPage() {
                     spaceDetail.value?.archived_reason,
                   )?.empty}
                 </p>
-              ) : (
+              ) : adminOnly('posts') ? null : (
                 <>
                   <p>
                     Be the first to share something with the rest of the space.
@@ -592,8 +605,10 @@ export default function SpaceFeedPage() {
                 onReact={(emoji) => handleReact(post.id, emoji)}
                 onComment={() => openCommentOverlay(post, spaceId)}
                 // The author, or content authority (owner / admin /
-                // moderator) acting on somebody else's post.
-                onDelete={post.author === currentUser.value?.user_id || canModerate
+                // moderator) acting on somebody else's post — unless the
+                // space keeps posts to its admins (§4.3).
+                onDelete={(post.author === currentUser.value?.user_id || canModerate)
+                  && !adminOnly('posts')
                   ? () => handleDelete(post.id)
                   : undefined}
                 spaceId={spaceId}
@@ -616,6 +631,7 @@ export default function SpaceFeedPage() {
       {activeTab.value === 'pages' && (
         <div class="sh-space-pages">
           <h2>Pages</h2>
+          {adminOnly('pages') && <AccessNote feature="pages" />}
           {spacePages.value.length === 0 && <p class="sh-muted">No pages in this space.</p>}
           {spacePages.value.map(p => (
             <div key={p.id} class="sh-page-card">
@@ -648,10 +664,13 @@ export default function SpaceFeedPage() {
                       onClick={() => { subscribeFeedOpen.value = true }}>
                 {t('event.subscribe.button')}
               </Button>
-              <Button onClick={() => openSpaceEventDialog(spaceId)}>
-                + New event
-              </Button>
+              {canWrite('calendar') && (
+                <Button onClick={() => openSpaceEventDialog(spaceId)}>
+                  + New event
+                </Button>
+              )}
             </div>
+            {adminOnly('calendar') && <AccessNote feature="calendar" />}
             <Modal
               open={subscribeFeedOpen.value}
               onClose={() => { subscribeFeedOpen.value = false }}
@@ -704,10 +723,12 @@ export default function SpaceFeedPage() {
               <div class="sh-empty-state">
                 <div aria-hidden="true">📅</div>
                 <h3>No events in this {spaceCalView.value}</h3>
-                <p>
-                  Click <strong>+ New event</strong> to schedule something
-                  in this space.
-                </p>
+                {canWrite('calendar') && (
+                  <p>
+                    Click <strong>+ New event</strong> to schedule something
+                    in this space.
+                  </p>
+                )}
               </div>
             )}
 
@@ -789,13 +810,17 @@ export default function SpaceFeedPage() {
           spaceId={spaceId}
           // Unknown until the member list answers: the tab waits rather
           // than flashing locked cards at a member.
-          writable={roleKnown.value ? isWriterRole(viewerRole.value) : undefined}
+          writable={roleKnown.value ? canWrite('tasks') : undefined}
+          adminOnly={accessLevel(f, 'tasks') === 'admin_only'}
           archived={!!s?.archived}
         />
       )}
 
       {activeTab.value === 'stickies' && (
-        <StickyBoardPage spaceId={spaceId} />
+        <StickyBoardPage
+          spaceId={spaceId}
+          readOnly={adminOnly('stickies') ? accessNote('stickies') : null}
+        />
       )}
 
       {activeTab.value === 'gallery' && (
@@ -803,7 +828,7 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'bazaar' && (
-        <SpaceBazaarTab spaceId={spaceId} />
+        <SpaceBazaarTab spaceId={spaceId} canSell={!adminOnly('posts')} />
       )}
 
       {activeTab.value === 'map' && s?.features?.location && (
@@ -818,7 +843,7 @@ export default function SpaceFeedPage() {
       )}
 
       {activeTab.value === 'moderation' && canModerateQueue && (
-        <ModerationQueue spaceId={spaceId} />
+        <ModerationQueue spaceId={spaceId} canApprove={!adminOnly('posts')} />
       )}
     </div>
   )

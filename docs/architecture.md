@@ -580,7 +580,13 @@ to `status='failed'` after its retry budget.
 Concurrent edits to a space page produce a `space_page_snapshots`
 row with `conflict=1`. The space's editing UI offers
 `mine | theirs | merged_content` resolution before further edits are
-allowed. Lives in `socialhome/services/page_conflict_service.py`.
+allowed. Lives in `socialhome/services/page_conflict_service.py`; the
+space wiki's own writes (create / update with the stale-update check /
+delete / resolve-conflict / versions) live in
+`socialhome/services/space_page_service.py` (`SpacePageService`) — path-space
+scoping, the writer seat, the `pages` access level and the
+`PageCreated` / `PageUpdated` / `PageDeleted` events with their actor —
+so `routes/pages.py` stays thin.
 
 ### Implementation pointers
 
@@ -849,6 +855,19 @@ upgrade and on the periodic sync tick, and a write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in
 [`docs/protocol/spaces.md`](protocol/spaces.md).
+
+**Per-feature access levels are enforced on every household (v_42).** A
+space's `posts` / `pages` / `tasks` / `stickies` / `calendar` access level
+(`open` / `moderated` / `admin_only`) is decided by the pure
+`SpaceFeatures.access_decision` and asked twice: by each local write path
+through the behaviour-only `ContentAccessMixin`
+(`socialhome/services/content_access.py`, composed into `SpaceService`,
+`SpaceTaskService`, `StickyService`, `SpaceCalendarService`,
+`SpacePageService` and the bot bridge) against the household's own copy of
+the features, and by every receiver — inbound handlers and non-host sync
+records — through `SpaceAuthorship.access_admits`, which binds the
+payload's `actor_user_id` to the sending household before checking its
+seat. See [`docs/protocol/spaces.md`](protocol/spaces.md#feature-access-levels-v_42).
 
 ## Spec references
 

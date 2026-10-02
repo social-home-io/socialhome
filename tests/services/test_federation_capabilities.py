@@ -22,7 +22,8 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 41
+    assert OURS == 42
+    assert FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT == 42
     assert FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE == 41
     assert FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS == 40
     assert FederationCapability.MIN_FOR_SPACE_TIMETABLE == 39
@@ -149,6 +150,7 @@ def test_space_features_missing_below_v13():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
 
 
@@ -172,6 +174,7 @@ def test_space_features_missing_below_v16():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
 
 
@@ -192,6 +195,7 @@ def test_space_features_missing_below_v22():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
 
 
@@ -210,6 +214,7 @@ def test_space_features_missing_below_v23():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
 
 
@@ -229,6 +234,7 @@ def test_space_features_missing_below_v24():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(27) == [
         "Mesh route-stale nack",
@@ -242,6 +248,7 @@ def test_space_features_missing_below_v24():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
 
 
@@ -263,6 +270,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(29) == [
         "Cross-household Follower seats",
@@ -274,6 +282,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(30) == [
         "Authenticated mesh-routed origin",
@@ -284,6 +293,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(31) == [
         "Space roster snapshot",
@@ -293,6 +303,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(32) == [
         "Shared gallery albums",
@@ -301,6 +312,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(33) == [
         "Creator-bound album ids",
@@ -308,35 +320,45 @@ def test_space_features_missing_below_v32_is_empty():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(34) == [
         "Creator-bound content ids",
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(35) == [
         "Creator-bound content ids",
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(36) == [
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(38) == [
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert space_features_missing_below(39) == [
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
-    assert space_features_missing_below(40) == ["Space moderators"]
-    assert space_features_missing_below(41) == []
+    assert space_features_missing_below(40) == [
+        "Space moderators",
+        "Admin-only space features",
+    ]
+    assert space_features_missing_below(41) == ["Admin-only space features"]
+    assert space_features_missing_below(42) == []
 
 
 def test_space_scoped_min_versions_are_capability_constants():

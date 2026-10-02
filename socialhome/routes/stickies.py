@@ -94,18 +94,23 @@ class StickyDetailView(BaseView):
     """
 
     async def patch(self) -> web.Response:
-        self.user
+        ctx = self.user
         await self.require_household_feature("stickies")
         body = await self.body()
         sticky = await self.svc(sticky_service_key).update(
-            self.match("id"), space_id=None, **_update_kwargs(body)
+            self.match("id"),
+            space_id=None,
+            actor_user_id=ctx.user_id,
+            **_update_kwargs(body),
         )
         return self._json(_sticky_dict(sticky))
 
     async def delete(self) -> web.Response:
-        self.user
+        ctx = self.user
         await self.require_household_feature("stickies")
-        await self.svc(sticky_service_key).delete(self.match("id"), space_id=None)
+        await self.svc(sticky_service_key).delete(
+            self.match("id"), space_id=None, actor_user_id=ctx.user_id
+        )
         return self._json({"ok": True})
 
 
@@ -163,7 +168,10 @@ class SpaceStickyDetailView(_SpaceStickiesBase):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         body = await self.body()
         sticky = await self.svc(sticky_service_key).update(
-            self.match("sid"), space_id=space_id, **_update_kwargs(body)
+            self.match("sid"),
+            space_id=space_id,
+            actor_user_id=ctx.user_id,
+            **_update_kwargs(body),
         )
         return self._json(_sticky_dict(sticky))
 
@@ -172,5 +180,7 @@ class SpaceStickyDetailView(_SpaceStickiesBase):
         space_id = self.match("id")
         if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        await self.svc(sticky_service_key).delete(self.match("sid"), space_id=space_id)
+        await self.svc(sticky_service_key).delete(
+            self.match("sid"), space_id=space_id, actor_user_id=ctx.user_id
+        )
         return self._json({"ok": True})

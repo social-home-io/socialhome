@@ -65,10 +65,21 @@ class _AllowAuthorship:
     ``_DenyAuthorship`` tests at the bottom prove every handler consults it.
     """
 
-    def __init__(self, answer: bool = True) -> None:
+    def __init__(self, answer: bool = True, *, access: bool = True) -> None:
         self.answer = answer
+        #: The answer of :meth:`access_admits` (the §4.3 access level).
+        self.access = access
         self.calls: list[tuple[str, str, str]] = []
+        self.access_calls: list[tuple] = []
+        self.access_owners: list[str] = []
         self.refusals: list[str] = []
+
+    async def access_admits(
+        self, event, space_id, feature, action, *, actor, row_owner=""
+    ):
+        self.access_calls.append((space_id, feature, action.value, actor))
+        self.access_owners.append(row_owner)
+        return self.access
 
     async def acts_for(self, event, space_id, user_id, *, any_role=False):
         self.calls.append(("acts_for", space_id, user_id))
@@ -1039,7 +1050,7 @@ async def test_calendar_saved_missing_end_drops(repos, handlers):
 
 
 async def test_calendar_deleted(repos, handlers):
-    repos["calendar"]._events["e-1"] = ("sp-1", object())
+    repos["calendar"]._events["e-1"] = ("sp-1", SimpleNamespace(created_by="u-author"))
     await handlers._on_calendar_deleted(
         _event(
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
@@ -1059,7 +1070,7 @@ async def test_calendar_deleted_publishes_space_scoped_bus_event(bus, repos, han
         seen.append(evt)
 
     bus.subscribe(CalendarEventDeleted, _capture)
-    repos["calendar"]._events["e-1"] = ("sp-1", object())
+    repos["calendar"]._events["e-1"] = ("sp-1", SimpleNamespace(created_by="u-author"))
     await handlers._on_calendar_deleted(
         _event(
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
@@ -2464,7 +2475,7 @@ def _seed_other_space(repos):
     repos["page"].rows.claim("p-b", "sp-b")
     repos["page"].rows.claim("hh-page", None)  # a household (personal) page
     repos["sticky"].rows.claim("s-b", "sp-b")
-    repos["calendar"]._events["e-b"] = ("sp-b", object())
+    repos["calendar"]._events["e-b"] = ("sp-b", SimpleNamespace(created_by="u-author"))
 
 
 @pytest.fixture
@@ -3386,7 +3397,7 @@ def _writes(repos) -> tuple:
 
 def _prime(repos, seed):
     _seed(repos, seed)
-    repos["calendar"]._events["e-1"] = ("sp-1", object())
+    repos["calendar"]._events["e-1"] = ("sp-1", SimpleNamespace(created_by="u-author"))
     repos["poll"].valid_options.add(("p-1", "o-1"))
 
 
@@ -4118,3 +4129,205 @@ async def test_task_with_an_invisible_title_is_dropped_with_a_warning(
         )
     assert repos["task"].saved == []
     assert "visible title" in caplog.text
+
+
+# ─── §4.3 access levels: every collaborative write consults them (v_42) ──
+
+
+_ACCESS_CASES = [
+    # (event type, payload, feature, action, seed)
+    (
+        FederationEventType.SPACE_PAGE_CREATED,
+        {"id": "pg-new", "title": "T", "created_by": "u-author"},
+        "pages",
+        "create",
+        None,
+    ),
+    (
+        FederationEventType.SPACE_PAGE_DELETED,
+        {"id": "pg-held"},
+        "pages",
+        "delete",
+        "page",
+    ),
+    (
+        FederationEventType.SPACE_STICKY_CREATED,
+        {"id": "st-new", "author": "u-author", "content": "x"},
+        "stickies",
+        "create",
+        None,
+    ),
+    (
+        FederationEventType.SPACE_STICKY_DELETED,
+        {"id": "st-held"},
+        "stickies",
+        "delete",
+        "sticky",
+    ),
+    (
+        FederationEventType.SPACE_TASK_UPDATED,
+        {"id": "tk-held", "list_id": "list-1", "title": "edited"},
+        "tasks",
+        "edit",
+        "task",
+    ),
+    (
+        FederationEventType.SPACE_TASK_DELETED,
+        {"id": "tk-held"},
+        "tasks",
+        "delete",
+        "task",
+    ),
+    (
+        FederationEventType.SPACE_TASK_LIST_UPDATED,
+        {"id": "ls-held", "name": "Renamed"},
+        "tasks",
+        "edit",
+        "list",
+    ),
+    (
+        FederationEventType.SPACE_TASK_LIST_DELETED,
+        {"id": "ls-held"},
+        "tasks",
+        "delete",
+        "list",
+    ),
+    (
+        FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+        {
+            "id": "ev-new",
+            "calendar_id": "sp-1",
+            "summary": "S",
+            "created_by": "u-author",
+            "start": "2026-06-10T18:00:00+00:00",
+            "end": "2026-06-10T19:00:00+00:00",
+        },
+        "calendar",
+        "create",
+        None,
+    ),
+]
+
+
+async def _seed_for_access(repos, seed):
+    from socialhome.domain.page import Page
+    from socialhome.domain.sticky import Sticky
+
+    if seed == "page":
+        await repos["page"].save(
+            Page(
+                id="pg-held",
+                title="T",
+                content="",
+                created_by="u-author",
+                created_at="",
+                updated_at="",
+                space_id="sp-1",
+            ),
+            space_id="sp-1",
+        )
+    elif seed == "sticky":
+        await repos["sticky"].save(
+            Sticky(
+                id="st-held",
+                author="u-author",
+                content="x",
+                color="#FFF9B1",
+                position_x=0,
+                position_y=0,
+                created_at="",
+                updated_at="",
+                space_id="sp-1",
+            ),
+            space_id="sp-1",
+        )
+    elif seed == "task":
+        repos["task"].lists["list-1"] = (
+            "sp-1",
+            TaskList(id="list-1", name="L", created_by="u-author"),
+        )
+        repos["task"].hold(_held_task("tk-held"), "sp-1")
+    elif seed == "list":
+        repos["task"].lists["ls-held"] = (
+            "sp-1",
+            TaskList(id="ls-held", name="L", created_by="u-author"),
+        )
+
+
+def _access_handler(handlers, event_type):
+    return {
+        FederationEventType.SPACE_PAGE_CREATED: handlers._on_page_saved,
+        FederationEventType.SPACE_PAGE_DELETED: handlers._on_page_deleted,
+        FederationEventType.SPACE_STICKY_CREATED: handlers._on_sticky_saved,
+        FederationEventType.SPACE_STICKY_DELETED: handlers._on_sticky_deleted,
+        FederationEventType.SPACE_TASK_UPDATED: handlers._on_task_saved,
+        FederationEventType.SPACE_TASK_DELETED: handlers._on_task_deleted,
+        FederationEventType.SPACE_TASK_LIST_UPDATED: handlers._on_task_list_updated,
+        FederationEventType.SPACE_TASK_LIST_DELETED: handlers._on_task_list_deleted,
+        FederationEventType.SPACE_CALENDAR_EVENT_CREATED: handlers._on_calendar_saved,
+    }[event_type]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload", "feature", "action", "seed"), _ACCESS_CASES
+)
+async def test_a_collaborative_write_asks_the_access_level_with_its_actor(
+    handlers, repos, event_type, payload, feature, action, seed
+):
+    await _seed_for_access(repos, seed)
+    await _access_handler(handlers, event_type)(
+        _event(event_type, {**payload, "actor_user_id": "u-act"}, space_id="sp-1")
+    )
+    assert repos["auth"].access_calls == [("sp-1", feature, action, "u-act")]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload", "feature", "action", "seed"), _ACCESS_CASES
+)
+async def test_a_write_the_access_level_refuses_changes_nothing(
+    handlers, repos, event_type, payload, feature, action, seed
+):
+    await _seed_for_access(repos, seed)
+    repos["auth"].access = False
+    before = (
+        list(repos["page"].saved),
+        list(repos["sticky"].saved),
+        list(repos["task"].saved),
+        dict(repos["task"].lists),
+        list(repos["calendar"].saved),
+    )
+    await _access_handler(handlers, event_type)(
+        _event(event_type, dict(payload), space_id="sp-1")
+    )
+    assert repos["auth"].access_calls[0][3] is None  # an older sender: no actor
+    assert (
+        list(repos["page"].saved),
+        list(repos["sticky"].saved),
+        list(repos["task"].saved),
+        dict(repos["task"].lists),
+        list(repos["calendar"].saved),
+    ) == before
+    assert repos["page"].deleted == []
+    assert repos["sticky"].deleted == []
+    assert repos["task"].deleted == []
+    assert repos["task"].deleted_lists == []
+    assert repos["calendar"].deleted == []
+
+
+async def test_a_task_edit_is_judged_on_the_held_rows_creator(handlers, repos):
+    """The payload's ``created_by`` never decides who owns the row an edit
+    touches — the stored row does (as for stickies and calendar events)."""
+    await _seed_for_access(repos, "task")
+    await handlers._on_task_saved(
+        _event(
+            FederationEventType.SPACE_TASK_UPDATED,
+            {
+                "id": "tk-held",
+                "list_id": "list-1",
+                "title": "x",
+                "created_by": "u-forged",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert repos["auth"].access_owners == ["u-author"]

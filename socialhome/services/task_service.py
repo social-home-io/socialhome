@@ -50,7 +50,7 @@ from ..domain.task import (
     sanitize_block,
     sanitize_line,
 )
-from ..domain.space import SpacePermissionError
+from ..domain.space import ContentAction, SpacePermissionError
 from ..federation.owner_bound_id import (
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
@@ -61,6 +61,7 @@ from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.task_repo import AbstractTaskRepo, AbstractSpaceTaskRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
+from .content_access import ContentAccessMixin
 from .space_service import SpaceService
 
 
@@ -814,12 +815,17 @@ def _next_occurrence(rrule: str, *, base: date) -> date | None:
     return None
 
 
-class SpaceTaskService(BusPublisherMixin):
+class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
     """Space task list operations.
 
     Each method publishes the corresponding domain event with
     ``space_id`` set, so realtime + notification + federation layers
     can scope fan-out correctly.
+
+    Every write passes the space's ``tasks`` access level (§4.3,
+    :class:`ContentAccessMixin`) for the acting user: under
+    ``ADMIN_ONLY`` only the owner / admins create, edit, move, reorder,
+    archive or delete tasks and lists. Task comments are never gated.
     """
 
     __slots__ = ("_repo", "_bus", "_spaces", "_remote_members")
@@ -919,6 +925,7 @@ class SpaceTaskService(BusPublisherMixin):
         created_by: str,
     ) -> TaskList:
         name = parse_list_name(name)
+        await self._gate(space_id, created_by, "tasks", ContentAction.CREATE, True)
         lst = TaskList(
             # Owner-bound (v_40): only the creator's household can
             # announce this list id.
@@ -936,6 +943,7 @@ class SpaceTaskService(BusPublisherMixin):
                 name=saved.name,
                 space_id=space_id,
                 created_by=saved.created_by,
+                actor_user_id=created_by,
             )
         )
         return saved
@@ -946,9 +954,17 @@ class SpaceTaskService(BusPublisherMixin):
         *,
         space_id: str,
         name: str,
+        actor_user_id: str,
     ) -> TaskList:
         name = parse_list_name(name)
         current = await self._list_in_space(list_id, space_id)
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "tasks",
+            ContentAction.EDIT,
+            current.created_by == actor_user_id,
+        )
         updated = replace(current, name=name)
         if not await self._repo.save_list(updated, space_id=space_id):
             raise KeyError(f"task list {list_id!r} not found")
@@ -958,17 +974,28 @@ class SpaceTaskService(BusPublisherMixin):
                 list_id=saved.id,
                 name=saved.name,
                 space_id=space_id,
+                actor_user_id=actor_user_id,
             )
         )
         return saved
 
-    async def delete_list(self, list_id: str, *, space_id: str) -> None:
-        await self._list_in_space(list_id, space_id)
+    async def delete_list(
+        self, list_id: str, *, space_id: str, actor_user_id: str
+    ) -> None:
+        current = await self._list_in_space(list_id, space_id)
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "tasks",
+            ContentAction.DELETE,
+            current.created_by == actor_user_id,
+        )
         await self._repo.delete_list(list_id, space_id=space_id)
         await self._emit(
             TaskListDeleted(
                 list_id=list_id,
                 space_id=space_id,
+                actor_user_id=actor_user_id,
             )
         )
 
@@ -1010,6 +1037,7 @@ class SpaceTaskService(BusPublisherMixin):
         task_priority = parse_priority(priority)
         task_labels = parse_labels(labels)
         due = parse_due_date(due_date)
+        await self._gate(space_id, created_by, "tasks", ContentAction.CREATE, True)
         await self._require_member_assignees(space_id, parsed_assignees)
         now = datetime.now(timezone.utc)
         task = Task(
@@ -1035,7 +1063,9 @@ class SpaceTaskService(BusPublisherMixin):
             raise KeyError(f"task list {list_id!r} not found in this space")
         saved = task
         if self._bus is not None:
-            await self._bus.publish(TaskCreated(task=saved, space_id=space_id))
+            await self._bus.publish(
+                TaskCreated(task=saved, space_id=space_id, actor_user_id=created_by)
+            )
             for user_id in saved.assignees:
                 if user_id == created_by:
                     continue
@@ -1066,9 +1096,22 @@ class SpaceTaskService(BusPublisherMixin):
         """Partial edit, same field rules as :meth:`TaskService.update_task`.
 
         Collaborative: any writable member may edit any task of the space
-        (the route's writer gate already ran).
+        (the route's writer gate already ran), subject to the ``tasks``
+        access level. A change of ``position`` alone is a LAYOUT write;
+        anything else — a status change / column move included — an EDIT.
         """
         task = await self._task_in_space(task_id, space_id)
+        layout_only = not isinstance(position, Unset) and all(
+            isinstance(v, Unset)
+            for v in (title, description, status, due_date, assignees, priority, labels)
+        )
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "tasks",
+            ContentAction.LAYOUT if layout_only else ContentAction.EDIT,
+            task.created_by == actor_user_id,
+        )
 
         parsed_assignees = (
             None if isinstance(assignees, Unset) else parse_assignees(assignees)
@@ -1096,7 +1139,9 @@ class SpaceTaskService(BusPublisherMixin):
             raise KeyError(f"space task {updated.id!r} not found in this space")
         saved = updated
         if self._bus is not None:
-            await self._bus.publish(TaskUpdated(task=saved, space_id=space_id))
+            await self._bus.publish(
+                TaskUpdated(task=saved, space_id=space_id, actor_user_id=actor_user_id)
+            )
             previous = set(task.assignees or ())
             for user_id in saved.assignees or ():
                 if user_id in previous or user_id == actor_user_id:
@@ -1125,6 +1170,7 @@ class SpaceTaskService(BusPublisherMixin):
         *,
         ordered_ids: list[str],
         moved_id: str,
+        actor_user_id: str,
     ) -> list[Task]:
         """Persist a new task order within a space list.
 
@@ -1143,6 +1189,13 @@ class SpaceTaskService(BusPublisherMixin):
         moved = await self._task_in_space(moved_id, space_id)
         if moved.list_id != list_id:
             raise KeyError(f"space task {moved_id!r} not found in this list")
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "tasks",
+            ContentAction.LAYOUT,
+            moved.created_by == actor_user_id,
+        )
         updated: list[Task] = []
         for idx, tid in enumerate(ordered_ids):
             held = await self._repo.get(tid)
@@ -1157,17 +1210,31 @@ class SpaceTaskService(BusPublisherMixin):
             if not await self._repo.save(new_task, space_id=space_id):
                 continue
             updated.append(new_task)
-            await self._emit(TaskUpdated(task=new_task, space_id=space_id))
+            await self._emit(
+                TaskUpdated(
+                    task=new_task, space_id=space_id, actor_user_id=actor_user_id
+                )
+            )
         return updated
 
-    async def delete_task(self, task_id: str, *, space_id: str) -> None:
+    async def delete_task(
+        self, task_id: str, *, space_id: str, actor_user_id: str
+    ) -> None:
         task = await self._task_in_space(task_id, space_id)
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "tasks",
+            ContentAction.DELETE,
+            task.created_by == actor_user_id,
+        )
         await self._repo.delete(task_id, space_id=space_id)
         await self._emit(
             TaskDeleted(
                 task_id=task_id,
                 list_id=task.list_id,
                 space_id=space_id,
+                actor_user_id=actor_user_id,
             )
         )
 
@@ -1192,6 +1259,13 @@ class SpaceTaskService(BusPublisherMixin):
         archived: bool,
     ) -> Task:
         task = await self._task_in_space(task_id, space_id)
+        await self._gate(
+            space_id,
+            actor_user_id,
+            "tasks",
+            ContentAction.DELETE,
+            task.created_by == actor_user_id,
+        )
         now = datetime.now(timezone.utc)
         updated = replace(
             task,
@@ -1201,5 +1275,7 @@ class SpaceTaskService(BusPublisherMixin):
         if not await self._repo.save(updated, space_id=space_id):
             raise KeyError(f"space task {updated.id!r} not found in this space")
         saved = updated
-        await self._emit(TaskUpdated(task=saved, space_id=space_id))
+        await self._emit(
+            TaskUpdated(task=saved, space_id=space_id, actor_user_id=actor_user_id)
+        )
         return saved

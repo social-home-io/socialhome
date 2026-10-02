@@ -9,6 +9,8 @@
  * settings authority at all.
  */
 
+import type { SpaceAccessLevel } from '@/types'
+
 export type SpaceRole = 'owner' | 'admin' | 'moderator' | 'member' | 'subscriber'
 
 const ROLES: readonly SpaceRole[] = ['owner', 'admin', 'moderator', 'member', 'subscriber']
@@ -33,6 +35,18 @@ export function canModerate(role: SpaceRole | undefined): boolean {
 /** May create content: everyone but a read-only subscriber. */
 export function isWriterRole(role: SpaceRole | undefined): boolean {
   return canModerate(role) || role === 'member'
+}
+
+/** May ``role`` create / edit / delete in a feature at ``level`` (§4.3)?
+ *  ``admin_only`` → owners and admins (a moderator reads only); otherwise
+ *  any writer — a member's post under ``moderated`` queues, but they may
+ *  still compose. ``undefined`` (a stub before the host's config) is open. */
+export function canContribute(
+  level: SpaceAccessLevel | undefined,
+  role: SpaceRole | undefined,
+): boolean {
+  if (level === 'admin_only') return hasSettingsAuthority(role)
+  return isWriterRole(role)
 }
 
 /** The roles ``actor`` may move a ``target`` seat to (current one

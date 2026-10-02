@@ -5,10 +5,14 @@ from __future__ import annotations
 import pytest
 
 from socialhome.domain.space import (
+    ACCESS_FEATURES,
     CONTENT_AUTHORITY_ROLES,
     MIRRORABLE_REMOTE_ROLES,
     SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
+    AccessAdminOnlyError,
+    AccessDecision,
+    ContentAction,
     HouseholdFeatures,
     JoinMode,
     RemoteAdminOutcome,
@@ -22,6 +26,7 @@ from socialhome.domain.space import (
     role_change_allowed,
     normalize_min_age,
     normalize_retention_exempt_types,
+    restricted_access_changes,
 )
 from socialhome.domain.post import PostType
 
@@ -153,28 +158,142 @@ def test_space_features_delegated_admin_authority_back_compat():
     assert SpaceFeatures.from_wire_dict({}).delegated_admin_authority is False
 
 
-def test_space_features_access_decision():
-    """access_decision returns proceed/queue/deny based on access level and admin status."""
-    f = SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED)
-    assert f.access_decision("posts", is_admin=True) == "proceed"
-    assert f.access_decision("posts", is_admin=False) == "queue"
-    f2 = SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY)
-    assert f2.access_decision("posts", is_admin=False) == "deny"
+_ACCESS_FEATURES = ("posts", "pages", "tasks", "stickies", "calendar")
 
 
-def test_a_moderator_bypasses_moderated_but_not_admin_only():
-    """Content authority skips the queue for one's own post; an
-    ``ADMIN_ONLY`` feature stays owner / admin only."""
-    moderated = SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED)
+def _expected_access(
+    level: SpaceFeatureAccess,
+    role: SpaceRole,
+    action: ContentAction,
+    owns: bool,
+) -> AccessDecision:
+    """The owner decision table, spelled out independently of the code."""
+    if level is SpaceFeatureAccess.OPEN:
+        return AccessDecision.PROCEED
+    if level is SpaceFeatureAccess.ADMIN_ONLY:
+        if role in (SpaceRole.OWNER, SpaceRole.ADMIN):
+            return AccessDecision.PROCEED
+        return AccessDecision.DENY
+    # MODERATED
+    if role in (SpaceRole.OWNER, SpaceRole.ADMIN, SpaceRole.MODERATOR):
+        return AccessDecision.PROCEED
+    if action is ContentAction.CREATE:
+        return AccessDecision.QUEUE
+    if action is ContentAction.LAYOUT:
+        return AccessDecision.PROCEED
+    return AccessDecision.PROCEED if owns else AccessDecision.QUEUE
+
+
+@pytest.mark.parametrize("feature", _ACCESS_FEATURES)
+@pytest.mark.parametrize("level", list(SpaceFeatureAccess))
+@pytest.mark.parametrize(
+    "role",
+    [SpaceRole.OWNER, SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER],
+)
+@pytest.mark.parametrize("action", list(ContentAction))
+@pytest.mark.parametrize("owns", [True, False])
+def test_access_decision_matrix(feature, level, role, action, owns):
+    """role × level × action × owns — every cell of the owner decisions."""
+    features = SpaceFeatures(**{f"{feature}_access": level})
+    got = features.access_decision(feature, role=role, action=action, owns_target=owns)
+    assert got is _expected_access(level, role, action, owns)
+
+
+def test_access_decision_reads_only_the_named_feature():
+    """One feature's level never leaks into another's decision."""
+    f = SpaceFeatures(tasks_access=SpaceFeatureAccess.ADMIN_ONLY)
     assert (
-        moderated.access_decision("posts", is_admin=False, is_moderator=True)
-        == "proceed"
+        f.access_decision(
+            "pages",
+            role=SpaceRole.MEMBER,
+            action=ContentAction.CREATE,
+            owns_target=True,
+        )
+        is AccessDecision.PROCEED
     )
-    admin_only = SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY)
     assert (
-        admin_only.access_decision("posts", is_admin=False, is_moderator=True) == "deny"
+        f.access_decision(
+            "tasks",
+            role=SpaceRole.MEMBER,
+            action=ContentAction.CREATE,
+            owns_target=True,
+        )
+        is AccessDecision.DENY
     )
-    assert admin_only.access_decision("posts", is_admin=True) == "proceed"
+
+
+def test_access_decision_accepts_plain_role_strings():
+    """A ``space_members.role`` column value (a plain str) works too."""
+    f = SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY)
+    assert (
+        f.access_decision(
+            "posts", role="admin", action=ContentAction.EDIT, owns_target=True
+        )
+        is AccessDecision.PROCEED
+    )
+    assert (
+        f.access_decision(
+            "posts", role="moderator", action=ContentAction.EDIT, owns_target=True
+        )
+        is AccessDecision.DENY
+    )
+
+
+def test_access_decision_fails_closed_for_unknown_roles():
+    """No seat / a subscriber / junk never passes a restricted feature."""
+    for level in (SpaceFeatureAccess.MODERATED, SpaceFeatureAccess.ADMIN_ONLY):
+        f = SpaceFeatures(calendar_access=level)
+        for role in (None, "subscriber", "root", ""):
+            got = f.access_decision(
+                "calendar",
+                role=role,
+                action=ContentAction.CREATE,
+                owns_target=True,
+            )
+            assert got is AccessDecision.DENY, (level, role)
+    # OPEN stays open — the writer gates decide membership, not this.
+    assert (
+        SpaceFeatures().access_decision(
+            "calendar", role=None, action=ContentAction.CREATE, owns_target=True
+        )
+        is AccessDecision.PROCEED
+    )
+
+
+def test_access_decision_rejects_an_unknown_feature():
+    with pytest.raises(ValueError):
+        SpaceFeatures().access_decision(
+            "gallery",
+            role=SpaceRole.OWNER,
+            action=ContentAction.CREATE,
+            owns_target=True,
+        )
+
+
+def test_access_level_names_every_gated_feature():
+    f = SpaceFeatures(stickies_access=SpaceFeatureAccess.MODERATED)
+    assert f.access_level("stickies") is SpaceFeatureAccess.MODERATED
+    assert f.access_level("posts") is SpaceFeatureAccess.OPEN
+    assert set(ACCESS_FEATURES) == set(_ACCESS_FEATURES)
+
+
+def test_restricted_access_changes_lists_only_raised_levels():
+    """Which features a features edit moves OFF ``OPEN`` (or between
+    restricted levels) — the PEERS_TOO_OLD guard's trigger."""
+    before = SpaceFeatures(pages_access=SpaceFeatureAccess.ADMIN_ONLY)
+    after = SpaceFeatures(
+        pages_access=SpaceFeatureAccess.OPEN,
+        tasks_access=SpaceFeatureAccess.ADMIN_ONLY,
+        posts_access=SpaceFeatureAccess.MODERATED,
+    )
+    assert restricted_access_changes(before, after) == ("posts", "tasks")
+    assert restricted_access_changes(after, after) == ()
+
+
+def test_access_admin_only_error_is_a_permission_error():
+    exc = AccessAdminOnlyError("tasks")
+    assert isinstance(exc, SpacePermissionError)
+    assert exc.feature == "tasks"
 
 
 def test_space_features_with_allowed_post_types():
@@ -437,3 +556,33 @@ def test_role_change_rejects_unknown_roles():
     assert role_change_allowed("owner", "member", "overlord") is False
     assert role_change_allowed("overlord", "member", "moderator") is False
     assert role_change_allowed("owner", "overlord", "member") is False
+
+
+def test_moderated_keeps_an_own_edit_or_delete_for_a_read_only_seat():
+    """A demoted (subscriber) author could always edit / delete their own
+    post — MODERATED keeps that; ADMIN_ONLY does not."""
+    mod = SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED)
+    for action in (ContentAction.EDIT, ContentAction.DELETE):
+        assert (
+            mod.access_decision(
+                "posts", role="subscriber", action=action, owns_target=True
+            )
+            is AccessDecision.PROCEED
+        )
+        assert (
+            mod.access_decision(
+                "posts", role="subscriber", action=action, owns_target=False
+            )
+            is AccessDecision.DENY
+        )
+        assert (
+            mod.access_decision("posts", role=None, action=action, owns_target=True)
+            is AccessDecision.DENY
+        )
+    ao = SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY)
+    assert (
+        ao.access_decision(
+            "posts", role="subscriber", action=ContentAction.DELETE, owns_target=True
+        )
+        is AccessDecision.DENY
+    )

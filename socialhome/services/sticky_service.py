@@ -15,6 +15,12 @@ Write access to a space board is gated by :meth:`StickyService.require_writer`
 (:class:`SpacePermissionError` → 403). Membership + the per-space
 ``stickies`` feature toggle are checked by the route before the call.
 
+A space board's writes also pass the space's ``stickies`` access level
+(§4.3, :class:`ContentAccessMixin`) for the acting user: under
+``ADMIN_ONLY`` only the owner / admins create, edit, recolour, move or
+delete notes. A position-only update is a LAYOUT write. The household
+board has no access level.
+
 Each mutation publishes :class:`StickyCreated` / :class:`StickyUpdated` /
 :class:`StickyDeleted`; :class:`RealtimeService` fans the WS frame out and
 :class:`StickyFederationOutbound` federates space-scoped ones to member
@@ -27,7 +33,7 @@ import builtins
 from typing import Any
 
 from ..domain.events import StickyCreated, StickyDeleted, StickyUpdated
-from ..domain.space import SpacePermissionError
+from ..domain.space import ContentAction, SpacePermissionError
 from ..domain.sticky import (
     DEFAULT_STICKY_COLOR,
     MAX_STICKY_CONTENT_LENGTH,
@@ -41,6 +47,7 @@ from ..domain.sticky import (
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.sticky_repo import AbstractStickyRepo
 from .bus_publisher import BusPublisherMixin
+from .content_access import ContentAccessMixin
 from .space_service import SpaceService
 
 
@@ -75,7 +82,7 @@ def _coord(value: Any, field: str, limit: float) -> float:
     return out
 
 
-class StickyService(BusPublisherMixin):
+class StickyService(BusPublisherMixin, ContentAccessMixin):
     """Scoped sticky-note operations for the household and space boards."""
 
     __slots__ = ("_repo", "_bus", "_spaces")
@@ -139,6 +146,8 @@ class StickyService(BusPublisherMixin):
         position_x: Any = 0.0,
         position_y: Any = 0.0,
     ) -> Sticky:
+        if space_id is not None:
+            await self._gate(space_id, author, "stickies", ContentAction.CREATE, True)
         sticky = await self._repo.add(
             author=author,
             content=_content(content),
@@ -156,6 +165,7 @@ class StickyService(BusPublisherMixin):
                 color=sticky.color,
                 position_x=sticky.position_x,
                 position_y=sticky.position_y,
+                actor_user_id=author,
             )
         )
         return sticky
@@ -165,6 +175,7 @@ class StickyService(BusPublisherMixin):
         sticky_id: str,
         *,
         space_id: str | None,
+        actor_user_id: str,
         content: Any = None,
         color: Any = None,
         position_x: Any = None,
@@ -176,6 +187,15 @@ class StickyService(BusPublisherMixin):
         validated before the first write so a bad request changes nothing.
         """
         sticky = await self._get_or_404(sticky_id, space_id)
+        if space_id is not None:
+            layout_only = content is None and color is None
+            await self._gate(
+                space_id,
+                actor_user_id,
+                "stickies",
+                ContentAction.LAYOUT if layout_only else ContentAction.EDIT,
+                sticky.author == actor_user_id,
+            )
         new_content = _content(content) if content is not None else None
         new_color = _color(color) if color is not None else None
         move = position_x is not None or position_y is not None
@@ -206,12 +226,28 @@ class StickyService(BusPublisherMixin):
                 color=updated.color,
                 position_x=updated.position_x,
                 position_y=updated.position_y,
+                actor_user_id=actor_user_id,
             )
         )
         return updated
 
-    async def delete(self, sticky_id: str, *, space_id: str | None) -> None:
+    async def delete(
+        self, sticky_id: str, *, space_id: str | None, actor_user_id: str
+    ) -> None:
         """Delete a sticky inside ``space_id`` — :class:`KeyError` otherwise."""
+        if space_id is not None:
+            sticky = await self._get_or_404(sticky_id, space_id)
+            await self._gate(
+                space_id,
+                actor_user_id,
+                "stickies",
+                ContentAction.DELETE,
+                sticky.author == actor_user_id,
+            )
         if not await self._repo.delete(sticky_id, space_id=space_id):
             raise KeyError(f"sticky {sticky_id!r} not found")
-        await self._emit(StickyDeleted(sticky_id=sticky_id, space_id=space_id))
+        await self._emit(
+            StickyDeleted(
+                sticky_id=sticky_id, space_id=space_id, actor_user_id=actor_user_id
+            )
+        )

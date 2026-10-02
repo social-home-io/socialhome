@@ -127,6 +127,13 @@ def test_validate_price_fixed_ok():
 # ── update_listing ───────────────────────────────────────────────────────
 
 
+class _OpenSpaces:
+    """Stands in for SpaceService: the posts level lets every edit through."""
+
+    async def require_content_access(self, *_a, **_kw):
+        return None
+
+
 async def test_update_listing_non_seller_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
     with pytest.raises(PermissionError):
@@ -149,6 +156,7 @@ async def test_update_listing_inactive_raises(env):
 
 
 async def test_update_listing_empty_title_raises(env):
+    env.svc.attach_spaces(_OpenSpaces())
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
     with pytest.raises(ValueError):
         await env.svc.update_listing(
@@ -159,6 +167,7 @@ async def test_update_listing_empty_title_raises(env):
 
 
 async def test_update_listing_too_long_title_raises(env):
+    env.svc.attach_spaces(_OpenSpaces())
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
     with pytest.raises(ValueError):
         await env.svc.update_listing(
@@ -169,6 +178,7 @@ async def test_update_listing_too_long_title_raises(env):
 
 
 async def test_update_listing_happy_path(env):
+    env.svc.attach_spaces(_OpenSpaces())
     pid = await _seed_listing(env, mode=BazaarMode.FIXED)
     updated = await env.svc.update_listing(
         post_id=pid,
@@ -339,3 +349,44 @@ async def test_list_bids_empty(env):
 async def test_get_listing_unknown_raises(env):
     with pytest.raises(ListingNotFoundError):
         await env.svc.get_listing("ghost")
+
+
+class _AdminOnlySpaces:
+    """Stands in for SpaceService: every posts write is ADMIN_ONLY-refused."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def require_content_access(
+        self, space_id, actor_user_id, feature, action, *, owns_target
+    ):
+        from socialhome.domain.space import AccessAdminOnlyError
+
+        self.calls.append((space_id, actor_user_id, feature, action, owns_target))
+        raise AccessAdminOnlyError(feature)
+
+
+async def test_update_listing_is_a_posts_edit_under_admin_only(env):
+    """A listing's title / description is its wrapper post's content — an
+    ADMIN_ONLY posts level refuses the seller's edit, row unchanged."""
+    from socialhome.domain.space import AccessAdminOnlyError, ContentAction
+
+    pid = await _seed_listing(env, mode=BazaarMode.FIXED)
+    spaces = _AdminOnlySpaces()
+    env.svc.attach_spaces(spaces)
+    with pytest.raises(AccessAdminOnlyError):
+        await env.svc.update_listing(
+            post_id=pid, actor_user_id="u-seller", title="Changed"
+        )
+    assert spaces.calls == [
+        (_DEFAULT_SPACE_ID, "u-seller", "posts", ContentAction.EDIT, True)
+    ]
+    assert (await env.repo.get_listing(pid)).title == "Item"
+
+
+async def test_update_listing_fails_closed_without_the_space_service(env):
+    """No space service → no access gate → no edit (never fail open)."""
+    pid = await _seed_listing(env, mode=BazaarMode.FIXED)
+    with pytest.raises(RuntimeError):
+        await env.svc.update_listing(post_id=pid, actor_user_id="u-seller", title="X")
+    assert (await env.repo.get_listing(pid)).title == "Item"

@@ -294,6 +294,10 @@ class SpaceDetailView(BaseView):
         # raises the mapped ``SpaceNotFoundError`` for an unknown id, exactly
         # as ``update_config`` would a moment later.
         current = await svc._require_space(space_id)
+        # Hosted elsewhere (and not executed here as a delegated admin):
+        # the edit is only forwarded — the host decides, and may keep a
+        # raised access level back (PEERS_TOO_OLD). The SPA says so.
+        forwarded = await svc.config_edits_forward(space_id)
         features = _features_from_body(
             body.get("features"),
             defaults=current.features,
@@ -324,12 +328,17 @@ class SpaceDetailView(BaseView):
                 if isinstance(body.get("allow_here_mention"), bool)
                 else None
             ),
+            # Apply a raised access level although some member households
+            # are below v_42 (the SPA's "apply anyway" after a 409
+            # PEERS_TOO_OLD).
+            force=body.get("force") is True,
         )
         return web.json_response(
             {
                 "id": updated.id,
                 "name": updated.name,
                 "about_markdown": updated.about_markdown,
+                "forwarded": forwarded,
             }
         )
 

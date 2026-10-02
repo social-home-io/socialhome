@@ -59,6 +59,16 @@ Rules, picked per event family by the handlers:
   ``*_DELETED`` events, so without it a moderated post would disappear
   everywhere except on the households that did not moderate it.
 
+* :meth:`access_admits` — the space's per-feature access level (§4.3,
+  v_42), checked AFTER the rules above by every write to posts, pages,
+  tasks / task lists, stickies and calendar events, against the receiver's
+  OWN copy of the features: ``OPEN`` admits; any other level first binds a
+  named ``actor_user_id`` to the sender (:meth:`acts_for`); ``ADMIN_ONLY``
+  then needs that actor to be an admin as the sender records it
+  (:meth:`admin_as`) — or, from an older sender that names no actor, the
+  sending household to hold settings authority (:meth:`is_admin_household`).
+  ``MODERATED`` admits for now.
+
 The bot bridge posts under the shared :data:`SYSTEM_AUTHOR` identity,
 which is no member at all: any writer household may create such a row
 (nobody is impersonated), and only content authority may change one.
@@ -73,13 +83,17 @@ from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
+    ContentAction,
+    SpaceFeatureAccess,
     SpaceRole,
 )
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.user import SYSTEM_AUTHOR
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
     from .pending_seat_buffer import PendingSeatBuffer
+    from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.space_remote_member_repo import (
         AbstractSpaceRemoteMemberRepo,
     )
@@ -103,10 +117,17 @@ _CONTENT_SEATS: frozenset[str] = frozenset(
 )
 
 
+def payload_actor(event: "FederationEvent") -> str | None:
+    """The payload's ``actor_user_id`` (v_42) — the user who made the write
+    — or ``None`` from an older sender. For :meth:`SpaceAuthorship.access_admits`."""
+    actor = event.payload.get("actor_user_id")
+    return actor if isinstance(actor, str) and actor else None
+
+
 class SpaceAuthorship:
     """Bind the users a space-content payload names to the sending household."""
 
-    __slots__ = ("_spaces", "_seats", "_users", "_pending")
+    __slots__ = ("_spaces", "_seats", "_users", "_pending", "_instances")
 
     def __init__(
         self,
@@ -115,8 +136,13 @@ class SpaceAuthorship:
         remote_member_repo: "AbstractSpaceRemoteMemberRepo",
         user_repo: "AbstractUserRepo",
         pending: "PendingSeatBuffer | None" = None,
+        federation_repo: "AbstractFederationRepo | None" = None,
     ) -> None:
         self._spaces = space_repo
+        #: The senders' advertised ``proto_version`` — whether a missing
+        #: ``actor_user_id`` means an older household (see
+        #: :meth:`access_admits`).
+        self._instances = federation_repo
         self._seats = remote_member_repo
         self._users = user_repo
         #: Where a write naming a user we hold no row for at all waits for
@@ -357,6 +383,160 @@ class SpaceAuthorship:
         if settings:
             return await self.is_admin_household(event, space_id)
         return await self.has_content_authority(event, space_id)
+
+    async def access_admits(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        feature: str,
+        action: ContentAction,
+        *,
+        actor: str | None,
+        row_owner: str = "",
+        release_ok: bool = False,
+    ) -> bool:
+        """Does ``space_id``'s ``feature`` access level, as THIS household
+        holds it, admit the write?
+
+        Called after the event family's authorship rule. ``actor`` is the
+        payload's ``actor_user_id`` (v_42) — the user who made the write.
+        ``row_owner`` is the row's creator: for a ``CREATE`` the claimed
+        author / ``created_by`` (already bound to the sender by
+        :meth:`may_author`), for an edit / delete the held row's.
+
+        * ``OPEN`` → admitted.
+        * A ``CREATE``'s actor **is** its author: a named actor that differs
+          is refused — an admin household cannot pass its plain member's row
+          off as its admin's. The one exception (``release_ok``) is a
+          moderation release, which only the host — where the queue lives —
+          may send. The host relaying a remote member's row (resume replay)
+          is admitted, as :meth:`may_author` admits it.
+        * A named actor must hold a live writer seat on the sender
+          (:meth:`acts_for`; any live seat for an edit / delete of their own
+          row); one this space has no record of yet is held for its seat.
+          The shared bot identity stands for its household instead.
+        * ``ADMIN_ONLY`` → the actor is an admin as the sender records it
+          (:meth:`admin_as`; the host's own people via their mirrored seat).
+          An edit / delete naming no actor is refused from a v_42 sender —
+          every v_42 producer names one; from an older sender (or one that
+          never advertised) the sending household must hold settings
+          authority (:meth:`is_admin_household`), as it must for the shared
+          bot identity — and that only on a bot's own row. A moderator never
+          passes.
+        * ``MODERATED`` → admitted for now.
+
+        A refusal logs at WARNING. An unknown space admits nothing beyond
+        ``OPEN``: there is no level to check against.
+        """
+        space = await self._spaces.get(space_id)
+        if space is None:
+            self._log_access_refusal(event, space_id, feature, action, actor, "unknown")
+            return False
+        level = space.features.access_level(feature)
+        if level is SpaceFeatureAccess.OPEN:
+            return True
+        if action is ContentAction.CREATE and row_owner:
+            if actor and actor != row_owner:
+                if not (release_ok and await self.is_host(event, space_id)):
+                    self._log_access_refusal(
+                        event,
+                        space_id,
+                        feature,
+                        action,
+                        actor,
+                        "actor is not the author",
+                    )
+                    return False
+            else:
+                actor = row_owner
+                if (
+                    actor != SYSTEM_AUTHOR
+                    and await self.is_host(event, space_id)
+                    and not await self.acts_for(event, space_id, actor)
+                    and await self.may_author(event, space_id, actor)
+                ):
+                    # The host relaying a remote member's row.
+                    return True
+        named = bool(actor) and actor != SYSTEM_AUTHOR
+        # An edit / delete of one's OWN row may come from a read-only seat
+        # (a demoted author), as ``may_mutate`` allows; anything else needs
+        # a writer seat on the sender.
+        own_row = (
+            named
+            and actor == row_owner
+            and action in (ContentAction.EDIT, ContentAction.DELETE)
+        )
+        if named and not await self.acts_for(
+            event, space_id, str(actor), any_role=own_row
+        ):
+            # Unknown here at all → the gossip seating them may trail the
+            # write: hold it until the seat lands (else refuse, logged).
+            await self.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what=f"{feature} {action.value}",
+                row_id="",
+                user_id=str(actor),
+            )
+            return False
+        if level is SpaceFeatureAccess.ADMIN_ONLY:
+            if named:
+                admitted = await self.admin_as(event, space_id, str(actor))
+            elif actor == SYSTEM_AUTHOR:
+                # The bot identity stands for its household on a BOT's own
+                # row only (an admin-configured bot's post); as the actor of
+                # an edit / delete of anybody else's row it is nobody.
+                admitted = row_owner == SYSTEM_AUTHOR and await self.is_admin_household(
+                    event, space_id
+                )
+            elif not await self._sender_names_actors(event):
+                admitted = await self.is_admin_household(event, space_id)
+            else:
+                admitted = False  # a v_42 sender that named nobody
+            if not admitted:
+                self._log_access_refusal(event, space_id, feature, action, actor, level)
+            return admitted
+        # MODERATED: v_42 receivers admit it like OPEN — the review queue is
+        # the host's, and a later version moves the other features into it.
+        return True
+
+    async def _sender_names_actors(self, event: "FederationEvent") -> bool:
+        """The sender advertised v_42+ — it names ``actor_user_id`` on every
+        collaborative write. Without a federation repo, assume it does
+        (strict). A peer that never advertised reads as old."""
+        if self._instances is None:
+            return True
+        try:
+            peer = await self._instances.get_instance(str(event.from_instance or ""))
+        except Exception:  # pragma: no cover — defensive
+            return True
+        return (
+            peer is not None
+            and peer.proto_version
+            >= FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT
+        )
+
+    @staticmethod
+    def _log_access_refusal(
+        event: "FederationEvent",
+        space_id: str,
+        feature: str,
+        action: ContentAction,
+        actor: str | None,
+        level: object,
+    ) -> None:
+        log.warning(
+            "%s from %s: %s %s in space %s by %r — refused by the space's "
+            "%s access level (%s)",
+            getattr(event, "event_type", "?"),
+            getattr(event, "from_instance", "?"),
+            feature,
+            action.value,
+            space_id,
+            actor or None,
+            feature,
+            getattr(level, "value", level),
+        )
 
     async def hold_or_refuse(
         self,

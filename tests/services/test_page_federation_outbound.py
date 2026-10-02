@@ -126,3 +126,27 @@ async def test_broadcast_failure_is_swallowed():
         ),
     )
     assert fed.broadcasts == []
+
+
+async def test_every_write_carries_its_actor(env):
+    """v_42: the actor rides inside the sealed payload so receivers can
+    judge the write against the space's ``pages`` access level."""
+    bus, fed = env
+    await bus.publish(
+        PageCreated(
+            page_id="p1", space_id="sp-A", title="T", content="c", actor_user_id="u-a"
+        )
+    )
+    await bus.publish(
+        PageUpdated(
+            page_id="p1", space_id="sp-A", title="T", content="d", actor_user_id="u-b"
+        )
+    )
+    await bus.publish(PageDeleted(page_id="p1", space_id="sp-A", actor_user_id="u-c"))
+    assert [p["actor_user_id"] for _s, _t, p in fed.broadcasts] == [
+        "u-a",
+        "u-b",
+        "u-c",
+    ]
+    # A create also names its creator, so a receiver attributes the row.
+    assert fed.broadcasts[0][2]["created_by"] == "u-a"

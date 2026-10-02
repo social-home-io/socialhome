@@ -382,3 +382,73 @@ async def test_space_schedule_summary_non_member_forbidden(client):
         headers={"Authorization": "Bearer out-tok"},
     )
     assert r.status == 403
+
+
+# ─── §4.3: attaching a poll is part of making a poll post ───────────────
+
+
+async def _member_in_admin_only_posts(client) -> dict:
+    token = "mem-tok"
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin) "
+        "VALUES('mem', 'uid-mem', 'Mem', 0)"
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) "
+        "VALUES('t-mem', 'uid-mem', 't', ?)",
+        (sha256_token_hash(token),),
+    )
+    await client._db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) "
+        "VALUES('sp-polls', 'uid-mem', 'member')"
+    )
+    await client._db.enqueue(
+        "UPDATE spaces SET posts_access='admin_only' WHERE id='sp-polls'"
+    )
+    return _auth(token)
+
+
+async def test_admin_only_posts_refuse_a_members_poll_and_schedule(client):
+    await _seed_space(client)
+    await _seed_post(client, post_id="admins-post", post_type="poll")
+    mem = await _member_in_admin_only_posts(client)
+    for path, body in (
+        (
+            "/api/spaces/sp-polls/posts/admins-post/poll",
+            {"question": "Q?", "options": ["a", "b"]},
+        ),
+        (
+            "/api/spaces/sp-polls/posts/admins-post/schedule-poll",
+            {"title": "T", "slots": [{"slot_date": "2026-05-01"}]},
+        ),
+    ):
+        r = await client.post(path, json=body, headers=mem)
+        assert r.status == 403, await r.text()
+        assert (await r.json())["error"]["code"] == "ACCESS_ADMIN_ONLY"
+    rows = await client._db.fetchall("SELECT * FROM space_polls")
+    assert rows == []
+    # The admin still attaches one.
+    r = await client.post(
+        "/api/spaces/sp-polls/posts/admins-post/poll",
+        json={"question": "Q?", "options": ["a", "b"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+
+
+async def test_admin_only_posts_still_take_a_members_vote(client):
+    await _seed_space(client)
+    await _seed_post(client, post_id="p-vote", post_type="poll")
+    r = await client.post(
+        "/api/spaces/sp-polls/posts/p-vote/poll",
+        json={"question": "Q?", "options": ["a", "b"]},
+        headers=_auth(client._tok),
+    )
+    option_id = (await r.json())["options"][0]["id"]
+    mem = await _member_in_admin_only_posts(client)
+    r = await client.post(
+        "/api/spaces/sp-polls/posts/p-vote/poll/vote",
+        json={"option_id": option_id},
+        headers=mem,
+    )
+    assert r.status in (200, 201), await r.text()

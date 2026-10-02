@@ -33,12 +33,14 @@ from datetime import datetime, timezone
 from ..domain.conversation import ConversationMessage
 from ..domain.events import DmMessageCreated, SpacePostCreated
 from ..domain.post import Post, PostType
+from ..domain.space import ContentAction, SpaceFeatureAccess
 from ..domain.space_bot import SpaceBot, SpaceBotDisabledError
 from ..domain.user import SYSTEM_AUTHOR
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from .content_access import ContentAccessMixin
 from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
@@ -58,7 +60,7 @@ class BotBridgeInvalidError(BotBridgeError):
     """Raised when the incoming payload fails basic validation."""
 
 
-class BotBridgeService:
+class BotBridgeService(ContentAccessMixin):
     """Inbound HA bridge: turn a ``{title, message}`` payload into a post.
 
     The service is deliberately thin — most of the security work lives at
@@ -119,6 +121,12 @@ class BotBridgeService:
             raise KeyError(f"space {bot.space_id!r} not found")
         if not space.bot_enabled:
             raise SpaceBotDisabledError("bot posting is disabled for this space")
+        # A bot speaks for the member who made it (a personal bot) or the
+        # admin who set it up: under an ADMIN_ONLY ``posts`` level (§4.3) its
+        # post is theirs — no posting around it through a webhook. Any other
+        # level keeps today's rule: a bot post never queues.
+        if space.features.access_level("posts") is SpaceFeatureAccess.ADMIN_ONLY:
+            await self._gate(space, bot.created_by, "posts", ContentAction.CREATE, True)
         content = f"**{title}**\n{message}" if title else message
         post = Post(
             id=str(uuid.uuid4()),

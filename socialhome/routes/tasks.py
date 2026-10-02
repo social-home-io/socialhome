@@ -473,6 +473,7 @@ class SpaceTaskListDetailView(_SpaceTasksBase):
             self.match("lid"),
             space_id=space_id,
             name=str(body.get("name") or ""),
+            actor_user_id=ctx.user_id,
         )
         return web.json_response(
             {"id": lst.id, "name": lst.name, "created_by": lst.created_by},
@@ -484,7 +485,9 @@ class SpaceTaskListDetailView(_SpaceTasksBase):
         if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
-        await svc.delete_list(self.match("lid"), space_id=space_id)
+        await svc.delete_list(
+            self.match("lid"), space_id=space_id, actor_user_id=ctx.user_id
+        )
         return web.json_response({"ok": True})
 
 
@@ -543,6 +546,7 @@ class SpaceTaskListReorderView(_SpaceTasksBase):
             self.match("lid"),
             ordered_ids=[str(x) for x in ordered],
             moved_id=str(body.get("moved_id") or ""),
+            actor_user_id=ctx.user_id,
         )
         return web.json_response({"ok": True, "count": len(updated)})
 
@@ -571,7 +575,9 @@ class SpaceTaskDetailView(_SpaceTasksBase):
         if not await self._require_member(space_id, ctx.user_id, write=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         svc = self.svc(K.space_task_service_key)
-        await svc.delete_task(self.match("tid"), space_id=space_id)
+        await svc.delete_task(
+            self.match("tid"), space_id=space_id, actor_user_id=ctx.user_id
+        )
         return web.json_response({"ok": True})
 
 

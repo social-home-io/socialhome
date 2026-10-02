@@ -531,7 +531,7 @@ async def test_a_space_task_from_another_space_is_not_found(env):
     with pytest.raises(KeyError):
         await svc.unarchive_task(task_b.id, space_id="sp-a", actor_user_id="uid-so")
     with pytest.raises(KeyError):
-        await svc.delete_task(task_b.id, space_id="sp-a")
+        await svc.delete_task(task_b.id, space_id="sp-a", actor_user_id="u-test")
     got = await env.space_task_repo.get(task_b.id)
     assert got is not None
     space_id, task = got
@@ -544,9 +544,11 @@ async def test_a_space_task_list_from_another_space_is_not_found(env):
     """List ops scoped to ``sp-a`` refuse ``sp-b``'s list."""
     svc, lst_b, task_b = await _two_spaces_with_a_task(env)
     with pytest.raises(KeyError):
-        await svc.rename_list(lst_b.id, space_id="sp-a", name="pwned")
+        await svc.rename_list(
+            lst_b.id, space_id="sp-a", name="pwned", actor_user_id="u-test"
+        )
     with pytest.raises(KeyError):
-        await svc.delete_list(lst_b.id, space_id="sp-a")
+        await svc.delete_list(lst_b.id, space_id="sp-a", actor_user_id="u-test")
     with pytest.raises(KeyError):
         await svc.list_tasks_by_list(lst_b.id, space_id="sp-a")
     got = await env.space_task_repo.get_list(lst_b.id)
@@ -563,7 +565,9 @@ async def test_space_task_ops_in_their_own_space_still_work(env):
     svc, lst_b, task_b = await _two_spaces_with_a_task(env)
     rows = await svc.list_tasks_by_list(lst_b.id, space_id="sp-b")
     assert [t.id for t in rows] == [task_b.id]
-    renamed = await svc.rename_list(lst_b.id, space_id="sp-b", name="B2")
+    renamed = await svc.rename_list(
+        lst_b.id, space_id="sp-b", name="B2", actor_user_id="u-test"
+    )
     assert renamed.name == "B2"
     updated = await svc.update_task(
         task_b.id, space_id="sp-b", actor_user_id="uid-so", title="TB2"
@@ -577,9 +581,9 @@ async def test_space_task_ops_in_their_own_space_still_work(env):
         task_b.id, space_id="sp-b", actor_user_id="uid-so"
     )
     assert restored.archived_at is None
-    await svc.delete_task(task_b.id, space_id="sp-b")
+    await svc.delete_task(task_b.id, space_id="sp-b", actor_user_id="u-test")
     assert await env.space_task_repo.get(task_b.id) is None
-    await svc.delete_list(lst_b.id, space_id="sp-b")
+    await svc.delete_list(lst_b.id, space_id="sp-b", actor_user_id="u-test")
     assert await env.space_task_repo.get_list(lst_b.id) is None
 
 
@@ -1115,7 +1119,11 @@ async def test_space_reorder_tasks(env):
         space_id="sp-m", list_id=lst.id, title="B", created_by="uid-so"
     )
     moved = await svc.reorder_tasks(
-        "sp-m", lst.id, ordered_ids=[b.id, a.id, "unknown"], moved_id=b.id
+        "sp-m",
+        lst.id,
+        ordered_ids=[b.id, a.id, "unknown"],
+        moved_id=b.id,
+        actor_user_id="uid-so",
     )
     assert {t.id for t in moved} == {a.id, b.id}
     rows = {t.id: t.position for t in await svc.list_tasks("sp-m")}
@@ -1127,7 +1135,9 @@ async def test_space_reorder_tasks(env):
 async def test_space_reorder_refuses_another_spaces_list(env):
     svc, _, lst = await _space_with_members(env)
     with pytest.raises(KeyError):
-        await svc.reorder_tasks("sp-other", lst.id, ordered_ids=["x"], moved_id="x")
+        await svc.reorder_tasks(
+            "sp-other", lst.id, ordered_ids=["x"], moved_id="x", actor_user_id="uid-so"
+        )
 
 
 async def test_space_reorder_skips_a_task_of_another_space(env):
@@ -1150,7 +1160,11 @@ async def test_space_reorder_skips_a_task_of_another_space(env):
         space_id="sp-m", list_id=lst.id, title="M", created_by="uid-m"
     )
     moved = await svc.reorder_tasks(
-        "sp-m", lst.id, ordered_ids=[foreign.id, mine.id], moved_id=mine.id
+        "sp-m",
+        lst.id,
+        ordered_ids=[foreign.id, mine.id],
+        moved_id=mine.id,
+        actor_user_id="uid-so",
     )
     assert [t.id for t in moved] == [mine.id]
     held = await env.space_task_repo.get(foreign.id)
@@ -1171,10 +1185,16 @@ async def test_space_reorder_moved_id_of_another_space_is_404(env):
     )
     with pytest.raises(KeyError):
         await svc.reorder_tasks(
-            "sp-m", lst.id, ordered_ids=[foreign.id], moved_id=foreign.id
+            "sp-m",
+            lst.id,
+            ordered_ids=[foreign.id],
+            moved_id=foreign.id,
+            actor_user_id="uid-so",
         )
     with pytest.raises(ValueError, match="moved_id"):
-        await svc.reorder_tasks("sp-m", lst.id, ordered_ids=[], moved_id="")
+        await svc.reorder_tasks(
+            "sp-m", lst.id, ordered_ids=[], moved_id="", actor_user_id="uid-so"
+        )
 
 
 async def test_space_task_list_ids_are_owner_bound(env):
@@ -1243,7 +1263,13 @@ async def test_space_reorder_duplicate_ids_are_422(env):
         space_id="sp-m", list_id=lst.id, title="A", created_by="uid-m"
     )
     with pytest.raises(ValueError, match="duplicate"):
-        await svc.reorder_tasks("sp-m", lst.id, ordered_ids=[a.id, a.id], moved_id=a.id)
+        await svc.reorder_tasks(
+            "sp-m",
+            lst.id,
+            ordered_ids=[a.id, a.id],
+            moved_id=a.id,
+            actor_user_id="uid-m",
+        )
 
 
 @pytest.mark.parametrize("position", [float("inf"), 1e30, 1.5, "x", 2**63, True])
@@ -1296,4 +1322,176 @@ async def test_list_names_are_capped_and_visible(env, name):
     with pytest.raises(ValueError):
         await svc.create_list(space_id="sp-m", name=name, created_by="uid-m")
     with pytest.raises(ValueError):
-        await svc.rename_list(lst.id, space_id="sp-m", name=name)
+        await svc.rename_list(
+            lst.id, space_id="sp-m", name=name, actor_user_id="u-test"
+        )
+
+
+# ─── ADMIN_ONLY tasks (§4.3 feature access levels) ──────────────────────
+
+
+async def _admin_only_tasks(env):
+    """``sp-ao``: owner, admin, moderator, member; a list + a task made
+    while the board was OPEN, then ``tasks_access`` flips to ADMIN_ONLY."""
+    svc = SpaceTaskService(env.space_task_repo, space_repo=env.space_repo)
+    await env.db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+           identity_public_key, config_sequence, space_type, join_mode)
+           VALUES(?,?,?,?,?,0,'private','invite_only')""",
+        ("sp-ao", "AO", env.iid, "o", generate_identity_keypair().public_key.hex()),
+    )
+    for uid, role in (
+        ("u-owner", "owner"),
+        ("u-admin", "admin"),
+        ("u-mod", "moderator"),
+        ("u-member", "member"),
+    ):
+        await env.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,?)",
+            ("sp-ao", uid, role),
+        )
+    lst = await svc.create_list(space_id="sp-ao", name="L", created_by="u-member")
+    task = await svc.create_task(
+        space_id="sp-ao", list_id=lst.id, title="T", created_by="u-member"
+    )
+    await env.db.enqueue("UPDATE spaces SET tasks_access='admin_only' WHERE id='sp-ao'")
+    return svc, lst, task
+
+
+def _task_writes(lst, task, actor):
+    """Every task / list write, as ``actor``."""
+    return {
+        "create_list": lambda s: s.create_list(
+            space_id="sp-ao", name="New", created_by=actor
+        ),
+        "rename_list": lambda s: s.rename_list(
+            lst.id, space_id="sp-ao", name="Renamed", actor_user_id=actor
+        ),
+        "delete_list": lambda s: s.delete_list(
+            lst.id, space_id="sp-ao", actor_user_id=actor
+        ),
+        "create_task": lambda s: s.create_task(
+            space_id="sp-ao", list_id=lst.id, title="New", created_by=actor
+        ),
+        "update_task": lambda s: s.update_task(
+            task.id, space_id="sp-ao", actor_user_id=actor, title="Changed"
+        ),
+        "move_task": lambda s: s.update_task(
+            task.id, space_id="sp-ao", actor_user_id=actor, status="done"
+        ),
+        "reorder": lambda s: s.reorder_tasks(
+            "sp-ao",
+            lst.id,
+            ordered_ids=[task.id],
+            moved_id=task.id,
+            actor_user_id=actor,
+        ),
+        "archive": lambda s: s.archive_task(
+            task.id, space_id="sp-ao", actor_user_id=actor
+        ),
+        "unarchive": lambda s: s.unarchive_task(
+            task.id, space_id="sp-ao", actor_user_id=actor
+        ),
+        "delete_task": lambda s: s.delete_task(
+            task.id, space_id="sp-ao", actor_user_id=actor
+        ),
+    }
+
+
+@pytest.mark.parametrize("actor", ["u-member", "u-mod"])
+@pytest.mark.parametrize(
+    "op",
+    [
+        "create_list",
+        "rename_list",
+        "delete_list",
+        "create_task",
+        "update_task",
+        "move_task",
+        "reorder",
+        "archive",
+        "unarchive",
+        "delete_task",
+    ],
+)
+async def test_admin_only_tasks_refuse_members_and_moderators(env, actor, op):
+    from socialhome.domain.space import AccessAdminOnlyError
+
+    svc, lst, task = await _admin_only_tasks(env)
+    with pytest.raises(AccessAdminOnlyError):
+        await _task_writes(lst, task, actor)[op](svc)
+    # Nothing changed.
+    assert [x.id for x in await svc.list_lists("sp-ao")] == [lst.id]
+    held = await env.space_task_repo.get(task.id)
+    assert held is not None
+    assert held[1].title == "T"
+    assert held[1].status == TaskStatus.TODO
+    assert held[1].archived_at is None
+
+
+@pytest.mark.parametrize("actor", ["u-owner", "u-admin"])
+async def test_admin_only_tasks_let_admins_work_the_board(env, actor):
+    svc, lst, task = await _admin_only_tasks(env)
+    writes = _task_writes(lst, task, actor)
+    for op in (
+        "create_list",
+        "rename_list",
+        "create_task",
+        "update_task",
+        "move_task",
+        "reorder",
+        "archive",
+        "unarchive",
+        "delete_task",
+        "delete_list",
+    ):
+        await writes[op](svc)
+    assert await env.space_task_repo.get(task.id) is None
+
+
+async def test_space_task_events_name_their_actor(env):
+    """The actor rides every space task / list event into federation."""
+    from socialhome.domain.events import (
+        TaskCreated,
+        TaskDeleted,
+        TaskListCreated,
+        TaskListDeleted,
+        TaskListUpdated,
+    )
+
+    svc, _lst, _task = await _admin_only_tasks(env)
+    await env.db.enqueue("UPDATE spaces SET tasks_access='open' WHERE id='sp-ao'")
+    bus = EventBus()
+    seen: list = []
+    for et in (
+        TaskCreated,
+        TaskUpdated,
+        TaskDeleted,
+        TaskListCreated,
+        TaskListUpdated,
+        TaskListDeleted,
+    ):
+        bus.subscribe(et, seen.append)
+    svc._bus = bus
+    lst = await svc.create_list(space_id="sp-ao", name="X", created_by="u-mod")
+    await svc.rename_list(lst.id, space_id="sp-ao", name="Y", actor_user_id="u-admin")
+    t = await svc.create_task(
+        space_id="sp-ao", list_id=lst.id, title="T", created_by="u-member"
+    )
+    await svc.update_task(t.id, space_id="sp-ao", actor_user_id="u-owner", title="U")
+    await svc.reorder_tasks(
+        "sp-ao", lst.id, ordered_ids=["pad", t.id], moved_id=t.id, actor_user_id="u-mod"
+    )
+    await svc.archive_task(t.id, space_id="sp-ao", actor_user_id="u-admin")
+    await svc.delete_task(t.id, space_id="sp-ao", actor_user_id="u-member")
+    await svc.delete_list(lst.id, space_id="sp-ao", actor_user_id="u-owner")
+    assert [(type(e).__name__, e.actor_user_id) for e in seen] == [
+        ("TaskListCreated", "u-mod"),
+        ("TaskListUpdated", "u-admin"),
+        ("TaskCreated", "u-member"),
+        ("TaskUpdated", "u-owner"),
+        ("TaskUpdated", "u-mod"),
+        ("TaskUpdated", "u-admin"),
+        ("TaskDeleted", "u-member"),
+        ("TaskListDeleted", "u-owner"),
+    ]

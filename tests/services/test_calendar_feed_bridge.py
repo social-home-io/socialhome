@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
@@ -15,6 +17,9 @@ from socialhome.domain.events import (
 from socialhome.domain.post import PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.services.calendar_feed_bridge import CalendarFeedBridge
 from socialhome.services.calendar_service import SpaceCalendarService
@@ -46,10 +51,14 @@ async def env(tmp_dir):
     space_cal_repo = SqliteSpaceCalendarRepo(db)
     space_post_repo = SqliteSpacePostRepo(db)
     space_cal_svc = SpaceCalendarService(space_cal_repo, bus)
+    space_cal_svc.attach_space_repo(SqliteSpaceRepo(db))
+    remote_members = SqliteSpaceRemoteMemberRepo(db)
     bridge = CalendarFeedBridge(
         bus=bus,
         post_repo=space_post_repo,
         calendar_repo=space_cal_repo,
+        space_repo=SqliteSpaceRepo(db),
+        remote_member_repo=remote_members,
     )
     bridge.wire()
 
@@ -62,6 +71,8 @@ async def env(tmp_dir):
     e.cal_svc = space_cal_svc
     e.cal_repo = space_cal_repo
     e.post_repo = space_post_repo
+    e.iid = iid
+    e.remote_members = remote_members
     yield e
     await db.shutdown()
 
@@ -113,7 +124,9 @@ async def test_event_update_rewrites_post_body(env):
         created_by="uid-alice",
         announce_in_feed=True,
     )
-    await env.cal_svc.update_event(event.id, space_id="sp-feed", summary="New title")
+    await env.cal_svc.update_event(
+        event.id, actor_user_id="u-test", space_id="sp-feed", summary="New title"
+    )
     feed = await env.post_repo.list_feed("sp-feed")
     assert len(feed) == 1
     assert feed[0].content == "New title"
@@ -132,7 +145,9 @@ async def test_event_update_no_body_change_is_noop(env):
         announce_in_feed=True,
     )
     pre = (await env.post_repo.list_feed("sp-feed"))[0]
-    await env.cal_svc.update_event(event.id, space_id="sp-feed", summary="Same title")
+    await env.cal_svc.update_event(
+        event.id, actor_user_id="u-test", space_id="sp-feed", summary="Same title"
+    )
     post = (await env.post_repo.list_feed("sp-feed"))[0]
     assert post.edited_at == pre.edited_at  # no edit happened
 
@@ -148,7 +163,7 @@ async def test_event_delete_soft_deletes_post(env):
         created_by="uid-alice",
         announce_in_feed=True,
     )
-    await env.cal_svc.delete_event(event.id, space_id="sp-feed")
+    await env.cal_svc.delete_event(event.id, actor_user_id="u-test", space_id="sp-feed")
     # list_feed filters out deleted posts; the row still exists with deleted=1.
     got = await env.post_repo.get_by_linked_event_id(event.id)
     assert got is not None
@@ -206,3 +221,113 @@ async def test_event_delete_event_emits_event_unused(env):
     # No exception, no rows.
     feed = await env.post_repo.list_feed("sp-feed")
     assert feed == []
+
+
+# ─── The mirror is a post: the space's ``posts`` level gates it (§4.3) ───
+
+
+async def _announced(env, *, created_by: str, event_id: str) -> list:
+    """An announced event lands the way an inbound one does — straight in
+    the repo, then ``CalendarEventCreated`` — and the feed is read back."""
+    from socialhome.domain.calendar import CalendarEvent
+
+    now = datetime(2026, 6, 1, 18, 0, tzinfo=timezone.utc)
+    ev = CalendarEvent(
+        id=event_id,
+        calendar_id="sp-feed",
+        summary="Announced",
+        start=now,
+        end=now + timedelta(hours=1),
+        created_by=created_by,
+        announce_in_feed=True,
+    )
+    assert await env.cal_repo.save_event(ev, space_id="sp-feed")
+    await env.bus.publish(CalendarEventCreated(event=ev))
+    return [
+        p
+        for p in await env.post_repo.list_feed("sp-feed")
+        if p.linked_event_id == event_id
+    ]
+
+
+async def _seat_local(env, user_id: str, role: str) -> None:
+    await env.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp-feed', ?, ?)",
+        (user_id, role),
+    )
+
+
+async def _posts_level(env, level: str) -> None:
+    await env.db.enqueue(
+        "UPDATE spaces SET posts_access=? WHERE id='sp-feed'", (level,)
+    )
+
+
+async def test_admin_only_posts_skip_a_members_announcement(env):
+    await _seat_local(env, "uid-mem", "member")
+    await _seat_local(env, "uid-mod", "moderator")
+    await _posts_level(env, "admin_only")
+    assert await _announced(env, created_by="uid-mem", event_id="e-mem") == []
+    assert await _announced(env, created_by="uid-mod", event_id="e-mod") == []
+
+
+async def test_admin_only_posts_keep_an_admins_announcement(env):
+    await _seat_local(env, "uid-adm", "admin")
+    await _seat_local(env, "uid-alice", "owner")
+    await _posts_level(env, "admin_only")
+    assert len(await _announced(env, created_by="uid-adm", event_id="e-adm")) == 1
+    assert len(await _announced(env, created_by="uid-alice", event_id="e-own")) == 1
+
+
+async def test_moderated_posts_skip_a_members_announcement(env):
+    """A mirrored post bypasses the review queue, so under MODERATED only
+    content authority announces."""
+    await _seat_local(env, "uid-mem", "member")
+    await _seat_local(env, "uid-mod", "moderator")
+    await _posts_level(env, "moderated")
+    assert await _announced(env, created_by="uid-mem", event_id="e-mem") == []
+    assert len(await _announced(env, created_by="uid-mod", event_id="e-mod")) == 1
+
+
+async def test_a_remote_creators_seat_decides(env):
+    """Remote creators are judged by their mirrored seat."""
+    await _posts_level(env, "admin_only")
+    for inst, uid, role in (
+        ("inst-b", "uid-r-adm", "admin"),
+        ("inst-b", "uid-r-mem", "member"),
+        ("inst-c", "uid-r-mod", "moderator"),
+    ):
+        await env.remote_members.add(
+            space_id="sp-feed",
+            instance_id=inst,
+            user_id=uid,
+            user_pk=None,
+            display_name=uid,
+            role=role,
+        )
+    assert len(await _announced(env, created_by="uid-r-adm", event_id="e-1")) == 1
+    assert await _announced(env, created_by="uid-r-mem", event_id="e-2") == []
+    assert await _announced(env, created_by="uid-r-mod", event_id="e-3") == []
+    assert await _announced(env, created_by="uid-nobody", event_id="e-4") == []
+
+
+async def test_the_hosts_people_are_seated_as_members_and_still_announce(env):
+    """A member household's mirror seats the space's owner as a plain
+    ``member`` of the host; the host refuses its plain members' announcements
+    at the source, so a host-seated writer passes (``SpaceAuthorship`` rule)."""
+    await env.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='inst-host' WHERE id='sp-feed'"
+    )
+    await _posts_level(env, "admin_only")
+    await env.remote_members.add(
+        space_id="sp-feed",
+        instance_id="inst-host",
+        user_id="uid-owner",
+        user_pk=None,
+        display_name="Owner",
+    )
+    assert len(await _announced(env, created_by="uid-owner", event_id="e-o")) == 1
+
+
+async def test_open_posts_announce_for_anyone(env):
+    assert len(await _announced(env, created_by="uid-whoever", event_id="e-x")) == 1

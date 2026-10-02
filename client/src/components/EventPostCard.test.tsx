@@ -350,3 +350,27 @@ describe('EventPostCard', () => {
     expect(container.querySelector('.sh-event-card-rsvp-note')).toBeNull()
   })
 })
+
+describe('EventPostCard — Edit follows the calendar access level (§4.3)', () => {
+  const mine = { ...futureEvent, id: 'ev-mine', created_by: 'me' }
+
+  async function openMenu(container: Element) {
+    fireEvent.click(container.querySelector('[aria-haspopup="menu"]') as HTMLElement)
+  }
+
+  it('offers Edit to the creator when they may edit', async () => {
+    apiMock.get.mockResolvedValueOnce({ ...mine, can_edit: true })
+    const { container, findByText, queryByRole } = render(<EventPostCard eventId="ev-mine" />)
+    await findByText('Going')
+    await openMenu(container)
+    expect(queryByRole('menuitem', { name: 'Edit' })).toBeTruthy()
+  })
+
+  it('hides Edit when the calendar is admin-only for the viewer', async () => {
+    apiMock.get.mockResolvedValueOnce({ ...mine, id: 'ev-mine-ro', can_edit: false })
+    const { container, findByText, queryByRole } = render(<EventPostCard eventId="ev-mine-ro" />)
+    await findByText('Going')
+    await openMenu(container)
+    expect(queryByRole('menuitem', { name: 'Edit' })).toBeNull()
+  })
+})

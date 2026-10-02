@@ -62,3 +62,16 @@ describe('SpaceBazaarTab', () => {
     expect(getAllByTestId('bazaar-card')).toHaveLength(2)
   })
 })
+
+describe('SpaceBazaarTab — ADMIN_ONLY posts (§4.3)', () => {
+  it('a member gets the admin-only note instead of New listing', async () => {
+    apiGet.mockResolvedValue([])
+    const { SpaceBazaarTab } = await import('./SpaceBazaarTab')
+    const { queryAllByText, getByText } = render(
+      <SpaceBazaarTab spaceId="sp-1" canSell={false} />,
+    )
+    await tick()
+    expect(queryAllByText('+ New listing')).toHaveLength(0)
+    expect(getByText('Only admins can post here.')).toBeTruthy()
+  })
+})

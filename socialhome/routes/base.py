@@ -28,8 +28,10 @@ from ..domain.child_protection import AccountProtectedError
 from ..domain.preferences import FeatureDisabledError
 from ..services.preferences_service import ScopeMismatchError
 from ..domain.space import (
+    AccessAdminOnlyError,
     HouseholdUpgradeRequiredError,
     ModerationAlreadyDecidedError,
+    PeersTooOldError,
     PublicSpaceLimitError,
     SpacePermissionError,
 )
@@ -324,6 +326,24 @@ class BaseView(web.View):
             return error_response(409, "NO_CONFLICT", str(exc))
         except PageLockError as exc:
             return error_response(409, "LOCKED", str(exc))
+        except AccessAdminOnlyError as exc:
+            # A SpacePermissionError subclass — must precede it. Stable
+            # code + the feature, so the SPA shows "only admins can …".
+            return error_response(
+                403,
+                "ACCESS_ADMIN_ONLY",
+                "Only space admins can change this here.",
+                extra={"feature": exc.feature},
+            )
+        except PeersTooOldError as exc:
+            # Member households below v_42 cannot enforce access levels;
+            # the admin retries with ``force: true`` to apply anyway.
+            return error_response(
+                409,
+                "PEERS_TOO_OLD",
+                "Some member households need an update to enforce this.",
+                extra={"households": exc.households},
+            )
         except HouseholdUpgradeRequiredError as exc:
             # A SpacePermissionError subclass — must precede it. A stable
             # code: the SPA renders its own translated copy.

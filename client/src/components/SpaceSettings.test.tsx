@@ -892,3 +892,149 @@ describe('SpaceSettings — sends only what the admin changed', () => {
     expect(apiMock.patch).not.toHaveBeenCalled()
   })
 })
+
+describe('SpaceSettings — who can contribute (§4.3)', () => {
+  beforeEach(() => {
+    apiMock.get.mockResolvedValue([])
+    apiMock.patch.mockReset()
+  })
+
+  function selects(container: Element) {
+    const fs = container.querySelector('[data-testid="space-access"]')!
+    return Object.fromEntries(
+      Array.from(fs.querySelectorAll('select')).map(s => [
+        (s as HTMLSelectElement).dataset.feature,
+        s as HTMLSelectElement,
+      ]),
+    )
+  }
+
+  it('offers one select per enabled feature, Reviewed for posts only', () => {
+    // stickies is off in the default fixture → no stickies select.
+    const { container } = render(<SpaceSettings space={makeSpace()} onUpdate={() => {}} />)
+    const s = selects(container)
+    expect(Object.keys(s)).toEqual(['posts', 'pages', 'tasks', 'calendar'])
+    const values = (sel: HTMLSelectElement) =>
+      Array.from(sel.options).map(o => o.value)
+    expect(values(s.posts)).toEqual(['open', 'moderated', 'admin_only'])
+    expect(values(s.pages)).toEqual(['open', 'admin_only'])
+    expect(values(s.tasks)).toEqual(['open', 'admin_only'])
+    expect(s.posts.value).toBe('open')
+  })
+
+  it('mirrors the stored levels', () => {
+    const space = makeSpace({
+      features: {
+        calendar: true, todo: true, location: false, stickies: true, pages: true,
+        gallery: true, posts_access: 'moderated', pages_access: 'admin_only',
+        tasks_access: 'open', stickies_access: 'admin_only', calendar_access: 'open',
+        allowed_post_types: ['text'],
+      },
+    })
+    const { container } = render(<SpaceSettings space={space} onUpdate={() => {}} />)
+    const s = selects(container)
+    expect(s.posts.value).toBe('moderated')
+    expect(s.pages.value).toBe('admin_only')
+    expect(s.stickies.value).toBe('admin_only')
+  })
+
+  it('sends only the changed level in the features block', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const { container, getByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    )
+    fireEvent.change(selects(container).tasks, { target: { value: 'admin_only' } })
+    fireEvent.click(getByText('Save changes'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiMock.patch).toHaveBeenCalledOnce()
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({
+      features: { tasks_access: 'admin_only' },
+    })
+  })
+
+  it('asks before applying a level older households cannot enforce, then forces', async () => {
+    const tooOld = Object.assign(new Error('needs update'), {
+      status: 409,
+      code: 'PEERS_TOO_OLD',
+      extra: {
+        households: [
+          { instance_id: 'i-1', display_name: "Granny's house", proto_version: 41 },
+        ],
+      },
+    })
+    apiMock.patch.mockRejectedValueOnce(tooOld).mockResolvedValueOnce({})
+    const onUpdate = vi.fn()
+    const { container, getByText, findByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={onUpdate} />,
+    )
+    fireEvent.change(selects(container).pages, { target: { value: 'admin_only' } })
+    fireEvent.click(getByText('Save changes'))
+    // The dialog names the household and offers to apply anyway.
+    expect(await findByText('space.access.peers_too_old.title')).toBeTruthy()
+    expect(container.ownerDocument.body.textContent).toContain('space.access.peers_too_old.body')
+    fireEvent.click(getByText('space.access.peers_too_old.apply'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiMock.patch).toHaveBeenCalledTimes(2)
+    expect(apiMock.patch.mock.calls[1][1]).toEqual({
+      features: { pages_access: 'admin_only' },
+      force: true,
+    })
+    expect(onUpdate).toHaveBeenCalled()
+  })
+
+  it('cancelling the older-households prompt changes nothing', async () => {
+    const tooOld = Object.assign(new Error('needs update'), {
+      status: 409,
+      code: 'PEERS_TOO_OLD',
+      extra: { households: [{ instance_id: 'i-1', display_name: 'G', proto_version: 41 }] },
+    })
+    apiMock.patch.mockRejectedValueOnce(tooOld)
+    const { container, getByText, findByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    )
+    fireEvent.change(selects(container).pages, { target: { value: 'admin_only' } })
+    fireEvent.click(getByText('Save changes'))
+    await findByText('space.access.peers_too_old.title')
+    fireEvent.click(getByText('Cancel'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiMock.patch).toHaveBeenCalledOnce()
+  })
+})
+
+describe('SpaceSettings — an edit forwarded to the host', () => {
+  beforeEach(() => {
+    apiMock.get.mockResolvedValue([])
+    apiMock.patch.mockReset()
+    vi.mocked(showToast).mockReset()
+  })
+
+  it('never shows a forwarded access change as saved', async () => {
+    apiMock.patch.mockResolvedValueOnce({ id: 's-1', forwarded: true })
+    const onUpdate = vi.fn()
+    const { container, getByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={onUpdate} />,
+    )
+    const sel = container.querySelector('select[data-feature="tasks"]') as HTMLSelectElement
+    fireEvent.change(sel, { target: { value: 'admin_only' } })
+    fireEvent.click(getByText('Save changes'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(showToast).toHaveBeenCalledWith('space.access.forwarded', 'info')
+    expect(showToast).not.toHaveBeenCalledWith('Space updated', 'success')
+    // The select shows the level in force (this household's copy), not the ask.
+    expect((container.querySelector('select[data-feature="tasks"]') as HTMLSelectElement).value)
+      .toBe('open')
+    expect(onUpdate).toHaveBeenCalled()
+  })
+
+  it('a forwarded edit without access changes says the host applies it', async () => {
+    apiMock.patch.mockResolvedValueOnce({ id: 's-1', forwarded: true })
+    const { container, getByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    )
+    const name = container.querySelector('input[type="text"], input:not([type])') as HTMLInputElement
+    fireEvent.input(name, { target: { value: 'New name' } })
+    fireEvent.click(getByText('Save changes'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(showToast).toHaveBeenCalledWith('space.settings.forwarded', 'info')
+  })
+})

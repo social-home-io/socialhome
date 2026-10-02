@@ -19,6 +19,7 @@ import {
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { relativeDocsTime } from '@/utils/relativeTime'
+import { t } from '@/i18n/i18n'
 
 /** Friendly label for a feature/action pair so the queue doesn't
  *  read as raw enum strings. */
@@ -91,7 +92,13 @@ const items = signal<QueueItem[]>([])
 const loading = signal(true)
 const error = signal<string | null>(null)
 
-export function ModerationQueue({ spaceId }: { spaceId: string }) {
+export function ModerationQueue({ spaceId, canApprove = true }: {
+  spaceId: string
+  /** False for a moderator while the space keeps posts to its admins
+   *  (``posts_access`` ADMIN_ONLY, §4.3): approving would create the post,
+   *  which the server refuses — rejecting stays open. */
+  canApprove?: boolean
+}) {
   useEffect(() => {
     // Hydrate the household roster so submitter rows render with
     // display names + avatars instead of raw user_ids.
@@ -178,6 +185,12 @@ export function ModerationQueue({ spaceId }: { spaceId: string }) {
   return (
     <div class="sh-moderation">
       <h3>Moderation queue</h3>
+      {!canApprove && (
+        <p class="sh-access-note" role="note">
+          <span aria-hidden="true">🔒</span>
+          <span>{t('space.access.note.approve')}</span>
+        </p>
+      )}
       {items.value.length === 0 && (
         <p class="sh-muted">Nothing pending — you're all caught up.</p>
       )}
@@ -198,7 +211,7 @@ export function ModerationQueue({ spaceId }: { spaceId: string }) {
           </div>
           <PayloadPreview payload={item.payload} />
           <div class="sh-moderation-actions">
-            <Button onClick={() => approve(item.id)}>Approve</Button>
+            {canApprove && <Button onClick={() => approve(item.id)}>Approve</Button>}
             <Button variant="secondary" onClick={() => reject(item.id)}>
               Reject
             </Button>

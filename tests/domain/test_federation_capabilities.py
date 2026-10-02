@@ -6,7 +6,20 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 41
+    assert fc.OURS == 42
+
+
+def test_content_access_enforcement_capability_threshold():
+    """v_42 — ADMIN_ONLY feature access enforced on every household, with
+    the write's ``actor_user_id`` on the wire. Space-scoped: a behind member
+    household neither enforces the level for its users nor names actors."""
+    assert fc.FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT == 42
+    assert fc.FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.space_features_missing_below(41) == ["Admin-only space features"]
+    assert fc.features_missing_below(42) == []
 
 
 def test_space_moderator_role_capability_threshold():
@@ -18,8 +31,11 @@ def test_space_moderator_role_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.space_features_missing_below(40) == ["Space moderators"]
-    assert fc.features_missing_below(41) == []
+    assert fc.space_features_missing_below(40) == [
+        "Space moderators",
+        "Admin-only space features",
+    ]
+    assert "Space moderators" not in fc.features_missing_below(41)
 
 
 def test_task_priority_labels_capability_threshold():
@@ -34,6 +50,7 @@ def test_task_priority_labels_capability_threshold():
     assert fc.space_features_missing_below(39) == [
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -90,6 +107,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
 
 
@@ -108,6 +126,7 @@ def test_moment_origin_signature_capability_threshold():
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
+        "Admin-only space features",
     ]
 
 

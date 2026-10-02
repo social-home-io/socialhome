@@ -13,6 +13,11 @@ content until the next §25.6 catch-up sync.
 Household-scoped pages (``space_id is None``) stay local — no peer
 has a right to know about them.
 
+Every payload carries ``actor_user_id`` (v_42) — who made the write, which
+receivers check against the space's ``pages`` access level — and a create
+also its ``created_by`` (the same user): the page id is owner-bound to its
+creator, so a receiver can only file a new page it can attribute.
+
 Sibling of :class:`TaskFederationOutbound` /
 :class:`StickyFederationOutbound`; identical shape, different
 event types.
@@ -58,13 +63,17 @@ class PageFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_PAGE_CREATED,
-            {
-                "id": event.page_id,
-                "page_id": event.page_id,
-                "space_id": event.space_id,
-                "title": event.title,
-                "content": event.content,
-            },
+            _with_actor(
+                {
+                    "id": event.page_id,
+                    "page_id": event.page_id,
+                    "space_id": event.space_id,
+                    "title": event.title,
+                    "content": event.content,
+                },
+                event.actor_user_id,
+                creates=True,
+            ),
         )
 
     async def _on_updated(self, event: PageUpdated) -> None:
@@ -73,13 +82,16 @@ class PageFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_PAGE_UPDATED,
-            {
-                "id": event.page_id,
-                "page_id": event.page_id,
-                "space_id": event.space_id,
-                "title": event.title,
-                "content": event.content,
-            },
+            _with_actor(
+                {
+                    "id": event.page_id,
+                    "page_id": event.page_id,
+                    "space_id": event.space_id,
+                    "title": event.title,
+                    "content": event.content,
+                },
+                event.actor_user_id,
+            ),
         )
 
     async def _on_deleted(self, event: PageDeleted) -> None:
@@ -88,11 +100,14 @@ class PageFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_PAGE_DELETED,
-            {
-                "id": event.page_id,
-                "page_id": event.page_id,
-                "space_id": event.space_id,
-            },
+            _with_actor(
+                {
+                    "id": event.page_id,
+                    "page_id": event.page_id,
+                    "space_id": event.space_id,
+                },
+                event.actor_user_id,
+            ),
         )
 
     async def _fan_out(
@@ -113,3 +128,13 @@ class PageFederationOutbound:
                 space_id,
                 exc,
             )
+
+
+def _with_actor(payload: dict, actor_user_id: str, *, creates: bool = False) -> dict:
+    """``payload`` plus the write's actor (v_42) — and, for a create, the
+    creator it is attributed to — when known."""
+    if actor_user_id:
+        payload["actor_user_id"] = actor_user_id
+        if creates:
+            payload["created_by"] = actor_user_id
+    return payload

@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
@@ -64,6 +66,7 @@ async def env(tmp_dir):
     user_repo = SqliteUserRepo(db)
     cal_svc = CalendarService(cal_repo, bus)
     space_cal_svc = SpaceCalendarService(space_cal_repo, bus)
+    space_cal_svc.attach_space_repo(SqliteSpaceRepo(db))
     space_cal_svc.wire()  # SpaceMemberLeft → drops RSVPs
     bridge = SpaceRsvpMirrorBridge(
         bus=bus,
@@ -167,6 +170,7 @@ async def test_source_update_refreshes_mirror(env):
     new_end = new_start + timedelta(hours=3)
     await env.space_cal_svc.update_event(
         event_id,
+        actor_user_id="u-test",
         space_id="space-1",
         summary="Movie night (rescheduled)",
         start=new_start.isoformat(),
@@ -184,7 +188,9 @@ async def test_source_delete_drops_mirror(env):
     event_id = await _create_space_event(env.space_cal_svc)
     mirror_id = _mint_mirror_id("u-anna", event_id)
     assert await env.cal_repo.get_event(mirror_id) is not None
-    await env.space_cal_svc.delete_event(event_id, space_id="space-1")
+    await env.space_cal_svc.delete_event(
+        event_id, actor_user_id="u-test", space_id="space-1"
+    )
     assert await env.cal_repo.get_event(mirror_id) is None
 
 

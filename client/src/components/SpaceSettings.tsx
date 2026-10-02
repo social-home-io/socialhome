@@ -15,7 +15,17 @@ import { RadioCardGroup } from './RadioCardGroup'
 import { joinOptionsForVisibility } from './spaceModeOptions'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
-import type { Space, GfsConnection, GfsSpacePublication } from '@/types'
+import type { Space, GfsConnection, GfsSpacePublication, SpaceAccessLevel } from '@/types'
+import {
+  ACCESS_FEATURES,
+  accessLevel,
+  featureLabel,
+  levelLabel,
+  levelOptions,
+  peersTooOldHouseholds,
+  type AccessFeature,
+  type BehindHousehold,
+} from '@/features/spaces/spaceAccess'
 
 // Post types an admin can enable/disable for the space feed (§23.49) —
 // the same set the space composer offers, in composer order, so each
@@ -250,6 +260,20 @@ export function SpaceSettings({
       ]),
     ),
   )
+  // Who may add / change things per feature (§4.3 access levels). The
+  // server enforces them on every household; the selects only offer the
+  // levels the server applies today (Reviewed is posts-only).
+  const accessLevels = useSignal<Record<AccessFeature, SpaceAccessLevel>>(
+    Object.fromEntries(
+      ACCESS_FEATURES.map(f => [f, accessLevel(space.features, f)]),
+    ) as Record<AccessFeature, SpaceAccessLevel>,
+  )
+  // A 409 PEERS_TOO_OLD: the body we tried, and the households that can't
+  // enforce a raised level yet — the admin applies anyway or backs out.
+  const peersTooOld = useSignal<{
+    body: Record<string, unknown>
+    households: BehindHousehold[]
+  } | null>(null)
   // Retention is "delete posts older than N days". ``null`` means
   // "keep forever" — that's the legacy default and what fresh spaces
   // ship with. The text input is empty in that case; entering 0 or
@@ -363,6 +387,13 @@ export function SpaceSettings({
         Boolean(f?.delegated_admin_authority),
       ],
     ]
+    for (const feature of ACCESS_FEATURES) {
+      featureValues.push([
+        `${feature}_access`,
+        accessLevels.value[feature],
+        accessLevel(f, feature),
+      ])
+    }
     const features: Record<string, unknown> = {}
     for (const [key, value, baseline] of featureValues) {
       if (value !== baseline) features[key] = value
@@ -378,8 +409,32 @@ export function SpaceSettings({
       showToast('No changes to save', 'info')
       return
     }
+    await sendPatch(body, modeChanged)
+  }
+
+  /** PATCH the config. A 409 ``PEERS_TOO_OLD`` (a raised access level some
+   *  member household can't enforce yet) opens the apply-anyway prompt
+   *  instead of an error toast. */
+  const sendPatch = async (body: Record<string, unknown>, modeChanged = false) => {
     try {
-      await api.patch(`/api/spaces/${space.id}`, body)
+      const res = await api.patch<{ forwarded?: boolean }>(`/api/spaces/${space.id}`, body)
+      if (res?.forwarded) {
+        // Hosted by another household: the edit went to the host, which
+        // applies it (and may keep a raised access level back until every
+        // member household can enforce it). Show the level in force here,
+        // never the ask; the config broadcast refreshes the page.
+        const features = body.features as Record<string, unknown> | undefined
+        const askedAccess = ACCESS_FEATURES.some(f => features?.[`${f}_access`] !== undefined)
+        accessLevels.value = Object.fromEntries(
+          ACCESS_FEATURES.map(f => [f, accessLevel(space.features, f)]),
+        ) as Record<AccessFeature, SpaceAccessLevel>
+        showToast(
+          askedAccess ? t('space.access.forwarded') : t('space.settings.forwarded'),
+          'info',
+        )
+        onUpdate()
+        return
+      }
       if (modeChanged) {
         showToast(
           locationMode.value === 'zone_only'
@@ -392,6 +447,11 @@ export function SpaceSettings({
       }
       onUpdate()
     } catch (e: any) {
+      const households = body.force === true ? null : peersTooOldHouseholds(e)
+      if (households) {
+        peersTooOld.value = { body, households }
+        return
+      }
       showToast(e.message || 'Failed to update', 'error')
     }
   }
@@ -611,6 +671,42 @@ export function SpaceSettings({
             />
             🛍 Bazaar
           </label>
+        </fieldset>
+        <fieldset class="sh-form-fieldset" data-testid="space-access">
+          <legend>🔐 {t('space.access.heading')}</legend>
+          <p class="sh-muted" style={{ marginTop: 0 }}>{t('space.access.intro')}</p>
+          {ACCESS_FEATURES.filter(feature => ({
+            posts: true,
+            pages: featurePages.value,
+            tasks: featureTodo.value,
+            stickies: featureStickies.value,
+            calendar: featureCalendar.value,
+          })[feature]).map(feature => {
+            const current = accessLevels.value[feature]
+            const id = `sh-access-${space.id}-${feature}`
+            return (
+              <div key={feature} class="sh-access-row">
+                <label for={id} class="sh-access-row__label">{featureLabel(feature)}</label>
+                <select
+                  id={id}
+                  class="sh-select sh-access-row__select"
+                  data-feature={feature}
+                  value={current}
+                  onChange={(e) => {
+                    accessLevels.value = {
+                      ...accessLevels.value,
+                      [feature]: (e.target as HTMLSelectElement).value as SpaceAccessLevel,
+                    }
+                  }}
+                >
+                  {levelOptions(feature, current).map(level => (
+                    <option key={level} value={level}>{levelLabel(level)}</option>
+                  ))}
+                </select>
+              </div>
+            )
+          })}
+          <p class="sh-muted sh-access-explain">{t('space.access.explain')}</p>
         </fieldset>
         <fieldset class="sh-form-fieldset" data-testid="space-post-types">
           <legend>📮 Post types</legend>
@@ -1008,6 +1104,22 @@ export function SpaceSettings({
           if (gfsId) doPublish(space.id, gfsId)
         }}
         onCancel={() => { confirmPublishGfs.value = null }}
+      />
+      <ConfirmDialog
+        open={peersTooOld.value !== null}
+        title={t('space.access.peers_too_old.title')}
+        message={t('space.access.peers_too_old.body', {
+          households: (peersTooOld.value?.households ?? [])
+            .map(h => h.display_name)
+            .join(', '),
+        })}
+        confirmLabel={t('space.access.peers_too_old.apply')}
+        onConfirm={() => {
+          const pending = peersTooOld.value
+          peersTooOld.value = null
+          if (pending) void sendPatch({ ...pending.body, force: true })
+        }}
+        onCancel={() => { peersTooOld.value = null }}
       />
       <ConfirmDialog open={showDissolve.value} title="Dissolve space?"
         message="This permanently deletes the space and all its content — posts, photos, events, everything — for every member household. This cannot be undone. With more than one admin it needs a majority to approve before it takes effect. To just hide it, use Archive instead."
