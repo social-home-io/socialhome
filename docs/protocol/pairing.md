@@ -489,7 +489,11 @@ The tombstone grants **no trust**:
 - the outbox refuses to *queue* anything else for it, too — and anything at
   all for a peer whose row is gone. The check is part of the outbox `INSERT`,
   so a send that was already in flight when the pairing ended (a space-sync
-  offer, an ICE candidate) cannot leave a row behind the unpair's purge.
+  offer, an ICE candidate) cannot leave a row behind the unpair's purge. The
+  DM and space media outboxes carry the same `INSERT` guard: DM media only
+  for a live (non-`unpairing`) pairing; space media never for a tombstone,
+  and otherwise only for a paired household or a member household of that
+  space (a mesh-only member has no `remote_instances` row).
 
 Exactly one `UNPAIR` is queued, with a 30-day `expires_at`
 (`UNPAIR_RETRY_MAX_AGE`) and the outbox's normal backoff. A signed envelope
@@ -514,16 +518,33 @@ column of its own.
 
 ### Cleanup
 
-Both directions run the same cleanup (`PeerUnpairService.forget`):
+Both directions run the same cleanup (`PeerUnpairService.forget`), built on
+`PeerUnpairService.purge` — the one helper every service that removes a
+`remote_instances` row goes through (unpair, the space-session cleanup of a
+link-joined seat, an inbound `PAIRING_ABORT` for a half-paired household).
+In order:
 
+- delete the `remote_instances` row first (`remote_users` and
+  `peer_user_visibility` cascade) — from then on every outbox `INSERT`
+  refuses the household, so the deletes below sweep everything a send still
+  in flight could have queued,
 - drop every queued outbox envelope for the peer (it can never be
-  delivered without the row),
+  delivered without the row), and its queued DM / space media,
 - drop the mesh topology the peer announced (`network_discovery` rows it
   is the source of — it is no longer a trusted neighbour),
-- delete the `remote_instances` row (`remote_users` and
-  `peer_user_visibility` cascade),
 - publish `PeerUnpaired`, which pushes `connection.removed` to every
-  household member.
+  household member (`forget` only; the other purge callers publish their
+  own event or none).
+
+A crash between the row delete and the outbox delete leaves rows addressed
+to nobody; the outbox's retention sweep (`purge_orphaned`, also run at
+startup) deletes every `federation_outbox` row whose `remote_instances` row
+is gone, whatever its status; the DM and space media outboxes run the same
+sweep when their sync services start (space media keeps rows for a member
+household of that space). A tombstone still has its row, so its queued
+`UNPAIR` survives the sweep. The repository's own bulk housekeeping
+(expired pending handshakes, a tombstone replaced by a re-pair) relies on
+the same sweep.
 
 Space membership is **not** touched. A space is shared by its members, not
 by the pairing: two households that stop being direct connections stay

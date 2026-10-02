@@ -128,7 +128,11 @@ The Social Home ↔ GFS link is split by direction:
     `NODE_SYNC_SPACE` — never moves a set pin; a peer node's sync re-pins only
     through the same cert check, and max-merges the peer's
     `authority_rotation_seq` for the pin it now holds, so a node never serves
-    a lower seq than its peer did. A GFS advertises the feature as
+    a lower seq than its peer did. The seq is capped at 2^63−1; a node that
+    reaches the cap stops advancing it, so a hostile cluster peer that gossips
+    the cap freezes follower re-pins on that GFS (mirrors need a strictly
+    higher seq). Cluster peers are trusted operator nodes, so this is a
+    documented residual, not a gate. A GFS advertises the feature as
     `authority_rotation: true` in its signed `/gfs/info` capability block; a
     household sends a GFS without it no cert (an older GFS would fail the
     signature over a field it doesn't know) and warns that the old key keeps

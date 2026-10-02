@@ -4919,8 +4919,9 @@ async def test_a_follower_household_is_kicked_like_any_member(stack):
     fed_repo.get_instance = AsyncMock(
         return_value=SimpleNamespace(source=InstanceSource.SPACE_SESSION)
     )
-    fed_repo.delete_instance = AsyncMock()
     stack.space_svc._federation_repo = fed_repo
+    purger = SimpleNamespace(purge=AsyncMock())
+    stack.space_svc.attach_instance_purger(purger)
 
     remote = await _wire_remote_members(stack)
     await remote.add(
@@ -4949,7 +4950,28 @@ async def test_a_follower_household_is_kicked_like_any_member(stack):
     assert left[0].args[2]["role"] == "subscriber"
     # Last shared space gone → the space-scoped seat loses its reason to
     # exist and its session keys go with it.
-    fed_repo.delete_instance.assert_awaited_once_with("peer-fan")
+    # Through the shared purge, so the seat's outbox + mesh hints go too.
+    purger.purge.assert_awaited_once_with("peer-fan")
+
+
+async def test_space_session_cleanup_without_a_purger_drops_nothing(stack):
+    """Unwired, the seat is never dropped by a bare row delete that would
+    leave its queued envelopes behind."""
+    from unittest.mock import MagicMock
+
+    from socialhome.domain.federation import InstanceSource
+
+    fed_repo = MagicMock()
+    fed_repo.get_instance = AsyncMock(
+        return_value=SimpleNamespace(source=InstanceSource.SPACE_SESSION)
+    )
+    fed_repo.delete_instance = AsyncMock()
+    stack.space_svc._federation_repo = fed_repo
+    assert (
+        await stack.space_svc.revoke_space_session_if_orphaned("peer-z", notify=False)
+        is False
+    )
+    fed_repo.delete_instance.assert_not_awaited()
 
 
 async def test_no_seed_skips_gossip_gracefully(stack):

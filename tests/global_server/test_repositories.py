@@ -831,3 +831,27 @@ async def test_raise_authority_rotation_seq_is_a_max_merge_for_the_held_pin(gfs_
     assert (await repo.get_space("sp")).authority_rotation_seq == 4
     await repo.raise_authority_rotation_seq("sp", pk="bb" * 32, seq=9)
     assert (await repo.get_space("sp")).authority_rotation_seq == 4
+
+
+async def test_authority_rotation_seq_is_capped_at_int64_max(gfs_db):
+    """A hostile cluster peer gossiping a huge seq cannot push the counter
+    past 2**63 - 1 (SQLite's INTEGER range) — neither by the max-merge nor
+    by a re-pin's +1 on top of it."""
+    cap = 2**63 - 1
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(
+        GlobalSpace(space_id="sp", owning_instance="o", identity_public_key="aa" * 32)
+    )
+    await repo.raise_authority_rotation_seq("sp", pk="aa" * 32, seq=2**64)
+    assert (await repo.get_space("sp")).authority_rotation_seq == cap
+    assert await repo.set_space_authority(
+        "sp",
+        expected_pk="aa" * 32,
+        expected_cert=None,
+        new_pk="bb" * 32,
+        cert={"key_epoch": 1},
+    )
+    row = await repo.get_space("sp")
+    assert row.authority_rotation_seq == cap
+    assert isinstance(row.authority_rotation_seq, int)

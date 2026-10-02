@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
     from .link_preview_service import LinkPreviewService
+    from .peer_unpair_service import InstancePurger
     from .space_authority_rotation_service import SpaceAuthorityRotationService
 from ..domain.child_protection import (
     PROTECTED_OWNER_PUBLISH_DETAIL,
@@ -294,6 +295,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_icons",
         "_gfs",
         "_federation_repo",
+        "_instance_purger",
         "_federation",
         "_remote_members",
         "_redeem_coordinator",
@@ -341,6 +343,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._gfs_mirror = None
         self._subscriber_keys = None
         self._federation_repo = None
+        self._instance_purger: "InstancePurger | None" = None
         self._federation = None
         self._remote_members = None
         self._redeem_coordinator = None
@@ -485,6 +488,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             RemoteJoinRequestApproved,
             self._on_remote_join_request_approved_bus,
         )
+
+    def attach_instance_purger(self, purger: "InstancePurger") -> None:
+        """Wire the shared ``remote_instances`` teardown
+        (:meth:`PeerUnpairService.purge`) the space-session cleanup drops a
+        seat through. Unwired, no seat is ever dropped."""
+        self._instance_purger = purger
 
     def attach_redeem_coordinator(self, coordinator) -> None:
         """Wire the §D2 cross-instance invite-token redeem driver.
@@ -961,7 +970,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         for a ``manual`` (QR-paired) peer: that relationship was never
         about a space and outlives every space.
         """
-        if self._federation_repo is None:
+        if self._federation_repo is None or self._instance_purger is None:
             return False
         instance = await self._federation_repo.get_instance(instance_id)
         if instance is None or instance.source is not InstanceSource.SPACE_SESSION:
@@ -985,7 +994,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     "SPACE_SESSION_CLEANUP to %s failed; dropping our row anyway",
                     instance_id,
                 )
-        await self._federation_repo.delete_instance(instance_id)
+        await self._instance_purger.purge(instance_id)
         log.info(
             "space session: dropped the space-scoped seat for %s — no shared "
             "space is left to justify it",

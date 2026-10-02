@@ -1656,6 +1656,53 @@ async def test_save_config_baseline_applies_once_under_the_pinned_epoch(env):
     assert (await env.repo.get("sp-base")).name == "Owner baseline"
 
 
+async def test_save_config_baseline_older_than_keeps_a_config_from_that_key(env):
+    """A missed-baseline catch-up resets only a config written under a key
+    OLDER than ``older_than`` — one applied under that key itself stays."""
+    await env.repo.save(_space("sp-cut"))
+    assert await env.repo.adopt_authority_key("sp-cut", "cc" * 32, 5)
+    await env.repo.mark_config_authority("sp-cut")  # config written under 5
+    assert await env.repo.adopt_authority_key("sp-cut", "dd" * 32, 9)
+    reset = replace(_space("sp-cut"), name="Owner snapshot")
+    assert not await env.repo.save_config_baseline(
+        reset, author="own-iid", epoch=9, older_than=5
+    )
+    assert (await env.repo.get("sp-cut")).name != "Owner snapshot"
+    assert await env.repo.save_config_baseline(
+        reset, author="own-iid", epoch=9, older_than=6
+    )
+    assert (await env.repo.get("sp-cut")).name == "Owner snapshot"
+    assert await env.repo.get_authority_config_epoch("sp-cut") == 9
+
+
+async def test_authority_baseline_tracks_the_claim(env):
+    await env.repo.save(_space("sp-claim"))
+    assert await env.repo.get_authority_baseline("sp-claim") == (0, 0)
+    assert await env.repo.claim_authority_baseline("sp-claim", 4)
+    assert await env.repo.get_authority_baseline("sp-claim") == (4, 0)
+    assert await env.repo.get_authority_baseline("sp-none") == (0, 0)
+
+
+async def test_adopting_past_an_unclaimed_pin_records_the_owed_baseline(env):
+    """An inline adoption that moves the pin past an epoch whose bundle was
+    never claimed records that epoch as owed — durably, so a later bundle
+    still knows a baseline was missed although the pin no longer shows it."""
+    await env.repo.save(_space("sp-owe"))
+    assert await env.repo.adopt_authority_key("sp-owe", "11" * 32, 3)
+    # Epoch 0 was never rotated: nothing owed for it.
+    assert await env.repo.get_authority_baseline("sp-owe") == (0, 0)
+    assert await env.repo.adopt_authority_key("sp-owe", "22" * 32, 5)
+    assert await env.repo.get_authority_baseline("sp-owe") == (0, 3)
+    assert await env.repo.adopt_authority_key("sp-owe", "33" * 32, 8)
+    assert await env.repo.get_authority_baseline("sp-owe") == (0, 5)
+    # Claiming a baseline settles what was owed.
+    assert await env.repo.claim_authority_baseline("sp-owe", 8)
+    assert await env.repo.get_authority_baseline("sp-owe") == (8, 0)
+    # Moving past a CLAIMED pin owes nothing.
+    assert await env.repo.adopt_authority_key("sp-owe", "44" * 32, 9)
+    assert await env.repo.get_authority_baseline("sp-owe") == (8, 0)
+
+
 async def test_save_config_baseline_refuses_when_the_pin_moved(env):
     await env.repo.save(_space("sp-moved"))
     assert await env.repo.adopt_authority_key("sp-moved", "cc" * 32, 7)

@@ -9,6 +9,8 @@ production.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from socialhome.repositories.dm_media_outbox_repo import (
@@ -17,6 +19,25 @@ from socialhome.repositories.dm_media_outbox_repo import (
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _seed_peer(db, instance_id: str, *, status: str = "confirmed") -> None:
+    """A minimal ``remote_instances`` row the outbox can queue against."""
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            instance_id,
+            instance_id,
+            "00" * 32,
+            "k1",
+            "k2",
+            f"https://{instance_id}.invalid/inbox",
+            f"inbox-{instance_id}",
+            status,
+        ),
+    )
 
 
 @pytest.fixture
@@ -37,6 +58,8 @@ async def media_outbox(db):
         """,
         ("m-1", "conv-1", "u-alice", "", "image"),
     )
+    # The outbox queues only for a household we still hold a pairing with.
+    await _seed_peer(db, "inst-bob")
     return SqliteDmMediaOutboxRepo(db), db
 
 
@@ -181,7 +204,9 @@ async def test_delete_for_instance_drops_every_row_for_that_household(media_outb
     """An unpair tombstone gets nothing but our UNPAIR: every media row
     addressed to it goes, whatever its status; other households keep
     theirs."""
-    repo, _db = media_outbox
+    repo, db = media_outbox
+    for peer in ("inst-gone", "inst-kept"):
+        await _seed_peer(db, peer)
     for target in ("inst-gone", "inst-kept"):
         await repo.enqueue(
             blob_id="m-1",
@@ -197,3 +222,49 @@ async def test_delete_for_instance_drops_every_row_for_that_household(media_outb
 
     rows = await repo.list_for_message("m-1")
     assert [r.target_instance_id for r in rows] == ["inst-kept"]
+
+
+async def test_enqueue_refuses_a_household_that_is_gone_or_a_tombstone(
+    media_outbox, caplog
+):
+    """Atomic peer check, like the federation outbox: a send that resolved
+    its recipients, then lost the pairing to an unpair (row gone) or an
+    unpair tombstone (``status='unpairing'``) before the INSERT, strands
+    nothing behind the purge."""
+    caplog.set_level(logging.INFO)
+    repo, db = media_outbox
+    await _seed_peer(db, "inst-tomb", status="unpairing")
+    for target in ("inst-gone", "inst-tomb", "inst-bob"):
+        await repo.enqueue(
+            blob_id="m-1",
+            message_id="m-1",
+            target_instance_id=target,
+            bytes_path="/tmp/foo.bin",
+        )
+    assert [e.target_instance_id for e in await repo.list_due()] == ["inst-bob"]
+    refused = [
+        r.getMessage() for r in caplog.records if "not queueing" in r.getMessage()
+    ]
+    assert len(refused) == 2  # a refusal is visible, like the federation outbox
+
+
+async def test_purge_orphaned_drops_rows_of_households_that_are_gone(media_outbox):
+    """Backstop for a crash mid-purge: rows whose ``remote_instances`` row is
+    gone are deleted (any status); a tombstone's and a live peer's stay."""
+    repo, db = media_outbox
+    await _seed_peer(db, "inst-gone")
+    await _seed_peer(db, "inst-tomb", status="unpairing")
+    for target in ("inst-gone", "inst-bob"):
+        await repo.enqueue(
+            blob_id="m-1",
+            message_id="m-1",
+            target_instance_id=target,
+            bytes_path="/tmp/foo.bin",
+        )
+    await repo.mark_failed(
+        blob_id="m-1", target_instance_id="inst-gone", last_error="x"
+    )
+    await db.enqueue("DELETE FROM remote_instances WHERE id='inst-gone'")
+    assert await repo.purge_orphaned() == 1
+    rows = await repo.list_for_message("m-1")
+    assert [r.target_instance_id for r in rows] == ["inst-bob"]

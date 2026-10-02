@@ -32,7 +32,9 @@ class AbstractSpaceKeyRepo(Protocol):
     async def get_latest(self, space_id: str) -> SpaceKey | None: ...
     async def list_for_space(self, space_id: str) -> list[SpaceKey]: ...
     async def next_epoch(self, space_id: str) -> int: ...
-    async def reset_to(self, key: SpaceKey, *, authority_epoch: int) -> int: ...
+    async def reset_to(
+        self, key: SpaceKey, *, authority_epoch: int, older_than: int | None = None
+    ) -> int: ...
 
 
 class SqliteSpaceKeyRepo:
@@ -134,24 +136,28 @@ class SqliteSpaceKeyRepo:
         )
         return int(row["m"]) + 1 if row else 0
 
-    async def reset_to(self, key: SpaceKey, *, authority_epoch: int) -> int:
+    async def reset_to(
+        self, key: SpaceKey, *, authority_epoch: int, older_than: int | None = None
+    ) -> int:
         """Make ``key`` the space's current epoch key, in ONE transaction.
 
         Only the v_44 authority-rotation baseline reset calls this. Every
         epoch above ``key.epoch`` that was written under an authority key
-        OLDER than ``authority_epoch`` is deleted — those were minted while a
-        now-revoked household could still sign rekeys — and ``key`` replaces
-        whatever sits at its epoch. Epochs above it written under the new key
-        (newer owner rekeys that arrived first) are kept. Returns how many
-        rows were deleted.
+        OLDER than ``older_than`` (default ``authority_epoch``) is deleted —
+        those were minted while a now-revoked household could still sign
+        rekeys — and ``key`` replaces whatever sits at its epoch, stamped
+        with ``authority_epoch``, the pin it is installed under. Epochs above
+        it written under a newer key (newer owner rekeys that arrived first)
+        are kept. Returns how many rows were deleted.
         """
         created = key.created_at or datetime.now(timezone.utc).isoformat()
+        cutoff = authority_epoch if older_than is None else older_than
 
         def _run(conn) -> int:
             cur = conn.execute(
                 "DELETE FROM space_keys WHERE space_id=? AND epoch > ?"
                 " AND authority_epoch < ?",
-                (key.space_id, key.epoch, authority_epoch),
+                (key.space_id, key.epoch, cutoff),
             )
             conn.execute(
                 """

@@ -283,6 +283,7 @@ class SpaceAuthorityRotationService:
             space = await self._spaces.get(space_id)
             if space is None or space.owner_instance_id != self._own_instance_id:
                 return None
+            prior_epoch = space.authority_key_epoch
             kp = generate_identity_keypair()
             # At least wall-clock seconds: an owner restored from a backup
             # taken before a rotation must still issue a HIGHER epoch than
@@ -327,7 +328,12 @@ class SpaceAuthorityRotationService:
                         space, instance_id=inst
                     )
             await self._distribute(
-                space, cert, kp.private_key, content_key, baseline=baseline
+                space,
+                cert,
+                kp.private_key,
+                content_key,
+                baseline=baseline,
+                prior_key_epoch=prior_epoch,
             )
             await self._refresh_gfs(space)
             return epoch
@@ -366,6 +372,7 @@ class SpaceAuthorityRotationService:
         content_key: dict | None,
         *,
         baseline: bool = True,
+        prior_key_epoch: int = 0,
     ) -> None:
         fed = self._federation
         fed_repo = self._federation_repo
@@ -413,15 +420,22 @@ class SpaceAuthorityRotationService:
             # rekey below.
             unknown = (await fed_repo.get_instance(inst)) is None
             if rotation_aware or unknown:
-                payload: dict = {"space_id": space.id, "authority_cert": cert}
-                if baseline:
-                    payload["space_meta"] = meta
-                    payload["roster_entries"] = await self._roster_for(
-                        space, seed, inst
-                    )
-                    payload["roster_version"] = space.roster_sequence
-                else:
+                payload: dict = {
+                    "space_id": space.id,
+                    "authority_cert": cert,
+                    "space_meta": meta,
+                    "roster_entries": await self._roster_for(space, seed, inst),
+                    "roster_version": space.roster_sequence,
+                }
+                if not baseline:
+                    # Post-restore: the snapshot above is the STALE restored
+                    # one. A member resets to it only when it missed the
+                    # baseline of an earlier rotation (see
+                    # :meth:`_missed_baseline_cutoff`); ``prior_key_epoch`` —
+                    # the epoch this rotation replaces — lets a member that
+                    # never even saw that rotation's cert notice.
                     payload["baseline"] = False
+                    payload["prior_key_epoch"] = prior_key_epoch
                 if signed_key is not None:
                     payload["space_content_key"] = signed_key
                 await self._send(
@@ -542,6 +556,12 @@ class SpaceAuthorityRotationService:
             )
             return
         space = await self._spaces.get(space_id) or space
+        # Read before the claim overwrites it. ``owed`` is durable: it was
+        # recorded when the pin moved past a rotated key whose bundle we
+        # never claimed — by the cert above, or by an inline cert any
+        # household relayed earlier — so who delivered the newer cert first
+        # cannot hide a missed baseline.
+        baseline_epoch, owed_epoch = await self._spaces.get_authority_baseline(space_id)
         # At most ONE baseline reset per key epoch (a redelivered or replayed
         # bundle is a no-op), claimed durably before any write.
         if not await self._spaces.claim_authority_baseline(
@@ -554,22 +574,77 @@ class SpaceAuthorityRotationService:
                 space.authority_key_epoch,
             )
             return
+        cutoff = space.authority_key_epoch
         if p.get("baseline") is False:
             # A post-restore rotation: the owner's roster and config are the
             # stale ones. Adopt the key, import the content key as an
-            # ordinary owner rekey, and reset nothing.
-            await self._import_content_key(space, p.get("space_content_key"))
-            return
+            # ordinary owner rekey, and reset nothing — UNLESS this household
+            # missed the baseline of an earlier rotation, in which case state
+            # the key it retired could have inflated is still here.
+            missed = self._missed_baseline_cutoff(
+                owed_epoch=owed_epoch,
+                baseline_epoch=baseline_epoch,
+                prior_key_epoch=p.get("prior_key_epoch"),
+                new_epoch=space.authority_key_epoch,
+            )
+            if missed is None:
+                await self._import_content_key(space, p.get("space_content_key"))
+                return
+            log.warning(
+                "SPACE_AUTHORITY_ROTATED for %s: missed the baseline for key "
+                "epoch %d (last applied %d) — resetting to the owner's snapshot",
+                space_id,
+                missed,
+                baseline_epoch,
+            )
+            cutoff = missed
         # Reset to the owner's baseline. Each part is checked against the new
-        # pin, and each only overrides state written under an OLDER key —
-        # what the revoked household may have inflated. State this household
-        # already accepted under the new key (it adopted the cert inline,
-        # then newer owner traffic arrived before this bundle) stays.
-        await self._reset_config(space, p.get("space_meta"), sender)
+        # pin, and each only overrides state written under a key older than
+        # ``cutoff`` — what the revoked household may have inflated. State
+        # this household already accepted under the new key (it adopted the
+        # cert inline, then newer owner traffic arrived before this bundle)
+        # stays.
+        await self._reset_config(space, p.get("space_meta"), sender, cutoff)
         await self._reset_roster(
-            space, p.get("roster_entries"), p.get("roster_version")
+            space,
+            p.get("roster_entries"),
+            p.get("roster_version"),
+            cutoff,
+            # The catch-up snapshot is the STALE restored roster: it may
+            # still list a household this one removed after the backup.
+            # A removal never grants anything, so it stands.
+            keep_newer_removals=p.get("baseline") is False,
         )
-        await self._reset_content_key(space, p.get("space_content_key"))
+        await self._reset_content_key(space, p.get("space_content_key"), cutoff)
+
+    @staticmethod
+    def _missed_baseline_cutoff(
+        *,
+        owed_epoch: int,
+        baseline_epoch: int,
+        prior_key_epoch: object,
+        new_epoch: int,
+    ) -> int | None:
+        """The key epoch whose baseline this household missed, or ``None``.
+
+        Two ways to have missed one, both below the new epoch:
+
+        * we pinned a rotated key and moved past it without claiming its
+          bundle — ``owed_epoch``, recorded durably by
+          :meth:`AbstractSpaceRepo.adopt_authority_key`;
+        * the owner rotated to ``prior_key_epoch`` and we never saw that cert
+          at all (``baseline_epoch < prior_key_epoch``).
+
+        State written under a key older than the returned epoch is what a
+        household revoked by that rotation may have inflated; the reset
+        overrides exactly that. A rotation the restored owner forgot AND we
+        never saw is not detectable here (see docs/protocol/spaces.md).
+        """
+        candidates = [owed_epoch]
+        if isinstance(prior_key_epoch, int) and not isinstance(prior_key_epoch, bool):
+            candidates.append(prior_key_epoch)
+        missed = [e for e in candidates if baseline_epoch < e < new_epoch]
+        return max(missed) if missed else None
 
     def _authority_ok(self, space: "Space", event_type: str, part: object) -> bool:
         if not isinstance(part, dict):
@@ -590,7 +665,9 @@ class SpaceAuthorityRotationService:
         except UnsupportedAuthoritySuite, ValueError:
             return False
 
-    async def _reset_config(self, space: "Space", meta: object, owner: str) -> None:
+    async def _reset_config(
+        self, space: "Space", meta: object, owner: str, cutoff: int
+    ) -> None:
         if not self._authority_ok(space, _CONFIG_EVENT, meta):
             log.warning(
                 "SPACE_AUTHORITY_ROTATED for %s: config not signed by the new key",
@@ -610,7 +687,10 @@ class SpaceAuthorityRotationService:
         # under the new key in the meantime (an inline-cert edit racing this
         # bundle) already stands and is never rolled back.
         if not await self._spaces.save_config_baseline(
-            refreshed, author=owner, epoch=space.authority_key_epoch
+            refreshed,
+            author=owner,
+            epoch=space.authority_key_epoch,
+            older_than=cutoff,
         ):
             return
         if space.features.delegated_admin_authority and not (
@@ -619,7 +699,13 @@ class SpaceAuthorityRotationService:
             await self._spaces.clear_space_seed(space.id)
 
     async def _reset_roster(
-        self, space: "Space", entries: object, roster_version: object
+        self,
+        space: "Space",
+        entries: object,
+        roster_version: object,
+        cutoff: int,
+        *,
+        keep_newer_removals: bool = False,
     ) -> None:
         if not isinstance(entries, list):
             return
@@ -654,11 +740,16 @@ class SpaceAuthorityRotationService:
             current = await self._remote_members.get_including_tombstones(
                 space.id, instance_id, user_id
             )
+            if current is not None and current.authority_epoch >= cutoff:
+                continue  # written under a key not being retired — leave it
             if (
-                current is not None
-                and current.authority_epoch >= space.authority_key_epoch
+                keep_newer_removals
+                and not tombstoned
+                and current is not None
+                and current.tombstoned
+                and current.member_version >= version
             ):
-                continue  # written under the new key already — leave it
+                continue  # removed after the (restored) snapshot — keep it
             await self._remote_members.reset_member_state(
                 space_id=space.id,
                 user_id=user_id,
@@ -699,8 +790,8 @@ class SpaceAuthorityRotationService:
                 continue
             if (row.instance_id, row.user_id) in seen or row.tombstoned:
                 continue
-            if row.authority_epoch >= space.authority_key_epoch:
-                continue  # seated under the new key — not the revoked one's
+            if row.authority_epoch >= cutoff:
+                continue  # seated under a key the revoked household never held
             await self._remote_members.reset_member_state(
                 space_id=space.id,
                 user_id=row.user_id,
@@ -766,7 +857,9 @@ class SpaceAuthorityRotationService:
             return None
         return epoch, raw, rotated_by
 
-    async def _reset_content_key(self, space: "Space", meta: object) -> None:
+    async def _reset_content_key(
+        self, space: "Space", meta: object, cutoff: int
+    ) -> None:
         parts = self._content_key_parts(space, meta)
         if parts is None:
             return
@@ -779,6 +872,7 @@ class SpaceAuthorityRotationService:
                 raw,
                 rotated_by=rotated_by,
                 authority_epoch=space.authority_key_epoch,
+                older_than=cutoff,
             )
         except ValueError:
             log.warning(

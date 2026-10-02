@@ -130,6 +130,10 @@ class FakeOutboxRepo:
         r.status = "failed"
         r.last_error = last_error
 
+    async def purge_orphaned(self):
+        self.purge_orphaned_calls = getattr(self, "purge_orphaned_calls", 0) + 1
+        return 0
+
     async def reclaim_in_flight(self):
         n = 0
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -522,6 +526,8 @@ async def test_start_reclaims_orphaned_in_flight_rows(stack):
     try:
         rows = await stack["outbox"].list_for_message("m1")
         assert rows[0].status == "pending"
+        # The orphan sweep (rows for households that are gone) runs too.
+        assert stack["outbox"].purge_orphaned_calls == 1
     finally:
         await stack["svc"].stop()
 

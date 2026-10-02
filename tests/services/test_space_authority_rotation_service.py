@@ -423,7 +423,7 @@ async def test_truncated_roster_never_tombstones_unscanned_seats(env, monkeypatc
             ),
         },
     }
-    await env.svc._reset_roster(space, [entry, entry], 1)
+    await env.svc._reset_roster(space, [entry, entry], 1, space.authority_key_epoch)
     assert (await env.remote.get(SPACE, "v44", "u-v44")).member_version == 3
     assert await env.remote.get(SPACE, "x", "ux") is not None  # not tombstoned
 
@@ -470,21 +470,36 @@ async def test_post_restore_rotation_shares_no_seed_and_asks_the_owner(env):
     assert shared == ["v44"]
 
 
-async def test_post_restore_bundle_carries_no_roster_or_config(env):
+async def test_post_restore_bundle_is_marked_non_baseline_with_its_prior_epoch(env):
     """M1: the restored roster / config are stale — the bundle is marked
-    ``baseline: false`` and carries the cert and content key only, at a
-    content epoch of at least wall-clock seconds."""
+    ``baseline: false`` (members reset to its snapshot only when they missed
+    an earlier baseline), names the epoch it replaces, and carries a content
+    epoch of at least wall-clock seconds."""
     before = int(time.time())
+    prior = (await env.spaces.get(SPACE)).authority_key_epoch
     assert await env.svc.rotate_hosted_after_restore() == 1
     bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[-1]
     assert bundle["baseline"] is False
-    assert set(bundle) == {
-        "space_id",
-        "authority_cert",
-        "baseline",
-        "space_content_key",
-    }
+    assert bundle["prior_key_epoch"] == prior
+    assert {"space_meta", "roster_entries", "roster_version"} <= set(bundle)
     assert bundle["space_content_key"]["epoch"] >= before
+
+
+def test_missed_baseline_cutoff():
+    cut = SpaceAuthorityRotationService._missed_baseline_cutoff
+    # Up to date: nothing missed.
+    assert cut(owed_epoch=5, baseline_epoch=5, prior_key_epoch=5, new_epoch=9) is None
+    # Moved past 5 (adopted inline) without its bundle.
+    assert cut(owed_epoch=5, baseline_epoch=0, prior_key_epoch=None, new_epoch=9) == 5
+    # Never saw the owner's rotation to 7.
+    assert cut(owed_epoch=5, baseline_epoch=5, prior_key_epoch=7, new_epoch=9) == 7
+    # Nothing owed and the owner's prior already claimed.
+    assert cut(owed_epoch=0, baseline_epoch=5, prior_key_epoch=5, new_epoch=9) is None
+    # A malformed prior is ignored.
+    assert (
+        cut(owed_epoch=5, baseline_epoch=5, prior_key_epoch=True, new_epoch=9) is None
+    )
+    assert cut(owed_epoch=5, baseline_epoch=5, prior_key_epoch="7", new_epoch=9) is None
 
 
 async def test_baseline_config_never_rolls_back_a_racing_new_key_edit(env, monkeypatch):
@@ -515,5 +530,5 @@ async def test_baseline_config_never_rolls_back_a_racing_new_key_edit(env, monke
         return 0
 
     monkeypatch.setattr(env.spaces, "get_authority_config_epoch", _stale_read)
-    await member._reset_config(space, meta, env.fed.own_instance_id)
+    await member._reset_config(space, meta, env.fed.own_instance_id, 9)
     assert (await env.spaces.get(SPACE)).name == "Racing edit"

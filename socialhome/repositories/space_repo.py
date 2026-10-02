@@ -70,13 +70,19 @@ class AbstractSpaceRepo(Protocol):
         self, space_id: str, public_key_hex: str, key_epoch: int
     ) -> bool: ...
     async def claim_authority_baseline(self, space_id: str, key_epoch: int) -> bool: ...
+    async def get_authority_baseline(self, space_id: str) -> tuple[int, int]: ...
     async def get_authority_config_epoch(self, space_id: str) -> int: ...
     async def save_config_if_authority_epoch(
         self, space: Space, *, verified_epoch: int
     ) -> bool: ...
     async def mark_config_authority(self, space_id: str) -> None: ...
     async def save_config_baseline(
-        self, space: Space, *, author: str, epoch: int
+        self,
+        space: Space,
+        *,
+        author: str,
+        epoch: int,
+        older_than: int | None = None,
     ) -> bool: ...
     async def mark_seed_shared(self, space_id: str) -> None: ...
     async def set_mirror_provenance(
@@ -420,7 +426,12 @@ class SqliteSpaceRepo:
         return bool(await self._db.transact(_run))
 
     async def save_config_baseline(
-        self, space: Space, *, author: str, epoch: int
+        self,
+        space: Space,
+        *,
+        author: str,
+        epoch: int,
+        older_than: int | None = None,
     ) -> bool:
         """Apply the owner's baseline config from a rotation bundle (v_44),
         ATOMICALLY.
@@ -431,8 +442,12 @@ class SqliteSpaceRepo:
         config author and stamps ``authority_config_epoch``. A config that a
         concurrent inbound edit applied under the new key in between is
         therefore never rolled back (``False``).
+
+        ``older_than`` (a missed-baseline catch-up) narrows that further: only
+        a config applied under a key epoch BELOW it is replaced.
         """
         sql, params = self._save_statement(space)
+        cutoff = epoch if older_than is None else min(older_than, epoch)
 
         def _run(conn) -> bool:
             row = conn.execute(
@@ -440,7 +455,7 @@ class SqliteSpaceRepo:
                 " FROM spaces WHERE id=?",
                 (space.id,),
             ).fetchone()
-            if row is None or int(row[0]) != epoch or int(row[1]) >= epoch:
+            if row is None or int(row[0]) != epoch or int(row[1]) >= cutoff:
                 return False
             conn.execute(sql, params)
             conn.execute(
@@ -782,10 +797,21 @@ class SqliteSpaceRepo:
         higher than the stored epoch, so a replayed or reordered older cert
         is a no-op. Callers MUST have verified the cert. Returns whether the
         row was updated.
+
+        When the pin we move AWAY from is a rotated key whose bundle we never
+        claimed (adopted inline, from a config / roster / invite cert), its
+        baseline is recorded as owed in the same statement — see
+        :meth:`get_authority_baseline`. A later post-restore bundle then
+        still knows a baseline was missed, whoever delivered the newer cert
+        first.
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE spaces SET identity_public_key=?, authority_key_epoch=?,"
-            " identity_private_key=NULL WHERE id=? AND authority_key_epoch < ?",
+            " identity_private_key=NULL,"
+            " authority_baseline_epoch=CASE"
+            "  WHEN ABS(authority_baseline_epoch) < authority_key_epoch"
+            "  THEN -authority_key_epoch ELSE authority_baseline_epoch END"
+            " WHERE id=? AND authority_key_epoch < ?",
             (public_key_hex, key_epoch, space_id, key_epoch),
         )
         return changed > 0
@@ -795,7 +821,9 @@ class SqliteSpaceRepo:
 
         Compare-and-set on ``authority_baseline_epoch``: True for exactly one
         caller per epoch, so a replayed / redelivered / concurrent rotation
-        bundle never resets this household a second time.
+        bundle never resets this household a second time. An owed marker
+        (negative, see :meth:`get_authority_baseline`) always compares lower,
+        so the claim settles it.
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE spaces SET authority_baseline_epoch=? WHERE id=?"
@@ -803,6 +831,28 @@ class SqliteSpaceRepo:
             (key_epoch, space_id, key_epoch),
         )
         return changed > 0
+
+    async def get_authority_baseline(self, space_id: str) -> tuple[int, int]:
+        """``(claimed, owed)`` for this space's rotation baselines (v_44).
+
+        ``authority_baseline_epoch`` holds one of two things, so that no
+        column is needed for the second:
+
+        * ``>= 0`` — the highest key epoch whose bundle we claimed
+          (:meth:`claim_authority_baseline`); nothing owed;
+        * ``< 0`` — ``-value`` is a rotated key epoch we pinned and then
+          moved past without ever claiming its bundle
+          (:meth:`adopt_authority_key`); the claimed epoch is then unknown and
+          reads as ``0`` (the conservative answer: more is reset, never
+          less). The next claim overwrites it with a plain claimed epoch.
+
+        ``(0, 0)`` for an unknown space.
+        """
+        row = await self._db.fetchone(
+            "SELECT authority_baseline_epoch FROM spaces WHERE id=?", (space_id,)
+        )
+        raw = int(row["authority_baseline_epoch"] or 0) if row else 0
+        return (raw, 0) if raw >= 0 else (0, -raw)
 
     async def get_authority_config_epoch(self, space_id: str) -> int:
         """The authority-key epoch in force when this space's config was

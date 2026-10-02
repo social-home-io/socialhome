@@ -218,6 +218,8 @@ async def test_unpair_sends_unpair_before_forgetting(env):
         "send_event",
         "delete_instance",
         "outbox_purge",
+        "dm_media_purge",
+        "space_media_purge",
         "forget_discovered_via",
     ]
     assert "peer-a" not in env["repo"].instances
@@ -388,3 +390,30 @@ async def test_forget_cleans_up_without_notifying(env):
     assert env["outbox"].rows == {}
     assert env["routing"].discovered_via == {}
     assert [e.instance_id for e in env["published"]] == ["peer-d"]
+
+
+async def test_purge_drops_row_first_then_every_outbox_and_hint(env):
+    """The shared teardown other paths (space-session cleanup,
+    ``PAIRING_ABORT``) use: row first, then the federation + both media
+    outboxes, then mesh hints — and no :class:`PeerUnpaired` event."""
+    env["repo"].instances["peer-p"] = _inst("peer-p")
+    env["outbox"].rows["peer-p"] = ["m1"]
+    env["dm_media"].targets.add("peer-p")
+    env["space_media"].targets.add("peer-p")
+    env["routing"].discovered_via["peer-p"] = ["peer-x"]
+
+    await env["svc"].purge("peer-p")
+
+    assert [c for c, _ in env["log"]] == [
+        "delete_instance",
+        "outbox_purge",
+        "dm_media_purge",
+        "space_media_purge",
+        "forget_discovered_via",
+    ]
+    assert "peer-p" not in env["repo"].instances
+    assert env["outbox"].rows == {}
+    assert env["dm_media"].targets == set()
+    assert env["space_media"].targets == set()
+    assert env["routing"].discovered_via == {}
+    assert env["published"] == []

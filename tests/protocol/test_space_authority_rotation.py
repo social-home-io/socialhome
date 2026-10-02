@@ -66,6 +66,7 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.federation.federation_service import FederationService
+from socialhome.services.space_authority_pin import apply_authority_cert
 from socialhome.services.space_crypto_service import KEY_SUITE_AESGCM_256
 from socialhome.services.space_service import space_metadata_for_federation
 
@@ -1317,7 +1318,9 @@ async def test_post_restore_rotation_never_reseats_or_rolls_back(world):
     await _restore_rotate(w)
     bundle = w.outbound(to=w.m_id, event_type=FET.SPACE_AUTHORITY_ROTATED)[-1]
     assert bundle.get("baseline") is False
-    assert "space_meta" not in bundle and "roster_entries" not in bundle
+    # The owner's snapshot rides along (signed with the new key) but only a
+    # member that MISSED an earlier baseline uses it — M missed none.
+    assert bundle["prior_key_epoch"] == 0
     await _deliver_bundle_to_m(w)
 
     m = await w.m_space()
@@ -1423,3 +1426,181 @@ async def test_lost_seed_of_a_rotated_space_is_reminted_by_a_real_rotation(world
     assert (await w.m_space()).identity_public_key == (
         await w.o_space()
     ).identity_public_key
+
+
+# ── Follow-up: a member that missed a baseline heals on the restore bundle ─
+
+
+async def _inflate_with_k1(w: World) -> None:
+    """``B`` inflates M's config, roster and content key with K1."""
+    await _config_from_b(w, w.m_app, seed=w.k1_seed, name="B's name", seq=10**6)
+    et, p = _roster(w, w.k1_seed, user="ghost", inst=B_ID, role="admin", version=10**9)
+    await _deliver(w.m_app, sender=B_ID, event_type=et, payload=p)
+    await _deliver(
+        w.m_app,
+        sender=B_ID,
+        event_type=FET.SPACE_KEY_EXCHANGE_REKEY,
+        payload=_rekey(w, w.k1_seed, epoch=10**12, raw=b"\x07" * 32),
+    )
+    assert (await w.m_space()).name == "B's name"
+
+
+async def _assert_reset_to_owner(w: World) -> None:
+    m = await w.m_space()
+    o = await w.o_space()
+    assert m.identity_public_key == o.identity_public_key
+    assert m.name == o.name == "Family"
+    ghost = await w.m_app[space_remote_member_repo_key].get_including_tombstones(
+        w.space_id, B_ID, "ghost"
+    )
+    assert ghost is not None and ghost.tombstoned
+    crypto = w.m_app[space_crypto_service_key]
+    owner = await w.o_app[space_crypto_service_key].export_current_key(w.space_id)
+    assert await crypto.export_current_key(w.space_id) == owner
+
+
+async def test_member_that_adopted_a_rotation_inline_resets_on_the_restore_bundle(
+    world,
+):
+    """M adopted B's revocation key from an inline cert but never received
+    that rotation's baseline bundle, so B's K1 inflation stayed. The later
+    post-restore (``baseline: false``) bundle must reset it to the owner's
+    snapshot instead of jumping to the new epoch with B's state intact."""
+    w = world
+    await _inflate_with_k1(w)
+    await _demote_b(w)  # epoch e1: B revoked — M never gets this bundle
+    e1_bundle = w.outbound(to=w.m_id, event_type=FET.SPACE_AUTHORITY_ROTATED)[-1]
+    outcome = await apply_authority_cert(
+        w.m_app[space_repo_key],
+        await w.m_space(),
+        e1_bundle["authority_cert"],
+        own_instance_id=w.m_id,
+    )
+    assert outcome.consistent  # adopted inline, no baseline reset
+    assert (await w.m_space()).name == "B's name"
+
+    await _restore_rotate(w)  # epoch e2, baseline: false
+    await _deliver_bundle_to_m(w)
+
+    await _assert_reset_to_owner(w)
+
+
+async def test_member_that_missed_a_rotation_entirely_resets_on_the_restore_bundle(
+    world,
+):
+    """M missed the e1 cert altogether (still on K1); the owner's
+    ``prior_key_epoch`` tells it a rotation it never saw retired K1."""
+    w = world
+    await _inflate_with_k1(w)
+    await _demote_b(w)  # epoch e1 — M sees nothing
+    assert (await w.m_space()).authority_key_epoch == 0
+
+    await _restore_rotate(w)
+    await _deliver_bundle_to_m(w)
+
+    await _assert_reset_to_owner(w)
+
+
+async def test_missed_baseline_reset_keeps_state_written_under_the_prior_key(world):
+    """The catch-up reset only overrides what was written under a key the
+    missed rotation retired: a seat M accepted under the e1 key (which B
+    never held) stays."""
+    w = world
+    await _demote_b(w)
+    e1_bundle = w.outbound(to=w.m_id, event_type=FET.SPACE_AUTHORITY_ROTATED)[-1]
+    await apply_authority_cert(
+        w.m_app[space_repo_key],
+        await w.m_space(),
+        e1_bundle["authority_cert"],
+        own_instance_id=w.m_id,
+    )
+    k2 = await w.o_app[space_repo_key].get_space_seed(w.space_id)
+    et, p = _roster(w, k2, user="un", inst="n" * 32, role="member", version=10**4)
+    await _deliver(w.m_app, sender=w.o_id, event_type=et, payload=p)
+
+    await _restore_rotate(w)
+    await _deliver_bundle_to_m(w)
+
+    kept = await w.m_app[space_remote_member_repo_key].get(w.space_id, "n" * 32, "un")
+    assert kept is not None and not kept.tombstoned
+
+
+async def test_a_relayed_inline_cert_cannot_suppress_a_missed_baseline(world):
+    """Review I1: M adopted e1 inline and never got its bundle. B (revoked
+    at e1) sees the post-restore e2 cert and relays it to M inline, in an
+    unsigned config, BEFORE the owner's bundle lands — so at bundle time M
+    already pins e2. The owed baseline is recorded durably when the pin
+    moved past the unclaimed e1, so the bundle still resets B's inflation."""
+    w = world
+    await _inflate_with_k1(w)
+    await _demote_b(w)
+    e1_bundle = w.outbound(to=w.m_id, event_type=FET.SPACE_AUTHORITY_ROTATED)[-1]
+    await apply_authority_cert(
+        w.m_app[space_repo_key],
+        await w.m_space(),
+        e1_bundle["authority_cert"],
+        own_instance_id=w.m_id,
+    )
+    await _restore_rotate(w)
+    e2 = w.outbound(to=w.m_id, event_type=FET.SPACE_AUTHORITY_ROTATED)[-1]
+    e2["prior_key_epoch"] = 0  # a backup older than e1: the owner forgot e1
+    await _deliver(
+        w.m_app,
+        sender=B_ID,
+        event_type=FET.SPACE_CONFIG_CHANGED,
+        payload={
+            "space_id": w.space_id,
+            "sequence": 1,
+            "space_meta": {
+                "name": "zzz",
+                "config_sequence": 1,
+                "authority_cert": e2["authority_cert"],
+            },
+        },
+    )
+    assert (await w.m_space()).authority_key_epoch == e2["authority_cert"]["key_epoch"]
+
+    await _deliver_bundle_to_m(w)
+
+    await _assert_reset_to_owner(w)
+
+
+async def test_missed_baseline_reset_never_reseats_a_household_kicked_later(world):
+    """Review M1: the restored owner still lists a household M kicked after
+    the backup. The catch-up reset keeps M's newer removal instead of
+    re-seating it from the stale snapshot."""
+    w = world
+    m_rm = w.m_app[space_remote_member_repo_key]
+    kicked = "x" * 32
+    await m_rm.add(
+        space_id=w.space_id,
+        instance_id=kicked,
+        user_id="ux",
+        user_pk=None,
+        display_name="ux",
+    )
+    await m_rm.remove(w.space_id, kicked, "ux")
+    await w.o_app[space_remote_member_repo_key].add(
+        space_id=w.space_id,
+        instance_id=kicked,
+        user_id="ux",
+        user_pk=None,
+        display_name="ux",
+    )
+    await w.o_app[space_repo_key].add_space_instance(w.space_id, kicked)
+    await _inflate_with_k1(w)
+    await _demote_b(w)
+    e1_bundle = w.outbound(to=w.m_id, event_type=FET.SPACE_AUTHORITY_ROTATED)[-1]
+    await apply_authority_cert(
+        w.m_app[space_repo_key],
+        await w.m_space(),
+        e1_bundle["authority_cert"],
+        own_instance_id=w.m_id,
+    )
+    await _restore_rotate(w)
+    await _deliver_bundle_to_m(w)
+
+    await _assert_reset_to_owner(w)  # the catch-up did run
+    row = await m_rm.get_including_tombstones(w.space_id, kicked, "ux")
+    assert row is not None and row.tombstoned
+    assert kicked not in await w.m_app[space_repo_key].list_member_instances(w.space_id)

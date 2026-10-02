@@ -34,6 +34,13 @@ async def _seed_space(db, *, space_id="sp-1"):
            VALUES(?,?,?,?,?,?,?)""",
         (space_id, "S", "peer", "owner", "aa" * 32, "household", "invite_only"),
     )
+    # The outbox queues only for a paired or member household of the space
+    # (the enqueue guard): seat every peer these tests address.
+    for peer in ("peer-a", "peer-b", "peer-x", "peer-tomb", "peer-mesh"):
+        await db.enqueue(
+            "INSERT INTO space_instances(space_id, instance_id) VALUES(?,?)",
+            (space_id, peer),
+        )
 
 
 @pytest.fixture
@@ -336,3 +343,23 @@ async def test_flush_once_drops_rows_for_an_unpair_tombstone(db, outbox, tmp_pat
     sent_to = {c.kwargs["to_instance_id"] for c in fed.send_media_chunk.call_args_list}
     assert sent_to == {"peer-mesh"}
     assert await outbox.list_for_correlation("p-1") == []
+
+
+async def test_start_drops_rows_for_households_that_are_gone(db, outbox, tmp_path):
+    """Backstop for a crash mid-teardown: on start, rows whose household is
+    neither paired nor seated in the space are deleted."""
+    await _seed_space(db)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=None, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b"],
+        media_urls=["api/media/img-1.webp"],
+    )
+    await db.enqueue("DELETE FROM space_instances WHERE instance_id='peer-a'")
+    await svc.start()
+    try:
+        rows = await outbox.list_for_correlation("p-1")
+        assert [r.target_instance_id for r in rows] == ["peer-b"]
+    finally:
+        await svc.stop()

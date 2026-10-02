@@ -1686,7 +1686,9 @@ kicked after the backup is listed live again, a later config edit is
 missing), so that rotation is **not a baseline**: its bundle is marked
 `baseline: false` and carries the cert plus a fresh content key whose
 epoch is at least unix seconds (members may hold epochs the backup never
-saw), and members keep the roster and config they have. It also turns
+saw), and members keep the roster and config they have — unless they
+missed an earlier rotation's baseline (see the missed-baseline catch-up
+above). It also turns
 `delegated_admin_authority` OFF on the owner — locally, no config
 broadcast, since one would push the stale config as the newest edit — and
 shares the new seed with NOBODY: the restored roster may name admins
@@ -1773,10 +1775,30 @@ the bundle's are deleted and the bundle key installed regardless of
   member still pins that epoch and no config was applied under it yet, so
   an inline-cert edit racing the bundle is never rolled back;
 - a bundle marked **`baseline: false`** (the post-restore rotation, below)
-  carries only the cert and a content key: the member adopts the key,
-  imports the content key as an ordinary owner rekey (checked against the
-  new pin) and resets nothing. It still claims the epoch, so no baseline
-  can follow at that epoch.
+  carries the cert, a content key, the owner's (stale, restored) snapshot
+  signed with the new key, and `prior_key_epoch` — the epoch the rotation
+  replaced. A member that is caught up adopts the key, imports the content
+  key as an ordinary owner rekey (checked against the new pin) and resets
+  nothing. It still claims the epoch, so no baseline can follow at that
+  epoch.
+- **missed-baseline catch-up.** A member that moved its pin past a rotated
+  key without that rotation's bundle (an inline cert, relayed by anyone) or
+  never saw the owner's previous rotation at all (`prior_key_epoch` above
+  its claimed baseline) may still hold what the revoked household inflated
+  under the retired key. The first case is recorded durably at the moment
+  the pin moves past the unclaimed epoch (`adopt_authority_key` stores it
+  as "owed" in `authority_baseline_epoch`), so a newer cert delivered
+  inline before the bundle — even by the revoked household itself — cannot
+  hide it. On a `baseline: false` bundle such a member resets to the
+  snapshot instead (config, roster, content key), overriding only state
+  written under a key OLDER than the missed epoch: state written under the
+  missed epoch's key (which the revoked household never held) stays, and
+  the reset content key is stamped with the pin it is installed under.
+  Because the snapshot is the restored (stale) roster, the catch-up never
+  re-seats a household this member holds as removed at a member version at
+  least the snapshot's — a removal grants nothing, so it stands. Owner state
+  beats possibly-revoked state: the cost is the restore residuals below at
+  that member.
 
 **No old-key write after the pin moved.** Every authority-verified write —
 a roster merge, a content-key import (rekey or subscriber handoff), a
@@ -1843,7 +1865,18 @@ anything encrypted under it unreadable at members that never imported it.
 After a restore: a household kicked after the backup is listed live in
 the restored roster, so it receives the post-restore content key until the
 owner removes it again, and the owner's next config edit reasserts the
-restored config over members' newer one.
+restored config over members' newer one. A member that missed an earlier
+baseline resets to that restored snapshot on the post-restore bundle
+(rolling back newer edits made under an older key there), except that it
+keeps removals newer than the snapshot — so a kick the revoked household
+forged under the old key also stands there until the owner re-adds the
+seat. A rotation the
+restored owner no longer knows about (made after the backup) AND that a
+member never saw is undetectable on both sides: that member keeps whatever
+the revoked household inflated until the next ordinary (baseline)
+rotation. A member that joined after a rotation is not flagged by its first
+adoption (its pin moves from the creation-time key), only once it moves
+past a rotated key without that key's bundle.
 
 ### Cross-household kick (phase 2, v_9+)
 

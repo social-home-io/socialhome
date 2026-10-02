@@ -278,6 +278,7 @@ async def test_prune_once_calls_expire_past_retention():
     """prune_once delegates to repo.expire_past_retention and returns its count."""
     repo = MagicMock()
     repo.expire_past_retention = AsyncMock(return_value=3)
+    repo.purge_orphaned = AsyncMock(return_value=0)
     repo.purge_terminal = AsyncMock(return_value=0)
     proc = OutboxProcessor(repo, AsyncMock())
     result = await proc.prune_once()
@@ -292,6 +293,7 @@ async def test_prune_once_sums_expire_and_purge():
     """prune_once returns expired + purged, purging terminal rows past grace."""
     repo = MagicMock()
     repo.expire_past_retention = AsyncMock(return_value=2)
+    repo.purge_orphaned = AsyncMock(return_value=0)
     repo.purge_terminal = AsyncMock(return_value=4)
     proc = OutboxProcessor(repo, AsyncMock())
     result = await proc.prune_once()
@@ -310,6 +312,7 @@ async def test_prune_once_drains_multiple_batches():
     """
     repo = MagicMock()
     repo.expire_past_retention = AsyncMock(return_value=0)
+    repo.purge_orphaned = AsyncMock(return_value=0)
     repo.purge_terminal = AsyncMock(side_effect=[5000, 5000, 1])
     proc = OutboxProcessor(repo, AsyncMock())
     result = await proc.prune_once()
@@ -323,6 +326,7 @@ async def test_loop_prunes_on_first_tick_when_last_prune_zero():
     repo.list_due = AsyncMock(return_value=[])
     repo.expire_past_retention = AsyncMock(return_value=0)
 
+    repo.purge_orphaned = AsyncMock(return_value=0)
     repo.purge_terminal = AsyncMock(return_value=0)
     proc = OutboxProcessor(repo, AsyncMock(), poll_interval_seconds=0.01)
     assert proc._last_prune is None  # "never pruned" → first tick prunes
@@ -373,6 +377,7 @@ async def test_prune_once_runs_after_prune_hook_after_the_sweep():
         return 0
 
     repo.expire_past_retention = AsyncMock(side_effect=_expire)
+    repo.purge_orphaned = AsyncMock(return_value=0)
     repo.purge_terminal = AsyncMock(return_value=0)
     proc = OutboxProcessor(repo, AsyncMock(), after_prune=_hook)
     await proc.prune_once()
@@ -382,8 +387,30 @@ async def test_prune_once_runs_after_prune_hook_after_the_sweep():
 async def test_prune_once_survives_a_failing_after_prune_hook():
     repo = MagicMock()
     repo.expire_past_retention = AsyncMock(return_value=1)
+    repo.purge_orphaned = AsyncMock(return_value=0)
     repo.purge_terminal = AsyncMock(return_value=0)
     hook = AsyncMock(side_effect=RuntimeError("boom"))
     proc = OutboxProcessor(repo, AsyncMock(), after_prune=hook)
     assert await proc.prune_once() == 1
     hook.assert_awaited_once()
+
+
+async def test_prune_once_purges_rows_of_households_that_are_gone():
+    """The sweep deletes outbox rows whose ``remote_instances`` row is gone
+    (a crash mid-purge), and counts them, before the after-prune hook."""
+    order: list[str] = []
+    repo = MagicMock()
+    repo.expire_past_retention = AsyncMock(return_value=0)
+    repo.purge_terminal = AsyncMock(return_value=0)
+
+    async def _orphans():
+        order.append("orphans")
+        return 3
+
+    async def _hook():
+        order.append("hook")
+
+    repo.purge_orphaned = AsyncMock(side_effect=_orphans)
+    proc = OutboxProcessor(repo, AsyncMock(), after_prune=_hook)
+    assert await proc.prune_once() == 3
+    assert order == ["orphans", "hook"]
