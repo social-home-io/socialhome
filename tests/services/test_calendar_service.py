@@ -45,6 +45,7 @@ from socialhome.domain.space import (
 )
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_moderation_service import SpaceModerationService
+from socialhome.services.moderation_release import release_scope
 
 
 # Event seeds are anchored in the near future so the service's
@@ -2900,3 +2901,71 @@ async def test_moderated_event_create_landed_then_federation_failed_stays_approv
     assert (await mod.get_item("cal-ao", exc.value.item.id)).status is (
         ModerationStatus.APPROVED
     )
+
+
+class _RecordingFed:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    async def broadcast_to_space_members(self, space_id, event_type, payload):
+        self.calls.append((space_id, event_type, payload))
+
+
+async def test_a_released_event_carries_the_approval_block(space_cal_env):
+    """v_43: an event written by a moderation release names the release
+    inside the sealed payload — create, update and delete."""
+    env = space_cal_env
+    fed = _RecordingFed()
+    env.space_cal_svc.attach_federation(fed)
+    start = datetime.now(timezone.utc) + timedelta(days=1)
+    with release_scope("item-9", "uid-alice"):
+        event = await env.space_cal_svc.create_event(
+            space_id="sp-cal",
+            summary="Reviewed",
+            start=start.isoformat(),
+            end=(start + timedelta(hours=1)).isoformat(),
+            created_by="uid-alice",
+            approved_by="uid-alice",
+        )
+        await env.space_cal_svc.update_event(
+            event.id,
+            actor_user_id="uid-alice",
+            space_id="sp-cal",
+            summary="Reviewed 2",
+            approved_by="uid-alice",
+        )
+        await env.space_cal_svc.delete_event(
+            event.id,
+            actor_user_id="uid-alice",
+            space_id="sp-cal",
+            approved_by="uid-alice",
+        )
+    writes = [c for c in fed.calls if "rsvp" not in c[1].value]
+    assert [c[1].value for c in writes] == [
+        "space_calendar_event_created",
+        "space_calendar_event_updated",
+        "space_calendar_event_deleted",
+    ]
+    block = {"item_id": "item-9", "approved_by": "uid-alice"}
+    assert all(c[2].get("moderation") == block for c in writes)
+
+
+async def test_an_event_released_for_a_remote_creator_rsvps_nobody(space_cal_env):
+    """An approver household releasing a REMOTE member's event cannot speak
+    for them: no automatic "going" RSVP is recorded or federated for the
+    creator here (their own household never could accept it)."""
+    env = space_cal_env
+    fed = _RecordingFed()
+    env.space_cal_svc.attach_federation(fed)
+    start = datetime.now(timezone.utc) + timedelta(days=1)
+    with release_scope("item-9", "uid-alice"):
+        event = await env.space_cal_svc.create_event(
+            space_id="sp-cal",
+            summary="Theirs",
+            start=start.isoformat(),
+            end=(start + timedelta(hours=1)).isoformat(),
+            created_by="u-remote",
+            approved_by="uid-alice",
+        )
+    assert await env.space_cal_svc.list_rsvps(event.id) == []
+    assert not [c for c in fed.calls if "rsvp" in c[1].value]

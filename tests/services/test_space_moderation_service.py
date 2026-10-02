@@ -28,15 +28,13 @@ from socialhome.domain.space import (
     ContentQueuedForReview,
     ModerationAlreadyDecidedError,
     ModerationExpiredError,
+    HostTooOldError,
     ModerationInProgressError,
-    ModerationNotFederatedError,
-    ModerationNotHostError,
     ModerationPayloadTooLargeError,
     ModerationQueueFullError,
     ModerationStatus,
     ModerationTargetGoneError,
     ModerationUnavailableError,
-    SpaceFeatureAccess,
     SpacePermissionError,
 )
 from socialhome.infrastructure.event_bus import EventBus
@@ -49,6 +47,7 @@ from socialhome.services.space_moderation_service import (
     ApplyResult,
     SpaceModerationService,
 )
+from socialhome.services.moderation_release import current_release
 from socialhome.services.sticky_service import StickyModerationHandler, StickyService
 
 HOST = "inst-host"
@@ -60,6 +59,43 @@ class _FakeFederationRepo:
 
     async def list_member_instance_ids(self, space_id: str) -> list[str]:
         return list(self.ids)
+
+
+class _FakeModerationFederation:
+    """Records what the queue sends to the other households (v_43)."""
+
+    def __init__(self, targets=(), *, host_too_old: bool = False) -> None:
+        self.targets = list(targets)
+        self.host_too_old = host_too_old
+        self.submitted: list[tuple[str, list[str]]] = []
+        self.decided: list[tuple[str, str, str, str | None]] = []
+        self.release_requests: list[tuple[str, str]] = []
+
+    async def submission_targets(self, space) -> list[str]:
+        if self.host_too_old:
+            raise HostTooOldError(space.owner_instance_id)
+        return list(self.targets)
+
+    async def send_submitted(self, space, item, targets) -> None:
+        self.submitted.append((item.id, list(targets)))
+
+    async def send_decided(self, space, item, *, decision, decided_by, reason):
+        self.decided.append((item.id, decision.value, decided_by, reason))
+
+    async def send_release_request(self, space, item, *, decided_by):
+        self.release_requests.append((item.id, decided_by))
+
+    async def reviewer_households(self, space):
+        return list(self.targets)
+
+    async def display_name(self, space_id, user_id):
+        return "Remote Rita" if user_id == "u-remote" else None
+
+    async def is_remote_writer(self, space_id, user_id):
+        return user_id == "u-remote"
+
+    async def remote_role(self, space_id, user_id):
+        return "admin" if user_id == "u-remote-admin" else None
 
 
 @pytest.fixture
@@ -190,19 +226,49 @@ async def test_others_delete_queues_with_full_snapshot(env):
     assert await env.stickies.get(note.id) is not None
 
 
-async def test_submit_refused_on_stub(env):
+async def test_submit_on_a_stub_goes_to_the_reviewers(env):
+    """v_43: a member household holds its member's item itself (the author's
+    ``…/mine``) and sends it to the reviewer households — nothing reaches
+    the content table."""
     await env.db.enqueue("UPDATE spaces SET owner_instance_id='elsewhere'")
-    with pytest.raises(ModerationNotFederatedError) as exc:
-        await env.svc.create(author="mem", content="x", space_id="sp")
-    assert exc.value.http_status == 403
+    fed = _FakeModerationFederation(["elsewhere", "inst-mod"])
+    env.mod.attach_federation(fed)
+    item = await _queue_create(env)
+    assert fed.submitted == [(item.id, ["elsewhere", "inst-mod"])]
+    assert (await env.spaces.get_moderation_item(item.id)).status.value == "pending"
     assert await env.stickies.list(space_id="sp") == []
 
 
-async def test_submit_refused_with_remote_households(env):
-    env.fed.ids.append("inst-remote")
-    with pytest.raises(ModerationNotFederatedError):
+async def test_submit_on_a_stub_whose_host_is_too_old_stores_nothing(env):
+    await env.db.enqueue("UPDATE spaces SET owner_instance_id='elsewhere'")
+    env.mod.attach_federation(_FakeModerationFederation(host_too_old=True))
+    with pytest.raises(HostTooOldError):
         await env.svc.create(author="mem", content="x", space_id="sp")
+    assert await env.spaces.count_pending("sp") == 0
     assert await env.stickies.list(space_id="sp") == []
+
+
+async def test_submit_on_a_stub_without_federation_fails_closed(env):
+    await env.db.enqueue("UPDATE spaces SET owner_instance_id='elsewhere'")
+    with pytest.raises(SpacePermissionError):
+        await env.svc.create(author="mem", content="x", space_id="sp")
+    assert await env.spaces.count_pending("sp") == 0
+    assert await env.stickies.list(space_id="sp") == []
+
+
+async def test_the_host_sends_its_members_items_to_remote_reviewers(env):
+    env.fed.ids.append("inst-mod")
+    fed = _FakeModerationFederation(["inst-mod"])
+    env.mod.attach_federation(fed)
+    item = await _queue_create(env)
+    assert fed.submitted == [(item.id, ["inst-mod"])]
+
+
+async def test_a_host_without_remote_reviewers_sends_nothing(env):
+    fed = _FakeModerationFederation([])
+    env.mod.attach_federation(fed)
+    await _queue_create(env)
+    assert fed.submitted == []
 
 
 async def test_queue_without_attached_submitter_fails_closed(env):
@@ -481,20 +547,6 @@ async def test_expire_due_and_purge(env):
 # ── Config gate ────────────────────────────────────────────────────────────
 
 
-async def test_require_moderation_supported(env):
-    await env.db.enqueue("UPDATE spaces SET stickies_access='open'")
-    space = await env.spaces.get("sp")
-    want = replace(space.features, pages_access=SpaceFeatureAccess.MODERATED)
-    await env.mod.require_moderation_supported(space, want)  # host, no remotes
-    env.fed.ids.append("inst-remote")
-    with pytest.raises(ModerationNotFederatedError) as exc:
-        await env.mod.require_moderation_supported(space, want)
-    assert exc.value.http_status == 422
-    # Posts keep their older behaviour: always allowed.
-    posts = replace(space.features, posts_access=SpaceFeatureAccess.MODERATED)
-    await env.mod.require_moderation_supported(space, posts)
-
-
 # ── A failure after the content landed (adversarial review I2) ────────────
 
 
@@ -592,13 +644,152 @@ async def test_approve_past_expiry_expires_it_410(env):
     assert SpaceModerationExpired in [type(e) for e in env.events]
 
 
-async def test_approve_on_a_non_host_is_refused_before_any_work(env):
-    item = await _queue_create(env)
+async def test_a_reviewer_household_hands_its_approval_to_the_host(env):
+    """v_43: off the host an approve applies nothing — it is checked, sent
+    to the host (which publishes from its own copy), and the row shows as
+    publishing until the host's decision arrives."""
     await env.db.enqueue("UPDATE spaces SET owner_instance_id='elsewhere'")
-    with pytest.raises(ModerationNotHostError):
-        await env.mod.approve("sp", item.id, actor_user_id="mod")
-    stored = await env.spaces.get_moderation_item(item.id)
-    assert stored.status is ModerationStatus.PENDING
+    fed = _FakeModerationFederation(["elsewhere"])
+    env.mod.attach_federation(fed)
+    item = await _queue_create(env)
+    result = await env.mod.approve("sp", item.id, actor_user_id="mod")
+    assert result.publishing is True
+    assert fed.release_requests == [(item.id, "mod")]
+    assert fed.decided == []
+    assert await env.stickies.list(space_id="sp") == []
+    held = await env.spaces.get_moderation_item(item.id)
+    assert held.status is ModerationStatus.PENDING
+    assert (await env.mod.describe(held))["publishing"] is True
+
+
+async def test_the_host_applies_a_remote_moderators_approval(env):
+    """The host releases an item for a moderator of another household: the
+    approver's verified role passes the content gate (they hold no local
+    seat), the content stays the submitter's, the decision is announced."""
+    fed = _FakeModerationFederation(["inst-mod"])
+    env.mod.attach_federation(fed)
+    seen: list = []
+
+    async def _scope(event) -> None:
+        seen.append(current_release())
+
+    env.mod._bus.subscribe(StickyCreated, _scope)
+    item = await _queue_create(env)
+    await env.mod.release_remote(item, approved_by="u-remote-mod", role="moderator")
+    notes = await env.stickies.list(space_id="sp")
+    assert [n.author for n in notes] == ["mem"]
+    assert [(r.item_id, r.approved_by) for r in seen] == [(item.id, "u-remote-mod")]
+    assert fed.decided == [(item.id, "approved", "u-remote-mod", None)]
+
+
+async def test_the_host_refuses_a_remote_approval_admin_only_keeps_out(env):
+    item = await _queue_create(env)
+    await env.db.enqueue("UPDATE spaces SET stickies_access='admin_only'")
+    with pytest.raises(AccessAdminOnlyError):
+        await env.mod.release_remote(item, approved_by="u-rm", role="moderator")
+    assert await env.stickies.list(space_id="sp") == []
+
+
+async def test_a_release_seen_from_the_host_marks_the_row_approved(env):
+    item = await _queue_create(env)
+    await env.mod.note_release(item, "u-rm")
+    assert (await env.spaces.get_moderation_item(item.id)).status is (
+        ModerationStatus.APPROVED
+    )
+
+
+async def test_an_early_decision_tombstone_blocks_a_late_submission(env):
+    item = replace(await _queue_create(env), id="late")
+    await env.mod.record_early_decision(
+        item_id="late",
+        space_id="sp",
+        decision=ModerationStatus.REJECTED,
+        decided_by="u-rm",
+        reason=None,
+    )
+    assert not await env.mod.store_received(item)
+    assert (await env.spaces.get_moderation_item("late")).status is (
+        ModerationStatus.REJECTED
+    )
+
+
+async def test_losing_content_authority_drops_other_households_items(env):
+    await env.db.enqueue("UPDATE spaces SET owner_instance_id='elsewhere'")
+    env.mod.attach_federation(_FakeModerationFederation(["elsewhere"]))
+    mine = await _queue_create(env)
+    theirs = replace(mine, id="theirs", submitted_by="u-remote")
+    await env.mod.store_received(theirs)
+    assert await env.mod.drop_held_for_others("sp") == 0  # we still review
+    await env.db.enqueue(
+        "UPDATE space_members SET role='member' WHERE role IN"
+        " ('owner', 'admin', 'moderator')"
+    )
+    assert await env.mod.drop_held_for_others("sp") == 1
+    gone = await env.spaces.get_moderation_item("theirs")
+    assert gone.status is ModerationStatus.EXPIRED and gone.payload == {}
+    kept = await env.spaces.get_moderation_item(mine.id)
+    assert kept.status is ModerationStatus.PENDING
+
+
+async def test_a_rejection_is_announced_with_its_reason(env):
+    fed = _FakeModerationFederation(["inst-mod"])
+    env.mod.attach_federation(fed)
+    item = await _queue_create(env)
+    await env.mod.reject("sp", item.id, actor_user_id="mod", reason="spam")
+    assert fed.decided == [(item.id, "rejected", "mod", "spam")]
+
+
+async def test_a_received_item_is_stored_once_and_announced(env):
+    item = replace(await _queue_create(env), id="remote-item", submitted_by="u-remote")
+    env.events.clear()
+    assert await env.mod.store_received(item)
+    assert not await env.mod.store_received(replace(item, payload={"x": 1}))
+    assert [type(e) for e in env.events] == [SpaceModerationQueued]
+    held = await env.spaces.get_moderation_item("remote-item")
+    assert held.payload == item.payload
+
+
+async def test_a_received_approval_beats_a_local_rejection(env):
+    """Two households decide at once: the approval wins everywhere — the
+    content was published — while a late rejection never undoes it."""
+    item = await _queue_create(env)
+    await env.mod.reject("sp", item.id, actor_user_id="mod", reason="no")
+    assert await env.mod.apply_decision(
+        item,
+        decision=ModerationStatus.APPROVED,
+        decided_by="u-remote-mod",
+        reason=None,
+    )
+    held = await env.spaces.get_moderation_item(item.id)
+    assert held.status is ModerationStatus.APPROVED
+    assert held.reviewed_by == "u-remote-mod"
+    assert not await env.mod.apply_decision(
+        item, decision=ModerationStatus.REJECTED, decided_by="mod", reason="late"
+    )
+    assert (await env.spaces.get_moderation_item(item.id)).status is (
+        ModerationStatus.APPROVED
+    )
+    # A duplicate approval moves nothing.
+    assert not await env.mod.apply_decision(
+        item, decision=ModerationStatus.APPROVED, decided_by="x", reason=None
+    )
+
+
+async def test_a_received_rejection_of_a_pending_item_is_recorded(env):
+    item = await _queue_create(env)
+    env.events.clear()
+    assert await env.mod.apply_decision(
+        item, decision=ModerationStatus.REJECTED, decided_by="u-rm", reason="dup"
+    )
+    held = await env.spaces.get_moderation_item(item.id)
+    assert (held.status, held.rejection_reason) == (ModerationStatus.REJECTED, "dup")
+    assert [type(e) for e in env.events] == [SpaceModerationRejected]
+
+
+async def test_describe_names_a_remote_submitter_from_the_roster(env):
+    env.mod.attach_federation(_FakeModerationFederation())
+    item = replace(await _queue_create(env), submitted_by="u-remote")
+    assert (await env.mod.describe(item))["submitted_by_display"] == "Remote Rita"
 
 
 async def test_payload_cap_counts_stored_utf8_bytes(env, monkeypatch):
@@ -671,3 +862,28 @@ async def test_an_approve_while_another_is_applying_is_in_progress(env, monkeypa
     assert len(await env.stickies.list(space_id="sp")) == 1
     with pytest.raises(ModerationAlreadyDecidedError):
         await env.mod.approve("sp", item.id, actor_user_id="alice")
+
+
+async def test_only_an_equal_or_higher_role_overturns_a_rejection(env):
+    """M4: rank owner > admin > moderator, by the seats the host holds; an
+    unknown rejecter counts as a moderator."""
+    env.mod.attach_federation(_FakeModerationFederation())
+    item = await _queue_create(env)
+    await env.mod.reject("sp", item.id, actor_user_id="admin")
+    with pytest.raises(ModerationAlreadyDecidedError):
+        await env.mod.release_remote(item, approved_by="u-rm", role="moderator")
+    await env.mod.release_remote(item, approved_by="u-ra", role="admin")
+    assert (await env.spaces.get_moderation_item(item.id)).status is (
+        ModerationStatus.APPROVED
+    )
+    other = await _queue_create(env, content="two")
+    await env.spaces.claim_moderation_item(
+        other.id, status=ModerationStatus.REJECTED, reviewed_by="u-remote-admin"
+    )
+    with pytest.raises(ModerationAlreadyDecidedError):
+        await env.mod.release_remote(other, approved_by="u-rm", role="moderator")
+    third = await _queue_create(env, content="three")
+    await env.spaces.claim_moderation_item(
+        third.id, status=ModerationStatus.REJECTED, reviewed_by="u-nobody"
+    )
+    await env.mod.release_remote(third, approved_by="u-rm", role="moderator")

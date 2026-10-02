@@ -11,6 +11,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEventType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.moderation_release import release_scope
 from socialhome.services.sticky_federation_outbound import (
     StickyFederationOutbound,
 )
@@ -153,3 +154,32 @@ async def test_every_write_carries_its_actor(env):
         "u-b",
         "u-c",
     ]
+
+
+async def test_a_moderation_release_carries_the_approval_block(env):
+    bus, fed = env
+    with release_scope("item-1", "u-mod"):
+        await bus.publish(
+            StickyCreated(
+                sticky_id="s1",
+                space_id="sp",
+                author="u",
+                content="x",
+                color="#FFF9B1",
+                position_x=0.0,
+                position_y=0.0,
+            )
+        )
+        await bus.publish(
+            StickyUpdated(
+                sticky_id="s1",
+                space_id="sp",
+                content="y",
+                color="#FFF9B1",
+                position_x=0.0,
+                position_y=0.0,
+            )
+        )
+        await bus.publish(StickyDeleted(sticky_id="s1", space_id="sp"))
+    block = {"item_id": "item-1", "approved_by": "u-mod"}
+    assert [p.get("moderation") for _s, _t, p in fed.broadcasts] == [block] * 3

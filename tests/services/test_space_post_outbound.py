@@ -24,6 +24,7 @@ from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import JoinMode, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.moderation_release import release_scope
 from socialhome.services.space_post_outbound import SpacePostOutbound
 from socialhome.services.space_public_author import (
     author_signing_bytes,
@@ -932,3 +933,75 @@ async def test_an_approved_posts_actor_is_its_approver():
     )
     payload = federation.broadcast_to_space_members.call_args.args[2]
     assert (payload["author"], payload["actor_user_id"]) == ("uid-bob", "uid-olga")
+
+
+async def test_a_released_post_names_its_author_and_the_release():
+    """v_43: a post released from the queue federates as its AUTHOR's
+    (``actor_user_id`` = the submitter) with the approval block naming the
+    item and the approver — on any approver household, not just the host."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    post = Post(
+        id="post-q",
+        author="uid-bob",
+        type=PostType.TEXT,
+        content="reviewed",
+        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+    )
+    with release_scope("item-1", "uid-mod"):
+        await bus.publish(
+            SpacePostCreated(post=post, space_id="sp-1", approved_by="uid-mod")
+        )
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert payload["actor_user_id"] == "uid-bob"
+    assert payload["moderation"] == {"item_id": "item-1", "approved_by": "uid-mod"}
+
+
+async def test_an_approved_announce_card_federates_with_its_event_link():
+    """The feed card of a reviewed calendar event (#790 concern 4) is a
+    queued post linked to the event: once approved it must reach the other
+    households — only the bridge's own unreviewed cards stay local."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    card = Post(
+        id="post-card",
+        author="uid-bob",
+        type=PostType.EVENT,
+        content="Picnic",
+        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        linked_event_id="ev-1",
+    )
+    with release_scope("item-2", "uid-mod"):
+        await bus.publish(
+            SpacePostCreated(post=card, space_id="sp-1", approved_by="uid-mod")
+        )
+    federation.broadcast_to_space_members.assert_awaited_once()
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert payload["linked_event_id"] == "ev-1"
+    assert payload["type"] == "event"
+    assert payload["moderation"]["item_id"] == "item-2"
+
+
+async def test_a_bridge_card_minted_during_an_event_release_stays_local():
+    """Approving a calendar EVENT runs the feed bridge on the approving
+    household; that card (no ``approved_by``) is the bridge's and must not
+    federate — every household's bridge mints its own."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    card = Post(
+        id="p-bridge",
+        author="uid-bob",
+        type=PostType.EVENT,
+        content="Picnic",
+        created_at=datetime(2026, 5, 23, tzinfo=timezone.utc),
+        linked_event_id="ev-1",
+    )
+    with release_scope("item-3", "uid-mod"):
+        await bus.publish(SpacePostCreated(post=card, space_id="sp-1"))
+    federation.broadcast_to_space_members.assert_not_awaited()

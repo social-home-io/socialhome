@@ -1797,7 +1797,9 @@ class SpaceModerationApproveView(BaseView):
         return web.json_response(
             {
                 "item_id": item_id,
-                "status": "approved",
+                # ``publishing``: approved on this member household and
+                # handed to the space's host, which publishes it (v_43).
+                "status": "publishing" if result.publishing else "approved",
                 "target_id": result.target_id,
                 # Legacy alias (the posts-only queue's response).
                 "post_id": result.post_id,

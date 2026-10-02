@@ -19,6 +19,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
+from .moderation_release import with_release
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -53,13 +54,17 @@ class ScheduleFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_SCHEDULE_CREATED,
-            {
-                "post_id": event.post_id,
-                "space_id": event.space_id,
-                "title": event.title,
-                "deadline": event.deadline,
-                "slots": list(event.slots),
-            },
+            # A schedule riding a reviewed post is published by its
+            # approval, which it names (v_43).
+            with_release(
+                {
+                    "post_id": event.post_id,
+                    "space_id": event.space_id,
+                    "title": event.title,
+                    "deadline": event.deadline,
+                    "slots": list(event.slots),
+                }
+            ),
         )
 
     async def _on_responded(self, event: SchedulePollResponded) -> None:

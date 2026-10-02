@@ -35,28 +35,11 @@ export function accessLevel(
 }
 
 /** The levels the settings offer — every feature can be Reviewed
- *  (``moderated``); whether Reviewed can be PICKED for a feature is
- *  ``moderatedBlocked``'s call. */
+ *  (``moderated``), in spaces shared with other households too (federated
+ *  moderation, v_43; a household too old for it shows up in the
+ *  ``409 PEERS_TOO_OLD`` prompt when Reviewed is picked). */
 export function levelOptions(): SpaceAccessLevel[] {
   return [...LEVELS]
-}
-
-/** Where the space can't hold non-post features for review yet: the
- *  queue lives on the host and isn't federated (§4.3, until protocol
- *  v43), so a space with members from other households — or a stub of a
- *  space hosted elsewhere — keeps Reviewed for posts only. The host
- *  refuses it anyway (``422 MODERATION_NOT_FEDERATED``). */
-export function moderatedBlocked(
-  feature: AccessFeature,
-  opts: { hasRemoteHouseholds?: boolean; isRemoteSpace?: boolean },
-): boolean {
-  if (feature === 'posts') return false
-  return !!opts.hasRemoteHouseholds || !!opts.isRemoteSpace
-}
-
-/** Is ``err`` the host's ``MODERATION_NOT_FEDERATED`` refusal? */
-export function isModerationNotFederated(err: unknown): boolean {
-  return (err as { code?: unknown } | null)?.code === 'MODERATION_NOT_FEDERATED'
 }
 
 /** Is ``role`` a writer the ADMIN_ONLY ``level`` alone keeps out — a

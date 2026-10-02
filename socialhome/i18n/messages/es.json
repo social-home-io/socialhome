@@ -24,7 +24,7 @@
   "notification.space.moderation.approved": "Tu envío en {space_name} fue aprobado",
   "notification.space.moderation.rejected": "Tu envío en {space_name} no fue aprobado",
   "notification.space.moderation.expired": "Tu envío en {space_name} caducó sin revisión",
-  "notification.space.moderation.unavailable": "«Revisado» no está disponible para {features} en {space_name} mientras haya miembros de otros hogares en este espacio: los cambios de los miembros se rechazan hasta que elijas otro nivel",
+  "notification.space.moderation.unavailable": "«Revisado» no está disponible para {features} en {space_name} para los miembros de un hogar que necesita actualizarse: sus cambios se rechazan hasta que se actualice o elijas otro nivel",
   "notification.space.feature.pages": "Páginas",
   "notification.space.feature.tasks": "Tareas",
   "notification.space.feature.stickies": "Notas adhesivas",

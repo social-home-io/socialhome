@@ -201,10 +201,13 @@ class SqliteFederationRepo:
         :data:`FederationEventType.INSTANCE_CAPABILITIES_UPDATED`
         handler. A single targeted UPDATE so the much larger
         :meth:`save_instance` (which re-writes every column) doesn't
-        accidentally clobber state set elsewhere between reads.
+        accidentally clobber state set elsewhere between reads. Never
+        lowers the stored version (a high-water mark).
         """
+        # A high-water mark: never lowered (see the inbound handler).
         await self._db.enqueue(
-            "UPDATE remote_instances SET proto_version=? WHERE id=?",
+            "UPDATE remote_instances SET proto_version=MAX(proto_version, ?) "
+            "WHERE id=?",
             (proto_version, instance_id),
         )
 
@@ -725,7 +728,9 @@ ON CONFLICT(id) DO UPDATE SET
     remote_inbox_url=excluded.remote_inbox_url,
     status=excluded.status,
     source=excluded.source,
-    proto_version=excluded.proto_version,
+    -- A high-water mark: a re-pair never lowers it (an unpair deletes the
+    -- row, so a fresh pairing starts from scratch).
+    proto_version=MAX(remote_instances.proto_version, excluded.proto_version),
     remote_pq_algorithm=excluded.remote_pq_algorithm,
     remote_pq_identity_pk=excluded.remote_pq_identity_pk,
     sig_suite=excluded.sig_suite,

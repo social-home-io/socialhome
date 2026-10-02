@@ -50,6 +50,7 @@ from ..domain.task import (
     normalize_labels,
     sanitize_block,
     sanitize_line,
+    task_to_wire_dict,
 )
 from ..domain.space import (
     AccessDecision,
@@ -1585,6 +1586,23 @@ class TaskModerationHandler:
                 return None
             return {"name": lst.name, "created_by": lst.created_by}
         return _task_dict(task)
+
+    async def held(self, space_id: str, target_id: str) -> dict | None:
+        """:meth:`snapshot` plus the fields an edit never changes (the
+        recurrence) — what a federated release is checked against (v_43)."""
+        row = await self.snapshot(space_id, target_id)
+        if row is None:
+            return None
+        try:
+            task = await self._svc.get_task_in_space(target_id, space_id)
+        except KeyError:
+            return row  # a list
+        wire = task_to_wire_dict(task, space_id)
+        return {
+            **row,
+            "recurrence": wire.get("recurrence"),
+            "recurrence_parent_id": wire.get("recurrence_parent_id"),
+        }
 
     async def apply(
         self, item: SpaceModerationItem, *, approved_by: str, force: bool

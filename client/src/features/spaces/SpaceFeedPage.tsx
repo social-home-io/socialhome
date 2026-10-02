@@ -6,7 +6,6 @@ import { addBase } from '@/baseUrl'
 import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import { loadHouseholdUsers } from '@/store/householdUsers'
-import { instanceConfig } from '@/store/instance'
 import { loadSpaceMembers, setSpaceHereAllowed } from '@/store/spaceMembers'
 import { useTitle } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
@@ -100,8 +99,7 @@ interface SpaceDetail {
    *  was removed. The latter two are remote-terminated read-only archives
    *  that can't be revived — the banner copy adapts to this. */
   archived_reason?: 'dissolved' | 'removed' | null
-  /** Another household has a member here (§4.3: "Reviewed" is posts-only
-   *  then, until federated moderation lands). */
+  /** Another household has a member here. */
   has_remote_households?: boolean
 }
 
@@ -413,20 +411,13 @@ export default function SpaceFeedPage() {
 
   if (loading.value) return <Spinner />
 
-  // §D1b — a stub of a remote-hosted space looks like a normal row
-  // locally, but its moderation queue lives on the host (a MODERATED post
-  // queues there), so a stub's queue is always empty until federated
-  // moderation lands (follow-up). Show the Moderation tab on the host only.
-  const isRemoteSpace = !!(
-    spaceDetail.value?.owner_instance_id
-    && instanceConfig.value?.instance_id
-    && spaceDetail.value.owner_instance_id !== instanceConfig.value.instance_id
-  )
   // Content authority (owner / admin / moderator, v_41): acting on other
-  // people's posts, and — on the host — the moderation queue. No settings
-  // power rides along with it; the server re-checks every action.
+  // people's posts, and the moderation queue — on the host and on every
+  // household holding a moderator / admin seat alike, since items are
+  // sent to each of them (federated moderation, v_43). No settings power
+  // rides along with it; the server re-checks every action.
   const canModerate = roleCanModerate(viewerRole.value)
-  const canModerateQueue = canModerate && !isRemoteSpace
+  const canModerateQueue = canModerate
   const s = spaceDetail.value
 
   // Per-space feature toggles hide their tab when off (``spaceTabs``).

@@ -17,7 +17,11 @@ from PIL import Image
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import SpaceConfigChanged, SpacePostCreated
+from socialhome.domain.events import (
+    SpaceConfigChanged,
+    SpaceModerationQueued,
+    SpacePostCreated,
+)
 from socialhome.domain.post import PostType
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -26,6 +30,7 @@ from socialhome.federation.owner_bound_id import (
     check_owner_bound_id,
 )
 from socialhome.domain.space import (
+    PeersTooOldError,
     ContentAction,
     ContentQueuedForReview,
     HouseholdUpgradeRequiredError,
@@ -830,31 +835,59 @@ async def _seat_remote_space_with_posts_access(stack, *, actor, posts_access):
     return space.id, actor_user.user_id
 
 
-async def test_remote_stub_moderated_post_proceeds_not_queued(stack):
-    """posts_access is HOST-authoritative: on a REMOTE stub a non-admin member's
-    post proceeds (returns a real Post) and is NOT dropped into a local
-    moderation queue the host can't resolve."""
-    from socialhome.domain.events import SpaceModerationQueued
+class _RecordingModerationFederation:
+    def __init__(self) -> None:
+        self.submitted: list[tuple[str, list[str]]] = []
 
+    async def submission_targets(self, space) -> list[str]:
+        return [space.owner_instance_id]
+
+    async def send_submitted(self, space, item, targets) -> None:
+        self.submitted.append((item.id, list(targets)))
+
+    async def send_decided(self, space, item, **kwargs) -> None:
+        return None
+
+    async def display_name(self, space_id, user_id):
+        return None
+
+    async def is_remote_writer(self, space_id, user_id):
+        return False
+
+    async def send_release_request(self, space, item, *, decided_by):
+        return None
+
+    async def reviewer_households(self, space):
+        return [space.owner_instance_id]
+
+    async def remote_role(self, space_id, user_id):
+        return None
+
+
+async def test_remote_stub_moderated_post_queues_for_the_reviewers(stack):
+    """v_43: on a member household's stub a plain member's post under
+    MODERATED is held for review like every other feature's item — stored
+    here (the author's pending strip) and sent to the reviewer households;
+    nothing reaches the feed."""
     sid, uid = await _seat_remote_space_with_posts_access(
         stack, actor="bob", posts_access=SpaceFeatureAccess.MODERATED
     )
+    fed = _RecordingModerationFederation()
+    stack.mod.attach_federation(fed)
     queued: list[SpaceModerationQueued] = []
     stack.space_svc._bus.subscribe(SpaceModerationQueued, queued.append)
 
-    result = await stack.space_svc.create_post(
-        sid,
-        author_user_id=uid,
-        type=PostType.TEXT,
-        content="hello from remote member",
-    )
-
-    assert result is not None
-    assert result.content == "hello from remote member"
-    assert result.author == uid
-    assert queued == []
-    # No moderation row was written.
-    assert await stack.space_repo.list_moderation_queue(sid) == []
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await stack.space_svc.create_post(
+            sid,
+            author_user_id=uid,
+            type=PostType.TEXT,
+            content="hello from remote member",
+        )
+    item = exc.value.item
+    assert fed.submitted == [(item.id, ["inst-remote-owner"])]
+    assert [q.item.id for q in queued] == [item.id]
+    assert await stack.space_svc.get_space_post(sid, item.payload["target_id"]) is None
 
 
 async def test_remote_stub_admin_only_post_is_refused_locally(stack):
@@ -3735,6 +3768,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
+        "Reviewed across households",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3761,6 +3795,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
+        "Reviewed across households",
     )
 
 
@@ -3799,6 +3834,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
+        "Reviewed across households",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3852,6 +3888,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
+        "Reviewed across households",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -8304,12 +8341,38 @@ async def test_up_to_date_households_never_block(stack):
     await stack.provision_user("anna", is_admin=True)
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     stack.space_svc._federation_repo = _FakeFedRepo(
-        [_member("peer-new", 42, seen=True)]
+        [_member("peer-new", 43, seen=True)]
     )
     await stack.space_svc.update_config(
         space.id,
         actor_username="anna",
         features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+
+
+@pytest.mark.parametrize("feature", ["posts", "pages", "tasks", "stickies", "calendar"])
+async def test_reviewed_needs_every_household_on_v43(stack, feature):
+    """v_43: a feature newly set to MODERATED needs every member household
+    to hold and review items for the others — a v_42 household is named
+    (PEERS_TOO_OLD) until forced; ADMIN_ONLY still only needs v_42."""
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    stack.space_svc._federation_repo = _FakeFedRepo([_member("peer-42", 42, seen=True)])
+    reviewed = SpaceFeatures(**{f"{feature}_access": SpaceFeatureAccess.MODERATED})
+    with pytest.raises(PeersTooOldError) as exc:
+        await stack.space_svc.update_config(
+            space.id, actor_username="anna", features=reviewed
+        )
+    assert [h["instance_id"] for h in exc.value.households] == ["peer-42"]
+    got = await stack.space_svc.update_config(
+        space.id, actor_username="anna", features=reviewed, force=True
+    )
+    assert got.features.access_level(feature) is SpaceFeatureAccess.MODERATED
+    other = await stack.space_svc.create_space(owner_username="anna", name="T")
+    await stack.space_svc.update_config(
+        other.id,
+        actor_username="anna",
+        features=SpaceFeatures(**{f"{feature}_access": SpaceFeatureAccess.ADMIN_ONLY}),
     )
 
 
@@ -8359,7 +8422,7 @@ async def test_the_host_rechecks_a_forwarded_access_raise(stack, caplog):
     # The rest of the edit is not lost with it.
     assert got.name == "Renamed"
     assert got.features.bazaar is False
-    assert any("below v_42" in r.getMessage() for r in caplog.records)
+    assert any("too old to enforce" in r.getMessage() for r in caplog.records)
     await stack.space_svc.apply_approved_admin_action(
         space.id, action="update_config", params={**params, "force": True}
     )

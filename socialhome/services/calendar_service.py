@@ -31,9 +31,9 @@ from ..domain.calendar import (
 )
 from ..domain.child_protection import ProtectedCapability
 from ..domain.space import (
+    HostTooOldError,
     AccessDecision,
     ContentAction,
-    ModerationNotFederatedError,
     ModerationQueueFullError,
     ModerationTargetGoneError,
     Space,
@@ -62,6 +62,7 @@ from ..utils.rrule import expand_rrule
 from ..utils.timezones import is_valid_tz
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
+from .moderation_release import with_release
 from .protection_gate import ProtectionGateMixin
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
@@ -1431,6 +1432,17 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
                 },
             )
         queue_announce = False
+        # A release of a REMOTE member's event (an approver household that is
+        # not the creator's, v_43) cannot speak for the creator: no announce
+        # card is queued in their name and no "going" RSVP is recorded for
+        # them — their own household could accept neither.
+        speaks_for_creator = (
+            approved_by is None
+            or await self._spaces_or_raise().get_member(space_id, created_by)
+            is not None
+        )
+        if announce_in_feed and not speaks_for_creator:
+            announce_in_feed = False
         if announce_in_feed:
             refusal = await self.announce_refusal(space_id, created_by)
             if refusal:
@@ -1480,6 +1492,8 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         # (skips the approval flow for self). Publish SpaceRsvpChanged
         # too so the personal-calendar mirror appears for the creator
         # without them having to RSVP again.
+        if not speaks_for_creator:
+            return saved
         await self._repo.upsert_rsvp(
             CalendarRSVP(
                 event_id=saved.id,
@@ -1555,7 +1569,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
                 },
             )
         except (
-            ModerationNotFederatedError,
+            HostTooOldError,
             ModerationQueueFullError,
             SpacePermissionError,
         ) as exc:
@@ -2430,7 +2444,8 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         await self._federation.broadcast_to_space_members(
             space_id,
             evt_type,
-            payload,
+            # A write released from the moderation queue names it (v_43).
+            with_release(payload),
         )
 
     async def _publish_federation_event_deleted(
@@ -2447,11 +2462,13 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
             # ``space_id`` rides the payload too — see
             # :meth:`_publish_federation_event_saved`.
-            {
-                "event_id": event_id,
-                "space_id": space_id,
-                "actor_user_id": actor_user_id,
-            },
+            with_release(
+                {
+                    "event_id": event_id,
+                    "space_id": space_id,
+                    "actor_user_id": actor_user_id,
+                }
+            ),
         )
 
     async def _publish_federation_rsvp(
@@ -2614,6 +2631,21 @@ class CalendarModerationHandler:
         except KeyError:
             return None
         return _event_dict(event)
+
+    async def held(self, space_id: str, target_id: str) -> dict | None:
+        """:meth:`snapshot` plus the fields an edit never changes (the feed
+        flag, the mirror origin, the calendar) — what a federated release
+        is checked against (v_43)."""
+        try:
+            event = await self._svc.get_event_in_space(target_id, space_id=space_id)
+        except KeyError:
+            return None
+        return {
+            **_event_dict(event),
+            "calendar_id": event.calendar_id,
+            "mirrored_from": event.mirrored_from,
+            "announce_in_feed": event.announce_in_feed,
+        }
 
     async def apply(
         self, item: SpaceModerationItem, *, approved_by: str, force: bool

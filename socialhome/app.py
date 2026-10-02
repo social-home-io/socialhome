@@ -315,6 +315,7 @@ from .services.resync_on_upgrade import request_capability_resync_if_upgraded
 from .services.preferences_service import PreferencesService
 from .services.page_conflict_service import PageConflictService
 from .services.space_page_service import PageModerationHandler, SpacePageService
+from .services.space_moderation_federation import SpaceModerationFederation
 from .services.space_moderation_service import SpaceModerationService
 from .services.space_post_moderation import PostModerationHandler, SpacePostAttachments
 from .services.poll_service import PollService
@@ -385,13 +386,19 @@ async def _deliver_outbox_entry(
     federation_repo,
     peer_unpair: PeerUnpairService,
     entry,
+    *,
+    still_wanted=None,
 ) -> DeliveryOutcome:
     """The :class:`OutboxProcessor` delivery callback.
 
     :func:`_redeliver_envelope` does the work; an ``UNPAIR`` that reached a
     verdict (delivered, or refused for good — the peer already forgot us)
-    also ends the peer's unpair tombstone.
+    also ends the peer's unpair tombstone. ``still_wanted`` (the moderation
+    queue's check) drops a retry the target may no longer receive — a
+    pending item to a household that no longer reviews the space.
     """
+    if still_wanted is not None and not await still_wanted(entry):
+        return DeliveryOutcome.PERMANENT
     outcome = await _redeliver_envelope(federation_service, federation_repo, entry)
     if (
         entry.event_type is FederationEventType.UNPAIR
@@ -1063,6 +1070,8 @@ def _wire_federation_stack(
         # A host's cover / icon change ships the image; members store it.
         space_cover_repo=space_cover_repo,
         space_icon_repo=space_icon_repo,
+        # An approved announce card must link an event of its own space.
+        space_calendar_repo=space_calendar_repo,
     )
     inbound_service.attach_to(federation_service)
     inbound_service.attach_groups(dm_service.groups)
@@ -1551,6 +1560,7 @@ def _wire_federation_stack(
         federation_service=federation_service,
         sync_manager=sync_manager,
         inbound_service=inbound_service,
+        space_authorship=space_authorship,
         pairing_relay_queue=pairing_relay_queue,
         household_instance_ban_repo=household_instance_ban_repo,
         relay_policy=relay_policy,
@@ -1605,6 +1615,7 @@ def _build_space_moderation(
     calendar_service: SpaceCalendarService,
     space_poll_service: PollService,
     bazaar_service: BazaarService,
+    federated: SpaceModerationFederation | None = None,
 ) -> SpaceModerationService:
     """The §4.3 moderation queue + its per-(feature, action) handler
     registry, attached to every content service that can queue.
@@ -1651,6 +1662,12 @@ def _build_space_moderation(
         service.attach_moderation(moderation)
         for action in actions:
             moderation.register(feature, action, handler)
+    if federated is not None:
+        # v_43: items and decisions travel to and from the households that
+        # review (SPACE_MODERATION_SUBMITTED / _DECIDED, targeted sends).
+        federated.bind(moderation)
+    # A household that stops reviewing drops other households' pending items.
+    moderation.watch_seats(bus)
     return moderation
 
 
@@ -2147,6 +2164,8 @@ def create_app(config: Config | None = None) -> web.Application:
     )
     notification_service.attach_calendar_repo(space_cal_repo)
     notification_service.attach_remote_member_repo(repos.space_remote_member)
+    # Only a household below v_43 warns about "Reviewed" (federated moderation).
+    notification_service.attach_federation_repo(repos.federation)
     notification_service.attach_personal_calendar_repo(calendar_repo)
 
     # ── Per-user data export (§25.8.7) ──────────────────────────────────
@@ -2914,13 +2933,23 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo=federation_repo,
             remote_member_repo=repos.space_remote_member,
         )
-        # §4.3 moderation queue for every MODERATED feature (host-local).
+        # §4.3 moderation queue for every MODERATED feature, held by every
+        # household that reviews (v_43 federated moderation).
+        moderation_federation = SpaceModerationFederation(
+            federation_service=federation_service,
+            space_repo=space_repo,
+            remote_member_repo=repos.space_remote_member,
+            authorship=fed.space_authorship,
+            media_sync=space_media_sync_service,
+        )
+        moderation_federation.attach_to(federation_service)
         space_moderation = _build_space_moderation(
             space_repo=space_repo,
             user_repo=user_repo,
             bus=bus,
             federation_repo=federation_repo,
             own_instance_id=real_instance_id,
+            federated=moderation_federation,
             space_service=real_space_service,
             page_service=space_page_service,
             task_service=space_task_service,
@@ -2930,6 +2959,12 @@ def create_app(config: Config | None = None) -> web.Application:
             bazaar_service=bazaar_service,
         )
         app[K.space_moderation_service_key] = space_moderation
+        # Releases of items held here are checked against our own rows, and
+        # move the held row to approved (v_43).
+        fed.space_authorship.attach_moderation(
+            held_rows=space_moderation.held_row,
+            on_release=space_moderation.note_release,
+        )
         nonlocal moderation_expiry_scheduler
         moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
         await moderation_expiry_scheduler.start()
@@ -3323,11 +3358,15 @@ def create_app(config: Config | None = None) -> web.Application:
             from the original send_event() call. On retry we POST the same
             bytes verbatim — no re-encryption.
             """
+            moderation = app.get(K.space_moderation_service_key)
             return await _deliver_outbox_entry(
                 federation_service,
                 federation_repo,
                 peer_unpair_service,
                 entry,
+                still_wanted=(
+                    moderation.outbox_entry_wanted if moderation is not None else None
+                ),
             )
 
         # ``after_prune``: once the retention sweep has failed an UNPAIR

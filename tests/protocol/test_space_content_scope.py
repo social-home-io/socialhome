@@ -477,6 +477,11 @@ NOT_ROW_SCOPED: dict[FederationEventType, str] = {
         "writes media bytes keyed by filename, not a space row — its scope "
         "and write-once rules live in test_media_blob_scope.py"
     ),
+    FET.SPACE_MODERATION_SUBMITTED: (
+        "writes only the moderation queue, never a content row — its "
+        "authorship, confinement and archived refusal live in "
+        "test_space_moderation_federated.py"
+    ),
 }
 
 

@@ -34,7 +34,7 @@
   "notification.space.moderation.approved": "Your submission in {space_name} was approved",
   "notification.space.moderation.rejected": "Your submission in {space_name} was not approved",
   "notification.space.moderation.expired": "Your submission in {space_name} expired without a review",
-  "notification.space.moderation.unavailable": "Reviewed isn't available for {features} in {space_name} while members from other households are in this space — member changes are refused until you choose another level",
+  "notification.space.moderation.unavailable": "Reviewed isn't available for {features} in {space_name} for members of a household that needs an update — their changes are refused until it updates or you choose another level",
   "notification.space.feature.pages": "Pages",
   "notification.space.feature.tasks": "Tasks",
   "notification.space.feature.stickies": "Sticky notes",

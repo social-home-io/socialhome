@@ -9887,6 +9887,239 @@ def cmd_group_dm() -> None:
     print("group-dm: ok")
 
 
+def cmd_federated_moderation() -> None:
+    """Federated moderation (v_43): "Reviewed" across households.
+
+    Beta (b) hosts a fresh space ("Reviewed club") with Alice (a), Carol
+    (c) and Dave (d) as remote members. Beta promotes Carol to
+    ``moderator`` and sets ``tasks_access`` to ``moderated``.
+
+    1. **Alice submits** a task on her own household: a answers 202
+       queued and sends ``SPACE_MODERATION_SUBMITTED`` to the host b and
+       the moderator household c only.
+    2. **Carol approves on her own household** (c's Moderation tab — no
+       ``NOT_HOST`` any more): c answers ``publishing`` and sends
+       ``SPACE_MODERATION_DECIDED{approved}`` to the host b alone; b applies
+       the task from its own copy and federates ``SPACE_TASK_CREATED`` as
+       Alice's with the approval block, then announces the decision to a
+       and c.
+    3. a, b, c **and** d all hold the task, created by Alice; a's own
+       queue row reads ``approved``.
+    4. **d — a plain member household — never received the pending
+       item**: no ``space_moderation_queue`` row for it in d's DB, and the
+       item id never appears in d's log.
+
+    Beta then resets the level, demotes Carol and the space stays (its
+    own, so no earlier step's assertions change).
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' + 'relay-pair' first")
+    inst = state["instances"]
+    a, b, c, d = inst["a"], inst["b"], inst["c"], inst["d"]
+    b_base = f"http://127.0.0.1:{b['port']}"
+    s, space = _request(
+        f"{b_base}/api/spaces",
+        token=b["token"],
+        method="POST",
+        body={"name": "Reviewed club", "join_mode": "invite_only"},
+    )
+    space_id = _must("space create(b)", s, space, ok=(201,))["id"]
+    print(f"  b: space {space_id[:8]} created")
+    d_log_before = _log_size("d")
+    for label in ("a", "c", "d"):
+        guest = inst[label]
+        s, inv = _request(
+            f"{b_base}/api/spaces/{space_id}/remote-invites",
+            token=b["token"],
+            method="POST",
+            body={
+                "invitee_instance_id": guest["instance_id"],
+                "invitee_user_id": guest["user_id"],
+            },
+        )
+        _must(f"remote-invite({label})", s, inv, ok=(201,))
+
+    def _invite_token(label: str) -> str | None:
+        guest = inst[label]
+        s, invites = _request(
+            f"http://127.0.0.1:{guest['port']}/api/remote_invites",
+            token=guest["token"],
+        )
+        items = invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        hit = next((i for i in items if i.get("space_id") == space_id), None)
+        return hit["invite_token"] if s == 200 and hit else None
+
+    for label in ("a", "c", "d"):
+        _wait_for(
+            f"{label} to receive b's invite",
+            lambda label=label: _invite_token(label) is not None,
+            timeout=60.0,
+        )
+        token = _invite_token(label)
+        guest = inst[label]
+        s, r = _request(
+            f"http://127.0.0.1:{guest['port']}/api/remote_invites/{token}/accept",
+            token=guest["token"],
+            method="POST",
+        )
+        _must(f"accept-invite({label})", s, r, ok=(204,))
+
+    def _seated(label: str) -> bool:
+        rows = _rows(
+            "b",
+            "SELECT 1 FROM space_remote_members WHERE space_id=? AND user_id=?"
+            " AND tombstoned=0",
+            (space_id, inst[label]["user_id"]),
+        )
+        return bool(rows)
+
+    for label in ("a", "c", "d"):
+        _wait_for(f"b to seat {label}", lambda label=label: _seated(label), timeout=60.0)
+    print("  a, c and d seated in the Reviewed club")
+
+    s, body = _request(
+        f"{b_base}/api/spaces/{space_id}/remote-members/{c['instance_id']}/{c['user_id']}",
+        token=b["token"],
+        method="PATCH",
+        body={"role": "moderator"},
+    )
+    _must("promote carol to moderator", s, body)
+
+    def _local_role(label: str) -> str | None:
+        rows = _rows(
+            label,
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, inst[label]["user_id"]),
+        )
+        return rows[0][0] if rows else None
+
+    _wait_for("c to hold carol's moderator seat", lambda: _local_role("c") == "moderator")
+    s, lst = _request(
+        f"{b_base}/api/spaces/{space_id}/tasks/lists",
+        token=b["token"],
+        method="POST",
+        body={"name": "Club chores"},
+    )
+    list_id = _must("task list create(b)", s, lst, ok=(201,))["id"]
+    s, body = _request(
+        f"{b_base}/api/spaces/{space_id}",
+        token=b["token"],
+        method="PATCH",
+        body={"features": {"tasks_access": "moderated"}},
+    )
+    _must("b: tasks_access=moderated (every household on v_43)", s, body)
+
+    def _level(label: str) -> str | None:
+        v = inst[label]
+        s, sp = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}", token=v["token"]
+        )
+        return ((sp or {}).get("features") or {}).get("tasks_access") if s == 200 else None
+
+    for label in ("a", "c"):
+        _wait_for(f"{label} to see tasks reviewed", lambda label=label: _level(label) == "moderated")
+
+    def _has_list(label: str) -> bool:
+        v = inst[label]
+        s, lists = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/tasks/lists",
+            token=v["token"],
+        )
+        return s == 200 and any(row.get("id") == list_id for row in lists)
+
+    for label in ("a", "c", "d"):
+        _wait_for(f"{label} to hold the list", lambda label=label: _has_list(label))
+
+    title = f"Bring snacks {int(time.time())}"
+    s, queued = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
+        token=a["token"],
+        method="POST",
+        body={"title": title},
+    )
+    if s != 202 or not (queued or {}).get("queued"):
+        raise SystemExit(
+            f"federated-moderation: a's member task -> {s} {queued!r} "
+            "(expected 202 queued — v_43 stub submit)"
+        )
+    item_id = queued["item_id"]
+    print(f"  a: Alice's task queued for review (item {item_id[:8]})")
+
+    def _queue_has(label: str) -> bool:
+        v = inst[label]
+        s, items = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/moderation",
+            token=v["token"],
+        )
+        return s == 200 and any(i.get("id") == item_id for i in items)
+
+    _wait_for("c's Moderation tab to list the item", lambda: _queue_has("c"), timeout=60.0)
+    _wait_for("b's Moderation tab to list the item", lambda: _queue_has("b"), timeout=60.0)
+    print("  b (host) and c (moderator household) hold the pending item ✓")
+
+    s, body = _request(
+        f"http://127.0.0.1:{c['port']}/api/spaces/{space_id}/moderation/{item_id}/approve",
+        token=c["token"],
+        method="POST",
+        body={},
+    )
+    _must("c: carol approves on her own household", s, body)
+    if body.get("status") != "publishing":
+        raise SystemExit(
+            f"federated-moderation: c's approve -> {body!r} (expected status "
+            "'publishing' — only the host applies an item)"
+        )
+    print("  c: Carol approved on Gamma → handed to the host b (publishing)")
+
+    def _task_by(label: str) -> str | None:
+        v = inst[label]
+        s, rows = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
+            token=v["token"],
+        )
+        hit = next((t for t in rows if t.get("title") == title), None) if s == 200 else None
+        return hit.get("created_by") if hit else None
+
+    for label in ("a", "b", "c", "d"):
+        _wait_for(
+            f"{label} to hold the approved task",
+            lambda label=label: _task_by(label) == a["user_id"],
+            timeout=90.0,
+        )
+        print(f"  {label} holds Alice's task (created_by Alice) ✓")
+
+    def _status(label: str) -> str | None:
+        rows = _rows(
+            label, "SELECT status FROM space_moderation_queue WHERE id=?", (item_id,)
+        )
+        return rows[0][0] if rows else None
+
+    _wait_for("a's own queue row to read approved", lambda: _status("a") == "approved")
+    print("  a's queue row: approved ✓")
+    if _rows("d", "SELECT 1 FROM space_moderation_queue WHERE id=?", (item_id,)):
+        raise SystemExit("federated-moderation: plain member household d holds the item")
+    if _log_contains("d", item_id, offset=d_log_before):
+        raise SystemExit("federated-moderation: d's log mentions the pending item")
+    print("  d (plain member) never received the pending item ✓")
+
+    _request(
+        f"{b_base}/api/spaces/{space_id}",
+        token=b["token"],
+        method="PATCH",
+        body={"features": {"tasks_access": "open"}},
+    )
+    _request(
+        f"{b_base}/api/spaces/{space_id}/remote-members/{c['instance_id']}/{c['user_id']}",
+        token=b["token"],
+        method="PATCH",
+        body={"role": "member"},
+    )
+    state["federated_moderation_space_id"] = space_id
+    _save(state)
+    print("federated-moderation: ok")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -10005,6 +10238,11 @@ def main() -> None:
         # (history catch-up) and removes c, b leaves; then a group on b
         # with c + d (never paired) proves the E2E-sealed mesh leg.
         cmd_group_dm()
+        # ``federated-moderation`` (v_43): a member on a submits a task in
+        # a Reviewed space hosted by b; a moderator on c approves on c; a,
+        # b, c and d all hold the task, and plain-member household d never
+        # received the pending item.
+        cmd_federated_moderation()
         # ``replay`` exercises the §24 outbox redelivery path by
         # killing Carol, posting a highlight from Alpha, restarting
         # Carol, and asserting the queued envelope flushes after the

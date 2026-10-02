@@ -34,6 +34,9 @@ export interface ModerationItem {
   reviewed_by?: string | null
   reviewed_at?: string | null
   rejection_reason?: string | null
+  /** Approved on this member household and handed to the space's host,
+   *  which publishes it (federated moderation, v_43). */
+  publishing?: boolean
   /** Proposed state — create: full; edit: the changed fields; delete: the row. */
   preview?: Record<string, unknown> | null
   /** Edit: OLD values of exactly the changed fields; delete: the full row. */

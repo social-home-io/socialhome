@@ -79,6 +79,7 @@ from ..domain.events import (
     TaskDeadlineDue,
     UserFollowed,
 )
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.mention import Mention, MentionType
 from ..repositories._spec import Spec
 from ..domain.space import (
@@ -155,6 +156,7 @@ class NotificationService(ProtectionGateMixin):
         "_here_last",
         "_convos",
         "_remote_members",
+        "_instances",
     )
 
     def __init__(
@@ -200,10 +202,18 @@ class NotificationService(ProtectionGateMixin):
         # Remote seats per household — optional; without it the
         # "Reviewed isn't available here any more" warning is skipped.
         self._remote_members = None
+        # Paired households' advertised ``proto_version`` — optional; it
+        # limits that warning to households below v_43 (federated
+        # moderation). Without it every new household warns.
+        self._instances = None
 
     def attach_remote_member_repo(self, remote_member_repo) -> None:
         """Wire the remote-seat mirror (``on_remote_seat_live``)."""
         self._remote_members = remote_member_repo
+
+    def attach_federation_repo(self, federation_repo) -> None:
+        """Wire the paired households' versions (``on_remote_seat_live``)."""
+        self._instances = federation_repo
 
     def attach_push_service(self, push_service) -> None:
         """Attach a :class:`PushService` to fan out Web Push alongside the
@@ -1100,12 +1110,21 @@ class NotificationService(ProtectionGateMixin):
 
     async def on_remote_seat_live(self, event: SpaceRemoteSeatLive) -> None:
         """A household's FIRST member just took a seat in a space that keeps
-        a feature other than posts "Reviewed": that level can't be held with
-        members from other households (§4.3, until federated moderation) and
-        the host now refuses members' changes there. Tell the space's local
-        owner / admins once, so they pick another level."""
+        a feature other than posts "Reviewed", and that household is too old
+        to submit its members' changes for review (below v_43, federated
+        moderation): every receiver refuses those changes. Tell the space's
+        local owner / admins once, so they ask that household to update or
+        pick another level. A v_43 household needs no warning."""
         if self._remote_members is None:
             return
+        if self._instances is not None:
+            peer = await self._instances.get_instance(event.instance_id)
+            if (
+                peer is not None
+                and peer.proto_version
+                >= FederationCapability.MIN_FOR_FEDERATED_MODERATION
+            ):
+                return
         space = await self._spaces.get(event.space_id)
         if space is None or space.dissolved:
             return
@@ -1157,9 +1176,9 @@ class NotificationService(ProtectionGateMixin):
                         locale=locale,
                         fallback=(
                             "Reviewed isn't available for {features} in "
-                            "{space_name} while members from other households "
-                            "are in this space — member changes are refused "
-                            "until you choose another level"
+                            "{space_name} for members of a household that "
+                            "needs an update — their changes are refused until "
+                            "it updates or you choose another level"
                         ),
                         features=names,
                         space_name=space.name,

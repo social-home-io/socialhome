@@ -16,7 +16,9 @@ has a right to know about them.
 Every payload carries ``actor_user_id`` (v_42) — who made the write, which
 receivers check against the space's ``pages`` access level — and a create
 also its ``created_by`` (the same user): the page id is owner-bound to its
-creator, so a receiver can only file a new page it can attribute.
+creator, so a receiver can only file a new page it can attribute. A write
+released from the moderation queue adds the ``moderation`` approval block
+(v_43, :mod:`.moderation_release`).
 
 Sibling of :class:`TaskFederationOutbound` /
 :class:`StickyFederationOutbound`; identical shape, different
@@ -31,6 +33,7 @@ from typing import TYPE_CHECKING
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
+from .moderation_release import with_release
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -132,9 +135,10 @@ class PageFederationOutbound:
 
 def _with_actor(payload: dict, actor_user_id: str, *, creates: bool = False) -> dict:
     """``payload`` plus the write's actor (v_42) — and, for a create, the
-    creator it is attributed to — when known."""
+    creator it is attributed to — when known, and the approval block of a
+    moderation release (v_43)."""
     if actor_user_id:
         payload["actor_user_id"] = actor_user_id
         if creates:
             payload["created_by"] = actor_user_id
-    return payload
+    return with_release(payload)

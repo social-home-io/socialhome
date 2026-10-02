@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -2501,3 +2502,35 @@ async def test_unavailable_warning_pushes_once_per_household(stack):
         for inst in ("inst-other", "inst-remote")
     }
     assert any(n.read_at is None for n in notes if "inst-remote" in n.link_url)
+
+
+class _VersionedInstances:
+    def __init__(self, versions: dict[str, int]) -> None:
+        self._versions = versions
+
+    async def get_instance(self, instance_id):
+        version = self._versions.get(instance_id)
+        if version is None:
+            return None
+        return SimpleNamespace(id=instance_id, proto_version=version)
+
+
+async def test_a_v43_household_joining_a_reviewed_space_warns_nobody(stack):
+    """v_43: Reviewed works across households — only a household too old to
+    submit for review (its members' changes are refused) warns the admins."""
+    a, space, remote = await _reviewed_space_with_remote(stack)
+    stack.notif_svc.attach_federation_repo(
+        _VersionedInstances({"inst-new": 43, "inst-old": 42})
+    )
+    await _seat_remote(stack, remote, space.id, "u-n1", inst="inst-new")
+    notes = await stack.notif_repo.list(a.user_id, limit=50)
+    assert not [n for n in notes if n.type == "moderation_unavailable"]
+    await _seat_remote(stack, remote, space.id, "u-o1", inst="inst-old")
+    notes = [
+        n
+        for n in await stack.notif_repo.list(a.user_id, limit=50)
+        if n.type == "moderation_unavailable"
+    ]
+    assert [n.link_url for n in notes] == [
+        f"/spaces/{space.id}/settings?household=inst-old"
+    ]

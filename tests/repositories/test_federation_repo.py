@@ -838,3 +838,44 @@ async def test_save_instance_keeps_the_tombstone_when_the_new_row_fails(env):
     tomb = await env.fed_repo.get_instance("peer-t", include_unpairing=True)
     assert tomb is not None and tomb.status is PairingStatus.UNPAIRING
     assert tomb.local_inbox_id == "wh-old"
+
+
+async def test_set_proto_version_is_a_high_water_mark(env):
+    inst = RemoteInstance(
+        id="peer-hw",
+        display_name="HW",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="https://x/hw",
+        local_inbox_id="inbox-hw",
+        status=PairingStatus.CONFIRMED,
+    )
+    await env.fed_repo.save_instance(inst)
+    await env.fed_repo.set_proto_version("peer-hw", 43)
+    await env.fed_repo.set_proto_version("peer-hw", 42)
+    assert (await env.fed_repo.get_instance("peer-hw")).proto_version == 43
+
+
+async def test_a_re_pair_never_lowers_the_stored_proto_version(env):
+    """The high-water mark holds across ``save_instance`` too: re-saving a
+    paired household (a re-pair, an invite-redeem bootstrap) with a lower
+    advertised version keeps the higher one. Only a deleted row (an unpair,
+    which also drops the household's space seats) starts again from scratch."""
+    inst = RemoteInstance(
+        id="peer-rp",
+        display_name="RP",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="https://x/rp",
+        local_inbox_id="inbox-rp",
+        status=PairingStatus.CONFIRMED,
+        proto_version=43,
+    )
+    await env.fed_repo.save_instance(inst)
+    await env.fed_repo.save_instance(replace(inst, proto_version=1))
+    assert (await env.fed_repo.get_instance("peer-rp")).proto_version == 43
+    await env.fed_repo.delete_instance("peer-rp")
+    await env.fed_repo.save_instance(replace(inst, proto_version=1))
+    assert (await env.fed_repo.get_instance("peer-rp")).proto_version == 1

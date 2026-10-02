@@ -928,27 +928,21 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
     expect(queryByTestId('space-access-review-hint')).toBeNull()
   })
 
-  it('with members from other households, Reviewed is posts-only (disabled + hint)', () => {
-    const { container, getByTestId } = render(
-      <SpaceSettings space={makeSpace({ has_remote_households: true })} onUpdate={() => {}} />,
-    )
-    const s = selects(container)
-    expect(reviewed(s.posts).disabled).toBe(false)
-    for (const f of ['pages', 'tasks', 'calendar']) {
-      expect(reviewed(s[f]).disabled).toBe(true)
-      expect(reviewed(s[f]).title).toBe('space.access.moderated_unavailable')
+  it('offers Reviewed for every feature with members from other households too', () => {
+    // v_43 federated moderation: the queue reaches every reviewer household.
+    for (const props of [{ space: makeSpace({ has_remote_households: true }) }, {
+      space: makeSpace(), isRemoteSpace: true,
+    }]) {
+      const { container, queryByTestId, unmount } = render(
+        <SpaceSettings {...props} onUpdate={() => {}} />,
+      )
+      const s = selects(container)
+      for (const f of ['posts', 'pages', 'tasks', 'calendar']) {
+        expect(reviewed(s[f]).disabled).toBe(false)
+      }
+      expect(queryByTestId('space-access-review-hint')).toBeNull()
+      unmount()
     }
-    expect(getByTestId('space-access-review-hint').textContent)
-      .toBe('space.access.moderated_unavailable')
-  })
-
-  it('on a remote-hosted space, Reviewed is posts-only too', () => {
-    const { container } = render(
-      <SpaceSettings space={makeSpace()} onUpdate={() => {}} isRemoteSpace />,
-    )
-    const s = selects(container)
-    expect(reviewed(s.posts).disabled).toBe(false)
-    expect(reviewed(s.tasks).disabled).toBe(true)
   })
 
   it('keeps a Reviewed level already in force selectable', () => {
@@ -967,7 +961,7 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
     expect(reviewed(s.pages).disabled).toBe(false)
   })
 
-  it('warns on a Reviewed level the space can no longer hold, until another is picked', () => {
+  it('never shows a stale-Reviewed warning: Reviewed holds across households', () => {
     const space = makeSpace({
       has_remote_households: true,
       features: {
@@ -977,47 +971,24 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
         allowed_post_types: ['text'],
       },
     })
-    const { container, queryByTestId, getByTestId } = render(
-      <SpaceSettings space={space} onUpdate={() => {}} />,
-    )
-    const warning = getByTestId('space-access-stale-pages')
-    expect(warning.textContent).toContain('space.access.moderated_stale')
-    expect(warning.getAttribute('role')).toBe('status')
-    // Posts keep Reviewed across households; an open feature has nothing to warn.
-    expect(queryByTestId('space-access-stale-posts')).toBeNull()
-    expect(queryByTestId('space-access-stale-tasks')).toBeNull()
-    const s = selects(container)
-    fireEvent.change(s.pages, { target: { value: 'open' } })
-    expect(queryByTestId('space-access-stale-pages')).toBeNull()
-  })
-
-  it('no stale warning for a Reviewed feature on a host-only space', () => {
-    const space = makeSpace({
-      has_remote_households: false,
-      features: {
-        calendar: true, todo: true, location: false, stickies: false, pages: true,
-        gallery: true, posts_access: 'open', pages_access: 'moderated',
-        tasks_access: 'open', stickies_access: 'open', calendar_access: 'open',
-        allowed_post_types: ['text'],
-      },
-    })
     const { queryByTestId } = render(<SpaceSettings space={space} onUpdate={() => {}} />)
     expect(queryByTestId('space-access-stale-pages')).toBeNull()
   })
 
-  it('a 422 MODERATION_NOT_FEDERATED shows the translated toast', async () => {
-    const refused = Object.assign(new Error('not federated'), {
-      status: 422, code: 'MODERATION_NOT_FEDERATED', extra: {},
+  it('picking Reviewed with an older household opens the apply-anyway prompt', async () => {
+    const tooOld = Object.assign(new Error('too old'), {
+      status: 409,
+      code: 'PEERS_TOO_OLD',
+      extra: { households: [{ instance_id: 'i-old', display_name: 'Grandma', proto_version: 42 }] },
     })
-    apiMock.patch.mockRejectedValueOnce(refused)
-    const { container, getByText } = render(
-      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    apiMock.patch.mockRejectedValueOnce(tooOld)
+    const { container, getByText, findByText } = render(
+      <SpaceSettings space={makeSpace({ has_remote_households: true })} onUpdate={() => {}} />,
     )
     fireEvent.change(selects(container).tasks, { target: { value: 'moderated' } })
     fireEvent.click(getByText('Save changes'))
-    await new Promise(r => setTimeout(r, 0))
+    expect(await findByText('space.access.peers_too_old.title')).toBeTruthy()
     expect(apiMock.patch.mock.calls[0][1]).toEqual({ features: { tasks_access: 'moderated' } })
-    expect(showToast).toHaveBeenCalledWith('space.access.moderated_not_federated', 'error')
   })
 
   it('mirrors the stored levels', () => {

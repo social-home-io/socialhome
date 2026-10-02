@@ -9,8 +9,6 @@ import {
   accessNote,
   announceSuppressedMessage,
   levelOptions,
-  moderatedBlocked,
-  isModerationNotFederated,
   peersTooOldHouseholds,
 } from './spaceAccess'
 
@@ -31,28 +29,6 @@ describe('accessLevel', () => {
 describe('levelOptions', () => {
   it('offers Reviewed for every feature', () => {
     expect(levelOptions()).toEqual(['open', 'moderated', 'admin_only'])
-  })
-})
-
-describe('moderatedBlocked', () => {
-  it('never blocks posts', () => {
-    expect(moderatedBlocked('posts', { hasRemoteHouseholds: true, isRemoteSpace: true })).toBe(false)
-  })
-
-  it('blocks other features on a space with remote households or a remote-hosted one', () => {
-    for (const f of ['pages', 'tasks', 'stickies', 'calendar'] as const) {
-      expect(moderatedBlocked(f, { hasRemoteHouseholds: true })).toBe(true)
-      expect(moderatedBlocked(f, { isRemoteSpace: true })).toBe(true)
-      expect(moderatedBlocked(f, {})).toBe(false)
-    }
-  })
-})
-
-describe('isModerationNotFederated', () => {
-  it('matches the host refusal code only', () => {
-    expect(isModerationNotFederated({ code: 'MODERATION_NOT_FEDERATED' })).toBe(true)
-    expect(isModerationNotFederated({ code: 'PEERS_TOO_OLD' })).toBe(false)
-    expect(isModerationNotFederated(null)).toBe(false)
   })
 })
 

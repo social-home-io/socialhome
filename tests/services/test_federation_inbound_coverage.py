@@ -19,7 +19,7 @@ from socialhome.domain.events import (
     UserStatusChanged,
 )
 from socialhome.domain.post import Comment, CommentType, Post, PostType
-from socialhome.domain.space import SpaceMember
+from socialhome.domain.space import SpaceFeatures, SpaceMember
 from socialhome.services.federation_inbound_service import FederationInboundService
 
 
@@ -206,6 +206,10 @@ async def test_space_post_deleted_missing_id(svc):
 
 
 async def test_space_post_deleted_happy_path(svc):
+    # An OPEN space: the delete is judged by authorship alone.
+    svc.sp_repo.get.return_value = SimpleNamespace(
+        owner_instance_id="host", features=SpaceFeatures()
+    )
     await svc.svc._on_space_post_deleted(
         _evt(
             "SPACE_POST_DELETED",

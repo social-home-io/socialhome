@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from ..domain.events import StickyCreated, StickyDeleted, StickyUpdated
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
+from .moderation_release import with_release
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -122,4 +123,5 @@ def _drop_blank_actor(payload: dict) -> dict:
     which receivers check against the space's ``stickies`` access level."""
     if not payload.get("actor_user_id"):
         payload.pop("actor_user_id", None)
-    return payload
+    # A write released from the moderation queue names the release (v_43).
+    return with_release(payload)

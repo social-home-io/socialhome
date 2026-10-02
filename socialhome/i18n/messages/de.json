@@ -24,7 +24,7 @@
   "notification.space.moderation.approved": "Dein Beitrag in {space_name} wurde freigegeben",
   "notification.space.moderation.rejected": "Dein Beitrag in {space_name} wurde nicht freigegeben",
   "notification.space.moderation.expired": "Dein Beitrag in {space_name} ist ohne Prüfung abgelaufen",
-  "notification.space.moderation.unavailable": "„Geprüft“ ist für {features} in {space_name} nicht verfügbar, solange Mitglieder aus anderen Haushalten im Space sind — Änderungen von Mitgliedern werden abgelehnt, bis du eine andere Stufe wählst",
+  "notification.space.moderation.unavailable": "„Geprüft“ ist für {features} in {space_name} für Mitglieder eines Haushalts, der ein Update braucht, nicht verfügbar — ihre Änderungen werden abgelehnt, bis er aktualisiert ist oder du eine andere Stufe wählst",
   "notification.space.feature.pages": "Seiten",
   "notification.space.feature.tasks": "Aufgaben",
   "notification.space.feature.stickies": "Haftnotizen",

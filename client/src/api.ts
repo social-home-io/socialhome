@@ -3,6 +3,7 @@
 import { token } from '@/store/token'
 import { showToast } from '@/components/Toast'
 import { accessNote } from '@/features/spaces/spaceAccess'
+import { t } from '@/i18n/i18n'
 
 // Logout handler, registered by store/auth at module load. Lets the 401 path
 // clear the session without importing '@/store/auth' (which would re-form the
@@ -166,6 +167,10 @@ class ApiClient {
             // "only admins can …" note for that feature.
             const feature = (parsed as { feature?: unknown }).feature
             parsed = { ...parsed, detail: accessNote(String(feature ?? '')) }
+          } else if (parsed.code === 'HOST_TOO_OLD') {
+            // v_43: the space's host can't hold this household's
+            // submissions for review — the toast says why, translated.
+            parsed = { ...parsed, detail: t('moderation.error.host_too_old') }
           }
         }
       } catch {

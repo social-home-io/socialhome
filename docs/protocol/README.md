@@ -118,6 +118,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Tasks](./tasks.md) — task lists and tasks.
   - [Calendar](./calendar.md) — calendar events and RSVPs.
   - [Space timetables](./timetables.md) — admin-maintained shared timetables (a class *Stundenplan*), one upserted aggregate per timetable, member households only (capability v_39).
+  - [Federated moderation](./moderation.md) — "Reviewed" across households: pending items go only to the host and the admin / moderator households, any of them approves, the approved content federates as the submitter's with an approval block (capability v_43).
 - **Realtime**
   - [Direct messages](./dm.md) — 1:1 and group conversations.
   - [DM media — pictures, videos, files](./dm-media.md) — `image` / `video` / `file` attachments, preview-now-sync-later for cross-household.

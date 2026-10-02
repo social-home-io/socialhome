@@ -317,6 +317,20 @@ class PairingInboundHandlers(ProtectionGateMixin):
             )
         if instance.proto_version == proto_version:
             return
+        if proto_version < instance.proto_version:
+            # A high-water mark: every security gate keyed on the version
+            # (the receivers' fallbacks for older senders) stays closed for
+            # a household that once advertised more. A household that
+            # really rolled back is still treated as its highest version.
+            log.warning(
+                "INSTANCE_CAPABILITIES_UPDATED from %s: advertised "
+                "proto_version %d below its high-water mark %d — kept at %d",
+                event.from_instance,
+                proto_version,
+                instance.proto_version,
+                instance.proto_version,
+            )
+            return
         await self._repo.set_proto_version(event.from_instance, proto_version)
         if proto_version > instance.proto_version:
             await self._bus.publish(

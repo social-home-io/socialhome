@@ -124,7 +124,6 @@ from ..domain.space import (
     ACCESS_FEATURES,
     AccessDecision,
     ContentAction,
-    ModerationNotFederatedError,
     PeersTooOldError,
     restricted_access_changes,
     PUBLIC_SPACE_TIERS,
@@ -137,6 +136,7 @@ from ..domain.space import (
     RemoteAdminOutcome,
     Space,
     SpaceConfigEventType,
+    SpaceFeatureAccess,
     SpaceFeatures,
     SpaceMember,
     SpacePermissionError,
@@ -1788,23 +1788,29 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         ):
             await self._require_owner(space, actor_username)
         # §4.3 / v_42: a level an older member household cannot enforce is
-        # applied only once the admin has seen which households lag.
-        if (
-            features is not None
-            and not force
-            and restricted_access_changes(space.features, features)
-        ):
-            behind = await self._households_below(
-                space_id, FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT
+        # applied only once the admin has seen which households lag — and a
+        # feature newly set to ``MODERATED`` needs every member household to
+        # hold and review items for the others (v_43, federated moderation).
+        # Checked before any forward, so a stub asks its host for it only
+        # once the admin saw the list (the host re-checks with its view).
+        raised_levels = (
+            restricted_access_changes(space.features, features)
+            if features is not None and not force
+            else ()
+        )
+        if raised_levels:
+            needed = (
+                FederationCapability.MIN_FOR_FEDERATED_MODERATION
+                if any(
+                    features is not None
+                    and features.access_level(f) is SpaceFeatureAccess.MODERATED
+                    for f in raised_levels
+                )
+                else FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT
             )
+            behind = await self._households_below(space_id, needed)
             if behind:
                 raise PeersTooOldError(behind)
-        # §4.3: review for a feature other than posts needs the queue on the
-        # host of a space without remote member households (federated
-        # moderation is a later protocol step). Refused before any
-        # forward, so a stub can't ask its host for it either.
-        if features is not None and self._moderation is not None:
-            await self._moderation.require_moderation_supported(space, features)
 
         # Delegated-admin authoritative path (v_24): when this space has
         # ``delegated_admin_authority`` ON and THIS household holds the space
@@ -2811,29 +2817,18 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                         force=p.get("force") is True,
                         **kwargs,
                     )
-                except (PeersTooOldError, ModerationNotFederatedError) as exc:
+                except PeersTooOldError as exc:
                     # Apply the rest of the edit; keep every access level as
                     # it is. The forwarding admin sees the outcome in the
                     # config broadcast that follows (their stub mirrors the
                     # host), and their SPA said the host decides.
-                    if isinstance(exc, PeersTooOldError):
-                        log.warning(
-                            "forwarded config edit for space %s: raised access "
-                            "level not applied — member households below v_42 "
-                            "cannot enforce it (%s); applying the rest",
-                            space_id,
-                            ", ".join(
-                                str(h.get("instance_id")) for h in exc.households
-                            ),
-                        )
-                    else:
-                        log.warning(
-                            "forwarded config edit for space %s: review for %s "
-                            "not applied — the space has remote member "
-                            "households; applying the rest",
-                            space_id,
-                            exc.feature,
-                        )
+                    log.warning(
+                        "forwarded config edit for space %s: raised access "
+                        "level not applied — member households too old to "
+                        "enforce it (%s); applying the rest",
+                        space_id,
+                        ", ".join(str(h.get("instance_id")) for h in exc.households),
+                    )
                     kwargs["features"] = replace(
                         kwargs["features"],
                         **{
@@ -4781,18 +4776,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # of the features — the host and each member household's stub
         # alike: ADMIN_ONLY refuses a non-admin's post here, before it can
         # federate (receivers refuse it again, ``access_admits``). A
-        # MODERATED post queues only on the host: the queue is the host's
-        # (its admins resolve it), so a stub sends the post on and the
-        # host applies its own policy to it.
+        # MODERATED post queues on whichever household its author is on
+        # and goes to the space's reviewers like every other feature's
+        # item (v_43, federated moderation).
         decision = await self._gate(
             space, author.user_id, "posts", ContentAction.CREATE, True
         )
-        is_host = (
-            self._own_instance_id is not None
-            and space.owner_instance_id == self._own_instance_id
-        )
-        if decision is AccessDecision.QUEUE and not is_host:
-            decision = AccessDecision.PROCEED
 
         # Truncate to 4dp at the service boundary regardless of what the
         # client sent — the column never holds higher precision than the

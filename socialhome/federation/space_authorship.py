@@ -67,7 +67,13 @@ Rules, picked per event family by the handlers:
   then needs that actor to be an admin as the sender records it
   (:meth:`admin_as`) — or, from an older sender that names no actor, the
   sending household to hold settings authority (:meth:`is_admin_household`).
-  ``MODERATED`` admits for now.
+  ``MODERATED`` admits content authority, own rows and layout moves — and a
+  plain member's write only as a moderation release.
+* :meth:`may_author_approved` — a moderation release (v_43): content an
+  approver household applied from the queue, attributed to its submitter,
+  carrying the approval block ``moderation: {item_id, approved_by}``. It
+  stands in for :meth:`may_author` on a create and for the ``MODERATED``
+  rule of :meth:`access_admits`.
 
 The bot bridge posts under the shared :data:`SYSTEM_AUTHOR` identity,
 which is no member at all: any writer household may create such a row
@@ -77,21 +83,31 @@ which is no member at all: any writer household may create such a row
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
+    MODERATION_BLOCK_KEY,
     SETTINGS_AUTHORITY_ROLES,
     WRITER_ROLES,
     ContentAction,
+    ModerationApproval,
+    ModerationStatus,
     SpaceFeatureAccess,
     SpaceRole,
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.user import SYSTEM_AUTHOR
+from .moderation_approval import (
+    FEATURE_OF_EVENT,
+    item_matches_event,
+    needs_held_row,
+)
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
+    from ..domain.space import SpaceModerationItem
     from .pending_seat_buffer import PendingSeatBuffer
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.space_remote_member_repo import (
@@ -101,6 +117,12 @@ if TYPE_CHECKING:
     from ..repositories.user_repo import AbstractUserRepo
 
 log = logging.getLogger(__name__)
+
+#: ``(space_id, feature, target_id) -> our copy of the row`` (the moderation
+#: handler's snapshot), ``None`` when not held.
+HeldRows = Callable[[str, str, str], Awaitable["dict | None"]]
+#: ``(item, approved_by)`` — a release of a held item was accepted.
+ReleaseSeen = Callable[["SpaceModerationItem", str], Awaitable[None]]
 
 #: Seats that write — the same set as the §24.11 follower gate. A remote
 #: seat is never ``owner``; the set is :data:`WRITER_ROLES` as strings.
@@ -116,6 +138,14 @@ _CONTENT_SEATS: frozenset[str] = frozenset(
     r.value for r in CONTENT_AUTHORITY_ROLES if r is not SpaceRole.OWNER
 )
 
+#: The statuses of a queue row a release may still land on (v_43). Approve
+#: beats reject — a row this household rejected while another approved
+#: takes the published content, so every copy converges; an expired or
+#: purged row takes nothing.
+_RELEASABLE: frozenset[ModerationStatus] = frozenset(
+    {ModerationStatus.PENDING, ModerationStatus.APPROVED, ModerationStatus.REJECTED}
+)
+
 
 def payload_actor(event: "FederationEvent") -> str | None:
     """The payload's ``actor_user_id`` (v_42) — the user who made the write
@@ -127,7 +157,15 @@ def payload_actor(event: "FederationEvent") -> str | None:
 class SpaceAuthorship:
     """Bind the users a space-content payload names to the sending household."""
 
-    __slots__ = ("_spaces", "_seats", "_users", "_pending", "_instances")
+    __slots__ = (
+        "_spaces",
+        "_seats",
+        "_users",
+        "_pending",
+        "_instances",
+        "_held_rows",
+        "_on_release",
+    )
 
     def __init__(
         self,
@@ -148,6 +186,21 @@ class SpaceAuthorship:
         #: Where a write naming a user we hold no row for at all waits for
         #: that user's seat (see :meth:`hold_or_refuse`). ``None`` refuses.
         self._pending = pending
+        #: Our own copy of a release's target (the moderation handlers'
+        #: snapshot) — an edit's release is checked against it. ``None``
+        #: refuses every release of an edit we hold the item of.
+        self._held_rows: HeldRows | None = None
+        #: Told when a release of an item we hold is accepted (the row moves
+        #: to approved before its decision arrives).
+        self._on_release: ReleaseSeen | None = None
+
+    def attach_moderation(
+        self, *, held_rows: "HeldRows", on_release: "ReleaseSeen"
+    ) -> None:
+        """Wire the moderation queue's read of our rows and its release
+        hook (``app._build_space_moderation``)."""
+        self._held_rows = held_rows
+        self._on_release = on_release
 
     async def acts_for(
         self,
@@ -294,6 +347,31 @@ class SpaceAuthorship:
             and row.role in roles
         )
 
+    async def approver_holds(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        user_id: str,
+        *,
+        admin: bool = False,
+    ) -> bool:
+        """Is ``user_id`` an approver (content authority; ``admin`` →
+        settings authority) the sender may name on a moderation decision or
+        release? :meth:`moderates_as` / :meth:`admin_as` — and, from the
+        HOST only, one of OUR users, by the role our own roster gives them
+        (the host publishes what our moderator approved, and tells us)."""
+        if await self._is_local_user(user_id):
+            if not await self.is_host(event, space_id):
+                return False
+            if await self._spaces.is_banned(space_id, user_id):
+                return False
+            member = await self._spaces.get_member(space_id, user_id)
+            wanted = SETTINGS_AUTHORITY_ROLES if admin else CONTENT_AUTHORITY_ROLES
+            return member is not None and str(member.role) in {r.value for r in wanted}
+        if admin:
+            return await self.admin_as(event, space_id, user_id)
+        return await self.moderates_as(event, space_id, user_id)
+
     async def writes_here(self, event: "FederationEvent", space_id: str) -> bool:
         """The host, or a household holding a live writer seat (``member`` /
         ``moderator`` / ``admin``).
@@ -344,6 +422,11 @@ class SpaceAuthorship:
             event, space_id, user_id
         ):
             return True
+        if MODERATION_BLOCK_KEY in event.payload:
+            # Content released from the moderation queue (v_43): judged by
+            # the release alone — the only way any household authors a row
+            # for one of OUR users, and then only for an item we hold.
+            return await self.may_author_approved(event, space_id, user_id)
         if not user_id or await self._is_local_user(user_id):
             return False
         # The host relays rows of people it seated — never of a user this
@@ -360,6 +443,118 @@ class SpaceAuthorship:
             return False
         space = await self._spaces.get(space_id)
         return bool(space is not None and space.features.allow_subscriber_comment)
+
+    async def may_author_approved(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        author: str,
+    ) -> bool:
+        """Is ``event`` a valid moderation release of ``author``'s item (v_43)?
+
+        The approval block ``moderation: {item_id, approved_by}`` is a claim
+        by the sender; every part of it is re-derived from what this
+        household already holds:
+
+        * the event is a reviewable content write (:data:`FEATURE_OF_EVENT`);
+        * the sender has **content authority** (the host, or a live
+          ``admin`` / ``moderator`` seat) and records the release as
+          ``approved_by``, a content-authority user seated on it
+          (:meth:`moderates_as` — live seats, so a demoted moderator fails);
+          under ``ADMIN_ONLY`` the approver must be an admin (:meth:`admin_as`);
+        * ``author`` still holds a live writer seat in the space and is not
+          banned — their local seat when they are one of ours, else their
+          mirrored seat on their own household;
+        * when ``author`` is one of OUR users, we hold the very item: same
+          id, space and submitter, the same feature / kind of write /
+          target, the same content (:func:`item_matches_event`), still
+          releasable — no household can author as our people otherwise. Any
+          household holding the item checks it the same way.
+
+        Refusals log at WARNING.
+        """
+        reason, item = await self._release_refusal(event, space_id, author)
+        if reason is None:
+            if item is not None and self._on_release is not None:
+                approval = ModerationApproval.from_wire(
+                    event.payload.get(MODERATION_BLOCK_KEY)
+                )
+                if approval is not None:
+                    await self._on_release(item, approval.approved_by)
+            return True
+        log.warning(
+            "%s from %s: release of %r's content in space %s refused — %s",
+            getattr(event, "event_type", "?"),
+            getattr(event, "from_instance", "?"),
+            author,
+            space_id,
+            reason,
+        )
+        return False
+
+    async def _release_refusal(
+        self, event: "FederationEvent", space_id: str, author: str
+    ) -> tuple[str | None, "SpaceModerationItem | None"]:
+        """``(reason, item)``: why the release is refused (``None``: it is
+        not), and the held queue item it releases, if any."""
+        approval = ModerationApproval.from_wire(event.payload.get(MODERATION_BLOCK_KEY))
+        if approval is None:
+            return "no well-formed approval block", None
+        feature = FEATURE_OF_EVENT.get(event.event_type)
+        if feature is None:
+            return "not a reviewable content write", None
+        if not author or author == SYSTEM_AUTHOR:
+            return "no author to release for", None
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return "unknown space", None
+        # Only the host applies a queue item — from its own stored copy —
+        # so only the host can send its release (I2: a moderator household
+        # cannot make one up). The host is the roster authority already.
+        if not await self.is_host(event, space_id):
+            return "only the space's host releases a queue item", None
+        if not await self.approver_holds(event, space_id, approval.approved_by):
+            return f"{approval.approved_by!r} holds no content-authority seat", None
+        if space.features.access_level(
+            feature
+        ) is SpaceFeatureAccess.ADMIN_ONLY and not await self.approver_holds(
+            event, space_id, approval.approved_by, admin=True
+        ):
+            return f"{feature} is admin-only and the approver is no admin", None
+        if await self._spaces.is_banned(space_id, author):
+            return "the author is banned", None
+        local = await self._is_local_user(author)
+        if local:
+            member = await self._spaces.get_member(space_id, author)
+            if member is None or str(member.role) not in _WRITER_ROLES:
+                return "the author holds no writer seat here", None
+        else:
+            seat = await self._seats.get_including_tombstones(space_id, "", author)
+            if seat is None or seat.tombstoned or seat.role not in _WRITER_ROLES:
+                return "the author holds no live writer seat", None
+        item = await self._spaces.get_moderation_item(approval.item_id)
+        if item is not None and not item.feature:
+            item = None  # a decision tombstone, not a copy of the item
+        if item is None:
+            if local:
+                return "one of our users, and we hold no such item", None
+            return None, None
+        held: dict | None = None
+        if needs_held_row(item):
+            target = str((item.payload or {}).get("target_id") or "")
+            held = (
+                await self._held_rows(space_id, item.feature, target)
+                if self._held_rows is not None and target
+                else None
+            )
+        if (
+            item.space_id != space_id
+            or item.submitted_by != author
+            or item.status not in _RELEASABLE
+            or not item_matches_event(item, event.event_type, event.payload, held=held)
+        ):
+            return "it does not match the item held here", None
+        return None, item
 
     async def may_mutate(
         self,
@@ -407,9 +602,9 @@ class SpaceAuthorship:
         * ``OPEN`` → admitted.
         * A ``CREATE``'s actor **is** its author: a named actor that differs
           is refused — an admin household cannot pass its plain member's row
-          off as its admin's. The one exception (``release_ok``) is a
-          moderation release, which only the host — where the queue lives —
-          may send. The host relaying a remote member's row (resume replay)
+          off as its admin's. The one exception (``release_ok``) is a v_42
+          host's moderation release, which named the approver; a v_43
+          release names the author and carries the approval block. The host relaying a remote member's row (resume replay)
           is admitted, as :meth:`may_author` admits it.
         * A named actor must hold a live writer seat on the sender
           (:meth:`acts_for`; any live seat for an edit / delete of their own
@@ -423,12 +618,15 @@ class SpaceAuthorship:
           authority (:meth:`is_admin_household`), as it must for the shared
           bot identity — and that only on a bot's own row. A moderator never
           passes.
-        * ``MODERATED`` → posts admitted (the host's queue judged them); every
-          other feature admits only content authority (:meth:`moderates_as`;
-          an actor-less older sender: :meth:`has_content_authority`), an
-          edit / delete of the actor's own row, and a layout move — a plain
-          member's create or edit of someone else's row would have waited
-          for review, which no household but a remote-free host can hold.
+        * ``MODERATED`` → content authority (:meth:`moderates_as`; an
+          actor-less older sender: :meth:`has_content_authority`), an edit /
+          delete of the actor's own row, and a layout move. A plain member's
+          create or edit of someone else's row waits for review, so it is
+          admitted only as a release (below) — posts included, whatever
+          version the sender advertises.
+        * A payload carrying an approval block (v_43) is judged by the
+          release alone (:meth:`may_author_approved`), at every level but
+          ``OPEN``.
 
         A refusal logs at WARNING. An unknown space admits nothing beyond
         ``OPEN``: there is no level to check against.
@@ -440,6 +638,10 @@ class SpaceAuthorship:
         level = space.features.access_level(feature)
         if level is SpaceFeatureAccess.OPEN:
             return True
+        if MODERATION_BLOCK_KEY in event.payload:
+            return await self._release_admitted(
+                event, space_id, feature, action, actor=actor, row_owner=row_owner
+            )
         if action is ContentAction.CREATE and row_owner:
             if actor and actor != row_owner:
                 if not (release_ok and await self.is_host(event, space_id)):
@@ -501,20 +703,28 @@ class SpaceAuthorship:
             if not admitted:
                 self._log_access_refusal(event, space_id, feature, action, actor, level)
             return admitted
-        # MODERATED. Posts keep their v_42 rule: the host's queue judges a
-        # member's post, and its receivers admit what the host published.
-        # Every other feature queues only on a host WITHOUT remote member
-        # households (no household but the host can hold the queue yet), so
-        # a remote plain member's write here is exactly one that would have
-        # waited for review — refused, fail closed, on every receiver alike:
-        # a modified or older stub cannot publish past review. Own edits /
-        # deletes and layout moves proceed, as locally.
-        if feature == "posts" or action is ContentAction.LAYOUT or own_row:
+        # MODERATED. A plain member's create, or edit / delete of someone
+        # else's row, is exactly a write that waits for review — every
+        # household submits it to the reviewers (v_43) and only its release
+        # (the approval block, above) publishes it. Sent straight on, it is
+        # refused, fail closed, on every receiver alike: a modified stub
+        # cannot publish past review. Own edits / deletes and layout moves
+        # proceed, as locally. Posts follow the same rule, whatever version
+        # the sender advertises (``PEERS_TOO_OLD`` names an older household
+        # when the level is set).
+        if action is ContentAction.LAYOUT or own_row:
             return True
         if named:
             admitted = await self.moderates_as(event, space_id, str(actor))
         elif actor == SYSTEM_AUTHOR:
-            admitted = False  # a bot posts, it never writes these features
+            # A bot posts (never writes the other features): its household
+            # must hold content authority — a member's personal bot is
+            # refused under review at its source (``BOT_POSTS_REVIEWED``).
+            admitted = (
+                feature == "posts"
+                and row_owner == SYSTEM_AUTHOR
+                and await self.has_content_authority(event, space_id)
+            )
         elif not await self._sender_names_actors(event):
             admitted = await self.has_content_authority(event, space_id)
         else:
@@ -523,21 +733,65 @@ class SpaceAuthorship:
             self._log_access_refusal(event, space_id, feature, action, actor, level)
         return admitted
 
+    async def _release_admitted(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        feature: str,
+        action: ContentAction,
+        *,
+        actor: str | None,
+        row_owner: str,
+    ) -> bool:
+        """A write carrying an approval block (v_43) is judged by the release
+        alone: the author it releases for is the create's author (the
+        payload may name them, or — from a v_42-style producer — the
+        approver, as the actor), or the actor of an edit / delete.
+        :meth:`may_author_approved` binds everything else."""
+        approval = ModerationApproval.from_wire(event.payload.get(MODERATION_BLOCK_KEY))
+        if action is ContentAction.CREATE:
+            author = row_owner
+            allowed_actors = {None, "", row_owner}
+            if approval is not None:
+                allowed_actors.add(approval.approved_by)
+            if actor not in allowed_actors:
+                self._log_access_refusal(
+                    event, space_id, feature, action, actor, "actor is not the author"
+                )
+                return False
+        else:
+            author = str(actor or "")
+        if not await self.may_author_approved(event, space_id, author):
+            self._log_access_refusal(
+                event,
+                space_id,
+                feature,
+                action,
+                actor,
+                "invalid release",
+            )
+            return False
+        return True
+
     async def _sender_names_actors(self, event: "FederationEvent") -> bool:
         """The sender advertised v_42+ — it names ``actor_user_id`` on every
         collaborative write. Without a federation repo, assume it does
         (strict). A peer that never advertised reads as old."""
+        return await self._sender_supports(
+            event, FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT
+        )
+
+    async def _sender_supports(self, event: "FederationEvent", version: int) -> bool:
+        """The sender advertised at least ``version``. Without a federation
+        repo, assume it did (strict). A peer that never advertised reads as
+        old."""
         if self._instances is None:
             return True
         try:
             peer = await self._instances.get_instance(str(event.from_instance or ""))
         except Exception:  # pragma: no cover — defensive
             return True
-        return (
-            peer is not None
-            and peer.proto_version
-            >= FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT
-        )
+        return peer is not None and peer.proto_version >= version
 
     @staticmethod
     def _log_access_refusal(

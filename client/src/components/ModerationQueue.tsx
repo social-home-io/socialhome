@@ -427,7 +427,16 @@ export function ModerationQueue({ spaceId, canApprove = true }: {
     items.value = items.value.filter(i => i.id !== item.id)
     try {
       const url = `/api/spaces/${spaceId}/moderation/${item.id}/approve`
-      let res = await api.post<{ complete?: boolean }>(url, force ? { force: true } : {})
+      let res = await api.post<{ complete?: boolean; status?: string }>(
+        url, force ? { force: true } : {},
+      )
+      if (res?.status === 'publishing') {
+        // A member household: the host publishes it from its own copy.
+        // The card stays, showing the state, until the decision arrives.
+        items.value = prev.map(i => (i.id === item.id ? { ...i, publishing: true } : i))
+        showToast(t('moderation.publishing_toast'), 'success')
+        return
+      }
       if (res?.complete === false) {
         // Published, but a part (a poll, a listing) didn't save: approving
         // an approved item again finishes it (idempotent on the host).
@@ -456,11 +465,6 @@ export function ModerationQueue({ spaceId, canApprove = true }: {
       if (code === 'EXPIRED') {
         showToast(t('moderation.error.expired'), 'info')
         void refresh()
-        return
-      }
-      if (code === 'NOT_HOST') {
-        items.value = prev
-        showToast(t('moderation.error.not_host'), 'error')
         return
       }
       if (status === 410 || code === 'TARGET_GONE') {
@@ -561,7 +565,16 @@ export function ModerationQueue({ spaceId, canApprove = true }: {
               </span>
             </div>
             <ItemBody item={item} />
-            {!canApproveItem && (
+            {item.publishing && (
+              <p class="sh-access-note" role="status">
+                <span aria-hidden="true">⏳</span>
+                <span>
+                  <strong>{t('moderation.publishing')}</strong>
+                  {' '}{t('moderation.publishing_hint')}
+                </span>
+              </p>
+            )}
+            {!item.publishing && !canApproveItem && (
               <p class="sh-access-note" role="note">
                 <span aria-hidden="true">🔒</span>
                 <span>
@@ -571,7 +584,7 @@ export function ModerationQueue({ spaceId, canApprove = true }: {
                 </span>
               </p>
             )}
-            <div class="sh-moderation-actions">
+            {!item.publishing && <div class="sh-moderation-actions">
               {canApproveItem && (
                 <Button onClick={() => approve(item)} loading={busyId === item.id}>
                   {t('moderation.approve')}
@@ -580,7 +593,7 @@ export function ModerationQueue({ spaceId, canApprove = true }: {
               <Button variant="secondary" onClick={() => reject(item)}>
                 {t('moderation.reject')}
               </Button>
-            </div>
+            </div>}
           </article>
         )
       })}

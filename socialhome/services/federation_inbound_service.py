@@ -67,6 +67,7 @@ from ..domain.post import (
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..domain.presence import truncate_coord
 from ..domain.space import (
+    MODERATION_BLOCK_KEY,
     ContentAction,
     Space,
     SpaceRole,
@@ -140,6 +141,7 @@ from .space_service import (
 from ..utils.datetime import parse_iso8601_lenient
 
 if TYPE_CHECKING:
+    from ..repositories.calendar_repo import AbstractSpaceCalendarRepo
     from .dm_group_service import DmGroupService
     from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..domain.federation import FederationEvent
@@ -385,6 +387,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_federation_service",
         "_space_cover_repo",
         "_space_icon_repo",
+        "_space_calendar_repo",
         "_groups",
         "_mentions",
         "_dm_mentions",
@@ -414,6 +417,7 @@ class FederationInboundService(ProtectionGateMixin):
         authorship_federation_repo: "AbstractFederationRepo | None" = None,
         space_cover_repo: "AbstractSpaceCoverRepo | None" = None,
         space_icon_repo: "AbstractSpaceIconRepo | None" = None,
+        space_calendar_repo: "AbstractSpaceCalendarRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -485,6 +489,9 @@ class FederationInboundService(ProtectionGateMixin):
         #: omit them (the image is then simply not stored).
         self._space_cover_repo = space_cover_repo
         self._space_icon_repo = space_icon_repo
+        #: Where an approved announce card's linked event must live (v_43):
+        #: without it such a card is refused.
+        self._space_calendar_repo = space_calendar_repo
         #: Group-conversation authority (v_37) — a deprovisioned member of a
         #: cross-household group leaves it instead of taking it down.
         self._groups: "DmGroupService | None" = None
@@ -1692,6 +1699,12 @@ class FederationInboundService(ProtectionGateMixin):
                 user_id=post.author,
             )
             return
+        else:
+            admitted, linked = await self._approved_card_link(event, space_id, post)
+            if not admitted:
+                return
+            if linked is not None:
+                post = replace(post, linked_event_id=linked)
         # §4.3 (v_42): the space's ``posts`` level, by who made the write.
         if not await authorship.access_admits(
             event,
@@ -1744,6 +1757,43 @@ class FederationInboundService(ProtectionGateMixin):
                 public_relay=public_relay,
             )
         )
+
+    async def _approved_card_link(
+        self, event: "FederationEvent", space_id: str, post: Post
+    ) -> tuple[bool, str | None]:
+        """``(admitted, link)``: the event link of an approved announce card
+        (v_43), ``None`` for any other post; ``admitted`` False (logged)
+        refuses the post.
+
+        Only content released from the moderation queue carries one — every
+        household's ``CalendarFeedBridge`` mints its own unreviewed cards —
+        and only for an event this space holds (a card linked to another
+        space's event would mirror that event's words here), never next to
+        a card this household already has for it."""
+        linked = event.payload.get("linked_event_id")
+        if (
+            not isinstance(linked, str)
+            or not linked
+            or MODERATION_BLOCK_KEY not in event.payload
+            or post.type is not PostType.EVENT
+        ):
+            return True, None
+        held = (
+            await self._space_calendar_repo.get_event(linked)
+            if self._space_calendar_repo is not None
+            else None
+        )
+        if held is None or held[0] != space_id:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="announce card event", row_id=linked
+            )
+            return False, None
+        if await self._space_post_repo.get_by_linked_event_id(linked) is not None:
+            log_not_applied(
+                event, what="announce card", row_id=post.id, reason="card already here"
+            )
+            return False, None
+        return True, linked
 
     async def _on_space_media_blob(self, event: "FederationEvent") -> None:
         """Persist a chunked space-post media blob to local media path.
