@@ -334,8 +334,12 @@ _PEER_PK = "cd" * 32
 _PEER_ID = derive_instance_id(bytes.fromhex(_PEER_PK))
 
 
-async def test_abort_drops_pending_and_publishes(bus, repo, handlers):
+async def test_abort_drops_pending_and_publishes(bus, repo, handlers, outbox, routing):
     repo.pairings["tok-1"] = _pending_session("tok-1", _PEER_PK)
+    # Whatever was queued for / learned from the half-paired household goes
+    # with its row (the shared purge).
+    outbox.rows[_PEER_ID] = ["queued"]
+    routing.discovered_via[_PEER_ID] = ["peer-x"]
     repo.instances[_PEER_ID] = _sample_instance(
         _PEER_ID,
         PairingStatus.PENDING_RECEIVED,
@@ -351,6 +355,8 @@ async def test_abort_drops_pending_and_publishes(bus, repo, handlers):
     )
     assert "tok-1" not in repo.pairings
     assert _PEER_ID not in repo.instances
+    assert _PEER_ID not in outbox.rows
+    assert _PEER_ID not in routing.discovered_via
     assert captured[0].reason == "timeout"
 
 

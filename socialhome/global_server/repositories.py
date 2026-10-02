@@ -23,6 +23,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import orjson
 
+from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..db import AsyncDatabase
 from ..domain.space import normalize_join_mode
 from .domain import (
@@ -50,6 +51,10 @@ from .domain import (
 # 24h comfortably exceeds any rate-limit window; rows are pruned on write,
 # keeping the table from growing without bound under repeated failed logins.
 _ADMIN_LOGIN_ATTEMPT_RETENTION_SECONDS = 86400
+
+#: Ceiling for ``global_spaces.authority_rotation_seq`` (v_44): SQLite's
+#: INTEGER range, the same bound a cert's ``key_epoch`` carries.
+_MAX_ROTATION_SEQ = MAX_AUTHORITY_KEY_EPOCH
 
 # Retention for ``gfs_pair_tokens``. Tokens are single-use with a 10-min TTL
 # and only counted within a short rate-limit window, so a row older than this
@@ -324,16 +329,21 @@ class SqliteGfsFederationRepo:
 
         Compare-and-set on the pin AND the stored cert the caller verified
         against, so two concurrent publishes (or a publish racing a cluster
-        sync) cannot interleave. Returns whether the row changed.
+        sync) cannot interleave. The ``authority_rotation_seq`` bump
+        saturates at :data:`_MAX_ROTATION_SEQ`. Returns whether the row
+        changed.
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE global_spaces SET identity_public_key=?, authority_cert=?,"
-            " authority_rotation_seq=authority_rotation_seq + 1"
+            " authority_rotation_seq=CASE WHEN authority_rotation_seq >= ?"
+            " THEN ? ELSE authority_rotation_seq + 1 END"
             " WHERE space_id=? AND COALESCE(identity_public_key, '')=?"
             " AND COALESCE(authority_cert, '')=?",
             (
                 new_pk,
                 _dump_cert(cert),
+                _MAX_ROTATION_SEQ,
+                _MAX_ROTATION_SEQ,
                 space_id,
                 expected_pk or "",
                 _dump_cert(expected_cert) or "",
@@ -346,7 +356,9 @@ class SqliteGfsFederationRepo:
     ) -> None:
         """Max-merge a peer node's ``authority_rotation_seq`` (v_44) — only
         while this node pins ``pk``, the key that seq describes. Never
-        lowers it."""
+        lowers it, and never past :data:`_MAX_ROTATION_SEQ` (a hostile
+        cluster peer could otherwise gossip a value SQLite cannot hold)."""
+        seq = min(max(seq, 0), _MAX_ROTATION_SEQ)
         await self._db.enqueue(
             "UPDATE global_spaces"
             " SET authority_rotation_seq=MAX(authority_rotation_seq, ?)"

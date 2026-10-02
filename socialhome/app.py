@@ -2972,6 +2972,9 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo=federation_repo,
             remote_member_repo=repos.space_remote_member,
         )
+        # A space-session seat is dropped through the same purge as an
+        # unpair, so its queued envelopes and mesh hints go with it.
+        real_space_service.attach_instance_purger(app[K.peer_unpair_service_key])
         # §4.3 moderation queue for every MODERATED feature, held by every
         # household that reviews (v_43 federated moderation).
         moderation_federation = SpaceModerationFederation(

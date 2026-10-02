@@ -195,7 +195,9 @@ class PairingInboundHandlers(ProtectionGateMixin):
                     )
         instance = await self._repo.get_instance(event.from_instance)
         if instance is not None and instance.status is not PairingStatus.CONFIRMED:
-            await self._repo.delete_instance(instance.id)
+            # Through the shared purge: whatever was queued for the
+            # half-paired household goes with its row.
+            await self._peer_unpair.purge(instance.id)
         await self._bus.publish(
             PairingAborted(
                 instance_id=event.from_instance,

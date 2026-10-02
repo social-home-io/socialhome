@@ -74,6 +74,8 @@ from socialhome.federation.transport import (
     HttpsInboxTransport,
 )
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
+from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
@@ -82,11 +84,13 @@ from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
 from socialhome.repositories.space_cover_repo import SqliteSpaceCoverRepo
+from socialhome.repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
 from socialhome.repositories.space_icon_repo import SqliteSpaceIconRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import GfsEnvelopeSender
+from socialhome.services.peer_unpair_service import PeerUnpairService
 from socialhome.services.space_service import SpaceService
 
 
@@ -232,10 +236,11 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
     remote_members = SqliteSpaceRemoteMemberRepo(db)
     gfs_repo = SqliteGfsConnectionRepo(db)
 
+    outbox_repo = SqliteOutboxRepo(db)
     federation = FederationService(
         db,
         federation_repo,
-        SqliteOutboxRepo(db),
+        outbox_repo,
         key_manager,
         bus,
         instance_id,
@@ -264,6 +269,17 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         own_instance_id=instance_id,
     )
     space_service.attach_federation(federation, federation_repo, remote_members)
+    space_service.attach_instance_purger(
+        PeerUnpairService(
+            bus=bus,
+            federation=federation,
+            federation_repo=federation_repo,
+            outbox_repo=outbox_repo,
+            routing_repo=SqliteDmRoutingRepo(db),
+            dm_media_outbox_repo=SqliteDmMediaOutboxRepo(db),
+            space_media_outbox_repo=SqliteSpaceMediaOutboxRepo(db),
+        )
+    )
     cover_repo = SqliteSpaceCoverRepo(db)
     icon_repo = SqliteSpaceIconRepo(db)
     space_service.attach_cover_repo(cover_repo)

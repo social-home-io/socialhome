@@ -57,3 +57,22 @@ async def test_reset_to_drops_only_older_key_epochs_above_it(repo):
     assert [k.epoch for k in await repo.list_for_space("sp-1")] == [0, 1, 5]
     assert (await repo.get("sp-1", 1)).rotated_by == "owner"
     assert [k.epoch for k in await repo.list_for_space("sp-2")] == [9]
+
+
+async def test_reset_to_stamps_the_pin_epoch_not_the_delete_cutoff(repo):
+    """A missed-baseline catch-up deletes only epochs older than the cutoff,
+    but the installed key is stamped with the pin epoch it was installed
+    under — a later baseline must see it as new-key state."""
+    await repo.save(_key("sp-1", 0))
+    await repo._db.enqueue("UPDATE spaces SET authority_key_epoch=7 WHERE id='sp-1'")
+    await repo.save(_key("sp-1", 4))  # written under pin 7
+    await repo.reset_to(_key("sp-1", 2, "owner"), authority_epoch=9, older_than=5)
+    rows = await repo._db.fetchall(
+        "SELECT epoch, authority_epoch FROM space_keys WHERE space_id='sp-1'"
+        " ORDER BY epoch"
+    )
+    assert [(r["epoch"], r["authority_epoch"]) for r in rows] == [
+        (0, 0),
+        (2, 9),
+        (4, 7),
+    ]

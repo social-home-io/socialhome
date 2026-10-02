@@ -195,6 +195,17 @@ class SpaceMediaSyncService:
                 )
         except Exception as exc:  # pragma: no cover
             log.warning("space-media-sync: reclaim_in_flight failed: %s", exc)
+        try:
+            # Backstop for a crash mid-teardown: rows for a household that is
+            # gone could only ever be refused.
+            orphaned = await self._outbox.purge_orphaned()
+            if orphaned:
+                log.info(
+                    "space-media-sync: dropped %d row(s) for households that are gone",
+                    orphaned,
+                )
+        except Exception as exc:  # pragma: no cover
+            log.warning("space-media-sync: purge_orphaned failed: %s", exc)
         self._stop.clear()
         self._task = asyncio.create_task(self._loop())
 

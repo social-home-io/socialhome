@@ -58,7 +58,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from ..domain.events import PeerUnpaired
 from ..domain.federation import FederationEventType, PairingStatus
@@ -98,6 +98,15 @@ async def is_unpair_tombstone(
         return False
     inst = await federation_repo.get_instance(instance_id, include_unpairing=True)
     return inst is not None and inst.status is PairingStatus.UNPAIRING
+
+
+class InstancePurger(Protocol):
+    """Drops a household's ``remote_instances`` row and everything queued or
+    learned because of it. Every deletion of a ``remote_instances`` row goes
+    through :meth:`PeerUnpairService.purge` (unpair, space-session cleanup,
+    ``PAIRING_ABORT``), so no path can leave its outbox behind."""
+
+    async def purge(self, instance_id: str) -> None: ...
 
 
 class PeerUnpairService:
@@ -166,7 +175,7 @@ class PeerUnpairService:
 
         Shared by the local unpair and the inbound ``UNPAIR`` handler.
         """
-        await self._purge(instance_id)
+        await self.purge(instance_id)
         await self._bus.publish(PeerUnpaired(instance_id=instance_id))
 
     async def finish_unpair(self, instance_id: str) -> None:
@@ -185,7 +194,7 @@ class PeerUnpairService:
         if inst is None or inst.status is not PairingStatus.UNPAIRING:
             return
         log.info("unpair: UNPAIR to %s settled — tombstone purged", instance_id)
-        await self._purge(instance_id)
+        await self.purge(instance_id)
 
     async def sweep_tombstones(self) -> int:
         """Purge every tombstone whose ``UNPAIR`` is no longer queued.
@@ -208,7 +217,7 @@ class PeerUnpairService:
                 "unpair: gave up telling %s it was unpaired — tombstone purged",
                 inst.id,
             )
-            await self._purge(inst.id)
+            await self.purge(inst.id)
             purged += 1
         return purged
 
@@ -258,14 +267,28 @@ class PeerUnpairService:
         )
         await self._bus.publish(PeerUnpaired(instance_id=instance_id))
 
-    async def _purge(self, instance_id: str) -> None:
-        # The row goes FIRST: from then on the outbox refuses to queue for
-        # this household (its INSERT checks ``remote_instances``), so the
-        # delete below sweeps everything a send still in flight could have
-        # queued. The reverse order left a window where such a send saw the
-        # row, queued, and stranded an envelope behind the purge.
+    async def purge(self, instance_id: str) -> None:
+        """Delete ``instance_id``'s ``remote_instances`` row, then everything
+        queued for it and every mesh hint it announced. Publishes nothing.
+
+        The one way a service removes a ``remote_instances`` row (see
+        :class:`InstancePurger`). The repository itself drops rows only in
+        bulk housekeeping (expired pending handshakes, a tombstone replaced
+        by a re-pair); anything those strand is collected by the outbox
+        sweep below. The row goes FIRST: from then on the
+        outboxes refuse to queue for this household (their INSERTs check
+        ``remote_instances``), so the deletes below sweep everything a send
+        still in flight could have queued. The reverse order left a window
+        where such a send saw the row, queued, and stranded an envelope
+        behind the purge. A crash between the steps leaves rows addressed to
+        nobody, which the outbox sweep
+        (:meth:`~socialhome.repositories.outbox_repo.SqliteOutboxRepo.purge_orphaned`)
+        drops.
+        """
         await self._federation_repo.delete_instance(instance_id)
         await self._outbox_repo.delete_for_instance(instance_id)
+        await self._dm_media_outbox_repo.delete_for_instance(instance_id)
+        await self._space_media_outbox_repo.delete_for_instance(instance_id)
         await self._routing_repo.forget_discovered_via(instance_id)
 
     async def _notify_peer(self, instance_id: str) -> bool:

@@ -298,17 +298,27 @@ class OutboxProcessor:
         return len(entries)
 
     async def prune_once(self) -> int:
-        """Retention sweep (§4.4.7). Two phases:
+        """Retention sweep (§4.4.7). First, drop rows addressed to a
+        household that is gone (no ``remote_instances`` row); then:
         1. flip pending rows past their expires_at to ``failed`` (NEVER_DROP
            rows have expires_at=NULL and are skipped);
         2. DELETE terminal (delivered/failed) rows older than TERMINAL_GRACE,
            in bounded batches, so the queue never accumulates tombstones
            (and a pre-change historical backlog is reclaimed over time).
         Then the optional ``after_prune`` hook (best-effort).
-        Returns expired + purged count.
+        Returns orphaned + expired + purged count.
         """
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
+        # Rows for a household whose ``remote_instances`` row is gone (a
+        # crash between a teardown's row delete and its outbox purge) can
+        # never be delivered: drop them outright.
+        orphaned = await self._repo.purge_orphaned()
+        if orphaned:
+            log.info(
+                "OutboxProcessor: dropped %d rows for households that are gone",
+                orphaned,
+            )
         expired = await self._repo.expire_past_retention(now_iso)
         cutoff_iso = (now - TERMINAL_GRACE).isoformat()
         purged = 0
@@ -327,7 +337,7 @@ class OutboxProcessor:
             except Exception:
                 # Best-effort like the sweep itself — never costs the prune.
                 log.exception("OutboxProcessor after-prune hook failed")
-        return expired + purged
+        return orphaned + expired + purged
 
     # ── Backoff math (pure) ────────────────────────────────────────────
 

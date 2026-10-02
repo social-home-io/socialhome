@@ -38,11 +38,15 @@ Lifecycle:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.federation import PairingStatus
 from .base import rows_to_dicts
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -94,6 +98,8 @@ class AbstractDmMediaOutboxRepo(Protocol):
 
     async def delete_for_instance(self, target_instance_id: str) -> None: ...
 
+    async def purge_orphaned(self) -> int: ...
+
     async def reschedule(
         self,
         *,
@@ -134,15 +140,41 @@ class SqliteDmMediaOutboxRepo:
         target_instance_id: str,
         bytes_path: str,
     ) -> None:
-        await self._db.enqueue(
+        # Queued only while we still hold a live pairing with the target
+        # (DM media rides ``send_event``, which needs the row). The check
+        # runs inside the INSERT, serialized with an unpair's purge on the
+        # single writer — the same guard as ``SqliteOutboxRepo.enqueue`` —
+        # so a send that resolved its recipients before the pairing ended
+        # cannot strand a row behind the purge. A tombstone
+        # (``unpairing``) gets nothing but our UNPAIR.
+        inserted = await self._db.enqueue_rowcount(
             """
             INSERT INTO dm_media_outbox(
                 blob_id, message_id, target_instance_id, bytes_path
-            ) VALUES(?,?,?,?)
+            )
+            SELECT ?,?,?,?
+             WHERE EXISTS (
+                SELECT 1 FROM remote_instances WHERE id=? AND status<>?
+             )
             ON CONFLICT(blob_id, target_instance_id) DO NOTHING
             """,
-            (blob_id, message_id, target_instance_id, bytes_path),
+            (
+                blob_id,
+                message_id,
+                target_instance_id,
+                bytes_path,
+                target_instance_id,
+                PairingStatus.UNPAIRING.value,
+            ),
         )
+        if not inserted:
+            # Refused by the peer guard (or a duplicate of a queued row).
+            log.info(
+                "dm-media outbox: not queueing %s for %s — "
+                "no live pairing (or already queued)",
+                blob_id,
+                target_instance_id,
+            )
 
     async def list_due(self, *, limit: int = 25) -> list[DmMediaOutboxEntry]:
         """Pending rows whose ``next_attempt_at`` is due now.
@@ -186,6 +218,19 @@ class SqliteDmMediaOutboxRepo:
         await self._db.enqueue(
             "DELETE FROM dm_media_outbox WHERE blob_id=? AND target_instance_id=?",
             (blob_id, target_instance_id),
+        )
+
+    async def purge_orphaned(self) -> int:
+        """Delete every row (any status) addressed to a household we hold no
+        ``remote_instances`` row for; return how many.
+
+        The backstop for a crash between a teardown's row delete and its
+        media purge — DM media rides ``send_event``, which needs the row.
+        """
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM dm_media_outbox WHERE NOT EXISTS ("
+            "SELECT 1 FROM remote_instances"
+            " WHERE remote_instances.id = dm_media_outbox.target_instance_id)",
         )
 
     async def delete_for_instance(self, target_instance_id: str) -> None:

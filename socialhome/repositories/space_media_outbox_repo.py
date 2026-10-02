@@ -17,11 +17,15 @@ schema audit + shape rationale.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.federation import PairingStatus
 from .base import rows_to_dicts
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -71,6 +75,8 @@ class AbstractSpaceMediaOutboxRepo(Protocol):
 
     async def delete_for_instance(self, target_instance_id: str) -> None: ...
 
+    async def purge_orphaned(self) -> int: ...
+
     async def reschedule(
         self,
         *,
@@ -111,11 +117,29 @@ class SqliteSpaceMediaOutboxRepo:
         target_instance_id: str,
         bytes_path: str,
     ) -> None:
-        await self._db.enqueue(
+        # The same atomic peer check as ``SqliteOutboxRepo.enqueue``, run
+        # inside the INSERT so it is serialized with an unpair's purge:
+        # refused for an unpair tombstone (``unpairing`` — it gets nothing
+        # but our UNPAIR), and for a household that is neither paired with
+        # us nor a member household of the space. A mesh-only member has no
+        # ``remote_instances`` row but a ``space_instances`` one, and still
+        # gets its bytes over ``SPACE_ROUTED``.
+        inserted = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_media_outbox(
                 blob_id, space_id, correlation_id, target_instance_id, bytes_path
-            ) VALUES(?,?,?,?,?)
+            )
+            SELECT ?,?,?,?,?
+             WHERE NOT EXISTS (
+                SELECT 1 FROM remote_instances WHERE id=? AND status=?
+             )
+               AND (
+                EXISTS (SELECT 1 FROM remote_instances WHERE id=?)
+                OR EXISTS (
+                    SELECT 1 FROM space_instances
+                     WHERE space_id=? AND instance_id=?
+                )
+             )
             ON CONFLICT(blob_id, target_instance_id) DO NOTHING
             """,
             (
@@ -124,8 +148,21 @@ class SqliteSpaceMediaOutboxRepo:
                 correlation_id,
                 target_instance_id,
                 bytes_path,
+                target_instance_id,
+                PairingStatus.UNPAIRING.value,
+                target_instance_id,
+                space_id,
+                target_instance_id,
             ),
         )
+        if not inserted:
+            # Refused by the peer guard (or a duplicate of a queued row).
+            log.info(
+                "space-media outbox: not queueing %s for %s — "
+                "neither paired nor seated in the space (or already queued)",
+                blob_id,
+                target_instance_id,
+            )
 
     async def list_due(self, *, limit: int = 25) -> list[SpaceMediaOutboxEntry]:
         rows = await self._db.fetchall(
@@ -151,6 +188,22 @@ class SqliteSpaceMediaOutboxRepo:
         await self._db.enqueue(
             "DELETE FROM space_media_outbox WHERE blob_id=? AND target_instance_id=?",
             (blob_id, target_instance_id),
+        )
+
+    async def purge_orphaned(self) -> int:
+        """Delete every row (any status) whose household is neither paired
+        with us nor a member household of the row's space; return how many.
+
+        The backstop for a crash between a teardown's row delete and its
+        media purge — such a row could only ever be refused.
+        """
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM space_media_outbox WHERE NOT EXISTS ("
+            "SELECT 1 FROM remote_instances"
+            " WHERE remote_instances.id = space_media_outbox.target_instance_id)"
+            " AND NOT EXISTS (SELECT 1 FROM space_instances"
+            " WHERE space_instances.space_id = space_media_outbox.space_id"
+            " AND space_instances.instance_id = space_media_outbox.target_instance_id)",
         )
 
     async def delete_for_instance(self, target_instance_id: str) -> None:

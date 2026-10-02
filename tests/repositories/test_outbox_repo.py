@@ -769,3 +769,38 @@ async def test_enqueue_to_unpair_tombstone_takes_only_the_unpair(env):
         "SELECT event_type FROM federation_outbox WHERE instance_id='tomb'"
     )
     assert [r["event_type"] for r in rows] == ["unpair"]
+
+
+async def test_purge_orphaned_drops_rows_of_households_that_are_gone(env):
+    """A crash between the ``remote_instances`` delete and the outbox purge
+    leaves rows addressed to nobody: the sweep deletes them (any status),
+    but keeps a tombstone's UNPAIR and every live peer's rows."""
+    await _seed_peer(env.db, "tomb", status="unpairing")
+    stranded = await env.outbox_repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    failed = await env.outbox_repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.SPACE_SYNC_OFFER,
+        payload_json="{}",
+    )
+    await env.outbox_repo.mark_failed(failed)
+    unpair = await env.outbox_repo.enqueue(
+        instance_id="tomb",
+        event_type=FederationEventType.UNPAIR,
+        payload_json="{}",
+    )
+    kept = await env.outbox_repo.enqueue(
+        instance_id="kept",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    assert stranded and failed
+    await env.db.enqueue("DELETE FROM remote_instances WHERE id='gone'")
+
+    assert await env.outbox_repo.purge_orphaned() == 2
+    rows = await env.db.fetchall("SELECT id FROM federation_outbox ORDER BY id")
+    assert sorted(r["id"] for r in rows) == sorted([unpair, kept])
+    assert await env.outbox_repo.purge_orphaned() == 0

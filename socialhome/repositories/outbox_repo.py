@@ -77,6 +77,7 @@ class AbstractOutboxRepo(Protocol):
     async def count_failed_for(self, instance_id: str) -> int: ...
     async def evict_oldest_droppable(self, instance_id: str) -> bool: ...
     async def delete_for_instance(self, instance_id: str) -> None: ...
+    async def purge_orphaned(self) -> int: ...
     async def expedite(
         self,
         instance_id: str,
@@ -363,6 +364,22 @@ class SqliteOutboxRepo:
         await self._db.enqueue(
             "DELETE FROM federation_outbox WHERE instance_id=?",
             (instance_id,),
+        )
+
+    async def purge_orphaned(self) -> int:
+        """Delete every row (any status) addressed to a household we hold no
+        ``remote_instances`` row for; return how many.
+
+        :meth:`delete_for_instance` runs right after the row delete on every
+        teardown path; this is the backstop for a crash between the two.
+        Such a row can never be delivered (redelivery needs the row), so it
+        is dropped outright instead of lingering as ``failed``. An unpair
+        tombstone still HAS its row, so its queued ``UNPAIR`` stays.
+        """
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM federation_outbox WHERE NOT EXISTS ("
+            "SELECT 1 FROM remote_instances"
+            " WHERE remote_instances.id = federation_outbox.instance_id)",
         )
 
     async def expedite(

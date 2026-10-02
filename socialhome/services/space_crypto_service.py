@@ -295,6 +295,7 @@ class SpaceContentEncryption(BusPublisherMixin):
         *,
         rotated_by: str | None,
         authority_epoch: int,
+        older_than: int | None = None,
     ) -> None:
         """Make ``(epoch, raw_key)`` the space's current key — atomically.
 
@@ -308,7 +309,9 @@ class SpaceContentEncryption(BusPublisherMixin):
         current forever) — but keeps a newer epoch the owner already rekeyed
         to under the new key. Delete + install run in one transaction.
         Called only after the bundle's owner signature and the new authority
-        signature have both verified.
+        signature have both verified. ``authority_epoch`` is the pin the key
+        is installed under (its stamp); ``older_than`` (a missed-baseline
+        catch-up) narrows which later epochs are dropped.
         """
         if len(raw_key) != 32:
             raise ValueError("space content key must be 32 bytes")
@@ -324,6 +327,7 @@ class SpaceContentEncryption(BusPublisherMixin):
                 rotated_by=rotated_by,
             ),
             authority_epoch=authority_epoch,
+            older_than=older_than,
         )
         log.info(
             "space_crypto: reset %s to the owner's epoch %d (dropped %d older-key "
