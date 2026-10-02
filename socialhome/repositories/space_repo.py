@@ -100,6 +100,9 @@ class AbstractSpaceRepo(Protocol):
     ) -> bool: ...
     async def get_seed_shared_epoch(self, space_id: str) -> int | None: ...
     async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None: ...
+    async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None: ...
+    async def get_owner_user_id(self, space_id: str) -> str | None: ...
+    async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
     async def set_cover_hash(
         self,
@@ -1000,6 +1003,38 @@ class SqliteSpaceRepo:
         if row is None:
             return None
         return row["host_identity_pk"]
+
+    async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None:
+        """Record the owner's ``user_id`` on a stub (migration 0070); ``None``
+        forgets it (the owner changed and no roster has named the new one).
+
+        Callers MUST take it from a roster the space's authenticated host
+        sent (its ``role: "owner"`` entry on the host's own instance)."""
+        await self._db.enqueue(
+            "UPDATE spaces SET owner_user_id=? WHERE id=?",
+            (user_id, space_id),
+        )
+
+    async def record_owner_change(self, space_id: str, owner_username: str) -> None:
+        """A stub learns from its HOST that ownership moved: store the new
+        ``owner_username`` (``save`` never rewrites the owner columns) and
+        forget the recorded owner seat until a host roster names the new one.
+
+        Callers MUST only pass a value from the space's authenticated host."""
+        await self._db.enqueue(
+            "UPDATE spaces SET owner_username=?, owner_user_id=NULL WHERE id=?",
+            (owner_username, space_id),
+        )
+
+    async def get_owner_user_id(self, space_id: str) -> str | None:
+        """The owner's ``user_id`` recorded on a stub, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT owner_user_id FROM spaces WHERE id=?",
+            (space_id,),
+        )
+        if row is None:
+            return None
+        return row["owner_user_id"]
 
     async def list_by_type(self, space_type: SpaceType) -> list[Space]:
         rows = await self._db.fetchall(

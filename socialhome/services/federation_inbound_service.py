@@ -2838,6 +2838,20 @@ class FederationInboundService(ProtectionGateMixin):
             await self._space_repo.mark_config_authority(space_id)
         if (
             is_owner
+            and existing.owner_instance_id != own_instance_id
+            and refreshed.owner_username
+            and refreshed.owner_username != existing.owner_username
+        ):
+            # The HOST says ownership moved (transfer_ownership). ``save``
+            # never rewrites the owner columns, so record it here, and forget
+            # the owner seat (migration 0070) — the host's next roster
+            # snapshot names the new owner. Only from the host itself: a
+            # seed holder's signed config can't move ownership.
+            await self._space_repo.record_owner_change(
+                space_id, refreshed.owner_username
+            )
+        if (
+            is_owner
             and existing.features.delegated_admin_authority
             and not refreshed.features.delegated_admin_authority
             and existing.owner_instance_id != own_instance_id

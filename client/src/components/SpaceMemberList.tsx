@@ -12,6 +12,7 @@ import { api } from '@/api'
 import { ws } from '@/ws'
 import { Avatar } from './Avatar'
 import { Spinner } from './Spinner'
+import { LoadErrorState } from './LoadErrorState'
 import { Button } from './Button'
 import { t } from '@/i18n/i18n'
 import { openReport } from './ReportDialog'
@@ -70,6 +71,10 @@ interface Member {
    *  household" badge + suppresses admin-only gestures (kebab menu,
    *  rename) that don't apply over federation. */
   instance_id?: string | null
+  /** The space owner's seat — on a member household the owner is
+   *  mirrored as a remote seat, so the server says so explicitly. No role
+   *  change is ever offered on it. */
+  is_owner?: boolean
 }
 
 interface Ban {
@@ -79,9 +84,14 @@ interface Ban {
   reason?: string | null
 }
 
+/** ``space.config.changed`` event types that mean a seat's role moved
+ *  (``role_change_event_type`` in ``domain/space.py``). */
+const ROLE_EVENT_TYPES = new Set(['role_changed', 'admin_granted', 'admin_revoked'])
+
 const members = signal<Member[]>([])
 const bans = signal<Ban[]>([])
 const loading = signal(true)
+const loadFailed = signal(false)
 const canManage = signal(false)
 
 interface Props {
@@ -97,6 +107,7 @@ interface Props {
 export function SpaceMemberList({ spaceId, viewerRole }: Props) {
   const reload = () => {
     loading.value = true
+    loadFailed.value = false
     const p1 = api.get(`/api/spaces/${spaceId}/members`)
     const p2 = hasSettingsAuthority(viewerRole)
       ? api.get(`/api/spaces/${spaceId}/bans`).catch(() => [] as Ban[])
@@ -105,6 +116,11 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
       members.value = mems as Member[]
       bans.value = bansList as Ban[]
       canManage.value = hasSettingsAuthority(viewerRole)
+      loading.value = false
+    }).catch(() => {
+      // A failed load (network, 429…) shows Retry — never an endless
+      // spinner, never an empty roster.
+      loadFailed.value = true
       loading.value = false
     })
   }
@@ -156,13 +172,23 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
     const offJoined = ws.on('space.member.joined', onRoster)
     const offLeft = ws.on('space.member.left', onRoster)
     const offProfile = ws.on('space.member.profile_updated', onRoster)
+    // A role change — local, or the host's answer to one this household
+    // forwarded (v_47) — rides ``space.config.changed`` with a role event
+    // type; refetch so the badge and the picker follow.
+    const offRole = ws.on('space.config.changed', (e) => {
+      const d = e.data as { space_id?: string; event_type?: string }
+      if (d.space_id === spaceId && ROLE_EVENT_TYPES.has(d.event_type ?? '')) reload()
+    })
     return () => {
       offOnline(); offIdle(); offOffline()
-      offJoined(); offLeft(); offProfile()
+      offJoined(); offLeft(); offProfile(); offRole()
     }
   }, [spaceId, viewerRole])
 
   if (loading.value) return <Spinner />
+  if (loadFailed.value) {
+    return <LoadErrorState message={t('space.member.load_failed')} onRetry={reload} />
+  }
 
   const roleBadge = (role: string) => {
     if (role === 'owner' || role === 'admin' || role === 'moderator') {
@@ -363,7 +389,8 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                   type="button"
                   aria-label={`Manage ${r.name}`}
                   onClick={() => openMemberActions(
-                    spaceId, m.user_id, m.role, m.instance_id ?? null, viewerRole,
+                    spaceId, m.user_id, m.is_owner ? 'owner' : m.role,
+                    m.instance_id ?? null, viewerRole,
                   )}
                 >
                   ···

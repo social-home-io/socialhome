@@ -1162,8 +1162,8 @@ album on the settings tier.
 **Who may change a role** (`role_change_allowed`): the owner sets
 `admin` / `moderator` / `member` on any non-owner seat; an admin moves a
 seat only between `member` and `moderator`; nobody else changes roles.
-Role changes happen on the host only — there is no forward path from a
-member stub yet. Nobody *joins* as a moderator: an invite link refuses
+On a member stub the change is forwarded to the host (v_47, see
+[Forwarded role changes](#forwarded-role-changes-v_47)). Nobody *joins* as a moderator: an invite link refuses
 the role and `SEATABLE_REMOTE_ROLES` omits it — though a household already
 seated as a moderator that re-redeems its link (a lost ACK) is re-ACKed with
 the seat it holds (`REACKABLE_REMOTE_ROLES`).
@@ -1495,6 +1495,87 @@ sequenceDiagram
 The role assignment is the foundation. The actual cross-household
 admin *action* (kick) rides `SPACE_REMOTE_ADMIN_KICK` documented
 below.
+
+### Forwarded role changes (v_47)
+
+The host's roster is the one every household trusts, so a role is never
+rewritten on a stub. An admin on a member household who changes a role
+(`PATCH /members/{user_id}` or `/remote-members/{instance}/{user}`) has
+it **forwarded**: the stub checks what it can (the actor is an admin
+there, `role_change_allowed` against its mirror, the target isn't the
+owner) and ships `SPACE_REMOTE_ADMIN_ACTION` with action
+`set_member_role` and params `{instance_id, user_id, from_role, role}` (all inside
+the encrypted payload; `instance_id` is the target's home household — the
+host's own id for a host-local member). The route answers 202
+`{forwarded: true}`; the SPA says "Sent to the space's host".
+
+The host re-checks everything with its own data before it runs or queues
+anything (`_validate_forwarded_role_change`):
+
+- the actor's live seat on the **signed sender** (`from_instance`) must be
+  `admin` — a moderator, a member, a demoted admin, or an actor named on
+  another household is dropped;
+- `role_change_allowed(actor_role, target_role, new_role)` for **that
+  seat's** role — never the owner's, so an admin's request stays
+  member ↔ moderator even when the owner approves it;
+- the target seat exists and isn't the owner; the role is assignable;
+- the seat still holds `from_role` (the role the stub saw) — a request
+  that waited in an outbox or for the owner's approval can't undo a newer
+  decision;
+- the v_41 moderator floor on the target's home household.
+
+Then the usual `delegated_admin_authority` gate applies: ON → applied
+immediately; OFF → an owner-only approval, and on APPROVE the actor's seat
+is read again and the change re-validated. The approval runs as the
+proposal's signer-bound `proposed_by_*`, and a `remote_admin_action`
+proposal can only be opened by this gate — the `propose` verb (and the
+local proposals route) refuse it, so nobody hand-builds one naming another
+actor. The owner's card reads "make Carol a moderator"; a newer request
+for the same seat replaces the older, and a household holds at most 20
+open requests per space (the cap is checked first; a replacement only
+ever replaces the same household's own request). An applied change federates
+like a host-local one (`SPACE_MEMBER_ROLE_CHANGED` + roster gossip), which
+is how the stub learns it; its Members list refetches on the resulting
+`space.config.changed` frame. **There is no refusal echo** (same as a
+forwarded config edit): a change the host declines simply never shows up.
+Since only the owner (who sits on the host) may grant or revoke admin, the
+forward path never moves an admin seat — no signing-seed share and no
+v_44 rotation can be triggered through it.
+
+A host below v_47 drops the unknown action silently, so the stub gates
+the forward on `peer_supports(host, MIN_FOR_FORWARDED_ROLE_CHANGE)` and
+answers 409 `HOST_TOO_OLD` (`feature: "role_change"`) instead. A forward
+that reached nobody and was not queued (no route, unknown host) answers
+503 `HOST_UNREACHABLE` — for every forwarded admin action — so the SPA
+never says "sent" for nothing. The stub knows the owner's seat from the
+host's invite roster and the host's own roster snapshot, which now ships
+the owner's seat as `role: "owner"` (`spaces.owner_user_id`, migration
+0070; every v_32+ receiver mirrors that row as `member`, as before). It
+marks the seat `owner` in its member list and refuses a role change on it.
+After `transfer_ownership` the host's config carries the new
+`owner_username`; the stub records it and forgets the old owner seat until
+the next snapshot from the host names the new one. A signed config from a
+seed holder can't move ownership.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as HFS A (stub, admin)
+    participant H as HFS H (host)
+    participant C as HFS C (target's household)
+    A->>A: PATCH .../remote-members/C/u {role: moderator}<br/>admin? matrix? host ≥ v_47?
+    A->>H: SPACE_REMOTE_ADMIN_ACTION<br/>{set_member_role, {instance_id: C, user_id: u, role}}
+    Note over A: 202 {forwarded: true}<br/>"Sent to the space's host"
+    H->>H: actor seat on A is admin?<br/>role_change_allowed(admin, member, moderator)<br/>target ≠ owner, C ≥ v_41
+    alt delegated_admin_authority ON
+        H->>H: space_remote_members.set_role(...)
+    else OFF
+        H->>H: owner-only approval → owner APPROVE<br/>(actor seat re-read)
+    end
+    H->>A: SPACE_MEMBER_ROLE_CHANGED + roster gossip
+    H->>C: SPACE_MEMBER_ROLE_CHANGED + roster gossip
+    Note over A: Members list refetches
+```
 
 ### Delegated-admin signing-seed share (`SPACE_ADMIN_KEY_SHARE`, v_22+)
 
@@ -2112,9 +2193,10 @@ sequenceDiagram
 ```
 
 Scope is admin-level only. **Owner-only** actions — dissolve,
-transfer-ownership, role assignment (`set_role` /
-`set_remote_member_role`) — are NOT forwardable and stay host-local;
-ownership privileges don't cross households. Against a host older than
+transfer-ownership, granting or revoking admin — are NOT forwardable and
+stay host-local; ownership privileges don't cross households. An admin's
+member ↔ moderator change IS forwardable since v_47 (`set_member_role`,
+below). Against a host older than
 v_15 (no handler) the forward raises `SpacePermissionError` rather
 than silently mutating the stub, so the admin gets a clear
 "host needs upgrading" error instead of a divergent local view.

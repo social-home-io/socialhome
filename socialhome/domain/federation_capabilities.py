@@ -719,7 +719,19 @@ from __future__ import annotations
 #:   the field); a v_45 owner ignores it, a v_45 member never sends it and
 #:   ignores ``forgotten_key_epoch``, so a forgotten rotation stays
 #:   undetected there, as before.
-OURS: int = 46
+#: * **v_47** (2026-10-02) — forwarded role changes. An admin on a member
+#:   household (a stub) can change a member's role: the stub ships
+#:   ``SPACE_REMOTE_ADMIN_ACTION`` with the new action ``set_member_role``
+#:   (``{instance_id, user_id, from_role, role}`` inside the encrypted payload) to the
+#:   host, which re-checks the actor's live admin seat on the sending
+#:   household, the role matrix (``role_change_allowed``) against its own
+#:   roster, the owner refusal and the v_41 moderator floor, then applies it
+#:   (or holds it for owner approval while ``delegated_admin_authority`` is
+#:   off) and federates the result through the normal role broadcast +
+#:   roster gossip. **Gated, no fallback**: a host below v_47 drops the
+#:   unknown action silently, so a stub refuses the request with 409
+#:   ``HOST_TOO_OLD`` instead of reporting it as sent.
+OURS: int = 47
 
 
 class FederationCapability:
@@ -1121,6 +1133,11 @@ class FederationCapability:
     #: echo only to an owner at or above it; the owner's reaction (a resent
     #: or fresh ``SPACE_AUTHORITY_ROTATED``) is its own signed state.
     MIN_FOR_AUTHORITY_EPOCH_ECHO = 46
+    #: Minimum proto_version whose host applies a forwarded
+    #: ``SPACE_REMOTE_ADMIN_ACTION`` ``set_member_role`` (v_47). An older
+    #: host drops the unknown action silently, so a stub refuses the role
+    #: change (409 ``HOST_TOO_OLD``) rather than claim it was sent.
+    MIN_FOR_FORWARDED_ROLE_CHANGE = 47
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -1262,6 +1279,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO,
         "Space key epoch echo",
     ),
+    (
+        FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE,
+        "Role changes from member households",
+    ),
 ]
 
 
@@ -1333,6 +1354,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
         FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE,
         FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO,
+        FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE,
     }
 )
 

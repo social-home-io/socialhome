@@ -10814,6 +10814,187 @@ def cmd_federated_moderation() -> None:
     print("federated-moderation: ok")
 
 
+def cmd_forwarded_role_change() -> None:
+    """Forwarded role change (v_47): an admin on a member household changes
+    a role in a space hosted elsewhere.
+
+    Beta (b) hosts a fresh "Roles club" with delegated admin authority on,
+    seats Alice (a), Carol (c) and Dave (d), and makes Alice an admin.
+
+    1. **Alice (on a) promotes Carol (on c) to moderator.** a's route
+       answers 202 ``{forwarded: true}`` — a's stub is not touched; it ships
+       ``SPACE_REMOTE_ADMIN_ACTION{set_member_role}`` to the host b.
+    2. b re-checks Alice's live admin seat and the role matrix with its own
+       roster, applies it and federates the role: **a, b, c and d all see
+       Carol as moderator** (c in ``space_members``, the others in
+       ``space_remote_members``).
+    3. **The new moderator can't drive a role change**: Carol's attempt to
+       promote Dave from c answers 403 and nothing is forwarded; Dave stays
+       a member on b.
+    4. **An admin still can't make an admin**: Alice's try to make Dave an
+       admin answers 403 on a.
+
+    The space is this step's own, so no earlier assertion changes.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' + 'relay-pair' first")
+    inst = state["instances"]
+    a, b, c, d = inst["a"], inst["b"], inst["c"], inst["d"]
+    b_base = f"http://127.0.0.1:{b['port']}"
+    a_base = f"http://127.0.0.1:{a['port']}"
+    c_base = f"http://127.0.0.1:{c['port']}"
+    s, space = _request(
+        f"{b_base}/api/spaces",
+        token=b["token"],
+        method="POST",
+        body={"name": "Roles club", "join_mode": "invite_only"},
+    )
+    space_id = _must("space create(b)", s, space, ok=(201,))["id"]
+    print(f"  b: space {space_id[:8]} created")
+    s, body = _request(
+        f"{b_base}/api/spaces/{space_id}",
+        token=b["token"],
+        method="PATCH",
+        body={"features": {"delegated_admin_authority": True}},
+    )
+    _must("b: delegated admin authority on", s, body)
+    for label in ("a", "c", "d"):
+        guest = inst[label]
+        s, inv = _request(
+            f"{b_base}/api/spaces/{space_id}/remote-invites",
+            token=b["token"],
+            method="POST",
+            body={
+                "invitee_instance_id": guest["instance_id"],
+                "invitee_user_id": guest["user_id"],
+            },
+        )
+        _must(f"remote-invite({label})", s, inv, ok=(201,))
+
+    def _invite_token(label: str) -> str | None:
+        guest = inst[label]
+        s, invites = _request(
+            f"http://127.0.0.1:{guest['port']}/api/remote_invites",
+            token=guest["token"],
+        )
+        items = invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        hit = next((i for i in items if i.get("space_id") == space_id), None)
+        return hit["invite_token"] if s == 200 and hit else None
+
+    for label in ("a", "c", "d"):
+        _wait_for(
+            f"{label} to receive b's invite",
+            lambda label=label: _invite_token(label) is not None,
+            timeout=60.0,
+        )
+        guest = inst[label]
+        s, r = _request(
+            f"http://127.0.0.1:{guest['port']}/api/remote_invites/"
+            f"{_invite_token(label)}/accept",
+            token=guest["token"],
+            method="POST",
+        )
+        _must(f"accept-invite({label})", s, r, ok=(204,))
+
+    def _role_on(viewer: str, label: str) -> str | None:
+        """``label``'s role in the Roles club as ``viewer``'s DB holds it."""
+        uid = inst[label]["user_id"]
+        if viewer == label:
+            rows = _rows(
+                viewer,
+                "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+                (space_id, uid),
+            )
+        else:
+            rows = _rows(
+                viewer,
+                "SELECT role FROM space_remote_members WHERE space_id=?"
+                " AND user_id=? AND tombstoned=0",
+                (space_id, uid),
+            )
+        return rows[0][0] if rows else None
+
+    for label in ("a", "c", "d"):
+        _wait_for(
+            f"b to seat {label}",
+            lambda label=label: _role_on("b", label) == "member",
+            timeout=60.0,
+        )
+    s, body = _request(
+        f"{b_base}/api/spaces/{space_id}/remote-members/{a['instance_id']}/{a['user_id']}",
+        token=b["token"],
+        method="PATCH",
+        body={"role": "admin"},
+    )
+    _must("b: make alice an admin", s, body)
+    _wait_for("a to hold alice's admin seat", lambda: _role_on("a", "a") == "admin")
+    # a's stub needs the roster mirror rows it will name as targets.
+    for label in ("c", "d"):
+        _wait_for(
+            f"a to mirror {label}'s seat",
+            lambda label=label: _role_on("a", label) == "member",
+            timeout=60.0,
+        )
+    print("  a, c and d seated; alice (a) is an admin")
+
+    # 1. Alice forwards a promotion from her own household.
+    s, body = _request(
+        f"{a_base}/api/spaces/{space_id}/remote-members/{c['instance_id']}/{c['user_id']}",
+        token=a["token"],
+        method="PATCH",
+        body={"role": "moderator"},
+    )
+    _must("a: promote carol to moderator (forwarded)", s, body, ok=(202,))
+    if body.get("forwarded") is not True:
+        raise SystemExit(f"forwarded-role-change: a answered {body!r}, not forwarded")
+    print("  a: 202 forwarded to the host b")
+
+    # 2. The host applies it; everyone sees the moderator.
+    for viewer in ("b", "a", "c", "d"):
+        _wait_for(
+            f"{viewer} to see carol as moderator",
+            lambda viewer=viewer: _role_on(viewer, "c") == "moderator",
+            timeout=60.0,
+        )
+    print("  a, b, c and d all see carol as moderator ✓")
+
+    # 3. A moderator can't drive a role change.
+    _wait_for("c to mirror dave's seat", lambda: _role_on("c", "d") == "member", timeout=60.0)
+    s, body = _request(
+        f"{c_base}/api/spaces/{space_id}/remote-members/{d['instance_id']}/{d['user_id']}",
+        token=c["token"],
+        method="PATCH",
+        body={"role": "moderator"},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"forwarded-role-change: moderator carol's role change -> {s} {body!r} "
+            "(expected 403)"
+        )
+    # 4. An admin can't make an admin, forwarded or not.
+    s, body = _request(
+        f"{a_base}/api/spaces/{space_id}/remote-members/{d['instance_id']}/{d['user_id']}",
+        token=a["token"],
+        method="PATCH",
+        body={"role": "admin"},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"forwarded-role-change: admin alice making dave an admin -> {s} {body!r} "
+            "(expected 403)"
+        )
+    time.sleep(3.0)  # give a stray forward the time it would need to land
+    if _role_on("b", "d") != "member":
+        raise SystemExit(
+            f"forwarded-role-change: dave is {_role_on('b', 'd')!r} on the host"
+        )
+    print("  carol (moderator) and an admin->admin grant both refused ✓")
+    state["forwarded_role_change_space_id"] = space_id
+    _save(state)
+    print("forwarded-role-change: ok")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -10941,6 +11122,11 @@ def main() -> None:
         # hosted by b; the moderator on a sees it, plain-member household d
         # never receives it, and a's resolve clears it on b.
         cmd_space_report()
+        # ``forwarded-role-change`` (v_47): an admin on a promotes a member
+        # of c to moderator in a space hosted by b — a answers 202
+        # forwarded, the host applies it and a, b, c, d all see the
+        # moderator; the new moderator's own role change is refused.
+        cmd_forwarded_role_change()
         # ``admin-revoke-rotation`` (v_44): a demotes delegated admin b; a
         # rotates the space authority key, c and b re-pin from the owner's
         # cert, b's old seed is cleared and b can no longer sign.

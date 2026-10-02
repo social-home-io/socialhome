@@ -68,6 +68,7 @@ from ..domain.space import (
     SpacePermissionError,
     SpaceRole,
     mirrorable_remote_role,
+    owner_seat_from_roster,
 )
 from ..services.space_authority_pin import (
     apply_authority_cert,
@@ -769,6 +770,9 @@ class SpaceInviteTokenRedeemCoordinator:
                 # because that lives in the local ``space_members``
                 # row we just inserted.
                 roster = meta.get("roster")
+                owner_uid = owner_seat_from_roster(roster, issuer_instance_id)
+                if owner_uid is not None:
+                    await self._spaces.set_owner_user_id(space_id, owner_uid)
                 if isinstance(roster, list):
                     for entry in roster:
                         if not isinstance(entry, dict):

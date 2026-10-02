@@ -104,6 +104,9 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # Read-only: whether a config edit here would be forwarded to the
         # host (the PATCH route's ``forwarded`` hint). Mutates nothing.
         "config_edits_forward",
+        # Read-only: the owner's user_id (the members route's ``is_owner``
+        # flag). Mutates nothing.
+        "owner_user_id",
         # Pure reads.
         # Deliberately ungated and reachable with NO session: the invite
         # token IS the credential, so whoever holds it can already redeem

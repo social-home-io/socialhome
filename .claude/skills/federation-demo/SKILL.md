@@ -396,7 +396,7 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (46 since the authority epoch echo).
+   ``OURS`` (47 since forwarded role changes).
 
 9c. ``federated-moderation`` (v_43 "Reviewed" across households) — **b**
    hosts a fresh "Reviewed club" with **a**'s, **c**'s and **d**'s admins as
@@ -420,6 +420,16 @@ That single command runs the full sequence:
    queues list it, no household admin queue does, and **d** (plain member)
    stores no row and logs no ``space_report``. Alice resolves it **on a**;
    ``SPACE_REPORT_DECIDED`` reaches **b**, whose copy reads ``resolved``.
+
+9c3. ``forwarded-role-change`` (v_47) — **b** hosts a fresh "Roles club"
+   with delegated admin authority on, seats **a**, **c** and **d**, and
+   makes **a**'s user an admin. **a** promotes **c**'s user to moderator
+   from its own household: the route answers 202 ``{forwarded: true}`` and
+   ships ``SPACE_REMOTE_ADMIN_ACTION{set_member_role}`` to **b**, which
+   re-checks the actor's seat and the matrix and applies it — **a**, **b**,
+   **c** and **d** all see the moderator. The new moderator's own attempt
+   (from **c**) and **a**'s try to make an admin both answer 403, and the
+   target stays a member on **b**.
 
 9d. ``admin-revoke-rotation`` (v_44 space authority key rotation) — **a**
    creates a private space with ``delegated_admin_authority`` on, invites
@@ -476,7 +486,7 @@ invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
-space-report → admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
+space-report → forwarded-role-change → admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
 unpair-offline`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /

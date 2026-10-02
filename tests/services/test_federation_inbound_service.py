@@ -2524,6 +2524,32 @@ async def test_space_config_changed_applies_when_sequence_advances(
     assert row["config_sequence"] == 6
 
 
+async def test_an_ownership_transfer_forgets_the_stubs_owner_seat(db, bus, inbound):
+    """Migration 0070: ``owner_user_id`` names the OLD owner after a
+    transfer — the host's config with a new ``owner_username`` clears it
+    (the host's next roster snapshot names the new owner)."""
+    await _seed_space(db, space_id="sp-own", from_instance="peer-a", seq=5)
+    await db.enqueue(
+        "UPDATE spaces SET owner_user_id='u-old' WHERE id='sp-own'",
+    )
+    same_owner = _cfg_event(
+        space_id="sp-own", from_instance="peer-a", sequence=6, name="Renamed"
+    )
+    await inbound._on_space_config_changed(same_owner)
+    row = await db.fetchone("SELECT owner_user_id FROM spaces WHERE id='sp-own'")
+    assert row["owner_user_id"] == "u-old"  # a plain rename keeps it
+    moved = _cfg_event(
+        space_id="sp-own", from_instance="peer-a", sequence=7, name="Renamed"
+    )
+    moved.payload["space_meta"]["owner_username"] = "newowner"
+    await inbound._on_space_config_changed(moved)
+    row = await db.fetchone(
+        "SELECT owner_username, owner_user_id FROM spaces WHERE id='sp-own'"
+    )
+    assert row["owner_username"] == "newowner"
+    assert row["owner_user_id"] is None
+
+
 # ─── A cover / icon change lands the new image on the member ──────────
 
 

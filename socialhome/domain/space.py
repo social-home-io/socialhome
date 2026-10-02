@@ -208,6 +208,26 @@ def mirrorable_remote_role(raw: object) -> str:
     return role if role in MIRRORABLE_REMOTE_ROLES else SpaceRole.MEMBER.value
 
 
+def owner_seat_from_roster(roster: object, host_instance_id: str) -> str | None:
+    """The owner's ``user_id`` in a host's invite roster (``space_meta``).
+
+    The host ships its own members with their real ``space_members.role``,
+    ``owner`` included; only an entry ON the host's (authenticated) instance
+    can name the owner. ``None`` when the roster names none.
+    """
+    if not isinstance(roster, list) or not host_instance_id:
+        return None
+    for entry in roster:
+        if (
+            isinstance(entry, dict)
+            and entry.get("role") == SpaceRole.OWNER.value
+            and entry.get("instance_id") == host_instance_id
+            and entry.get("user_id")
+        ):
+            return str(entry["user_id"])
+    return None
+
+
 #: Privilege order of the roles a remote seat may hold (low → high).
 _REMOTE_ROLE_RANK: dict[str, int] = {
     SpaceRole.SUBSCRIBER.value: 0,
@@ -1048,16 +1068,43 @@ class ContentQueuedForReview(Exception):
 
 
 class HostTooOldError(Exception):
-    """A member household's submission for review needs the space's host to
-    hold moderation items for other households (v_43); a host below it
-    cannot. 409 ``HOST_TOO_OLD`` — nothing is stored or sent."""
+    """The space's host is too old for what a member household asked of it.
+    409 ``HOST_TOO_OLD`` — nothing is stored or sent.
 
-    def __init__(self, host_instance_id: str) -> None:
+    ``feature`` names what needs the newer host, so the SPA can say why:
+
+    * ``"moderation"`` — a submission for review needs the host to hold
+      moderation items for other households (v_43).
+    * ``"role_change"`` — a role change made on a member household is
+      forwarded to the host, which must apply ``set_member_role`` (v_47).
+    """
+
+    def __init__(self, host_instance_id: str, *, feature: str = "moderation") -> None:
         super().__init__(
             "the space's host household must be updated before members of "
             "other households can submit for review"
+            if feature == "moderation"
+            else "the space's host household must be updated before roles "
+            "can be changed from another household"
         )
         self.host_instance_id = host_instance_id
+        self.feature = feature
+
+
+class HostUnreachableError(Exception):
+    """A forward to the space's host went nowhere — no route, an unknown or
+    unconfirmed host, or (``reason="unknown_host"``) a stub with no recorded
+    host at all. 503 ``HOST_UNREACHABLE``: nothing was queued, so the SPA
+    must not say "sent"."""
+
+    def __init__(self, host_instance_id: str, *, reason: str = "unreachable") -> None:
+        super().__init__(
+            "this space's host household is not known here"
+            if reason == "unknown_host"
+            else "couldn't reach the space's host household"
+        )
+        self.host_instance_id = host_instance_id
+        self.reason = reason
 
 
 class ModerationQueueFullError(Exception):
