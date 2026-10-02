@@ -403,3 +403,54 @@ async def test_untargeted_handoff_for_someone_else_dropped_quietly(env, caplog):
         if r.name.startswith("socialhome") and r.levelno > logging.DEBUG
     ]
     assert noisy == [], [(r.levelname, r.getMessage()) for r in noisy]
+
+
+# ── v_44: lazy pin heal on an authority failure ──────────────────────────
+
+
+async def test_handoff_signed_by_a_rotated_key_heals_then_imports(env):
+    from socialhome.crypto import generate_space_keypair
+
+    space_id = "sp-heal"
+    await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
+    k2 = generate_space_keypair()
+    calls: list[str] = []
+    space_repo = env["space_repo"]
+
+    class _Refresher:
+        async def refresh_authority_pin(self, sid: str) -> bool:
+            calls.append(sid)
+            await space_repo.adopt_authority_key(sid, k2.public_key.hex(), 1)
+            return True
+
+    env["svc"].attach_pin_refresher(_Refresher())
+    sealed = await _sealed_meta(env, recipient_pub=env["kw_kp"].public_key)
+    await env["svc"].handle(
+        _handoff_frame(space_id, target=None, sealed=sealed, space_seed=k2.private_key)
+    )
+    assert calls == [space_id]
+    got = await env["crypto"].export_current_key(space_id)
+    assert got is not None and got[1] == bytes(range(32))
+
+
+async def test_old_key_handoff_refused_after_rotation(env):
+    space_id = "sp-old"
+    await env["mirror_space"](space_id, pubkey_hex=env["skp"].public_key.hex())
+    from socialhome.crypto import generate_space_keypair
+
+    await env["space_repo"].adopt_authority_key(
+        space_id, generate_space_keypair().public_key.hex(), 1
+    )
+
+    class _NoHeal:
+        async def refresh_authority_pin(self, sid: str) -> bool:
+            return False
+
+    env["svc"].attach_pin_refresher(_NoHeal())
+    sealed = await _sealed_meta(env, recipient_pub=env["kw_kp"].public_key)
+    await env["svc"].handle(
+        _handoff_frame(
+            space_id, target=None, sealed=sealed, space_seed=env["skp"].private_key
+        )
+    )
+    assert await env["crypto"].export_current_key(space_id) is None

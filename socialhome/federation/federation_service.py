@@ -1176,12 +1176,22 @@ class FederationService:
                 await self._bus.publish(
                     ConnectionUnreachable(instance_id=to_instance_id),
                 )
-        await self._outbox_repo.enqueue(
+        queued = await self._outbox_repo.enqueue(
             instance_id=to_instance_id,
             event_type=event_type,
             payload_json=_dumps(envelope_dict),
             msg_id=msg_id,
         )
+        if queued is None:
+            # The pairing ended while this send was in flight (an unpair
+            # purged the peer between our lookup and here) — nothing was
+            # queued, so do not report it as queued.
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                status_code=status_code if isinstance(status_code, int) else None,
+                error="unknown_instance",
+            )
         if transport_error == DELIVERY_ERROR_RELAY_THROTTLED:
             # Queued like any other failure — a throttle must never cost
             # an event — but reported as the waitable window it is, so a

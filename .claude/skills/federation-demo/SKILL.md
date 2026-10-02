@@ -396,7 +396,7 @@ That single command runs the full sequence:
    with each other — proves the mesh leg: **c**'s message reaches **d**
    E2E-sealed (``SPACE_ROUTED``) and non-member **a** stores none of it.
    ``verify`` already asserts every confirmed peer advertises the build's
-   ``OURS`` (43 since federated moderation).
+   ``OURS`` (44 since the authority-key rotation).
 
 9c. ``federated-moderation`` (v_43 "Reviewed" across households) — **b**
    hosts a fresh "Reviewed club" with **a**'s, **c**'s and **d**'s admins as
@@ -410,6 +410,30 @@ That single command runs the full sequence:
    and **d** all hold the task created by Alice, **a**'s own queue row reads
    ``approved``, and **d** — a plain member household — holds no queue row
    for the item and its log never names it.
+
+9d. ``admin-revoke-rotation`` (v_44 space authority key rotation) — **a**
+   creates a private space with ``delegated_admin_authority`` on, invites
+   **b** and **c**, promotes **b** to admin and waits until **b** holds the
+   signing seed (K1). **a** then demotes **b**: **a**'s pin moves off K1 at a
+   wall-clock-seconds ``authority_key_epoch``, **c** and **b** re-pin to the new key from the
+   owner-signed cert in ``SPACE_AUTHORITY_ROTATED``, **b**'s
+   ``identity_private_key`` is cleared, and a rename attempted on **b**
+   reaches neither **a** nor **c**.
+
+9e. ``rotation-offline-catchup`` (v_44, modelled on ``replay`` /
+   ``owner-offline``) — the same revocation with **c** stopped first. **a**
+   creates a fresh delegated space, seats **b** + **c**, promotes **b** to
+   admin (K1 seed on **b**), kills **c**, demotes **b** (rotation to K2 and a
+   content-key rekey), posts once and renames the space; **a**'s outbox
+   must hold the ``SPACE_AUTHORITY_ROTATED`` bundle for **c**. After **c**
+   restarts it pins K2 at **a**'s epoch with the owner's baseline, the bundle
+   leaves **a**'s outbox (delivered), **c** holds and reads the post and the
+   rename, and **c**'s newest ``space_keys`` epoch is **a**'s post-rotation
+   one. Finally **b** plays a hostile ex-admin: the harness writes the K1
+   seed and **b**'s admin seat back into **b**'s DB (the step's one write
+   behind a backend), **b** executes and K1-signs a rename, and **c** (and
+   **a**) keep **a**'s name — **c** logs ``authority signature did not
+   verify against the space key — dropping``.
 
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is
@@ -442,10 +466,12 @@ invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
-replay → unpair → unpair-offline`` in that order.
+admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
+unpair-offline`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
-``gfs-space-rotate`` / ``gfs-space-no-subscribers`` / ``gfs-down``)
+``gfs-space-rotate`` / ``gfs-authority-rotate`` /
+``gfs-space-no-subscribers`` / ``gfs-down``)
 stays
 opt-in — it spins up a
 separate GFS process and isn't required to validate the HFS↔HFS
@@ -648,6 +674,7 @@ python .claude/skills/federation-demo/harness.py gfs-traffic
 python .claude/skills/federation-demo/harness.py gfs-space-subscribe
 python .claude/skills/federation-demo/harness.py gfs-space-post
 python .claude/skills/federation-demo/harness.py gfs-space-rotate
+python .claude/skills/federation-demo/harness.py gfs-authority-rotate
 python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
 python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
@@ -903,6 +930,16 @@ relay line (scoped to relay lines — the GFS legitimately knows that id from
 ``gfs.relay.received: space=… event=space_post_public`` records carry no
 ``from=``; and Alpha never logged the legacy downgrade WARNING ("does not
 advertise anonymous_publish"). ``verify`` re-checks Delta's log-line shape.
+
+### ``gfs-authority-rotate`` — the GFS and a subscriber follow a v_44 rotation
+
+Prereqs: ``gfs-space-post``. **a** turns ``delegated_admin_authority`` on
+and off on its global space — the off-flip rotates the space AUTHORITY key
+unconditionally. Asserts the GFS re-pinned from the owner's cert
+(``global_spaces.identity_public_key`` is **a**'s new key and
+``authority_cert`` is stored), then **a** posts and **d** — a subscriber
+still pinned to the old key — heals its pin from the GFS listing's cert and
+reads the post.
 
 ### ``gfs-space-rotate`` — a key rotation must not cut subscribers off
 

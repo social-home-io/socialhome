@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -766,3 +767,67 @@ def _string_consts(func) -> list[str]:
             elif hasattr(const, "co_consts"):
                 stack.append(const)
     return out
+
+
+async def _owner_row(repo) -> None:
+    await repo.upsert_instance(
+        ClientInstance(
+            instance_id="o",
+            display_name="O",
+            public_key="ee" * 32,
+            inbox_url="http://o",
+            status="active",
+        )
+    )
+
+
+async def test_set_space_authority_is_compare_and_set(gfs_db):
+    """v_44: the pin + cert move together, and only from the state the
+    caller verified against."""
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(
+        GlobalSpace(space_id="sp", owning_instance="o", identity_public_key="aa" * 32)
+    )
+    cert = {"key_epoch": 1}
+    assert await repo.set_space_authority(
+        "sp", expected_pk="aa" * 32, expected_cert=None, new_pk="bb" * 32, cert=cert
+    )
+    row = await repo.get_space("sp")
+    assert (row.identity_public_key, row.authority_cert) == ("bb" * 32, cert)
+    assert not await repo.set_space_authority(
+        "sp", expected_pk="aa" * 32, expected_cert=None, new_pk="cc" * 32, cert=cert
+    )
+    assert (await repo.get_space("sp")).identity_public_key == "bb" * 32
+
+
+async def test_upsert_space_never_moves_a_set_pin(gfs_db):
+    """Only the cert-checked ``set_space_authority`` may change a pin; the
+    ordinary upsert (publish refresh, cluster gossip) keeps it."""
+
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    s = GlobalSpace(space_id="sp2", owning_instance="o", identity_public_key="aa" * 32)
+    await repo.upsert_space(s)
+    await repo.upsert_space(
+        replace(s, identity_public_key="dd" * 32, authority_cert={"key_epoch": 9})
+    )
+    row = await repo.get_space("sp2")
+    assert row.identity_public_key == "aa" * 32
+    assert row.authority_cert is None
+
+
+async def test_raise_authority_rotation_seq_is_a_max_merge_for_the_held_pin(gfs_db):
+    """F2: a peer node's seq raises ours, never lowers it, and only while we
+    pin the key it describes."""
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(
+        GlobalSpace(space_id="sp", owning_instance="o", identity_public_key="aa" * 32)
+    )
+    await repo.raise_authority_rotation_seq("sp", pk="aa" * 32, seq=4)
+    assert (await repo.get_space("sp")).authority_rotation_seq == 4
+    await repo.raise_authority_rotation_seq("sp", pk="aa" * 32, seq=2)
+    assert (await repo.get_space("sp")).authority_rotation_seq == 4
+    await repo.raise_authority_rotation_seq("sp", pk="bb" * 32, seq=9)
+    assert (await repo.get_space("sp")).authority_rotation_seq == 4

@@ -60,6 +60,7 @@ from ..domain.events import (
     PostCreated,
     PostEdited,
     RemoteSpaceDissolved,
+    SpaceAdminSeedsRetiredAfterRestore,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     SpaceJoinApproved,
@@ -86,6 +87,7 @@ from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
     SpaceFeatureAccess,
+    SpaceRole,
 )
 from ..i18n import Catalog
 from ..infrastructure.event_bus import EventBus
@@ -404,6 +406,9 @@ class NotificationService(ProtectionGateMixin):
             self.on_remote_invite_declined,
         )
         self._bus.subscribe(RemoteSpaceDissolved, self.on_remote_space_dissolved)
+        self._bus.subscribe(
+            SpaceAdminSeedsRetiredAfterRestore, self.on_admin_seeds_retired
+        )
         # Momentum (§Momentum) — reactions, replies, and new follows.
         self._bus.subscribe(MomentReactionChanged, self.on_moment_reaction_changed)
         self._bus.subscribe(MomentCreated, self.on_moment_created)
@@ -1541,6 +1546,35 @@ class NotificationService(ProtectionGateMixin):
                 # A re-broadcast of SPACE_DISSOLVED (fresh msg_id) must not
                 # re-notify every member; the (user_id, type, link_url) tuple
                 # is stable for this one-time notice.
+                dedupe_by_link=True,
+            )
+
+    async def on_admin_seeds_retired(
+        self, event: SpaceAdminSeedsRetiredAfterRestore
+    ) -> None:
+        """v_44: a restore rotated a space's authority key, shared the new
+        seed with nobody and turned delegated admin OFF. Tell the space's
+        OWNER (only) to review its admins; turning delegation back on shares
+        the seed with the admins seated then."""
+        for member in await self._spaces.list_members(event.space_id):
+            if member.role != SpaceRole.OWNER:
+                continue
+            owner = await self._users.get_by_user_id(member.user_id)
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_admins_reconfirm",
+                    title=self._t(
+                        "notification.space.admins_reconfirm",
+                        locale=self._locale(owner),
+                        fallback=(
+                            "Restored from backup: review space admins, then "
+                            "turn delegated admin back on"
+                        ),
+                    ),
+                    body=None,
+                    link_url=f"/spaces/{event.space_id}",
+                ),
                 dedupe_by_link=True,
             )
 

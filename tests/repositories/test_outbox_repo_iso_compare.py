@@ -22,6 +22,25 @@ from socialhome.domain.federation import FederationEventType
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
 
 
+async def _seed_peer(db, instance_id: str, *, status: str = "confirmed") -> None:
+    """A minimal ``remote_instances`` row the outbox can queue against."""
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            instance_id,
+            instance_id,
+            "00" * 32,
+            "k1",
+            "k2",
+            f"https://{instance_id}.invalid/inbox",
+            f"inbox-{instance_id}",
+            status,
+        ),
+    )
+
+
 @pytest.fixture
 async def env(tmp_dir):
     from socialhome.crypto import derive_instance_id, generate_identity_keypair
@@ -36,6 +55,11 @@ async def env(tmp_dir):
         " identity_public_key, routing_secret) VALUES(?,?,?,?)",
         (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
     )
+
+    # The outbox only queues for a household we still hold a
+    # ``remote_instances`` row for — seed the peers these tests address.
+    for peer in ("peer",):
+        await _seed_peer(db, peer)
 
     class Env:
         pass

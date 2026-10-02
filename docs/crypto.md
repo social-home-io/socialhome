@@ -413,8 +413,31 @@ unknown) so a future hybrid PQ signing key is a wire-additive suite
 bump. The receiver fails closed — it accepts the seed only from the
 authentic owner instance into a space whose *local* copy has
 delegation enabled, and only when the b64url payload decodes to
-exactly 32 bytes. See `_share_admin_signing_seed` (sender) /
+exactly 32 bytes — and, from v_44, only when the seed is the private half
+of the key it pins. See `_share_admin_signing_seed` (sender) /
 `PrivateSpaceInviteHandler._on_admin_key_share` (receiver).
+
+**Space authority key certificate** (`authority_cert.py`, v_44) — the
+space authority key rotates when an admin household is revoked, and the
+rotation is announced by a cert signed with the OWNER HOUSEHOLD's identity
+key, never with the old space key (which the revoked household holds). Wire
+shape `{space_id, owner_instance_id, owner_pk, authority_pk,
+authority_key_suite, key_epoch, issued_at, cert_sig_suite, cert_sig}`;
+signing bytes `b"space-authority-cert:v1:"` + canonical JSON (sorted keys,
+compact) of the cert minus `cert_sig`, so both suite tags are signed. Two
+suite tags, each validated against its own frozenset with no default:
+`cert_sig_suite` (`SUPPORTED_AUTHORITY_CERT_SUITES`, today `"ed25519"`) for
+the owner's signature, `authority_key_suite`
+(`SUPPORTED_AUTHORITY_KEY_SUITES`, today `"ed25519"`) for the certified key —
+the owner identity and the space key migrate independently, so Phase-2 grows
+each set separately (e.g. `"ed25519+mldsa65"` with concatenated key
+material). Unknown or missing → `UnsupportedAuthorityCertSuite`. Receivers
+bind the cert with keys they already hold — `derive_instance_id(owner_pk)
+== owner_instance_id`, plus the stored host / registered key when there is
+one — and apply it only at a strictly higher `key_epoch` (an int in
+`1..2^63−1`; anything else is refused), so a replayed older cert can never
+restore a revoked key. The owner picks `max(current + 1, unix seconds)`. No new long-lived key exists:
+the cert is signed by the household identity every peer already pins.
 
 **GFS capability block** (`capabilities_sig.py`) — `GET
 /gfs/info` is unauthenticated, so the capability that decides whether a

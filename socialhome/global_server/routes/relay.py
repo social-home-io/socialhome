@@ -27,6 +27,21 @@ _SUBSCRIBE_ACTIONS = frozenset({"subscribe", "unsubscribe"})
 _MAX_WIRE_ID_CHARS = 128
 
 
+def public_space_dict(space) -> dict:
+    """A :class:`GlobalSpace` as the unauthenticated directory serves it.
+
+    The owner's ``authority_cert`` (v_44) stays INSIDE this server — it names
+    the owner household's identity key and carries the rotation time, and
+    neither belongs on a public page; nor does its epoch, which is
+    wall-clock based. Readers get what they need to heal a pin: the current
+    ``identity_public_key`` (re-pinned here only after the cert verified)
+    and ``authority_rotation_seq``, this server's own +1-per-re-pin counter.
+    """
+    body = asdict(space)
+    body.pop("authority_cert", None)
+    return body
+
+
 def _require_short_str(value: object, field: str) -> str:
     """Return *value* as a non-empty, bounded ``str`` or raise ``400``."""
     if not isinstance(value, str) or not value or len(value) > _MAX_WIRE_ID_CHARS:
@@ -75,10 +90,15 @@ class GfsInfoView(GfsBaseView):
         # siblings — a stripped flag would silently send a household back to
         # a path that discloses more (here: none at all, so the household
         # refuses rather than 404-ing behind a timeout).
+        # ``authority_rotation`` (v_44): this GFS re-pins a space's authority
+        # key from an owner-signed cert on publish. Signed like its siblings:
+        # a stripped flag only makes a household warn that a revoked admin's
+        # old key may keep authorizing relays here.
         capabilities = {
             "anonymous_publish": True,
             "envelope_relay": True,
             "invite_links": True,
+            "authority_rotation": True,
         }
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {
@@ -356,7 +376,7 @@ class SpacesListView(GfsBaseView):
         svc = self.svc(K.gfs_federation_key)
         spaces = await svc.list_spaces(status="active")
         return web.json_response(
-            {"spaces": [asdict(s) for s in spaces]},
+            {"spaces": [public_space_dict(s) for s in spaces]},
         )
 
 
@@ -378,7 +398,7 @@ class SpaceDetailView(GfsBaseView):
         # just like a non-active status (see ``GfsFederationService.hide_space``).
         if space is None or space.status != "active" or space.withdrawn:
             raise web.HTTPNotFound(reason="Space not found or not published")
-        return web.json_response(asdict(space))
+        return web.json_response(public_space_dict(space))
 
 
 class SpaceSubscribersView(GfsBaseView):
@@ -457,6 +477,12 @@ class SpacePublishView(GfsBaseView):
             name = body["name"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
+        # v_44 — the owner's cert for a rotated space authority key. Optional
+        # (absent before any rotation, and from an older household); when
+        # present it must be an object, and it is inside the signed bytes.
+        authority_cert = body.get("authority_cert")
+        if authority_cert is not None and not isinstance(authority_cert, dict):
+            raise web.HTTPBadRequest(reason="authority_cert must be an object")
         try:
             space = await svc.publish_space(
                 space_id=space_id,
@@ -487,6 +513,7 @@ class SpacePublishView(GfsBaseView):
                 identity_public_key=str(body.get("identity_public_key") or ""),
                 signature=str(body.get("signature") or ""),
                 ts=str(body.get("ts") or ""),
+                authority_cert=authority_cert,
             )
         except PermissionError as exc:
             return web.json_response(

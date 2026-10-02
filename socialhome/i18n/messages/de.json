@@ -28,5 +28,6 @@
   "notification.space.feature.pages": "Seiten",
   "notification.space.feature.tasks": "Aufgaben",
   "notification.space.feature.stickies": "Haftnotizen",
-  "notification.space.feature.calendar": "Termine"
+  "notification.space.feature.calendar": "Termine",
+  "notification.space.admins_reconfirm": "Aus Backup wiederhergestellt: Prüfe die Space-Admins und schalte dann die delegierte Verwaltung wieder ein"
 }

@@ -1,0 +1,42 @@
+-- 0013 — store the owner's certificate for a space's authority key (v_44).
+--
+-- ``global_spaces.identity_public_key`` is the TOFU-pinned space authority
+-- key this connection server authorizes every relay (``/gfs/publish``) and
+-- subscriber query against. From v_44 the household that OWNS a space
+-- rotates that key when an admin household is revoked, and proves it with
+-- a cert signed by its household identity key (``socialhome/authority_cert.py``).
+-- The owner's publish carries the cert; this server re-pins only when the
+-- cert verifies against the owner's REGISTERED key and its ``key_epoch`` is
+-- higher than the epoch of the cert stored here. This column is that stored
+-- cert (JSON), so a replayed older cert can never move the pin back to a key
+-- the revoked household still holds. It is also served on
+-- ``GET /gfs/spaces/{id}`` so a subscriber household heals its own pin.
+--
+-- The cert names no member, no reason and no revoked household: what this
+-- server learns is that a rotation happened, and how many.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every path that touches the pin: ``SqliteGfsFederationRepo
+--       .upsert_space`` (publish + cluster NODE_SYNC_SPACE), ``publish_space``
+--       (the TOFU pin), ``_authorize_authority_relay`` /
+--       ``list_subscribers_with_keys`` (the verifiers), and the cluster wire
+--       (``_space_to_wire`` / ``_wire_to_space``). ``upsert_space`` no longer
+--       moves a set pin at all; only the cert-checked
+--       ``set_space_authority`` compare-and-set does.
+--   (2) Alternatives rejected: trusting the owner's household-signed publish
+--       alone (it carries no ordering, so a captured older body re-pins the
+--       old key inside its freshness window); an epoch column alone (the cert
+--       is also what subscribers fetch to heal); a separate registry of
+--       allowed keys (a new key store for something one signed document
+--       already proves).
+--   (3) Smallest change: one additive nullable TEXT column. NULL = epoch 0,
+--       the TOFU pin taken before any rotation — no backfill.
+--
+-- ``authority_rotation_seq`` is this server's OWN counter of accepted
+-- re-pins (+1 each time an owner cert moved the pin). It is what the public
+-- directory shows followers instead of the cert or its epoch: the owner's
+-- epoch is wall-clock based and would leak WHEN the owner revoked an admin;
+-- a local +1 counter says only "the pin moved N times here".
+ALTER TABLE global_spaces ADD COLUMN authority_cert TEXT;
+ALTER TABLE global_spaces ADD COLUMN authority_rotation_seq INTEGER NOT NULL DEFAULT 0;

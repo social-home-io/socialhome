@@ -17,6 +17,7 @@ business logic.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Protocol, runtime_checkable
 
@@ -84,6 +85,18 @@ class AbstractGfsFederationRepo(Protocol):
 
     # Spaces
     async def upsert_space(self, space: GlobalSpace) -> None: ...
+    async def set_space_authority(
+        self,
+        space_id: str,
+        *,
+        expected_pk: str,
+        expected_cert: dict | None,
+        new_pk: str,
+        cert: dict,
+    ) -> bool: ...
+    async def raise_authority_rotation_seq(
+        self, space_id: str, *, pk: str, seq: int
+    ) -> None: ...
     async def get_space(self, space_id: str) -> GlobalSpace | None: ...
     async def list_spaces(
         self,
@@ -243,9 +256,9 @@ class SqliteGfsFederationRepo:
                 allow_subscribers,
                 accent_color,
                 primary_color, status, subscriber_count, posts_per_week,
-                published_at, identity_public_key, withdrawn
+                published_at, identity_public_key, withdrawn, authority_cert
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     COALESCE(?, datetime('now')), ?, ?)
+                     COALESCE(?, datetime('now')), ?, ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -261,15 +274,16 @@ class SqliteGfsFederationRepo:
                 status = excluded.status,
                 subscriber_count = excluded.subscriber_count,
                 posts_per_week = excluded.posts_per_week,
-                -- The TOFU-pinned space authority key is immutable once
-                -- set (see the pin comment in ``federation.publish_space``).
-                -- Enforced here rather than trusting every caller: a write
-                -- carrying an empty pin (e.g. a cluster NODE_SYNC_SPACE
-                -- rebuilt from a partial wire shape) must not wipe it and
-                -- downgrade the space to owner-only relay.
+                -- The pinned space authority key never moves on an upsert
+                -- (see the pin comment in ``federation.publish_space``): an
+                -- empty pin (a cluster NODE_SYNC_SPACE rebuilt from a partial
+                -- wire shape) must not wipe it, and a DIFFERENT one must not
+                -- replace it — re-pinning is the owner-certified
+                -- ``set_space_authority`` (v_44) and nothing else. The
+                -- stored cert likewise moves only there.
                 identity_public_key = COALESCE(
-                    NULLIF(excluded.identity_public_key, ''),
-                    global_spaces.identity_public_key
+                    NULLIF(global_spaces.identity_public_key, ''),
+                    NULLIF(excluded.identity_public_key, '')
                 ),
                 withdrawn = excluded.withdrawn
             """,
@@ -293,7 +307,51 @@ class SqliteGfsFederationRepo:
                 space.published_at or None,
                 space.identity_public_key or None,
                 1 if space.withdrawn else 0,
+                _dump_cert(space.authority_cert),
             ),
+        )
+
+    async def set_space_authority(
+        self,
+        space_id: str,
+        *,
+        expected_pk: str,
+        expected_cert: dict | None,
+        new_pk: str,
+        cert: dict,
+    ) -> bool:
+        """Re-pin a space's authority key from a VERIFIED owner cert (v_44).
+
+        Compare-and-set on the pin AND the stored cert the caller verified
+        against, so two concurrent publishes (or a publish racing a cluster
+        sync) cannot interleave. Returns whether the row changed.
+        """
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE global_spaces SET identity_public_key=?, authority_cert=?,"
+            " authority_rotation_seq=authority_rotation_seq + 1"
+            " WHERE space_id=? AND COALESCE(identity_public_key, '')=?"
+            " AND COALESCE(authority_cert, '')=?",
+            (
+                new_pk,
+                _dump_cert(cert),
+                space_id,
+                expected_pk or "",
+                _dump_cert(expected_cert) or "",
+            ),
+        )
+        return changed > 0
+
+    async def raise_authority_rotation_seq(
+        self, space_id: str, *, pk: str, seq: int
+    ) -> None:
+        """Max-merge a peer node's ``authority_rotation_seq`` (v_44) — only
+        while this node pins ``pk``, the key that seq describes. Never
+        lowers it."""
+        await self._db.enqueue(
+            "UPDATE global_spaces"
+            " SET authority_rotation_seq=MAX(authority_rotation_seq, ?)"
+            " WHERE space_id=? AND identity_public_key=?",
+            (seq, space_id, pk),
         )
 
     async def get_space(self, space_id: str) -> GlobalSpace | None:
@@ -1180,8 +1238,27 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         posts_per_week=float(row.get("posts_per_week") or 0.0),
         published_at=row.get("published_at", ""),
         identity_public_key=row.get("identity_public_key") or "",
+        authority_cert=_load_cert(row.get("authority_cert")),
+        authority_rotation_seq=int(row.get("authority_rotation_seq") or 0),
         withdrawn=bool(row.get("withdrawn") or 0),
     )
+
+
+def _dump_cert(cert: dict | None) -> str | None:
+    """Canonical JSON for the stored cert (stable for the CAS compare)."""
+    if cert is None:
+        return None
+    return json.dumps(cert, separators=(",", ":"), sort_keys=True)
+
+
+def _load_cert(raw: object) -> dict | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _row_to_report(row: dict | None) -> GfsFraudReport | None:

@@ -895,6 +895,8 @@ async def test_0054_rebuild_preserves_rows_index_and_fk(tmp_path):
             "role": "admin",
             "member_version": 7,
             "tombstoned": 1,
+            # 0066 (v_44) — a later additive column; a migrated row reads 0.
+            "authority_epoch": 0,
         }
         idx = await db.fetchall("PRAGMA index_list(space_remote_members)")
         assert "idx_space_remote_members_instance_user" in {r["name"] for r in idx}, (

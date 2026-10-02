@@ -703,3 +703,150 @@ async def test_resubscribe_all_swallows_a_refusal_per_space(env, caplog):
         assert await svc.resubscribe_all("gfs-1") == 1
     assert gfs.subscribes == [("sp-ok", "gfs-1")]
     assert caplog.text == ""
+
+
+# ─── v_44: a follower heals its pin from the GFS that seated it ──────────
+
+
+async def test_ensure_mirror_records_provenance_and_seq(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    body = _gfs_space_body(identity_public_key=PIN_B, authority_rotation_seq=3)
+    mirror = _mirror(
+        env, _StubSession({"https://gfs.test/gfs/spaces/sp-1": (200, body)})
+    )
+    await mirror.ensure_mirror("sp-1")
+    assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1", 3)
+    # Never touches the owner-certified epoch.
+    assert (await env.spaces.get("sp-1")).authority_key_epoch == 0
+
+
+async def _follower(
+    env,
+    *,
+    space_type=SpaceType.GLOBAL,
+    role="subscriber",
+    owner_id="remote-host",
+    gfs="gfs-1",
+    seq=0,
+):
+    from socialhome.domain.space import SpaceMember
+
+    await env.spaces.save(
+        Space(
+            id="sp-1",
+            name="Cool",
+            owner_instance_id=owner_id,
+            owner_username="",
+            identity_public_key=PIN_A,
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=space_type,
+            join_mode=JoinMode.OPEN,
+        )
+    )
+    if role is not None:
+        await env.spaces.save_member(
+            SpaceMember(space_id="sp-1", user_id="u1", role=role, joined_at="x")
+        )
+    if gfs is not None:
+        await env.spaces.set_mirror_provenance("sp-1", gfs_id=gfs, rotation_seq=seq)
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    await env.conns.save(_conn("gfs-2", inbox_url="https://other.test"))
+
+
+def _listing(pk: str, seq: int, url: str = "https://gfs.test") -> _StubSession:
+    return _StubSession(
+        {
+            f"{url}/gfs/spaces/sp-1": (
+                200,
+                _gfs_space_body(identity_public_key=pk, authority_rotation_seq=seq),
+            )
+        }
+    )
+
+
+async def test_refresh_heals_a_follower_from_its_own_gfs(env):
+    await _follower(env)
+    session = _listing(PIN_B, 1)
+    mirror = _mirror(env, session)
+    mirror.attach_identity(own_instance_id=env.iid)
+    assert await mirror.refresh_authority_pin("sp-1") is True
+    assert (await env.spaces.get("sp-1")).identity_public_key == PIN_B
+    assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1", 1)
+    # Rate-limited: a second failed-verify burst does not refetch.
+    assert await mirror.refresh_authority_pin("sp-1") is False
+
+
+@pytest.mark.parametrize(
+    "setup,session_url",
+    [
+        ({"space_type": SpaceType.PRIVATE}, "https://gfs.test"),
+        ({"role": "member"}, "https://gfs.test"),
+        ({"role": None}, "https://gfs.test"),  # no local seat at all
+        ({"gfs": None}, "https://gfs.test"),  # unknown provenance
+        ({}, "https://other.test"),  # another GFS lists it
+        ({"seq": 4}, "https://gfs.test"),  # not a higher seq
+        ({"owner_id": "SELF"}, "https://gfs.test"),  # our own space
+    ],
+)
+async def test_refresh_refuses_outside_the_follower_trust_model(
+    env, setup, session_url
+):
+    if setup.get("owner_id") == "SELF":
+        setup = {**setup, "owner_id": env.iid}
+    await _follower(env, **setup)
+    mirror = _mirror(env, _listing(PIN_B, 4, url=session_url))
+    mirror.attach_identity(own_instance_id=env.iid)
+    assert await mirror.refresh_authority_pin("sp-1") is False
+    assert (await env.spaces.get("sp-1")).identity_public_key == PIN_A
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"identity_public_key": "zz" * 32, "authority_rotation_seq": 5},
+        {"identity_public_key": PIN_B, "authority_rotation_seq": "5"},
+        {"identity_public_key": PIN_B, "authority_rotation_seq": 2**63},
+        {"identity_public_key": PIN_B[:10], "authority_rotation_seq": 5},
+    ],
+)
+async def test_refresh_refuses_a_malformed_listing(env, body):
+    await _follower(env)
+    session = _StubSession(
+        {"https://gfs.test/gfs/spaces/sp-1": (200, _gfs_space_body(**body))}
+    )
+    mirror = _mirror(env, session)
+    mirror.attach_identity(own_instance_id=env.iid)
+    assert await mirror.refresh_authority_pin("sp-1") is False
+
+
+async def test_refresh_unknown_space_is_false(env):
+    mirror = _mirror(env, _StubSession())
+    mirror.attach_identity(own_instance_id=env.iid)
+    assert await mirror.refresh_authority_pin("sp-none") is False
+
+
+async def test_refresh_pins_for_gfs_walks_listed_subscriptions(env):
+    from unittest.mock import AsyncMock
+
+    await _follower(env)
+
+    class _Listed:
+        async def get(self, space_id):
+            return object() if space_id == "sp-1" else None
+
+    mirror = _mirror(env, _listing(PIN_B, 2), public_space_repo=_Listed())
+    mirror.attach_identity(own_instance_id=env.iid)
+    env.spaces.list_subscribed_space_ids = AsyncMock(return_value=["sp-1", "sp-2"])
+    assert await mirror.refresh_authority_pins("gfs-1") == 1
+    assert (await env.spaces.get("sp-1")).identity_public_key == PIN_B
+    assert await mirror.refresh_authority_pins("unknown-gfs") == 0
+
+
+def test_refresh_bookkeeping_stays_bounded(env):
+    from socialhome.services import gfs_space_mirror_service as mod
+
+    mirror = _mirror(env, _StubSession())
+    for i in range(mod._PIN_REFRESH_MAX_TRACKED + 10):
+        mirror._remember_refresh(f"sp-{i}", 0.0)
+    assert len(mirror._last_pin_refresh) <= mod._PIN_REFRESH_MAX_TRACKED

@@ -259,9 +259,14 @@ class PeerUnpairService:
         await self._bus.publish(PeerUnpaired(instance_id=instance_id))
 
     async def _purge(self, instance_id: str) -> None:
+        # The row goes FIRST: from then on the outbox refuses to queue for
+        # this household (its INSERT checks ``remote_instances``), so the
+        # delete below sweeps everything a send still in flight could have
+        # queued. The reverse order left a window where such a send saw the
+        # row, queued, and stranded an envelope behind the purge.
+        await self._federation_repo.delete_instance(instance_id)
         await self._outbox_repo.delete_for_instance(instance_id)
         await self._routing_repo.forget_discovered_via(instance_id)
-        await self._federation_repo.delete_instance(instance_id)
 
     async def _notify_peer(self, instance_id: str) -> bool:
         # The payload is empty: the receiver unpairs the *signer*

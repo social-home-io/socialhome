@@ -46,6 +46,10 @@ class SpaceRemoteMember:
     #: hard-deleted so a replayed older JOIN can't resurrect them; live
     #: roster reads filter these out (migration 0031).
     tombstoned: bool = False
+    #: The space authority-key epoch in force when this row was last
+    #: written (migration 0066, v_44). The rotation baseline reset only
+    #: overrides seats written under an OLDER key.
+    authority_epoch: int = 0
 
 
 @runtime_checkable
@@ -93,8 +97,21 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
         role: str,
         member_version: int,
         tombstoned: bool,
+        verified_epoch: int | None = None,
     ) -> bool: ...
 
+    async def reset_member_state(
+        self,
+        *,
+        space_id: str,
+        user_id: str,
+        instance_id: str,
+        display_name: str | None,
+        user_pk: str | None,
+        role: str,
+        member_version: int,
+        tombstoned: bool,
+    ) -> None: ...
     async def list_admin_instances(self, space_id: str) -> list[str]: ...
 
     async def list_instances_with_roles(
@@ -174,17 +191,19 @@ class SqliteSpaceRemoteMemberRepo:
         await self._db.enqueue(
             """
             INSERT INTO space_remote_members(
-                space_id, instance_id, user_id, user_pk, display_name, role
-            ) VALUES(?, ?, ?, ?, ?, ?)
+                space_id, instance_id, user_id, user_pk, display_name, role,
+                authority_epoch
+            ) VALUES(?, ?, ?, ?, ?, ?, (SELECT authority_key_epoch FROM spaces WHERE id=?))
             ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
                 user_pk=excluded.user_pk,
                 display_name=excluded.display_name,
                 role=excluded.role,
+                authority_epoch=excluded.authority_epoch,
                 tombstoned=0,
                 member_version=space_remote_members.member_version
                     + (CASE WHEN space_remote_members.tombstoned THEN 1 ELSE 0 END)
             """,
-            (space_id, instance_id, user_id, user_pk, display_name, role),
+            (space_id, instance_id, user_id, user_pk, display_name, role, space_id),
         )
 
     async def remove(
@@ -205,10 +224,11 @@ class SqliteSpaceRemoteMemberRepo:
         await self._db.enqueue(
             """
             UPDATE space_remote_members
-            SET tombstoned=1, member_version=member_version + 1
+            SET tombstoned=1, member_version=member_version + 1,
+                authority_epoch=(SELECT authority_key_epoch FROM spaces WHERE id=?)
             WHERE space_id=? AND instance_id=? AND user_id=?
             """,
-            (space_id, instance_id, user_id),
+            (space_id, space_id, instance_id, user_id),
         )
 
     async def list_for_space(self, space_id: str) -> list[SpaceRemoteMember]:
@@ -273,8 +293,16 @@ class SqliteSpaceRemoteMemberRepo:
         role: str,
         member_version: int,
         tombstoned: bool,
+        verified_epoch: int | None = None,
     ) -> bool:
         """Version-guarded CRDT merge of an inbound roster event.
+
+        ``verified_epoch`` (v_44) is the space authority-key epoch whose key
+        the event's signature verified against. When given, the write lands
+        ONLY while the space still pins that epoch — in the same statement —
+        and the row is stamped with it. A rotation that moved the pin between
+        the verify and the write makes this a no-op (``False``), so an
+        old-key event can never be stored as a new-key row.
 
         Applies (upserts) the event ONLY if it is newer than the stored row:
         strictly greater ``member_version``, OR an equal version that is a
@@ -301,18 +329,50 @@ class SqliteSpaceRemoteMemberRepo:
                 # Equal version only wins when it flips a live row to a
                 # tombstone (removal-wins-tie); otherwise it's a duplicate.
                 return False
-        await self._db.enqueue(
+        if verified_epoch is None:
+            await self._db.enqueue(
+                """
+                INSERT INTO space_remote_members(
+                    space_id, instance_id, user_id, user_pk, display_name,
+                    role, member_version, tombstoned, authority_epoch
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?,
+                         (SELECT authority_key_epoch FROM spaces WHERE id=?))
+                ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
+                    user_pk=excluded.user_pk,
+                    display_name=excluded.display_name,
+                    role=excluded.role,
+                    member_version=excluded.member_version,
+                    tombstoned=excluded.tombstoned,
+                    authority_epoch=excluded.authority_epoch
+                """,
+                (
+                    space_id,
+                    instance_id,
+                    user_id,
+                    user_pk,
+                    display_name,
+                    role,
+                    member_version,
+                    1 if tombstoned else 0,
+                    space_id,
+                ),
+            )
+            return True
+        changed = await self._db.enqueue_rowcount(
             """
             INSERT INTO space_remote_members(
                 space_id, instance_id, user_id, user_pk, display_name,
-                role, member_version, tombstoned
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                role, member_version, tombstoned, authority_epoch
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE (SELECT authority_key_epoch FROM spaces WHERE id=?) = ?
             ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
                 user_pk=excluded.user_pk,
                 display_name=excluded.display_name,
                 role=excluded.role,
                 member_version=excluded.member_version,
-                tombstoned=excluded.tombstoned
+                tombstoned=excluded.tombstoned,
+                authority_epoch=excluded.authority_epoch
             """,
             (
                 space_id,
@@ -323,9 +383,61 @@ class SqliteSpaceRemoteMemberRepo:
                 role,
                 member_version,
                 1 if tombstoned else 0,
+                verified_epoch,
+                space_id,
+                verified_epoch,
             ),
         )
-        return True
+        return changed > 0
+
+    async def reset_member_state(
+        self,
+        *,
+        space_id: str,
+        user_id: str,
+        instance_id: str,
+        display_name: str | None,
+        user_pk: str | None,
+        role: str,
+        member_version: int,
+        tombstoned: bool,
+    ) -> None:
+        """Overwrite one seat with the owner's state, IGNORING the version
+        guard (v_44 authority-rotation baseline reset).
+
+        :meth:`apply_member_event` refuses anything not newer than the
+        stored row, which is right for gossip — but a revoked seed holder
+        could have inflated a seat's ``member_version`` (or invented a seat)
+        with the old key, and nothing ordinary ever out-ranks that. The
+        owner's ``SPACE_AUTHORITY_ROTATED`` bundle is the one statement that
+        does; only its handler calls this, after verifying the bundle.
+        """
+        await self._db.enqueue(
+            """
+            INSERT INTO space_remote_members(
+                space_id, instance_id, user_id, user_pk, display_name,
+                role, member_version, tombstoned, authority_epoch
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, (SELECT authority_key_epoch FROM spaces WHERE id=?))
+            ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
+                user_pk=excluded.user_pk,
+                display_name=excluded.display_name,
+                role=excluded.role,
+                member_version=excluded.member_version,
+                tombstoned=excluded.tombstoned,
+                authority_epoch=excluded.authority_epoch
+            """,
+            (
+                space_id,
+                instance_id,
+                user_id,
+                user_pk,
+                display_name,
+                role,
+                member_version,
+                1 if tombstoned else 0,
+                space_id,
+            ),
+        )
 
     async def list_admin_instances(self, space_id: str) -> list[str]:
         """DISTINCT instance_ids of remote members with role ADMIN.
@@ -441,4 +553,5 @@ def _row(row: dict) -> SpaceRemoteMember:
         role=row.get("role") or "member",
         member_version=int(row.get("member_version") or 0),
         tombstoned=bool(row.get("tombstoned")),
+        authority_epoch=int(row.get("authority_epoch") or 0),
     )

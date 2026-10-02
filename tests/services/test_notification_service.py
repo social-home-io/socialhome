@@ -33,7 +33,11 @@ from socialhome.domain.space import (
 )
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.user import RemoteUser
-from socialhome.domain.events import SpaceRemoteSeatLive, TaskAssigned
+from socialhome.domain.events import (
+    SpaceAdminSeedsRetiredAfterRestore,
+    SpaceRemoteSeatLive,
+    TaskAssigned,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import SqliteCalendarRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -2533,4 +2537,38 @@ async def test_a_v43_household_joining_a_reviewed_space_warns_nobody(stack):
     ]
     assert [n.link_url for n in notes] == [
         f"/spaces/{space.id}/settings?household=inst-old"
+    ]
+
+
+async def test_post_restore_rotation_tells_the_owner_to_reconfirm_admins(stack):
+    """v_44: after a backup / Recovery Kit restore the owner's spaces rotate
+    and share the new seed with NOBODY; only the owner is told to re-confirm
+    its admins (turning delegation back on shares as usual)."""
+    alice = await stack.provision_user("alice-rs")
+    bob = await stack.provision_user("bob-rs")
+    space_svc = SpaceService(
+        stack.space_repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="alice-rs", name="Crew")
+    await space_svc.add_member(space.id, actor_username="alice-rs", user_id=bob.user_id)
+
+    await stack.bus.publish(SpaceAdminSeedsRetiredAfterRestore(space_id=space.id))
+
+    owner_notes = [
+        n
+        for n in await stack.notif_repo.list(alice.user_id, limit=10)
+        if n.type == "space_admins_reconfirm"
+    ]
+    assert len(owner_notes) == 1
+    assert "Restored from backup" in owner_notes[0].title
+    assert "review space admins" in owner_notes[0].title
+    assert owner_notes[0].link_url == f"/spaces/{space.id}"
+    assert not [
+        n
+        for n in await stack.notif_repo.list(bob.user_id, limit=10)
+        if n.type == "space_admins_reconfirm"
     ]

@@ -415,3 +415,67 @@ async def test_re_adding_a_live_member_leaves_the_version_alone(repo):
     after = await repo.get("sp1", "i-a", "u1")
     assert before is not None and after is not None
     assert after.member_version == before.member_version
+
+
+async def test_reset_member_state_ignores_the_version_guard(repo):
+    """v_44 baseline reset: the owner's rotation bundle sets a seat's state
+    even when a revoked seed holder inflated the version above it."""
+    await repo.apply_member_event(
+        space_id="sp1",
+        user_id="u1",
+        instance_id="i-a",
+        display_name="Old",
+        user_pk=None,
+        role="admin",
+        member_version=10**9,
+        tombstoned=False,
+    )
+    await repo.reset_member_state(
+        space_id="sp1",
+        user_id="u1",
+        instance_id="i-a",
+        display_name="Owner's view",
+        user_pk="pk",
+        role="member",
+        member_version=7,
+        tombstoned=False,
+    )
+    got = await repo.get("sp1", "i-a", "u1")
+    assert (got.role, got.member_version, got.display_name) == (
+        "member",
+        7,
+        "Owner's view",
+    )
+    # And a fresh row is inserted, tombstone included.
+    await repo.reset_member_state(
+        space_id="sp1",
+        user_id="u9",
+        instance_id="i-b",
+        display_name=None,
+        user_pk=None,
+        role="member",
+        member_version=3,
+        tombstoned=True,
+    )
+    gone = await repo.get_including_tombstones("sp1", "i-b", "u9")
+    assert gone.tombstoned and gone.member_version == 3
+
+
+async def test_apply_member_event_with_a_stale_verified_epoch_is_dropped(repo):
+    """v_44: an event verified against the epoch-0 key cannot land once the
+    space pins a newer key — in the same statement as the write."""
+    kw = dict(
+        space_id="sp1",
+        user_id="u1",
+        instance_id="i-a",
+        display_name=None,
+        user_pk=None,
+        role="admin",
+        member_version=5,
+        tombstoned=False,
+    )
+    await repo._db.enqueue("UPDATE spaces SET authority_key_epoch=7 WHERE id='sp1'")
+    assert not await repo.apply_member_event(**kw, verified_epoch=0)
+    assert await repo.get_including_tombstones("sp1", "i-a", "u1") is None
+    assert await repo.apply_member_event(**kw, verified_epoch=7)
+    assert (await repo.get("sp1", "i-a", "u1")).authority_epoch == 7

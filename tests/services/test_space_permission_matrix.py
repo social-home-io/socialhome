@@ -183,6 +183,15 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # holding its signing seed; it only re-sends authority-signed roster
         # state the members already may see. No actor to authorize.
         "send_roster_snapshot",
+        # The signed seat list behind it, also used by the v_44 rotation
+        # bundle (signed with the NEW key). Builds signatures over state
+        # every member already may see; no actor, no route.
+        "roster_snapshot_entries",
+        # Owner-side seed share (v_22, public since v_44 so the rotation
+        # service re-shares after a rotation). Self-gates on owning the
+        # space, the delegation flag's caller and the peer's version; no
+        # actor to authorize, no route reaches it.
+        "share_admin_signing_seed",
         "send_hosted_roster_snapshots",
         "on_peer_proto_version_raised",
         # Internal seam the invite-redeem coordinator calls after it has

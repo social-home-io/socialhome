@@ -69,7 +69,6 @@ from ..domain.presence import truncate_coord
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
-    Space,
     SpaceRole,
     role_change_event_type,
 )
@@ -129,6 +128,7 @@ from .inbound_media_store import (
 from .protection_gate import ProtectionGateMixin
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .space_mentions import SpaceMentionResolver
+from .space_authority_pin import AuthorityCertOutcome, apply_authority_cert
 from .space_crypto_service import (
     UnsupportedAuthoritySuite,
     strip_authority_sig_fields,
@@ -136,6 +136,7 @@ from .space_crypto_service import (
 )
 from .space_service import (
     apply_space_images_from_config_change,
+    keep_local_space_state,
     stub_space_from_metadata,
 )
 from ..utils.datetime import parse_iso8601_lenient
@@ -210,53 +211,6 @@ def _coerce_sequence(meta: dict, payload: dict) -> int | None:
         return int(raw)
     except TypeError, ValueError:
         return None
-
-
-def _keep_local_space_state(
-    refreshed: Space,
-    *,
-    existing: Space,
-    meta: dict,
-    we_host: bool,
-) -> Space:
-    """Carry the row's local state across a SPACE_CONFIG_CHANGED snapshot.
-
-    ``stub_space_from_metadata`` rebuilds a whole :class:`Space` from the
-    wire, so every field that never federates comes back at its dataclass
-    default, and ``save`` writes it over the stored row. On the HOST — which
-    receives a seed-holding delegated admin's authority-signed snapshot —
-    that used to wipe its join code, geo-gate, bot toggle and retention
-    policy. Keep them from ``existing``:
-
-    * Host-local state (join code, geo-gate, bot toggle, dissolve bookkeeping)
-      never federates; the stored value always wins.
-    * Retention is mirrored (it rides ``space_meta``) but enforced by the host
-      alone, so the host pins its own values — a co-admin's mirror may be
-      stale, and a co-admin's retention edit reaches the host as a forwarded
-      ``update_config`` instead. A member household takes the host's values
-      when the snapshot carries them, and keeps what it has when an older
-      sender omits them ("absent" is "unknown", not "Forever").
-    """
-    keep_retention = we_host or "retention_days" not in meta
-    keep_exempt = we_host or "retention_exempt_types" not in meta
-    return replace(
-        refreshed,
-        join_code=existing.join_code,
-        lat=existing.lat,
-        lon=existing.lon,
-        radius_km=existing.radius_km,
-        bot_enabled=existing.bot_enabled,
-        dissolved=existing.dissolved,
-        archived_reason=existing.archived_reason,
-        retention_days=(
-            existing.retention_days if keep_retention else refreshed.retention_days
-        ),
-        retention_exempt_types=(
-            existing.retention_exempt_types
-            if keep_exempt
-            else refreshed.retention_exempt_types
-        ),
-    )
 
 
 #: Mapping from canonical media MIME types (produced by
@@ -2594,6 +2548,27 @@ class FederationInboundService(ProtectionGateMixin):
             # later config snapshot must not revive it — ignore further config
             # changes for a remote-terminated space.
             return
+        own_instance_id = (
+            self._federation_service.own_instance_id
+            if self._federation_service is not None
+            else None
+        )
+        # ── Authority key rotation (v_44) ───────────────────────────────────
+        # The owner's snapshot carries its cert for the CURRENT authority key.
+        # Apply it BEFORE the signature check below, so a household that
+        # missed the rotation bundle can verify an edit signed with the new
+        # key. The cert is owner-signed and epoch-ordered, so a forged, stale
+        # or replayed one changes nothing (``apply_authority_cert``) and the
+        # edit is then judged against the pin we already hold.
+        if meta.get("authority_cert") is not None:
+            outcome = await apply_authority_cert(
+                self._space_repo,
+                existing,
+                meta.get("authority_cert"),
+                own_instance_id=own_instance_id or "",
+            )
+            if outcome is AuthorityCertOutcome.APPLIED:
+                existing = await self._space_repo.get(space_id) or existing
         # ── Authorization (v_24) ────────────────────────────────────────────
         # Two ways an inbound config edit is authorised to mutate our stub:
         #
@@ -2767,11 +2742,6 @@ class FederationInboundService(ProtectionGateMixin):
         # already store. We pin ONLY where we host: a member household mirroring
         # the space is not the authority for it, and the owner's value is
         # exactly what it should be mirroring.
-        own_instance_id = (
-            self._federation_service.own_instance_id
-            if self._federation_service is not None
-            else None
-        )
         if own_instance_id and existing.owner_instance_id == own_instance_id:
             pinned = replace(
                 refreshed.features,
@@ -2788,14 +2758,45 @@ class FederationInboundService(ProtectionGateMixin):
                     event.from_instance,
                 )
             refreshed = replace(refreshed, features=pinned)
-        refreshed = _keep_local_space_state(
+        refreshed = keep_local_space_state(
             refreshed,
             existing=existing,
             meta=meta,
             we_host=bool(own_instance_id)
             and existing.owner_instance_id == own_instance_id,
         )
-        await self._space_repo.save(refreshed)
+        if authority_verified:
+            # v_44 — the save lands only while the space still pins the key
+            # epoch the signature verified against (one atomic write that also
+            # records that epoch); a rotation in between drops the old-key
+            # edit instead of stamping it as a new-key config.
+            if not await self._space_repo.save_config_if_authority_epoch(
+                refreshed, verified_epoch=existing.authority_key_epoch
+            ):
+                log.warning(
+                    "SPACE_CONFIG_CHANGED for %s: verified against authority "
+                    "epoch %d, but the pin moved before the write — dropped",
+                    space_id,
+                    existing.authority_key_epoch,
+                )
+                return
+        else:
+            # The owner's own unsigned edit (legacy path): authorized by the
+            # §24.11 envelope sender, not by the pinned key.
+            await self._space_repo.save(refreshed)
+            await self._space_repo.mark_config_authority(space_id)
+        if (
+            is_owner
+            and existing.features.delegated_admin_authority
+            and not refreshed.features.delegated_admin_authority
+            and existing.owner_instance_id != own_instance_id
+        ):
+            # The owner itself turned delegation off: this household may no
+            # longer sign for the space. The owner also rotates the key
+            # (v_44), but drop our copy now rather than keep a seed nobody
+            # authorizes. (Only on the owner's word — a co-admin's signed
+            # snapshot must not be able to strip another admin's seed.)
+            await self._space_repo.clear_space_seed(space_id)
         # A cover / icon change ships the new image in ``space_meta``; land
         # it (validated) now that the change itself passed every gate above,
         # so an out-of-order older change can never roll the picture back.

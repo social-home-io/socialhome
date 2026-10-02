@@ -1283,3 +1283,106 @@ def test_space_publish_cap_fits_two_maximal_images_and_metadata():
     assert 2 * SPACE_IMAGE_DATA_URI_MAX_CHARS + 512 * 1024 < (
         SPACE_PUBLISH_MAX_BODY_BYTES
     )
+
+
+# ── v_44: owner-certified re-pin over the wire ─────────────────────────────
+
+
+async def test_publish_route_repins_and_detail_serves_only_key_and_seq(
+    gfs_client,
+):
+    """``POST /gfs/spaces/{id}/publish`` with an owner cert re-pins, and
+    ``GET /gfs/spaces/{id}`` serves the cert (so a subscriber can heal)
+    with nothing in it beyond the space, owner and key facts."""
+    from socialhome.authority_cert import sign_authority_cert
+    from socialhome.crypto import derive_instance_id
+
+    app = gfs_client.server.app
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    await _register_owner(app, instance_id=owner_id)
+    # Re-register with the derivable key (``_register_owner`` mints its own).
+    fed_repo = app[gfs_fed_repo_key]
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id=owner_id,
+            display_name="o",
+            public_key=owner.public_key.hex(),
+            inbox_url="https://owner.example/federation/inbox/x",
+            status="active",
+            auto_accept=True,
+        )
+    )
+    k1 = generate_identity_keypair()
+    k2 = generate_identity_keypair()
+    base = {
+        "space_id": "sp-rot",
+        "owning_instance": owner_id,
+        "name": "Rot",
+        "description": "",
+        "about_markdown": "",
+        "cover_url": "",
+        "icon_url": "",
+        "min_age": 0,
+        "category": "general",
+        "accent_color": "#D2542A",
+        "primary_color": "#D2542A",
+    }
+    first = _sign_publish_body(
+        {**base, "identity_public_key": k1.public_key.hex()},
+        seed=owner.private_key,
+        ts=_now_iso(),
+    )
+    assert (
+        await gfs_client.post("/gfs/spaces/sp-rot/publish", json=first)
+    ).status == 200
+    cert = sign_authority_cert(
+        space_id="sp-rot",
+        owner_instance_id=owner_id,
+        owner_seed=owner.private_key,
+        owner_pk_hex=owner.public_key.hex(),
+        authority_pk_hex=k2.public_key.hex(),
+        key_epoch=1,
+    )
+    second = _sign_publish_body(
+        {**base, "identity_public_key": k2.public_key.hex(), "authority_cert": cert},
+        seed=owner.private_key,
+        ts=_now_iso(),
+    )
+    assert (
+        await gfs_client.post("/gfs/spaces/sp-rot/publish", json=second)
+    ).status == 200
+    body = await (await gfs_client.get("/gfs/spaces/sp-rot")).json()
+    assert body["identity_public_key"] == k2.public_key.hex()
+    # The GFS's own +1-per-re-pin counter, never the owner's (wall-clock)
+    # epoch: followers order pins without learning WHEN a revocation was.
+    assert body["authority_rotation_seq"] == 1
+    assert "authority_key_epoch" not in body
+    # The cert stays inside the GFS: no owner identity key, no rotation
+    # time on an unauthenticated page.
+    assert "authority_cert" not in body
+    blob = json.dumps(body)
+    assert owner.public_key.hex() not in blob
+    assert cert["issued_at"] not in blob
+    listing = await (await gfs_client.get("/gfs/spaces")).json()
+    assert [s["authority_rotation_seq"] for s in listing["spaces"]] == [1]
+    assert all("authority_cert" not in s for s in listing["spaces"])
+    stored = await fed_repo.get_space("sp-rot")
+    assert stored.authority_cert == cert
+
+
+async def test_publish_route_rejects_a_non_object_cert(gfs_client):
+    app = gfs_client.server.app
+    seed, _pk = await _register_owner(app)
+    body = _sign_publish_body(
+        {
+            "space_id": "sp-x",
+            "owning_instance": "owner.home",
+            "name": "X",
+            "authority_cert": "not-an-object",
+        },
+        seed=seed,
+        ts=_now_iso(),
+    )
+    resp = await gfs_client.post("/gfs/spaces/sp-x/publish", json=body)
+    assert resp.status == 400

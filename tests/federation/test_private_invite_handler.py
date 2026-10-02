@@ -275,7 +275,7 @@ async def test_joined_gossip_registers_broadcast_target(handler):
     with patch.object(
         PrivateSpaceInviteHandler,
         "_verify_roster_gossip",
-        AsyncMock(return_value=("sp-gossip", payload)),
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
     ):
         await handler.h._on_space_member_joined(ev)
 
@@ -299,7 +299,7 @@ async def test_left_gossip_does_not_register_broadcast_target(handler):
     with patch.object(
         PrivateSpaceInviteHandler,
         "_verify_roster_gossip",
-        AsyncMock(return_value=("sp-gossip", payload)),
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
     ):
         await handler.h._on_space_member_left(ev)
 
@@ -322,7 +322,7 @@ async def test_subscriber_gossip_is_mirrored_as_a_follower_seat(handler):
     with patch.object(
         PrivateSpaceInviteHandler,
         "_verify_roster_gossip",
-        AsyncMock(return_value=("sp-gossip", payload)),
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
     ):
         await handler.h._on_space_member_joined(ev)
 
@@ -345,7 +345,7 @@ async def test_moderator_gossip_is_mirrored_as_a_moderator_seat(handler):
     with patch.object(
         PrivateSpaceInviteHandler,
         "_verify_roster_gossip",
-        AsyncMock(return_value=("sp-gossip", payload)),
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
     ):
         await handler.h._on_space_member_joined(ev)
 
@@ -375,7 +375,7 @@ async def test_out_of_vocabulary_gossip_role_keeps_the_mutation(handler):
     with patch.object(
         PrivateSpaceInviteHandler,
         "_verify_roster_gossip",
-        AsyncMock(return_value=("sp-gossip", payload)),
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
     ):
         await handler.h._on_space_member_left(ev)
 
@@ -1260,7 +1260,7 @@ async def test_key_exchange_rekey_imports_new_epoch_key():
     )
     await h._on_key_exchange_rekey(ev)
     space_crypto.import_key.assert_awaited_once_with(
-        "sp-rekey", 7, new_key, rotated_by=None
+        "sp-rekey", 7, new_key, rotated_by=None, verified_pin=None
     )
 
 
@@ -1302,7 +1302,7 @@ async def test_key_exchange_rekey_threads_rotated_by_through():
     )
     await h._on_key_exchange_rekey(ev)
     space_crypto.import_key.assert_awaited_once_with(
-        "sp-rekey", 4, new_key, rotated_by="inst-minter-7"
+        "sp-rekey", 4, new_key, rotated_by="inst-minter-7", verified_pin=None
     )
 
 

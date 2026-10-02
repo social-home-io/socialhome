@@ -38,5 +38,6 @@
   "notification.space.feature.pages": "Pages",
   "notification.space.feature.tasks": "Tasks",
   "notification.space.feature.stickies": "Sticky notes",
-  "notification.space.feature.calendar": "Calendar events"
+  "notification.space.feature.calendar": "Calendar events",
+  "notification.space.admins_reconfirm": "Restored from backup: review space admins, then turn delegated admin back on"
 }

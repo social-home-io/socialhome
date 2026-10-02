@@ -675,7 +675,27 @@ from __future__ import annotations
 #:   answers 409 ``PEERS_TOO_OLD`` unless forced. A v_42 receiver refuses a
 #:   non-host approval (it never saw the block) — content approved off the
 #:   host reaches only v_43 households.
-OURS: int = 43
+#: * **v_44** (2026-10-02) — the space authority key rotates on admin
+#:   revocation. When a household loses its last admin seat while
+#:   ``delegated_admin_authority`` is on (or delegation goes on→off), the
+#:   owner host mints a fresh space authority key, signs an
+#:   ``authority_cert`` with its HOUSEHOLD identity key
+#:   (:mod:`socialhome.authority_cert` — never the old space key, which the
+#:   demoted household holds) and sends every member household
+#:   :data:`FederationEventType.SPACE_AUTHORITY_ROTATED` (cert + the owner's
+#:   baseline config, roster and content key, all signed with the new key).
+#:   ``SPACE_ADMIN_KEY_SHARE`` gains ``key_epoch`` + ``authority_cert`` (and
+#:   the receiver now requires the shared seed to match its pin);
+#:   ``space_meta`` and ``SPACE_ROSTER_SNAPSHOT`` carry the cert so a
+#:   household that missed the bundle heals; the GFS re-pins from the cert
+#:   on the owner's publish. **Gated, no safe fallback**: the bundle and the
+#:   key share go only to households at or above v_44 (a mesh-only member
+#:   whose version is unknown also gets the bundle — an older one drops the
+#:   unknown type). A household below v_44 stays pinned to the old key: the
+#:   owner keeps reaching it with UNSIGNED config and rekeys over the
+#:   owner-from-instance path, its roster mirror freezes, and the banner
+#:   names the gap.
+OURS: int = 44
 
 
 class FederationCapability:
@@ -1058,6 +1078,15 @@ class FederationCapability:
     #: answers 409 ``PEERS_TOO_OLD`` unless forced.
     MIN_FOR_FEDERATED_MODERATION = 43
 
+    #: Minimum proto_version that verifies an owner-signed space
+    #: ``authority_cert`` and re-pins the space authority key from it (v_44):
+    #: :data:`FederationEventType.SPACE_AUTHORITY_ROTATED`, the cert on
+    #: ``SPACE_ADMIN_KEY_SHARE`` / ``space_meta`` / ``SPACE_ROSTER_SNAPSHOT``.
+    #: The owner sends the rotation bundle and the new seed only to
+    #: households at or above it; one below it stays on the old key and gets
+    #: the owner's config and rekeys unsigned.
+    MIN_FOR_SPACE_AUTHORITY_ROTATION = 44
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1186,6 +1215,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_FEDERATED_MODERATION,
         "Reviewed across households",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
+        "Space key rotation on revoke",
+    ),
 ]
 
 
@@ -1254,6 +1287,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
         FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT,
         FederationCapability.MIN_FOR_FEDERATED_MODERATION,
+        FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
     }
 )
 

@@ -486,6 +486,10 @@ The tombstone grants **no trust**:
   and space media for it (`dm_media_outbox`, `space_media_outbox`) is
   dropped when the tombstone is made, and those senders skip tombstones —
   not even the space mesh fallback reaches it.
+- the outbox refuses to *queue* anything else for it, too — and anything at
+  all for a peer whose row is gone. The check is part of the outbox `INSERT`,
+  so a send that was already in flight when the pairing ended (a space-sync
+  offer, an ICE candidate) cannot leave a row behind the unpair's purge.
 
 Exactly one `UNPAIR` is queued, with a 30-day `expires_at`
 (`UNPAIR_RETRY_MAX_AGE`) and the outbox's normal backoff. A signed envelope

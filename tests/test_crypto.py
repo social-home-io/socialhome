@@ -1057,3 +1057,19 @@ def test_verify_move_link_freshness_is_caller_controlled():
             stored_old_user_pubkey=user_kp.public_key,
             max_age=timedelta(days=30),
         )
+
+
+def test_ed25519_public_key_matches_the_generated_pair():
+    from socialhome.crypto import ed25519_public_key, generate_identity_keypair
+
+    kp = generate_identity_keypair()
+    assert ed25519_public_key(kp.private_key) == kp.public_key
+
+
+def test_ed25519_public_key_rejects_wrong_length():
+    import pytest
+
+    from socialhome.crypto import ed25519_public_key
+
+    with pytest.raises(ValueError):
+        ed25519_public_key(b"short")

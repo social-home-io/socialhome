@@ -26,7 +26,10 @@ there is no ``derive_space_id(pk) == space_id`` check to make. The pin is
 therefore **TOFU at the household**, which the repository layer enforces:
 ``SqliteSpaceRepo.save`` deliberately leaves ``identity_public_key`` out of
 its ``ON CONFLICT DO UPDATE SET`` clause, so a later refresh — from this
-GFS or any other — can never move a pin once seated.
+GFS or any other — can never move a pin once seated. The one exception is an
+owner-signed authority cert (v_44, :mod:`.space_authority_pin`): it re-pins
+only when it verifies against the space's owner instance and carries a
+higher epoch, which a GFS cannot forge.
 
 Consequences, stated plainly:
 
@@ -68,6 +71,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 
 import aiohttp
 
@@ -77,6 +81,8 @@ from ..repositories.public_space_repo import AbstractPublicSpaceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_http import MAX_GFS_BODY_BYTES, read_json_capped
+from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole
 from .space_service import can_seat_remote_stub, stub_space_from_metadata
 
 log = logging.getLogger(__name__)
@@ -104,6 +110,37 @@ _PIN_HEX_LEN = 64
 #: than the 15 s used for the interactive GFS calls.
 _MIRROR_FETCH_TIMEOUT_S = 5.0
 
+#: Minimum seconds between two lazy pin refreshes of one space (v_44). A
+#: relayed frame that fails the authority check triggers a refresh; a burst
+#: of them (or a hostile relay replaying old-key frames) must not turn into
+#: a GFS request per frame.
+PIN_REFRESH_INTERVAL_S = 60.0
+
+#: Most spaces whose last refresh time is remembered at once.
+_PIN_REFRESH_MAX_TRACKED = 1024
+
+
+def _listing_pin(body: dict) -> tuple[str, int] | None:
+    """``(identity_public_key, authority_rotation_seq)`` off a GFS listing,
+    or ``None`` when either is missing or malformed (fail-closed)."""
+    pk = body.get("identity_public_key")
+    epoch = body.get("authority_rotation_seq", 0)
+    if not isinstance(pk, str) or len(pk) != _PIN_HEX_LEN:
+        return None
+    try:
+        if len(bytes.fromhex(pk)) != 32:
+            return None
+    except ValueError:
+        return None
+    if (
+        isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or epoch < 0
+        or epoch > MAX_AUTHORITY_KEY_EPOCH
+    ):
+        return None
+    return pk.lower(), epoch
+
 
 def _as_text(value: object) -> str | None:
     """Coerce a GFS-supplied field to ``str``, preserving ``None``.
@@ -125,6 +162,8 @@ class GfsSpaceMirrorService:
         "_public_spaces",
         "_gfs",
         "_http_client",
+        "_own_instance_id",
+        "_last_pin_refresh",
     )
 
     def __init__(
@@ -145,6 +184,12 @@ class GfsSpaceMirrorService:
         self._public_spaces = public_space_repo
         self._gfs = gfs_connection_service
         self._http_client: aiohttp.ClientSession | None = None
+        self._own_instance_id = ""
+        self._last_pin_refresh: dict[str, float] = {}
+
+    def attach_identity(self, *, own_instance_id: str) -> None:
+        """Our instance id — an owner never re-pins its own space (v_44)."""
+        self._own_instance_id = own_instance_id
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
         """Provide the shared aiohttp session after construction.
@@ -262,6 +307,15 @@ class GfsSpaceMirrorService:
                 meta=meta,
             )
             await self._spaces.save(space)
+            # v_44 — remember WHICH connection server seated this mirror and
+            # the re-pin counter it showed: a later pin heal is accepted from
+            # this GFS only, and only to a higher counter.
+            listed = _listing_pin(body)
+            await self._spaces.set_mirror_provenance(
+                space_id,
+                gfs_id=conn.id,
+                rotation_seq=listed[1] if listed is not None else 0,
+            )
             log.info(
                 "gfs_space_mirror: seated stub for space %s from GFS %s",
                 space_id,
@@ -269,6 +323,131 @@ class GfsSpaceMirrorService:
             )
             return space, conn.id
         return None
+
+    async def _fetch_listing(self, conn, space_id: str) -> dict | None:
+        """``GET {gfs}/gfs/spaces/{space_id}`` from one connection, or None."""
+        client = self._http_client
+        if client is None or not _SAFE_SPACE_ID.fullmatch(space_id):
+            return None
+        url = f"{conn.inbox_url.rstrip('/')}/gfs/spaces/{space_id}"
+        try:
+            async with client.get(
+                url,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=_MIRROR_FETCH_TIMEOUT_S),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                body = await read_json_capped(resp, url=url, limit=MAX_GFS_BODY_BYTES)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            log.warning("gfs_space_mirror: fetch failed for %s: %s", url, exc)
+            return None
+        return body if isinstance(body, dict) else None
+
+    async def refresh_authority_pin(
+        self, space_id: str, *, force: bool = False
+    ) -> bool:
+        """Heal a FOLLOWER's pin from the GFS listing after a rotation (v_44).
+
+        Called when a relayed frame fails the authority check (the owner may
+        have rotated the key), and on every GFS-WS reconnect. The listing
+        carries only the current ``identity_public_key`` and the GFS's own
+        ``authority_rotation_seq`` — the GFS re-pinned after verifying the
+        owner's cert against the owner's registered key, and keeps the cert
+        (and its wall-clock epoch) private. Trust model: the same trust a
+        follower already places in the GFS that seated its mirror for its
+        first (TOFU) pin — and only that GFS — bounded by a strictly HIGHER
+        seq than the one held, so an older key never comes back.
+
+        Only for a PUBLIC / GLOBAL space this household merely FOLLOWS (at
+        least one local ``subscriber`` seat, nothing else): a household with
+        a real seat, or a private stub, trusts the owner's own cert,
+        delivered over federation, never a connection server's word.
+        Rate-limited to one fetch per :data:`PIN_REFRESH_INTERVAL_S` per
+        space unless ``force``. Returns whether the pin moved.
+        """
+        now = time.monotonic()
+        last = self._last_pin_refresh.get(space_id)
+        if not force and last is not None and now - last < PIN_REFRESH_INTERVAL_S:
+            return False
+        self._remember_refresh(space_id, now)
+        return await self._refresh_from(
+            await self._gfs_conn_repo.list_active(), space_id
+        )
+
+    def _remember_refresh(self, space_id: str, now: float) -> None:
+        """Record a refresh; prune entries past the interval so the map is
+        bounded by the spaces refreshed in the last minute."""
+        if len(self._last_pin_refresh) >= _PIN_REFRESH_MAX_TRACKED:
+            cutoff = now - PIN_REFRESH_INTERVAL_S
+            for sid, at in list(self._last_pin_refresh.items()):
+                if at < cutoff:
+                    del self._last_pin_refresh[sid]
+            if len(self._last_pin_refresh) >= _PIN_REFRESH_MAX_TRACKED:
+                self._last_pin_refresh.clear()
+        self._last_pin_refresh[space_id] = now
+
+    async def refresh_authority_pins(self, gfs_id: str) -> int:
+        """Re-check every mirrored subscription's pin against *gfs_id*.
+
+        Run on each GFS-WS (re)connect beside :meth:`resubscribe_all`, scoped
+        by the same mirror provenance. Returns how many pins moved.
+        """
+        conn = await self._gfs_conn_repo.get(gfs_id)
+        if conn is None:
+            return 0
+        moved = 0
+        for space_id in await self._spaces.list_subscribed_space_ids():
+            if not await self.was_gfs_listed(space_id):
+                continue
+            self._remember_refresh(space_id, time.monotonic())
+            if await self._refresh_from([conn], space_id):
+                moved += 1
+        return moved
+
+    async def _refresh_from(self, conns, space_id: str) -> bool:
+        """Heal from the listing of the ONE GFS that seated this mirror.
+
+        Refused unless every condition of the follower trust model holds:
+        not our space; a public / global tier; at least one local
+        ``subscriber`` seat and no other local seat; the connection is the
+        recorded ``mirror_gfs_id``; the listed ``authority_rotation_seq`` is
+        strictly higher than the one held.
+        """
+        space = await self._spaces.get(space_id)
+        if space is None or (
+            self._own_instance_id and space.owner_instance_id == self._own_instance_id
+        ):
+            return False
+        if space.space_type not in PUBLIC_SPACE_TIERS:
+            return False
+        members = await self._spaces.list_members(space_id)
+        if not members or any(m.role != SpaceRole.SUBSCRIBER for m in members):
+            return False  # a real seat heals from the owner's cert only
+        mirror_gfs, held_seq = await self._spaces.get_mirror_provenance(space_id)
+        if mirror_gfs is None:
+            return False  # provenance unknown (a pre-v44 mirror)
+        for conn in conns:
+            if conn.id != mirror_gfs:
+                continue
+            body = await self._fetch_listing(conn, space_id)
+            listed = _listing_pin(body) if body is not None else None
+            if listed is None or listed[1] <= held_seq:
+                continue
+            if await self._spaces.adopt_gfs_pin(
+                space_id,
+                gfs_id=conn.id,
+                public_key_hex=listed[0],
+                rotation_seq=listed[1],
+            ):
+                log.info(
+                    "gfs_space_mirror: space %s re-pinned from GFS %s (seq %d)",
+                    space_id,
+                    conn.id,
+                    listed[1],
+                )
+                return True
+        return False
 
     def _validated_metadata(
         self,

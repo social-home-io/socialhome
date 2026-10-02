@@ -89,7 +89,12 @@ join **locally** from the ACK's ``space_meta``: a stub ``spaces`` row
 own ``space_members`` row, the ``(space, instance)`` mapping, and the rest
 of the roster as ``SpaceRemoteMember`` rows — so ``/api/spaces`` shows the
 space immediately. (An older issuer that ships no ``space_meta`` falls back
-to the mapping-only behaviour.) The endpoint returns ``{space_id, role}``
+to the mapping-only behaviour.) Once the space's authority key has been
+rotated (v_44), the ACK's — and the §D1b invite's — ``space_meta`` also
+carries the owner's ``authority_cert`` + ``authority_key_epoch``; the
+receiver applies the cert to the stub it just seated, recording the epoch
+(and re-pinning a re-invited member's stub that still names a retired key),
+so a replay of an older cert can never move the pin back. The endpoint returns ``{space_id, role}``
 like the local path; on DENY returns 422 with the reason; on timeout 504.
 
 **§CP.F1 age gate:** the receiver enforces the host's ``min_age`` (carried
@@ -904,14 +909,14 @@ hold authority, and a peer met through a public link is not that.
 
 Two reasons, either sufficient:
 
-- **The seed cannot be taken back.** The connection server pins a
-  space's `identity_public_key` TOFU-immutably on first publish: a later
-  publish offering a different key keeps the pinned one. So there is no
-  rotation available if a link-joined admin turns out to be hostile or
-  is simply kicked — the household would have to abandon the space's
-  published identity to change the key. A credential that cannot be
-  revoked must not be handed to someone whose only introduction was a
-  string anyone could have copied.
+- **Taking the seed back is not guaranteed everywhere.** Since v_44 the
+  owner rotates the space authority key when an admin household is
+  revoked, and a connection server re-pins from the owner's cert — but only
+  households and connection servers that support it follow (a v_43 member
+  or a GFS without `authority_rotation` keeps the old key, which the revoked
+  household still holds). A credential whose revocation depends on every
+  party being upgraded must not be handed to someone whose only
+  introduction was a string anyone could have copied.
 - **A link is not an acquaintance.** An invite link is, by design,
   redeemable by whoever holds it. The owner chose to open a seat, not to
   vouch for the person who walked through it.
@@ -925,8 +930,8 @@ hold authority promotes them through the normal path, where the decision
 is about a household the owner can now name. Even then, the promote path
 (`_share_admin_signing_seed`) withholds the seed from a **relay-only**
 (`InstanceSource.SPACE_SESSION`) household — one met purely through a
-connection server — because the TOFU-pin argument above still applies to
-it; such an admin keeps acting through the host.
+connection server — because the revocation argument above still applies
+to it; such an admin keeps acting through the host.
 
 #### A Follower link works across households (v_30)
 

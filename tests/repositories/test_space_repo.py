@@ -1543,3 +1543,127 @@ async def test_purge_payloads_nulls_decided_rows_only(env):
     assert done.payload == {} and done.current_snapshot is None
     assert (await env.repo.get_moderation_item("pending")).payload
     assert (await env.repo.get_moderation_item("recent")).payload
+
+
+# ── Space authority key rotation (v_44) ──────────────────────────────────
+
+
+async def test_authority_key_epoch_defaults_to_zero(env):
+    await env.repo.save(_space("sp-ep"))
+    got = await env.repo.get("sp-ep")
+    assert got is not None
+    assert got.authority_key_epoch == 0
+
+
+async def test_save_never_writes_the_pin_or_the_epoch(env):
+    """``save`` is the stub upsert every inbound snapshot goes through, so
+    neither the pin nor the epoch may move on it — only a verified cert
+    (``adopt_authority_key``) or the owner's own rotation may."""
+    await env.repo.save(_space("sp-pin"))
+    assert await env.repo.adopt_authority_key("sp-pin", "cc" * 32, 3)
+    await env.repo.save(
+        replace(_space("sp-pin"), identity_public_key="dd" * 32, authority_key_epoch=9)
+    )
+    got = await env.repo.get("sp-pin")
+    assert got.identity_public_key == "cc" * 32
+    assert got.authority_key_epoch == 3
+
+
+async def test_rotate_authority_key_is_compare_and_set(env):
+    from socialhome.crypto import generate_identity_keypair
+
+    await env.repo.save(_space("sp-rot"))
+    kp = generate_identity_keypair()
+    assert await env.repo.rotate_authority_key(
+        "sp-rot", public_key_hex=kp.public_key.hex(), seed=kp.private_key, key_epoch=1
+    )
+    got = await env.repo.get("sp-rot")
+    assert got.identity_public_key == kp.public_key.hex()
+    assert got.authority_key_epoch == 1
+    assert await env.repo.get_space_seed("sp-rot") == kp.private_key
+    # A concurrent rotation that read the old epoch loses the race.
+    other = generate_identity_keypair()
+    assert not await env.repo.rotate_authority_key(
+        "sp-rot",
+        public_key_hex=other.public_key.hex(),
+        seed=other.private_key,
+        key_epoch=1,
+    )
+    assert (await env.repo.get("sp-rot")).identity_public_key == kp.public_key.hex()
+    assert await env.repo.get_space_seed("sp-rot") == kp.private_key
+
+
+async def test_rotate_authority_key_validates_seed(env):
+    await env.repo.save(_space("sp-bad"))
+    with pytest.raises(ValueError):
+        await env.repo.rotate_authority_key(
+            "sp-bad", public_key_hex="aa" * 32, seed=b"short", key_epoch=1
+        )
+
+
+async def test_adopt_authority_key_clears_the_old_seed(env):
+    from socialhome.crypto import generate_identity_keypair
+
+    await env.repo.save(_space("sp-adopt"))
+    old = generate_identity_keypair()
+    await env.repo.set_space_seed("sp-adopt", old.private_key)
+    assert await env.repo.adopt_authority_key("sp-adopt", "ee" * 32, 2)
+    got = await env.repo.get("sp-adopt")
+    assert got.identity_public_key == "ee" * 32
+    assert got.authority_key_epoch == 2
+    assert await env.repo.get_space_seed("sp-adopt") is None
+
+
+async def test_adopt_authority_key_refuses_an_older_or_equal_epoch(env):
+    await env.repo.save(_space("sp-old"))
+    assert await env.repo.adopt_authority_key("sp-old", "11" * 32, 3)
+    assert not await env.repo.adopt_authority_key("sp-old", "22" * 32, 3)
+    assert not await env.repo.adopt_authority_key("sp-old", "33" * 32, 2)
+    got = await env.repo.get("sp-old")
+    assert got.identity_public_key == "11" * 32
+    assert got.authority_key_epoch == 3
+
+
+async def test_adopt_unknown_space_is_false(env):
+    assert not await env.repo.adopt_authority_key("sp-none", "11" * 32, 1)
+
+
+async def test_clear_space_seed(env):
+    from socialhome.crypto import generate_identity_keypair
+
+    await env.repo.save(_space("sp-clear"))
+    await env.repo.set_space_seed("sp-clear", generate_identity_keypair().private_key)
+    await env.repo.clear_space_seed("sp-clear")
+    assert await env.repo.get_space_seed("sp-clear") is None
+
+
+async def test_save_config_baseline_applies_once_under_the_pinned_epoch(env):
+    """F4: the baseline config reset saves, records its author and stamps
+    ``authority_config_epoch`` in ONE transaction — only while the space
+    pins ``epoch`` and no config was applied under that epoch yet."""
+    await env.repo.save(_space("sp-base"))
+    assert await env.repo.adopt_authority_key("sp-base", "cc" * 32, 5)
+    renamed = replace(_space("sp-base"), name="Owner baseline")
+    assert await env.repo.save_config_baseline(renamed, author="own-iid", epoch=5)
+    got = await env.repo.get("sp-base")
+    assert got.name == "Owner baseline"
+    assert await env.repo.get_config_author("sp-base") == "own-iid"
+    assert await env.repo.get_authority_config_epoch("sp-base") == 5
+    # A config applied under epoch 5 already stands: a second baseline at
+    # the same epoch moves nothing.
+    again = replace(_space("sp-base"), name="Second")
+    assert not await env.repo.save_config_baseline(again, author="x", epoch=5)
+    assert (await env.repo.get("sp-base")).name == "Owner baseline"
+
+
+async def test_save_config_baseline_refuses_when_the_pin_moved(env):
+    await env.repo.save(_space("sp-moved"))
+    assert await env.repo.adopt_authority_key("sp-moved", "cc" * 32, 7)
+    stale = replace(_space("sp-moved"), name="Stale")
+    assert not await env.repo.save_config_baseline(stale, author="x", epoch=6)
+    assert (await env.repo.get("sp-moved")).name != "Stale"
+    assert await env.repo.get_authority_config_epoch("sp-moved") == 0
+    assert not await env.repo.save_config_baseline(stale, author="x", epoch=8)
+    assert not await env.repo.save_config_baseline(
+        replace(_space("nope"), name="Ghost"), author="x", epoch=7
+    )

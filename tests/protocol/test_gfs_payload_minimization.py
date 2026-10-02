@@ -739,3 +739,154 @@ async def test_e2e_untargeted_handoff_reaches_only_the_household_it_was_sealed_t
     finally:
         await target_db.shutdown()
         await bystander_db.shutdown()
+
+
+# ─── v_44: the authority cert names no member and no reason ─────────────
+
+
+#: Every key the owner-signed authority cert carries — and so everything a
+#: connection server learns from a rotation: which space, which owner (it
+#: already knows both), which key, and how many rotations happened.
+AUTHORITY_CERT_KEYS: frozenset[str] = frozenset(
+    {
+        "space_id",
+        "owner_instance_id",
+        "owner_pk",
+        "authority_pk",
+        "authority_key_suite",
+        "key_epoch",
+        "issued_at",
+        "cert_sig_suite",
+        "cert_sig",
+    }
+)
+
+
+async def test_publish_after_rotation_carries_only_the_cert_facts(tmp_dir):
+    """The owner's publish after a rotation adds exactly one field — the
+    cert — and nothing in it (or in the body) names the revoked household,
+    any member, or why the key rotated."""
+    db = AsyncDatabase(tmp_dir / "rot.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        owner = generate_identity_keypair()
+        owner_id = derive_instance_id(owner.public_key)
+        spaces = SqliteSpaceRepo(db, key_manager=KeyManager(b"\x03" * 32))
+        await spaces.save(
+            Space(
+                id=SPACE_ID,
+                name="Rot",
+                owner_instance_id=owner_id,
+                owner_username="anna",
+                identity_public_key="aa" * 32,
+                config_sequence=0,
+                features=SpaceFeatures(),
+                space_type=SpaceType.GLOBAL,
+                join_mode=JoinMode.OPEN,
+            )
+        )
+        k2 = generate_space_keypair()
+        await spaces.rotate_authority_key(
+            SPACE_ID,
+            public_key_hex=k2.public_key.hex(),
+            seed=k2.private_key,
+            key_epoch=1,
+        )
+        from socialhome.capabilities_sig import sign_capabilities
+
+        gfs_kp = generate_identity_keypair()
+        conns = SqliteGfsConnectionRepo(db)
+        await conns.save(
+            GfsConnection(
+                id="g1",
+                gfs_instance_id="gfs",
+                display_name="GFS",
+                public_key=gfs_kp.public_key.hex(),
+                inbox_url="https://gfs.example",
+                status="active",
+                paired_at="2025-01-01T00:00:00+00:00",
+            )
+        )
+        caps = {"anonymous_publish": True, "authority_rotation": True}
+        caps_sig, caps_suite = sign_capabilities(gfs_kp.private_key, "gfs", caps)
+
+        class _Session(_RecordingSession):
+            def get(self, url, **_kw):
+                resp = _RecordingResp()
+
+                async def _json():
+                    return {
+                        "capabilities": caps,
+                        "capabilities_sig": caps_sig,
+                        "capabilities_sig_suite": caps_suite,
+                    }
+
+                resp.json = _json  # type: ignore[attr-defined]
+                return resp
+
+            def post(self, url, *, json=None, **_kw):
+                self.posts.append((url, json or {}))
+                resp = _RecordingResp()
+
+                async def _json():
+                    return {"status": "active"}
+
+                resp.json = _json  # type: ignore[attr-defined]
+                return resp
+
+        session = _Session()
+        svc = GfsConnectionService(conns, http_client=session)
+        svc.attach_publish_context(
+            space_repo=spaces,
+            own_instance_id=owner_id,
+            own_signing_key=owner.private_key,
+        )
+        await svc.publish_space(SPACE_ID, "g1")
+        body = session.posts[-1][1]
+        assert set(body["authority_cert"]) == AUTHORITY_CERT_KEYS
+        blob = json.dumps(body)
+        for marker in (PUBLISHER_INSTANCE, SUBSCRIBER_INSTANCE_NAME, AUTHOR_USERNAME):
+            assert marker not in blob
+        assert "reason" not in body["authority_cert"]
+    finally:
+        await db.shutdown()
+
+
+def test_public_directory_never_serves_the_owner_cert():
+    """The unauthenticated listing / detail show the current key and its
+    epoch only: the owner's household identity key and the rotation time
+    stay inside the GFS."""
+    from socialhome.authority_cert import sign_authority_cert
+    from socialhome.global_server.routes.relay import public_space_dict
+
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    k2 = generate_space_keypair()
+    cert = sign_authority_cert(
+        space_id=SPACE_ID,
+        owner_instance_id=owner_id,
+        owner_seed=owner.private_key,
+        owner_pk_hex=owner.public_key.hex(),
+        authority_pk_hex=k2.public_key.hex(),
+        key_epoch=1790000000,
+    )
+    body = public_space_dict(
+        GlobalSpace(
+            space_id=SPACE_ID,
+            owning_instance=owner_id,
+            identity_public_key=k2.public_key.hex(),
+            authority_cert=cert,
+            authority_rotation_seq=3,
+        )
+    )
+    blob = json.dumps(body)
+    assert "authority_cert" not in body
+    assert owner.public_key.hex() not in blob
+    assert cert["issued_at"] not in blob
+    assert cert["cert_sig"] not in blob
+    # No wall-clock epoch (it would date the revocation) — only the GFS's
+    # own re-pin counter.
+    assert "authority_key_epoch" not in body
+    assert "1790000000" not in blob
+    assert body["authority_rotation_seq"] == 3
+    assert body["identity_public_key"] == k2.public_key.hex()

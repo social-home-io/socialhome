@@ -304,6 +304,12 @@ class FederationEventType(str, enum.Enum):
     SPACE_KEY_EXCHANGE_ACK = "space_key_exchange_ack"
     SPACE_KEY_EXCHANGE_REKEY = "space_key_exchange_rekey"
     SPACE_ADMIN_KEY_SHARE = "space_admin_key_share"
+    #: v_44 — owner host → each member household: the space authority key
+    #: was rotated (an admin household was revoked). Carries the
+    #: owner-signed ``authority_cert`` plus the owner's baseline config,
+    #: roster and content key, all signed with the NEW key. Only
+    #: ``space_id`` travels in plaintext.
+    SPACE_AUTHORITY_ROTATED = "space_authority_rotated"
     SPACE_SESSION_CLEANUP = "space_session_cleanup"
 
     # ── Space sync ──
@@ -500,6 +506,7 @@ STRUCTURAL_EVENTS: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_KEY_EXCHANGE,
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
         FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        FederationEventType.SPACE_AUTHORITY_ROTATED,
     }
 )
 
@@ -643,6 +650,11 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_KEY_EXCHANGE,
         FederationEventType.SPACE_KEY_EXCHANGE_ACK,
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        #: The owner's authority-key rotation (v_44). A link-joined member
+        #: that misses it stays pinned to the revoked key and drops every
+        #: later authority-signed event. Authorized by the owner household's
+        #: own signature on the cert, never by the sender's class.
+        FederationEventType.SPACE_AUTHORITY_ROTATED,
         # ── Catch-up sync (§25.6) ──
         #: The chunked backfill that populates a fresh seat. The RTC
         #: *signalling* half of sync (``SPACE_SYNC_OFFER`` / ``_ANSWER`` /
@@ -889,6 +901,7 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_KEY_EXCHANGE_ACK,
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
         FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        FederationEventType.SPACE_AUTHORITY_ROTATED,
         FederationEventType.SPACE_SUBSCRIBER_KEY_HANDOFF,
         FederationEventType.SPACE_SESSION_CLEANUP,
         # ── §25.6 catch-up sync. A reader syncs the same way a member

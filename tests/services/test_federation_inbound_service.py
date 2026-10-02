@@ -4603,3 +4603,161 @@ async def test_inbound_moderator_edit_mentions_nobody(db, bus, inbound):
     assert len(captured) == 1  # the edit itself applies
     assert captured[0].post.content == "hello @bob"
     assert captured[0].new_mentions == ()
+
+
+# ── v_44: an inline authority cert re-pins before the signature check ────
+
+
+@pytest.mark.security
+async def test_config_with_owner_cert_repins_a_lagging_member_first(db, bus, inbound):
+    """A member that missed the rotation bundle still pins K1. The owner's
+    next config is signed with K2 and carries the cert for K2 inside the
+    signed ``space_meta``: the cert applies first, then the edit verifies."""
+    from socialhome.authority_cert import sign_authority_cert
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
+
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    k1 = generate_identity_keypair()
+    k2 = generate_identity_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-cert",
+        owner_instance=owner_id,
+        space_pub_hex=k1.public_key.hex(),
+        seq=5,
+    )
+    _own_instance(inbound, "member-i")
+    cert = sign_authority_cert(
+        space_id="sp-cert",
+        owner_instance_id=owner_id,
+        owner_seed=owner.private_key,
+        owner_pk_hex=owner.public_key.hex(),
+        authority_pk_hex=k2.public_key.hex(),
+        key_epoch=1,
+    )
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-cert",
+            from_instance=owner_id,
+            owner_instance=owner_id,
+            sequence=6,
+            name="After rotation",
+            seed=k2.private_key,
+            extra_meta={"authority_cert": cert, "authority_key_epoch": 1},
+        )
+    )
+    space = await SqliteSpaceRepo(db).get("sp-cert")
+    assert (space.identity_public_key, space.authority_key_epoch) == (
+        k2.public_key.hex(),
+        1,
+    )
+    assert space.name == "After rotation"
+
+
+@pytest.mark.security
+async def test_config_with_a_forged_cert_changes_nothing(db, bus, inbound):
+    from socialhome.authority_cert import sign_authority_cert
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
+
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    k1 = generate_identity_keypair()
+    evil = generate_identity_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-forged",
+        owner_instance=owner_id,
+        space_pub_hex=k1.public_key.hex(),
+        seq=5,
+    )
+    _own_instance(inbound, "member-i")
+    forged = sign_authority_cert(
+        space_id="sp-forged",
+        owner_instance_id=owner_id,
+        owner_seed=evil.private_key,
+        owner_pk_hex=evil.public_key.hex(),
+        authority_pk_hex=evil.public_key.hex(),
+        key_epoch=1,
+    )
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-forged",
+            from_instance="b-i",
+            owner_instance=owner_id,
+            sequence=6,
+            name="Hijacked",
+            seed=evil.private_key,
+            extra_meta={"authority_cert": forged},
+        )
+    )
+    space = await SqliteSpaceRepo(db).get("sp-forged")
+    assert space.identity_public_key == k1.public_key.hex()
+    assert space.name == "Cfg Space"
+
+
+async def _seeded_admin_stub(db, *, space_id, owner_instance, kp):
+    from socialhome.infrastructure.key_manager import KeyManager
+
+    await _seed_signed_space(
+        db,
+        space_id=space_id,
+        owner_instance=owner_instance,
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    await db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?",
+        (space_id,),
+    )
+    repo = SqliteSpaceRepo(db, key_manager=KeyManager(b"\x0c" * 32))
+    await repo.set_space_seed(space_id, kp.private_key)
+    return repo
+
+
+async def test_owner_turning_delegation_off_clears_our_seed(db, bus, inbound):
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    repo = await _seeded_admin_stub(
+        db, space_id="sp-off", owner_instance="owner-i", kp=kp
+    )
+    inbound._space_repo = repo
+    _own_instance(inbound, "admin-i")
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-off",
+            from_instance="owner-i",
+            owner_instance="owner-i",
+            sequence=6,
+            name="Off",
+            seed=kp.private_key,
+            features={"delegated_admin_authority": False},
+        )
+    )
+    assert await repo.get_space_seed("sp-off") is None
+
+
+async def test_a_co_admin_cannot_strip_our_seed_with_a_signed_off_flip(
+    db, bus, inbound
+):
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    repo = await _seeded_admin_stub(
+        db, space_id="sp-coadmin", owner_instance="owner-i", kp=kp
+    )
+    inbound._space_repo = repo
+    _own_instance(inbound, "admin-i")
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-coadmin",
+            from_instance="other-admin-i",
+            owner_instance="owner-i",
+            sequence=6,
+            name="Off",
+            seed=kp.private_key,
+            features={"delegated_admin_authority": False},
+        )
+    )
+    assert await repo.get_space_seed("sp-coadmin") == kp.private_key

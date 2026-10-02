@@ -146,6 +146,24 @@ def generate_identity_keypair() -> Ed25519Keypair:
     return Ed25519Keypair(private_key=seed, public_key=pk)
 
 
+def ed25519_public_key(seed: bytes) -> bytes:
+    """The 32-byte Ed25519 public key for a 32-byte private ``seed``.
+
+    Used to check that a shared space signing seed belongs to the key a
+    household pins (v_44) before storing it.
+    """
+    if len(seed) != 32:
+        raise ValueError("Ed25519 seed must be 32 bytes")
+    return (
+        Ed25519PrivateKey.from_private_bytes(seed)
+        .public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+
+
 def sign_ed25519(seed: bytes, message: bytes) -> bytes:
     """Sign ``message`` with the Ed25519 private key seed.
 

@@ -211,11 +211,14 @@ async def test_unpair_sends_unpair_before_forgetting(env):
             "row_present": True,
         }
     ]
+    # The row goes before the outbox purge: the outbox refuses to queue for
+    # a household with no row, so a send still in flight cannot strand an
+    # envelope behind the purge.
     assert [c for c, _ in env["log"]] == [
         "send_event",
+        "delete_instance",
         "outbox_purge",
         "forget_discovered_via",
-        "delete_instance",
     ]
     assert "peer-a" not in env["repo"].instances
     assert env["outbox"].rows == {}

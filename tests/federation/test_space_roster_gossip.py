@@ -685,3 +685,153 @@ async def test_an_applied_seat_announces_itself(tmp_dir):
     ]
     assert live == [(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)]
     await db.shutdown()
+
+
+# ── v_44: on the HOST, gossip never raises a seat; a lost admin seat is news ──
+
+
+async def _hosted_handler(tmp_dir):
+    """Same as ``_make_handler`` but this household HOSTS the space, and
+    the bus is a recorder."""
+    h, space_repo, rm, db, seed = await _make_handler(tmp_dir)
+    h._own_instance_id = OWNER  # we are the host
+    published: list = []
+
+    async def _publish(evt):
+        published.append(evt)
+
+    h._bus = SimpleNamespace(publish=_publish)
+    return h, space_repo, rm, db, seed, published
+
+
+async def _gossip(h, seed, *, tombstoned=False, **kw):
+    et = (
+        FederationEventType.SPACE_MEMBER_LEFT
+        if tombstoned
+        else FederationEventType.SPACE_MEMBER_JOINED
+    )
+    payload = _signed_payload(et, seed=seed, **kw)
+    if tombstoned:
+        await h._on_space_member_left(_event(et, payload, from_instance=RELAY))
+    else:
+        await h._on_space_member_joined(_event(et, payload, from_instance=RELAY))
+
+
+async def test_host_ignores_gossip_that_raises_a_seat_to_admin(tmp_dir):
+    """SECURITY (v_44): a demoted household still holding the old seed
+    signs ``JOINED role=admin`` for its own seat. On the host that would
+    re-seat it as admin and hand it the next signing seed. Pinned."""
+    h, _sr, rm, db, seed, _pub = await _hosted_handler(tmp_dir)
+    try:
+        await rm.add(
+            space_id=SPACE_ID,
+            instance_id=MEMBER_INSTANCE,
+            user_id=MEMBER_USER,
+            user_pk=None,
+            display_name="R",
+            role="member",
+        )
+        await _gossip(h, seed, member_version=50, role="admin")
+        got = await rm.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)
+        assert got.role == "member"
+    finally:
+        await db.shutdown()
+
+
+async def test_host_never_seats_an_invented_admin(tmp_dir):
+    """A seat the host never made cannot arrive as admin or moderator: the
+    raise is refused outright, so no row is seated at all."""
+    h, _sr, rm, db, seed, _pub = await _hosted_handler(tmp_dir)
+    try:
+        await _gossip(h, seed, member_version=3, role="moderator", user_id="ghost")
+        assert (
+            await rm.get_including_tombstones(SPACE_ID, MEMBER_INSTANCE, "ghost")
+            is None
+        )
+        # A plain member seat from a seed holder still lands.
+        await _gossip(h, seed, member_version=4, role="member", user_id="ghost")
+        assert (await rm.get(SPACE_ID, MEMBER_INSTANCE, "ghost")).role == "member"
+    finally:
+        await db.shutdown()
+
+
+async def test_member_household_still_mirrors_the_hosts_role(tmp_dir):
+    """Only the host pins: a member household mirrors the role the
+    authority signed (that is how a promotion reaches it)."""
+    h, _sr, rm, db, seed = await _make_handler(tmp_dir)
+    h._own_instance_id = "a-member-household"
+    try:
+        await _gossip(h, seed, member_version=2, role="admin")
+        assert (await rm.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)).role == "admin"
+    finally:
+        await db.shutdown()
+
+
+async def test_host_publishes_revocation_when_an_admin_seat_is_tombstoned(tmp_dir):
+    """A delegated admin removed another admin while the owner was offline:
+    the host learns from the LEFT gossip and must rotate."""
+    from socialhome.domain.events import SpaceAdminAuthorityRevoked
+
+    h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
+    try:
+        await rm.add(
+            space_id=SPACE_ID,
+            instance_id=MEMBER_INSTANCE,
+            user_id=MEMBER_USER,
+            user_pk=None,
+            display_name="R",
+            role="admin",
+        )
+        await _gossip(h, seed, tombstoned=True, member_version=9, role="admin")
+        assert published == [
+            SpaceAdminAuthorityRevoked(
+                space_id=SPACE_ID,
+                instance_id=MEMBER_INSTANCE,
+                occurred_at=published[0].occurred_at,
+            )
+        ]
+    finally:
+        await db.shutdown()
+
+
+async def test_host_publishes_revocation_when_gossip_lowers_an_admin(tmp_dir):
+    """Lowering is allowed (it only takes privilege away) — and it ends an
+    admin seat, so it is a revocation."""
+    from socialhome.domain.events import SpaceAdminAuthorityRevoked
+
+    h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
+    try:
+        await rm.add(
+            space_id=SPACE_ID,
+            instance_id=MEMBER_INSTANCE,
+            user_id=MEMBER_USER,
+            user_pk=None,
+            display_name="R",
+            role="admin",
+        )
+        await _gossip(h, seed, member_version=9, role="member")
+        assert (await rm.get(SPACE_ID, MEMBER_INSTANCE, MEMBER_USER)).role == "member"
+        assert [type(e) for e in published if not hasattr(e, "user_id")] == [
+            SpaceAdminAuthorityRevoked
+        ]
+    finally:
+        await db.shutdown()
+
+
+async def test_no_revocation_for_a_non_admin_seat_or_a_mirror(tmp_dir):
+    from socialhome.domain.events import SpaceAdminAuthorityRevoked
+
+    h, _sr, rm, db, seed, published = await _hosted_handler(tmp_dir)
+    try:
+        await rm.add(
+            space_id=SPACE_ID,
+            instance_id=MEMBER_INSTANCE,
+            user_id=MEMBER_USER,
+            user_pk=None,
+            display_name="R",
+            role="member",
+        )
+        await _gossip(h, seed, tombstoned=True, member_version=9)
+        assert not [e for e in published if isinstance(e, SpaceAdminAuthorityRevoked)]
+    finally:
+        await db.shutdown()

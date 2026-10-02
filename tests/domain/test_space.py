@@ -586,3 +586,17 @@ def test_moderated_keeps_an_own_edit_or_delete_for_a_read_only_seat():
         )
         is AccessDecision.DENY
     )
+
+
+def test_cap_remote_role_never_raises_a_seat():
+    from socialhome.domain.space import cap_remote_role
+
+    assert cap_remote_role("admin", "member") == "member"
+    assert cap_remote_role("moderator", "member") == "member"
+    assert cap_remote_role("admin", "moderator") == "moderator"
+    assert cap_remote_role("member", "admin") == "member"
+    assert cap_remote_role("subscriber", "member") == "subscriber"
+    assert cap_remote_role("admin", "admin") == "admin"
+    # Unknown values coerce down to member before comparing.
+    assert cap_remote_role("owner", "admin") == "member"
+    assert cap_remote_role("admin", "bogus") == "member"
