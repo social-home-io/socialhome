@@ -38,8 +38,9 @@ from ..domain.media_constraints import (
 )
 from ..domain.space import SpaceConfigEventType
 from ..infrastructure.event_bus import EventBus
+from .space_authority_pin import owner_authority_cert_via
 from .space_crypto_service import sign_authority_event, strip_authority_sig_fields
-from .space_service import _space_metadata_for_federation, embed_space_images
+from .space_service import space_metadata_for_federation, embed_space_images
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -99,7 +100,7 @@ class SpaceConfigOutbound:
         non-host household has no authority to push the gate around.
 
         Join-time propagation rides in ``space_meta`` (see
-        ``_space_metadata_for_federation``); this covers the case where the
+        ``space_metadata_for_federation``); this covers the case where the
         host changes the gate *after* members already hold a stub.
         """
         space = await self._space_repo.get(event.space_id)
@@ -203,6 +204,24 @@ class SpaceConfigOutbound:
         kwargs: dict = {}
         if min_proto_version is not None:
             kwargs["min_proto_version"] = min_proto_version
+        if is_owner and seed is not None and space.authority_key_epoch > 0:
+            # v_44 — the authority key rotated, and a household below v_44
+            # still pins the OLD key: a new-key signature would be dropped
+            # there. The owner reaches it UNSIGNED instead, over the legacy
+            # owner-from-instance path its config handler still accepts.
+            kwargs["legacy_payload"] = await self._build_payload(
+                space,
+                event.event_type,
+                seed=None,
+                own=own,
+                cover=cover,
+                icon=icon,
+                cover_max_bytes=SPACE_COVER_SNAPSHOT_MAX_BYTES,
+                icon_max_bytes=SPACE_ICON_SNAPSHOT_MAX_BYTES,
+            )
+            kwargs["legacy_below"] = (
+                FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION
+            )
         if _carries_image(payload):
             kwargs["relay_payload"] = await self._build_payload(
                 space,
@@ -239,8 +258,19 @@ class SpaceConfigOutbound:
         cover_max_bytes: int,
         icon_max_bytes: int,
     ) -> dict:
-        """One ``SPACE_CONFIG_CHANGED`` payload, images bounded as given."""
-        meta = _space_metadata_for_federation(space)
+        """One ``SPACE_CONFIG_CHANGED`` payload, images bounded as given.
+
+        A signed payload from the owner host carries the cert for the
+        current authority key (v_44), inside the signed ``space_meta``.
+        """
+        meta = space_metadata_for_federation(
+            space,
+            authority_cert=(
+                owner_authority_cert_via(self._federation, space)
+                if seed is not None
+                else None
+            ),
+        )
         if cover or icon:
             await embed_space_images(
                 meta,

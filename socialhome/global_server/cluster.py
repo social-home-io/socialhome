@@ -24,10 +24,12 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
 from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
+from .federation import certified_authority_repin
 
 if TYPE_CHECKING:
     from .repositories import (
@@ -655,7 +657,44 @@ class ClusterService:
         # the space is stuck invisible cluster-wide with no way out.
         if existing is not None and existing.withdrawn and not space.withdrawn:
             space = replace(space, withdrawn=True)
+        # v_44 — a peer node's gossip never moves a pin on its own say-so:
+        # the space's OWNER must have certified the new key (checked here
+        # against the owner's registered key, exactly like a publish). The
+        # upsert keeps the stored pin + cert; a verified cert re-pins after.
+        owner_id = existing.owning_instance if existing else space.owning_instance
+        owner = await self._fed_repo.get_instance(owner_id)
+        certified = owner is not None and certified_authority_repin(
+            space.space_id,
+            owning_instance=owner_id,
+            owner_pk_hex=owner.public_key,
+            offered_pk=space.identity_public_key,
+            cert=space.authority_cert,
+            stored_cert=existing.authority_cert if existing else None,
+        )
+        wire_cert = space.authority_cert
+        space = replace(
+            space, authority_cert=existing.authority_cert if existing else None
+        )
         await self._fed_repo.upsert_space(space)
+        if certified and wire_cert is not None:
+            stored = await self._fed_repo.get_space(space.space_id)
+            if stored is not None:
+                await self._fed_repo.set_space_authority(
+                    space.space_id,
+                    expected_pk=stored.identity_public_key,
+                    expected_cert=stored.authority_cert,
+                    new_pk=space.identity_public_key,
+                    cert=wire_cert,
+                )
+        # Max-merge the rotation seq, for the pin this node now holds only:
+        # a re-pin bumped ours by one, but the publishing node may be further
+        # along, and a stale gossip must never move it backwards.
+        if space.authority_rotation_seq > 0:
+            await self._fed_repo.raise_authority_rotation_seq(
+                space.space_id,
+                pk=space.identity_public_key,
+                seq=space.authority_rotation_seq,
+            )
 
     async def apply_sync_report(self, report_dict: dict) -> None:
         """Inbound NODE_SYNC_REPORT — idempotent save via UNIQUE index."""
@@ -1133,6 +1172,14 @@ def _space_to_wire(s: GlobalSpace) -> dict:
         # peer's NODE_SYNC_SPACE downgraded the space to owner-only relay.
         # ``upsert_space`` now refuses to clear a pin in SQL as well.
         "identity_public_key": s.identity_public_key,
+        # v_44 — the owner's cert for that key travels with it; a receiving
+        # node re-pins only after verifying it (``apply_sync_space``).
+        "authority_cert": s.authority_cert,
+        # …and how often this node re-pinned it: followers compare it to
+        # decide whether a listing's pin is newer than theirs, so a node
+        # must never serve a seq lower than its peer did (max-merged in
+        # ``apply_sync_space``).
+        "authority_rotation_seq": s.authority_rotation_seq,
         # Owner withdrawal travels with the gossip: without it, the next
         # peer sync would silently un-withdraw a space the owner delisted
         # (the same reason ``status='banned'`` has its ban-wins rule).
@@ -1160,8 +1207,20 @@ def _wire_to_space(d: dict) -> GlobalSpace:
         posts_per_week=float(d.get("posts_per_week") or 0.0),
         published_at=str(d.get("published_at") or ""),
         identity_public_key=str(d.get("identity_public_key") or ""),
+        authority_cert=(
+            d["authority_cert"] if isinstance(d.get("authority_cert"), dict) else None
+        ),
+        authority_rotation_seq=_wire_rotation_seq(d.get("authority_rotation_seq")),
         withdrawn=bool(d.get("withdrawn") or False),
     )
+
+
+def _wire_rotation_seq(raw: object) -> int:
+    """A gossiped ``authority_rotation_seq``; anything malformed reads as 0
+    (which the max-merge ignores)."""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return 0
+    return raw if 0 <= raw <= MAX_AUTHORITY_KEY_EPOCH else 0
 
 
 def _report_to_wire(r: GfsFraudReport) -> dict:

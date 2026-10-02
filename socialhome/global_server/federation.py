@@ -17,6 +17,7 @@ import itertools
 import json
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,12 @@ from ..authority_sig import (
     authority_signing_bytes,
     strip_authority_sig_fields,
     verify_authority_event,
+)
+from ..authority_cert import (
+    InvalidAuthorityCert,
+    UnsupportedAuthorityCertSuite,
+    authority_cert_epoch,
+    verify_authority_cert,
 )
 from ..crypto import b64url_decode, verify_ed25519
 from ..peer_http import post_to_peer
@@ -192,6 +199,52 @@ def _burn_dummy_verify(event_type: str, space_id: str, payload: object) -> None:
         message,
         _TIMING_UNIFORM_DUMMY_SIG,
     )
+
+
+def certified_authority_repin(
+    space_id: str,
+    *,
+    owning_instance: str,
+    owner_pk_hex: str,
+    offered_pk: str,
+    cert: dict | None,
+    stored_cert: dict | None,
+) -> bool:
+    """Whether ``cert`` authorizes pinning ``offered_pk`` (v_44).
+
+    True only when the cert verifies for this space and this owner —
+    signed by the owner's REGISTERED key, which derives to
+    ``owning_instance`` — names exactly ``offered_pk``, and is newer than
+    the cert stored here. Never raises; a refusal is logged.
+    """
+    if cert is None:
+        return False
+    try:
+        verified = verify_authority_cert(
+            cert,
+            space_id=space_id,
+            owner_instance_id=owning_instance,
+            known_owner_pk_hex=owner_pk_hex,
+        )
+    except (InvalidAuthorityCert, UnsupportedAuthorityCertSuite) as exc:
+        log.warning("GFS: authority cert for space %s refused: %s", space_id, exc)
+        return False
+    if verified.authority_pk_hex != (offered_pk or "").lower():
+        log.warning(
+            "GFS: authority cert for space %s names another key than the "
+            "one published — refused",
+            space_id,
+        )
+        return False
+    if verified.key_epoch <= authority_cert_epoch(stored_cert):
+        log.warning(
+            "GFS: authority cert for space %s is not newer than the stored "
+            "one (epoch %d) — refused",
+            space_id,
+            verified.key_epoch,
+        )
+        return False
+    return True
 
 
 class SeenPayloadCache:
@@ -1116,6 +1169,7 @@ class GfsFederationService:
         identity_public_key: str = "",
         signature: str = "",
         ts: str = "",
+        authority_cert: dict | None = None,
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -1146,6 +1200,14 @@ class GfsFederationService:
         fail-closed ``False``. Storing ``False`` also PURGES the space's
         subscriber seats: a space nobody may read has no public readership, so
         a seat taken earlier would linger forever, pulling relayed content.
+
+        ``authority_cert`` (v_44) is the owner's cert for a ROTATED space
+        authority key. It rides inside the signed body, and a body carrying
+        one must carry a fresh signed ``ts``. The pin moves only when the
+        cert verifies against the owner's REGISTERED key (and derives to
+        ``owning_instance``), names exactly the offered key, and has a higher
+        ``key_epoch`` than the cert stored here (0 for none) — see
+        :func:`certified_authority_repin`. Anything else keeps the pin and logs.
         """
         inst = await self._repo.get_instance(owning_instance)
         if inst is None:
@@ -1186,6 +1248,14 @@ class GfsFederationService:
         # signature. Its absence normalises to the MORE restrictive False.
         if allow_subscribers is not None:
             signed["allow_subscribers"] = bool(allow_subscribers)
+        # v_44 — the authority cert rides inside the signed bytes (a relay
+        # cannot bolt one onto an owner's publish), and a body that carries
+        # one is a re-pin request: it must be a FRESH statement, so ``ts`` is
+        # mandatory for it.
+        if authority_cert is not None:
+            if not ts:
+                raise PermissionError("authority_cert requires a signed ts")
+            signed["authority_cert"] = authority_cert
         # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
         # subscribe/unsubscribe, ``publish_space`` has shipped production
         # callers, so hard-requiring ``ts`` would 403 every older household
@@ -1254,12 +1324,27 @@ class GfsFederationService:
         # an empty pubkey leaves it NULL — that space can't use authority-signed
         # relay until a pubkey is pinned. The owner is already immutable
         # (checked above), so only the legit owner could ever pin/refresh.
+        # v_44: the only way to MOVE a pin is an owner cert for the offered
+        # key (``_certified_repin``, applied after the upsert below).
         pinned_pubkey = identity_public_key or ""
+        certified = certified_authority_repin(
+            space_id,
+            owning_instance=owning_instance,
+            owner_pk_hex=inst.public_key,
+            offered_pk=pinned_pubkey,
+            cert=authority_cert,
+            stored_cert=existing.authority_cert if existing is not None else None,
+        )
         if existing is not None and existing.identity_public_key:
-            if pinned_pubkey and pinned_pubkey != existing.identity_public_key:
+            if (
+                pinned_pubkey
+                and pinned_pubkey != existing.identity_public_key
+                and not certified
+            ):
                 log.warning(
                     "GFS: ignoring attempt to change pinned authority pubkey "
-                    "for space %s (pinned=%s…, offered=%s…)",
+                    "for space %s (pinned=%s…, offered=%s…) — no valid owner "
+                    "cert for it",
                     space_id,
                     existing.identity_public_key[:8],
                     pinned_pubkey[:8],
@@ -1296,6 +1381,7 @@ class GfsFederationService:
             posts_per_week=existing.posts_per_week if existing else 0.0,
             published_at=existing.published_at if existing else "",
             identity_public_key=pinned_pubkey,
+            authority_cert=existing.authority_cert if existing is not None else None,
             # A FRESH signed publish from the owner (one carrying a signed,
             # replay-guarded ``ts``) is the RECOVERY path for an earlier
             # withdrawal — it restores discoverability. A legacy publish with
@@ -1312,6 +1398,25 @@ class GfsFederationService:
                 space_id,
             )
         await self._repo.upsert_space(space)
+        if certified and authority_cert is not None:
+            stored = await self._repo.get_space(space_id)
+            if stored is not None and await self._repo.set_space_authority(
+                space_id,
+                expected_pk=stored.identity_public_key,
+                expected_cert=stored.authority_cert,
+                new_pk=identity_public_key,
+                cert=authority_cert,
+            ):
+                log.info(
+                    "GFS: space %s authority key re-pinned by its owner (epoch %d)",
+                    space_id,
+                    authority_cert_epoch(authority_cert),
+                )
+                space = replace(
+                    space,
+                    identity_public_key=identity_public_key,
+                    authority_cert=authority_cert,
+                )
         # Data repair, at the moment the truth arrives: a space whose owner
         # EXPLICITLY withdrew readability has no public readership, so every
         # seat in ``space_subscribers`` is meaningless and would otherwise keep

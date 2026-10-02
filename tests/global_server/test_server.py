@@ -289,6 +289,10 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # only offers to mint one against a server that proved it can serve
         # the ``/join`` page. Signed for the same reason as its siblings.
         "invite_links": True,
+        # v_44 — this GFS re-pins a space's authority key from an owner
+        # cert on publish. A household warns when its GFS lacks it: there,
+        # a revoked admin's old key keeps authorizing relays.
+        "authority_rotation": True,
     }
     assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
     assert verify_capabilities(

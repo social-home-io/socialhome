@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
     from .link_preview_service import LinkPreviewService
+    from .space_authority_rotation_service import SpaceAuthorityRotationService
 from ..domain.child_protection import (
     PROTECTED_OWNER_PUBLISH_DETAIL,
     PROTECTED_OWNER_TRANSFER_DETAIL,
@@ -78,6 +79,7 @@ from ..domain.events import (
     PostDeleted,
     PostEdited,
     RemoteJoinRequestApproved,
+    SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
     SpaceLocationFeatureEnabled,
     SpaceLocationModeChanged,
@@ -170,6 +172,7 @@ from .space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
+from .space_authority_pin import owner_authority_cert_via
 from .space_member_guard import SpaceMemberGuardMixin
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
@@ -306,6 +309,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_link_previews",
         "_moderation",
         "_post_attachments",
+        "_authority_rotation",
     )
 
     def __init__(
@@ -358,6 +362,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # with a post (polls / schedule polls / Bazaar listings).
         self._moderation: "ModerationSubmitter | None" = None
         self._post_attachments = SpacePostAttachments()
+        # v_44 — re-mints a lost seed of an already-rotated space through a
+        # REAL rotation (``attach_authority_rotation``).
+        self._authority_rotation: "SpaceAuthorityRotationService | None" = None
 
     def attach_invite_identity(
         self,
@@ -439,6 +446,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         did before, 404ing on an unknown space id.
         """
         self._gfs_mirror = mirror
+
+    def attach_authority_rotation(
+        self, rotation: "SpaceAuthorityRotationService"
+    ) -> None:
+        """Wire the v_44 authority rotation, so :meth:`ensure_space_seed`
+        re-mints a lost seed of a rotated space by rotating (members get a
+        cert for the new key) instead of silently forking the pin."""
+        self._authority_rotation = rotation
 
     def attach_subscriber_key_outbound(self, subscriber_key_outbound) -> None:
         """Wire the Phase-5b subscriber content-key producer so a
@@ -803,12 +818,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
           seed. Pre-upgrade owned spaces had their private key discarded at
           create time, so a *fresh* identity is the only recovery — the old
           public key has no recoverable private half.
+        * If the column is NULL on an owned space whose key was already
+          rotated (``authority_key_epoch > 0``, v_44), members pin a
+          certified key: the seed is re-minted through
+          :meth:`SpaceAuthorityRotationService.rotate`, which certifies the
+          new key and sends members the bundle. Without a wired rotation it
+          returns ``None`` rather than fork the pin.
         * If the column is NULL and the space is **not** owned by this
           household, return ``None`` — we never held its private key and must
           never mint a new identity for a space hosted elsewhere.
-
-        Not yet called outside tests; this is the accessor a later
-        space-authority signing task wires in.
         """
         space = await self._spaces.get(space_id)
         if space is None:
@@ -824,6 +842,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         )
         if not owned:
             return None
+
+        if space.authority_key_epoch > 0:
+            # The members pin a CERTIFIED key: a fresh, uncertified pubkey
+            # would fork the space (they refuse everything it signs). Mint it
+            # through a real rotation, which certifies it and tells them.
+            if self._authority_rotation is None:
+                log.warning(
+                    "space %s: seed missing at authority epoch %d and no "
+                    "rotation wired — not minting an uncertified key",
+                    space_id,
+                    space.authority_key_epoch,
+                )
+                return None
+            await self._authority_rotation.rotate(space_id)
+            return await self._spaces.get_space_seed(space_id)
 
         kp = generate_identity_keypair()
         # Replace the published public key via a targeted update (``save``'s
@@ -1070,7 +1103,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
             return False
 
-    async def _share_admin_signing_seed(
+    async def share_admin_signing_seed(
         self,
         space: Space,
         *,
@@ -1105,9 +1138,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             return
         # A relay-only household (met through a connection server via an
         # invite link, ``InstanceSource.SPACE_SESSION``) never receives the
-        # signing seed — the standing rule for a link-joined admin. The GFS
-        # pin is TOFU-immutable, so there is no rotation on a later kick;
-        # such an admin acts through the host, not by signing locally. This
+        # signing seed — the standing rule for a link-joined admin. A
+        # connection server sits between the two households, and the
+        # owner-certified rotation (v_44) only retires a key on a GFS that
+        # supports it; such an admin acts through the host instead. This
         # keeps that invariant now that an admin/mod elevation is approved
         # through :meth:`set_remote_member_role` rather than seated directly.
         if self._federation_repo is not None:
@@ -1140,6 +1174,27 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE,
             )
             return
+        # Re-read: a rotation may have moved the key since the caller
+        # fetched ``space`` (the share must name the CURRENT key + epoch).
+        space = await self._spaces.get(space.id) or space
+        rotation_aware = await self._federation.peer_supports(
+            instance_id,
+            min_version=FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
+        )
+        if space.authority_key_epoch > 0 and not rotation_aware:
+            # v_44 — the key was rotated, and a household below v_44 still
+            # pins the old one: it would store a seed whose signatures its
+            # own verifiers refuse, with no cert to re-pin from. No safe
+            # degraded share exists.
+            log.warning(
+                "delegated-admin: skipping signing-seed share to %s for space "
+                "%s — its authority key was rotated and the peer is below v_%d "
+                "(it can't re-pin); it acts through the host until it upgrades",
+                instance_id,
+                space.id,
+                FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
+            )
+            return
         seed = await self.ensure_space_seed(space.id)
         if seed is None:
             log.warning(
@@ -1149,11 +1204,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 instance_id,
             )
             return
-        payload = {
+        payload: dict = {
             "space_id": space.id,
             "space_seed": base64.urlsafe_b64encode(seed).decode("ascii"),
             "seed_suite": SEED_SUITE_ED25519,
         }
+        if rotation_aware:
+            # v_44 — which key this seed belongs to, and (once rotated) the
+            # owner's cert for it, so the receiver re-pins first and then
+            # refuses a seed that doesn't match its pin.
+            payload["key_epoch"] = space.authority_key_epoch
+            cert = owner_authority_cert_via(self._federation, space)
+            if cert is not None:
+                payload["authority_cert"] = cert
         try:
             # Audit: log the key-blast radius at INFO (recipient + space).
             log.info(
@@ -1168,6 +1231,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 payload=payload,
                 space_id=space.id,
             )
+            # v_44 — remember that a seed for the CURRENT key is out, so a
+            # later revocation rotates even if delegation is off by then.
+            await self._spaces.mark_seed_shared(space.id)
         except Exception:
             log.exception(
                 "delegated-admin: signing-seed share to %s for space %s failed",
@@ -1253,6 +1319,49 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             return False
         if seed is None:
             return False
+        entries = await self.roster_snapshot_entries(
+            space, seed=seed, to_instance_id=to_instance_id
+        )
+        if not entries:
+            return False
+        payload: dict = {"space_id": space.id, "entries": entries}
+        # v_44 — the periodic heal also carries the owner's cert for the
+        # current authority key, so a household that missed the rotation
+        # bundle re-pins before verifying these (new-key-signed) entries.
+        # Additive: an older receiver ignores the field.
+        cert = owner_authority_cert_via(self._federation, space)
+        if cert is not None:
+            payload["authority_cert"] = cert
+        try:
+            result = await self._federation.send_with_mesh_fallback(
+                to_instance_id=to_instance_id,
+                event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
+                payload=payload,
+                space_id=space.id,
+            )
+        except Exception:
+            log.exception(
+                "roster-snapshot: send to %s failed for %s", to_instance_id, space.id
+            )
+            return False
+        return bool(getattr(result, "ok", True))
+
+    async def roster_snapshot_entries(
+        self,
+        space: Space,
+        *,
+        seed: bytes,
+        to_instance_id: str,
+    ) -> list[dict]:
+        """Every seat of a space we host, authority-signed with ``seed``, as
+        ``SPACE_ROSTER_SNAPSHOT`` entries for household ``to_instance_id``.
+
+        Shared by :meth:`send_roster_snapshot` and the v_44 rotation bundle
+        (which signs with the NEW key). The receiver's own seats are left out
+        — they live in its ``space_members`` — and Follower seats are left
+        out for a household below v_30, which cannot store them.
+        """
+        own = self._own_instance_id or ""
         seats: list[tuple[str, str, str | None, str | None, str, int, bool]] = []
         local = await self._spaces.list_members(space.id)
         names = {
@@ -1287,9 +1396,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                         r.tombstoned,
                     )
                 )
-        subscriber_ok = await self._federation.peer_supports(
-            to_instance_id,
-            min_version=FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
+        subscriber_ok = self._federation is not None and (
+            await self._federation.peer_supports(
+                to_instance_id,
+                min_version=FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
+            )
         )
         unsigned: list[tuple[str, dict]] = []
         for user_id, inst, display_name, user_pk, role, version, gone in seats:
@@ -1315,25 +1426,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             }
             unsigned.append((entry_type.value, payload))
         if not unsigned:
-            return False
+            return []
         # One signature per seat, per household, every tick — CPU work, so
         # it runs off the event loop.
-        entries = await asyncio.to_thread(
+        return await asyncio.to_thread(
             self._sign_roster_entries_sync, space.id, seed, unsigned
         )
-        try:
-            result = await self._federation.send_with_mesh_fallback(
-                to_instance_id=to_instance_id,
-                event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
-                payload={"space_id": space.id, "entries": entries},
-                space_id=space.id,
-            )
-        except Exception:
-            log.exception(
-                "roster-snapshot: send to %s failed for %s", to_instance_id, space.id
-            )
-            return False
-        return bool(getattr(result, "ok", True))
 
     @staticmethod
     def _sign_roster_entries_sync(
@@ -1883,7 +1981,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
 
         # Retention is enforced by the host alone, and the host pins its own
         # values against an inbound config snapshot (our mirror may be stale —
-        # see ``_keep_local_space_state``). So a seed-holding delegated admin's
+        # see ``keep_local_space_state``). So a seed-holding delegated admin's
         # retention change, applied to our mirror below, ALSO travels to the
         # host as a forwarded edit carrying just those fields.
         if (
@@ -1940,6 +2038,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         directory_state_changed = False
         location_feature_just_enabled = False
         delegated_admin_just_enabled = False
+        delegated_admin_just_disabled = False
         subscribers_just_disabled = False
         if features is not None:
             location_mode_changed = (
@@ -1950,12 +2049,16 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 not space.features.location and features.location
             )
             # Track delegated-admin OFF→ON so we can distribute the space's
-            # signing seed to remote admins after the write (v_22). Only the
-            # False→True edge triggers a share — True→False leaves already-
-            # shared seeds in place (deeper revocation is a later phase).
+            # signing seed to remote admins after the write (v_22), and
+            # ON→OFF so the shared seeds are retired by rotating the
+            # authority key (v_44).
             delegated_admin_just_enabled = (
                 not space.features.delegated_admin_authority
                 and features.delegated_admin_authority
+            )
+            delegated_admin_just_disabled = (
+                space.features.delegated_admin_authority
+                and not features.delegated_admin_authority
             )
             # Readability opt-in flipped either way — the GFS has to learn
             # (see the re-publish block below).
@@ -2134,9 +2237,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             for admin_instance in await self._remote_members.list_admin_instances(
                 space_id
             ):
-                await self._share_admin_signing_seed(
-                    updated, instance_id=admin_instance
-                )
+                await self.share_admin_signing_seed(updated, instance_id=admin_instance)
+        # Delegated-admin authority just flipped OFF on the space we host:
+        # every seed ever shared is now unauthorized. Rotate the authority
+        # key and re-share it with nobody (v_44).
+        if (
+            delegated_admin_just_disabled
+            and space.owner_instance_id == self._own_instance_id
+        ):
+            await self._bus.publish(SpaceAdminAuthorityRevoked(space_id=space_id))
         return updated
 
     # ── Membership ─────────────────────────────────────────────────────
@@ -3026,7 +3135,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and space.features.delegated_admin_authority
             and space.owner_instance_id == self._own_instance_id
         ):
-            await self._share_admin_signing_seed(space, instance_id=instance_id)
+            await self.share_admin_signing_seed(space, instance_id=instance_id)
+        if target.role == SpaceRole.ADMIN and role != SpaceRole.ADMIN:
+            # v_44 — an admin seat just ended. If it was that household's
+            # last one, the rotation service retires the authority key the
+            # household may hold (``_require_role_host`` above: we host).
+            await self._bus.publish(
+                SpaceAdminAuthorityRevoked(space_id=space_id, instance_id=instance_id)
+            )
 
     # ── Per-space profile (§4.1.6) ─────────────────────────────────────
 
@@ -3236,12 +3352,74 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise SpacePermissionError("cannot ban the owner")
         actor = await self._users.get(actor_username)
         assert actor is not None
+        remote_seat = (
+            await self._live_remote_seat(space_id, user_id) if target is None else None
+        )
+        stale_seat = (
+            await self._remote_members.get_including_tombstones(space_id, "", user_id)
+            if target is None and remote_seat is None and self._remote_members
+            else None
+        )
         await self._spaces.ban_member(
             space_id,
             user_id,
             banned_by=actor.user_id,
             reason=reason,
         )
+        if remote_seat is not None:
+            # The banned user is seated on ANOTHER household. ``ban_member``
+            # only drops a local ``space_members`` row, so without this the
+            # remote seat — and, for an admin, its authority — would outlive
+            # the ban. Take the full cross-household removal path: the seat
+            # is tombstoned, the household told, the content key rotated
+            # and (v_44) an admin household's authority key retired.
+            await self._bus.publish(
+                SpaceConfigChanged(
+                    space_id=space_id,
+                    event_type=SpaceConfigEventType.MEMBER_BANNED.value,
+                    payload={"user_id": user_id, "reason": reason},
+                    sequence=space.config_sequence,
+                )
+            )
+            await self.remove_remote_member(
+                space_id,
+                actor_username=actor_username,
+                instance_id=remote_seat.instance_id,
+                user_id=user_id,
+            )
+            return
+        if stale_seat is not None:
+            # The user's seat on another household is already a tombstone.
+            # The ban still lands; the LEFT gossip names THAT household (not
+            # ours), and an admin seat that ended without a rotation now gets
+            # one (v_44).
+            await self._bus.publish(
+                SpaceConfigChanged(
+                    space_id=space_id,
+                    event_type=SpaceConfigEventType.MEMBER_BANNED.value,
+                    payload={"user_id": user_id, "reason": reason},
+                    sequence=space.config_sequence,
+                )
+            )
+            await self._emit_member_roster_gossip(
+                space,
+                user_id=user_id,
+                instance_id=stale_seat.instance_id,
+                display_name=stale_seat.display_name,
+                user_pk=stale_seat.user_pk,
+                role=stale_seat.role,
+                tombstoned=True,
+            )
+            if (
+                stale_seat.role == SpaceRole.ADMIN
+                and space.owner_instance_id == self._own_instance_id
+            ):
+                await self._bus.publish(
+                    SpaceAdminAuthorityRevoked(
+                        space_id=space_id, instance_id=stale_seat.instance_id
+                    )
+                )
+            return
         # A ban is a ROSTER mutation, not a config edit — it must NOT advance
         # config_sequence. The removal federates via the LEFT gossip below
         # (roster_sequence); the local bus event carries the CURRENT config
@@ -3273,6 +3451,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 actor_id=actor.user_id,
             )
         await self._rotate_and_distribute_space_key(space_id)
+
+    async def _live_remote_seat(self, space_id: str, user_id: str):
+        """The live remote seat ``user_id`` holds in ``space_id``, if any."""
+        if self._remote_members is None:
+            return None
+        return next(
+            (
+                r
+                for r in await self._remote_members.list_for_space(space_id)
+                if r.user_id == user_id
+            ),
+            None,
+        )
 
     async def unban(
         self,
@@ -3797,6 +3988,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 space_id,
             )
             seed = None
+        unsigned_meta = dict(meta)
         if seed is not None:
             signed = sign_authority_event(
                 event_type="space_key_exchange_rekey",
@@ -3806,11 +3998,31 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
             meta.update(signed)
         payload = {"space_id": space_id, "space_content_key": meta}
+        # v_44 — once the authority key rotated, a household below v_44 still
+        # pins the OLD key and would drop a new-key signature. The owner
+        # reaches it over the unsigned owner-from-instance path instead (its
+        # rekey handler accepts an unsigned rekey from the host). Only the
+        # owner can: a delegated admin's unsigned rekey is refused there.
+        space = await self._spaces.get(space_id)
+        legacy: dict = {}
+        if (
+            space is not None
+            and space.authority_key_epoch > 0
+            and space.owner_instance_id == self._own_instance_id
+        ):
+            legacy = {
+                "legacy_payload": {
+                    "space_id": space_id,
+                    "space_content_key": unsigned_meta,
+                },
+                "legacy_below": FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
+            }
         try:
             await self._federation.broadcast_to_space_members(
                 space_id,
                 FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
                 payload,
+                **legacy,
             )
         except Exception:
             log.exception(
@@ -3964,6 +4176,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     cover_repo=self._covers,
                     icon_repo=self._icons,
                     space_crypto_service=self._space_crypto,
+                    authority_cert=owner_authority_cert_via(self._federation, space),
                 ),
             },
         )
@@ -3990,7 +4203,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # ACCEPT envelope, so the host never sees a join the invitee's
         # household refuses to seat (no split-brain). The host's ``min_age``
         # rides in the invite's ``space_meta`` and is persisted on the stub
-        # (see ``_space_metadata_for_federation`` / ``stub_space_from_metadata``),
+        # (see ``space_metadata_for_federation`` / ``stub_space_from_metadata``),
         # so the gate is effective for cross-household spaces too.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(
@@ -4114,6 +4327,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # Capture role/display BEFORE the tombstone so the LEFT gossip carries
         # the member's last-known attributes.
         removed = await self._remote_members.get(space_id, instance_id, user_id)
+        # The seat's last state even when it is already a tombstone (v_44): a
+        # seat that ended through a path that did not rotate still names the
+        # role it held, and removing it again must retire that authority.
+        last = removed or await self._remote_members.get_including_tombstones(
+            space_id, instance_id, user_id
+        )
         await self._remote_members.remove(space_id, instance_id, user_id)
         # Audit-fix (HIGH from PR #429 review): if that was the
         # last remote member from this peer instance, also drop the
@@ -4146,6 +4365,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             tombstoned=True,
         )
         await self._rotate_and_distribute_space_key(space_id)
+        if (
+            last is not None
+            and last.instance_id == instance_id
+            and last.role == SpaceRole.ADMIN
+            and space.owner_instance_id == self._own_instance_id
+        ):
+            # v_44 — an admin seat ended on the space we host; the rotation
+            # service retires the key if that household holds no admin seat
+            # any more. (On a delegated admin's household the host learns of
+            # the removal from the LEFT gossip above and rotates there.)
+            await self._bus.publish(
+                SpaceAdminAuthorityRevoked(space_id=space_id, instance_id=instance_id)
+            )
         # LAST: every step above still needs the ``remote_instances`` row to
         # reach this household (the REMOVED notice, the roster gossip, the
         # rekey that gives them forward secrecy). Only once they have all
@@ -5847,9 +6079,14 @@ async def build_space_snapshot_for_federation(
     space_crypto_service=None,
     cover_max_bytes: int = SPACE_COVER_SNAPSHOT_MAX_BYTES,
     icon_max_bytes: int = SPACE_ICON_SNAPSHOT_MAX_BYTES,
+    authority_cert: dict | None = None,
 ) -> dict:
-    """:func:`_space_metadata_for_federation` + a roster of every
+    """:func:`space_metadata_for_federation` + a roster of every
     member of this space.
+
+    ``authority_cert`` — see :func:`space_metadata_for_federation`: the
+    joiner applies it so a re-invited member whose stub still pins a
+    retired key catches up (v_44).
 
     The cover and icon ship inline, each bounded by ``cover_max_bytes`` /
     ``icon_max_bytes`` (raw WebP): the whole snapshot rides one
@@ -5870,7 +6107,7 @@ async def build_space_snapshot_for_federation(
     *our* instance, because from the joiner's perspective every
     member of this space lives somewhere else.
     """
-    meta = _space_metadata_for_federation(space)
+    meta = space_metadata_for_federation(space, authority_cert=authority_cert)
     local_members = await space_repo.list_members(space.id)
     local_users = await user_repo.list_by_ids({m.user_id for m in local_members})
     name_by_id = {u.user_id: u.display_name for u in local_users}
@@ -5915,7 +6152,7 @@ async def build_space_snapshot_for_federation(
     # reads roster_version for staleness detection — the per-roster-entry
     # member_version (above) is what the CRDT merge keys on, and the stub's
     # roster_sequence is round-tripped via the base meta's "roster_sequence"
-    # key (see _space_metadata_for_federation). Decoupled from config_sequence
+    # key (see space_metadata_for_federation). Decoupled from config_sequence
     # (migration 0036); backfilled from it so it stays strictly above every
     # prior member_version.
     meta["roster_version"] = space.roster_sequence
@@ -5969,7 +6206,11 @@ async def build_space_snapshot_for_federation(
     return meta
 
 
-def _space_metadata_for_federation(space: Space) -> dict:
+def space_metadata_for_federation(
+    space: Space,
+    *,
+    authority_cert: dict | None = None,
+) -> dict:
     """Snapshot the space's user-visible config for federation envelopes.
 
     Used by the §D1b invite + redeem-ACK paths so the joiner's
@@ -5978,7 +6219,23 @@ def _space_metadata_for_federation(space: Space) -> dict:
     the columns ``Space`` already exposes — we deliberately don't
     include host-private state (admins list, ban list, cover bytes;
     those federate over their own dedicated events).
+
+    ``authority_cert`` (v_44) is the owner-signed cert for the space's
+    CURRENT authority key (:func:`owner_authority_cert_via`), passed only by
+    the owner host once the key has rotated. It rides with
+    ``authority_key_epoch`` so a receiver still pinned to an older key
+    re-pins BEFORE it verifies anything signed with the new one; an older
+    receiver ignores both keys.
     """
+    meta = space_metadata_fields(space)
+    if authority_cert is not None:
+        meta["authority_cert"] = authority_cert
+        meta["authority_key_epoch"] = space.authority_key_epoch
+    return meta
+
+
+def space_metadata_fields(space: Space) -> dict:
+    """The plain config fields of :func:`space_metadata_for_federation`."""
     return {
         "name": space.name,
         "emoji": space.emoji,
@@ -6056,6 +6313,7 @@ async def apply_space_content_key_from_metadata(
     *,
     meta: dict,
     space_crypto_service,
+    verified_pin: tuple[int, str] | None = None,
 ) -> None:
     """Persist the §D1b shipped space content key on the receiver side.
 
@@ -6124,7 +6382,13 @@ async def apply_space_content_key_from_metadata(
         return
     try:
         await space_crypto_service.import_key(
-            space_id, int(epoch), raw, rotated_by=rotated_by
+            space_id,
+            int(epoch),
+            raw,
+            rotated_by=rotated_by,
+            # v_44 — the pin whose signature authorized this key, when one
+            # did: the import is dropped if a rotation retired it meanwhile.
+            verified_pin=verified_pin,
         )
     except Exception:  # pragma: no cover — defensive
         log.exception(
@@ -6305,7 +6569,7 @@ def stub_space_from_metadata(
     meta: dict,
 ) -> Space:
     """Build a :class:`Space` from a federation metadata payload (the
-    counterpart to :func:`_space_metadata_for_federation`).
+    counterpart to :func:`space_metadata_for_federation`).
 
     Used by the §D1b inbound paths — ``PrivateSpaceInviteHandler``
     on receipt of ``SPACE_PRIVATE_INVITE`` and the receiver side of
@@ -6321,7 +6585,7 @@ def stub_space_from_metadata(
     resulting Space's ``owner_instance_id != my_instance`` is the runtime
     signal for "this is a remote space" downstream.
     """
-    # Faithful inverse of ``_space_metadata_for_federation``'s
+    # Faithful inverse of ``space_metadata_for_federation``'s
     # ``to_wire_dict``. ``from_wire_dict`` parses ``location_mode`` +
     # ``allowed_post_types`` with the SAME defaults this used to do by hand
     # (calendar=True, etc.) and ALSO reconstructs the access-level +
@@ -6371,6 +6635,53 @@ def stub_space_from_metadata(
         # peer's) rather than reject the whole snapshot.
         retention_exempt_types=normalize_retention_exempt_types(
             meta.get("retention_exempt_types")
+        ),
+    )
+
+
+def keep_local_space_state(
+    refreshed: Space,
+    *,
+    existing: Space,
+    meta: dict,
+    we_host: bool,
+) -> Space:
+    """Carry the row's local state across a SPACE_CONFIG_CHANGED snapshot.
+
+    ``stub_space_from_metadata`` rebuilds a whole :class:`Space` from the
+    wire, so every field that never federates comes back at its dataclass
+    default, and ``save`` writes it over the stored row. On the HOST — which
+    receives a seed-holding delegated admin's authority-signed snapshot —
+    that used to wipe its join code, geo-gate, bot toggle and retention
+    policy. Keep them from ``existing``:
+
+    * Host-local state (join code, geo-gate, bot toggle, dissolve bookkeeping)
+      never federates; the stored value always wins.
+    * Retention is mirrored (it rides ``space_meta``) but enforced by the host
+      alone, so the host pins its own values — a co-admin's mirror may be
+      stale, and a co-admin's retention edit reaches the host as a forwarded
+      ``update_config`` instead. A member household takes the host's values
+      when the snapshot carries them, and keeps what it has when an older
+      sender omits them ("absent" is "unknown", not "Forever").
+    """
+    keep_retention = we_host or "retention_days" not in meta
+    keep_exempt = we_host or "retention_exempt_types" not in meta
+    return replace(
+        refreshed,
+        join_code=existing.join_code,
+        lat=existing.lat,
+        lon=existing.lon,
+        radius_km=existing.radius_km,
+        bot_enabled=existing.bot_enabled,
+        dissolved=existing.dissolved,
+        archived_reason=existing.archived_reason,
+        retention_days=(
+            existing.retention_days if keep_retention else refreshed.retention_days
+        ),
+        retention_exempt_types=(
+            existing.retention_exempt_types
+            if keep_exempt
+            else refreshed.retention_exempt_types
         ),
     )
 

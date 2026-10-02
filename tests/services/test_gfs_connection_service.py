@@ -3213,3 +3213,111 @@ async def test_client_exposes_the_shared_session(env):
     session = _AnonSession()
     svc = GfsConnectionService(repo, http_client=session)
     assert svc.client() is session
+
+
+# ── v_44: the owner's publish carries its authority cert ─────────────────
+
+
+async def _rotated_publish_svc(env, session):
+    """An owner whose GLOBAL space's authority key rotated to epoch 1."""
+    from socialhome.crypto import derive_instance_id
+    from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+    from socialhome.infrastructure.key_manager import KeyManager
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+
+    db, conn_repo = env
+    await conn_repo.save(_make_conn("g1", public_key=_GFS_KP.public_key.hex()))
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    space_repo = SqliteSpaceRepo(db, key_manager=KeyManager(b"\x05" * 32))
+    await space_repo.save(
+        Space(
+            id="sp-rot",
+            name="Rot",
+            owner_instance_id=owner_id,
+            owner_username="alice",
+            identity_public_key="aa" * 32,
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.GLOBAL,
+            join_mode=JoinMode.OPEN,
+        )
+    )
+    k2 = generate_identity_keypair()
+    await space_repo.rotate_authority_key(
+        "sp-rot", public_key_hex=k2.public_key.hex(), seed=k2.private_key, key_epoch=1
+    )
+    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc.attach_publish_context(
+        space_repo=space_repo,
+        own_instance_id=owner_id,
+        own_signing_key=owner.private_key,
+    )
+    return svc, owner, owner_id, k2
+
+
+async def test_publish_body_carries_the_owner_cert_after_a_rotation(env):
+    """Once the space authority key rotated, the owner's publish to a GFS
+    that advertises ``authority_rotation`` ships the cert (inside the signed
+    body) so the GFS re-pins from it."""
+    from socialhome.authority_cert import verify_authority_cert
+
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id="inst-g1",
+            capabilities={"anonymous_publish": True, "authority_rotation": True},
+        )
+    )
+    svc, owner, owner_id, k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    body = dict(session.posts[-1][1])
+    assert body["identity_public_key"] == k2.public_key.hex()
+    got = verify_authority_cert(
+        body["authority_cert"], space_id="sp-rot", owner_instance_id=owner_id
+    )
+    assert (got.authority_pk_hex, got.key_epoch) == (k2.public_key.hex(), 1)
+    sig_b64 = body.pop("signature")
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    assert verify_ed25519(owner.public_key, canonical, b64url_decode(sig_b64))
+
+
+async def test_publish_to_a_gfs_without_rotation_omits_the_cert_and_warns(env, caplog):
+    """An older GFS signs only the fields it knows — a cert in the body would
+    break its signature check and 403 every publish. So it gets the body
+    without the cert (it keeps the old pin) and the household warns."""
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-g1"))
+    svc, owner, _owner_id, k2 = await _rotated_publish_svc(env, session)
+    with caplog.at_level(logging.WARNING):
+        await svc.publish_space("sp-rot", "g1")
+    body = dict(session.posts[-1][1])
+    assert "authority_cert" not in body
+    assert body["identity_public_key"] == k2.public_key.hex()
+    assert any("authority_rotation" in m for m in _warnings(caplog))
+    sig_b64 = body.pop("signature")
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    assert verify_ed25519(owner.public_key, canonical, b64url_decode(sig_b64))
+
+
+async def test_publish_body_has_no_cert_before_any_rotation(env):
+    session = _StubSession(method_responses={"POST": (200, {"status": "active"})})
+    svc = await _publishable_svc(env, session, "gfs-pub", space_id="sp-pub")
+    await svc.publish_space("sp-pub", "gfs-pub")
+    assert "authority_cert" not in session._last_body  # type: ignore[attr-defined]
+
+
+async def test_republish_space_targets_only_the_gfs_it_is_published_to(env):
+    """v_44 — after a rotation the owner re-publishes so each GFS re-pins,
+    but ONLY where the space is already listed: a GFS that never heard of
+    the space must not learn of it from a key rotation."""
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-g1"))
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    _db, conn_repo = env
+    await conn_repo.save(_make_conn("g2", inbox_url="https://other.example"))
+    assert await svc.republish_space("sp-rot") == 0  # published nowhere yet
+    assert not session.posts
+    await svc.publish_space("sp-rot", "g1")
+    session.posts.clear()
+    assert await svc.republish_space("sp-rot") == 1
+    assert [u for u, _b in session.posts] == [
+        "https://gfs.example.com/gfs/spaces/sp-rot/publish"
+    ]

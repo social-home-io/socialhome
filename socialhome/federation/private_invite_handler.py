@@ -25,6 +25,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
+    SpaceAdminAuthorityRevoked,
     SpaceRemoteSeatLive,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
@@ -32,16 +33,21 @@ from ..domain.events import (
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
 )
-from ..crypto import derive_instance_id
+from ..crypto import derive_instance_id, ed25519_public_key
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.space import (
     WRITER_ROLES,
     RemoteAdminOutcome,
     SpaceRole,
+    cap_remote_role,
     mirrorable_remote_role,
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_remote_location_repo import SpaceRemoteLocation
+from ..services.space_authority_pin import (
+    AuthorityCertOutcome,
+    apply_authority_cert,
+)
 from ..services.space_crypto_service import (
     UnsupportedAuthoritySuite,
     strip_authority_sig_fields,
@@ -161,6 +167,7 @@ class PrivateSpaceInviteHandler:
         "_space_service",
         "_approval_service",
         "_remote_locations",
+        "_own_instance_id",
     )
 
     def __init__(
@@ -205,6 +212,9 @@ class PrivateSpaceInviteHandler:
         #: space map endpoint surfaces remote members' pins alongside
         #: local presence.
         self._remote_locations = remote_location_repo
+        #: This household's instance id — set in :meth:`attach_to`. Lets the
+        #: roster merge tell "a space we host" from a mirror (v_44).
+        self._own_instance_id = ""
 
     def attach_space_service(self, space_service) -> None:
         """Wire :class:`SpaceService` post-construction (#114 phase 2).
@@ -223,6 +233,9 @@ class PrivateSpaceInviteHandler:
         self._approval_service = approval_service
 
     def attach_to(self, federation_service: "FederationService") -> None:
+        self._own_instance_id = str(
+            getattr(federation_service, "own_instance_id", "") or ""
+        )
         registry = federation_service._event_registry  # noqa: SLF001
         registry.register(
             FederationEventType.SPACE_PRIVATE_INVITE,
@@ -381,6 +394,26 @@ class PrivateSpaceInviteHandler:
             return
         await self._space_repo.set_host_identity_pk(space_id, claimed_pk_hex)
 
+    async def _apply_meta_cert(self, space_id: str, meta: dict) -> None:
+        """Apply the owner's authority cert a ``space_meta`` carries (v_44).
+
+        A brand-new stub is seated with the snapshot's pin at epoch 0; the
+        cert then records the epoch, so a replay of an OLDER cert (for a
+        key a revoked admin still holds) can never move the pin back. A
+        re-invited member whose stub still pins a retired key catches up.
+        """
+        cert = meta.get("authority_cert")
+        if cert is None:
+            return
+        space = await self._space_repo.get(space_id)
+        if space is not None:
+            await apply_authority_cert(
+                self._space_repo,
+                space,
+                cert,
+                own_instance_id=self._own_instance_id,
+            )
+
     async def _on_invite(self, event: "FederationEvent") -> None:
         """A peer invited one of our users to their private space.
 
@@ -466,6 +499,7 @@ class PrivateSpaceInviteHandler:
                 host_instance_id=event.from_instance,
                 claimed_pk_hex=p.get("host_identity_pk"),
             )
+            await self._apply_meta_cert(space_id, meta)
             # §D1b cover bytes (#116) — when shipped inline, persist
             # so the stub renders the real cover rather than the
             # gradient placeholder.
@@ -747,11 +781,28 @@ class PrivateSpaceInviteHandler:
         user_id = str(p.get("user_id") or "")
         if not space_id or not user_id:
             return
+        prior = await self._remote_members.get(space_id, event.from_instance, user_id)
         await self._remote_members.remove(
             space_id,
             event.from_instance,
             user_id,
         )
+        hosted = await self._space_repo.get(space_id)
+        if (
+            prior is not None
+            and prior.role == SpaceRole.ADMIN
+            and hosted is not None
+            and self._own_instance_id
+            and hosted.owner_instance_id == self._own_instance_id
+        ):
+            # v_44 — a household dropped its own ADMIN seat on the space we
+            # host. That ends an admin seat like any demotion or kick: it may
+            # still hold the signing seed, so the key must rotate.
+            await self._bus.publish(
+                SpaceAdminAuthorityRevoked(
+                    space_id=space_id, instance_id=event.from_instance
+                )
+            )
         # Drop any stored location pin too — without this, the kicked
         # member's last pin stays on the map until next reload OR a
         # future SPACE_LOCATION_UPDATED arrives (which the kick should
@@ -1243,6 +1294,11 @@ class PrivateSpaceInviteHandler:
             space_id,
             meta=event.payload,
             space_crypto_service=self._space_crypto,
+            verified_pin=(
+                (space.authority_key_epoch, space.identity_public_key)
+                if authority_verified
+                else None
+            ),
         )
 
     async def _on_admin_key_share(self, event: "FederationEvent") -> None:
@@ -1331,7 +1387,38 @@ class PrivateSpaceInviteHandler:
                 len(seed),
             )
             return
-        await self._space_repo.set_space_seed(space_id, seed)
+        # v_44 — a share after a rotation carries the owner's cert for the
+        # new key: apply it FIRST, so the pin names the key this seed is for.
+        if p.get("authority_cert") is not None:
+            outcome = await apply_authority_cert(
+                self._space_repo,
+                space,
+                p.get("authority_cert"),
+                own_instance_id=self._own_instance_id,
+            )
+            if outcome is AuthorityCertOutcome.APPLIED:
+                space = await self._space_repo.get(space_id) or space
+        # SECURITY (v_44): the seed must be the private half of the key we
+        # pin. Any other seed signs nothing our own verifiers — or anybody
+        # else's — would accept; storing it would only let a stale or
+        # replayed share stand in for the real one.
+        if ed25519_public_key(seed).hex() != (space.identity_public_key or "").lower():
+            log.warning(
+                "SPACE_ADMIN_KEY_SHARE: seed for %s does not match the pinned "
+                "authority key (epoch %d) — dropping",
+                space_id,
+                space.authority_key_epoch,
+            )
+            return
+        if not await self._space_repo.set_space_seed_if_pin(
+            space_id, seed, expected_pk=space.identity_public_key
+        ):
+            log.warning(
+                "SPACE_ADMIN_KEY_SHARE: the pin for %s moved before the seed "
+                "was stored — dropped",
+                space_id,
+            )
+            return
         log.info(
             "SPACE_ADMIN_KEY_SHARE: stored delegated-admin signing seed for "
             "%s (from owner %s) — this household can now sign space-authority "
@@ -1345,9 +1432,10 @@ class PrivateSpaceInviteHandler:
     async def _verify_roster_gossip(
         self,
         event: "FederationEvent",
-    ) -> tuple[str, dict] | None:
+    ) -> tuple[str, dict, int] | None:
         """Authenticate an inbound roster-gossip event. Returns
-        ``(space_id, payload)`` on success, or ``None`` (logged at WARNING)
+        ``(space_id, payload, verified_epoch)`` on success — the last being
+        the authority-key epoch whose key the signature verified against, or ``None`` (logged at WARNING)
         when the event must be dropped.
 
         SECURITY: trust is in the SIGNATURE, not the sender — any seed-holder
@@ -1399,7 +1487,7 @@ class PrivateSpaceInviteHandler:
                 reason, event.event_type, space_id, event.from_instance, p
             )
             return None
-        return space_id, p
+        return space_id, p, space.authority_key_epoch
 
     async def _apply_roster_gossip(
         self,
@@ -1418,9 +1506,13 @@ class PrivateSpaceInviteHandler:
         result = await self._verify_roster_gossip(event)
         if result is None:
             return
-        space_id, p = result
+        space_id, p, verified_epoch = result
         await self._merge_roster_entry(
-            event.event_type, space_id, p, tombstoned=tombstoned
+            event.event_type,
+            space_id,
+            p,
+            tombstoned=tombstoned,
+            verified_epoch=verified_epoch,
         )
 
     async def _merge_roster_entry(
@@ -1430,8 +1522,14 @@ class PrivateSpaceInviteHandler:
         p: dict,
         *,
         tombstoned: bool,
+        verified_epoch: int,
     ) -> None:
-        """Merge one already-verified roster entry into the mirror."""
+        """Merge one already-verified roster entry into the mirror.
+
+        ``verified_epoch`` is the authority-key epoch the entry's signature
+        verified against; the write lands only while that key is still
+        pinned (v_44), so a rotation between the verify and the write drops
+        the old-key entry rather than stamping it as a new-key row."""
         user_id = str(p.get("user_id") or "")
         instance_id = str(p.get("instance_id") or "")
         if not user_id or not instance_id:
@@ -1462,6 +1560,46 @@ class PrivateSpaceInviteHandler:
             )
         display_name = p.get("display_name")
         user_pk = p.get("user_pk")
+        space = await self._space_repo.get(space_id)
+        hosted = (
+            space is not None
+            and bool(self._own_instance_id)
+            and space.owner_instance_id == self._own_instance_id
+        )
+        prior = (
+            await self._remote_members.get_including_tombstones(
+                space_id, instance_id, user_id
+            )
+            if hosted
+            else None
+        )
+        if hosted and not tombstoned:
+            # SECURITY (v_44): on the household that HOSTS the space, gossip
+            # may lower a seat but never raise it. Promotion is the owner's
+            # own ``set_remote_member_role`` (roles change only on the host
+            # since #788); any seed holder can sign a JOINED, and a demoted
+            # one would otherwise gossip itself back to admin here and be
+            # handed the rotated signing seed. A raise is refused OUTRIGHT —
+            # nothing of the event is stored, so the host's row never drifts
+            # from what the members hold. A seat we never made (or one we
+            # removed) may come back as a member at most.
+            ceiling = (
+                prior.role
+                if prior is not None and not prior.tombstoned
+                else SpaceRole.MEMBER.value
+            )
+            if cap_remote_role(role, ceiling) != role:
+                log.warning(
+                    "roster-gossip %s for %s would raise %s@%s from %r to %r "
+                    "on the space we host — refused (promotion is the owner's)",
+                    event_type,
+                    space_id,
+                    user_id,
+                    instance_id,
+                    ceiling,
+                    role,
+                )
+                return
         applied = await self._remote_members.apply_member_event(
             space_id=space_id,
             user_id=user_id,
@@ -1471,12 +1609,38 @@ class PrivateSpaceInviteHandler:
             role=role,
             member_version=member_version,
             tombstoned=tombstoned,
+            verified_epoch=verified_epoch,
         )
+        if not applied:
+            fresh = await self._space_repo.get(space_id)
+            if fresh is not None and fresh.authority_key_epoch != verified_epoch:
+                log.warning(
+                    "roster-gossip %s for %s: verified against authority epoch %d "
+                    "but the space now pins %d — dropped",
+                    event_type,
+                    space_id,
+                    verified_epoch,
+                    fresh.authority_key_epoch,
+                )
         if applied and not tombstoned:
             await self._bus.publish(
                 SpaceRemoteSeatLive(
                     space_id=space_id, instance_id=instance_id, user_id=user_id
                 )
+            )
+        if (
+            applied
+            and prior is not None
+            and not prior.tombstoned
+            and prior.role == SpaceRole.ADMIN
+            and (tombstoned or role != SpaceRole.ADMIN)
+        ):
+            # v_44 — an admin seat on the space we host just ended through
+            # gossip (a delegated admin removed / demoted it, or the admin
+            # left, while we were offline). The rotation service retires the
+            # authority key if that household holds no admin seat any more.
+            await self._bus.publish(
+                SpaceAdminAuthorityRevoked(space_id=space_id, instance_id=instance_id)
             )
         # Register the member's household as a broadcast target. Without this a
         # member learned ONLY via roster gossip (not a direct invite/accept) is
@@ -1484,15 +1648,27 @@ class PrivateSpaceInviteHandler:
         # ``broadcast_to_space_members`` (config edits, posts, rekeys) would
         # never reach them. This is exactly the offline-of-owner case: a
         # delegated admin must be able to fan a change out to every member it
-        # knows, not just the host it accepted from. We do NOT remove on a LEFT
-        # tombstone here — a household may host other live members of the space,
-        # and content access is already gated by epoch rotation, so a lingering
-        # target is harmless (and removal would need an any-other-live-member
-        # check). ``add_space_instance`` is an idempotent upsert and
+        # knows, not just the host it accepted from. On a LEFT
+        # tombstone the household stays a target only while it still holds
+        # another live seat (v_44: a lingering target would receive the next
+        # rekey or rotation bundle). ``add_space_instance`` is an idempotent upsert and
         # ``broadcast_to_space_members`` already excludes our own household, so
         # a gossip row naming our instance is harmless.
         if not tombstoned:
             await self._space_repo.add_space_instance(space_id, instance_id)
+        elif (
+            applied
+            and space is not None
+            and instance_id != space.owner_instance_id
+            and not await self._remote_members.list_for_instance(
+                space_id, instance_id, include_tombstoned=False
+            )
+        ):
+            # The household's LAST seat just went: stop treating it as a
+            # member household, exactly as the host's own
+            # ``remove_remote_member`` does — otherwise every later fan-out
+            # (posts, rekeys, a rotation bundle) still reaches it.
+            await self._space_repo.remove_space_instance(space_id, instance_id)
 
     async def _on_space_member_joined(self, event: "FederationEvent") -> None:
         """Authority-signed roster JOINED (v_23) — apply (upsert) the member."""
@@ -1543,6 +1719,18 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
+        # v_44 — the host's periodic snapshot carries its cert for the
+        # current authority key: re-pin first, so entries signed with a key
+        # this household never heard about verify.
+        if p.get("authority_cert") is not None:
+            outcome = await apply_authority_cert(
+                self._space_repo,
+                space,
+                p.get("authority_cert"),
+                own_instance_id=self._own_instance_id,
+            )
+            if outcome is AuthorityCertOutcome.APPLIED:
+                space = await self._space_repo.get(space_id) or space
         # Thousands of signature checks are CPU work: batch them off the
         # event loop, then merge the verified entries in order.
         reasons = await asyncio.to_thread(
@@ -1560,7 +1748,11 @@ class PrivateSpaceInviteHandler:
                 )
                 continue
             await self._merge_roster_entry(
-                entry_type, space_id, payload, tombstoned=tombstoned
+                entry_type,
+                space_id,
+                payload,
+                tombstoned=tombstoned,
+                verified_epoch=space.authority_key_epoch,
             )
 
     @staticmethod

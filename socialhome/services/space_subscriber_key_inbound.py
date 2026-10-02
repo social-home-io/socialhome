@@ -53,6 +53,7 @@ from ..federation.keywrap_seal import UnsupportedKemSuite, open_keywrap
 from .space_service import apply_space_content_key_from_metadata
 
 if TYPE_CHECKING:
+    from .space_authority_pin import AuthorityPinRefresher
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_crypto_service import SpaceContentEncryption
 
@@ -62,7 +63,13 @@ log = logging.getLogger(__name__)
 class SpaceSubscriberKeyInbound:
     """GFS-relay → local content-key import consumer for a subscriber."""
 
-    __slots__ = ("_spaces", "_crypto", "_own_instance_id", "_keywrap_private_key")
+    __slots__ = (
+        "_spaces",
+        "_crypto",
+        "_own_instance_id",
+        "_keywrap_private_key",
+        "_pin_refresher",
+    )
 
     def __init__(
         self,
@@ -74,6 +81,11 @@ class SpaceSubscriberKeyInbound:
         self._crypto = space_crypto
         self._own_instance_id: str = ""
         self._keywrap_private_key: bytes = b""
+        self._pin_refresher: "AuthorityPinRefresher | None" = None
+
+    def attach_pin_refresher(self, refresher: "AuthorityPinRefresher") -> None:
+        """Wire the lazy pin heal (v_44), as on :class:`SpacePublicInbound`."""
+        self._pin_refresher = refresher
 
     def attach_identity(
         self,
@@ -127,12 +139,24 @@ class SpaceSubscriberKeyInbound:
                 space_id,
             )
             return
+        verified = space
         if not self._verify_authority(space_id, envelope, space.identity_public_key):
-            log.warning(
-                "space_subscriber_key.inbound: authority signature failed for space %s",
-                space_id,
-            )
-            return
+            # v_44 — heal a pin the owner rotated away from, then retry once.
+            healed = None
+            if self._pin_refresher is not None and (
+                await self._pin_refresher.refresh_authority_pin(space_id)
+            ):
+                healed = await self._spaces.get(space_id)
+            if healed is None or not self._verify_authority(
+                space_id, envelope, healed.identity_public_key
+            ):
+                log.warning(
+                    "space_subscriber_key.inbound: authority signature failed "
+                    "for space %s",
+                    space_id,
+                )
+                return
+            verified = healed
 
         sealed = envelope.get("sealed")
         if not isinstance(sealed, dict):
@@ -179,6 +203,10 @@ class SpaceSubscriberKeyInbound:
                 space_id,
                 meta=meta,
                 space_crypto_service=self._crypto,
+                verified_pin=(
+                    verified.authority_key_epoch,
+                    verified.identity_public_key,
+                ),
             )
         except (ValueError, KeyError) as exc:
             log.warning(

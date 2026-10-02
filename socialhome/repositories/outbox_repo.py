@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.federation import FederationEventType
+from ..domain.federation import FederationEventType, PairingStatus
 from ..domain.federation_retention import (
     MAX_PENDING_PER_PEER,
     NEVER_DROP,
@@ -58,7 +58,7 @@ class AbstractOutboxRepo(Protocol):
         msg_id: str | None = None,
         authority_json: str | None = None,
         expires_at: str | None = None,
-    ) -> str: ...
+    ) -> str | None: ...
 
     async def list_due(self, limit: int = 50) -> list[OutboxEntry]: ...
     async def mark_delivered(self, entry_id: str) -> None: ...
@@ -99,7 +99,18 @@ class SqliteOutboxRepo:
         msg_id: str | None = None,
         authority_json: str | None = None,
         expires_at: str | None = None,
-    ) -> str:
+    ) -> str | None:
+        """Queue one signed envelope for ``instance_id``; return its id.
+
+        Returns ``None`` — and writes nothing — when we no longer hold a
+        pairing the envelope could ever be delivered to: the
+        ``remote_instances`` row is gone (unpaired), or it is an unpair
+        tombstone and this is anything but our ``UNPAIR``. The check runs
+        inside the INSERT itself, so it is serialized with the unpair's
+        purge on the single DB writer: a send that looked the peer up,
+        awaited its transport while the pairing ended, and only then
+        reached here can no longer strand a row behind the purge.
+        """
         entry_id = msg_id or uuid.uuid4().hex
         # §4.4.7: default the retention deadline from the event type so every
         # AbstractOutboxRepo caller (today: send_event) gets a 7-day TTL on
@@ -122,12 +133,17 @@ class SqliteOutboxRepo:
                     "(all NEVER_DROP) — inserting over cap",
                     instance_id,
                 )
-        await self._db.enqueue(
+        inserted = await self._db.enqueue_rowcount(
             """
             INSERT INTO federation_outbox(
                 id, instance_id, event_type, payload_json,
                 authority_json, expires_at
-            ) VALUES(?,?,?,?,?,?)
+            )
+            SELECT ?,?,?,?,?,?
+             WHERE EXISTS (
+                SELECT 1 FROM remote_instances
+                 WHERE id=? AND (status<>? OR ?=?)
+             )
             """,
             (
                 entry_id,
@@ -136,8 +152,19 @@ class SqliteOutboxRepo:
                 payload_json,
                 authority_json,
                 expires_at,
+                instance_id,
+                PairingStatus.UNPAIRING.value,
+                event_type.value,
+                FederationEventType.UNPAIR.value,
             ),
         )
+        if not inserted:
+            log.info(
+                "outbox: %s is no longer paired — not queueing %s",
+                instance_id,
+                event_type.value,
+            )
+            return None
         return entry_id
 
     async def list_due(self, limit: int = 50) -> list[OutboxEntry]:

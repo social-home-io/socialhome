@@ -169,6 +169,14 @@ async def test_restore_into_empty_db_works(tmp_dir):
     assert any(r["username"] == "alice" for r in rows)
     posts = await tgt.fetchall("SELECT id, content FROM feed_posts")
     assert any(p["id"] == "p1" and p["content"] == "hi" for p in posts)
+    # v_44 — the restore is recorded so the next boot rotates every hosted
+    # space's authority key (the restored rows may be behind the members).
+    from socialhome.services.backup_service import BACKUP_RESTORED_AT_KEY
+
+    marker = await tgt.fetchone(
+        "SELECT value FROM instance_config WHERE key=?", (BACKUP_RESTORED_AT_KEY,)
+    )
+    assert marker is not None and marker["value"]
     await tgt.shutdown()
 
 

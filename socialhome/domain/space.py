@@ -208,6 +208,30 @@ def mirrorable_remote_role(raw: object) -> str:
     return role if role in MIRRORABLE_REMOTE_ROLES else SpaceRole.MEMBER.value
 
 
+#: Privilege order of the roles a remote seat may hold (low → high).
+_REMOTE_ROLE_RANK: dict[str, int] = {
+    SpaceRole.SUBSCRIBER.value: 0,
+    SpaceRole.MEMBER.value: 1,
+    SpaceRole.MODERATOR.value: 2,
+    SpaceRole.ADMIN.value: 3,
+}
+
+
+def cap_remote_role(role: str, ceiling: str) -> str:
+    """``role``, but never more privileged than ``ceiling``.
+
+    The household that HOSTS a space applies this to inbound roster gossip
+    (v_44): promotion is the owner's own ``set_remote_member_role``, so a
+    gossiped role may lower a seat but never raise it — otherwise a
+    demoted seed holder could gossip itself back to admin and be handed
+    the new signing seed. Both arguments are mirrorable roles (unknown →
+    ``member``, see :func:`mirrorable_remote_role`).
+    """
+    role = mirrorable_remote_role(role)
+    ceiling = mirrorable_remote_role(ceiling)
+    return role if _REMOTE_ROLE_RANK[role] <= _REMOTE_ROLE_RANK[ceiling] else ceiling
+
+
 class RemoteAdminOutcome(StrEnum):
     """Result of a host receiving a forwarded ``SPACE_REMOTE_ADMIN_ACTION``."""
 
@@ -421,8 +445,9 @@ class SpaceFeatures:
     #: authorised admins to act on the space's behalf (moderate, invite,
     #: publish) even while the owner is offline. Flipping it on distributes
     #: the space's Ed25519 signing seed to remote admin households via
-    #: ``SPACE_ADMIN_KEY_SHARE`` (v_22); flipping it off leaves already-shared
-    #: seeds in place (deeper revocation is a later phase). Toggling it is
+    #: ``SPACE_ADMIN_KEY_SHARE`` (v_22); flipping it off rotates the space
+    #: authority key so every shared seed stops verifying (v_44, see
+    #: ``SpaceAuthorityRotationService``). Toggling it is
     #: OWNER-only (a host-local admin can't enact it). Defaults OFF
     #: (least-privilege). Older peers that omit the field default to False.
     delegated_admin_authority: bool = False
@@ -1157,6 +1182,13 @@ class Space:
     #: tie-break when the HLC ties (a legacy "0-0" row / older sender). See
     #: ``infrastructure/hlc.py`` + ``federation_inbound_service`` config LWW.
     config_hlc: str = "0-0"
+    #: Rotation counter of ``identity_public_key`` (migration 0066, v_44).
+    #: 0 = the creation-time key; each owner-certified rotation bumps it. A
+    #: receiver adopts a new pin only from a cert whose epoch is HIGHER than
+    #: this, so a replayed older cert can never restore a revoked key. Never
+    #: federated as a plain field and never written by ``save`` — only by a
+    #: verified cert (``adopt_authority_key``) or the owner's own rotation.
+    authority_key_epoch: int = 0
     description: str | None = None
     emoji: str | None = None
     retention_days: int | None = None  # None → unlimited

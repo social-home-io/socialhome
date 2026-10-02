@@ -132,3 +132,51 @@ async def test_publish_raises_still_marks_done(tmp_path):
     # Durable outbox retries delivery; we mark done to avoid re-fanning.
     assert await _get(db, RECONNECTED_AT_KEY) is not None
     await db.shutdown()
+
+
+# ── v_44: one authority rotation per restore ─────────────────────────────
+
+
+class _RotationStub:
+    def __init__(self, raises=False):
+        self.calls = 0
+        self._raises = raises
+
+    async def rotate_hosted_after_restore(self) -> int:
+        self.calls += 1
+        if self._raises:
+            raise RuntimeError("boom")
+        return 2
+
+
+@pytest.mark.asyncio
+async def test_rotation_runs_once_per_restore(tmp_dir):
+    from socialhome.services.backup_service import BACKUP_RESTORED_AT_KEY
+
+    db = await _make_db(tmp_dir)
+    try:
+        svc = RecoveryReconnectService(db, _UrlUpdateStub(), _AdapterStub())
+        rot = _RotationStub()
+        assert await svc.maybe_rotate_space_authority(rot) == 0  # no restore
+        assert rot.calls == 0
+        await _set(db, RECOVERED_AT_KEY, "2026-10-01T00:00:00+00:00")
+        assert await svc.maybe_rotate_space_authority(rot) == 2
+        assert await svc.maybe_rotate_space_authority(rot) == 0  # same restore
+        assert rot.calls == 1
+        await _set(db, BACKUP_RESTORED_AT_KEY, "2026-10-02T00:00:00+00:00")
+        assert await svc.maybe_rotate_space_authority(rot) == 2  # a new restore
+        assert rot.calls == 2
+    finally:
+        await db.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_rotation_failure_is_retried_next_boot(tmp_dir):
+    db = await _make_db(tmp_dir)
+    try:
+        svc = RecoveryReconnectService(db, _UrlUpdateStub(), _AdapterStub())
+        await _set(db, RECOVERED_AT_KEY, "2026-10-01T00:00:00+00:00")
+        assert await svc.maybe_rotate_space_authority(_RotationStub(raises=True)) == 0
+        assert await svc.maybe_rotate_space_authority(_RotationStub()) == 2
+    finally:
+        await db.shutdown()

@@ -112,8 +112,27 @@ The Social Home ↔ GFS link is split by direction:
     [invites.md](invites.md#the-mint--landing-leg--where-the-blob-comes-from).
   - `spaces/{id}/publish` additionally carries the space's Ed25519
     **authority** verify key (`identity_public_key`, hex). The GFS
-    **TOFU-pins** it on the first publish and holds it immutable — a later
-    publish offering a different key keeps the pinned one.
+    **TOFU-pins** it on the first publish. After that the pin moves **only on
+    an owner-certified rotation** (v_44): when the owner revokes an admin
+    household it rotates the key and its publish carries `authority_cert`
+    (inside the signed body, which must then carry a fresh signed `ts`). The
+    GFS re-pins only when the cert verifies against the owner's REGISTERED
+    key (`client_instances.public_key`, which must derive to
+    `owning_instance`), names exactly the offered key, and has a higher
+    `key_epoch` than the cert it stored (`global_spaces.authority_cert`,
+    migration `0013`; none = epoch 0). Anything else keeps the pin and logs a
+    warning. The cert names no member and no reason: the GFS learns that a
+    rotation happened, and when. It stays inside the GFS (ordering and
+    cluster sync); the public directory serves only the key and the GFS's own
+    re-pin counter (`authority_rotation_seq`, migration `0013`). An ordinary upsert — including a cluster
+    `NODE_SYNC_SPACE` — never moves a set pin; a peer node's sync re-pins only
+    through the same cert check, and max-merges the peer's
+    `authority_rotation_seq` for the pin it now holds, so a node never serves
+    a lower seq than its peer did. A GFS advertises the feature as
+    `authority_rotation: true` in its signed `/gfs/info` capability block; a
+    household sends a GFS without it no cert (an older GFS would fail the
+    signature over a field it doesn't know) and warns that the old key keeps
+    authorizing relays there.
   - `publish` (relay) is **anonymous**. The canonical body is exactly
     `{space_id, event_type, payload}` — no household identity — and the only
     authenticator is the **space-authority signature** carried inside the
@@ -243,8 +262,9 @@ The Social Home ↔ GFS link is split by direction:
   - **NULL-pin self-heal.** A space whose GFS row pinned no authority key
     `403`s every relay, and nothing else re-publishes its metadata. So on
     every GFS-WS (re)connect the household re-publishes the metadata of each
-    space it has published to that server. This is idempotent (the pin is
-    immutable once set), sequential, and fail-soft per space.
+    space it has published to that server. This is idempotent (the pin only
+    moves on an owner-certified rotation, which the re-publish also carries),
+    sequential, and fail-soft per space.
   - **Replay / dedupe contract.** The authority signature binds the space id
     and the (opaque) `payload`, but **no timestamp, nonce, or epoch**, so a
     captured authority-signed payload stays valid forever and anyone who saw
@@ -323,6 +343,29 @@ cannot widen access through a missing field or Python truthiness.
   pinned. `owning_instance` from the listing is *not* an authenticated
   envelope sender, which is why every inbound relay verifies against the
   pinned key, never the claimed owner.
+- **A follower heals its pin from the GFS listing (v_44).** When the owner
+  rotates the space authority key, the GFS re-pins only after verifying the
+  owner's `authority_cert` against the owner's registered key — and keeps
+  the cert to itself: it names the owner household's identity key and
+  carries the rotation time, neither of which belongs on an unauthenticated
+  page — and so does the cert's wall-clock-based epoch, which would date the
+  revocation. `GET /gfs/spaces` and `GET /gfs/spaces/{id}` serve only the
+  current `identity_public_key` and `authority_rotation_seq`, the GFS's OWN
+  counter (+1 per accepted, cert-verified re-pin). A household that merely
+  FOLLOWS a public / global space (at least one local `subscriber` seat and
+  no other) re-pins from that pair when a relayed `space_post_public` /
+  `space_subscriber_key_handoff` fails the authority check (re-fetched at
+  most once a minute per space, then verified once more) and on every GFS-WS
+  reconnect — but only from the GFS connection that SEATED the mirror
+  (`spaces.mirror_gfs_id`, recorded at seat time) and only to a strictly
+  HIGHER seq than the one it stored (`spaces.gfs_rotation_seq`). **Trust
+  model:** the same trust a follower already places in that one GFS for its
+  first (TOFU) pin; the seq bound stops it from rolling the pin back, and no
+  other connection server can move it. A household with a real seat, or a
+  private stub (a pending invite), never takes a pin from a GFS — it re-pins
+  from the owner's own cert, delivered over federation (`spaces.md`). A
+  mirror seated before v_44 has no recorded provenance and does not heal
+  from a GFS until it is re-mirrored.
 - **Known gap — a GFS can poison a space this household hasn't met yet.**
   "Cannot hijack one already pinned" only helps once a pin exists. A hostile
   GFS can list a *real* space id (ids are harvestable from any public

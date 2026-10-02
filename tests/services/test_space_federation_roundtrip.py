@@ -4,7 +4,7 @@ hand-rolled federation snapshot/rebuild pair.
 
 This closes a recurring bug class. THREE per-space fields have shipped
 that *should* federate but silently didn't, because the federation
-send (:func:`_space_metadata_for_federation`) and receive
+send (:func:`space_metadata_for_federation`) and receive
 (:func:`stub_space_from_metadata`) are hand-rolled dicts — adding a
 ``Space`` field doesn't force you to wire it:
 
@@ -43,13 +43,13 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.services.space_service import (
-    _space_metadata_for_federation,
+    space_metadata_for_federation,
     stub_space_from_metadata,
 )
 
 # ── The three classifications (the load-bearing contract) ─────────────────
 #
-# Derived by reading ``_space_metadata_for_federation`` (the meta keys) and
+# Derived by reading ``space_metadata_for_federation`` (the meta keys) and
 # ``stub_space_from_metadata`` (how each is rebuilt). Verified, not guessed.
 
 #: Fields that travel in ``space_meta`` AND rebuild IDENTICALLY on the stub.
@@ -118,6 +118,10 @@ INTENTIONALLY_LOCAL: dict[str, str] = {
     # The reason string is host-bookkeeping; the receiver derives read-only
     # state from ``archived`` alone.
     "archived_reason": "host bookkeeping; receivers act on ``archived``",
+    # v_44: the epoch a receiver holds moves ONLY through a verified owner
+    # cert (``apply_authority_cert``). The owner ships it next to the cert,
+    # never as a plain snapshot field a stub would rebuild from.
+    "authority_key_epoch": "set only from a verified owner-signed cert",
 }
 
 
@@ -127,7 +131,7 @@ def test_every_space_field_is_classified() -> None:
 
     THE load-bearing assertion: a newly-added ``Space`` field lands in none
     of the sets, so this fails and forces the author to classify it (and, if
-    federated, wire it into ``_space_metadata_for_federation`` +
+    federated, wire it into ``space_metadata_for_federation`` +
     ``stub_space_from_metadata`` and add it to ``FEDERATED_ROUNDTRIP``).
     """
     all_fields = {f.name for f in dataclasses.fields(Space)}
@@ -142,7 +146,7 @@ def test_every_space_field_is_classified() -> None:
         "Unclassified Space field(s): "
         f"{sorted(unclassified)}. A new Space field MUST be classified as "
         "FEDERATED_ROUNDTRIP (travels in space_meta and rebuilds identically "
-        "— also wire it into _space_metadata_for_federation + "
+        "— also wire it into space_metadata_for_federation + "
         "stub_space_from_metadata), FEDERATED_TRANSFORMED (federates but is "
         "rebuilt differently, e.g. owner_instance_id), or INTENTIONALLY_LOCAL "
         "(host-only/runtime — must not federate). This is the field-drop "
@@ -231,13 +235,13 @@ def test_federated_roundtrip_fields_survive() -> None:
     """Every FEDERATED_ROUNDTRIP field rebuilds identically on the stub.
 
     A field present in the set but dropped from
-    ``_space_metadata_for_federation`` (or not rebuilt by
+    ``space_metadata_for_federation`` (or not rebuilt by
     ``stub_space_from_metadata``) mismatches here — closing the bug class
     that bit ``delegated_admin_authority`` / ``roster_sequence`` /
     ``config_hlc``.
     """
     space = _fully_non_default_space()
-    meta = _space_metadata_for_federation(space)
+    meta = space_metadata_for_federation(space)
     stub = stub_space_from_metadata(
         space.id, host_instance_id="host.example", meta=meta
     )
@@ -246,7 +250,7 @@ def test_federated_roundtrip_fields_survive() -> None:
         assert getattr(stub, name) == getattr(space, name), (
             f"Federated Space field {name!r} did NOT round-trip: "
             f"origin={getattr(space, name)!r} stub={getattr(stub, name)!r}. "
-            "Either it was dropped from _space_metadata_for_federation, not "
+            "Either it was dropped from space_metadata_for_federation, not "
             "rebuilt in stub_space_from_metadata, or it's misclassified."
         )
 
@@ -255,7 +259,7 @@ def test_federated_transformed_fields() -> None:
     """FEDERATED_TRANSFORMED fields federate but rebuild differently — assert
     the documented transform."""
     space = _fully_non_default_space()
-    meta = _space_metadata_for_federation(space)
+    meta = space_metadata_for_federation(space)
     stub = stub_space_from_metadata(
         space.id, host_instance_id="host.example", meta=meta
     )
@@ -280,7 +284,7 @@ def test_intentionally_local_fields_do_not_leak() -> None:
     ``join_code``). The stub rebuilds them at their dataclass defaults.
     """
     space = _fully_non_default_space()
-    meta = _space_metadata_for_federation(space)
+    meta = space_metadata_for_federation(space)
     meta_json = json.dumps(meta)
 
     # No INTENTIONALLY_LOCAL field name is a top-level meta key.

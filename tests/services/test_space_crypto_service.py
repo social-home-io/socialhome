@@ -106,6 +106,16 @@ async def test_export_current_key_returns_unwrapped_bytes_and_epoch(crypto_env):
     assert len(raw) == 32  # AES-256
 
 
+async def test_rotate_epoch_min_epoch_lifts_the_new_epoch(crypto_env):
+    """v_44 post-restore: the new content epoch starts at ``min_epoch`` when
+    that is above the next one, and is never lowered by it."""
+    crypto, _ = crypto_env
+    await crypto.initialise_for_space("sp-1")
+    assert await crypto.rotate_epoch("sp-1", min_epoch=1000) == 1000
+    assert await crypto.rotate_epoch("sp-1", min_epoch=5) == 1001
+    assert await crypto.get_current_epoch("sp-1") == 1001
+
+
 async def test_export_current_key_returns_none_when_uninitialised(crypto_env):
     """A space with no epoch key yet exports ``None`` — caller
     skips shipping the field rather than synthesising garbage."""
@@ -650,3 +660,30 @@ def test_verify_authority_event_returns_false_on_malformed_sig():
         )
         is False
     )
+
+
+async def test_reset_to_key_replaces_the_epoch_and_drops_later_ones(crypto_env):
+    """v_44 baseline reset: the owner's rotation bundle wins over whatever
+    a demoted seed holder pushed — same epoch regardless of ``rotated_by``,
+    and every epoch above it is gone."""
+    crypto, repo = crypto_env
+    bogus = b"\x01" * 32
+    await crypto.import_key("sp-1", 3, bogus, rotated_by="a-smallest")
+    await crypto.import_key("sp-1", 1_000_000, bogus, rotated_by="b")
+    owner_key = b"\x02" * 32
+    await crypto.reset_to_key(
+        "sp-1", 3, owner_key, rotated_by="z-owner", authority_epoch=1
+    )
+    assert await crypto.get_current_epoch("sp-1") == 3
+    exported = await crypto.export_current_key("sp-1")
+    assert exported == (3, owner_key)
+    assert (await repo.get("sp-1", 3)).rotated_by == "z-owner"
+    assert await repo.get("sp-1", 1_000_000) is None
+
+
+async def test_reset_to_key_rejects_wrong_length(crypto_env):
+    crypto, _repo = crypto_env
+    with pytest.raises(ValueError):
+        await crypto.reset_to_key(
+            "sp-1", 1, b"short", rotated_by="x", authority_epoch=1
+        )

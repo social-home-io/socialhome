@@ -6,7 +6,21 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 43
+    assert fc.OURS == 44
+
+
+def test_space_authority_rotation_capability_threshold():
+    """v_44 — owner-certified rotation of the space authority key
+    (``SPACE_AUTHORITY_ROTATED`` + the cert on key shares / space_meta /
+    snapshots). Space-scoped: a household below it stays pinned to the
+    revoked key, so its roster mirror freezes and the banner says so."""
+    assert fc.FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION == 44
+    assert fc.FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.space_features_missing_below(43) == ["Space key rotation on revoke"]
+    assert fc.features_missing_below(44) == []
 
 
 def test_federated_moderation_capability_threshold():
@@ -18,8 +32,11 @@ def test_federated_moderation_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_FEDERATED_MODERATION in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.space_features_missing_below(42) == ["Reviewed across households"]
-    assert fc.features_missing_below(43) == []
+    assert fc.space_features_missing_below(42) == [
+        "Reviewed across households",
+        "Space key rotation on revoke",
+    ]
+    assert "Reviewed across households" not in fc.features_missing_below(43)
 
 
 def test_content_access_enforcement_capability_threshold():
@@ -34,6 +51,7 @@ def test_content_access_enforcement_capability_threshold():
     assert fc.space_features_missing_below(41) == [
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -51,6 +69,7 @@ def test_space_moderator_role_capability_threshold():
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -69,6 +88,7 @@ def test_task_priority_labels_capability_threshold():
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -127,6 +147,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     ]
 
 
@@ -147,6 +168,7 @@ def test_moment_origin_signature_capability_threshold():
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     ]
 
 

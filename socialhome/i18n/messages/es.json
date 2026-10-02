@@ -28,5 +28,6 @@
   "notification.space.feature.pages": "Páginas",
   "notification.space.feature.tasks": "Tareas",
   "notification.space.feature.stickies": "Notas adhesivas",
-  "notification.space.feature.calendar": "Eventos"
+  "notification.space.feature.calendar": "Eventos",
+  "notification.space.admins_reconfirm": "Restaurado desde una copia de seguridad: revisa los administradores del espacio y vuelve a activar la administración delegada"
 }

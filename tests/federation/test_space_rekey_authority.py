@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
@@ -234,7 +234,7 @@ async def test_owner_unsigned_rekey_applies_backcompat(tmp_dir):
         )
         await h._on_key_exchange_rekey(ev)
         space_crypto.import_key.assert_awaited_once_with(
-            SPACE_ID, 7, bytes([0x11]) * 32, rotated_by=OWNER
+            SPACE_ID, 7, bytes([0x11]) * 32, rotated_by=OWNER, verified_pin=None
         )
     finally:
         await db.shutdown()
@@ -259,7 +259,7 @@ async def test_owner_unsigned_rekey_null_rotated_by_applies(tmp_dir):
         )
         await h._on_key_exchange_rekey(ev)
         space_crypto.import_key.assert_awaited_once_with(
-            SPACE_ID, 7, bytes([0x11]) * 32, rotated_by=None
+            SPACE_ID, 7, bytes([0x11]) * 32, rotated_by=None, verified_pin=None
         )
     finally:
         await db.shutdown()
@@ -280,7 +280,7 @@ async def test_delegated_admin_authority_signed_rekey_applies(tmp_dir):
         )
         await h._on_key_exchange_rekey(ev)
         space_crypto.import_key.assert_awaited_once_with(
-            SPACE_ID, 9, bytes([0x22]) * 32, rotated_by=ADMIN
+            SPACE_ID, 9, bytes([0x22]) * 32, rotated_by=ADMIN, verified_pin=ANY
         )
     finally:
         await db.shutdown()

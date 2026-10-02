@@ -59,13 +59,19 @@ from ..domain.federation import (
 from ..domain.federation_capabilities import OURS, FederationCapability
 from ..domain.media_constraints import (
     SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+    SPACE_COVER_SNAPSHOT_MAX_BYTES,
     SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+    SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
 from ..domain.space import (
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
     mirrorable_remote_role,
+)
+from ..services.space_authority_pin import (
+    apply_authority_cert,
+    owner_authority_cert_via,
 )
 from ..services.space_service import (
     _coerce_min_age,
@@ -715,6 +721,18 @@ class SpaceInviteTokenRedeemCoordinator:
                     meta=meta,
                 )
                 await self._spaces.save(stub)
+                # v_44 — the ACK's cert records the authority-key epoch on
+                # the stub (and re-pins one that still names a retired key),
+                # so a replayed older cert can never move the pin back.
+                if meta.get("authority_cert") is not None:
+                    seated = await self._spaces.get(space_id)
+                    if seated is not None:
+                        await apply_authority_cert(
+                            self._spaces,
+                            seated,
+                            meta.get("authority_cert"),
+                            own_instance_id=self._federation.own_instance_id,
+                        )
                 # §D1b cover bytes (#116) — persist host's WebP
                 # when shipped inline so the stub renders properly.
                 await apply_space_cover_from_metadata(
@@ -997,7 +1015,7 @@ class SpaceInviteTokenRedeemCoordinator:
         # decision, 2026-09-19). The redeeming household is seated as a
         # MEMBER now and a pending elevation is filed on the HOST; the owner
         # approves it with a click (``set_remote_member_role``), and the
-        # relay-only seed guard in ``_share_admin_signing_seed`` keeps the
+        # relay-only seed guard in ``share_admin_signing_seed`` keeps the
         # standing "a link-joined admin never holds the seed" rule. A leaked
         # admin link is therefore at worst a member on the host.
         pending_admin = seat == SpaceRole.ADMIN.value
@@ -1056,10 +1074,10 @@ class SpaceInviteTokenRedeemCoordinator:
 
         # An ADMIN seat gets the ROLE and nothing else. NO signing-seed
         # share happens here, on either leg, and none should be added:
-        # the seed is the authority to act AS the space, the connection
-        # server pins a space's authority key TOFU-immutably (so the seed
-        # cannot be rotated away from a household that turns out to be
-        # the wrong one to trust), and a household met through a public
+        # the seed is the authority to act AS the space, retiring it again
+        # (the v_44 owner-certified rotation) only reaches the households and
+        # connection servers that support it — a mixed-version window keeps
+        # the old key alive there — and a household met through a public
         # link is exactly the household we cannot make that bet on —
         # anyone who saw the URL could be holding it. The seat is a
         # delegated admin WITHOUT authority: its actions ride
@@ -1116,14 +1134,19 @@ class SpaceInviteTokenRedeemCoordinator:
                 cover_repo=self._cover_repo,
                 icon_repo=self._icon_repo,
                 space_crypto_service=self._space_crypto,
-                **(
-                    {
-                        "cover_max_bytes": SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-                        "icon_max_bytes": SPACE_ICON_BOOTSTRAP_MAX_BYTES,
-                    }
+                cover_max_bytes=(
+                    SPACE_COVER_BOOTSTRAP_MAX_BYTES
                     if bootstrap
-                    else {}
+                    else SPACE_COVER_SNAPSHOT_MAX_BYTES
                 ),
+                icon_max_bytes=(
+                    SPACE_ICON_BOOTSTRAP_MAX_BYTES
+                    if bootstrap
+                    else SPACE_ICON_SNAPSHOT_MAX_BYTES
+                ),
+                # v_44 — the owner's cert for the current authority key, so
+                # a redeemer whose old stub pins a retired key re-pins.
+                authority_cert=owner_authority_cert_via(self._federation, space),
             )
         return ack_body
 

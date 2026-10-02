@@ -19,17 +19,23 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from .backup_service import BACKUP_RESTORED_AT_KEY
 from .recovery_kit_service import RECOVERED_AT_KEY
 
 if TYPE_CHECKING:
     from ..db import AsyncDatabase
     from ..platform.adapter import PlatformAdapter
+    from .space_authority_rotation_service import SpaceAuthorityRotationService
     from .url_update_outbound import UrlUpdateOutbound
 
 log = logging.getLogger(__name__)
 
 #: instance_config key recording the wall-clock time the one-shot reconnect ran.
 RECONNECTED_AT_KEY = "recovery.reconnected_at"
+
+#: instance_config key recording WHICH restore (its timestamp marker) the
+#: post-restore authority rotation already ran for (v_44).
+AUTHORITY_ROTATED_FOR_KEY = "authority.rotated_after_restore"
 
 
 class RecoveryReconnectService:
@@ -91,6 +97,37 @@ class RecoveryReconnectService:
             # re-fan every boot. The outbox retries delivery.
         await self._set(RECONNECTED_AT_KEY, datetime.now(timezone.utc).isoformat())
         return True
+
+    async def maybe_rotate_space_authority(
+        self, rotation: "SpaceAuthorityRotationService"
+    ) -> int:
+        """Once per restore, rotate every hosted space's authority key (v_44).
+
+        A backup or Recovery Kit restore brings back ``spaces`` rows as they
+        were: possibly a key an admin revoked since still holds, and an epoch
+        the members already moved past (they refuse a lower one, so the owner
+        would be locked out of its own space). A fresh rotation — epoch at
+        least wall-clock seconds — puts the owner ahead again. Keyed on the
+        restore's own timestamp, so a second restore rotates again and a
+        plain reboot never does. Never raises.
+        """
+        marker = "|".join(
+            v or ""
+            for v in (
+                await self._get(RECOVERED_AT_KEY),
+                await self._get(BACKUP_RESTORED_AT_KEY),
+            )
+        )
+        if marker == "|" or await self._get(AUTHORITY_ROTATED_FOR_KEY) == marker:
+            return 0
+        try:
+            n = await rotation.rotate_hosted_after_restore()
+        except Exception:
+            log.warning("post-restore authority rotation failed", exc_info=True)
+            return 0
+        log.info("post-restore: rotated the authority key of %d hosted space(s)", n)
+        await self._set(AUTHORITY_ROTATED_FOR_KEY, marker)
+        return n
 
     async def _get(self, key: str) -> str | None:
         row = await self._db.fetchone(

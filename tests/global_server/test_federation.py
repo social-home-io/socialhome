@@ -3092,3 +3092,311 @@ async def test_fan_out_inbox_fallback_does_not_follow_a_redirect_elsewhere():
         await srv.close()
     assert delivered == []
     assert hits == ["registered"]
+
+
+# ── v_44: owner-certified re-pin of the space authority key ────────────────────
+
+
+def _owner_identity():
+    """A household identity whose instance id DERIVES from its key, as the
+    cert binding requires (the older tests above use free-form ids)."""
+    from socialhome.crypto import derive_instance_id
+
+    seed, pk = _make_keypair()
+    return seed, pk, derive_instance_id(pk)
+
+
+def _rot_cert(
+    owner_seed: bytes,
+    owner_pk: bytes,
+    owner_id: str,
+    *,
+    space_id: str,
+    authority_pk_hex: str,
+    epoch: int,
+) -> dict:
+    from socialhome.authority_cert import sign_authority_cert
+
+    return sign_authority_cert(
+        space_id=space_id,
+        owner_instance_id=owner_id,
+        owner_seed=owner_seed,
+        owner_pk_hex=owner_pk.hex(),
+        authority_pk_hex=authority_pk_hex,
+        key_epoch=epoch,
+    )
+
+
+async def _publish_with_cert(
+    svc,
+    seed: bytes,
+    *,
+    owning_instance: str,
+    space_id: str,
+    identity_public_key: str,
+    authority_cert: dict | None,
+    ts: str | None = None,
+):
+    body = _publish_space_args(
+        owning_instance, space_id, identity_public_key=identity_public_key
+    )
+    ts = _now_iso() if ts is None else ts
+    if ts:
+        body["ts"] = ts
+    if authority_cert is not None:
+        body["authority_cert"] = authority_cert
+    return await svc.publish_space(
+        space_id=space_id,
+        owning_instance=owning_instance,
+        name="My Space",
+        signature=_sign(seed, body),
+        identity_public_key=identity_public_key,
+        authority_cert=authority_cert,
+        ts=ts,
+    )
+
+
+async def _rotation_world(svc, space_id: str = "sp-rot"):
+    seed, pk, owner_id = _owner_identity()
+    await svc.register_instance(
+        owner_id, pk.hex(), "http://o.example/wh", auto_accept=True
+    )
+    k1_seed, k1_pk = _make_keypair()
+    await _publish_with_cert(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id=space_id,
+        identity_public_key=k1_pk.hex(),
+        authority_cert=None,
+    )
+    return seed, pk, owner_id, k1_seed, k1_pk
+
+
+async def test_publish_with_owner_cert_repins_the_authority_key(svc):
+    seed, pk, owner_id, _k1s, k1_pk = await _rotation_world(svc)
+    k2_seed, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    await _publish_with_cert(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k2_pk.hex(),
+        authority_cert=cert,
+    )
+    row = await svc.get_space("sp-rot")
+    assert row.identity_public_key == k2_pk.hex()
+    assert row.authority_cert == cert
+
+
+async def test_old_key_relay_and_query_are_refused_after_the_repin(svc):
+    """Spec §8.4 at the unit level: K1-signed relays / subscriber queries
+    403 once the GFS re-pinned to K2."""
+    seed, pk, owner_id, k1_seed, _k1 = await _rotation_world(svc)
+    k2_seed, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    await _publish_with_cert(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k2_pk.hex(),
+        authority_cert=cert,
+    )
+    payload = {"ciphertext": "x"}
+    payload.update(_sign_authority(k1_seed, space_id="sp-rot", payload=payload))
+    with pytest.raises(PermissionError):
+        await svc.publish_event("sp-rot", "space_post_public", payload)
+    ts = _now_iso()
+    q = _sign_authority_subscribers_query(k1_seed, space_id="sp-rot", ts=ts)
+    with pytest.raises(PermissionError):
+        await svc.list_subscribers_with_keys(
+            "sp-rot",
+            ts=ts,
+            authority_sig=q["authority_sig"],
+            authority_sig_suite=q["authority_sig_suite"],
+        )
+    fresh = {"ciphertext": "y"}
+    fresh.update(_sign_authority(k2_seed, space_id="sp-rot", payload=fresh))
+    assert await svc.publish_event("sp-rot", "space_post_public", fresh) == []
+
+
+@pytest.mark.parametrize(
+    "forgery", ["other_household", "old_space_key", "wrong_owner_id"]
+)
+async def test_forged_cert_never_moves_the_pin(svc, forgery):
+    seed, pk, owner_id, k1_seed, k1_pk = await _rotation_world(svc)
+    evil_seed, evil_pk = _make_keypair()
+    if forgery == "other_household":
+        cert = _rot_cert(
+            evil_seed,
+            evil_pk,
+            owner_id,
+            space_id="sp-rot",
+            authority_pk_hex=evil_pk.hex(),
+            epoch=1,
+        )
+    elif forgery == "old_space_key":
+        cert = _rot_cert(
+            k1_seed,
+            pk,
+            owner_id,
+            space_id="sp-rot",
+            authority_pk_hex=evil_pk.hex(),
+            epoch=1,
+        )
+    else:
+        from socialhome.crypto import derive_instance_id
+
+        cert = _rot_cert(
+            evil_seed,
+            evil_pk,
+            derive_instance_id(evil_pk),
+            space_id="sp-rot",
+            authority_pk_hex=evil_pk.hex(),
+            epoch=1,
+        )
+    await _publish_with_cert(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=evil_pk.hex(),
+        authority_cert=cert,
+    )
+    row = await svc.get_space("sp-rot")
+    assert row.identity_public_key == k1_pk.hex()
+    assert row.authority_cert is None
+
+
+async def test_cert_for_a_different_key_than_offered_is_refused(svc):
+    seed, pk, owner_id, _k1s, k1_pk = await _rotation_world(svc)
+    _k2s, k2_pk = _make_keypair()
+    _k3s, k3_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    await _publish_with_cert(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k3_pk.hex(),
+        authority_cert=cert,
+    )
+    assert (await svc.get_space("sp-rot")).identity_public_key == k1_pk.hex()
+
+
+async def test_replayed_older_cert_cannot_move_the_pin_back(svc):
+    seed, pk, owner_id, _k1s, _k1 = await _rotation_world(svc)
+    _k2s, k2_pk = _make_keypair()
+    _k3s, k3_pk = _make_keypair()
+    c1 = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    c2 = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k3_pk.hex(), epoch=2
+    )
+    for cert, key in ((c1, k2_pk), (c2, k3_pk)):
+        await _publish_with_cert(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=key.hex(),
+            authority_cert=cert,
+        )
+    # Replaying the epoch-1 publish (fresh ts — the owner itself could not
+    # be fooled into this, but a stale cert must never win on its own).
+    await _publish_with_cert(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-rot",
+        identity_public_key=k2_pk.hex(),
+        authority_cert=c1,
+    )
+    row = await svc.get_space("sp-rot")
+    assert row.identity_public_key == k3_pk.hex()
+    assert row.authority_cert == c2
+
+
+async def test_cert_requires_a_signed_fresh_ts(svc):
+    seed, pk, owner_id, _k1s, k1_pk = await _rotation_world(svc)
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    with pytest.raises(PermissionError):
+        await _publish_with_cert(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+            ts="",
+        )
+    stale = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    with pytest.raises(PermissionError):
+        await _publish_with_cert(
+            svc,
+            seed,
+            owning_instance=owner_id,
+            space_id="sp-rot",
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+            ts=stale,
+        )
+    assert (await svc.get_space("sp-rot")).identity_public_key == k1_pk.hex()
+
+
+async def test_cert_is_inside_the_signed_publish_body(svc):
+    """A relay cannot bolt a cert onto an owner's publish body."""
+    seed, pk, owner_id, _k1s, _k1 = await _rotation_world(svc)
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-rot", authority_pk_hex=k2_pk.hex(), epoch=1
+    )
+    ts = _now_iso()
+    body = _publish_space_args(owner_id, "sp-rot", identity_public_key=k2_pk.hex())
+    body["ts"] = ts  # signed WITHOUT the cert
+    with pytest.raises(PermissionError):
+        await svc.publish_space(
+            space_id="sp-rot",
+            owning_instance=owner_id,
+            name="My Space",
+            signature=_sign(seed, body),
+            identity_public_key=k2_pk.hex(),
+            authority_cert=cert,
+            ts=ts,
+        )
+
+
+async def test_first_publish_with_a_cert_stores_it(svc):
+    """A GFS that first meets the space after a rotation stores the cert,
+    so a replay of the older one is refused here too."""
+    seed, pk, owner_id = _owner_identity()
+    await svc.register_instance(
+        owner_id, pk.hex(), "http://o.example/wh", auto_accept=True
+    )
+    _k2s, k2_pk = _make_keypair()
+    cert = _rot_cert(
+        seed, pk, owner_id, space_id="sp-new", authority_pk_hex=k2_pk.hex(), epoch=3
+    )
+    await _publish_with_cert(
+        svc,
+        seed,
+        owning_instance=owner_id,
+        space_id="sp-new",
+        identity_public_key=k2_pk.hex(),
+        authority_cert=cert,
+    )
+    row = await svc.get_space("sp-new")
+    assert row.identity_public_key == k2_pk.hex()
+    assert row.authority_cert == cert

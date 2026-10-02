@@ -26,6 +26,7 @@ NEVER_DROP: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_KEY_EXCHANGE,
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
         FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        FederationEventType.SPACE_AUTHORITY_ROTATED,
         FederationEventType.SPACE_DISSOLVED,
         FederationEventType.UNPAIR,
     }

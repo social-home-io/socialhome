@@ -47,6 +47,46 @@ relaxes the dual-sig / sender-pinned-key verification, or changes how the
 needs explicit reviewer sign-off. See
 [`protocol/user-identity.md`](protocol/user-identity.md).
 
+## Space authority pins move only on owner certification (v_44)
+
+A space's authority key (`spaces.identity_public_key`, and the GFS's
+`global_spaces.identity_public_key`) used to be **TOFU-pinned and
+immutable**: once a household or connection server pinned it, nothing ever
+moved it. That made every delegated admin a co-authority for life.
+
+**Relaxed (needs owner sign-off):** a pin may now move, under exactly one
+rule. The household that OWNS the space rotates the key when an admin
+household is revoked (or delegation is turned off), and announces the new
+key with a certificate signed by its **household identity key** — never by
+the old space key. A receiver re-pins only when that certificate
+
+- verifies under a known suite (unknown → refused, no default),
+- binds to the space's own owner — `derive_instance_id(owner_pk)` equals
+  the space's `owner_instance_id`, and `owner_pk` equals the stored host /
+  registered key when there is one — and
+- carries a strictly HIGHER `key_epoch` than the one it holds.
+
+One deliberate exception, for a household that merely FOLLOWS a public /
+global space through a connection server (no real seat): it re-pins from
+the directory listing of the ONE GFS that seated its mirror — the key that
+GFS re-pinned after verifying the owner's cert, plus the GFS's own re-pin
+counter — not from the cert itself, which the GFS keeps private so the owner
+household's identity key and the rotation time never reach a public page.
+That is the same trust such a follower already places in that GFS for its
+very first (TOFU) pin; the counter must strictly rise, so the GFS cannot hand
+back an older key, and no other connection server can move the pin. A
+household with a real seat, or a private stub, never takes a pin from a GFS.
+
+What this does not relax: no third party — a relay, a GFS, a delegated
+admin, the demoted household — can produce such a certificate; the owner
+household's identity key is the same trust root that already signs its
+federation envelopes, so no new long-lived key or registry exists. A
+replayed or older certificate can never restore a revoked key. The
+residuals are stated in
+[`protocol/spaces.md`](protocol/spaces.md#authority-key-rotation-on-admin-revocation-v_44):
+an offline owner rotates nothing until it returns, and households or
+connection servers below v_44 stay on the old key.
+
 ## Encryption-first (§25.8.21)
 
 Every field in every outgoing federation event is encrypted unless the

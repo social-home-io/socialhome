@@ -9162,6 +9162,487 @@ def cmd_owner_offline() -> None:
     print("owner-offline: ok (delegated admin moderates with the owner offline)")
 
 
+def _poll(what: str, check, *, timeout: float = 45.0, interval: float = 1.0):
+    """Poll ``check()`` until it returns a truthy value; return it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        got = check()
+        if got:
+            return got
+        time.sleep(interval)
+    raise SystemExit(f"timed out waiting for {what}")
+
+
+def cmd_admin_revoke_rotation() -> None:
+    """Demoting a delegated admin rotates the space authority key (v_44).
+
+    a = owner, b = delegated admin, c = plain member (all paired by ``pair``).
+
+    1. a creates a private space, turns ``delegated_admin_authority`` on,
+       invites b + c, promotes b to admin, and waits until b holds the seed.
+    2. a demotes b to member. Assert, on the live wire:
+       * a's ``identity_public_key`` moved off K1 and ``authority_key_epoch``
+         is a wall-clock-seconds value;
+       * c pins a's new key at that epoch and recorded it as its baseline (the
+         ``SPACE_AUTHORITY_ROTATED`` bundle was verified and applied once);
+       * b pins the new key too and its ``identity_private_key`` is NULL;
+       * a rename attempted on b is not executed there any more (b no longer
+         signs for the space): neither a nor c changes its name.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    a = state["instances"]["a"]
+    b = state["instances"]["b"]
+    c = state["instances"]["c"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+
+    s, space = _request(
+        f"{a_base}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": "Revoke lab",
+            "space_type": "private",
+            "join_mode": "invite_only",
+            "emoji": "🔑",
+        },
+    )
+    space_id = _must("a create space", s, space, ok=(201,))["id"]
+    s, cur = _request(f"{a_base}/api/spaces/{space_id}", token=a["token"])
+    feats = dict(_must("a get space", s, cur).get("features") or {})
+    feats["delegated_admin_authority"] = True
+    s, upd = _request(
+        f"{a_base}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": feats},
+    )
+    _must("a enable delegation", s, upd, ok=(200,))
+    for label, inst in (("b", b), ("c", c)):
+        s, inv = _request(
+            f"{a_base}/api/spaces/{space_id}/remote-invites",
+            token=a["token"],
+            method="POST",
+            body={
+                "invitee_instance_id": inst["instance_id"],
+                "invitee_user_id": inst["user_id"],
+            },
+        )
+        _must(f"a invite {label}", s, inv, ok=(201,))
+    time.sleep(4)
+    _accept_remote_invite(state, "b", space_id)
+    _accept_remote_invite(state, "c", space_id)
+    time.sleep(10)  # let the capability exchange settle (seed share is gated)
+    role_url = (
+        f"{a_base}/api/spaces/{space_id}/remote-members/"
+        f"{b['instance_id']}/{b['user_id']}"
+    )
+    s, role = _request(
+        role_url, token=a["token"], method="PATCH", body={"role": "admin"}
+    )
+    _must("a promote b to admin", s, role, ok=(200,))
+    _poll(
+        "b to hold the space signing seed",
+        lambda: _space_col("b", space_id, "identity_private_key"),
+        timeout=30.0,
+    )
+    k1 = _space_col("a", space_id, "identity_public_key")
+    print(f"  b holds the seed for K1={k1[:12]}… ✓")
+
+    s, role = _request(
+        role_url, token=a["token"], method="PATCH", body={"role": "member"}
+    )
+    _must("a demote b to member", s, role, ok=(200,))
+    k2 = _poll(
+        "a to rotate the authority key",
+        lambda: (
+            _space_col("a", space_id, "identity_public_key")
+            if (_space_col("a", space_id, "authority_key_epoch") or 0) > 0
+            else None
+        ),
+        timeout=20.0,
+    )
+    if k2 == k1:
+        raise SystemExit("admin-revoke-rotation: a's pin did not move off K1")
+    epoch = _space_col("a", space_id, "authority_key_epoch")
+    # The epoch is at least wall-clock seconds (it must outrank an epoch the
+    # members hold even after the owner is restored from an old backup).
+    if epoch < int(time.time()) - 600:
+        raise SystemExit(f"admin-revoke-rotation: epoch {epoch} is not time-based")
+    print(f"  a rotated to K2={k2[:12]}… at epoch {epoch} ✓")
+    for label in ("c", "b"):
+        _poll(
+            f"{label} to pin K2 at epoch {epoch}",
+            lambda label=label: (
+                _space_col(label, space_id, "identity_public_key") == k2
+                and _space_col(label, space_id, "authority_key_epoch") == epoch
+                and _space_col(label, space_id, "authority_baseline_epoch") == epoch
+            ),
+        )
+        print(f"  {label} applied the owner's cert + baseline (K2, epoch {epoch}) ✓")
+    _poll(
+        "b's old seed to be cleared",
+        lambda: _space_col("b", space_id, "identity_private_key") is None,
+        timeout=20.0,
+    )
+    print("  b's K1 seed is gone ✓")
+
+    a_name = _space_col("a", space_id, "name")
+    _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}",
+        token=b["token"],
+        method="PATCH",
+        body={"name": f"Hijack {time.time_ns()}"},
+    )
+    time.sleep(6)
+    for label in ("a", "c"):
+        if _space_col(label, space_id, "name") != a_name:
+            raise SystemExit(
+                f"admin-revoke-rotation: b's post-demotion rename reached {label}"
+            )
+    print("  a rename on b is no longer executed or accepted anywhere ✓")
+
+    state["admin_revoke_rotation_space_id"] = space_id
+    _save(state)
+    print("admin-revoke-rotation: ok (revoking an admin retires its signing key)")
+
+
+def _outbox_events(label: str, peer_iid: str) -> list[str]:
+    """Pending ``federation_outbox`` event types ``label`` holds for a peer."""
+    return [
+        r[0]
+        for r in _rows(
+            label,
+            "SELECT event_type FROM federation_outbox"
+            " WHERE instance_id=? AND status='pending' ORDER BY created_at",
+            (peer_iid,),
+        )
+    ]
+
+
+def _content_epoch(label: str, space_id: str) -> int | None:
+    rows = _rows(
+        label, "SELECT MAX(epoch) FROM space_keys WHERE space_id=?", (space_id,)
+    )
+    return rows[0][0] if rows else None
+
+
+def cmd_rotation_offline_catchup() -> None:
+    """A member that was OFFLINE through a rotation catches up from the outbox (v_44).
+
+    a = owner, b = delegated admin, c = plain member. Sibling of
+    ``admin-revoke-rotation`` with c down for the whole revocation, modelled
+    on ``replay`` / ``owner-offline``:
+
+    1. a creates a private space with ``delegated_admin_authority`` on,
+       seats b + c, promotes b to admin and waits until b holds the K1 seed.
+    2. Stop c. a demotes b (→ rotation to K2 + a content-key rekey), posts
+       once and renames the space. a's outbox must hold the
+       ``SPACE_AUTHORITY_ROTATED`` bundle for c — c was down, so the outbox
+       is the only way it can ever arrive.
+    3. Restart c. Assert c pins K2 at a's epoch with the owner's baseline,
+       a's bundle left the outbox (delivered), c holds the post and the
+       rename, and c's newest content key is a's post-rotation epoch.
+    4. b plays a hostile ex-admin that kept its K1 seed: the harness writes
+       the K1 seed (and the admin seat) back into b's DB — the one place the
+       harness writes app state, because a revoked household that refuses to
+       forget is exactly the threat the rotation answers. b's rename is then
+       executed and K1-signed on b, and c must refuse it.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    a = state["instances"]["a"]
+    b = state["instances"]["b"]
+    c = state["instances"]["c"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    marker = time.time_ns()
+
+    s, space = _request(
+        f"{a_base}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": f"Offline rotation lab {marker}",
+            "space_type": "private",
+            "join_mode": "invite_only",
+            "emoji": "🛰",
+        },
+    )
+    space_id = _must("a create space", s, space, ok=(201,))["id"]
+    s, cur = _request(f"{a_base}/api/spaces/{space_id}", token=a["token"])
+    feats = dict(_must("a get space", s, cur).get("features") or {})
+    feats["delegated_admin_authority"] = True
+    s, upd = _request(
+        f"{a_base}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": feats},
+    )
+    _must("a enable delegation", s, upd, ok=(200,))
+    for label, inst in (("b", b), ("c", c)):
+        s, inv = _request(
+            f"{a_base}/api/spaces/{space_id}/remote-invites",
+            token=a["token"],
+            method="POST",
+            body={
+                "invitee_instance_id": inst["instance_id"],
+                "invitee_user_id": inst["user_id"],
+            },
+        )
+        _must(f"a invite {label}", s, inv, ok=(201,))
+    time.sleep(4)
+    _accept_remote_invite(state, "b", space_id)
+    _accept_remote_invite(state, "c", space_id)
+    time.sleep(10)  # let the capability exchange settle (seed share is gated)
+    role_url = (
+        f"{a_base}/api/spaces/{space_id}/remote-members/"
+        f"{b['instance_id']}/{b['user_id']}"
+    )
+    s, role = _request(
+        role_url, token=a["token"], method="PATCH", body={"role": "admin"}
+    )
+    _must("a promote b to admin", s, role, ok=(200,))
+    k1_seed = _poll(
+        "b to hold the space signing seed",
+        lambda: _space_col("b", space_id, "identity_private_key"),
+        timeout=30.0,
+    )
+    k1 = _space_col("a", space_id, "identity_public_key")
+    _poll(
+        "c to hold the space content key",
+        lambda: _content_epoch("c", space_id) is not None,
+        timeout=30.0,
+    )
+    epoch_before = _content_epoch("c", space_id)
+    print(f"  b holds the K1={k1[:12]}… seed; c on content epoch {epoch_before} ✓")
+
+    # 2. c goes offline for the whole revocation.
+    _kill_household("c", c)
+    s, role = _request(
+        role_url, token=a["token"], method="PATCH", body={"role": "member"}
+    )
+    _must("a demote b to member", s, role, ok=(200,))
+    k2 = _poll(
+        "a to rotate the authority key",
+        lambda: (
+            _space_col("a", space_id, "identity_public_key")
+            if (_space_col("a", space_id, "authority_key_epoch") or 0) > 0
+            else None
+        ),
+        timeout=20.0,
+    )
+    if k2 == k1:
+        raise SystemExit("rotation-offline-catchup: a's pin did not move off K1")
+    epoch = _space_col("a", space_id, "authority_key_epoch")
+    content_epoch = _poll(
+        "a to rekey the content",
+        lambda: (
+            _content_epoch("a", space_id)
+            if (_content_epoch("a", space_id) or 0) > (epoch_before or 0)
+            else None
+        ),
+        timeout=20.0,
+    )
+    print(
+        f"  c offline; a rotated to K2={k2[:12]}… (epoch {epoch}, content {content_epoch}) ✓"
+    )
+    content = f"Post while c was offline — {marker}"
+    s, post = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("a posts while c offline", s, post, ok=(201,))["id"]
+    new_name = f"Renamed offline {marker}"
+    s, upd = _request(
+        f"{a_base}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"name": new_name},
+    )
+    _must("a renames while c offline", s, upd, ok=(200,))
+    queued = _poll(
+        "a to outbox the rotation bundle for c",
+        lambda: (
+            q
+            if "space_authority_rotated" in (q := _outbox_events("a", c["instance_id"]))
+            else None
+        ),
+        timeout=30.0,
+    )
+    print(f"  a's outbox holds for c: {', '.join(queued)} ✓")
+
+    # 3. c comes back and catches up from a's outbox.
+    time.sleep(4)
+    new_pid = _spawn("c", c["port"])
+    state["instances"]["c"]["pid"] = new_pid
+    _save(state)
+    _wait_ready(c["port"])
+    print(f"  c respawned: pid={new_pid}")
+    _poll(
+        f"c to pin K2 at epoch {epoch}",
+        lambda: (
+            _space_col("c", space_id, "identity_public_key") == k2
+            and _space_col("c", space_id, "authority_key_epoch") == epoch
+            and _space_col("c", space_id, "authority_baseline_epoch") == epoch
+        ),
+        timeout=120.0,
+        interval=2.0,
+    )
+    _poll(
+        "a's rotation bundle for c to leave the outbox",
+        lambda: "space_authority_rotated" not in _outbox_events("a", c["instance_id"]),
+        timeout=30.0,
+    )
+    print(f"  c applied the outboxed bundle: K2 at epoch {epoch}, baseline {epoch} ✓")
+    _poll(
+        "c to hold a's offline-time rename",
+        lambda: _space_col("c", space_id, "name") == new_name,
+        timeout=60.0,
+        interval=2.0,
+    )
+    print(f"  c holds the rename ({new_name!r}) ✓")
+    _poll(
+        "c to hold a's offline-time post",
+        lambda: _rows(
+            "c",
+            "SELECT 1 FROM space_posts WHERE id=? AND space_id=?",
+            (post_id, space_id),
+        ),
+        timeout=60.0,
+        interval=2.0,
+    )
+    s, feed = _request(
+        f"http://127.0.0.1:{c['port']}/api/spaces/{space_id}/feed", token=c["token"]
+    )
+    feed = feed if isinstance(feed, list) else (feed or {}).get("posts") or []
+    seen = next((p for p in feed if p.get("id") == post_id), None)
+    if seen is None or seen.get("content") != content:
+        raise SystemExit(f"rotation-offline-catchup: c cannot read the post ({seen!r})")
+    print("  c holds and reads the post ✓")
+    if _content_epoch("c", space_id) != content_epoch:
+        raise SystemExit(
+            f"rotation-offline-catchup: c's content key is epoch "
+            f"{_content_epoch('c', space_id)}, a's is {content_epoch}"
+        )
+    print(f"  c's content key is the post-rotation epoch {content_epoch} ✓")
+
+    # 4. b as a hostile ex-admin that kept K1: put the seed + seat back.
+    if _space_col("b", space_id, "identity_private_key") is not None:
+        raise SystemExit(
+            "rotation-offline-catchup: b still held a seed after the rotation"
+        )
+    conn = sqlite3.connect(_instance_dir("b") / "socialhome.db", timeout=10)
+    try:
+        conn.execute(
+            "UPDATE spaces SET identity_private_key=? WHERE id=?", (k1_seed, space_id)
+        )
+        conn.execute(
+            "UPDATE space_members SET role='admin' WHERE space_id=? AND user_id=?",
+            (space_id, b["user_id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    hijack = f"Hijack {marker}"
+    s, resp = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}",
+        token=b["token"],
+        method="PATCH",
+        body={"name": hijack},
+    )
+    if s != 200 or _space_col("b", space_id, "name") != hijack:
+        raise SystemExit(
+            f"rotation-offline-catchup: b did not execute its K1 rename "
+            f"(status={s}, body={resp!r}) — the refusal below would prove nothing"
+        )
+    print("  b (K1 seed restored) executed + K1-signed a rename locally")
+    time.sleep(8)
+    for label in ("c", "a"):
+        got = _space_col(label, space_id, "name")
+        if got != new_name:
+            raise SystemExit(
+                f"rotation-offline-catchup: {label} accepted b's K1 rename ({got!r})"
+            )
+    print("  c (and a) refused b's old-key rename ✓")
+
+    state["rotation_offline_catchup_space_id"] = space_id
+    _save(state)
+    print("rotation-offline-catchup: ok (an offline member catches up on the rotation)")
+
+
+def cmd_gfs_authority_rotate() -> None:
+    """The GFS and a subscriber follow an owner-certified rotation (v_44).
+
+    Prereqs: ``gfs-space-post`` (d is a GFS subscriber of a's global space).
+
+    1. a turns ``delegated_admin_authority`` on, then off — the off-flip
+       rotates the space authority key unconditionally.
+    2. Assert the GFS re-pinned: ``global_spaces.identity_public_key`` is a's
+       new key and ``authority_cert`` is stored.
+    3. a posts; d (still pinned to the old key) must heal its pin from the
+       GFS listing's cert and read the post.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("gfs_space_id")
+    if not space_id or not state.get("gfs_space_post_id"):
+        raise SystemExit("run 'gfs-space-post' first")
+    a = state["instances"]["a"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    before = _space_col("a", space_id, "authority_key_epoch") or 0
+    s, cur = _request(f"{a_base}/api/spaces/{space_id}", token=a["token"])
+    feats = dict(_must("a get gfs space", s, cur).get("features") or {})
+    for flag in (True, False):
+        feats["delegated_admin_authority"] = flag
+        s, upd = _request(
+            f"{a_base}/api/spaces/{space_id}",
+            token=a["token"],
+            method="PATCH",
+            body={"features": feats},
+        )
+        _must(f"a delegation={flag}", s, upd, ok=(200,))
+    k2 = _poll(
+        "a to rotate the gfs space's key",
+        lambda: (
+            _space_col("a", space_id, "identity_public_key")
+            if (_space_col("a", space_id, "authority_key_epoch") or 0) > before
+            else None
+        ),
+        timeout=20.0,
+    )
+    _poll(
+        "the GFS to re-pin from the owner's cert",
+        lambda: _gfs_rows(
+            "SELECT 1 FROM global_spaces WHERE space_id=? AND identity_public_key=?"
+            " AND authority_cert IS NOT NULL",
+            (space_id, k2),
+        ),
+        timeout=30.0,
+    )
+    print(f"  GFS re-pinned {space_id} to K2={k2[:12]}… from the owner cert ✓")
+    time.sleep(8)  # the K2-signed subscriber key re-seal reaches d
+    content = f"Post after the authority rotation — {time.time_ns()}"
+    s, post = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("a posts after rotation", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "d", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit("gfs-authority-rotate: d did not read the post-rotation post")
+    if _space_col("d", space_id, "identity_public_key") != k2:
+        raise SystemExit("gfs-authority-rotate: d did not heal its pin to K2")
+    print("  d healed its pin from the GFS listing and reads the K2-relayed post ✓")
+    print("gfs-authority-rotate: ok (the GFS and a subscriber follow the rotation)")
+
+
 def cmd_owner_offline_ban() -> None:
     """Delegated-admin offline-of-owner BAN converges (covers the #618 path).
 
@@ -10243,6 +10724,15 @@ def main() -> None:
         # b, c and d all hold the task, and plain-member household d never
         # received the pending item.
         cmd_federated_moderation()
+        # ``admin-revoke-rotation`` (v_44): a demotes delegated admin b; a
+        # rotates the space authority key, c and b re-pin from the owner's
+        # cert, b's old seed is cleared and b can no longer sign.
+        cmd_admin_revoke_rotation()
+        # ``rotation-offline-catchup`` (v_44): c is DOWN while a demotes b
+        # (rotation), posts and renames; on restart c applies the outboxed
+        # bundle (K2 pin + baseline), holds the post, the rename and the
+        # post-rotation content key, and refuses b's K1-signed rename.
+        cmd_rotation_offline_catchup()
         # ``replay`` exercises the §24 outbox redelivery path by
         # killing Carol, posting a highlight from Alpha, restarting
         # Carol, and asserting the queued envelope flushes after the

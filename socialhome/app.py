@@ -189,6 +189,7 @@ from .services.profile_sync_service import ProfileSyncService
 from .services.moment_public_outbound import MomentPublicOutbound
 from .services.space_config_outbound import SpaceConfigOutbound
 from .services.space_post_outbound import SpacePostOutbound
+from .services.space_authority_rotation_service import SpaceAuthorityRotationService
 from .services.space_public_inbound import SpacePublicInbound
 from .services.space_mentions import SpaceMentionResolver
 from .services.space_public_outbound import SpacePublicOutbound
@@ -679,6 +680,38 @@ async def _redeliver_envelope(
             describe_exception(exc),
         )
         return DeliveryOutcome.TRANSIENT
+
+
+def _wire_space_authority_rotation(
+    *,
+    bus: EventBus,
+    space_repo,
+    remote_member_repo,
+    own_instance_id: str,
+    federation_service,
+    federation_repo,
+    space_crypto,
+    space_service,
+    gfs_connection_service,
+    subscriber_key_outbound,
+) -> SpaceAuthorityRotationService:
+    """Build + wire :class:`SpaceAuthorityRotationService` (v_44)."""
+    svc = SpaceAuthorityRotationService(
+        space_repo=space_repo,
+        remote_member_repo=remote_member_repo,
+        bus=bus,
+        own_instance_id=own_instance_id,
+    )
+    svc.attach_federation(federation_service, federation_repo)
+    svc.attach_space_crypto(space_crypto)
+    svc.attach_space_service(space_service)
+    space_service.attach_authority_rotation(svc)
+    svc.attach_gfs(gfs_connection_service)
+    if subscriber_key_outbound is not None:
+        svc.attach_subscriber_keys(subscriber_key_outbound)
+    svc.wire()
+    svc.attach_to(federation_service)
+    return svc
 
 
 async def dispatch_gfs_relay_frame(
@@ -2318,6 +2351,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # the identity seed + KEK are available at startup.
     space_public_outbound: SpacePublicOutbound | None = None
     space_public_inbound: SpacePublicInbound | None = None
+    space_authority_rotation: SpaceAuthorityRotationService | None = None
     # Phase 5b-b: deliver the per-space content key to a GFS subscriber so it
     # can decrypt the Phase-5a public relay. Same late-build reason as above
     # (both depend on ``space_crypto``).
@@ -2834,6 +2868,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # publisher to exclude it any more) — our own id is what the self-echo
         # guard drops on.
         space_public_inbound.attach_identity(own_instance_id=real_instance_id)
+        # v_44 — a relayed frame signed by a rotated authority key heals the
+        # subscriber's pin from the GFS listing's owner cert, then retries.
+        gfs_space_mirror.attach_identity(own_instance_id=real_instance_id)
+        space_public_inbound.attach_pin_refresher(gfs_space_mirror)
         # Phase 5b-b — subscriber content-key delivery. Outbound: a seed-holder
         # seals + relays the content key on a GFS ``new_subscriber`` notify.
         # Inbound: the subscriber unseals + imports the relayed handoff.
@@ -2864,6 +2902,7 @@ def create_app(config: Config | None = None) -> web.Application:
             own_instance_id=real_instance_id,
             keywrap_private_key=identity.keywrap_private_key,
         )
+        space_subscriber_key_inbound.attach_pin_refresher(gfs_space_mirror)
 
         # 5. Federation stack — FederationService + sync manager + typing/dm/
         #    presence attach + inbound bridge + pairing-relay queue.
@@ -2975,6 +3014,23 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.private_invite_handler_key].attach_space_service(
             real_space_service,
         )
+        # v_44 — rotate the space authority key when an admin household is
+        # revoked (owner side), and apply the owner's rotation bundle
+        # (member side).
+        nonlocal space_authority_rotation
+        space_authority_rotation = _wire_space_authority_rotation(
+            bus=bus,
+            space_repo=space_repo,
+            remote_member_repo=repos.space_remote_member,
+            own_instance_id=real_instance_id,
+            federation_service=federation_service,
+            federation_repo=federation_repo,
+            space_crypto=space_crypto,
+            space_service=real_space_service,
+            gfs_connection_service=gfs_connection_service,
+            subscriber_key_outbound=space_subscriber_key_outbound,
+        )
+        app[K.space_authority_rotation_key] = space_authority_rotation
         # v_32 roster snapshots: the host re-sends its whole roster to a
         # member household that just upgraded, and on every periodic sync
         # tick, so a roster mirror that missed gossip heals by itself.
@@ -3295,7 +3351,8 @@ def create_app(config: Config | None = None) -> web.Application:
             # alone, so a space whose GFS row pinned none (published before
             # the pin existed) 403s every relay until its metadata is
             # published again. Re-publish each space we published to this GFS
-            # — idempotent (the pin is immutable once set) and fail-soft.
+            # — idempotent (the pin only moves on an owner-certified rotation,
+            # v_44) and fail-soft.
             await gfs_connection_service.heal_space_pins(gfs_id)
             # Self-heal our SUBSCRIBER seats on the GFS, the mirror image of
             # the pin heal above. ``subscribe_to_space`` POSTs
@@ -3306,6 +3363,13 @@ def create_app(config: Config | None = None) -> web.Application:
             # The GFS-side subscribe is an upsert, so re-POSTing is free.
             # Fail-soft per space (never raises).
             await gfs_space_mirror.resubscribe_all(gfs_id)
+            # v_44 — and re-check each mirrored subscription's authority pin
+            # against the listing's owner cert (a rotation while we were
+            # disconnected). Fail-soft per space.
+            try:
+                await gfs_space_mirror.refresh_authority_pins(gfs_id)
+            except Exception:
+                log.exception("gfs: authority pin refresh failed for %s", gfs_id)
             # Self-heal the household name on the GFS: a rename is pushed only
             # best-effort on edit (and never re-pushed), so a GFS that was down
             # at rename time — or that re-created our client row — keeps showing
@@ -3595,6 +3659,10 @@ def create_app(config: Config | None = None) -> web.Application:
             await recovery_reconnect_service.maybe_reconnect()
         except Exception:
             log.warning("post-restore reconnect hook failed", exc_info=True)
+        if space_authority_rotation is not None:
+            await recovery_reconnect_service.maybe_rotate_space_authority(
+                space_authority_rotation
+            )
 
         # 8. Default-calendar backfill. Runs after the adapter (so the
         #    headless ``provision_admin`` path is included) and after the

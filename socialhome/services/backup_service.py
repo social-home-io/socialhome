@@ -97,6 +97,10 @@ NEVER_EXPORT: frozenset[str] = frozenset(
 )
 
 
+#: instance_config key recording when a backup was last restored (v_44).
+BACKUP_RESTORED_AT_KEY = "backup.restored_at"
+
+
 # ─── Errors ──────────────────────────────────────────────────────────────
 
 
@@ -293,6 +297,16 @@ class BackupService:
         # Sync, I/O-bound phase: write the media files onto disk.
         if media_files:
             await asyncio.to_thread(self._write_restore_media, media_files)
+
+        # v_44 — the restored ``spaces`` rows may name an authority key (and
+        # epoch) the space's members have since moved past. Record the
+        # restore so the next boot rotates every hosted space with an
+        # authority history (``RecoveryReconnectService``).
+        await self._db.enqueue(
+            "INSERT INTO instance_config(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (BACKUP_RESTORED_AT_KEY, datetime.now(timezone.utc).isoformat()),
+        )
 
     def _read_restore_tar(
         self,

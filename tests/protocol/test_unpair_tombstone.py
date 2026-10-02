@@ -18,7 +18,9 @@ peer's identity key and session keys, so it must grant **no** trust:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import orjson
 import pytest
@@ -123,6 +125,7 @@ async def env(tmp_dir):
         "kp": kp,
         "iid": iid,
         "wrapped": wrapped,
+        "unpair": unpair,
     }
     await db.shutdown()
 
@@ -286,3 +289,105 @@ async def test_a_new_pairing_replaces_the_tombstone(env):
         msg_id="m-after-repair",
     )
     assert await env["svc"].handle_inbound_envelope("wh-c-2", body) == {"status": "ok"}
+
+
+class _StalledTransport:
+    """A transport whose send blocks until released, then fails — the
+    in-flight sync / RTC signalling send that straddles an unpair."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def send(self, *, instance, envelope_dict):
+        self.entered.set()
+        await self.release.wait()
+        return SimpleNamespace(ok=False, via="rtc", status_code=None, error="boom")
+
+
+@pytest.mark.parametrize("ended_by", ["forget", "tombstone"])
+async def test_send_in_flight_across_an_unpair_queues_nothing(env, ended_by):
+    """Regression (federation-demo ``unpair``): a ``send_event`` that looked
+    the peer up, then awaited its transport while the pairing ended, used to
+    enqueue its failed envelope AFTER the unpair had purged the outbox —
+    leaving a row for a household we no longer hold (or a non-UNPAIR row for
+    a tombstone). The outbox queues only for a peer that still exists."""
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await env["repo"].save_instance(
+        RemoteInstance(
+            id=iid,
+            display_name="d",
+            remote_identity_pk=kp.public_key.hex(),
+            key_self_to_remote=env["wrapped"],
+            key_remote_to_self=env["wrapped"],
+            remote_inbox_url="https://d.invalid/wh",
+            local_inbox_id="wh-d",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        )
+    )
+    transport = _StalledTransport()
+    env["svc"].attach_transport(transport)
+    send = asyncio.create_task(
+        env["svc"].send_event(
+            to_instance_id=iid,
+            event_type=FederationEventType.SPACE_SYNC_OFFER,
+            payload={"x": 1},
+        )
+    )
+    await transport.entered.wait()
+    if ended_by == "forget":
+        await env["unpair"].forget(iid)
+    else:
+        await env["repo"].mark_unpairing(iid)
+        await env["outbox"].delete_for_instance(iid)
+    transport.release.set()
+    result = await send
+    assert result.ok is False
+    rows = await env["db"].fetchall(
+        "SELECT event_type FROM federation_outbox WHERE instance_id=?",
+        (iid,),
+    )
+    assert rows == []
+
+
+async def test_send_landing_mid_purge_queues_nothing(env):
+    """Regression: ``forget`` purged the outbox BEFORE deleting the
+    ``remote_instances`` row, so an in-flight send whose enqueue landed
+    between the two writes still saw the peer and stranded a row. The row
+    goes first now; the outbox delete then sweeps anything queued before."""
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await env["repo"].save_instance(
+        RemoteInstance(
+            id=iid,
+            display_name="d",
+            remote_identity_pk=kp.public_key.hex(),
+            key_self_to_remote=env["wrapped"],
+            key_remote_to_self=env["wrapped"],
+            remote_inbox_url="https://d.invalid/wh",
+            local_inbox_id="wh-d",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        )
+    )
+    outbox = env["outbox"]
+    real_delete = outbox.delete_for_instance
+
+    async def _delete_then_race(instance_id: str) -> None:
+        await real_delete(instance_id)
+        # The in-flight sender's enqueue, landing right after the purge.
+        await outbox.enqueue(
+            instance_id=instance_id,
+            event_type=FederationEventType.SPACE_SYNC_ICE,
+            payload_json="{}",
+        )
+
+    outbox.delete_for_instance = _delete_then_race
+    await env["unpair"].forget(iid)
+    rows = await env["db"].fetchall(
+        "SELECT event_type FROM federation_outbox WHERE instance_id=?",
+        (iid,),
+    )
+    assert rows == []

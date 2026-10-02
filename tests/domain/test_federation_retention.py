@@ -61,6 +61,9 @@ def test_never_drop_membership():
         FederationEventType.SPACE_KEY_EXCHANGE,
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
         FederationEventType.SPACE_ADMIN_KEY_SHARE,
+        # v_44 — a lost rotation bundle leaves a member pinned to a key the
+        # revoked household still holds.
+        FederationEventType.SPACE_AUTHORITY_ROTATED,
         FederationEventType.UNPAIR,
     }
     # Exact equality — catches an accidentally dropped OR added member, so the

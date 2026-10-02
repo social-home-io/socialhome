@@ -3038,7 +3038,7 @@ async def test_archive_federates_via_space_meta(stack):
     """The archived flag rides the federation metadata snapshot so member
     households apply it through the normal config-change stub refresh."""
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3047,7 +3047,7 @@ async def test_archive_federates_via_space_meta(stack):
     await stack.space_svc.archive_space(space.id, actor_username="anna")
     refreshed = await stack.space_repo.get(space.id)
 
-    meta = _space_metadata_for_federation(refreshed)
+    meta = space_metadata_for_federation(refreshed)
     assert meta["archived"] is True
     stub = stub_space_from_metadata(
         space.id, host_instance_id=refreshed.owner_instance_id, meta=meta
@@ -3110,12 +3110,12 @@ async def test_delegated_admin_authority_federates_via_space_meta(stack):
     metadata snapshot AND a joiner's stub carries it locally.
 
     Regression: a multi-node demo found the flag never crossed the wire —
-    _space_metadata_for_federation dropped it and stub_space_from_metadata
+    space_metadata_for_federation dropped it and stub_space_from_metadata
     defaulted it OFF, so a §D1b joiner / config-flip receiver never enabled
     delegation locally and rejected the space signing seed.
     """
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3130,7 +3130,7 @@ async def test_delegated_admin_authority_federates_via_space_meta(stack):
     assert refreshed.features.delegated_admin_authority is True
 
     # Fix A.2 — the metadata snapshot carries the flag.
-    meta = _space_metadata_for_federation(refreshed)
+    meta = space_metadata_for_federation(refreshed)
     assert meta["features"]["delegated_admin_authority"] is True
 
     # Fix A.3 — the receiver-side stub reads it back as True.
@@ -3158,7 +3158,7 @@ async def test_min_age_federates_via_space_meta_and_persists(stack):
     carries it, and a save()/get() round-trip persists it (so a member
     household's join paths can enforce the host's gate locally)."""
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3174,7 +3174,7 @@ async def test_min_age_federates_via_space_meta_and_persists(stack):
     assert refreshed.min_age == 18  # _row_to_space reads the column
     assert refreshed.category == "gaming"
 
-    meta = _space_metadata_for_federation(refreshed)
+    meta = space_metadata_for_federation(refreshed)
     assert meta["min_age"] == 18
     assert meta["category"] == "gaming"
 
@@ -3212,7 +3212,7 @@ async def test_config_hlc_federates_via_space_meta_and_persists(stack):
     reads it, and a save()/get() round-trip persists it (so a receiver adopts
     the winning edit's clock for a later causally-ordered local edit)."""
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3223,7 +3223,7 @@ async def test_config_hlc_federates_via_space_meta_and_persists(stack):
     refreshed = await stack.space_repo.get(space.id)
     assert refreshed.config_hlc != "0-0"
 
-    meta = _space_metadata_for_federation(refreshed)
+    meta = space_metadata_for_federation(refreshed)
     assert meta["config_hlc"] == refreshed.config_hlc
 
     stub = stub_space_from_metadata(
@@ -3255,7 +3255,7 @@ async def test_icon_hash_federates_via_space_meta(stack):
     member household renders the host's icon (after the bytes arrive via
     icon_webp_base64)."""
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3263,7 +3263,7 @@ async def test_icon_hash_federates_via_space_meta(stack):
     space = await stack.space_svc.create_space(owner_username="anna", name="S")
     await stack.space_repo.set_icon_hash(space.id, "feedface")
     refreshed = await stack.space_repo.get(space.id)
-    meta = _space_metadata_for_federation(refreshed)
+    meta = space_metadata_for_federation(refreshed)
     assert meta["icon_hash"] == "feedface"
     stub = stub_space_from_metadata(
         space.id, host_instance_id=refreshed.owner_instance_id, meta=meta
@@ -3321,7 +3321,7 @@ async def test_allowed_post_types_federate_via_space_meta(stack):
     """The per-space post-type allow-list rides the federation metadata so a
     member household enforces the same restriction when its users compose."""
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3334,7 +3334,7 @@ async def test_allowed_post_types_federate_via_space_meta(stack):
     refreshed = await stack.space_repo.get(space.id)
     assert set(refreshed.features.allowed_post_types) == {"text", "image"}
 
-    meta = _space_metadata_for_federation(refreshed)
+    meta = space_metadata_for_federation(refreshed)
     assert sorted(meta["features"]["allowed_post_types"]) == ["image", "text"]
 
     stub = stub_space_from_metadata(
@@ -3361,7 +3361,7 @@ def test_stub_space_defaults_all_post_types_when_meta_omits_them():
 def test_federation_features_pair_roundtrips_every_wire_field():
     """CI guard for the federation send/receive pair: every field
     ``SpaceFeatures.to_wire_dict`` carries survives
-    ``_space_metadata_for_federation`` → ``stub_space_from_metadata``.
+    ``space_metadata_for_federation`` → ``stub_space_from_metadata``.
 
     Fails the moment either function drops a feature field from the wire
     (the bug that silently lost ``delegated_admin_authority`` at the
@@ -3370,7 +3370,7 @@ def test_federation_features_pair_roundtrips_every_wire_field():
     per-field assert breaks.
     """
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3405,7 +3405,7 @@ def test_federation_features_pair_roundtrips_every_wire_field():
         join_mode=JoinMode.INVITE_ONLY,
     )
 
-    meta = _space_metadata_for_federation(space)
+    meta = space_metadata_for_federation(space)
     stub = stub_space_from_metadata(
         space.id, host_instance_id=space.owner_instance_id, meta=meta
     )
@@ -3437,7 +3437,7 @@ def test_stub_anchors_roster_sequence_from_host_meta():
     to that same value (not reset to 0), and re-applying a config edit
     through the same path keeps it anchored."""
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3454,7 +3454,7 @@ def test_stub_anchors_roster_sequence_from_host_meta():
         join_mode=JoinMode.INVITE_ONLY,
     )
 
-    meta = _space_metadata_for_federation(space)
+    meta = space_metadata_for_federation(space)
     # The base meta must carry roster_sequence for the round-trip.
     assert meta["roster_sequence"] == 7
 
@@ -3500,7 +3500,7 @@ async def test_anchored_stub_gossip_version_beats_other_households(stack, tmp_di
     and apply_member_event drops it as stale (member_version < current).
     """
     from socialhome.services.space_service import (
-        _space_metadata_for_federation,
+        space_metadata_for_federation,
         stub_space_from_metadata,
     )
 
@@ -3518,7 +3518,7 @@ async def test_anchored_stub_gossip_version_beats_other_households(stack, tmp_di
         space_type=SpaceType.PRIVATE,
         join_mode=JoinMode.INVITE_ONLY,
     )
-    meta = _space_metadata_for_federation(host_space)
+    meta = space_metadata_for_federation(host_space)
 
     # Delegated-admin household seats the stub from that snapshot, then
     # persists it so increment_roster_sequence has a row to bump.
@@ -3798,6 +3798,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3825,6 +3826,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     )
 
 
@@ -3864,6 +3866,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3918,6 +3921,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
+        "Space key rotation on revoke",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -4041,6 +4045,44 @@ async def test_ensure_space_seed_mints_for_owned_null_seed(stack):
     assert verify_ed25519(bytes.fromhex(refreshed.identity_public_key), b"x", sig)
     # And it's now durably stored.
     assert await stack.space_repo.get_space_seed(space.id) == seed
+
+
+async def test_ensure_space_seed_on_a_rotated_space_goes_through_rotation(stack):
+    """F6 (v_44): members of a space whose key was already rotated pin a
+    CERTIFIED key. A lost seed is re-minted by a real rotation (cert +
+    bundle to members), never by silently swapping the pubkey — and without
+    a wired rotation nothing is minted."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    await stack.db.enqueue(
+        "UPDATE spaces SET identity_private_key=NULL, authority_key_epoch=5 WHERE id=?",
+        (space.id,),
+    )
+    old_pub = (await stack.space_repo.get(space.id)).identity_public_key
+    assert await stack.space_svc.ensure_space_seed(space.id) is None
+    assert (await stack.space_repo.get(space.id)).identity_public_key == old_pub
+
+    calls: list[str] = []
+
+    class _Rotation:
+        async def rotate(self, space_id):
+            calls.append(space_id)
+            await stack.space_repo.rotate_authority_key(
+                space_id,
+                public_key_hex=kp.public_key.hex(),
+                seed=kp.private_key,
+                key_epoch=6,
+            )
+            return 6
+
+    kp = generate_identity_keypair()
+    stack.space_svc.attach_authority_rotation(_Rotation())
+    seed = await stack.space_svc.ensure_space_seed(space.id)
+    assert calls == [space.id]
+    assert seed == kp.private_key
+    got = await stack.space_repo.get(space.id)
+    assert got.identity_public_key == kp.public_key.hex()
+    assert got.authority_key_epoch == 6
 
 
 async def test_ensure_space_seed_never_mints_for_non_owned_space(stack):
@@ -8498,3 +8540,206 @@ async def test_config_edits_forward_answers_for_a_remote_hosted_space(stack):
     await stack.provision_user("anna", is_admin=True)
     own = await stack.space_svc.create_space(owner_username="anna", name="Mine")
     assert await stack.space_svc.config_edits_forward(own.id) is False
+
+
+# ─── v_44: space authority key rotation hooks ─────────────────────────────
+
+
+async def _rotation_fed(stack, *, version: int = 44):
+    """A federation double carrying the stack's REAL household identity (so
+    certs bind to the owner id) whose peers advertise ``version``."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from socialhome.domain.federation import DeliveryResult
+
+    row = await stack.db.fetchone(
+        "SELECT identity_private_key, identity_public_key FROM instance_identity"
+    )
+    kp = SimpleNamespace(
+        private_key=bytes.fromhex(row["identity_private_key"]),
+        public_key=bytes.fromhex(row["identity_public_key"]),
+    )
+
+    async def _supports(_iid, *, min_version):
+        return version >= min_version
+
+    return SimpleNamespace(
+        own_instance_id=stack.iid,
+        own_identity_seed=kp.private_key,
+        own_identity_pk=kp.public_key,
+        peer_supports=_supports,
+        send_with_mesh_fallback=AsyncMock(
+            return_value=DeliveryResult(instance_id="x", ok=True)
+        ),
+        broadcast_to_space_members=AsyncMock(),
+    ), kp
+
+
+async def _rotated_space(stack, *, delegation: bool = True):
+    from socialhome.domain.space import SpaceFeatures
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="S",
+        features=SpaceFeatures(delegated_admin_authority=delegation),
+    )
+    k2 = generate_identity_keypair()
+    await stack.space_repo.rotate_authority_key(
+        space.id, public_key_hex=k2.public_key.hex(), seed=k2.private_key, key_epoch=1
+    )
+    return space, k2
+
+
+async def test_rekey_after_rotation_reaches_old_peers_unsigned(stack):
+    from socialhome.domain.federation_capabilities import FederationCapability
+    from socialhome.infrastructure.key_manager import KeyManager
+    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+    from socialhome.services.space_crypto_service import SpaceContentEncryption
+
+    space, _k2 = await _rotated_space(stack)
+    fed, _kp = await _rotation_fed(stack)
+    stack.space_svc._federation = fed
+    stack.space_svc._space_crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(stack.db),
+        KeyManager(b"\x0a" * 32),
+        own_instance_id=stack.iid,
+    )
+    await stack.space_svc._rotate_and_distribute_space_key(space.id)
+    call = fed.broadcast_to_space_members.await_args
+    assert "authority_sig" in call.args[2]["space_content_key"]
+    legacy = call.kwargs["legacy_payload"]["space_content_key"]
+    assert "authority_sig" not in legacy
+    assert legacy["key_base64"] == call.args[2]["space_content_key"]["key_base64"]
+    assert (
+        call.kwargs["legacy_below"]
+        == FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION
+    )
+
+
+async def test_roster_snapshot_carries_the_owner_cert_after_rotation(stack):
+    from socialhome.authority_cert import verify_authority_cert
+    from socialhome.domain.federation import FederationEventType
+
+    space, k2 = await _rotated_space(stack)
+    fed, _kp = await _rotation_fed(stack)
+    stack.space_svc._federation = fed
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru1",
+        user_pk=None,
+        display_name=None,
+    )
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-y")
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["event_type"] is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    got = verify_authority_cert(
+        kw["payload"]["authority_cert"], space_id=space.id, owner_instance_id=stack.iid
+    )
+    assert got.authority_pk_hex == k2.public_key.hex()
+
+
+async def test_seed_share_after_rotation_skips_a_pre_v44_admin(stack):
+    space, _k2 = await _rotated_space(stack)
+    fed, _kp = await _rotation_fed(stack, version=43)
+    stack.space_svc._federation = fed
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="peer-old")
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_seed_share_carries_epoch_and_cert_for_a_v44_admin(stack):
+    import base64
+
+    from socialhome.authority_cert import verify_authority_cert
+
+    space, k2 = await _rotated_space(stack)
+    fed, _kp = await _rotation_fed(stack)
+    stack.space_svc._federation = fed
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="peer-new")
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert payload["key_epoch"] == 1
+    assert base64.urlsafe_b64decode(payload["space_seed"]) == k2.private_key
+    verify_authority_cert(
+        payload["authority_cert"], space_id=space.id, owner_instance_id=stack.iid
+    )
+
+
+class _NoPeers:
+    """A federation repo with no ``remote_instances`` rows."""
+
+    async def get_instance(self, _iid):
+        return None
+
+
+async def test_revocation_events_fire_on_admin_demotion_removal_and_delegation_off(
+    stack,
+):
+    from socialhome.domain.events import SpaceAdminAuthorityRevoked
+    from socialhome.domain.space import SpaceFeatures, SpaceRole
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="S",
+        features=SpaceFeatures(delegated_admin_authority=True),
+    )
+    fed, _kp = await _rotation_fed(stack)
+    stack.space_svc._federation = fed
+    stack.space_svc._federation_repo = _NoPeers()
+    remote = await _wire_remote_members(stack)
+    for user in ("ra", "rb"):
+        await remote.add(
+            space_id=space.id,
+            instance_id="peer-x",
+            user_id=user,
+            user_pk=None,
+            display_name=None,
+            role=SpaceRole.ADMIN.value,
+        )
+    seen: list[SpaceAdminAuthorityRevoked] = []
+
+    async def _rec(e):
+        seen.append(e)
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _rec)
+    await stack.space_svc.set_remote_member_role(
+        space.id,
+        actor_username="anna",
+        instance_id="peer-x",
+        user_id="ra",
+        role=SpaceRole.MEMBER.value,
+    )
+    await stack.space_svc.remove_remote_member(
+        space.id, actor_username="anna", instance_id="peer-x", user_id="rb"
+    )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="anna",
+        features=SpaceFeatures(delegated_admin_authority=False),
+    )
+    assert [e.instance_id for e in seen] == ["peer-x", "peer-x", None]
+
+
+async def test_banning_a_remote_user_tombstones_their_seat(stack):
+    from socialhome.domain.space import SpaceRole
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    fed, _kp = await _rotation_fed(stack)
+    stack.space_svc._federation = fed
+    stack.space_svc._federation_repo = _NoPeers()
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-x",
+        user_id="ru",
+        user_pk=None,
+        display_name=None,
+        role=SpaceRole.MEMBER.value,
+    )
+    await stack.space_svc.ban(space.id, actor_username="anna", user_id="ru")
+    assert await remote.get(space.id, "peer-x", "ru") is None
+    assert await stack.space_repo.is_banned(space.id, "ru")

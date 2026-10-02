@@ -1451,6 +1451,35 @@ class SpaceRemoteSeatLive(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceAdminAuthorityRevoked(DomainEvent):
+    """On the household that HOSTS a space: someone's ability to sign for
+    the space as an admin may just have ended (v_44).
+
+    ``instance_id`` names a household whose admin seat was just demoted,
+    removed, banned or tombstoned by roster gossip — the rotation service
+    re-checks whether it still holds any admin seat and, if not (and
+    delegation is on), rotates the space authority key. ``None`` means
+    ``delegated_admin_authority`` was just turned OFF: every seed ever
+    shared is now unauthorized, so the key rotates unconditionally."""
+
+    space_id: str
+    instance_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceAdminSeedsRetiredAfterRestore(DomainEvent):
+    """The owner household was restored from a backup or Recovery Kit and a
+    space it hosts rotated its authority key WITHOUT re-sharing the new
+    seed (v_44). The restored roster may name admins that were revoked since
+    the backup, so delegated authority comes back only when the owner
+    re-confirms its admins (the next promote or delegation toggle shares)."""
+
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteSpaceInviteDeclined(DomainEvent):
     """Mirror of :class:`RemoteSpaceInviteAccepted` for the decline path."""
 

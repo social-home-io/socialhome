@@ -146,8 +146,12 @@ class SpaceContentEncryption(BusPublisherMixin):
             return existing.epoch
         return await self.rotate_epoch(space_id)
 
-    async def rotate_epoch(self, space_id: str) -> int:
+    async def rotate_epoch(self, space_id: str, *, min_epoch: int | None = None) -> int:
         """Generate a fresh AES key, persist it, return the new epoch.
+
+        ``min_epoch`` lifts the new epoch to at least that value — the v_44
+        post-restore rotation passes wall-clock seconds, because members
+        may already hold epochs the restored backup never saw.
 
         Stamps ``rotated_by`` with this household's instance id (Phase 4b) so
         that when two delegated admins rotate to the SAME epoch concurrently,
@@ -155,6 +159,8 @@ class SpaceContentEncryption(BusPublisherMixin):
         deterministic smallest-``rotated_by`` tiebreak.
         """
         epoch = await self._repo.next_epoch(space_id)
+        if min_epoch is not None:
+            epoch = max(epoch, min_epoch)
         raw = AESGCM.generate_key(bit_length=256)
         wrapped = self._kek.encrypt(raw, associated_data=space_id.encode("utf-8"))
         await self._repo.save(
@@ -207,8 +213,13 @@ class SpaceContentEncryption(BusPublisherMixin):
         raw_key: bytes,
         *,
         rotated_by: str | None = None,
+        verified_pin: tuple[int, str] | None = None,
     ) -> None:
         """Persist a key received from a federated peer.
+
+        ``verified_pin`` — see :meth:`SqliteSpaceKeyRepo.save`: the
+        ``(epoch, pubkey)`` of the space key that authorized this key. The
+        write is dropped if the space no longer pins exactly that key.
 
         KEK-wraps with the *receiver's* key manager so the local
         ``space_keys`` row matches the at-rest invariant.
@@ -249,19 +260,77 @@ class SpaceContentEncryption(BusPublisherMixin):
             raw_key,
             associated_data=space_id.encode("utf-8"),
         )
-        await self._repo.save(
+        stored = await self._repo.save(
             SpaceKey(
                 space_id=space_id,
                 epoch=epoch,
                 content_key_hex=wrapped,
                 rotated_by=rotated_by,
-            )
+            ),
+            verified_pin=verified_pin,
         )
+        if stored is False:
+            log.warning(
+                "space_crypto: epoch %d key for %s was authorized by a space key "
+                "that is no longer pinned (rotated meanwhile) — dropped",
+                epoch,
+                space_id,
+            )
+            return
         log.info(
             "space_crypto: imported epoch %d for %s from peer (rotated_by=%r)",
             epoch,
             space_id,
             rotated_by,
+        )
+        await self._emit(
+            SpaceContentKeyImported(space_id=space_id, epoch=epoch),
+        )
+
+    async def reset_to_key(
+        self,
+        space_id: str,
+        epoch: int,
+        raw_key: bytes,
+        *,
+        rotated_by: str | None,
+        authority_epoch: int,
+    ) -> None:
+        """Make ``(epoch, raw_key)`` the space's current key — atomically.
+
+        The v_44 authority-rotation baseline reset: the owner's
+        ``SPACE_AUTHORITY_ROTATED`` bundle carries the content key every
+        member must converge on. Unlike :meth:`import_key` this ignores the
+        smallest-``rotated_by`` tiebreak (a demoted seed holder could have
+        won it with a crafted minter id) and deletes every epoch ABOVE
+        ``epoch`` that was written under an authority key older than
+        ``authority_epoch`` (one it pushed at epoch 10^6 would otherwise stay
+        current forever) — but keeps a newer epoch the owner already rekeyed
+        to under the new key. Delete + install run in one transaction.
+        Called only after the bundle's owner signature and the new authority
+        signature have both verified.
+        """
+        if len(raw_key) != 32:
+            raise ValueError("space content key must be 32 bytes")
+        wrapped = self._kek.encrypt(
+            raw_key,
+            associated_data=space_id.encode("utf-8"),
+        )
+        removed = await self._repo.reset_to(
+            SpaceKey(
+                space_id=space_id,
+                epoch=epoch,
+                content_key_hex=wrapped,
+                rotated_by=rotated_by,
+            ),
+            authority_epoch=authority_epoch,
+        )
+        log.info(
+            "space_crypto: reset %s to the owner's epoch %d (dropped %d older-key "
+            "epoch(s) above it)",
+            space_id,
+            epoch,
+            removed,
         )
         await self._emit(
             SpaceContentKeyImported(space_id=space_id, epoch=epoch),

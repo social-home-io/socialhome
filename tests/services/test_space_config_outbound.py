@@ -603,3 +603,58 @@ async def test_the_authority_signature_covers_each_variant(fed):
             authority_sig_suite=meta["authority_sig_suite"],
             space_public_key=kp.public_key,
         )
+
+
+async def test_owner_after_rotation_signs_with_the_cert_and_reaches_old_peers_unsigned():
+    """v_44 — once the authority key rotated, the owner's config ships the
+    cert inside the signed space_meta; a household below v_44 (still
+    pinned to the old key) gets the UNSIGNED owner variant instead."""
+    from socialhome.authority_cert import verify_authority_cert
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    owner = generate_identity_keypair()
+    own = derive_instance_id(owner.public_key)
+    k2 = generate_space_keypair()
+    space = dataclasses.replace(
+        _make_space(owner_instance_id=own),
+        identity_public_key=k2.public_key.hex(),
+        authority_key_epoch=1,
+    )
+    fed = MagicMock()
+    fed.broadcast_to_space_members = AsyncMock()
+    fed._own_instance_id = own
+    fed.own_instance_id = own
+    fed.own_identity_seed = owner.private_key
+    fed.own_identity_pk = owner.public_key
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=space)
+    repo.get_space_seed = AsyncMock(return_value=k2.private_key)
+    bus = EventBus()
+    SpaceConfigOutbound(bus=bus, federation_service=fed, space_repo=repo).wire()
+    await bus.publish(
+        SpaceConfigChanged(
+            space_id="sp-1", event_type="rename", payload={"name": "x"}, sequence=5
+        )
+    )
+    call = fed.broadcast_to_space_members.await_args
+    meta = call.args[2]["space_meta"]
+    got = verify_authority_cert(
+        meta["authority_cert"], space_id="sp-1", owner_instance_id=own
+    )
+    assert (got.authority_pk_hex, got.key_epoch) == (k2.public_key.hex(), 1)
+    assert meta["authority_key_epoch"] == 1
+    assert verify_authority_event(
+        event_type="space_config_changed",
+        space_id="sp-1",
+        payload=strip_authority_sig_fields(meta),
+        authority_sig=meta["authority_sig"],
+        authority_sig_suite=meta["authority_sig_suite"],
+        space_public_key=k2.public_key,
+    )
+    legacy = call.kwargs["legacy_payload"]["space_meta"]
+    assert "authority_sig" not in legacy and "authority_cert" not in legacy
+    assert (
+        call.kwargs["legacy_below"]
+        == FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION
+    )

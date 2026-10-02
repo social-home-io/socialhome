@@ -25,7 +25,8 @@ from ...domain.space import (
 )
 from ...infrastructure.event_bus import EventBus
 from ..child_protection_service import _VALID_MIN_AGES
-from ..space_service import _space_metadata_for_federation, can_seat_remote_stub
+from ..space_authority_pin import owner_authority_cert_via
+from ..space_service import space_metadata_for_federation, can_seat_remote_stub
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -399,7 +400,12 @@ class SpaceMembershipInboundHandlers:
             "space_type": space.space_type.value,
             "features": space.features.to_wire_dict(),
             "retention_days": space.retention_days,
-            "space_meta": _space_metadata_for_federation(space),
+            # v_44 — the owner's catch-up carries its cert for the current
+            # authority key, so a lagging member re-pins from it.
+            "space_meta": space_metadata_for_federation(
+                space,
+                authority_cert=owner_authority_cert_via(self._federation, space),
+            ),
         }
         try:
             await self._federation.send_event(

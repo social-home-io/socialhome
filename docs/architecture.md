@@ -412,8 +412,15 @@ content key; members who left or were banned cannot — because the
 **epoch advances** on member removal, and the new key is delivered
 only to remaining members.
 
-- `spaces.identity_public_key` — the space's permanent Ed25519
-  public key, derived once at creation.
+- `spaces.identity_public_key` — the space's Ed25519 authority public
+  key, minted at creation. It is no longer permanent (v_44): when an admin
+  household that held the seed is revoked (or delegation is turned off)
+  the owner rotates it, bumping `spaces.authority_key_epoch` and announcing
+  the new key with a cert signed by the owner HOUSEHOLD's identity key
+  (`authority_cert.py`). Every receiver — member, admin, subscriber, GFS —
+  re-pins only from a cert that binds to the space's owner and carries a
+  higher epoch (`services/space_authority_pin.py`), and every
+  authority-signature verifier then reads the new pin.
 - `space_keys(space_id, epoch)` — one row per epoch holding the
   KEK-encrypted AES-256 content key.
 - Membership change → rekey: when a member is removed or banned,
@@ -434,6 +441,9 @@ ordering for non-key config changes.
   and writes.
 - `socialhome/services/space_service.py` — membership churn that
   triggers rekey.
+- `socialhome/services/space_authority_rotation_service.py` — the owner's
+  authority-key rotation on admin revocation and the member-side
+  `SPACE_AUTHORITY_ROTATED` handler (v_44).
 
 ## Resilience and outage recovery (§4.4)
 

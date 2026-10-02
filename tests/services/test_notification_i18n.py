@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -11,11 +12,21 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+import socialhome.i18n as i18n_pkg
 from socialhome.domain.events import (
     PostCreated,
+    SpaceAdminSeedsRetiredAfterRestore,
     TaskAssigned,
 )
 from socialhome.domain.post import Post, PostType
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceFeatures,
+    SpaceMember,
+    SpaceRole,
+    SpaceType,
+)
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.i18n import Catalog
 from socialhome.infrastructure.event_bus import EventBus
@@ -131,3 +142,58 @@ async def test_task_assigned_uses_recipient_locale(env):
     bob = await repo.list("b-id")
     assert bob
     assert "Zugewiesen" in bob[0].title
+
+
+# ─── Shipped catalogs ───────────────────────────────────────────────────
+
+
+async def test_post_restore_admin_notice_is_translated_for_the_owner(tmp_dir):
+    """v_44 F5: the post-restore "review space admins" notice goes through
+    the shipped catalog — every locale has it, and the owner reads it in
+    their own language."""
+    shipped = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+    for locale in ("en", "de", "es", "fr", "nl"):
+        msg = shipped.gettext("notification.space.admins_reconfirm", locale=locale)
+        assert msg != "notification.space.admins_reconfirm", locale
+    db = AsyncDatabase(tmp_dir / "n.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name, locale)"
+            " VALUES('bob', 'b-id', 'Bob', 'de')",
+        )
+        bus = EventBus()
+        spaces = SqliteSpaceRepo(db)
+        await spaces.save(
+            Space(
+                id="sp1",
+                name="Crew",
+                owner_instance_id="iid",
+                owner_username="bob",
+                identity_public_key="00" * 32,
+                config_sequence=0,
+                features=SpaceFeatures(),
+                space_type=SpaceType.PRIVATE,
+                join_mode=JoinMode.INVITE_ONLY,
+            )
+        )
+        await spaces.save_member(
+            SpaceMember(
+                space_id="sp1",
+                user_id="b-id",
+                role=SpaceRole.OWNER.value,
+                joined_at="2026-01-01 00:00:00",
+            )
+        )
+        repo = SqliteNotificationRepo(db)
+        NotificationService(repo, SqliteUserRepo(db), spaces, bus, i18n=shipped).wire()
+        await bus.publish(SpaceAdminSeedsRetiredAfterRestore(space_id="sp1"))
+        notes = [
+            n for n in await repo.list("b-id") if n.type == "space_admins_reconfirm"
+        ]
+        assert [n.title for n in notes] == [
+            shipped.gettext("notification.space.admins_reconfirm", locale="de")
+        ]
+        assert "Backup" in notes[0].title
+    finally:
+        await db.shutdown()

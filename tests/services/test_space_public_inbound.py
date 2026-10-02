@@ -665,3 +665,46 @@ async def test_a_relayed_post_into_an_archived_space_is_dropped(env, reason):
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     assert await env["post_repo"].get("post-1") is None
     assert env["events"] == []
+
+
+# ── v_44: lazy pin heal on an authority failure ──────────────────────────
+
+
+class _Refresher:
+    """Stands in for the GFS mirror's pin refresh: re-pins to ``new_pk``."""
+
+    def __init__(self, space_repo, new_pk_hex: str | None):
+        self._spaces = space_repo
+        self._new = new_pk_hex
+        self.calls: list[str] = []
+
+    async def refresh_authority_pin(self, space_id: str) -> bool:
+        self.calls.append(space_id)
+        if self._new is None:
+            return False
+        await self._spaces.adopt_authority_key(space_id, self._new, 1)
+        return True
+
+
+async def test_new_key_post_heals_the_pin_and_is_accepted(env):
+    """The owner rotated; this subscriber still pins K1. A K2-signed post
+    fails, the refresh re-pins from the GFS cert, the retry accepts it."""
+    k2 = generate_space_keypair()
+    refresher = _Refresher(env["space_repo"], k2.public_key.hex())
+    env["inbound"].attach_pin_refresher(refresher)
+    env_frame = _frame(await _make_envelope(env, space_seed=k2.private_key))
+    await env["inbound"].handle(env_frame)
+    assert refresher.calls == ["sp-1"]
+    assert await env["post_repo"].get("post-1") is not None
+
+
+async def test_old_key_post_is_refused_after_the_heal(env):
+    """Spec §8.5: once healed to K2, a K1-signed relayed post is refused."""
+    k1_seed = env["space_kp"].private_key
+    k2 = generate_space_keypair()
+    await env["space_repo"].adopt_authority_key("sp-1", k2.public_key.hex(), 1)
+    refresher = _Refresher(env["space_repo"], None)
+    env["inbound"].attach_pin_refresher(refresher)
+    await env["inbound"].handle(_frame(await _make_envelope(env, space_seed=k1_seed)))
+    assert refresher.calls == ["sp-1"]
+    assert await env["post_repo"].get("post-1") is None

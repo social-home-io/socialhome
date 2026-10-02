@@ -16,6 +16,25 @@ from socialhome.infrastructure.outbox_processor import (
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
 
 
+async def _seed_peer(db, instance_id: str, *, status: str = "confirmed") -> None:
+    """A minimal ``remote_instances`` row the outbox can queue against."""
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            instance_id,
+            instance_id,
+            "00" * 32,
+            "k1",
+            "k2",
+            f"https://{instance_id}.invalid/inbox",
+            f"inbox-{instance_id}",
+            status,
+        ),
+    )
+
+
 @pytest.fixture
 async def env(tmp_dir):
     """Minimal env with an outbox repo over a real SQLite database."""
@@ -31,6 +50,11 @@ async def env(tmp_dir):
         " identity_public_key, routing_secret) VALUES(?,?,?,?)",
         (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
     )
+
+    # The outbox only queues for a household we still hold a
+    # ``remote_instances`` row for — seed the peers these tests address.
+    for peer in ("peer", "gone", "kept", "other-peer", "peer-a", "peer-b", "peer-x"):
+        await _seed_peer(db, peer)
 
     class Env:
         pass
@@ -704,3 +728,44 @@ async def test_expedite_is_a_no_op_once_the_row_is_already_due(env):
     finally:
         env.db.enqueue = real_enqueue
     assert writes == []
+
+
+async def test_enqueue_refuses_a_peer_that_is_gone(env):
+    """Regression (unpair race): a send that looked the peer up, then
+    awaited its transport while the admin unpaired it, must not leave a row
+    behind once :meth:`delete_for_instance` + the ``remote_instances``
+    delete have run. The outbox queues only for a household we still hold."""
+    await env.db.enqueue("DELETE FROM remote_instances WHERE id='gone'")
+    queued = await env.outbox_repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.SPACE_SYNC_OFFER,
+        payload_json="{}",
+    )
+    assert queued is None
+    rows = await env.db.fetchall(
+        "SELECT id FROM federation_outbox WHERE instance_id='gone'"
+    )
+    assert rows == []
+
+
+async def test_enqueue_to_unpair_tombstone_takes_only_the_unpair(env):
+    """A tombstone (``status='unpairing'``) gets our UNPAIR and nothing
+    else: an in-flight send that enqueues after the tombstone was built must
+    not land a row the redelivery gate would only fail."""
+    await _seed_peer(env.db, "tomb", status="unpairing")
+    refused = await env.outbox_repo.enqueue(
+        instance_id="tomb",
+        event_type=FederationEventType.SPACE_SYNC_ICE,
+        payload_json="{}",
+    )
+    unpair = await env.outbox_repo.enqueue(
+        instance_id="tomb",
+        event_type=FederationEventType.UNPAIR,
+        payload_json="{}",
+    )
+    assert refused is None
+    assert unpair is not None
+    rows = await env.db.fetchall(
+        "SELECT event_type FROM federation_outbox WHERE instance_id='tomb'"
+    )
+    assert [r["event_type"] for r in rows] == ["unpair"]

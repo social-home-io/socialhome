@@ -166,7 +166,11 @@ sequenceDiagram
 
 `SPACE_KEY_EXCHANGE`, `SPACE_KEY_EXCHANGE_ACK`,
 `SPACE_KEY_EXCHANGE_REKEY`, `SPACE_ADMIN_KEY_SHARE`,
-`SPACE_SESSION_CLEANUP`.
+`SPACE_AUTHORITY_ROTATED` (v_44), `SPACE_SESSION_CLEANUP`.
+
+`SPACE_AUTHORITY_ROTATED` is the owner's rotation of the space authority
+key after an admin household is revoked — see
+[Authority key rotation on admin revocation](#authority-key-rotation-on-admin-revocation-v_44).
 
 `SPACE_SESSION_CLEANUP` is the teardown of a §D2b space-scoped seat: when
 the last membership a link-joined household holds in any space we share
@@ -1517,17 +1521,22 @@ its *own* local copy of the space has `delegated_admin_authority` ON,
 the `seed_suite` is recognised (`SUPPORTED_SEED_SUITES`, no default
 fallback), and the seed b64url-decodes to exactly 32 bytes. Anything
 else is dropped (logged) and nothing is stored. Receipt is logged at
-INFO as the key-blast-radius audit event. Turning the flag back off
-does **not** revoke already-shared seeds — deeper revocation (seed
-rotation) is a later phase.
+INFO as the key-blast-radius audit event. From v_44 the share also
+carries `key_epoch` and, once the key has rotated, the owner's
+`authority_cert`; the receiver applies the cert first and then **refuses a
+seed that is not the private half of the key it pins** (that check closes
+an older gap where any 32 bytes were stored). Revoking an admin household,
+or turning the flag back off, rotates the key — see
+[Authority key rotation on admin revocation](#authority-key-rotation-on-admin-revocation-v_44).
 
 **Trust boundary.** A seed-holding admin household can sign anything the
 space key signs — roster gossip and roster snapshots included — so it can
 seat, re-role or remove members in every household's roster mirror, and
 through that decide whose content the §24.11 authorship rule accepts.
 Sharing the seed makes that household a co-authority of the space, not
-just an admin; the owner opts into it per space and it is not revoked by
-turning the flag off.
+just an admin; the owner opts into it per space. From v_44 that authority
+ends with the admin seat: the owner rotates the key the moment the
+household's last admin seat goes (or the flag is turned off).
 
 Gated on `FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE`: against
 a sub-v_22 admin household (no handler) the owner SKIPS the send and
@@ -1632,6 +1641,209 @@ owner's policy switch that distributes the seed). Gated on
 `FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS`; a sub-v_24
 member falls back to the owner-only gate and reconciles when the owner
 re-broadcasts / §25.6 sync runs.
+
+### Authority key rotation on admin revocation (v_44)
+
+**Why.** A seed-holding admin household can sign everything the space key
+signs — config, roster gossip and snapshots, content-key rekeys, GFS
+relays, subscriber key handoffs and subscriber queries. Before v_44 the
+seed was never taken back, so a household demoted from admin stayed a
+co-authority forever.
+
+**When.** The owner host rotates the space authority key under a per-space
+lock (`SpaceAuthorityRotationService`) when, with
+`delegated_admin_authority` ON, a household loses its **last** admin seat:
+
+1. `set_remote_member_role` admin → moderator or admin → member;
+2. `remove_remote_member` of an admin seat (also via
+   `SPACE_REMOTE_ADMIN_KICK`);
+3. a `ban` of a remote admin (the ban now takes the full cross-household
+   removal path, so the seat is really tombstoned);
+4. inbound on the owner: roster gossip / a snapshot that tombstones or
+   lowers an admin seat — an admin household left, or a delegated admin
+   removed another while the owner was offline;
+5. inbound on the owner: `SPACE_REMOTE_MEMBER_REMOVED` with which a
+   household drops its OWN admin seat;
+6. `remove_remote_member` or `ban` of a seat that is ALREADY a tombstone
+   whose last role was admin (it ended through a path that did not rotate);
+
+and unconditionally when `delegated_admin_authority` goes ON → OFF (the
+new seed is then shared with nobody). A household that keeps another admin
+seat keeps the key. With delegation already OFF a revocation still rotates
+when a seed was shared at the current key epoch
+(`spaces.authority_seed_shared_epoch`). The triggers all publish
+`SpaceAdminAuthorityRevoked`; the rotation service re-checks the seats
+(tombstones keep the seat's last role, so no extra table is needed).
+
+**Epoch.** A rotation's `key_epoch` is `max(current + 1, unix seconds)`
+(capped at 2^63−1). An owner restored from a backup or Recovery Kit taken
+before a rotation therefore still issues a HIGHER epoch than the one its
+members hold — and the first boot after either restore rotates every hosted
+space with an authority history (`RecoveryReconnectService
+.maybe_rotate_space_authority`), so a key an admin revoked since the backup
+is retired again. The restored roster and config are STALE (a household
+kicked after the backup is listed live again, a later config edit is
+missing), so that rotation is **not a baseline**: its bundle is marked
+`baseline: false` and carries the cert plus a fresh content key whose
+epoch is at least unix seconds (members may hold epochs the backup never
+saw), and members keep the roster and config they have. It also turns
+`delegated_admin_authority` OFF on the owner — locally, no config
+broadcast, since one would push the stale config as the newest edit — and
+shares the new seed with NOBODY: the restored roster may name admins
+revoked since the backup. With delegation off and no share at the new
+epoch, a later revocation shares nothing either. The owner is notified
+("Restored from backup: review space admins, then turn delegated admin
+back on", translated through the notification catalog); turning delegation
+back on shares the seed with the admins seated then. An owner that lost
+the seed of an already-rotated space (`ensure_space_seed`) re-mints it the
+same way — through a rotation, so members get a cert — never by swapping
+the pin. Legacy spaces: migration 0066 marks every hosted space that holds its
+seed as "seed shared at epoch 0", so a pre-v44 owner that turned delegation
+off without retiring a shared seed still rotates on the next revocation.
+
+**Owner-certified, not old-key-signed.** The new key is announced by an
+`authority_cert` signed with the OWNER HOUSEHOLD's identity key
+(`socialhome/authority_cert.py`) — the demoted household holds the old
+space key and could otherwise sign a competing rotation. Receivers verify
+it against keys they already have: `derive_instance_id(owner_pk)` must
+equal the space's `owner_instance_id` (and `owner_pk` must equal the
+stored host key when one is stored). The cert is
+`{space_id, owner_instance_id, owner_pk, authority_pk,
+authority_key_suite: "ed25519", key_epoch, issued_at,
+cert_sig_suite: "ed25519", cert_sig}` — it names no member, no reason and
+no revoked household.
+
+**Steps on the owner.** (1) mint a fresh keypair at
+`authority_key_epoch + 1` in one compare-and-set write; (2) sign the cert;
+(3) rotate the content key, the rekey signed with the NEW key; (4) send
+each member household `SPACE_AUTHORITY_ROTATED` over its encrypted
+pairwise path — only `space_id` is plaintext; the payload carries the
+cert, the owner's full `space_meta` (signed with the new key, including
+the cert, `authority_key_epoch` and `config_sequence`), the content key
+(signed with the new key) and the household's roster entries (as in a
+roster snapshot, signed with the new key); (5) if delegation is still on,
+re-share the new seed with the cert to every remaining admin household;
+(6) re-publish a public / global space to every GFS that already lists it
+(each re-pins from the cert; a rotation never tells a new GFS the space
+exists), then re-seal the content key to GFS subscribers. The remaining
+admins' seed share (step 5) is sent BEFORE the bundles, and the bundle and
+legacy rekey go only to households that still hold a live seat — a
+household whose last seat was just tombstoned (also through gossip, which
+now drops it from `space_instances` like the owner's own removal path does)
+gets neither the new content key nor the config or roster.
+
+**Receiver rules** (`services/space_authority_pin.py`, one function every
+path uses):
+
+- unknown cert or key suite → refuse (no default);
+- the binding checks above, and a 32-byte `authority_pk`;
+- apply only when `key_epoch` is **higher** than the epoch held. The same
+  epoch with the same key is a no-op; the same epoch with another key, or a
+  lower epoch, is dropped at WARNING. A household that missed rotations
+  jumps straight to the latest;
+- the owner host ignores certs for its own spaces;
+- applying moves the pin and the epoch and clears any seed held, in one
+  write. Every verifier reads the pin from the row, so old-key signatures
+  fail everywhere from then on;
+- a payload that carries a cert inline (config `space_meta`, an invite, a
+  redeem ACK, a roster snapshot) applies it BEFORE verifying its own
+  signature.
+
+For `SPACE_AUTHORITY_ROTATED` only — and only from the owner household
+itself — the member then **resets to the owner's baseline**, because the
+revoked household could have inflated all three with the old key: the
+config `space_meta` is applied past last-writer-wins (its
+`config_sequence` and HLC adopted); every listed seat takes the owner's
+state and version, and seats of other households the owner does not list
+are tombstoned at the owner's roster version; content-key epochs above
+the bundle's are deleted and the bundle key installed regardless of
+`rotated_by`. The reset is bounded three ways:
+
+- it runs **at most once per key epoch**, claimed by compare-and-set on
+  `spaces.authority_baseline_epoch` under a per-space lock, so a redelivered,
+  replayed or concurrent bundle is a no-op;
+- it only overrides state written **under an older key**: every config,
+  seat and content key records the pin epoch it was written under
+  (`spaces.authority_config_epoch`, `space_remote_members.authority_epoch`,
+  `space_keys.authority_epoch`). A member that adopted the cert inline and
+  then accepted newer owner traffic keeps it when the bundle arrives late;
+- a roster longer than the verification cap is applied up to the cap, but
+  nothing is tombstoned for being "missing" from it.
+- the config reset is one conditional statement: it lands only while the
+  member still pins that epoch and no config was applied under it yet, so
+  an inline-cert edit racing the bundle is never rolled back;
+- a bundle marked **`baseline: false`** (the post-restore rotation, below)
+  carries only the cert and a content key: the member adopts the key,
+  imports the content key as an ordinary owner rekey (checked against the
+  new pin) and resets nothing. It still claims the epoch, so no baseline
+  can follow at that epoch.
+
+**No old-key write after the pin moved.** Every authority-verified write —
+a roster merge, a content-key import (rekey or subscriber handoff), a
+config snapshot, a key-share seed — carries the pin it verified against and
+lands only while that pin is still in force, checked in the same statement
+(the config save and its epoch mark are one transaction). A bundle that
+re-pins between a handler's verify and its write therefore turns the old-key
+write into a logged no-op instead of a row stamped with the new epoch.
+
+**Hardening on the owner.** On the household that hosts the space, an
+inbound roster gossip / snapshot entry that would RAISE a seat's role is
+refused outright (WARNING, nothing of it stored) — promotion is the owner's
+own `set_remote_member_role`, and roles change only on the host. Otherwise
+the demoted household could gossip itself back to admin and be handed the
+new seed; dropping instead of capping keeps the host's row identical to
+what the members hold.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as HFS O (owner)
+    participant B as HFS B (demoted admin)
+    participant A as HFS A (remaining admin)
+    participant M as HFS M (member)
+    participant G as GFS
+    Note over O: owner demotes B's last admin seat<br/>(delegation ON)
+    O->>O: mint K2 at epoch N+1 (CAS)<br/>cert = sign(owner household key)
+    O->>O: rotate content key, rekey signed K2
+    O-->>M: SPACE_AUTHORITY_ROTATED<br/>{cert, space_meta·K2, content key·K2, roster·K2}
+    O-->>A: SPACE_AUTHORITY_ROTATED
+    O-->>B: SPACE_AUTHORITY_ROTATED (B is still a member)
+    M->>M: verify cert (derive(owner_pk) = owner id,<br/>epoch > held) → pin K2, reset to baseline
+    B->>B: pin K2, K1 seed cleared
+    O-->>A: SPACE_ADMIN_KEY_SHARE {K2 seed, key_epoch, cert}
+    A->>A: apply cert, seed matches pin → store K2
+    O->>G: publish {…, identity_public_key: K2, authority_cert, ts}<br/>(owner-signed body)
+    G->>G: cert verifies vs owner's registered key,<br/>epoch > stored → re-pin K2
+    B--xM: anything signed with K1 → refused
+    B--xG: K1-signed relay → 403
+```
+
+**Mixed versions and residual windows.** `SPACE_AUTHORITY_ROTATED` and the
+new key-share fields go only to households at or above v_44 (a mesh-only
+member whose version is unknown also gets the bundle — an older one drops
+the unknown type). A household below v_44 stays pinned to the old key: the
+owner keeps reaching it with UNSIGNED config and rekeys over the
+owner-from-instance path, its roster mirror freezes, and the version banner
+names the gap. A GFS that does not advertise `authority_rotation` keeps
+the old pin (the household warns and sends it no cert). An offline owner
+rotates nothing until it is back. Before a receiver applies the cert it
+still accepts old-key signatures. History the revoked household already
+read stays read — forward secrecy holds from the rotation on. The baseline
+reset can drop a remaining admin's edits made under the OLD key before the
+member adopted the new one, and content posted under a deleted old-key
+content epoch becomes unreadable at that member. A household that drops
+off a mixed-version GFS or misses the bundle and every later cert-bearing
+message stays on the old key until the owner's next config edit, roster
+heal or catch-up reaches it. A config, roster or rekey signed with the old key that is
+still in flight when a member adopts the new one is refused there and not
+retried — the authoring admin's edit is lost at that member (the owner's
+own edits converge on its next config edit or roster heal). A content
+epoch an admin minted under the old key and that the bundle deletes leaves
+anything encrypted under it unreadable at members that never imported it.
+After a restore: a household kicked after the backup is listed live in
+the restored roster, so it receives the post-restore content key until the
+owner removes it again, and the owner's next config edit reasserts the
+restored config over members' newer one.
 
 ### Cross-household kick (phase 2, v_9+)
 
@@ -2336,6 +2548,11 @@ shape — no per-event-type `_ROUTED` variants are needed.
   (shared with [sync.md](./sync.md)).
 - `socialhome/services/federation_inbound/space_membership.py` —
   inbound handlers for `SPACE_CREATED`, `SPACE_MEMBER_JOINED`, etc.
+- `socialhome/authority_cert.py` — the owner-signed authority cert (v_44);
+  `socialhome/services/space_authority_pin.py` — `apply_authority_cert`
+  (every receiver) and `owner_authority_cert` (the owner);
+  `socialhome/services/space_authority_rotation_service.py` — the owner's
+  rotation and the member's `SPACE_AUTHORITY_ROTATED` handler.
 - `socialhome/repositories/space_repo.py`,
   `space_remote_member_repo.py` — persistence.
 - `socialhome/routes/space_routes.py` — REST endpoints

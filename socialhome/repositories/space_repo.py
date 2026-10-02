@@ -54,6 +54,39 @@ class AbstractSpaceRepo(Protocol):
     async def set_space_seed(self, space_id: str, seed: bytes) -> None: ...
     async def set_space_pubkey(self, space_id: str, public_key_hex: str) -> None: ...
     async def get_space_seed(self, space_id: str) -> bytes | None: ...
+    async def clear_space_seed(self, space_id: str) -> None: ...
+    async def set_space_seed_if_pin(
+        self, space_id: str, seed: bytes, *, expected_pk: str
+    ) -> bool: ...
+    async def rotate_authority_key(
+        self,
+        space_id: str,
+        *,
+        public_key_hex: str,
+        seed: bytes,
+        key_epoch: int,
+    ) -> bool: ...
+    async def adopt_authority_key(
+        self, space_id: str, public_key_hex: str, key_epoch: int
+    ) -> bool: ...
+    async def claim_authority_baseline(self, space_id: str, key_epoch: int) -> bool: ...
+    async def get_authority_config_epoch(self, space_id: str) -> int: ...
+    async def save_config_if_authority_epoch(
+        self, space: Space, *, verified_epoch: int
+    ) -> bool: ...
+    async def mark_config_authority(self, space_id: str) -> None: ...
+    async def save_config_baseline(
+        self, space: Space, *, author: str, epoch: int
+    ) -> bool: ...
+    async def mark_seed_shared(self, space_id: str) -> None: ...
+    async def set_mirror_provenance(
+        self, space_id: str, *, gfs_id: str, rotation_seq: int
+    ) -> None: ...
+    async def get_mirror_provenance(self, space_id: str) -> tuple[str | None, int]: ...
+    async def adopt_gfs_pin(
+        self, space_id: str, *, gfs_id: str, public_key_hex: str, rotation_seq: int
+    ) -> bool: ...
+    async def get_seed_shared_epoch(self, space_id: str) -> int | None: ...
     async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
     async def set_cover_hash(
@@ -354,8 +387,76 @@ class SqliteSpaceRepo:
     # ── Spaces ─────────────────────────────────────────────────────────
 
     async def save(self, space: Space) -> Space:
+        sql, params = self._save_statement(space)
+        await self._db.enqueue(sql, params)
+        return space
+
+    async def save_config_if_authority_epoch(
+        self, space: Space, *, verified_epoch: int
+    ) -> bool:
+        """Apply an authority-signed config snapshot ATOMICALLY (v_44).
+
+        One transaction: the save lands only while the space still pins the
+        key epoch the snapshot's signature verified against, and records
+        that epoch as the config's ``authority_config_epoch``. A rotation
+        between the verify and the write makes this a no-op (``False``), so
+        an old-key config can never be stored as a new-key one.
+        """
+        sql, params = self._save_statement(space)
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT authority_key_epoch FROM spaces WHERE id=?", (space.id,)
+            ).fetchone()
+            if row is None or int(row[0]) != verified_epoch:
+                return False
+            conn.execute(sql, params)
+            conn.execute(
+                "UPDATE spaces SET authority_config_epoch=? WHERE id=?",
+                (verified_epoch, space.id),
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def save_config_baseline(
+        self, space: Space, *, author: str, epoch: int
+    ) -> bool:
+        """Apply the owner's baseline config from a rotation bundle (v_44),
+        ATOMICALLY.
+
+        One transaction: the save lands only while the space pins ``epoch``
+        AND no config was applied under that epoch yet
+        (``authority_config_epoch < epoch``); it records ``author`` as the
+        config author and stamps ``authority_config_epoch``. A config that a
+        concurrent inbound edit applied under the new key in between is
+        therefore never rolled back (``False``).
+        """
+        sql, params = self._save_statement(space)
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT authority_key_epoch, authority_config_epoch"
+                " FROM spaces WHERE id=?",
+                (space.id,),
+            ).fetchone()
+            if row is None or int(row[0]) != epoch or int(row[1]) >= epoch:
+                return False
+            conn.execute(sql, params)
+            conn.execute(
+                "UPDATE spaces SET authority_config_epoch=?,"
+                " config_author_instance=? WHERE id=?",
+                (epoch, author, space.id),
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    @staticmethod
+    def _save_statement(space: Space) -> tuple[str, tuple]:
+        """The upsert ``save`` runs, as ``(sql, params)``."""
         cols = space.features.to_columns()
-        await self._db.enqueue(
+        return (
             """
             INSERT INTO spaces(
                 id, name, description, emoji,
@@ -516,7 +617,6 @@ class SqliteSpaceRepo:
                 space.category,
             ),
         )
-        return space
 
     async def set_cover_hash(
         self,
@@ -610,6 +710,168 @@ class SqliteSpaceRepo:
         if wrapped is None:
             return None
         return self._kek.decrypt(wrapped, associated_data=space_id.encode("utf-8"))
+
+    async def set_space_seed_if_pin(
+        self, space_id: str, seed: bytes, *, expected_pk: str
+    ) -> bool:
+        """Store ``seed`` only while the space still pins ``expected_pk``
+        (v_44) — the check the key-share handler made, repeated in the same
+        statement, so a rotation in between never leaves a retired seed
+        stored next to the new pin. Returns whether it was stored."""
+        if self._kek is None:
+            raise RuntimeError("space seed persistence requires a key_manager")
+        if len(seed) != 32:
+            raise ValueError("Ed25519 seed must be 32 bytes")
+        wrapped = self._kek.encrypt(seed, associated_data=space_id.encode("utf-8"))
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET identity_private_key=? WHERE id=?"
+            " AND lower(identity_public_key)=lower(?)",
+            (wrapped, space_id, expected_pk),
+        )
+        return changed > 0
+
+    async def clear_space_seed(self, space_id: str) -> None:
+        """Drop this household's copy of the space signing seed.
+
+        Used when a member household learns it may no longer sign for the
+        space (delegation turned off, or the seed no longer matches the
+        pinned authority key). Idempotent.
+        """
+        await self._db.enqueue(
+            "UPDATE spaces SET identity_private_key=NULL WHERE id=?",
+            (space_id,),
+        )
+
+    async def rotate_authority_key(
+        self,
+        space_id: str,
+        *,
+        public_key_hex: str,
+        seed: bytes,
+        key_epoch: int,
+    ) -> bool:
+        """Owner-side rotation (v_44): install a fresh authority keypair at
+        ``key_epoch`` in ONE compare-and-set write.
+
+        Pubkey, KEK-wrapped seed and epoch move together, and only when the
+        stored epoch is still below ``key_epoch`` — two rotations racing on
+        the same space cannot interleave a pubkey from one with the seed of
+        the other. Returns whether the row was updated.
+        """
+        if self._kek is None:
+            raise RuntimeError("space seed persistence requires a key_manager")
+        if len(seed) != 32:
+            raise ValueError("Ed25519 seed must be 32 bytes")
+        wrapped = self._kek.encrypt(seed, associated_data=space_id.encode("utf-8"))
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET identity_public_key=?, identity_private_key=?,"
+            " authority_key_epoch=? WHERE id=? AND authority_key_epoch < ?",
+            (public_key_hex, wrapped, key_epoch, space_id, key_epoch),
+        )
+        return changed > 0
+
+    async def adopt_authority_key(
+        self, space_id: str, public_key_hex: str, key_epoch: int
+    ) -> bool:
+        """Receiver-side re-pin from a VERIFIED owner cert (v_44).
+
+        Moves the pin and the epoch, and drops any seed we hold — that seed
+        belongs to the key being retired (a new one only ever arrives in a
+        ``SPACE_ADMIN_KEY_SHARE`` that is checked against the NEW pin). One
+        compare-and-set UPDATE: applied only when ``key_epoch`` is strictly
+        higher than the stored epoch, so a replayed or reordered older cert
+        is a no-op. Callers MUST have verified the cert. Returns whether the
+        row was updated.
+        """
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET identity_public_key=?, authority_key_epoch=?,"
+            " identity_private_key=NULL WHERE id=? AND authority_key_epoch < ?",
+            (public_key_hex, key_epoch, space_id, key_epoch),
+        )
+        return changed > 0
+
+    async def claim_authority_baseline(self, space_id: str, key_epoch: int) -> bool:
+        """Claim the one baseline reset for ``key_epoch`` (v_44).
+
+        Compare-and-set on ``authority_baseline_epoch``: True for exactly one
+        caller per epoch, so a replayed / redelivered / concurrent rotation
+        bundle never resets this household a second time.
+        """
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET authority_baseline_epoch=? WHERE id=?"
+            " AND authority_baseline_epoch < ?",
+            (key_epoch, space_id, key_epoch),
+        )
+        return changed > 0
+
+    async def get_authority_config_epoch(self, space_id: str) -> int:
+        """The authority-key epoch in force when this space's config was
+        last applied (v_44)."""
+        row = await self._db.fetchone(
+            "SELECT authority_config_epoch FROM spaces WHERE id=?", (space_id,)
+        )
+        return int(row["authority_config_epoch"] or 0) if row else 0
+
+    async def mark_config_authority(self, space_id: str) -> None:
+        """Record that the config just applied was applied under the pin we
+        hold now — a later baseline reset must not roll it back."""
+        await self._db.enqueue(
+            "UPDATE spaces SET authority_config_epoch=authority_key_epoch WHERE id=?",
+            (space_id,),
+        )
+
+    async def set_mirror_provenance(
+        self, space_id: str, *, gfs_id: str, rotation_seq: int
+    ) -> None:
+        """Record which GFS connection seated this follower mirror, and the
+        ``authority_rotation_seq`` it showed then (v_44)."""
+        await self._db.enqueue(
+            "UPDATE spaces SET mirror_gfs_id=?, gfs_rotation_seq=? WHERE id=?",
+            (gfs_id, rotation_seq, space_id),
+        )
+
+    async def get_mirror_provenance(self, space_id: str) -> tuple[str | None, int]:
+        row = await self._db.fetchone(
+            "SELECT mirror_gfs_id, gfs_rotation_seq FROM spaces WHERE id=?",
+            (space_id,),
+        )
+        if row is None:
+            return None, 0
+        return row["mirror_gfs_id"], int(row["gfs_rotation_seq"] or 0)
+
+    async def adopt_gfs_pin(
+        self, space_id: str, *, gfs_id: str, public_key_hex: str, rotation_seq: int
+    ) -> bool:
+        """A FOLLOWER re-pins from the GFS that seated its mirror (v_44).
+
+        Compare-and-set: only that connection (``mirror_gfs_id``), only to a
+        strictly higher ``rotation_seq``. Clears any seed held. Never touches
+        ``authority_key_epoch`` — that orders owner-certified epochs.
+        """
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET identity_public_key=?, gfs_rotation_seq=?,"
+            " identity_private_key=NULL WHERE id=? AND mirror_gfs_id=?"
+            " AND gfs_rotation_seq < ?",
+            (public_key_hex, rotation_seq, space_id, gfs_id, rotation_seq),
+        )
+        return changed > 0
+
+    async def mark_seed_shared(self, space_id: str) -> None:
+        """Owner side: the signing seed for the CURRENT key was just shared
+        with an admin household."""
+        await self._db.enqueue(
+            "UPDATE spaces SET authority_seed_shared_epoch=authority_key_epoch"
+            " WHERE id=?",
+            (space_id,),
+        )
+
+    async def get_seed_shared_epoch(self, space_id: str) -> int | None:
+        row = await self._db.fetchone(
+            "SELECT authority_seed_shared_epoch FROM spaces WHERE id=?", (space_id,)
+        )
+        if row is None or row["authority_seed_shared_epoch"] is None:
+            return None
+        return int(row["authority_seed_shared_epoch"])
 
     async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None:
         """Record the hosting household's Ed25519 identity pubkey (hex).
@@ -851,7 +1113,7 @@ class SqliteSpaceRepo:
         transaction: the HLC is read, ``tick(now_ms)``-ed off the current value
         (monotonic per node) and written back beside the incremented sequence.
         The advanced HLC rides on the row → picked up by the federation
-        snapshot (``_space_metadata_for_federation``); callers consume only the
+        snapshot (``space_metadata_for_federation``); callers consume only the
         returned int, so the 8 config-edit call sites are unchanged.
 
         ``AsyncDatabase.transact`` runs the read + UPDATE inside a single
@@ -2121,6 +2383,7 @@ def _row_to_space(row: dict | None) -> Space | None:
         config_sequence=int(row.get("config_sequence") or 0),
         roster_sequence=int(row.get("roster_sequence") or 0),
         config_hlc=str(row.get("config_hlc") or "0-0"),
+        authority_key_epoch=int(row.get("authority_key_epoch") or 0),
         features=features,
         space_type=SpaceType(row.get("space_type", "private")),
         join_mode=JoinMode(row.get("join_mode", "invite_only")),

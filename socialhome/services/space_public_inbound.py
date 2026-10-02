@@ -71,6 +71,7 @@ from .space_public_author import (
 )
 
 if TYPE_CHECKING:
+    from .space_authority_pin import AuthorityPinRefresher
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_crypto_service import SpaceContentEncryption
@@ -89,6 +90,7 @@ class SpacePublicInbound:
         "_posts",
         "_own_instance_id",
         "_mentions",
+        "_pin_refresher",
     )
 
     def __init__(
@@ -108,6 +110,12 @@ class SpacePublicInbound:
         #: Resolves @-mentions in the decrypted relayed post against this
         #: household's view of the space's members. ``None`` → no mentions.
         self._mentions = mention_resolver
+        self._pin_refresher: "AuthorityPinRefresher | None" = None
+
+    def attach_pin_refresher(self, refresher: "AuthorityPinRefresher") -> None:
+        """Wire the lazy pin heal (v_44): on an authority failure the
+        subscriber re-fetches the GFS listing's owner cert once."""
+        self._pin_refresher = refresher
 
     def attach_identity(self, *, own_instance_id: str) -> None:
         """Wire our own instance id — the self-echo guard's only input."""
@@ -151,11 +159,22 @@ class SpacePublicInbound:
             )
             return
         if not self._verify_authority(space_id, envelope, space.identity_public_key):
-            log.warning(
-                "space_public.inbound: authority signature failed for space %s",
-                space_id,
-            )
-            return
+            # v_44 — the owner may have rotated the space authority key
+            # since we pinned it: heal from the GFS listing's owner cert
+            # (rate-limited) and verify ONCE more against the new pin.
+            healed = None
+            if self._pin_refresher is not None and (
+                await self._pin_refresher.refresh_authority_pin(space_id)
+            ):
+                healed = await self._spaces.get(space_id)
+            if healed is None or not self._verify_authority(
+                space_id, envelope, healed.identity_public_key
+            ):
+                log.warning(
+                    "space_public.inbound: authority signature failed for space %s",
+                    space_id,
+                )
+                return
         epoch = envelope.get("epoch")
         ciphertext = envelope.get("encrypted_payload")
         if not isinstance(epoch, int) or not isinstance(ciphertext, str):

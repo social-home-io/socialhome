@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from socialhome.authority_cert import sign_authority_cert
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.global_server import cluster as cluster_mod
 from socialhome.global_server.app_keys import (
     gfs_cluster_key,
@@ -591,6 +594,8 @@ async def test_wire_helpers_roundtrip_client_space_report():
         posts_per_week=1.5,
         published_at="2026-01-01T00:00:00",
         identity_public_key="cc" * 32,
+        authority_cert={"key_epoch": 2, "space_id": "s"},
+        authority_rotation_seq=7,
         withdrawn=True,
     )
     # Every field round-trips. ``identity_public_key`` in particular: it used
@@ -610,3 +615,158 @@ async def test_wire_helpers_roundtrip_client_space_report():
         created_at=123,
     )
     assert _wire_to_report(_report_to_wire(r)) == r
+
+
+async def _cert_world(started_app):
+    """A registered owner (derivable id) with a space pinned to K1."""
+    svc: ClusterService = started_app[gfs_cluster_key]
+    fed = started_app[gfs_fed_repo_key]
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    await svc.apply_sync_client(
+        "upsert",
+        {
+            "instance_id": owner_id,
+            "public_key": owner.public_key.hex(),
+            "inbox_url": "http://o",
+            "status": "active",
+        },
+    )
+    k1 = generate_identity_keypair()
+    seeded = GlobalSpace(
+        space_id="rot",
+        owning_instance=owner_id,
+        name="R",
+        status="active",
+        identity_public_key=k1.public_key.hex(),
+    )
+    await fed.upsert_space(seeded)
+    return svc, fed, owner, owner_id, seeded
+
+
+def _cluster_cert(owner, owner_id, pk_hex, epoch):
+    return sign_authority_cert(
+        space_id="rot",
+        owner_instance_id=owner_id,
+        owner_seed=owner.private_key,
+        owner_pk_hex=owner.public_key.hex(),
+        authority_pk_hex=pk_hex,
+        key_epoch=epoch,
+    )
+
+
+async def test_cluster_sync_repins_only_with_a_valid_owner_cert(started_app):
+    """v_44: a peer node's NODE_SYNC_SPACE moves the pin only when it
+    carries the owner's cert for the new key — never on its say-so."""
+    svc, fed, owner, owner_id, seeded = await _cert_world(started_app)
+    k2 = generate_identity_keypair().public_key.hex()
+    # No cert: the pin stays.
+    await svc.apply_sync_space(
+        "upsert", cluster_mod._space_to_wire(replace(seeded, identity_public_key=k2))
+    )
+    assert (
+        await fed.get_space("rot")
+    ).identity_public_key == seeded.identity_public_key
+    # Forged cert (another household's key): the pin stays.
+    evil = generate_identity_keypair()
+    forged = _cluster_cert(evil, owner_id, k2, 1)
+    await svc.apply_sync_space(
+        "upsert",
+        cluster_mod._space_to_wire(
+            replace(seeded, identity_public_key=k2, authority_cert=forged)
+        ),
+    )
+    assert (
+        await fed.get_space("rot")
+    ).identity_public_key == seeded.identity_public_key
+    # The owner's cert: re-pinned, cert stored.
+    cert = _cluster_cert(owner, owner_id, k2, 1)
+    await svc.apply_sync_space(
+        "upsert",
+        cluster_mod._space_to_wire(
+            replace(seeded, identity_public_key=k2, authority_cert=cert)
+        ),
+    )
+    row = await fed.get_space("rot")
+    assert (row.identity_public_key, row.authority_cert) == (k2, cert)
+    # A replay of the older state cannot move it back.
+    await svc.apply_sync_space("upsert", cluster_mod._space_to_wire(seeded))
+    assert (await fed.get_space("rot")).identity_public_key == k2
+
+
+async def test_cluster_sync_new_row_drops_an_invalid_cert(started_app):
+    svc: ClusterService = started_app[gfs_cluster_key]
+    fed = started_app[gfs_fed_repo_key]
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    await svc.apply_sync_client(
+        "upsert",
+        {
+            "instance_id": owner_id,
+            "public_key": owner.public_key.hex(),
+            "inbox_url": "http://o",
+            "status": "active",
+        },
+    )
+    k2 = generate_identity_keypair().public_key.hex()
+    await svc.apply_sync_space(
+        "upsert",
+        cluster_mod._space_to_wire(
+            GlobalSpace(
+                space_id="rot",
+                owning_instance=owner_id,
+                name="R",
+                status="active",
+                identity_public_key=k2,
+                authority_cert={"key_epoch": 4},
+            )
+        ),
+    )
+    row = await fed.get_space("rot")
+    assert row.identity_public_key == k2
+    assert row.authority_cert is None
+
+
+async def test_cluster_sync_never_moves_the_rotation_seq_backwards(started_app):
+    """F2: ``authority_rotation_seq`` travels in the cluster wire and is
+    max-merged — a node that re-pins from the cert catches up with the
+    publishing node's seq, and a stale gossip never lowers it. A seq for a
+    pin this node does not hold is not taken."""
+    svc, fed, owner, owner_id, seeded = await _cert_world(started_app)
+    k2 = generate_identity_keypair().public_key.hex()
+    cert = _cluster_cert(owner, owner_id, k2, 1)
+    rotated = replace(
+        seeded, identity_public_key=k2, authority_cert=cert, authority_rotation_seq=5
+    )
+    await svc.apply_sync_space("upsert", cluster_mod._space_to_wire(rotated))
+    assert (await fed.get_space("rot")).authority_rotation_seq == 5
+    # Stale gossip (same pin, lower seq): unchanged.
+    await svc.apply_sync_space(
+        "upsert", cluster_mod._space_to_wire(replace(rotated, authority_rotation_seq=2))
+    )
+    assert (await fed.get_space("rot")).authority_rotation_seq == 5
+    # A seq for an uncertified pin: not taken.
+    k3 = generate_identity_keypair().public_key.hex()
+    await svc.apply_sync_space(
+        "upsert",
+        cluster_mod._space_to_wire(
+            replace(
+                rotated,
+                identity_public_key=k3,
+                authority_cert=None,
+                authority_rotation_seq=99,
+            )
+        ),
+    )
+    row = await fed.get_space("rot")
+    assert (row.identity_public_key, row.authority_rotation_seq) == (k2, 5)
+    # Same pin, higher seq: caught up.
+    await svc.apply_sync_space(
+        "upsert", cluster_mod._space_to_wire(replace(rotated, authority_rotation_seq=8))
+    )
+    assert (await fed.get_space("rot")).authority_rotation_seq == 8
+    # A malformed seq is ignored.
+    wire = cluster_mod._space_to_wire(rotated)
+    wire["authority_rotation_seq"] = "lots"
+    await svc.apply_sync_space("upsert", wire)
+    assert (await fed.get_space("rot")).authority_rotation_seq == 8

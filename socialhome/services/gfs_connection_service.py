@@ -60,7 +60,7 @@ from datetime import datetime, timezone
 import aiohttp
 
 from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
-from ..crypto import b64url_encode, sign_ed25519
+from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_PREFIX,
@@ -71,6 +71,7 @@ from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from .space_authority_pin import owner_authority_cert
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +182,8 @@ class GfsConnectionService:
         "_info_failed_at",
         "_envelope_relay",
         "_invite_links",
+        "_authority_rotation",
+        "_rotation_warned",
     )
 
     def __init__(
@@ -234,6 +237,12 @@ class GfsConnectionService:
         # Same discipline again, for the ``invite_links`` capability
         # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
         self._invite_links: dict[str, bool] = {}
+        # Same again for ``authority_rotation`` (v_44): whether the GFS
+        # re-pins a space's authority key from an owner cert. A GFS without
+        # it keeps the OLD key — and so keeps honouring a revoked admin's
+        # relays — so a household publishing a cert there warns, once.
+        self._authority_rotation: dict[str, bool] = {}
+        self._rotation_warned: set[str] = set()
 
     def attach_publish_context(
         self,
@@ -734,6 +743,15 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
 
         body = await self._build_publish_body(space_id)
+        if "authority_cert" in body and not await self._signed_capability_supported(
+            conn, "authority_rotation", self._authority_rotation
+        ):
+            # An older GFS folds only the fields it knows into the canonical
+            # bytes it verifies, so a cert in the body would break the
+            # signature and 403 the whole publish. Send it the body without
+            # the cert: it keeps the old pin, and we say so.
+            self._warn_no_authority_rotation(conn)
+            body = await self._build_publish_body(space_id, with_cert=False)
         client = self._client()
         publish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/publish"
         try:
@@ -760,7 +778,22 @@ class GfsConnectionService:
         status = data.get("status") or "active"
         return await self._repo.publish_space(space_id, gfs_id, status=status)
 
-    async def _build_publish_body(self, space_id: str) -> dict:
+    def _warn_no_authority_rotation(self, conn: GfsConnection) -> None:
+        """WARN once per connection: this GFS cannot re-pin a rotated key."""
+        if conn.id in self._rotation_warned:
+            return
+        self._rotation_warned.add(conn.id)
+        log.warning(
+            "GFS %r (%s) does not advertise authority_rotation — it keeps the "
+            "old space authority key after a rotation, so a revoked admin's "
+            "relays to it stay authorized. Ask its operator to upgrade.",
+            conn.display_name,
+            conn.inbox_url,
+        )
+
+    async def _build_publish_body(
+        self, space_id: str, *, with_cert: bool = True
+    ) -> dict:
         """Compose + sign the publish body.
 
         Fail-closed: the GFS now mandates an Ed25519 signature on every
@@ -833,6 +866,22 @@ class GfsConnectionService:
             # and refreshing metadata); see ``GfsFederationService.publish_space``.
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        # v_44 — once the space authority key rotated, the owner's cert for
+        # the current key, inside the signed body: the GFS re-pins only from
+        # a cert that verifies against this household's registered key. It
+        # names no member and no reason.
+        cert = (
+            owner_authority_cert(
+                space,
+                own_instance_id=self._own_instance_id,
+                owner_seed=self._own_signing_key,
+                owner_pk=ed25519_public_key(self._own_signing_key),
+            )
+            if with_cert
+            else None
+        )
+        if cert is not None:
+            body["authority_cert"] = cert
         canonical = json.dumps(
             body,
             separators=(",", ":"),
@@ -1280,6 +1329,30 @@ class GfsConnectionService:
                 )
         return published
 
+    async def republish_space(self, space_id: str) -> int:
+        """Re-publish ``space_id`` to every GFS it is ALREADY published to.
+
+        The v_44 authority rotation calls this so each GFS that lists the
+        space re-pins from the owner's cert. Deliberately not
+        :meth:`publish_space_to_all`: a key rotation must never be how a
+        connection server first learns that a space exists. Fail-soft per
+        GFS; returns how many accepted the publish.
+        """
+        done = 0
+        for conn in await self._repo.list_gfs_for_space(space_id):
+            if conn.status != "active":
+                continue
+            try:
+                await self.publish_space(space_id, conn.id)
+                done += 1
+            except GfsConnectionError as exc:
+                log.warning(
+                    "republish_space: failed for gfs %s: %s",
+                    conn.id,
+                    exc,
+                )
+        return done
+
     async def publish_space_event(
         self,
         *,
@@ -1441,7 +1514,8 @@ class GfsConnectionService:
         pinned NO key (published by a household predating the pin) rejects
         every relay for that space with 403 until the metadata is published
         again — and nothing else re-publishes it. Re-publishing is idempotent
-        on the GFS side (the pin is COALESCE-guarded and immutable once set),
+        on the GFS side (the pin is COALESCE-guarded and only moves on an
+        owner-certified rotation, v_44 — which this publish also carries),
         so this heals a NULL pin without disturbing a healthy one.
 
         Skipped, at DEBUG (both are expected, not faults): a space whose local

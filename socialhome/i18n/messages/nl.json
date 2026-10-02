@@ -28,5 +28,6 @@
   "notification.space.feature.pages": "Pagina's",
   "notification.space.feature.tasks": "Taken",
   "notification.space.feature.stickies": "Notities",
-  "notification.space.feature.calendar": "Agenda-items"
+  "notification.space.feature.calendar": "Agenda-items",
+  "notification.space.admins_reconfirm": "Hersteld uit back-up: controleer de beheerders van de ruimte en zet gedelegeerd beheer daarna weer aan"
 }

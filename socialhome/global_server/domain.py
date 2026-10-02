@@ -78,11 +78,23 @@ class GlobalSpace:
     posts_per_week: float = 0.0
     published_at: str = ""  # ISO 8601
     #: The space's Ed25519 *authority* verify key (hex), TOFU-pinned on first
-    #: publish (Phase 5a). Lets the GFS authorize a relay by a space-authority
+    #: publish (Phase 5a); moved afterwards only by an owner-signed
+    #: ``authority_cert`` with a higher epoch (v_44). Lets the GFS authorize a relay by a space-authority
     #: signature (any seed-holder — owner or delegated admin) without learning
     #: the space content. Empty when an older HFS published no pubkey → such a
     #: space can only be relayed by its owning instance.
     identity_public_key: str = ""
+    #: The owner's cert for ``identity_public_key`` (v_44,
+    #: :mod:`socialhome.authority_cert`) — ``None`` while the space still uses
+    #: its creation-time key (epoch 0). Stored only after verifying it against
+    #: the owner's registered key; served on ``GET /gfs/spaces/{id}`` so a
+    #: subscriber can heal its pin. Names no member and no reason.
+    authority_cert: dict | None = None
+    #: This server's own count of accepted re-pins (migration 0013): +1 each
+    #: time an owner cert moved the pin. The public directory serves THIS,
+    #: never the cert's wall-clock-based epoch, so followers can order pins
+    #: without learning when the owner revoked an admin.
+    authority_rotation_seq: int = 0
     #: The OWNER withdrew this listing (``DELETE /gfs/spaces/{id}/unpublish``).
     #: Reversible: the owner's next signed publish clears it. Deliberately
     #: distinct from ``status='banned'``, which is a GFS MODERATOR action and
