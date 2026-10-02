@@ -385,6 +385,9 @@ a:focus:not(:focus-visible) { outline: none; }
   border-radius: var(--sh-radius-md);
   text-decoration: none;
 }
+@media (pointer: coarse) {
+  .sh-sidenav .sh-sidenav-subitem { min-height: var(--sh-tap-target-compact); }
+}
 .sh-sidenav .sh-sidenav-subitem--active {
   background: color-mix(in srgb, var(--sh-primary) 14%, transparent);
   color: var(--sh-primary-text);
@@ -1024,6 +1027,11 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
   margin-bottom: -1px;
 }
 .sh-tab:hover { color: var(--sh-text); }
+@media (pointer: coarse) {
+  /* Every tab strip (calendar Month / Week / Day, settings…) clears the
+   * compact floor; the space sub-header raises its own to 44 below. */
+  .sh-tab { min-height: var(--sh-tap-target-compact); }
+}
 .sh-tab--active {
   color: var(--sh-primary-text);
   border-bottom-color: var(--sh-primary);
@@ -3023,6 +3031,11 @@ button.sh-friends-member-chip:not(:disabled):hover {
   transition: background var(--sh-transition-fast), color var(--sh-transition-fast);
 }
 .sh-comment-btn:hover { background: var(--sh-bg-secondary); color: var(--sh-primary-text); }
+@media (pointer: coarse) {
+  .sh-reaction-chip,
+  .sh-reaction-add,
+  .sh-comment-btn { min-height: var(--sh-tap-target-compact); }
+}
 
 /* Latest-comment preview line — shown under the reactions row on
  * posts that have at least one comment.  Renders the comment as a
@@ -3466,6 +3479,14 @@ button.sh-friends-member-chip:not(:disabled):hover {
   flex-shrink: 0;
 }
 .sh-type-btn:hover { background: var(--sh-bg); }
+@media (pointer: coarse) {
+  /* The type picker scrolls sideways, so the compact floor keeps every
+   * type in reach without a 44 px row that hides half of them. */
+  .sh-type-btn {
+    width: var(--sh-tap-target-compact);
+    height: var(--sh-tap-target-compact);
+  }
+}
 .sh-type-btn--active,
 .sh-type-btn--active:hover {
   background: var(--sh-primary-fill);
@@ -4721,6 +4742,13 @@ body.sh-dm-thread-open .sh-messages {
 .sh-thread-history:focus-visible {
   background: var(--sh-bg-secondary);
 }
+@media (pointer: coarse) {
+  .sh-thread-back,
+  .sh-thread-history {
+    width: var(--sh-tap-target);
+    height: var(--sh-tap-target);
+  }
+}
 
 /* Thread-header mute bell (§23.47). Same square as the history link;
  * the bell-slash state tints so a muted thread reads at a glance. The
@@ -5867,6 +5895,9 @@ body.sh-dm-thread-open .sh-messages {
   background: var(--sh-bg-secondary);
   border-color: var(--sh-border);
 }
+@media (pointer: coarse) {
+  .sh-cal-strip-quick__btn { min-height: var(--sh-tap-target-compact); }
+}
 
 /* Target-calendar picker in the event dialog — multi-select avatar
  * chip row carrying the same identity language as the filter strip
@@ -6102,6 +6133,10 @@ body.sh-dm-thread-open .sh-messages {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+@media (pointer: coarse) {
+  /* The agenda / list row's tap-to-expand header was ~21 px tall. */
+  .sh-event-header { min-height: var(--sh-tap-target-compact); }
 }
 .sh-event-header strong {
   flex: 1;
@@ -7954,6 +7989,12 @@ button.sh-shopping-item__text:focus-visible {
   font-family: inherit;
 }
 .sh-md-btn:hover { background: var(--sh-bg-secondary); border-color: var(--sh-border); }
+@media (pointer: coarse) {
+  .sh-md-btn {
+    min-width: var(--sh-tap-target-compact);
+    min-height: var(--sh-tap-target-compact);
+  }
+}
 .sh-md-sep {
   width: 1px;
   height: 20px;
@@ -8030,6 +8071,10 @@ button.sh-shopping-item__text:focus-visible {
   cursor: pointer;
   font-weight: 600;
 }
+/* The tabs are ``role="tab"`` and carry ``aria-selected`` — the
+ * ``aria-pressed`` selector alone never matched, so the active pane
+ * had no highlight. */
+.sh-page-editor-mobile-tabs button[aria-selected="true"],
 .sh-page-editor-mobile-tabs button[aria-pressed="true"] {
   background: var(--sh-primary-fill);
   color: var(--sh-on-primary-fill);
@@ -8041,6 +8086,9 @@ button.sh-shopping-item__text:focus-visible {
   .sh-page-editor-preview { min-height: 55vh; max-height: 65vh; }
   .sh-page-editor-mobile-tabs { display: flex; }
   .sh-page-editor-hidden-mobile { display: none; }
+}
+@media (pointer: coarse) {
+  .sh-page-editor-mobile-tabs button { min-height: var(--sh-tap-target-compact); }
 }
 
 /* Pages — history drawer */
@@ -8361,6 +8409,14 @@ button.sh-shopping-item__text:focus-visible {
 .sh-pages-help summary {
   cursor: pointer;
   font-size: var(--sh-font-size-sm);
+}
+@media (pointer: coarse) {
+  /* Padding, not ``display: flex`` — that would drop the ▸ marker. */
+  .sh-pages-help summary {
+    padding-block: var(--sh-space-sm);
+    min-height: var(--sh-tap-target-compact);
+    box-sizing: border-box;
+  }
 }
 .sh-pages-help ul {
   margin: var(--sh-space-sm) 0 0;
@@ -14458,6 +14514,12 @@ a.sh-link-preview-link:focus-visible {
   transition: background var(--sh-transition-fast);
 }
 .sh-emoji-pick-btn:hover { background: var(--sh-bg-secondary); }
+@media (pointer: coarse) {
+  .sh-emoji-pick-btn {
+    width: var(--sh-tap-target-compact);
+    height: var(--sh-tap-target-compact);
+  }
+}
 .sh-emoji-pick-wrap .sh-reaction-picker {
   bottom: calc(100% + 6px);
   right: 0;
@@ -14644,6 +14706,18 @@ a.sh-link-preview-link:focus-visible {
   cursor: pointer;
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
+  /* Fill the round ``.sh-notif-bell`` so the whole circle that lights
+   * up on hover is the target — the bare glyph was a 26 × 17 hit box. */
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border-radius: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+@media (pointer: coarse) {
+  .sh-notif-bell { width: var(--sh-tap-target); height: var(--sh-tap-target); }
 }
 .sh-notif-link {
   color: var(--sh-primary-text);
@@ -22643,6 +22717,14 @@ body.sh-board-dragging * {
   background: var(--sh-bg-tertiary);
   color: var(--sh-text-muted);
   font-size: var(--sh-font-size-sm);
+}
+/* The viewer's own edit / delete of the open page waits for review. */
+.sh-page-review-note--pending {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+  color: var(--sh-text);
 }
 button.sh-page-editor-status {
   border: none;

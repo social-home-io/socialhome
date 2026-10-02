@@ -466,6 +466,8 @@
   "dashboard.unread": "ongelezen",
   "dashboard.conversations": "gesprekken",
   "pages.title": "Pagina's",
+  "pages.pending_edit_mine": "Je bewerking van deze pagina wacht op beoordeling.",
+  "pages.pending_delete_mine": "Je verzoek om deze pagina te verwijderen wacht op beoordeling.",
   "pages.new_page": "Nieuwe pagina",
   "pages.no_pages": "Nog geen pagina's.",
   "pages.empty_page": "Lege pagina",

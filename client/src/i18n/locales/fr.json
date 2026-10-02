@@ -466,6 +466,8 @@
   "dashboard.unread": "non lus",
   "dashboard.conversations": "conversations",
   "pages.title": "Pages",
+  "pages.pending_edit_mine": "Votre modification de cette page attend une vérification.",
+  "pages.pending_delete_mine": "Votre demande de suppression de cette page attend une vérification.",
   "pages.new_page": "Nouvelle page",
   "pages.no_pages": "Aucune page pour le moment.",
   "pages.empty_page": "Page vide",
