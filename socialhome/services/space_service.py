@@ -94,7 +94,10 @@ from ..domain.events import (
     SpacePostModerated,
 )
 from ..domain.federation import (
+    DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_RELAY_THROTTLED,
     BehindMember,
+    DeliveryResult,
     FederationEventType,
     InstanceSource,
     PairingStatus,
@@ -134,6 +137,8 @@ from ..domain.space import (
     JoinMode,
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
+    HostTooOldError,
+    HostUnreachableError,
     HouseholdUpgradeRequiredError,
     PublicSpaceLimitError,
     RemoteAdminOutcome,
@@ -156,6 +161,7 @@ from ..infrastructure.event_bus import EventBus
 from ..repositories.base import row_to_dict
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
+from ..repositories.space_remote_member_repo import SpaceRemoteMember
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from ..domain.media_constraints import (
@@ -186,6 +192,11 @@ log = logging.getLogger(__name__)
 _REMOTE_ASSIGNABLE_ROLES: frozenset[SpaceRole] = frozenset(
     {SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER}
 )
+
+#: The ``SPACE_REMOTE_ADMIN_ACTION`` action a member household forwards a
+#: role change as (v_47). Params: ``{instance_id, user_id, from_role, role}`` — the
+#: target seat's home household (the host's own id for a host-local member).
+_SET_MEMBER_ROLE = "set_member_role"
 
 
 #: Sentinel for ``update_member_profile`` partial-patch kwargs.
@@ -1064,7 +1075,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         actor = await self._users.get(actor_username)
         if actor is None:
             raise KeyError(f"actor {actor_username!r} not found")
-        await self._federation.send_with_mesh_fallback(
+        result = await self._federation.send_with_mesh_fallback(
             to_instance_id=space.owner_instance_id,
             event_type=FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
             payload={
@@ -1076,6 +1087,24 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             },
             space_id=space.id,
         )
+        # Never report "sent" for an envelope that went nowhere. A queued
+        # direct send (durable outbox) or a throttled relay (still parked)
+        # will arrive; every other failure — no route, unknown or
+        # unconfirmed host — is a single-attempt loss.
+        if (
+            isinstance(result, DeliveryResult)
+            and not result.ok
+            and result.error
+            not in (DELIVERY_ERROR_QUEUED, DELIVERY_ERROR_RELAY_THROTTLED)
+        ):
+            log.warning(
+                "forwarded %s for space=%s did not reach host %s: %s",
+                action,
+                space.id,
+                space.owner_instance_id,
+                result.error,
+            )
+            raise HostUnreachableError(space.owner_instance_id)
         return True
 
     async def _executes_locally_as_delegated_admin(self, space: Space) -> bool:
@@ -1385,7 +1414,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     own,
                     names.get(m.user_id),
                     None,
-                    mirrorable_remote_role(m.role),
+                    # The owner ships as ``owner`` so a member household can
+                    # record its seat (migration 0070); every receiver of a
+                    # snapshot (v_32+) mirrors an unknown/owner role as
+                    # ``member``, so nothing else changes for it.
+                    SpaceRole.OWNER.value
+                    if m.role == SpaceRole.OWNER
+                    else mirrorable_remote_role(m.role),
                     int(current),
                     False,
                 )
@@ -2003,9 +2038,22 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 retention_fwd["retention_days"] = retention_days
             if exempt_types is not None:
                 retention_fwd["retention_exempt_types"] = list(exempt_types)
-            await self._forward_admin_action_if_remote(
-                space, actor_username, "update_config", retention_fwd
-            )
+            try:
+                await self._forward_admin_action_if_remote(
+                    space, actor_username, "update_config", retention_fwd
+                )
+            except HostUnreachableError:
+                # Best-effort side-copy: this delegated admin applies the
+                # edit authoritatively here (that is the whole point of
+                # owner-offline config), so an unreachable host must not
+                # abort it. The host learns the retention values from the
+                # next forward / config it accepts.
+                log.warning(
+                    "update_config: retention forward to host %s for space=%s "
+                    "did not reach it — applying the edit locally anyway",
+                    space.owner_instance_id,
+                    space.id,
+                )
 
         # SECURITY (v_24): the publication tier (``space_type``) is owner/quorum
         # gated (v_16 ``SpaceApprovalService``) and the v_15 forward path
@@ -2572,30 +2620,59 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         actor_username: str,
         user_id: str,
         role: str,
-    ) -> None:
+    ) -> bool:
         """Change a local member's role per :func:`role_change_allowed`.
 
         The owner sets ``admin`` / ``moderator`` / ``member``; an admin
         moves a target only between ``member`` and ``moderator``. The owner
         cannot be demoted, and ``owner`` is assigned only by
         :meth:`transfer_ownership`.
+
+        On a member household (the space is hosted elsewhere) the change is
+        not applied here — the stub's roster is a mirror of the host's. It is
+        forwarded to the host as ``set_member_role`` (v_47,
+        :meth:`_forward_role_change`), which re-checks everything against its
+        own roster and federates the result back. Returns ``True`` when
+        forwarded, ``False`` when applied here.
         """
         space = await self._require_space(space_id)
         if role == SpaceRole.OWNER:
             raise ValueError("use transfer_ownership to assign owner role")
         actor = await self._require_admin_or_owner(space, actor_username)
-        self._require_role_host(space)
         target = await self._spaces.get_member(space_id, user_id)
         if target is None:
             raise KeyError(f"user {user_id!r} is not a member")
-        if target.role == SpaceRole.OWNER:
-            raise SpacePermissionError("cannot demote the owner")
-        if not role_change_allowed(actor.role, target.role, role):
-            raise SpacePermissionError(
-                f"a space {actor.role} cannot change a {target.role} to {role}",
+        self._check_role_change(actor.role, target.role, role)
+        if self._hosted_elsewhere(space):
+            if target.role == role:
+                return False
+            await self._forward_role_change(
+                space,
+                actor_username,
+                instance_id=self._own_instance_id or "",
+                user_id=user_id,
+                from_role=target.role,
+                role=role,
             )
+            return True
+        await self._apply_local_role(
+            space, user_id=user_id, old_role=target.role, role=role
+        )
+        return False
+
+    async def _apply_local_role(
+        self,
+        space: Space,
+        *,
+        user_id: str,
+        old_role: str,
+        role: str,
+    ) -> None:
+        """Write a host-local member's new role and federate it. Every check
+        (actor authority, matrix, owner refusal, we host) already passed."""
+        space_id = space.id
         await self._spaces.set_role(space_id, user_id, role)
-        evt = role_change_event_type(target.role, role)
+        evt = role_change_event_type(old_role, role)
         # A role change is a ROSTER mutation, not a config edit — it must NOT
         # advance config_sequence (that lagged member stubs and collided
         # offline-of-owner config edits). The roster effect federates via
@@ -2623,6 +2700,206 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             role=role,
             tombstoned=False,
         )
+
+    @staticmethod
+    def _check_role_change(actor_role: str, target_role: str, role: str) -> None:
+        """Refuse a role change the matrix does not allow (403)."""
+        if target_role == SpaceRole.OWNER:
+            raise SpacePermissionError("cannot demote the owner")
+        if not role_change_allowed(actor_role, target_role, role):
+            raise SpacePermissionError(
+                f"a space {actor_role} cannot change a {target_role} to {role}",
+            )
+
+    async def _forward_role_change(
+        self,
+        space: Space,
+        actor_username: str,
+        *,
+        instance_id: str,
+        user_id: str,
+        from_role: str,
+        role: str,
+    ) -> None:
+        """Ship a stub's role change to the space's host (v_47).
+
+        Rides the generic ``SPACE_REMOTE_ADMIN_ACTION`` forward as the
+        ``set_member_role`` action; the host runs
+        :meth:`_validate_forwarded_role_change` with its own data. A host
+        below v_47 drops the unknown action without a word, so it is refused
+        here (409 ``HOST_TOO_OLD``) rather than reported as sent. The host
+        sends no refusal back: a change it declines simply never shows up.
+        """
+        if self._federation is None:
+            raise RuntimeError("a forwarded role change requires federation")
+        host = space.owner_instance_id
+        if not host:
+            # A stub with no recorded host can't forward anywhere — say so
+            # rather than blame the (non-existent) host's version.
+            raise HostUnreachableError("", reason="unknown_host")
+        if not await self._federation.peer_supports(
+            host,
+            min_version=FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE,
+        ):
+            raise HostTooOldError(host, feature="role_change")
+        await self._forward_admin_action_if_remote(
+            space,
+            actor_username,
+            _SET_MEMBER_ROLE,
+            {
+                "instance_id": instance_id,
+                "user_id": user_id,
+                # The role this household saw — the host applies the change
+                # only while the seat still holds it, so a request that waited
+                # (owner approval, outbox) can't undo a newer decision.
+                "from_role": str(from_role),
+                "role": str(role),
+            },
+        )
+
+    async def _validate_forwarded_role_change(
+        self,
+        space: Space,
+        actor_role: str,
+        params: dict,
+    ) -> tuple[SpaceRole, SpaceMember | SpaceRemoteMember] | None:
+        """Host-side checks for a forwarded ``set_member_role`` (v_47), all
+        against the HOST's own roster — never the stub's claims:
+
+        * the target seat exists (a host-local member when ``instance_id`` is
+          ours, else a ``space_remote_members`` row) and is not the owner;
+        * the new role is assignable and differs from the current one;
+        * :func:`role_change_allowed` for the actor's live seat role;
+        * the v_41 moderator floor on the target's home household.
+
+        Returns ``(new_role, target_seat)``, or ``None`` (logged at INFO) to
+        drop it — no differential error goes back to the sender.
+        """
+        instance_id = str(params.get("instance_id") or "")
+        user_id = str(params.get("user_id") or "")
+        try:
+            role = SpaceRole(str(params.get("role") or ""))
+        except ValueError:
+            role = None
+        if not instance_id or not user_id or role not in _REMOTE_ASSIGNABLE_ROLES:
+            log.info(
+                "forwarded role change for space=%s: malformed params — dropping",
+                space.id,
+            )
+            return None
+        assert role is not None  # narrowed by the membership test above
+        local = instance_id == self._own_instance_id
+        target: SpaceMember | SpaceRemoteMember | None
+        if local:
+            target = await self._spaces.get_member(space.id, user_id)
+        elif self._remote_members is not None:
+            target = await self._remote_members.get(space.id, instance_id, user_id)
+        else:
+            target = None
+        if target is None:
+            log.info(
+                "forwarded role change for space=%s: no seat %s@%s — dropping",
+                space.id,
+                user_id,
+                instance_id,
+            )
+            return None
+        from_role = str(params.get("from_role") or "")
+        if target.role != from_role:
+            # The seat moved since the request was made (e.g. the owner
+            # decided in the meantime) — the stale ask must not undo it.
+            log.info(
+                "forwarded role change for space=%s: %s@%s is %s, not the %r "
+                "the request was made against — dropping",
+                space.id,
+                user_id,
+                instance_id,
+                target.role,
+                from_role,
+            )
+            return None
+        if (
+            target.role == role
+            or target.role == SpaceRole.OWNER
+            or not role_change_allowed(actor_role, target.role, role)
+        ):
+            log.info(
+                "forwarded role change for space=%s: a %s may not move %s@%s "
+                "from %s to %s — dropping",
+                space.id,
+                actor_role,
+                user_id,
+                instance_id,
+                target.role,
+                role.value,
+            )
+            return None
+        if (
+            role == SpaceRole.MODERATOR
+            and not local
+            and (
+                self._federation is None
+                or not await self._federation.peer_supports(
+                    instance_id,
+                    min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+                )
+            )
+        ):
+            log.info(
+                "forwarded role change for space=%s: %s's household %s must "
+                "upgrade before they can be a moderator — dropping",
+                space.id,
+                user_id,
+                instance_id,
+            )
+            return None
+        return role, target
+
+    async def _apply_forwarded_role_change(
+        self,
+        space: Space,
+        *,
+        actor_instance_id: str,
+        actor_user_id: str,
+        params: dict,
+    ) -> None:
+        """Run a forwarded ``set_member_role`` on the host. Re-reads the
+        actor's live seat (an admin may have been demoted while an owner
+        approval was pending) and re-validates before writing."""
+        actor_role = await self._live_remote_admin_role(
+            space.id, actor_instance_id, actor_user_id
+        )
+        if actor_role is None:
+            log.info(
+                "forwarded role change for space=%s: %s@%s no longer an admin "
+                "— dropping",
+                space.id,
+                actor_user_id,
+                actor_instance_id,
+            )
+            return
+        change = await self._validate_forwarded_role_change(space, actor_role, params)
+        if change is None:
+            return
+        role, target = change
+        if isinstance(target, SpaceMember):
+            await self._apply_local_role(
+                space, user_id=target.user_id, old_role=target.role, role=role
+            )
+        else:
+            await self._apply_remote_role(space, target=target, role=role)
+
+    async def _live_remote_admin_role(
+        self, space_id: str, instance_id: str, user_id: str
+    ) -> str | None:
+        """The seat role of a remote actor bound to ``instance_id`` (the
+        signed sender), when it is ``admin``; else ``None``."""
+        if self._remote_members is None or not instance_id or not user_id:
+            return None
+        seat = await self._remote_members.get(space_id, instance_id, user_id)
+        if seat is None or seat.role != SpaceRole.ADMIN:
+            return None
+        return seat.role
 
     async def apply_remote_admin_kick(
         self,
@@ -2756,7 +3033,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     #: substrate only makes sense for these; anything else is dropped at the
     #: door so no phantom owner-approval is ever enqueued).
     _FORWARDABLE_ADMIN_ACTIONS = frozenset(
-        {"update_config", "archive", "unarchive", "ban", "unban", "invite"}
+        {
+            "update_config",
+            "archive",
+            "unarchive",
+            "ban",
+            "unban",
+            "invite",
+            _SET_MEMBER_ROLE,
+        }
     )
 
     async def apply_remote_admin_action(
@@ -2787,10 +3072,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
           can enqueue an owner-approval (the enqueue is a later task).
 
         Scope is admin-level mutations only: ``update_config``,
-        ``archive`` / ``unarchive``, ``ban`` / ``unban``, ``invite``.
-        Owner-only
-        actions (dissolve, transfer-ownership, role assignment) are NOT
-        forwardable and never reach this dispatcher. Unknown actions,
+        ``archive`` / ``unarchive``, ``ban`` / ``unban``, ``invite`` and
+        ``set_member_role`` (v_47). A role change is validated here with the
+        host's own roster BEFORE it can be held for approval or run
+        (:meth:`_validate_forwarded_role_change`) — under the actor's own
+        seat role, never the owner's, so the matrix still caps a remote admin
+        at member ↔ moderator. Owner-only actions (dissolve,
+        transfer-ownership, granting admin) are NOT forwardable. Unknown actions,
         unauthenticated actors, and spaces not hosted here are silently
         dropped (:attr:`RemoteAdminOutcome.DROPPED`) — no differential
         errors, same posture as the kick path (the most likely cause is a
@@ -2838,6 +3126,16 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 space_id,
             )
             return RemoteAdminOutcome.DROPPED
+        if (
+            action == _SET_MEMBER_ROLE
+            and await self._validate_forwarded_role_change(
+                space, actor.role, params or {}
+            )
+            is None
+        ):
+            # Refused under the host's view — never queued for the owner,
+            # so no phantom approval for a change the matrix forbids.
+            return RemoteAdminOutcome.DROPPED
         if not space.features.delegated_admin_authority:
             log.info(
                 "apply_remote_admin_action: delegation OFF for space=%s — "
@@ -2846,7 +3144,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 action,
             )
             return RemoteAdminOutcome.NEEDS_OWNER_APPROVAL
-        await self._run_admin_action(space, space.owner_username, action, params or {})
+        await self._run_admin_action(
+            space,
+            space.owner_username,
+            action,
+            params or {},
+            actor_instance_id=actor_instance_id,
+            actor_user_id=actor_user_id,
+        )
         return RemoteAdminOutcome.EXECUTED
 
     async def apply_approved_admin_action(
@@ -2855,12 +3160,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         *,
         action: str,
         params: dict | None = None,
+        actor_instance_id: str = "",
+        actor_user_id: str = "",
     ) -> None:
         """Execute a previously owner-approved forwarded admin action as the owner.
 
         The owner-approval gate has already passed; this just re-validates the
         space is still hosted here and runs the action (same path as the
-        delegation-ON case).
+        delegation-ON case). ``actor_*`` name the forwarding admin — a
+        ``set_member_role`` re-checks that seat at execution time.
         """
         space = await self._spaces.get(space_id)
         if space is None:
@@ -2870,7 +3178,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             or space.owner_instance_id != self._own_instance_id
         ):
             return
-        await self._run_admin_action(space, space.owner_username, action, params or {})
+        await self._run_admin_action(
+            space,
+            space.owner_username,
+            action,
+            params or {},
+            actor_instance_id=actor_instance_id,
+            actor_user_id=actor_user_id,
+        )
 
     async def _run_admin_action(
         self,
@@ -2878,6 +3193,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         owner_username: str,
         action: str,
         params: dict,
+        *,
+        actor_instance_id: str = "",
+        actor_user_id: str = "",
     ) -> None:
         """Run a forwarded admin action as the owner. The actor-role gate and
         the delegation/approval decision have already passed."""
@@ -2988,6 +3306,16 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     invitee_instance_id=invitee_instance_id,
                     invitee_user_id=invitee_user_id,
                 )
+            case "set_member_role":
+                # NOT run as the owner: the matrix is evaluated for the
+                # forwarding admin's live seat, so an owner approval can't
+                # widen what that admin may do.
+                await self._apply_forwarded_role_change(
+                    space,
+                    actor_instance_id=actor_instance_id,
+                    actor_user_id=actor_user_id,
+                    params=p,
+                )
             case _:
                 log.info(
                     "apply_remote_admin_action: unknown action=%r for "
@@ -3004,7 +3332,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         instance_id: str,
         user_id: str,
         role: str,
-    ) -> None:
+    ) -> bool:
         """Cross-household role change (#114, PR #434; moderator v_41).
 
         Same matrix as :meth:`set_role` (:func:`role_change_allowed`): the
@@ -3024,6 +3352,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         Owner role is not assignable to a remote member — ownership
         carries local-only privileges (dissolve, ownership transfer)
         that can't sensibly cross households.
+
+        On a member household the change is forwarded to the host (v_47,
+        :meth:`_forward_role_change`) and ``True`` is returned; the host
+        re-checks it (including the moderator floor) with its own data.
+        ``False`` when applied here (or a no-op).
         """
         if self._federation is None or self._remote_members is None:
             raise RuntimeError("federation not attached")
@@ -3034,18 +3367,30 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
         space = await self._require_space(space_id)
         actor = await self._require_admin_or_owner(space, actor_username)
-        self._require_role_host(space)
         target = await self._remote_members.get(space_id, instance_id, user_id)
         if target is None:
             raise KeyError(
                 f"remote member {user_id!r}@{instance_id!r} not found in {space_id!r}",
             )
         if target.role == role:
-            return
-        if not role_change_allowed(actor.role, target.role, role):
-            raise SpacePermissionError(
-                f"a space {actor.role} cannot change a {target.role} to {role}",
+            return False
+        self._check_role_change(actor.role, target.role, role)
+        if self._hosted_elsewhere(space):
+            # The owner sits on the host, mirrored here as a plain seat;
+            # refuse here what the host would only drop in silence.
+            if instance_id == space.owner_instance_id and user_id == (
+                await self._spaces.get_owner_user_id(space_id)
+            ):
+                raise SpacePermissionError("cannot demote the owner")
+            await self._forward_role_change(
+                space,
+                actor_username,
+                instance_id=instance_id,
+                user_id=user_id,
+                from_role=target.role,
+                role=role,
             )
+            return True
         if role == SpaceRole.MODERATOR and not await self._federation.peer_supports(
             instance_id,
             min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
@@ -3053,6 +3398,25 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise HouseholdUpgradeRequiredError(
                 "this member's household must upgrade before they can be a moderator",
             )
+        await self._apply_remote_role(space, target=target, role=role)
+        return False
+
+    async def _apply_remote_role(
+        self,
+        space: Space,
+        *,
+        target: SpaceRemoteMember,
+        role: str,
+    ) -> None:
+        """Write a remote seat's new role on the host and federate it (the
+        role broadcast, roster gossip, the delegated seed share on an admin
+        promotion, the v_44 revocation on an admin demotion). Every check
+        already passed — called by :meth:`set_remote_member_role` and the
+        forwarded ``set_member_role`` path alike."""
+        assert self._federation is not None and self._remote_members is not None
+        space_id = space.id
+        instance_id = target.instance_id
+        user_id = target.user_id
         await self._remote_members.set_role(space_id, instance_id, user_id, role)
         evt = role_change_event_type(target.role, role)
         # A role change is a ROSTER mutation, not a config edit — it must NOT
@@ -3148,7 +3512,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if target.role == SpaceRole.ADMIN and role != SpaceRole.ADMIN:
             # v_44 — an admin seat just ended. If it was that household's
             # last one, the rotation service retires the authority key the
-            # household may hold (``_require_role_host`` above: we host).
+            # household may hold (callers only reach here on the host).
             await self._bus.publish(
                 SpaceAdminAuthorityRevoked(space_id=space_id, instance_id=instance_id)
             )
@@ -5949,17 +6313,32 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         owner = await self._users.get(space.owner_username)
         return owner is not None and await self._is_protected(owner.user_id)
 
-    def _require_role_host(self, space: Space) -> None:
-        """Role changes are made on the space's host household.
+    async def owner_user_id(self, space: Space) -> str | None:
+        """The space owner's ``user_id``: from ``users`` on the host; on a
+        stub, the seat the host's roster marked ``owner`` (``None`` until a
+        roster from the host has said so)."""
+        if not self._hosted_elsewhere(space):
+            owner = await self._users.get(space.owner_username)
+            return owner.user_id if owner is not None else None
+        return await self._spaces.get_owner_user_id(space.id)
 
-        There is no forward path for a role change from a member stub, and
-        the roster mirror every household trusts is the host's — a role
-        rewritten on a stub would be a local fiction the host never learns.
-        """
-        if (
+    def _hosted_elsewhere(self, space: Space) -> bool:
+        """Whether ``space`` is hosted on another household (we hold a
+        stub). The roster mirror every household trusts is the host's, so a
+        role is never rewritten on a stub — it is forwarded (v_47)."""
+        return (
             self._own_instance_id is not None
             and space.owner_instance_id != self._own_instance_id
-        ):
+        )
+
+    def _require_role_host(self, space: Space) -> None:
+        """Approving an admin-elevation join request happens on the host.
+
+        Role changes themselves forward from a stub (:meth:`set_role`,
+        :meth:`set_remote_member_role`); this guard is for the paths with no
+        forward shape.
+        """
+        if self._hosted_elsewhere(space):
             raise SpacePermissionError(
                 "roles are changed on the household that hosts this space",
             )

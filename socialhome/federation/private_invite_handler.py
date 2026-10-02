@@ -41,6 +41,7 @@ from ..domain.space import (
     SpaceRole,
     cap_remote_role,
     mirrorable_remote_role,
+    owner_seat_from_roster,
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_remote_location_repo import SpaceRemoteLocation
@@ -533,6 +534,9 @@ class PrivateSpaceInviteHandler:
             # own row. We skip the invitee's *own* user_id — that
             # comes in via ``space_members`` when she accepts.
             roster = meta.get("roster")
+            owner_uid = owner_seat_from_roster(roster, event.from_instance)
+            if owner_uid is not None:
+                await self._space_repo.set_owner_user_id(space_id, owner_uid)
             if isinstance(roster, list):
                 for entry in roster:
                     if not isinstance(entry, dict):
@@ -1550,7 +1554,9 @@ class PrivateSpaceInviteHandler:
             return
         raw_role = str(p.get("role") or SpaceRole.MEMBER.value)
         role = mirrorable_remote_role(raw_role)
-        if role != raw_role:
+        # ``owner`` is expected (the host names its owner seat, migration
+        # 0070) and needs no log line on every snapshot.
+        if role != raw_role and raw_role != SpaceRole.OWNER.value:
             log.info(
                 "roster-gossip %s for %s: unknown role %r — mirroring as %r",
                 event_type,
@@ -1739,6 +1745,9 @@ class PrivateSpaceInviteHandler:
             space.identity_public_key,
             candidates,
         )
+        from_host = bool(space.owner_instance_id) and (
+            event.from_instance == space.owner_instance_id
+        )
         for (entry_type, payload, tombstoned), reason in zip(
             candidates, reasons, strict=True
         ):
@@ -1747,6 +1756,18 @@ class PrivateSpaceInviteHandler:
                     reason, entry_type, space_id, event.from_instance, payload
                 )
                 continue
+            if (
+                from_host
+                and not tombstoned
+                and space.owner_instance_id != self._own_instance_id
+                and owner_seat_from_roster([payload], space.owner_instance_id)
+            ):
+                # The host's own snapshot names its owner seat (migration
+                # 0070) — trusted from the HOST only, like the invite roster;
+                # a seed-holding admin's signature alone can't name an owner.
+                await self._space_repo.set_owner_user_id(
+                    space_id, str(payload["user_id"])
+                )
             await self._merge_roster_entry(
                 entry_type,
                 space_id,

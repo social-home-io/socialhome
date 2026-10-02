@@ -6,6 +6,7 @@ import pytest
 
 from socialhome.domain.space import (
     ACCESS_FEATURES,
+    owner_seat_from_roster,
     CONTENT_AUTHORITY_ROLES,
     MIRRORABLE_REMOTE_ROLES,
     SETTINGS_AUTHORITY_ROLES,
@@ -600,3 +601,17 @@ def test_cap_remote_role_never_raises_a_seat():
     # Unknown values coerce down to member before comparing.
     assert cap_remote_role("owner", "admin") == "member"
     assert cap_remote_role("admin", "bogus") == "member"
+
+
+def test_owner_seat_from_roster_takes_only_the_hosts_own_owner_entry():
+    roster = [
+        {"user_id": "u-fake", "instance_id": "house-c", "role": "owner"},
+        {"user_id": "u-bob", "instance_id": "host", "role": "member"},
+        {"user_id": "u-anna", "instance_id": "host", "role": "owner"},
+    ]
+    assert owner_seat_from_roster(roster, "host") == "u-anna"
+    # An "owner" on another household names nobody.
+    assert owner_seat_from_roster(roster[:2], "host") is None
+    assert owner_seat_from_roster(roster, "") is None
+    assert owner_seat_from_roster(None, "host") is None
+    assert owner_seat_from_roster(["junk", {"role": "owner"}], "host") is None

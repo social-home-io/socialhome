@@ -167,10 +167,27 @@ class ApiClient {
             // "only admins can …" note for that feature.
             const feature = (parsed as { feature?: unknown }).feature
             parsed = { ...parsed, detail: accessNote(String(feature ?? '')) }
+          } else if (parsed.code === 'HOST_UNREACHABLE') {
+            // A forward to the space's host went nowhere — nothing was
+            // queued, so never say "sent".
+            const reason = (parsed as { reason?: unknown }).reason
+            parsed = {
+              ...parsed,
+              detail: reason === 'unknown_host'
+                ? t('space.host.unknown')
+                : t('space.host.unreachable'),
+            }
           } else if (parsed.code === 'HOST_TOO_OLD') {
-            // v_43: the space's host can't hold this household's
-            // submissions for review — the toast says why, translated.
-            parsed = { ...parsed, detail: t('moderation.error.host_too_old') }
+            // The space's host is too old for what this household asked:
+            // v_43 review submissions, or a v_47 forwarded role change
+            // (``feature: 'role_change'``) — the toast says why, translated.
+            const feature = (parsed as { feature?: unknown }).feature
+            parsed = {
+              ...parsed,
+              detail: feature === 'role_change'
+                ? t('space.member.role_host_too_old')
+                : t('moderation.error.host_too_old'),
+            }
           }
         }
       } catch {

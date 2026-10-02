@@ -131,6 +131,11 @@ class _FakeSpaceRepo:
         self.space_rows_for_get: dict = {}
         #: Tokens a rolled-back redeem handed a use back to.
         self.released: list[str] = []
+        #: space_id → owner user_id the ACK roster named (migration 0070).
+        self.owner_user_ids: dict[str, str] = {}
+
+    async def set_owner_user_id(self, space_id, user_id):
+        self.owner_user_ids[space_id] = user_id
 
     async def get_live_invite_token(self, token):
         """Read-only peek — mirrors the repo's "live" predicate exactly and
@@ -2432,6 +2437,12 @@ async def test_the_ack_roster_mirrors_a_follower_with_its_own_role():
                         "display_name": "Boss",
                         "role": "overlord",
                     },
+                    {
+                        "user_id": "u-owner",
+                        "instance_id": "issuer-1",
+                        "display_name": "Owner",
+                        "role": SpaceRole.OWNER.value,
+                    },
                 ],
             },
         },
@@ -2440,7 +2451,13 @@ async def test_the_ack_roster_mirrors_a_follower_with_its_own_role():
     )
     assert spaces is not None
     roles = {entry["user_id"]: entry["role"] for entry in members.added}
-    assert roles == {"u-follower": SpaceRole.SUBSCRIBER.value, "u-boss": "member"}
+    assert roles == {
+        "u-follower": SpaceRole.SUBSCRIBER.value,
+        "u-boss": "member",
+        "u-owner": "member",  # no remote ``owner`` row shape …
+    }
+    # … so the owner's seat is recorded on the stub instead (migration 0070).
+    assert spaces.owner_user_ids == {"sp-1": "u-owner"}
 
 
 async def test_the_gossip_runs_before_the_redeemer_joins_space_instances():

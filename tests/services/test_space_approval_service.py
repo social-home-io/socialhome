@@ -209,6 +209,20 @@ async def test_non_admin_cannot_propose(stack):
         )
 
 
+async def test_nobody_proposes_a_remote_admin_action_directly(stack):
+    """Only the host's forward gate opens an owner-approval request (it binds
+    the actor to the signed sender); the owner can't hand-build one either."""
+    space = await _space(stack)
+    with pytest.raises(ValueError):
+        await stack.approvals.propose(
+            space.id,
+            actor_username="alice",
+            action=ProposalAction.REMOTE_ADMIN_ACTION,
+            params={"fwd_action": "ban", "fwd_params": {"user_id": "x"}},
+        )
+    assert await stack.approvals.list_for_space(space.id) == []
+
+
 async def test_vote_by_non_admin_dropped(stack):
     space = await _space(stack)
     await _add_admin(stack, space.id, "bob")

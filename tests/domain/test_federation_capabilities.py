@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 46
+    assert fc.OURS == 47
 
 
 def test_space_authority_rotation_capability_threshold():
@@ -23,9 +23,13 @@ def test_space_authority_rotation_capability_threshold():
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     ]
-    assert fc.features_missing_below(45) == ["Space key epoch echo"]
-    assert fc.features_missing_below(46) == []
+    assert fc.features_missing_below(45) == [
+        "Space key epoch echo",
+        "Role changes from member households",
+    ]
+    assert fc.features_missing_below(46) == ["Role changes from member households"]
 
 
 def test_authority_epoch_echo_capability_threshold():
@@ -37,8 +41,11 @@ def test_authority_epoch_echo_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.space_features_missing_below(45) == ["Space key epoch echo"]
-    assert fc.features_missing_below(46) == []
+    assert fc.space_features_missing_below(45) == [
+        "Space key epoch echo",
+        "Role changes from member households",
+    ]
+    assert fc.features_missing_below(46) == ["Role changes from member households"]
 
 
 def test_space_report_scope_capability_threshold():
@@ -51,6 +58,7 @@ def test_space_report_scope_capability_threshold():
     assert fc.space_features_missing_below(44) == [
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     ]
 
 
@@ -68,6 +76,7 @@ def test_federated_moderation_capability_threshold():
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     ]
     assert "Reviewed across households" not in fc.features_missing_below(43)
 
@@ -87,6 +96,7 @@ def test_content_access_enforcement_capability_threshold():
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -107,6 +117,7 @@ def test_space_moderator_role_capability_threshold():
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -128,6 +139,7 @@ def test_task_priority_labels_capability_threshold():
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -189,6 +201,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     ]
 
 
@@ -212,6 +225,7 @@ def test_moment_origin_signature_capability_threshold():
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     ]
 
 
@@ -453,3 +467,18 @@ def test_owner_bound_album_id_capability_threshold():
     assert "Creator-bound album ids" in dict(fc.CAPABILITY_FEATURES).values()
     assert "Creator-bound album ids" in fc.features_missing_below(33)
     assert "Creator-bound album ids" not in fc.features_missing_below(34)
+
+
+def test_forwarded_role_change_capability_threshold():
+    """v_47 — a stub forwards a role change to the host as the
+    ``set_member_role`` remote admin action. Space-scoped: a host below it
+    drops the unknown action, so the stub refuses with HOST_TOO_OLD."""
+    assert fc.FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE == 47
+    assert fc.FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.space_features_missing_below(46) == [
+        "Role changes from member households"
+    ]
+    assert fc.features_missing_below(47) == []

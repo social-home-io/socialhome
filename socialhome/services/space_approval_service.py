@@ -63,6 +63,13 @@ log = logging.getLogger(__name__)
 #: How long a proposal stays open before it lapses unapproved.
 PROPOSAL_TTL = timedelta(days=7)
 
+#: Cap on PENDING owner-approval requests (forwarded remote admin actions,
+#: delegation off) one household may hold open per space. A household
+#: whose admin floods the host is dropped past this; with the
+#: ``set_member_role`` supersede (one open request per seat) it bounds
+#: what the owner's approval list can grow to.
+MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD = 20
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -137,6 +144,10 @@ class SpaceApprovalService(ProtectionGateMixin):
         SPA-facing proposal view. When the space is hosted elsewhere the
         intent forwards to the host and a ``pending`` placeholder view is
         returned (the real state arrives via the mirror broadcast)."""
+        if action is ProposalAction.REMOTE_ADMIN_ACTION:
+            # Only the host's forward gate opens one (enqueue_owner_approval),
+            # with the actor bound to the signed sender — never a proposer.
+            raise ValueError("remote_admin_action proposals are not proposable")
         space = await self._require_space(space_id)
         actor = await self._require_local_admin(space_id, actor_username)
         params = params or {}
@@ -262,6 +273,20 @@ class SpaceApprovalService(ProtectionGateMixin):
         except ValueError:
             log.info("apply_remote_propose: unknown action=%r — dropping", action)
             return
+        if act is ProposalAction.REMOTE_ADMIN_ACTION:
+            # SECURITY: an owner-approval request is opened ONLY by the host's
+            # own forward gate (enqueue_owner_approval), after it validated
+            # the action and bound the actor to the signed sender. A proposer
+            # building one here would skip that validation and name any
+            # actor it likes in the params.
+            log.warning(
+                "apply_remote_propose: %s@%s tried to open a remote_admin_action "
+                "proposal for space=%s directly — dropping",
+                proposer_user,
+                proposer_instance,
+                space_id,
+            )
+            return
         await self._host_propose(
             space_id,
             act,
@@ -320,13 +345,49 @@ class SpaceApprovalService(ProtectionGateMixin):
         if not await self._host_owns(space_id):
             return
         now = _now()
+        fwd_params = fwd_params or {}
+        pending = [
+            p
+            for p in await self._proposals.list_open(space_id)
+            if p.action == ProposalAction.REMOTE_ADMIN_ACTION and p.expires_at > now
+        ]
+        # Cap first — a household at the cap gets nothing in, not even a
+        # replacement (so a flood can't churn the owner's list either).
+        mine = [p for p in pending if p.proposed_by_instance == actor_instance]
+        if len(mine) >= MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD:
+            log.warning(
+                "enqueue_owner_approval: %s already holds %d pending requests "
+                "for space=%s — dropping %r",
+                actor_instance,
+                MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD,
+                space_id,
+                fwd_action,
+            )
+            return
+        if fwd_action == "set_member_role":
+            # One open request per seat AND household: a newer one replaces
+            # that household's own older one for the same (instance_id,
+            # user_id), so the owner sees its latest ask. Another
+            # household's request is never evicted — each stays for the
+            # owner to decide.
+            seat = (fwd_params.get("instance_id"), fwd_params.get("user_id"))
+            for old in mine:
+                op = old.params
+                old_fwd = op.get("fwd_params")
+                if (
+                    op.get("fwd_action") == "set_member_role"
+                    and isinstance(old_fwd, dict)
+                    and (old_fwd.get("instance_id"), old_fwd.get("user_id")) == seat
+                ):
+                    await self._proposals.set_status(old.id, ProposalStatus.EXPIRED)
+                    await self._emit(old, ProposalStatus.EXPIRED)
         proposal = SpaceAdminProposal(
             id=str(uuid.uuid4()),
             space_id=space_id,
             action=ProposalAction.REMOTE_ADMIN_ACTION,
             params={
                 "fwd_action": fwd_action,
-                "fwd_params": fwd_params or {},
+                "fwd_params": fwd_params,
                 "actor_instance": actor_instance,
                 "actor_user": actor_user,
             },
@@ -512,6 +573,10 @@ class SpaceApprovalService(ProtectionGateMixin):
                         if isinstance(p.get("fwd_params"), dict)
                         else {}
                     ),
+                    # The signer-bound proposer — set by enqueue_owner_approval
+                    # from the verified envelope sender — never the params.
+                    actor_instance_id=proposal.proposed_by_instance,
+                    actor_user_id=proposal.proposed_by_user,
                 )
         except Exception:
             log.exception(
@@ -530,6 +595,12 @@ class SpaceApprovalService(ProtectionGateMixin):
         falls back to the generic phrase). Host-side only."""
         if not isinstance(fwd_params, dict):
             return None
+        if fwd_action == "set_member_role":
+            return await self._seat_label(
+                space_id,
+                str(fwd_params.get("instance_id") or ""),
+                str(fwd_params.get("user_id") or ""),
+            )
         if fwd_action in ("ban", "unban"):
             uid = str(fwd_params.get("user_id") or "")
             return await self._user_label(space_id, uid) if uid else None
@@ -542,6 +613,22 @@ class SpaceApprovalService(ProtectionGateMixin):
             ru = await self._users.get_remote(uid)
             return ru.display_name if ru and ru.display_name else None
         return None
+
+    async def _seat_label(
+        self, space_id: str, instance_id: str, user_id: str
+    ) -> str | None:
+        """Display name of the exact seat ``(instance_id, user_id)`` — a
+        host-local member when ``instance_id`` is ours."""
+        if not instance_id or not user_id:
+            return None
+        if instance_id == self._own_instance_id:
+            u = await self._users.get_by_user_id(user_id)
+            return u.display_name if u and u.display_name else None
+        rm = await self._remote_members.get(space_id, instance_id, user_id)
+        if rm is not None and rm.display_name:
+            return rm.display_name
+        ru = await self._users.get_remote(user_id)
+        return ru.display_name if ru and ru.display_name else None
 
     async def _user_label(self, space_id: str, user_id: str) -> str | None:
         # A current remote member of this space carries a display_name.

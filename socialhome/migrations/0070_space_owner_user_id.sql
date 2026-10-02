@@ -1,0 +1,21 @@
+-- 0070 — a member household knows which seat is the space owner (v_47).
+--
+-- On a stub (a space hosted on another household) the owner is mirrored
+-- as an ordinary ``space_remote_members`` row: the role CHECK has no
+-- ``owner`` (ownership has no remote seat shape), so the invite roster's
+-- ``role: "owner"`` is coerced to ``member`` on the way in. Since an admin
+-- on a stub can now forward a role change to the host, the stub must know
+-- the owner's seat to refuse a change on it (and to stop offering one),
+-- instead of forwarding a request the host can only drop in silence.
+--
+-- Not derivable: ``spaces.owner_username`` + ``host_identity_pk`` don't
+-- give the user_id since user ids anchor on a per-user uuid (v_26), and
+-- the stored remote row's role is already coerced. The source is the
+-- host's own invite roster, which has always shipped the owner's
+-- ``role: "owner"`` entry — no new wire field.
+--
+-- ``spaces.owner_user_id`` — the owner's user_id on a stub, NULL until a
+-- roster from the host names it (stubs seated before this migration, and
+-- every space this household hosts: there ``users`` answers it). Written
+-- only by ``SqliteSpaceRepo.set_owner_user_id``, never by ``save``.
+ALTER TABLE spaces ADD COLUMN owner_user_id TEXT;

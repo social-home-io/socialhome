@@ -15,6 +15,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     DeliveryResult,
     FederationEvent,
     FederationEventType,
@@ -23,6 +24,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.space import (
+    HostUnreachableError,
     JoinMode,
     RemoteAdminOutcome,
     SpaceFeatures,
@@ -1592,3 +1594,47 @@ async def test_owner_approval_gate_end_to_end_real_services(stack):
 
     # 7. The ban actually ran as the owner: the target is no longer a member.
     assert await stack.space_repo.get_member(space.id, victim.user_id) is None
+
+
+# ── a forward that reached nobody is never reported sent (503) ──────
+
+
+_NO_ROUTE = DeliveryResult(
+    instance_id="instance-remote-host", ok=False, error="no_route"
+)
+
+
+@pytest.mark.parametrize(
+    "act",
+    [
+        lambda svc, sid: svc.ban(sid, actor_username="localadmin", user_id="victim"),
+        lambda svc, sid: svc.unban(sid, actor_username="localadmin", user_id="victim"),
+        lambda svc, sid: svc.archive_space(sid, actor_username="localadmin"),
+        lambda svc, sid: svc.unarchive_space(sid, actor_username="localadmin"),
+        lambda svc, sid: svc.invite_remote_user(
+            sid,
+            actor_username="localadmin",
+            invitee_instance_id="peer",
+            invitee_user_id="u-new",
+        ),
+    ],
+    ids=["ban", "unban", "archive", "unarchive", "invite"],
+)
+async def test_forwarded_admin_action_to_an_unreachable_host_raises(stack, act):
+    """A stub can't do any of these itself; when the forward went nowhere
+    (not even queued) the caller learns it instead of a false "sent"."""
+    stub = await _remote_stub_space(stack)
+    stack.fed_svc.send_with_mesh_fallback = AsyncMock(return_value=_NO_ROUTE)
+    with pytest.raises(HostUnreachableError):
+        await act(stack.svc, stub.id)
+    stack.fed_svc.send_with_mesh_fallback.assert_awaited_once()
+
+
+async def test_a_queued_forward_still_counts_as_sent(stack):
+    stub = await _remote_stub_space(stack)
+    stack.fed_svc.send_with_mesh_fallback = AsyncMock(
+        return_value=DeliveryResult(
+            instance_id="instance-remote-host", ok=False, error=DELIVERY_ERROR_QUEUED
+        )
+    )
+    await stack.svc.archive_space(stub.id, actor_username="localadmin")

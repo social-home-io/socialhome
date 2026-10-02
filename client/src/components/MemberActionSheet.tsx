@@ -6,6 +6,12 @@
  * sets admin / moderator / member, an admin moves a seat only between
  * member and moderator. A refused change shows the server's reason in
  * the sheet (e.g. "household must upgrade") instead of closing it.
+ *
+ * On a member household (the space is hosted elsewhere) the server
+ * forwards the change to the host (v_47) and answers 202
+ * ``{forwarded: true}``: the sheet says "Sent to the space's host" and
+ * the member list refreshes when the host's role update arrives
+ * (``space.config.changed``). A change the host refuses never arrives.
  */
 import { signal } from '@preact/signals'
 import { api, ApiError } from '@/api'
@@ -55,6 +61,11 @@ const ROLE_OPTION_KEY: Record<SpaceRole, string> = {
 function roleErrorCopy(e: unknown): string {
   const code = e instanceof ApiError ? e.code : null
   if (code === 'HOUSEHOLD_UPGRADE_REQUIRED') return t('space.member.role_upgrade_required')
+  if (code === 'HOST_TOO_OLD') return t('space.member.role_host_too_old')
+  if (code === 'HOST_UNREACHABLE') {
+    const reason = e instanceof ApiError ? e.extra.reason : null
+    return t(reason === 'unknown_host' ? 'space.host.unknown' : 'space.host.unreachable')
+  }
   if (code === 'FORBIDDEN') return t('space.member.role_change_forbidden')
   return t('space.member.role_change_failed')
 }
@@ -74,8 +85,14 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
         // ``(instance_id, user_id)`` composite key.
         ? `/api/spaces/${spaceId.value}/remote-members/${memberInstanceId.value}/${memberUserId.value}`
         : `/api/spaces/${spaceId.value}/members/${memberUserId.value}`
-      await api.patch(path, { role })
-      showToast(t('space.member.role_changed', { role: roleLabel(role) }), 'success')
+      const res = await api.patch<{ forwarded?: boolean } | null>(path, { role })
+      if (res?.forwarded) {
+        // Hosted elsewhere: the host decides; its roster update refreshes
+        // the list (SpaceMemberList listens for it).
+        showToast(t('space.member.role_forwarded'), 'info')
+      } else {
+        showToast(t('space.member.role_changed', { role: roleLabel(role) }), 'success')
+      }
       open.value = false; onUpdate()
     } catch (e: unknown) {
       // Keep the sheet open with the reason — "household must upgrade"

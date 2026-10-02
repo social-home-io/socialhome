@@ -835,3 +835,48 @@ async def test_no_revocation_for_a_non_admin_seat_or_a_mirror(tmp_dir):
         assert not [e for e in published if isinstance(e, SpaceAdminAuthorityRevoked)]
     finally:
         await db.shutdown()
+
+
+async def test_the_hosts_snapshot_names_its_owner_seat(tmp_dir):
+    """Migration 0070: the host ships its owner as ``owner``; the stub
+    records that seat (and still mirrors it as a plain ``member`` row)."""
+    h, spaces, remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    owner_entry = _signed_payload(
+        j,
+        seed=seed,
+        member_version=2,
+        role="owner",
+        user_id="u-anna",
+        instance_id=OWNER,
+    )
+    await h._on_space_roster_snapshot(_snapshot([_entry(j, owner_entry)]))
+    assert await spaces.get_owner_user_id(SPACE_ID) == "u-anna"
+    seat = await remote.get(SPACE_ID, OWNER, "u-anna")
+    assert seat is not None and seat.role == "member"
+    await db.shutdown()
+
+
+async def test_only_the_host_can_name_the_owner_seat(tmp_dir):
+    """A validly signed snapshot relayed by another household (any seed
+    holder can sign) names no owner — only the host's own does."""
+    h, spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    forged_owner = _signed_payload(
+        j,
+        seed=seed,
+        member_version=2,
+        role="owner",
+        user_id="u-mallory",
+        instance_id=OWNER,
+    )
+    await h._on_space_roster_snapshot(
+        _snapshot([_entry(j, forged_owner)], from_instance=RELAY)
+    )
+    # An "owner" on a household that isn't the host names nobody either.
+    elsewhere = _signed_payload(
+        j, seed=seed, member_version=3, role="owner", user_id="u-x", instance_id="p-x"
+    )
+    await h._on_space_roster_snapshot(_snapshot([_entry(j, elsewhere)]))
+    assert await spaces.get_owner_user_id(SPACE_ID) is None
+    await db.shutdown()

@@ -444,6 +444,11 @@ async def test_invite_with_roster_seats_remote_members_for_each_peer(handler):
         for call in handler.remote_members.add.await_args_list
     }
     assert roles == {"u-pascal": "member", "u-anna": "member"}
+    # The host's own ``owner`` entry names the owner's seat on the stub
+    # (migration 0070), so the stub never offers a role change on it.
+    handler.space_repo.set_owner_user_id.assert_awaited_once_with(
+        "sp-remote", "u-pascal"
+    )
 
 
 async def test_invite_roster_mirrors_a_follower_as_a_follower(handler):

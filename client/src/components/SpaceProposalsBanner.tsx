@@ -20,6 +20,7 @@ import { ws } from '@/ws'
 import { Button } from './Button'
 import { isRestricted } from './ProtectedNotice'
 import { t } from '@/i18n/i18n'
+import { parseSpaceRole } from '@/features/spaces/spaceRoles'
 import { showToast } from './Toast'
 
 export interface SpaceProposal {
@@ -60,6 +61,15 @@ const FWD_ACTION_COPY: Record<string, string> = {
   invite: 'invite a member to this space',
 }
 
+/** "make Carol …" — the role a forwarded ``set_member_role`` asks for. */
+const ROLE_PHRASE: Record<string, string> = {
+  owner: 'the owner',
+  admin: 'an admin',
+  moderator: 'a moderator',
+  member: 'a member',
+  subscriber: 'a follower',
+}
+
 function describe(p: SpaceProposal): string {
   if (p.action === 'dissolve') return 'permanently delete this space'
   if (p.action === 'set_public_tier') {
@@ -67,6 +77,14 @@ function describe(p: SpaceProposal): string {
     return tier
       ? `change the publication tier to “${tier}”`
       : 'change the publication tier'
+  }
+  if (p.action === 'remote_admin_action' && p.fwd_action === 'set_member_role') {
+    // "make Carol a moderator" — the owner must see exactly what they
+    // approve: who, and to which role.
+    // (English like the rest of this banner's sentence.)
+    const role = parseSpaceRole(p.fwd_params?.role)
+    const who = p.fwd_target_label || 'someone'
+    return role ? `make ${who} ${ROLE_PHRASE[role]}` : `change ${who}'s role`
   }
   if (p.action === 'remote_admin_action') {
     const base =

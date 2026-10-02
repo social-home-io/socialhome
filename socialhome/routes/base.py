@@ -35,6 +35,7 @@ from ..domain.space import (
     ModerationExpiredError,
     ModerationInProgressError,
     HostTooOldError,
+    HostUnreachableError,
     ModerationPayloadTooLargeError,
     ModerationQueueFullError,
     ModerationStaleError,
@@ -248,12 +249,30 @@ class BaseView(web.View):
             return error_response(
                 409, "IN_PROGRESS", "This submission is being approved right now."
             )
-        except HostTooOldError:
+        except HostUnreachableError as exc:
+            return error_response(
+                503,
+                "HOST_UNREACHABLE",
+                "This space's host household isn't known here yet."
+                if exc.reason == "unknown_host"
+                else "Couldn't reach the space's host household. Try again later.",
+                extra={"reason": exc.reason},
+            )
+        except HostTooOldError as exc:
+            if exc.feature == "role_change":
+                return error_response(
+                    409,
+                    "HOST_TOO_OLD",
+                    "The space's host household must be updated before roles "
+                    "can be changed from here.",
+                    extra={"feature": exc.feature},
+                )
             return error_response(
                 409,
                 "HOST_TOO_OLD",
                 "The space's host household must be updated before this can "
                 "be submitted for review.",
+                extra={"feature": exc.feature},
             )
         except ModerationUnavailableError:
             return error_response(

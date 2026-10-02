@@ -10,7 +10,7 @@ import random
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from PIL import Image
@@ -22,6 +22,13 @@ from socialhome.domain.events import (
     SpaceModerationQueued,
     SpacePostCreated,
 )
+from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    DeliveryResult,
+    FederationEventType,
+)
+from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.post import PostType
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -33,6 +40,8 @@ from socialhome.domain.space import (
     PeersTooOldError,
     ContentAction,
     ContentQueuedForReview,
+    HostTooOldError,
+    HostUnreachableError,
     HouseholdUpgradeRequiredError,
     JoinMode,
     Space,
@@ -1244,6 +1253,35 @@ async def test_delegated_admin_retention_edit_also_forwards_to_host(stack):
     reloaded = await stack.space_repo.get(sid)
     assert reloaded.retention_days == 14
     assert reloaded.retention_exempt_types == ("poll",)
+
+
+async def test_delegated_admin_retention_edit_survives_an_unreachable_host(stack):
+    """Owner-offline config: the retention side-copy to the host is best
+    effort. A host the forward can't reach (no route — not queued) must not
+    abort the delegated admin's authoritative local edit."""
+    from socialhome.crypto import generate_space_keypair
+
+    kp = generate_space_keypair()
+    sid = await _seat_remote_delegated_space(stack, actor="anna", seed=kp.private_key)
+    await stack.space_repo.set_space_pubkey(sid, kp.public_key.hex())
+    fed = MagicMock()
+    fed._own_instance_id = stack.iid
+    fed.broadcast_to_space_members = AsyncMock()
+    fed.peer_supports = AsyncMock(return_value=True)
+    fed.send_with_mesh_fallback = AsyncMock(
+        return_value=DeliveryResult(
+            instance_id="inst-remote-owner", ok=False, error="no_route"
+        )
+    )
+    stack.space_svc._federation = fed
+
+    await stack.space_svc.update_config(
+        sid, actor_username="anna", name="Offline rename", retention_days=30
+    )
+    fed.send_with_mesh_fallback.assert_awaited_once()
+    reloaded = await stack.space_repo.get(sid)
+    assert reloaded.name == "Offline rename"
+    assert reloaded.retention_days == 30
 
 
 @pytest.mark.security
@@ -3801,6 +3839,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3831,6 +3870,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     )
 
 
@@ -3873,6 +3913,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3930,6 +3971,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
+        "Role changes from member households",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -7352,6 +7394,10 @@ async def test_a_new_member_household_is_sent_one_signed_roster_snapshot(stack):
     assert set(by_user) == {"u-early", owner.user_id}
     assert by_user["u-early"]["payload"]["instance_id"] == "peer-early"
     assert by_user[owner.user_id]["payload"]["instance_id"] == stack.iid
+    # The owner's seat ships as ``owner`` so the member household can record
+    # it (migration 0070); every other seat keeps its mirrorable role.
+    assert by_user[owner.user_id]["payload"]["role"] == "owner"
+    assert by_user["u-early"]["payload"]["role"] == "member"
     pub = bytes.fromhex((await stack.space_repo.get(space.id)).identity_public_key)
     for e in entries:
         p = e["payload"]
@@ -7998,22 +8044,166 @@ async def test_role_change_event_types_name_what_happened(stack):
     ]
 
 
-async def test_role_changes_happen_on_the_host_only(stack):
-    """There is no forward path for role changes yet: on a stub (a space
-    hosted elsewhere) the matrix would let an admin rewrite a local role the
-    host never learns, so it is refused outright."""
-    space, u = await _space_with_roles(stack)
+async def _as_stub(stack, space, *, host_version_ok=True):
+    """Re-home ``space`` onto another household (we now hold a stub) and
+    attach a federation mock whose host is (or isn't) at v_47."""
     await stack.db.enqueue(
         "UPDATE spaces SET owner_instance_id=? WHERE id=?",
         ("some-other-household", space.id),
     )
-    with pytest.raises(SpacePermissionError):
+    fed = _roster_gossip_fed()
+
+    async def _supports(iid, *, min_version):
+        if min_version >= FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE:
+            return host_version_ok
+        return True
+
+    fed.peer_supports = AsyncMock(side_effect=_supports)
+    fed.send_with_mesh_fallback = AsyncMock()
+    stack.space_svc._federation = fed
+    return fed
+
+
+async def test_a_stub_forwards_a_role_change_to_the_host(stack):
+    """v_47: on a stub the change is not written locally — it ships to the
+    host as ``set_member_role`` and the host's roster gossip brings it back."""
+    space, u = await _space_with_roles(stack)
+    fed = await _as_stub(stack, space)
+    forwarded = await stack.space_svc.set_role(
+        space.id,
+        actor_username="olga",
+        user_id=u["bob"].user_id,
+        role="moderator",
+    )
+    assert forwarded is True
+    call = fed.send_with_mesh_fallback.await_args
+    assert call.kwargs["event_type"] is FederationEventType.SPACE_REMOTE_ADMIN_ACTION
+    assert call.kwargs["to_instance_id"] == "some-other-household"
+    payload = call.kwargs["payload"]
+    assert payload["action"] == "set_member_role"
+    assert payload["params"] == {
+        "instance_id": stack.space_svc._own_instance_id,
+        "user_id": u["bob"].user_id,
+        "from_role": "member",
+        "role": "moderator",
+    }
+    bob = await stack.space_svc._spaces.get_member(space.id, u["bob"].user_id)
+    assert bob.role == "member"  # the stub is a mirror — untouched
+
+
+async def test_a_stub_refuses_a_forward_to_a_host_below_v47(stack):
+    """A pre-v_47 host drops the unknown action silently, so the stub says
+    HOST_TOO_OLD instead of pretending it was sent."""
+    space, u = await _space_with_roles(stack)
+    fed = await _as_stub(stack, space, host_version_ok=False)
+    with pytest.raises(HostTooOldError) as exc:
         await stack.space_svc.set_role(
             space.id,
             actor_username="olga",
             user_id=u["bob"].user_id,
             role="moderator",
         )
+    assert exc.value.feature == "role_change"
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("actor", "target", "role"),
+    [
+        ("mo", "bob", "moderator"),  # a moderator holds no settings authority
+        ("bob", "mo", "member"),  # a member neither
+        ("olga", "bob", "admin"),  # an admin never makes an admin
+        ("olga", "anna", "member"),  # nobody demotes the owner
+    ],
+)
+async def test_a_stub_refuses_what_the_matrix_forbids_before_forwarding(
+    stack, actor, target, role
+):
+    space, u = await _space_with_roles(stack)
+    fed = await _as_stub(stack, space)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_role(
+            space.id,
+            actor_username=actor,
+            user_id=u[target].user_id,
+            role=role,
+        )
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_a_stub_refuses_a_role_change_on_the_owner(stack):
+    """The host's roster named the owner's seat (migration 0070): the stub
+    refuses a change on it instead of forwarding one the host drops."""
+    space, _u = await _space_with_roles(stack)
+    fed = await _as_stub(stack, space)
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="some-other-household",
+        user_id="u-host-owner",
+        user_pk=None,
+        display_name="Hannah",
+    )
+    await stack.space_svc._spaces.set_owner_user_id(space.id, "u-host-owner")
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="olga",
+            instance_id="some-other-household",
+            user_id="u-host-owner",
+            role="moderator",
+        )
+    fed.send_with_mesh_fallback.assert_not_awaited()
+    stub = await stack.space_svc._spaces.get(space.id)
+    assert await stack.space_svc.owner_user_id(stub) == "u-host-owner"
+
+
+async def test_the_hosts_owner_user_id_comes_from_users(stack):
+    space, u = await _space_with_roles(stack)
+    assert await stack.space_svc.owner_user_id(space) == u["anna"].user_id
+
+
+@pytest.mark.parametrize(
+    ("error", "raises"),
+    [
+        ("no_route", True),
+        ("not_confirmed", True),
+        (DELIVERY_ERROR_QUEUED, False),  # parked in the durable outbox
+        (DELIVERY_ERROR_RELAY_THROTTLED, False),  # still parked
+    ],
+)
+async def test_a_forward_that_went_nowhere_is_not_reported_sent(stack, error, raises):
+    space, u = await _space_with_roles(stack)
+    fed = await _as_stub(stack, space)
+    fed.send_with_mesh_fallback = AsyncMock(
+        return_value=DeliveryResult(
+            instance_id="some-other-household", ok=False, error=error
+        )
+    )
+    call = stack.space_svc.set_role(
+        space.id, actor_username="olga", user_id=u["bob"].user_id, role="moderator"
+    )
+    if raises:
+        with pytest.raises(HostUnreachableError) as exc:
+            await call
+        assert exc.value.reason == "unreachable"
+    else:
+        assert await call is True
+
+
+async def test_a_stub_with_no_recorded_host_says_so(stack):
+    """A blank owner_instance_id is an unknown host, not a too-old one."""
+    space, u = await _space_with_roles(stack)
+    fed = await _as_stub(stack, space)
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='' WHERE id=?", (space.id,)
+    )
+    with pytest.raises(HostUnreachableError) as exc:
+        await stack.space_svc.set_role(
+            space.id, actor_username="olga", user_id=u["bob"].user_id, role="moderator"
+        )
+    assert exc.value.reason == "unknown_host"
+    fed.send_with_mesh_fallback.assert_not_awaited()
 
 
 async def test_invite_links_never_seat_a_moderator(stack):

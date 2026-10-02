@@ -1760,3 +1760,15 @@ async def test_save_never_writes_the_echo_columns(env):
     await env.repo.set_authority_echo("sp-keep", {"forgotten_epoch": 2})
     await env.repo.save(_space("sp-keep"))
     assert await env.repo.get_authority_echo("sp-keep") == {"forgotten_epoch": 2}
+
+
+async def test_owner_user_id_round_trips_and_survives_a_resave(env):
+    """Migration 0070: the stub's owner seat, set only by its own setter —
+    a later config re-save must not clear it."""
+    space = _space("sp-stub")
+    await env.repo.save(space)
+    assert await env.repo.get_owner_user_id("sp-stub") is None
+    await env.repo.set_owner_user_id("sp-stub", "u-owner")
+    await env.repo.save(replace(space, name="Renamed"))
+    assert await env.repo.get_owner_user_id("sp-stub") == "u-owner"
+    assert await env.repo.get_owner_user_id("sp-missing") is None

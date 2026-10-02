@@ -790,6 +790,24 @@ class SpaceMembersView(BaseView):
                     household_name=household_names[rm.instance_id],
                 ),
             )
+        # ``is_owner`` on every row. On a stub the owner is mirrored as a
+        # plain remote seat (its role CHECK has no ``owner``); the host's
+        # invite roster named it (migration 0070), so show it as the owner
+        # and the SPA offers no role change on it.
+        space_svc = self.svc(space_service_key)
+        space = await space_svc._require_space(space_id)
+        owner_uid = await space_svc.owner_user_id(space)
+        for row in local_rows:
+            row["is_owner"] = row.get("role") == SpaceRole.OWNER.value
+        for row in remote_rows:
+            is_owner = (
+                owner_uid is not None
+                and row.get("user_id") == owner_uid
+                and row.get("instance_id") == space.owner_instance_id
+            )
+            row["is_owner"] = is_owner
+            if is_owner:
+                row["role"] = SpaceRole.OWNER.value
         return web.json_response(local_rows + remote_rows)
 
     async def post(self) -> web.Response:
@@ -1175,6 +1193,11 @@ class SpaceMemberDetailView(BaseView):
         ``admin`` / ``moderator`` / ``member``. The owner sets any of them;
         an admin moves a member between ``member`` and ``moderator`` only
         (:func:`role_change_allowed` — 403 otherwise).
+
+        On a member household the change is forwarded to the space's host
+        (v_47): 202 ``{forwarded: true}``. The host decides; the new role
+        arrives with its roster update, a refused one never does. 409
+        ``HOST_TOO_OLD`` when the host can't take a forwarded role change.
         """
         ctx = self.user
         svc = self.svc(space_service_key)
@@ -1192,12 +1215,16 @@ class SpaceMemberDetailView(BaseView):
                 },
                 status=422,
             )
-        await svc.set_role(
+        forwarded = await svc.set_role(
             space_id,
             actor_username=ctx.username,
             user_id=user_id,
             role=role,
         )
+        if forwarded:
+            return web.json_response(
+                {"user_id": user_id, "role": role, "forwarded": True}, status=202
+            )
         return web.json_response({"user_id": user_id, "role": role})
 
     async def delete(self) -> web.Response:
@@ -1393,7 +1420,9 @@ class SpaceRemoteMemberRoleView(BaseView):
     sets any of them, an admin moves a member between ``member`` and
     ``moderator`` only; the change federates to every member household via
     ``SPACE_MEMBER_ROLE_CHANGED``. ``moderator`` needs the member's home
-    household at v_41 (403 "must upgrade" otherwise).
+    household at v_41 (403 "must upgrade" otherwise). On a member household
+    the change is forwarded to the host (v_47): 202 ``{forwarded: true}``,
+    or 409 ``HOST_TOO_OLD`` for a host that can't take it.
 
     ``DELETE`` — admin/owner only; routes through
     :meth:`SpaceService.remove_remote_member` which broadcasts
@@ -1415,16 +1444,17 @@ class SpaceRemoteMemberRoleView(BaseView):
                 "UNPROCESSABLE",
                 "role must be 'admin', 'moderator' or 'member'",
             )
-        await svc.set_remote_member_role(
+        forwarded = await svc.set_remote_member_role(
             space_id,
             actor_username=ctx.username,
             instance_id=instance_id,
             user_id=user_id,
             role=role,
         )
-        return web.json_response(
-            {"instance_id": instance_id, "user_id": user_id, "role": role}
-        )
+        body_out = {"instance_id": instance_id, "user_id": user_id, "role": role}
+        if forwarded:
+            return web.json_response({**body_out, "forwarded": True}, status=202)
+        return web.json_response(body_out)
 
     async def delete(self) -> web.Response:
         ctx = self.user

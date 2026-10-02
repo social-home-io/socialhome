@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
+from socialhome.app_keys import space_service_key as _space_service_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
+from socialhome.domain.federation import DeliveryResult
 
 
 def _auth(token: str) -> dict:
@@ -429,3 +433,135 @@ async def test_promoting_a_behind_household_answers_a_stable_code(client):
     assert r.status == 403
     body = await r.json()
     assert body["error"]["code"] == "HOUSEHOLD_UPGRADE_REQUIRED"
+
+
+# ── forwarded role changes from a stub (v_47) ──
+
+
+async def _as_stub(client, sid: str, *, host_ok: bool = True):
+    """Re-home ``sid`` onto another household and fake its transport."""
+    app = client.server.app
+    await app[_db_key].enqueue(
+        "UPDATE spaces SET owner_instance_id=? WHERE id=?", ("host-x", sid)
+    )
+    fed = MagicMock()
+    fed.peer_supports = AsyncMock(return_value=host_ok)
+    fed.send_with_mesh_fallback = AsyncMock()
+    app[_space_service_key]._federation = fed
+    return fed
+
+
+async def test_a_stub_admin_role_change_is_forwarded_202(client):
+    sid, _cara, (_ouid, olga) = await _moderator_space(client)
+    fed = await _as_stub(client, sid)
+    r = await _set_role(client, sid, client._bob_uid, "moderator", olga)
+    assert r.status == 202, await r.text()
+    body = await r.json()
+    assert body == {"user_id": client._bob_uid, "role": "moderator", "forwarded": True}
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert payload["action"] == "set_member_role"
+    # The stub's roster is a mirror: nothing changed locally yet.
+    r = await client.get(f"/api/spaces/{sid}/members", headers=_auth(olga))
+    bob = next(m for m in await r.json() if m["user_id"] == client._bob_uid)
+    assert bob["role"] == "member"
+
+
+async def test_a_stub_moderator_cannot_forward_a_role_change_403(client):
+    sid, (_cuid, cara), _olga = await _moderator_space(client)
+    fed = await _as_stub(client, sid)
+    r = await _set_role(client, sid, client._bob_uid, "moderator", cara)
+    assert r.status == 403
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_a_stub_admin_still_cannot_make_an_admin_403(client):
+    sid, _cara, (_ouid, olga) = await _moderator_space(client)
+    fed = await _as_stub(client, sid)
+    r = await _set_role(client, sid, client._bob_uid, "admin", olga)
+    assert r.status == 403
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_a_stub_on_an_old_host_answers_host_too_old_409(client):
+    sid, _cara, (_ouid, olga) = await _moderator_space(client)
+    fed = await _as_stub(client, sid, host_ok=False)
+    r = await _set_role(client, sid, client._bob_uid, "moderator", olga)
+    assert r.status == 409
+    err = (await r.json())["error"]
+    assert err["code"] == "HOST_TOO_OLD"
+    assert err["feature"] == "role_change"
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_a_stub_remote_member_role_change_is_forwarded_202(client):
+    sid, _cara, (_ouid, olga) = await _moderator_space(client)
+    await client.server.app[_db_key].enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,'member')",
+        (sid, "peer-c", "ru-c"),
+    )
+    fed = await _as_stub(client, sid)
+    r = await client.patch(
+        f"/api/spaces/{sid}/remote-members/peer-c/ru-c",
+        json={"role": "moderator"},
+        headers=_auth(olga),
+    )
+    assert r.status == 202, await r.text()
+    assert (await r.json())["forwarded"] is True
+    params = fed.send_with_mesh_fallback.await_args.kwargs["payload"]["params"]
+    assert params == {
+        "instance_id": "peer-c",
+        "user_id": "ru-c",
+        "from_role": "member",
+        "role": "moderator",
+    }
+
+
+async def test_a_forward_that_reached_nobody_answers_503(client):
+    """No route to the host: nothing was queued, so never 202 "sent"."""
+    sid, _cara, (_ouid, olga) = await _moderator_space(client)
+    fed = await _as_stub(client, sid)
+    fed.send_with_mesh_fallback = AsyncMock(
+        return_value=DeliveryResult(instance_id="host-x", ok=False, error="no_route")
+    )
+    r = await _set_role(client, sid, client._bob_uid, "moderator", olga)
+    assert r.status == 503
+    err = (await r.json())["error"]
+    assert err["code"] == "HOST_UNREACHABLE"
+    assert err["reason"] == "unreachable"
+
+
+async def test_the_owner_seat_on_a_stub_is_flagged_and_refused(client):
+    """The host's roster named the owner (migration 0070): the members list
+    marks that remote seat ``owner`` and a role change on it is a 403."""
+    sid, _cara, (_ouid, olga) = await _moderator_space(client)
+    db = client.server.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,'member')",
+        (sid, "host-x", "u-hannah"),
+    )
+    fed = await _as_stub(client, sid)
+    await db.enqueue("UPDATE spaces SET owner_user_id=? WHERE id=?", ("u-hannah", sid))
+    r = await client.get(f"/api/spaces/{sid}/members", headers=_auth(olga))
+    rows = {m["user_id"]: m for m in await r.json()}
+    assert rows["u-hannah"]["is_owner"] is True
+    assert rows["u-hannah"]["role"] == "owner"
+    assert rows[client._bob_uid]["is_owner"] is False
+    r = await client.patch(
+        f"/api/spaces/{sid}/remote-members/host-x/u-hannah",
+        json={"role": "moderator"},
+        headers=_auth(olga),
+    )
+    assert r.status == 403
+    fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+async def test_a_remote_admin_action_proposal_cannot_be_posted(client):
+    sid = await _seed_moderated_space(client)
+    r = await client.post(
+        f"/api/spaces/{sid}/proposals",
+        json={"action": "remote_admin_action"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status in (400, 422), await r.text()

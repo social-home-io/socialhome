@@ -228,4 +228,29 @@ describe('SpaceProposalsBanner — protected admin', () => {
     await findByText('Approve')
     currentUser.value = null
   })
+
+  it('a forwarded role change says who and which role', async () => {
+    apiGet.mockResolvedValue({ proposals: [proposal({
+      action: 'remote_admin_action', owner_only: true, needed: 1, approvals: 0,
+      fwd_action: 'set_member_role',
+      fwd_params: { instance_id: 'house-c', user_id: 'u-carol', from_role: 'member', role: 'moderator' },
+      fwd_target_label: 'Carol',
+    })] })
+    const { container } = render(
+      <SpaceProposalsBanner spaceId="s1" canVote={true} isOwner={true} />,
+    )
+    await waitFor(() => expect(container.textContent).toContain('make Carol a moderator'))
+  })
+
+  it('a role change with no resolvable name still names the role', async () => {
+    apiGet.mockResolvedValue({ proposals: [proposal({
+      action: 'remote_admin_action', owner_only: true, needed: 1, approvals: 0,
+      fwd_action: 'set_member_role',
+      fwd_params: { instance_id: 'house-c', user_id: 'u-x', from_role: 'moderator', role: 'member' },
+    })] })
+    const { container } = render(
+      <SpaceProposalsBanner spaceId="s1" canVote={true} isOwner={true} />,
+    )
+    await waitFor(() => expect(container.textContent).toContain('make someone a member'))
+  })
 })
