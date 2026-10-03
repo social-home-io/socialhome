@@ -34,6 +34,7 @@ import asyncio
 import enum
 import logging
 import re
+import time
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -107,6 +108,18 @@ MAX_SEQ = 2**53
 #: claim is a lie or a corrupt copy: it does not move ``seq`` — the edit is
 #: kept as a side one step up — so nobody can push a page to ``MAX_SEQ``.
 MAX_FLOOR_STEP = 2**20
+
+#: Seq-floor hints (a member's sync record, :meth:`PageConflictService
+#: .raise_floor`): one per (provider, space, page) per this window — about
+#: one §25.6 sync session (sessions run 30 minutes apart, 5 / h at most).
+FLOOR_HINT_WINDOW_S = 600
+
+#: Floor raises a single provider may cause per space per hour.
+FLOOR_RAISES_PER_PROVIDER_PER_HOUR = 50
+
+#: The most one page's floor rises from hints in a day, all providers
+#: together — a real restore needs one step; nobody can walk it upwards.
+MAX_FLOOR_RAISE_PER_DAY = MAX_FLOOR_STEP
 
 #: ``resolve_conflict`` resolutions. ``side`` keeps a version by hash;
 #: ``mine`` / ``theirs`` are the two-way names (the shown body / the newest
@@ -644,6 +657,7 @@ class PageConflictService(BusPublisherMixin):
         "_own_instance_id",
         "_spaces",
         "_limiter",
+        "_floor_raised",
     )
 
     def __init__(
@@ -658,6 +672,9 @@ class PageConflictService(BusPublisherMixin):
         self._own_instance_id = ""
         self._spaces: "AbstractSpaceRepo | None" = None
         self._limiter = RateLimiter()
+        #: ``(space_id, page_id)`` → ``[(monotonic time, amount)]`` of the
+        #: floor raises from hints in the last day.
+        self._floor_raised: dict[tuple[str, str], list[tuple[float, int]]] = {}
 
     def attach_federation(
         self,
@@ -1328,163 +1345,124 @@ class PageConflictService(BusPublisherMixin):
             )
         )
 
-    async def raise_floor(self, space_id: str, page_id: str, seq: int) -> bool:
-        """The host learns a member household mirrors ``page_id`` at
-        ``seq`` (its §25.6 sync record — never its content). A ``seq`` ahead
-        of ours means we were restored from a backup (or took over from
-        another host): raise our floor to it, so our next commit lands
-        above every version members hold and they take it. Only ever
-        raised, by at most :data:`MAX_FLOOR_STEP` per signal and never to
-        :data:`MAX_SEQ`; a live page held here only. ``True`` when it
-        moved. The caller has checked that this household hosts the space.
-        """
+    async def raise_floor(
+        self, space_id: str, page_id: str, seq: int, *, provider: str
+    ) -> bool:
+        """The host learns a member household (``provider``) mirrors
+        ``page_id`` at ``seq`` (the highest of its §25.6 sync records for
+        the page — never its content). A ``seq`` ahead of ours means we were
+        restored from a backup: raise our floor to it, so our next commit
+        lands above every version members hold and they take it.
+
+        Only ever raised, for a live page held here, never to
+        :data:`MAX_SEQ`, and bounded so no member can walk the page up:
+        at most :data:`MAX_FLOOR_STEP` per hint, one hint per (provider,
+        page) per :data:`FLOOR_HINT_WINDOW_S`, at most
+        :data:`FLOOR_RAISES_PER_PROVIDER_PER_HOUR` raises per (provider,
+        space), and :data:`MAX_FLOOR_RAISE_PER_DAY` per page in total.
+        ``True`` when it moved. The caller has checked that this household
+        hosts the space and that ``provider`` is a writer household."""
         if seq <= 0 or seq > MAX_SEQ:
+            return False
+        if not self._limiter.is_allowed(
+            f"page-floor-hint:{provider}:{space_id}:{page_id}",
+            limit=1,
+            window_s=FLOOR_HINT_WINDOW_S,
+        ):
             return False
         async with self.lock_for(space_id, page_id):
             page = await self._pages.get_space_page(page_id, space_id=space_id)
             if page is None or seq <= page.seq:
                 return False
-            if seq - page.seq > MAX_FLOOR_STEP:
+            floor = min(seq, MAX_SEQ - 1)
+            amount = floor - page.seq
+            key = (space_id, page_id)
+            now = time.monotonic()
+            recent = [
+                (t, n) for t, n in self._floor_raised.get(key, []) if now - t < 86400
+            ]
+            spent = sum(n for _t, n in recent)
+            if amount > MAX_FLOOR_STEP or spent + amount > MAX_FLOOR_RAISE_PER_DAY:
                 log.warning(
-                    "page %s in space %s: a member reports seq %s, %s past ours "
-                    "— beyond the floor step; not raised",
+                    "page %s in space %s: %s reports seq %s, %s past ours — "
+                    "beyond the floor step or the day's budget; not raised",
                     page_id,
                     space_id,
+                    provider,
                     seq,
-                    seq - page.seq,
+                    amount,
                 )
                 return False
-            floor = min(seq, MAX_SEQ - 1)
+            if not self._limiter.is_allowed(
+                f"page-floor-raises:{provider}:{space_id}",
+                limit=FLOOR_RAISES_PER_PROVIDER_PER_HOUR,
+                window_s=3600,
+            ):
+                log.warning(
+                    "page %s in space %s: floor raises from %s over the rate "
+                    "limit — not raised",
+                    page_id,
+                    space_id,
+                    provider,
+                )
+                return False
             raised = await self._pages.raise_seq(page_id, space_id=space_id, seq=floor)
+            if raised:
+                recent.append((now, amount))
+            self._floor_raised[key] = recent
         if raised:
             log.warning(
-                "page %s in space %s: a member mirrors seq %s, ahead of ours "
-                "(%s) — restored host; floor raised",
+                "page %s in space %s: %s mirrors seq %s, ahead of ours (%s) — "
+                "restored host; floor raised",
                 page_id,
                 space_id,
+                provider,
                 floor,
                 page.seq,
             )
         return raised
 
     async def delete_page(
-        self, space_id: str, page_id: str, *, deleted_by: str = ""
+        self,
+        space_id: str,
+        page_id: str,
+        *,
+        deleted_by: str = "",
+        from_instance: str = "",
     ) -> bool:
         """Tombstone a space page (migration 0073) under its lock, so no
-        sequencing or mirroring step interleaves with the delete. ``False``
-        when no live page of ``space_id`` was there."""
-        async with self.lock_for(space_id, page_id):
-            return await self._pages.delete(
-                page_id, space_id=space_id, deleted_by=deleted_by
-            )
+        sequencing or mirroring step interleaves with the delete.
+        ``from_instance`` is the household the delete came from (empty: a
+        local delete).
 
-    async def adopt_draft(self, space_id: str, page_id: str) -> bool:
-        """This household hosts the space now, yet still holds a draft of
-        its own made under the previous host: commit it as host and clear
-        ``pending_base_seq``. The draft is sequenced like a proposal on the
-        base it was made from, against the newest version mirrored since
-        (``seq`` stays above every version we saw), so it fast-forwards,
-        merges, or is kept as a side — never lost. ``True`` when a draft
-        was adopted."""
+        Deletes are not sequenced, so households can judge one differently;
+        only the host's view is final. The tombstone is **confirmed** when
+        this household hosts the space or the delete comes from the host;
+        otherwise it yields to a later host version (:meth:`mirror`). A
+        host's delete of a page tombstoned here unconfirmed confirms it.
+        ``True`` when anything changed (``False``: no page of
+        ``space_id`` here to delete or confirm)."""
+        mode, host = await self.mode(space_id)
+        confirmed = mode is PageMode.HOST or (
+            bool(from_instance) and from_instance == host
+        )
         async with self.lock_for(space_id, page_id):
-            page = await self._pages.get_space_page(page_id, space_id=space_id)
-            if page is None or page.pending_base_seq is None:
-                return False
-            base = await self._pages.get_draft_base(page_id, space_id=space_id)
-            proposal = Proposal(
-                title=page.title,
-                content=page.content,
-                cover_image_url=page.cover_image_url,
-                actor_user_id=page.last_editor_user_id or page.created_by,
+            if await self._pages.delete(
+                page_id, space_id=space_id, deleted_by=deleted_by, confirmed=confirmed
+            ):
+                return True
+            return confirmed and await self._pages.confirm_delete(
+                page_id, space_id=space_id
             )
-            await self._pages.clear_draft_base(page_id, space_id=space_id)
-            if page.pending_base_seq == 0 or base is None or not base.title:
-                # Our own create, never sequenced: its first version.
-                first = replace(
-                    page, seq=min(page.seq + 1, MAX_SEQ), pending_base_seq=None
-                )
-                await self._pages.save(first, space_id=space_id)
-                stored = await self._pages.get_space_page(page_id, space_id=space_id)
-                result = SequenceResult(
-                    SequenceOutcome.APPLIED, None, stored or first, created=True
-                )
-            else:
-                current = await self._canonical_under_draft(space_id, page, base)
-                # The draft's base is an ancestor of the current version:
-                # keep it in history, where the merge looks bases up.
-                await self._remember(
-                    page,
-                    title=base.title,
-                    content=base.content,
-                    cover_image_url=base.cover_image_url,
-                    edited_by=base.by,
-                    space_id=space_id,
-                )
-                proposal = replace(
-                    proposal,
-                    base_seq=page.pending_base_seq,
-                    base_hash=version_hash(
-                        base.title, base.content, base.cover_image_url
-                    ),
-                    resolves=base.resolves,
-                )
-                result = await self._sequence_edit(space_id, current, proposal)
-                if result.outcome not in (
-                    SequenceOutcome.APPLIED,
-                    SequenceOutcome.SIDE,
-                ):
-                    # Nothing to commit (the draft was the current version
-                    # already): just drop the draft.
-                    await self._pages.save(current, space_id=space_id)
-        log.info(
-            "page %s in space %s: this household hosts the space now — our "
-            "draft is sequenced here (%s)",
-            page_id,
-            space_id,
-            result.outcome,
-        )
-        await self._publish_result(
-            result,
-            space_id=space_id,
-            page_id=page_id,
-            proposal=proposal,
-            proposer_instance="",
-        )
-        return True
-
-    async def _canonical_under_draft(
-        self, space_id: str, page: Page, base: DraftBase
-    ) -> Page:
-        """The canonical version a draft row sits on: the draft's base, or —
-        when a newer host version was mirrored under the draft — that
-        version (the newest history row: a member writes history only when
-        it mirrors a host version)."""
-        title, content, cover = base.title, base.content, base.cover_image_url
-        editor = base.by
-        if page.seq > base.seq:
-            versions = await self._pages.list_versions(page.id, space_id=space_id)
-            newest = max(versions, key=lambda v: v.version, default=None)
-            if newest is not None:
-                title, content, cover = (
-                    newest.title,
-                    newest.content,
-                    newest.cover_image_url,
-                )
-                editor = newest.edited_by
-        return replace(
-            page,
-            title=title,
-            content=content,
-            cover_image_url=cover,
-            last_editor_user_id=editor or page.last_editor_user_id,
-            pending_base_seq=None,
-        )
 
     async def host_create(self, page: Page, *, actor_user_id: str) -> Page:
         """A page created here, on its host: sequenced as ``seq`` 1."""
         async with self.lock_for(page.space_id or "", page.id):
             first = replace(page, seq=1, pending_base_seq=None)
-            await self._pages.save(first, space_id=page.space_id)
+            if not await self._pages.save(first, space_id=page.space_id):
+                # A tombstoned (or another space's) id: nothing was written,
+                # so nothing is broadcast.
+                raise PageNotFoundError(page.id)
             stored = await self._pages.get_space_page(
                 page.id, space_id=page.space_id or ""
             )
@@ -1636,8 +1614,25 @@ class PageConflictService(BusPublisherMixin):
         published after the page lock is released."""
         settled: PageProposalSettled | None = None
         changed = False
+        revived = False
         async with self.lock_for(space_id, page_id):
             page = await self._pages.get_space_page(page_id, space_id=space_id)
+            if page is None and version.has_state and version.seq >= 1:
+                # Our tombstone the host never confirmed (another member's
+                # delete, or our own) yields to the host still holding the
+                # page at or above the tombstone's seq: its view is final.
+                revived = await self._pages.revive(
+                    page_id, space_id=space_id, seq=version.seq
+                )
+                if revived:
+                    log.info(
+                        "page %s in space %s: the host still holds it (seq "
+                        "%s) — our unconfirmed delete yields",
+                        page_id,
+                        space_id,
+                        version.seq,
+                    )
+                    page = await self._pages.get_space_page(page_id, space_id=space_id)
             if page is None:
                 return await self._mirror_create(space_id, page_id, version)
             draft_hash = (
@@ -1666,6 +1661,7 @@ class PageConflictService(BusPublisherMixin):
                     page,
                     version,
                     keep_draft=draft_hash is not None and not settles,
+                    remember=not revived,
                 )
                 changed = True
                 if settles and draft_hash is not None:
@@ -1801,7 +1797,13 @@ class PageConflictService(BusPublisherMixin):
         return True
 
     async def _mirror_apply(
-        self, space_id: str, page: Page, version: CanonicalVersion, *, keep_draft: bool
+        self,
+        space_id: str,
+        page: Page,
+        version: CanonicalVersion,
+        *,
+        keep_draft: bool,
+        remember: bool = True,
     ) -> None:
         if not version.has_state:
             return
@@ -1818,11 +1820,16 @@ class PageConflictService(BusPublisherMixin):
             )
             updated = replace(page, seq=version.seq)
         else:
-            if page.pending_base_seq is None and (
-                page.title,
-                page.content,
-                page.cover_image_url,
-            ) != (version.title, version.content, version.cover_image_url):
+            if (
+                remember
+                and page.pending_base_seq is None
+                and (
+                    page.title,
+                    page.content,
+                    page.cover_image_url,
+                )
+                != (version.title, version.content, version.cover_image_url)
+            ):
                 await self._remember_page(page, space_id)
             updated = replace(
                 page,

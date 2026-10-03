@@ -96,8 +96,15 @@ class AbstractPageRepo(Protocol):
         limit: int = 500,
     ) -> builtins.list[Page]: ...
     async def delete(
-        self, page_id: str, *, space_id: str | None, deleted_by: str = ""
+        self,
+        page_id: str,
+        *,
+        space_id: str | None,
+        deleted_by: str = "",
+        confirmed: bool = True,
     ) -> bool: ...
+    async def confirm_delete(self, page_id: str, *, space_id: str) -> bool: ...
+    async def revive(self, page_id: str, *, space_id: str, seq: int) -> bool: ...
     async def tombstone(
         self,
         page_id: str,
@@ -352,7 +359,12 @@ class SqlitePageRepo:
         return [p for p in (_row_to_page(d) for d in rows_to_dicts(rows)) if p]
 
     async def delete(
-        self, page_id: str, *, space_id: str | None, deleted_by: str = ""
+        self,
+        page_id: str,
+        *,
+        space_id: str | None,
+        deleted_by: str = "",
+        confirmed: bool = True,
     ) -> bool:
         """Delete a page from the table its scope selects.
 
@@ -368,7 +380,9 @@ class SqlitePageRepo:
         can be named), so sync and resume can tell a household that missed
         it, and no stale copy can bring it back. Its title / content /
         cover are blanked, any draft dropped; the migration-0073 trigger
-        drops its snapshots and history in this space.
+        drops its snapshots and history in this space. ``confirmed``: the
+        space's host stands behind the delete (final); an unconfirmed
+        tombstone may still yield to the host (:meth:`revive`).
         """
         if space_id is None:
             n = await self._db.enqueue_rowcount(
@@ -385,11 +399,38 @@ class SqlitePageRepo:
             return n > 0
         n = await self._db.enqueue_rowcount(
             "UPDATE space_pages SET deleted_at=datetime('now'),"
-            " deleted_by=NULLIF(?, ''), title='', content='',"
+            " deleted_by=NULLIF(?, ''), delete_confirmed=?, title='', content='',"
             " cover_image_url=NULL, pending_base_seq=NULL,"
             " locked_by=NULL, locked_at=NULL, lock_expires_at=NULL"
             " WHERE id=? AND space_id=? AND deleted_at IS NULL",
-            (deleted_by, page_id, space_id),
+            (deleted_by, 1 if confirmed else 0, page_id, space_id),
+        )
+        return n > 0
+
+    async def confirm_delete(self, page_id: str, *, space_id: str) -> bool:
+        """The space's host stands behind an unconfirmed tombstone of
+        ``space_id``: make it final. ``True`` when it changed."""
+        n = await self._db.enqueue_rowcount(
+            "UPDATE space_pages SET delete_confirmed=1"
+            " WHERE id=? AND space_id=? AND deleted_at IS NOT NULL"
+            " AND delete_confirmed=0",
+            (page_id, space_id),
+        )
+        return n > 0
+
+    async def revive(self, page_id: str, *, space_id: str, seq: int) -> bool:
+        """Bring an **unconfirmed** tombstone of ``space_id`` back because
+        the host still holds the page at ``seq`` — at or above the
+        tombstone's own ``seq`` (the host refused, or never saw, the
+        delete). The row comes back blank at ``seq`` 0, so the host's
+        version the caller mirrors next applies over it. A confirmed
+        tombstone, or an older host version, never revives. ``True`` when
+        it did."""
+        n = await self._db.enqueue_rowcount(
+            "UPDATE space_pages SET deleted_at=NULL, deleted_by=NULL, seq=0"
+            " WHERE id=? AND space_id=? AND deleted_at IS NOT NULL"
+            " AND delete_confirmed=0 AND seq <= ?",
+            (page_id, space_id, int(seq)),
         )
         return n > 0
 
@@ -413,8 +454,8 @@ class SqlitePageRepo:
         """
         n = await self._db.enqueue_rowcount(
             "INSERT INTO space_pages(id, space_id, title, content, created_by,"
-            " deleted_at, deleted_by)"
-            " VALUES(?, ?, '', '', ?, datetime('now'), NULLIF(?, ''))"
+            " deleted_at, deleted_by, delete_confirmed)"
+            " VALUES(?, ?, '', '', ?, datetime('now'), NULLIF(?, ''), 1)"
             " ON CONFLICT(id) DO NOTHING",
             (page_id, space_id, created_by, deleted_by),
         )

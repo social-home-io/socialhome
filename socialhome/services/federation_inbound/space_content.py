@@ -51,6 +51,7 @@ from ...domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    PageDeleted,
     TaskCreated,
     TaskDeleted,
     TaskListCreated,
@@ -809,12 +810,14 @@ class SpaceContentInboundHandlers:
         if mode is PageMode.HOST:
             await self._on_page_proposal(event, space_id, page_id, existing)
             return
-        if existing is None and await self._page_repo.is_page_deleted(
+        tombstoned = existing is None and await self._page_repo.is_page_deleted(
             page_id, space_id=space_id
-        ):
+        )
+        if tombstoned and not (host and event.from_instance == host and "seq" in p):
             # Deleted here (migration 0073): a household that missed the
-            # delete, or its replay, never brings the page back — not even
-            # the host's version (its delete reaches the host by sync).
+            # delete, or its replay, never brings the page back. Only the
+            # host's version may — and only over a tombstone the host never
+            # confirmed (:meth:`PageConflictService.mirror`).
             log_not_applied(event, what="page", row_id=page_id, reason="deleted here")
             return
         if (
@@ -827,10 +830,16 @@ class SpaceContentInboundHandlers:
             # The host sequences (it sent ``seq``) even if we have not seen
             # its v_48 capabilities yet: mirror it as the host's version,
             # never last write wins on our possibly stale view.
-            await self._on_host_page_version(event, space_id, page_id, existing)
+            await self._on_host_page_version(
+                event, space_id, page_id, existing, tombstoned=tombstoned
+            )
             return
         if mode is PageMode.MEMBER and event.from_instance == host:
-            await self._on_host_page_version(event, space_id, page_id, existing)
+            await self._on_host_page_version(
+                event, space_id, page_id, existing, tombstoned=tombstoned
+            )
+            return
+        if tombstoned:
             return
         if mode is PageMode.MEMBER and existing is not None:
             log.debug(
@@ -1039,9 +1048,15 @@ class SpaceContentInboundHandlers:
         space_id: str,
         page_id: str,
         existing: Page | None,
+        *,
+        tombstoned: bool = False,
     ) -> None:
         """A member household: the host's canonical version (or its answer
-        to our proposal), mirrored by ``seq``."""
+        to our proposal), mirrored by ``seq``. ``tombstoned``: we hold the
+        page as a tombstone — the engine revives it only if the host never
+        confirmed the delete and still holds the page at or above its
+        ``seq``; the row (and its creator) is ours, so it is judged as a
+        held page."""
         engine = self._page_conflicts
         assert engine is not None
         p = event.payload
@@ -1056,7 +1071,8 @@ class SpaceContentInboundHandlers:
                     space_id,
                 )
             return
-        if existing is None and (
+        held = existing is not None or tombstoned
+        if not held and (
             event.event_type is not FederationEventType.SPACE_PAGE_CREATED
             or not version.has_state
         ):
@@ -1070,7 +1086,7 @@ class SpaceContentInboundHandlers:
             # seated on the host): only the authorship of a new page — an
             # id bound to its creator, whom the host relays — is checked.
             page = _page_from_payload(p, page_id, space_id)
-            if existing is None and self._bound_id_refused(
+            if not held and self._bound_id_refused(
                 event, SPACE_PAGE_KIND, page_id, space_id, page.created_by
             ):
                 return
@@ -1079,7 +1095,7 @@ class SpaceContentInboundHandlers:
                 space_id,
                 what="page",
                 row_id=page_id,
-                claimed_author=page.created_by if existing is None else "",
+                claimed_author=page.created_by if not held else "",
             ):
                 return
             # A moderation release is still checked against the item this
@@ -1088,78 +1104,109 @@ class SpaceContentInboundHandlers:
                 event,
                 space_id,
                 "pages",
-                ContentAction.CREATE if existing is None else ContentAction.EDIT,
+                ContentAction.CREATE if not held else ContentAction.EDIT,
                 actor=payload_actor(event),
-                row_owner=page.created_by if existing is None else existing.created_by,
+                row_owner=existing.created_by if existing else page.created_by,
             ):
                 return
         await engine.mirror(space_id=space_id, page_id=page_id, version=version)
 
     async def _on_page_deleted(self, event: "FederationEvent") -> None:
+        """A space page delete (migration 0073: tombstoned, not removed).
+
+        Deletes are not sequenced, so households may judge one differently;
+        as for every page decision, only the **host's** view is final:
+
+        * from the host of a v_48 space the delete is taken as final (the
+          host already judged it — its ``actor_user_id`` may be seated on
+          any household), confirming a tombstone we made ourselves;
+        * from another household it is gated as before and tombstoned
+          *unconfirmed*: a later host version at or above its ``seq``
+          brings the page back (:meth:`PageConflictService.mirror`);
+        * on the host, an accepted member delete is final and the host
+          re-broadcasts it, so every member converges on the host's view.
+        """
         space_id = resolve_space_id(event)
         if not space_id:
             return
         page_id = str(event.payload.get("id") or event.payload.get("page_id") or "")
         if not page_id:
             return
+        engine = self._page_conflicts
+        mode, host = (
+            await engine.mode(space_id) if engine is not None else (PageMode.LEGACY, "")
+        )
+        from_host = bool(host) and event.from_instance == host
         existing = await self._page_repo.get(page_id)
         if existing is None:
-            await self._page_delete_of_unseen(event, space_id, page_id)
+            await self._page_delete_of_unseen(event, space_id, page_id, from_host)
             return
         if existing.space_id != space_id:
             log_cross_space_refusal(
                 event, space_id=space_id, what="page", row_id=page_id
             )
             return
-        if not await self._collaborative_write_allowed(
-            event,
-            space_id,
-            what="page",
-            row_id=page_id,
-            feature="pages",
-            action=ContentAction.DELETE,
-            row_owner=existing.created_by,
+        if not (mode is PageMode.MEMBER and from_host) and (
+            not await self._collaborative_write_allowed(
+                event,
+                space_id,
+                what="page",
+                row_id=page_id,
+                feature="pages",
+                action=ContentAction.DELETE,
+                row_owner=existing.created_by,
+            )
         ):
             return
-        # Tombstoned, not removed (migration 0073): sync / resume tell a
-        # household that missed it, and a stale copy cannot come back.
         deleter = _deleter(event)
         deleted = (
-            await self._page_conflicts.delete_page(
-                space_id, page_id, deleted_by=deleter
+            await engine.delete_page(
+                space_id,
+                page_id,
+                deleted_by=deleter,
+                from_instance=event.from_instance,
             )
-            if self._page_conflicts is not None
+            if engine is not None
             else await self._page_repo.delete(
-                page_id, space_id=space_id, deleted_by=deleter
+                page_id, space_id=space_id, deleted_by=deleter, confirmed=False
             )
         )
         if not deleted:
             log_cross_space_refusal(
                 event, space_id=space_id, what="page", row_id=page_id
             )
+            return
+        if mode is PageMode.HOST:
+            # The host decided: tell every member household, so the ones
+            # that missed (or refused) the member's own broadcast converge.
+            await self._bus.publish(
+                PageDeleted(page_id=page_id, space_id=space_id, actor_user_id=deleter)
+            )
 
     async def _page_delete_of_unseen(
-        self, event: "FederationEvent", space_id: str, page_id: str
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        page_id: str,
+        from_host: bool,
     ) -> None:
         """A delete of a page not held live here. From the space's **host**
-        (live, or its resume replay) a page we never held gets a stub
-        tombstone, so a stale copy another household streams or replays
-        later cannot create it — but only for an id owner-bound to its
-        ``created_by`` in THIS space (page ids are global)."""
+        (live, its re-broadcast, or its resume replay) it confirms our own
+        unconfirmed tombstone; a page we never held gets a stub tombstone,
+        so a stale copy another household streams or replays later cannot
+        create it — but only for an id owner-bound to its ``created_by`` in
+        THIS space (page ids are global)."""
         if await self._page_repo.is_page_deleted(page_id, space_id=space_id):
-            log_not_applied(
-                event, what="page", row_id=page_id, reason="deleted here already"
-            )
+            if from_host:
+                await self._page_repo.confirm_delete(page_id, space_id=space_id)
+            else:
+                log_not_applied(
+                    event, what="page", row_id=page_id, reason="deleted here already"
+                )
             return
-        host = (
-            (await self._page_conflicts.mode(space_id))[1]
-            if self._page_conflicts is not None
-            else ""
-        )
         created_by = str(event.payload.get("created_by") or "")
         if (
-            not host
-            or host != event.from_instance
+            not from_host
             or check_owner_bound_id(
                 SPACE_PAGE_KIND, page_id, space_id=space_id, owner_user_id=created_by
             )

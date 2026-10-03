@@ -12,12 +12,6 @@ While the host is marked unreachable nothing is sent (no new outbox rows
 pile up); drafts flush when it answers again (:class:`ConnectionReachable`),
 at startup and on a 30-minute tick — the host recognises a resent
 proposal by its hash and simply acknowledges it.
-
-A draft always goes to the household hosting the space *now*: a proposal
-outstanding at a former host is dropped and the draft re-sent to the new
-one, and a household that has become the host itself commits its own
-pending drafts as host (:meth:`PageConflictService.adopt_draft`) instead
-of proposing them.
 """
 
 from __future__ import annotations
@@ -81,9 +75,8 @@ class PageProposalForwarder:
         self._federation = federation_service
         self._federation_repo = federation_repo
         self._bus = bus
-        #: ``(space_id, page_id)`` → the proposal on the wire, and the host
-        #: it went to.
-        self._outstanding: dict[tuple[str, str], tuple[Proposal, str]] = {}
+        #: ``(space_id, page_id)`` → the proposal on the wire.
+        self._outstanding: dict[tuple[str, str], Proposal] = {}
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -135,8 +128,7 @@ class PageProposalForwarder:
 
     async def _on_settled(self, event: PageProposalSettled) -> None:
         key = (event.space_id, event.page_id)
-        entry = self._outstanding.get(key)
-        sent = entry[0] if entry is not None else None
+        sent = self._outstanding.get(key)
         if sent is not None and sent.hash == event.proposal_hash:
             del self._outstanding[key]
             if event.outcome == "applied" and event.seq:
@@ -177,21 +169,20 @@ class PageProposalForwarder:
             # Nothing pending (settled, refused or deleted): nothing waits.
             self._outstanding.pop(key, None)
             return False
+        if key in self._outstanding:
+            return False
         mode, host = await self._conflicts.mode(space_id)
         if mode is PageMode.HOST:
-            # We host this space now — a draft made under a former host is
-            # ours to sequence.
-            self._outstanding.pop(key, None)
-            await self._conflicts.adopt_draft(space_id, page_id)
+            # A draft is made only under another household's v_48 host, and
+            # a space's host never changes (``owner_instance_id`` is fixed),
+            # so this is a corrupt row — say so, never propose to ourselves.
+            log.warning(
+                "page %s in space %s: a pending draft on the space's host — "
+                "not proposed",
+                page_id,
+                space_id,
+            )
             return False
-        outstanding = self._outstanding.get(key)
-        if outstanding is not None:
-            if outstanding[1] == host:
-                return False
-            # The space's host changed under an outstanding proposal: its
-            # answer would come from a household no longer counted — the
-            # draft goes to the new host.
-            del self._outstanding[key]
         if mode is not PageMode.MEMBER or not host:
             return False
         instance = await self._federation_repo.get_instance(host)
@@ -214,7 +205,7 @@ class PageProposalForwarder:
         creates = proposal.base_seq == 0
         if creates:
             payload["created_by"] = proposal.created_by
-        self._outstanding[key] = (proposal, host)
+        self._outstanding[key] = proposal
         try:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=host,
@@ -246,4 +237,4 @@ class PageProposalForwarder:
 
     def outstanding(self) -> dict[tuple[str, str], str]:
         """Hashes of the proposals on the wire (tests, diagnostics)."""
-        return {k: p.hash for k, (p, _host) in self._outstanding.items()}
+        return {k: p.hash for k, p in self._outstanding.items()}

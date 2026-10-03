@@ -45,7 +45,7 @@ from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import ContentAction, SpaceMember, SpaceZone
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
-from ....domain.events import TaskDeleted, TaskListDeleted, TimetableSaved
+from ....domain.events import PageDeleted, TaskDeleted, TaskListDeleted, TimetableSaved
 from ....domain.timetable import (
     Timetable,
     from_wire_dict,
@@ -588,10 +588,14 @@ class SpaceSyncReceiver:
                 page = _page_from_record(r, space_id)
                 if page is None:
                     continue
-                if await self._page_repo.is_page_deleted(page.id, space_id=space_id):
+                if await self._page_repo.is_page_deleted(
+                    page.id, space_id=space_id
+                ) and not await self._is_host_version(space_id, provider, r):
                     # Deleted here — a provider that missed the delete still
                     # streams it; the tombstone wins (its id is never
                     # reused), and its own tombstone stream will tell it.
+                    # Only the host's version may revive a tombstone, and
+                    # only one the host never confirmed (the engine's call).
                     log.debug("sync: page %s was deleted here — skipped", page.id)
                     continue
                 if await self._apply_page_version(page, r, space_id, provider):
@@ -958,8 +962,11 @@ class SpaceSyncReceiver:
 
         A page held live here in this space is tombstoned (``deleted_by``
         from the record's ``actor_user_id``) exactly as a live
-        ``SPACE_PAGE_DELETED`` does. A member household's records were
-        admitted only for such pages (:meth:`_authored_record`).
+        ``SPACE_PAGE_DELETED`` does — confirmed (final) when the host
+        streams it, or when we are the host (which then re-broadcasts the
+        delete); unconfirmed from another member. The host's record also
+        confirms a tombstone of our own. A member household's records were
+        admitted only for pages held live here (:meth:`_authored_record`).
 
         From the **host**, an id we never held gets a stub tombstone, so a
         stale copy another household streams or replays later cannot
@@ -970,6 +977,11 @@ class SpaceSyncReceiver:
         """
         space = await self._space_repo.get(space_id)
         from_host = space is not None and space.owner_instance_id == provider
+        is_host = (
+            space is not None
+            and self._page_conflicts is not None
+            and space.owner_instance_id == self._page_conflicts.own_instance_id
+        )
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -982,17 +994,33 @@ class SpaceSyncReceiver:
                 if held.space_id != space_id:
                     cross_space.append(page_id)
                 elif self._page_conflicts is not None:
-                    await self._page_conflicts.delete_page(
-                        space_id, page_id, deleted_by=deleted_by
+                    deleted = await self._page_conflicts.delete_page(
+                        space_id, page_id, deleted_by=deleted_by, from_instance=provider
                     )
+                    if deleted and space is not None and is_host:
+                        # The host accepted a member's delete it had missed:
+                        # it decides, so it tells every member household.
+                        await self._bus.publish(
+                            PageDeleted(
+                                page_id=page_id,
+                                space_id=space_id,
+                                actor_user_id=deleted_by,
+                            )
+                        )
                 else:
                     await self._page_repo.delete(
-                        page_id, space_id=space_id, deleted_by=deleted_by
+                        page_id,
+                        space_id=space_id,
+                        deleted_by=deleted_by,
+                        confirmed=from_host,
                     )
                 continue
-            if not from_host or await self._page_repo.is_page_deleted(
-                page_id, space_id=space_id
-            ):
+            if await self._page_repo.is_page_deleted(page_id, space_id=space_id):
+                if from_host:
+                    # The host stands behind our own (unconfirmed) delete.
+                    await self._page_repo.confirm_delete(page_id, space_id=space_id)
+                continue
+            if not from_host:
                 continue
             created_by = str(r.get("created_by") or "")
             if (
@@ -1032,21 +1060,21 @@ class SpaceSyncReceiver:
         self, records: list[dict[str, Any]], space_id: str, *, provider: str
     ) -> None:
         """On the **host**: a member household's ``pages`` records carry
-        the ``seq`` it mirrors. A host restored from a backup (or one that
-        took over from another host) raises its seq floor to it, so its
-        next own edit lands above every version members hold — they take
-        it. Only the number is read, only for live pages held here, and
-        only from a household seated in the space; the content is never
+        the ``seq`` it mirrors. A host restored from a backup raises its seq
+        floor to it, so its next own edit lands above every version members
+        hold — they take it. Only the number is read (the highest per page
+        in the chunk), only for live pages held here, and only from a
+        **writer** household seated in the space; the content is never
         taken this way (and the admission drops the records right after).
-        Bounded per signal by :meth:`PageConflictService.raise_floor`."""
+        :meth:`PageConflictService.raise_floor` bounds each raise and rate
+        limits them per provider, page and day."""
         engine = self._page_conflicts
-        if engine is None or not records:
+        if engine is None or not records or self._authorship is None:
             return
         mode, host = await engine.mode(space_id)
         if mode is not PageMode.HOST or not provider or provider == host:
             return
-        if provider not in await self._space_repo.list_member_instances(space_id):
-            return
+        highest: dict[str, int] = {}
         for r in records:
             page_id = str(r.get("id") or r.get("page_id") or "")
             seq = r.get("seq")
@@ -1057,7 +1085,31 @@ class SpaceSyncReceiver:
                 or seq <= 0
             ):
                 continue
-            await engine.raise_floor(space_id, page_id, seq)
+            highest[page_id] = max(seq, highest.get(page_id, 0))
+        if not highest:
+            return
+        event = FederationEvent(
+            msg_id=f"sync:{space_id}:pages",
+            event_type=FederationEventType.SPACE_SYNC_CHUNK,
+            from_instance=provider,
+            to_instance="",
+            timestamp="",
+            payload={},
+            space_id=space_id,
+        )
+        if not await self._authorship.writes_here(event, space_id):
+            return
+        for page_id, seq in highest.items():
+            await engine.raise_floor(space_id, page_id, seq, provider=provider)
+
+    async def _is_host_version(
+        self, space_id: str, provider: str, r: dict[str, Any]
+    ) -> bool:
+        """Is ``r`` a host version (``seq``) streamed by the space's host?"""
+        if "seq" not in r or not provider:
+            return False
+        space = await self._space_repo.get(space_id)
+        return space is not None and space.owner_instance_id == provider
 
     async def _apply_page_version(
         self, page: Page, r: dict[str, Any], space_id: str, provider: str

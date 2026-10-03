@@ -781,3 +781,30 @@ async def test_raise_seq_only_raises_a_live_pages_seq(scoped):
     assert await repo.raise_seq("pg-a", space_id="space-b", seq=9) is False
     await repo.delete("pg-a", space_id="space-a")
     assert await repo.raise_seq("pg-a", space_id="space-a", seq=9) is False
+
+
+async def test_an_unconfirmed_tombstone_revives_for_the_hosts_seq(scoped):
+    from dataclasses import replace
+
+    repo = scoped.page_repo
+    page = await repo.get_space_page("pg-a", space_id="space-a")
+    await repo.save(replace(page, seq=3), space_id="space-a")
+    await repo.delete("pg-a", space_id="space-a", confirmed=False)
+    assert not await repo.revive("pg-a", space_id="space-a", seq=2)  # older
+    assert await repo.revive("pg-a", space_id="space-a", seq=3)
+    back = await repo.get_space_page("pg-a", space_id="space-a")
+    assert (back.seq, back.title, back.created_by) == (0, "", "uid-owner")
+    assert not await repo.is_page_deleted("pg-a", space_id="space-a")
+
+
+async def test_a_confirmed_tombstone_never_revives(scoped):
+    repo = scoped.page_repo
+    await repo.delete("pg-a", space_id="space-a", confirmed=False)
+    assert await repo.confirm_delete("pg-a", space_id="space-a")
+    assert not await repo.confirm_delete("pg-a", space_id="space-a")
+    assert not await repo.revive("pg-a", space_id="space-a", seq=99)
+    # Host-made deletes and stubs are confirmed from the start.
+    await repo.delete("pg-b", space_id="space-b")
+    assert not await repo.revive("pg-b", space_id="space-b", seq=99)
+    await repo.tombstone("pg-s", space_id="space-a", created_by="u")
+    assert not await repo.revive("pg-s", space_id="space-a", seq=99)

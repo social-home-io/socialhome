@@ -26,7 +26,6 @@ import pytest
 
 from socialhome.app_keys import (
     federation_service_key,
-    page_proposal_forwarder_key,
     page_repo_key,
 )
 from socialhome.federation.federation_service import FederationService
@@ -55,7 +54,6 @@ from .test_space_page_host_sequencing import (
     _receive,
     _sent_to,
     _seq,
-    _states,
     _take,
     _with,
 )
@@ -71,6 +69,15 @@ async def _deleted(house: House, pid: str) -> bool:
         "SELECT deleted_at FROM space_pages WHERE id=? AND space_id=?", (pid, SID)
     )
     return row is not None and row["deleted_at"] is not None
+
+
+async def _confirmed(house: House, pid: str) -> bool:
+    """A tombstone the space's host confirmed (final)."""
+    row = await house.db.fetchone(
+        "SELECT delete_confirmed FROM space_pages WHERE id=? AND space_id=?",
+        (pid, SID),
+    )
+    return row is not None and bool(row["delete_confirmed"])
 
 
 async def _bodies_left(house: House, pid: str) -> int:
@@ -205,18 +212,15 @@ async def test_a_member_delete_the_host_missed_reaches_it_by_sync(mesh):
     a, b, h = mesh["A"], mesh["B"], mesh["H"]
     pid = await _create(mesh)
     await _delete_missed_by(mesh, pid, h, a, by="B")
-    assert await _content(h, pid) == BASE
-    # The host's next version does not bring the page back on B.
-    await _edit(h, pid, _with(BASE, p1="host edit"))
-    await _pump(mesh)
-    assert await _deleted(b, pid) and await _content(b, pid) is None
-    # B's tombstone stream reaches the host (live delete rules) …
+    assert await _content(h, pid) == BASE and await _content(a, pid) == BASE
+    # B's tombstone stream reaches the host (live delete rules); the host
+    # decides, tombstones and re-broadcasts its delete to every member.
     await _chunk(b, h, "pages_deleted")
     assert await _deleted(h, pid)
-    # … and the host's own stream then reaches A, who held it at seq 2.
-    assert await _seq(a, pid) == 2
-    await _chunk(h, a, "pages_deleted")
-    assert await _deleted(a, pid)
+    await _pump(mesh)
+    for house in (a, b, mesh["C"]):
+        assert await _deleted(house, pid), house.name
+        assert await _confirmed(house, pid), house.name
 
 
 async def test_a_member_tombstone_needs_the_delete_level(mesh):
@@ -312,110 +316,124 @@ async def test_a_create_proposal_for_a_tombstoned_id_is_refused_gone(mesh):
     ] == ["gone"]
 
 
-async def test_a_host_version_never_resurrects_a_page_deleted_here(mesh):
+def _host_version(pid: str, h: House, *, seq: int, content: str) -> dict:
+    return {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "Rules",
+        "content": content,
+        "created_by": h.user_id,
+        "seq": seq,
+        "conflict": [],
+    }
+
+
+async def test_a_host_confirmed_delete_is_never_revived(mesh):
+    """A tombstone the host confirmed (its own delete, or its re-broadcast
+    of a member's) is final: no host version brings it back."""
     b, h = mesh["B"], mesh["H"]
     pid = await _create(mesh)
-    await _delete_missed_by(mesh, pid, h, by="B")
-    # Even a create-shaped host version at a higher seq stays out.
+    await _delete(b, pid)
+    await _pump(mesh)  # H accepts B's delete and re-broadcasts it
+    assert await _confirmed(b, pid)
     await _receive(
         b,
         _event(
             h,
             FET.SPACE_PAGE_CREATED,
-            {
-                "id": pid,
-                "page_id": pid,
-                "space_id": SID,
-                "title": "Rules",
-                "content": "back again",
-                "created_by": h.user_id,
-                "seq": 9,
-                "conflict": [],
-            },
+            _host_version(pid, h, seq=9, content="back again"),
             b,
         ),
     )
     assert await _content(b, pid) is None and await _deleted(b, pid)
 
 
-# ── Host change with drafts pending ──────────────────────────────────────
-
-
-async def _move_host(mesh, to: House) -> None:
-    for house in mesh.values():
-        await house.db.enqueue(
-            "UPDATE spaces SET owner_instance_id=? WHERE id=?", (to.iid, SID)
-        )
-
-
-async def test_a_members_pending_draft_is_proposed_to_the_new_host(mesh):
+async def test_a_member_tombstone_the_host_refused_yields_to_the_host(mesh):
+    """Deletes are not sequenced: households judge a member's delete by
+    their own view of seats and levels, and may disagree. Only the host's
+    view is final — a member tombstone the host refused yields to the
+    host's next version (live) or its sync record."""
     a, b, h = mesh["A"], mesh["B"], mesh["H"]
     pid = await _create(mesh)
-    await _edit(a, pid, _with(BASE, p1="anna"))
-    # H sequences A's proposal, but its answer is lost in transit.
-    await _deliver(a, h)
-    stale = _take(h, a)
-    _drop(h)
-    assert await _pending(a, pid) == 1
-    await _move_host(mesh, b)
-    await a.app[page_proposal_forwarder_key].flush(resend=True)
-    (proposal,) = _sent_to(a, b, FET.SPACE_PAGE_UPDATED)
-    assert proposal["base_seq"] == 1
-    assert _sent_to(a, h) == []
+    # An admin-only level has reached H but not yet A or B.
+    await h.db.enqueue("UPDATE spaces SET pages_access='admin_only' WHERE id=?", (SID,))
+    await _delete(a, pid)
     await _pump(mesh)
-    assert await _pending(a, pid) is None
-    assert await _content(b, pid) == _with(BASE, p1="anna")
-    assert await _seq(b, pid) == 2
-    # The old host's late answer moves nothing: only the owner's count.
-    for et, payload in stale:
-        await _receive(a, _event(h, et, payload, a))
+    assert await _content(h, pid) == BASE  # the host refused it
+    assert await _deleted(a, pid) and await _deleted(b, pid)
+    assert not await _confirmed(b, pid)
+    await _edit(h, pid, _with(BASE, p1="hanna keeps editing"))
+    await _pump(mesh)
     for house in (a, b, mesh["C"]):
-        assert await _content(house, pid) == _with(BASE, p1="anna"), house.name
+        assert await _content(house, pid) == _with(BASE, p1="hanna keeps editing"), (
+            house.name
+        )
         assert await _seq(house, pid) == 2, house.name
 
 
-async def test_a_household_that_becomes_host_commits_its_own_drafts(mesh):
-    a, b, c, h = mesh["A"], mesh["B"], mesh["C"], mesh["H"]
-    pid = await _create(mesh)
-    await _edit(h, pid, _with(BASE, p5="host v2"))
-    await _pump(mesh)
-    await _edit(b, pid, _with(BASE, p5="host v2", p1="bert"))
-    _take(b, h)  # the proposal never reached the old host
-    assert await _pending(b, pid) == 2
-    await _move_host(mesh, b)
-    await b.app[page_proposal_forwarder_key].flush(resend=True)
-    # No proposal to the former host: it only gets B's canonical version.
-    assert [p for p in _sent_to(b, h) if "base_seq" in p] == []
-    assert await _pending(b, pid) is None
-    # Committed as host above the highest seq it had mirrored.
-    assert await _seq(b, pid) == 3
-    await _pump(mesh)
-    for house in (a, b, c, h):
-        assert await _content(house, pid) == _with(BASE, p5="host v2", p1="bert"), (
-            house.name
-        )
-        assert await _seq(house, pid) == 3, house.name
-        assert await _pending(house, pid) is None, house.name
-
-
-async def test_a_new_hosts_draft_made_under_an_older_version_is_merged(mesh):
-    """The draft's base is the old host's version it was made from, the
-    current version the newest one mirrored meanwhile."""
+async def test_a_refused_member_tombstone_yields_to_a_host_sync_record(mesh):
     b, h = mesh["B"], mesh["H"]
     pid = await _create(mesh)
-    await _edit(b, pid, _with(BASE, p1="bert"))
-    _take(b, h)
-    await _edit(h, pid, _with(BASE, p5="host v2"))
-    await _pump(mesh)  # B keeps its draft on top, mirrors seq 2 under it
-    assert (await _seq(b, pid), await _pending(b, pid)) == (2, 1)
-    await _move_host(mesh, b)
-    await b.app[page_proposal_forwarder_key].flush(resend=True)
+    await h.db.enqueue("UPDATE spaces SET pages_access='admin_only' WHERE id=?", (SID,))
+    await _delete(b, pid)
     await _pump(mesh)
-    states = await _states(mesh, pid)
-    assert len(set(states.values())) == 1, states
-    content, sides, seq, pending = next(iter(states.values()))
-    assert content == _with(BASE, p1="bert", p5="host v2")
-    assert (sides, seq, pending) == ((), 3, None)
+    assert await _deleted(b, pid) and await _content(h, pid) == BASE
+    # The host still holds the page at the very seq B deleted: it wins.
+    await _chunk(h, b, "pages")
+    assert await _content(b, pid) == BASE and await _seq(b, pid) == 1
+    assert (await _page(b, pid))["title"] == "Rules"
+
+
+async def test_a_member_tombstone_never_yields_to_an_older_host_version(mesh):
+    a, b, h = mesh["A"], mesh["B"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(h, pid, _with(BASE, p1="v2"))
+    await _pump(mesh)
+    await h.db.enqueue("UPDATE spaces SET pages_access='admin_only' WHERE id=?", (SID,))
+    await _delete(b, pid)
+    await _pump(mesh)
+    await _receive(
+        b,
+        _event(
+            h, FET.SPACE_PAGE_UPDATED, _host_version(pid, h, seq=1, content=BASE), b
+        ),
+    )
+    assert await _deleted(b, pid) and await _content(b, pid) is None
+    # … nor to another member's copy.
+    await _chunk(a, b, "pages")
+    assert await _deleted(b, pid)
+
+
+async def test_an_accepted_member_delete_is_rebroadcast_by_the_host(mesh):
+    a, b, c, h = mesh["A"], mesh["B"], mesh["C"], mesh["H"]
+    pid = await _create(mesh)
+    await _delete(b, pid)
+    _take(b, c)  # C never hears B's own delete …
+    await _pump(mesh)
+    # … but the host's re-broadcast reaches it, confirmed everywhere.
+    for house in (a, b, c):
+        assert await _deleted(house, pid), house.name
+        assert await _confirmed(house, pid), house.name
+    assert await _deleted(h, pid)
+
+
+async def test_a_host_create_never_ghosts_a_tombstoned_id(mesh):
+    from dataclasses import replace
+
+    from socialhome.app_keys import page_conflict_service_key
+    from socialhome.repositories.page_repo import PageNotFoundError, new_page
+
+    h = mesh["H"]
+    page = new_page(title="T", content="x", created_by=h.user_id, space_id=SID)
+    await h.app[page_repo_key].tombstone(page.id, space_id=SID, created_by=h.user_id)
+    _drop(*mesh.values())
+    with pytest.raises(PageNotFoundError):
+        await h.app[page_conflict_service_key].host_create(
+            replace(page), actor_user_id=h.user_id
+        )
+    assert [e for _t, e, _p in h.sent if e is FET.SPACE_PAGE_CREATED] == []
+    assert await _content(h, page.id) is None
 
 
 # ── A restored host learns the members' seq ─────────────────────────────
@@ -449,22 +467,71 @@ async def test_a_restored_hosts_next_own_edit_reaches_members(mesh):
 
 async def test_a_seq_hint_is_bounded_and_never_creates_a_page(mesh, monkeypatch):
     monkeypatch.setattr(page_conflict_service, "MAX_FLOOR_STEP", 10)
-    a, h = mesh["A"], mesh["H"]
+    a, b, c, h = mesh["A"], mesh["B"], mesh["C"], mesh["H"]
     pid = await _create(mesh)
     records = await PagesExporter(a.app[page_repo_key]).list_records(SID)
     (record,) = records
     await _chunk(a, h, "pages", [{**record, "seq": 1 + 11}])
     assert await _seq(h, pid) == 1  # beyond one floor step: moves nothing
-    await _chunk(a, h, "pages", [{**record, "seq": 1 + 10}])
-    assert await _seq(h, pid) == 11
-    await _chunk(a, h, "pages", [{**record, "seq": 3}])
+    await _chunk(b, h, "pages", [{**record, "seq": 3}, {**record, "seq": 1 + 10}])
+    assert await _seq(h, pid) == 11  # the chunk's highest seq, once
+    await _chunk(c, h, "pages", [{**record, "seq": 3}])
     assert await _seq(h, pid) == 11  # only ever raised
-    await _chunk(a, h, "pages", [{**record, "id": "nope", "seq": 5}])
+    await _chunk(c, h, "pages", [{**record, "id": "nope", "seq": 5}])
     assert await _content(h, "nope") is None
     # A tombstoned page takes no hint.
     await _delete(h, pid)
-    await _chunk(a, h, "pages", [{**record, "seq": 15}])
+    await _chunk(c, h, "pages", [{**record, "seq": 15}])
     assert await _seq(h, pid) == 11
+
+
+async def test_one_chunk_cannot_ratchet_the_seq(mesh):
+    """Every record of a chunk used to step the floor: one 2000-record
+    chunk took the seq from 1 to ~2**31. Now the chunk's highest seq per
+    page counts, once per page and provider per sync session."""
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    step = page_conflict_service.MAX_FLOOR_STEP
+    recs = [
+        {
+            "id": pid,
+            "title": "Rules",
+            "content": "x",
+            "created_by": h.user_id,
+            "seq": 1 + step * i,
+        }
+        for i in range(1, 2001)
+    ]
+    await _chunk(a, h, "pages", recs)
+    assert await _seq(h, pid) == 1  # the highest claim is beyond one step
+    await _chunk(a, h, "pages", [{**recs[0], "seq": 1 + step}])
+    assert await _seq(h, pid) == 1  # once per page per session
+    await _chunk(mesh["B"], h, "pages", [{**recs[0], "seq": 1 + step}])
+    assert await _seq(h, pid) == 1 + step
+    # The day's budget for the page is spent: no further provider moves it.
+    await _chunk(mesh["C"], h, "pages", [{**recs[0], "seq": 1 + 2 * step}])
+    assert await _seq(h, pid) == 1 + step
+
+
+async def test_a_seq_hint_needs_a_writer_household(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    records = await PagesExporter(a.app[page_repo_key]).list_records(SID)
+    await h.db.enqueue(
+        "UPDATE space_remote_members SET role='subscriber' WHERE instance_id=?",
+        (a.iid,),
+    )
+    await _chunk(a, h, "pages", [{**records[0], "seq": 5}])
+    assert await _seq(h, pid) == 1
+
+
+async def test_seq_hints_are_rate_limited_per_provider(mesh, monkeypatch):
+    monkeypatch.setattr(page_conflict_service, "FLOOR_RAISES_PER_PROVIDER_PER_HOUR", 2)
+    a, h = mesh["A"], mesh["H"]
+    pids = [await _create(mesh) for _ in range(3)]
+    records = await PagesExporter(a.app[page_repo_key]).list_records(SID)
+    await _chunk(a, h, "pages", [{**r, "seq": 4} for r in records])
+    assert sorted([await _seq(h, p) for p in pids]) == [1, 4, 4]
 
 
 async def test_a_member_ignores_a_seq_hint(mesh):

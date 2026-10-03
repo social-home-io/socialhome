@@ -108,3 +108,9 @@ def test_the_trigger_fires_only_on_the_tombstone_transition(conn):
     n_hist = conn.execute("SELECT COUNT(*) FROM page_edit_history").fetchone()[0]
     n_snap = conn.execute("SELECT COUNT(*) FROM space_page_snapshots").fetchone()[0]
     assert (n_hist, n_snap) == (2, 3)
+
+
+def test_tombstones_start_unconfirmed(conn):
+    _apply_through(conn, _VERSION)
+    row = conn.execute("SELECT delete_confirmed FROM space_pages").fetchone()
+    assert row[0] == 0

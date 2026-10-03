@@ -17,7 +17,19 @@
 --    streamed tombstone and the replayed ``SPACE_PAGE_DELETED``, so a
 --    receiver judges it against the space's ``pages`` access level like a
 --    live delete. NULL = live, or nobody we can name.
--- 3. Trigger ``space_pages_tombstone_drops_bodies`` — on the live →
+-- 3. ``space_pages.delete_confirmed`` — 1 once the space's HOST stands
+--    behind the tombstone (its own delete, its re-broadcast of a member's
+--    delete, its ``pages_deleted`` stream or a stub it caused). Deletes are
+--    not sequenced: a member household judges another member's delete (or
+--    makes its own) by its own view of seats and access levels, which can
+--    differ from the host's. Like every other page decision, only the
+--    host's is final: an unconfirmed (0) tombstone yields to a host version
+--    or host sync record whose ``seq`` is at least the tombstone's (the
+--    host still holds the page live — it refused or never saw the delete);
+--    a confirmed one never comes back. Not derivable: ``deleted_by`` names
+--    the user, not whose judgement made it final, and the tombstone's
+--    ``seq`` is the version it was deleted at.
+-- 4. Trigger ``space_pages_tombstone_drops_bodies`` — on the live →
 --    tombstoned transition the page's conflict sides, draft base and
 --    resolved snapshots (``space_page_snapshots``) and its edit history
 --    (``page_edit_history``) in that space go too. Neither table has a FK
@@ -38,9 +50,10 @@
 -- tombstone: the shared upsert (``save``, ``commit_version``) carries
 -- ``deleted_at IS NULL`` in its ON CONFLICT ... WHERE, so a sequenced
 -- commit, a mirror, a sync record, a resume replay or a late proposal
--- naming a deleted id writes nothing (the host answers ``gone``). The
--- sequencer's history / side writes run under the page lock the delete
--- also takes. ``page_edit_history`` / ``space_page_snapshots`` are read
+-- naming a deleted id writes nothing (the host answers ``gone``). The one
+-- way back is ``revive``: only an unconfirmed tombstone, only for a host
+-- version at or above its ``seq``, under the page lock. The sequencer's
+-- history / side writes run under the page lock the delete also takes. ``page_edit_history`` / ``space_page_snapshots`` are read
 -- per (page, space) only.
 -- Alternatives rejected: a separate ``space_page_tombstones`` table (a
 -- second home for the same id — the one PRIMARY KEY's ON CONFLICT is what
@@ -49,12 +62,17 @@
 -- (forgets on restart, cannot be streamed to a household offline across
 -- the delete); a ``deleted`` flag carried on the ``pages`` sync records
 -- (an older receiver would read a tombstone as a live page — the separate
--- ``pages_deleted`` resource is dropped as unknown instead). A stub
+-- ``pages_deleted`` resource is dropped as unknown instead). For the
+-- confirmed flag: routing every member delete through the host first
+-- (members ignoring each other's deletes) — a v_48 host never re-broadcasts
+-- a member's delete, so under it no member would ever delete, and the
+-- deleter would need a pending-delete state of its own; the flag keeps the
+-- immediate delete and lets the host's view win when it differs. A stub
 -- tombstone for an id never held is written only from the host and only
 -- for an id owner-bound to its creator in this space (page ids are
 -- global). Tombstones are never pruned (like 0069 / 0071).
 --
--- Smallest change: two NULL-default columns (metadata-only in SQLite — no
+-- Smallest change: three defaulted columns (metadata-only in SQLite — no
 -- table rewrite, no backfill) and one trigger; no new index (tombstone
 -- reads are per space, served by ``idx_space_pages_space``). No existing
 -- row changes: the trigger fires only on a later live → tombstoned
@@ -62,6 +80,7 @@
 
 ALTER TABLE space_pages ADD COLUMN deleted_at TEXT;
 ALTER TABLE space_pages ADD COLUMN deleted_by TEXT;
+ALTER TABLE space_pages ADD COLUMN delete_confirmed INTEGER NOT NULL DEFAULT 0;
 
 CREATE TRIGGER space_pages_tombstone_drops_bodies
 AFTER UPDATE OF deleted_at ON space_pages
