@@ -441,6 +441,38 @@ one — and apply it only at a strictly higher `key_epoch` (an int in
 restore a revoked key. The owner picks `max(current + 1, unix seconds)`. No new long-lived key exists:
 the cert is signed by the household identity every peer already pins.
 
+**Space writer certificate** (`writer_cert.py`, domain shape in
+`domain/writer_cert.py`, v_49) — the space AUTHORITY key's per-epoch
+statement that one household may write in a space, so a member's own signed
+item can be authorized without a host signature on every post. Issued by a
+seed holder (owner or delegated admin, and only while its seed still matches
+the pinned space key) once per writer household per content epoch: `scope:
+"write"` for owner / admin / moderator / member seats, `"comment"` for a
+follower seat while `allow_subscriber_comment` is on; a household with
+several seats gets one cert at its strongest scope. Wire shape (every field
+always present) `{cert_suite, space_id, epoch, instance_pk, scope,
+issued_at, cert_sig}` — `instance_pk` is the household's Ed25519 identity
+public key (b64url), `issued_at` unix seconds. Signing bytes
+`b"space-writer-cert:v1:"` + canonical JSON (sorted keys, compact) of the
+cert minus `cert_sig`, so the suite tag is signed; the prefix is distinct
+from `space-authority:v1:` so neither signature can be lifted onto the
+other. Suite `cert_suite` validated against `SUPPORTED_WRITER_CERT_SUITES`
+(`WRITER_CERT_SUITE_ED25519 = "ed25519"`); unknown →
+`UnsupportedWriterCertSuite`, never a default. `verify_writer_cert(cert, *,
+space_pubkey, space_id, epoch, author_pk, required_scope)` checks the suite,
+the signature against the pinned space key, `space_id` and `epoch` equal,
+`instance_pk == author_pk`, and that `scope` permits the action (`write`
+implies `comment`); every failure raises. Receivers additionally require
+the item's epoch to be the newest they hold, or the previous one for
+`WRITER_CERT_EPOCH_GRACE_S` (600 s) after the newest key arrived, so an
+old epoch's cert cannot authorize items forever; any scope-reducing change
+rotates the content epoch. A cert is not secret, but it always travels
+inside encrypted payloads: each household is delivered its own, and once it
+posts, the cert rides in the item to every member and on to subscribers. No
+new key: it is
+signed by the space authority key every member already pins, and binds the
+household identity key every peer already pins.
+
 **GFS capability block** (`capabilities_sig.py`) — `GET
 /gfs/info` is unauthenticated, so the capability that decides whether a
 household may relay identity-free (`anonymous_publish`) is signed with the
@@ -462,7 +494,7 @@ publish.
 The suite-tag retrofit promised in earlier revisions of this doc is
 shipped — every cryptographic wire format in the federation surface
 carries a ``*_suite`` identifier (signatures, mesh KEM, key-wrap KEM,
-content-key delivery, GFS capability block). A future ChaCha20-Poly1305 or
+content-key delivery, GFS capability block, writer certificates). A future ChaCha20-Poly1305 or
 PQ-protected variant
 is therefore a wire-additive change. (An earlier *sealed-sender*
 primitive carried its own ``aead_suite``; it was never wired into any

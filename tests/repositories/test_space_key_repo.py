@@ -76,3 +76,53 @@ async def test_reset_to_stamps_the_pin_epoch_not_the_delete_cutoff(repo):
         (2, 9),
         (4, 7),
     ]
+
+
+# ─── Writer certs (migration 0074) ───────────────────────────────────────
+
+
+async def test_writer_cert_stored_per_epoch(repo):
+    """The household's held writer cert rides on its epoch's key row."""
+    await repo.save(_key("sp-1", 0))
+    await repo.save(_key("sp-1", 1))
+    assert await repo.get_writer_cert("sp-1", 1) is None
+    assert await repo.set_writer_cert("sp-1", 1, '{"epoch":1}') is True
+    assert await repo.get_writer_cert("sp-1", 1) == '{"epoch":1}'
+    assert await repo.get_writer_cert("sp-1", 0) is None
+    # Replacing the cert (authority rotation re-issue) overwrites it.
+    assert await repo.set_writer_cert("sp-1", 1, '{"epoch":1,"v":2}') is True
+    assert await repo.get_writer_cert("sp-1", 1) == '{"epoch":1,"v":2}'
+
+
+async def test_writer_cert_needs_the_epoch_key(repo):
+    """No key row for the epoch → nothing stored (a cert for an epoch we
+    can't read is useless and never creates a row)."""
+    assert await repo.set_writer_cert("sp-1", 7, "{}") is False
+    assert await repo.get_writer_cert("sp-1", 7) is None
+
+
+async def test_writer_cert_survives_a_rekey_tiebreak(repo):
+    """A same-epoch key replacement (Phase-4b tiebreak) keeps the cert —
+    the cert is bound to the epoch, not to the key bytes."""
+    await repo.save(_key("sp-1", 2, "b"))
+    await repo.set_writer_cert("sp-1", 2, "cert")
+    await repo.save(_key("sp-1", 2, "a"))
+    assert (await repo.get("sp-1", 2)).rotated_by == "a"
+    assert await repo.get_writer_cert("sp-1", 2) == "cert"
+
+
+async def test_a_baseline_reset_clears_the_cert_at_its_epoch(repo):
+    """The v_44 reset installs the owner's key at an epoch: a cert stored
+    there was issued under the retired authority key, so it goes."""
+    await repo.save(_key("sp-1", 1))
+    await repo.set_writer_cert("sp-1", 1, "old-key-cert")
+    await repo.reset_to(_key("sp-1", 1, "owner"), authority_epoch=1)
+    assert await repo.get_writer_cert("sp-1", 1) is None
+
+
+async def test_get_previous_skips_gaps(repo):
+    for epoch in (0, 3, 9):
+        await repo.save(_key("sp-1", epoch))
+    assert (await repo.get_previous("sp-1", 9)).epoch == 3
+    assert (await repo.get_previous("sp-1", 3)).epoch == 0
+    assert await repo.get_previous("sp-1", 0) is None

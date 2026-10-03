@@ -110,6 +110,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..rate_limiter import RateLimiter
     from ..repositories.user_repo import AbstractUserRepo
+    from ..services.space_writer_cert_service import SpaceWriterCertService
     from .federation_service import FederationService
     from .invite_bootstrap import RelayEnvelopeSender
     from .route_discovery import RouteDiscoveryService
@@ -273,6 +274,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_rate_limiter",
         "_space_service",
         "_redeem_locks",
+        "_writer_certs",
     )
 
     def __init__(
@@ -355,6 +357,9 @@ class SpaceInviteTokenRedeemCoordinator:
         self._redeem_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+        #: v_49 writer certs: the issuer puts the redeemer's own cert in the
+        #: ACK ``space_meta``; the redeemer stores it. ``None`` → no cert.
+        self._writer_certs: "SpaceWriterCertService | None" = None
 
     def _redeem_lock(self, instance_id: str) -> asyncio.Lock:
         lock = self._redeem_locks.get(instance_id)
@@ -376,6 +381,31 @@ class SpaceInviteTokenRedeemCoordinator:
         where its writes actually land.
         """
         self._space_service = space_service
+
+    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+        """Wire the v_49 writer-cert service (issuer and redeemer sides)."""
+        self._writer_certs = writer_certs
+
+    async def _add_writer_cert(self, ack_body: dict, redeemer_instance_id: str) -> None:
+        """Put the redeeming household's OWN writer cert into the ACK's
+        ``space_meta`` (v_49). Called once its instance row exists, so the
+        v_49 gate reads the version it advertised. Fail-soft: a cert that
+        can't be issued never costs the join."""
+        meta = ack_body.get("space_meta")
+        if self._writer_certs is None or not isinstance(meta, dict):
+            return
+        try:
+            cert = await self._writer_certs.cert_for_peer(
+                str(ack_body.get("space_id") or ""), redeemer_instance_id
+            )
+        except Exception:
+            log.exception(
+                "invite redeem: writer cert for %s could not be issued",
+                redeemer_instance_id,
+            )
+            return
+        if cert is not None:
+            meta["writer_cert"] = cert
 
     def attach_bootstrap(
         self,
@@ -754,6 +784,13 @@ class SpaceInviteTokenRedeemCoordinator:
                     meta=meta,
                     space_crypto_service=self._space_crypto,
                 )
+                # v_49 — our writer cert for that epoch (needs the key row
+                # just written; verified against the stub's pinned key).
+                if (
+                    meta.get("writer_cert") is not None
+                    and self._writer_certs is not None
+                ):
+                    await self._writer_certs.accept(space_id, meta.get("writer_cert"))
                 await self._spaces.save_member(
                     SpaceMember(
                         space_id=space_id,
@@ -885,6 +922,7 @@ class SpaceInviteTokenRedeemCoordinator:
                     routed_route_id=routed_route_id,
                 )
                 return
+            await self._add_writer_cert(ack_payload, event.from_instance)
             ack_payload = {"redeem_nonce": nonce, **ack_payload}
             try:
                 if routed_route_id is not None and self._routed_handler is not None:
@@ -1817,6 +1855,7 @@ class SpaceInviteTokenRedeemCoordinator:
             if reservation is not None:
                 await self._rollback_redeem(reservation, space_session=True)
             raise
+        await self._add_writer_cert(ack_body, redeemer_instance_id)
         if not await self._send_bootstrap_ack(
             body,
             nonce,

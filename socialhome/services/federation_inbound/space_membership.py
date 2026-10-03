@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...federation.federation_service import FederationService
     from ...repositories.space_repo import AbstractSpaceRepo
+    from ..space_service import SpaceService
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class SpaceMembershipInboundHandlers:
         "_bus",
         "_space_repo",
         "_federation",
+        "_space_service",
     )
 
     def __init__(
@@ -54,6 +56,13 @@ class SpaceMembershipInboundHandlers:
         self._bus = bus
         self._space_repo = space_repo
         self._federation: "FederationService | None" = None
+        #: v_49 — the host side of a member household's leave. Built after
+        #: these handlers, so wired late; absent → the old row-only drop.
+        self._space_service: "SpaceService | None" = None
+
+    def attach_space_service(self, space_service: "SpaceService") -> None:
+        """Wire :class:`SpaceService` (built downstream of this handler)."""
+        self._space_service = space_service
 
     def attach_to(self, federation_service: "FederationService") -> None:
         self._federation = federation_service
@@ -206,9 +215,24 @@ class SpaceMembershipInboundHandlers:
         await self._bus.publish(RemoteSpaceDissolved(space_id=space_id))
 
     async def _on_instance_left(self, event: "FederationEvent") -> None:
+        """A member household left (all its seats, or ``user_id``'s).
+
+        On the space's host (v_49) the service ends that household's seat(s)
+        — only ever the §24.11-authenticated sender's, whatever the payload
+        names — drops its ``space_instances`` row with its last seat, gossips
+        the change and rotates the content key. Anywhere else the old
+        meaning stands: stop fanning out to that household.
+        """
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         if not space_id:
             return
+        if self._space_service is not None:
+            raw_user = event.payload.get("user_id")
+            user_id = str(raw_user) if isinstance(raw_user, str) and raw_user else None
+            if await self._space_service.on_remote_member_left(
+                space_id, event.from_instance, user_id
+            ):
+                return
         await self._space_repo.remove_space_instance(space_id, event.from_instance)
 
     async def _is_from_the_host(self, event: "FederationEvent", space_id: str) -> bool:

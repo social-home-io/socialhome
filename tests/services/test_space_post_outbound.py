@@ -1005,3 +1005,57 @@ async def test_a_bridge_card_minted_during_an_event_release_stays_local():
     with release_scope("item-3", "uid-mod"):
         await bus.publish(SpacePostCreated(post=card, space_id="sp-1"))
     federation.broadcast_to_space_members.assert_not_awaited()
+
+
+# ─── v_49: the relay hint carries this household's writer cert ─────────
+
+
+class _FakeCerts:
+    def __init__(self, wire):
+        self.wire = wire
+        self.asked: list[str] = []
+
+    async def current_own_cert_wire(self, space_id):
+        self.asked.append(space_id)
+        return self.wire
+
+
+async def _relay_hint_with(certs):
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+    out = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(space_type=SpaceType.PUBLIC)}),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    if certs is not None:
+        out.attach_writer_certs(certs)
+    post = Post(
+        id="post-c",
+        author=uid,
+        type=PostType.TEXT,
+        content="hi",
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    return federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+
+
+async def test_relay_hint_carries_our_writer_cert_outside_the_author_sig():
+    certs = _FakeCerts({"cert": "ours"})
+    relay = await _relay_hint_with(certs)
+    assert relay["writer_cert"] == {"cert": "ours"}
+    assert certs.asked == ["sp-1"]
+    # Unsigned by the author (the cert is self-authenticating), so the
+    # author signature verifies exactly as before.
+    assert verify_signed_author_inner(relay)
+
+
+async def test_relay_hint_without_a_cert_has_no_field():
+    assert "writer_cert" not in await _relay_hint_with(_FakeCerts(None))
+    assert "writer_cert" not in await _relay_hint_with(None)

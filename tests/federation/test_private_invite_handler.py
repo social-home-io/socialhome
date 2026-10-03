@@ -27,6 +27,7 @@ from socialhome.domain.events import (
 from socialhome.domain.space import RemoteAdminOutcome, SpaceRole
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.infrastructure.event_bus import EventBus
+import base64
 
 
 class _RecordingBus:
@@ -1858,3 +1859,126 @@ async def test_space_location_updated_refused_seat_publishes_nothing():
     )
     await h._on_space_location_updated(ev)
     assert h._bus.events == []
+
+
+# ─── v_49 writer certs ride the rekey + roster snapshot ──────────────────
+
+
+def _cert_handler(space=None):
+    space_repo = AsyncMock()
+    space_repo.get = AsyncMock(
+        return_value=space
+        or SimpleNamespace(
+            id="sp-c",
+            owner_instance_id="peer-1",
+            identity_public_key="00" * 32,
+            authority_key_epoch=0,
+        )
+    )
+    space_crypto = AsyncMock()
+    h = PrivateSpaceInviteHandler(
+        bus=_RecordingBus(),  # type: ignore[arg-type]
+        space_repo=space_repo,
+        remote_member_repo=AsyncMock(),
+        space_crypto_service=space_crypto,
+    )
+    certs = AsyncMock()
+    certs.accept = AsyncMock(return_value=True)
+    h.attach_writer_certs(certs)
+    return h, certs, space_crypto
+
+
+async def test_rekey_hands_the_writer_cert_to_the_holder_after_the_key():
+    h, certs, crypto = _cert_handler()
+    order: list[str] = []
+    crypto.import_key = AsyncMock(side_effect=lambda *a, **k: order.append("key"))
+    certs.accept = AsyncMock(side_effect=lambda *a, **k: order.append("cert"))
+    await h._on_key_exchange_rekey(
+        _event(
+            "SPACE_KEY_EXCHANGE_REKEY",
+            {
+                "space_id": "sp-c",
+                "space_content_key": {
+                    "epoch": 3,
+                    "key_suite": "aesgcm-256",
+                    "key_base64": base64.b64encode(bytes(32)).decode("ascii"),
+                },
+                "writer_cert": {"cert": 1},
+            },
+        )
+    )
+    certs.accept.assert_awaited_once_with("sp-c", {"cert": 1})
+    assert order == ["key", "cert"]
+
+
+async def test_rekey_without_a_cert_touches_no_cert():
+    h, certs, _crypto = _cert_handler()
+    await h._on_key_exchange_rekey(
+        _event(
+            "SPACE_KEY_EXCHANGE_REKEY",
+            {
+                "space_id": "sp-c",
+                "space_content_key": {
+                    "epoch": 3,
+                    "key_suite": "aesgcm-256",
+                    "key_base64": base64.b64encode(bytes(32)).decode("ascii"),
+                },
+            },
+        )
+    )
+    certs.accept.assert_not_awaited()
+
+
+async def test_roster_snapshot_with_only_a_cert_still_stores_it():
+    h, certs, _crypto = _cert_handler()
+    await h._on_space_roster_snapshot(
+        _event(
+            "SPACE_ROSTER_SNAPSHOT",
+            {"space_id": "sp-c", "entries": [], "writer_cert": {"cert": 2}},
+        )
+    )
+    certs.accept.assert_awaited_once_with("sp-c", {"cert": 2})
+
+
+async def test_roster_snapshot_without_cert_or_entries_is_a_no_op():
+    h, certs, _crypto = _cert_handler()
+    await h._on_space_roster_snapshot(
+        _event("SPACE_ROSTER_SNAPSHOT", {"space_id": "sp-c", "entries": []})
+    )
+    certs.accept.assert_not_awaited()
+
+
+async def test_roster_snapshot_cert_from_a_non_host_is_ignored():
+    """Snapshots are the host's; a cert another member relays (a replay of
+    one it saw) is not stored."""
+    h, certs, _crypto = _cert_handler()
+    await h._on_space_roster_snapshot(
+        _event(
+            "SPACE_ROSTER_SNAPSHOT",
+            {"space_id": "sp-c", "entries": [], "writer_cert": {"cert": 3}},
+            from_instance="peer-2",
+        )
+    )
+    certs.accept.assert_not_awaited()
+
+
+async def test_rekey_cert_from_an_unauthorised_sender_is_ignored():
+    """A non-owner rekey without an authority signature is dropped whole —
+    its cert with it."""
+    h, certs, _crypto = _cert_handler()
+    await h._on_key_exchange_rekey(
+        _event(
+            "SPACE_KEY_EXCHANGE_REKEY",
+            {
+                "space_id": "sp-c",
+                "space_content_key": {
+                    "epoch": 3,
+                    "key_suite": "aesgcm-256",
+                    "key_base64": base64.b64encode(bytes(32)).decode("ascii"),
+                },
+                "writer_cert": {"cert": 4},
+            },
+            from_instance="peer-2",
+        )
+    )
+    certs.accept.assert_not_awaited()

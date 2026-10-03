@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         AbstractSpaceRemoteMemberRepo,
     )
     from ..repositories.space_repo import AbstractSpaceRepo
+    from ..services.space_writer_cert_service import SpaceWriterCertService
     from .federation_service import FederationService
 
 log = logging.getLogger(__name__)
@@ -169,6 +170,7 @@ class PrivateSpaceInviteHandler:
         "_approval_service",
         "_remote_locations",
         "_own_instance_id",
+        "_writer_certs",
     )
 
     def __init__(
@@ -216,6 +218,9 @@ class PrivateSpaceInviteHandler:
         #: This household's instance id — set in :meth:`attach_to`. Lets the
         #: roster merge tell "a space we host" from a mirror (v_44).
         self._own_instance_id = ""
+        #: v_49 — stores the writer cert a seed holder delivered to us on a
+        #: rekey / roster snapshot. ``None`` → certs are ignored.
+        self._writer_certs: "SpaceWriterCertService | None" = None
 
     def attach_space_service(self, space_service) -> None:
         """Wire :class:`SpaceService` post-construction (#114 phase 2).
@@ -226,6 +231,10 @@ class PrivateSpaceInviteHandler:
         — degrading to a no-op rather than crashing the receiver.
         """
         self._space_service = space_service
+
+    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+        """Wire the v_49 writer-cert holder (built after this handler)."""
+        self._writer_certs = writer_certs
 
     def attach_approval_service(self, approval_service) -> None:
         """Wire :class:`SpaceApprovalService` post-construction (v_16) so the
@@ -1304,6 +1313,15 @@ class PrivateSpaceInviteHandler:
                 else None
             ),
         )
+        # v_49 — the rotator's per-peer copy carries our writer cert for the
+        # new epoch, right after its key (which the cert needs to be kept).
+        # Reached only from the owner or a proven seed holder (the
+        # authority-signed rekey above), never from an arbitrary peer.
+        if (
+            event.payload.get("writer_cert") is not None
+            and self._writer_certs is not None
+        ):
+            await self._writer_certs.accept(space_id, event.payload.get("writer_cert"))
 
     async def _on_admin_key_share(self, event: "FederationEvent") -> None:
         """Delegated-admin signing-seed share from the space owner (v_22).
@@ -1714,7 +1732,7 @@ class PrivateSpaceInviteHandler:
             else:
                 continue
             candidates.append((FederationEventType(raw_type), payload, tombstoned))
-        if not candidates:
+        if not candidates and p.get("writer_cert") is None:
             return
         space = await self._space_repo.get(space_id)
         if space is None:
@@ -1737,6 +1755,19 @@ class PrivateSpaceInviteHandler:
             )
             if outcome is AuthorityCertOutcome.APPLIED:
                 space = await self._space_repo.get(space_id) or space
+        # v_49 — our own writer cert for the current epoch, from the HOST
+        # only (snapshots are the owner's; any other sender could replay a
+        # cert it saw). Verified against the (just re-pinned) space key and
+        # our own identity key.
+        if (
+            p.get("writer_cert") is not None
+            and self._writer_certs is not None
+            and space.owner_instance_id
+            and event.from_instance == space.owner_instance_id
+        ):
+            await self._writer_certs.accept(space_id, p.get("writer_cert"))
+        if not candidates:
+            return
         # Thousands of signature checks are CPU work: batch them off the
         # event loop, then merge the verified entries in order.
         reasons = await asyncio.to_thread(

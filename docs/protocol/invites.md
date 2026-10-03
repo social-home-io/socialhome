@@ -94,7 +94,13 @@ rotated (v_44), the ACK's — and the §D1b invite's — ``space_meta`` also
 carries the owner's ``authority_cert`` + ``authority_key_epoch``; the
 receiver applies the cert to the stub it just seated, recording the epoch
 (and re-pinning a re-invited member's stub that still names a retired key),
-so a replay of an older cert can never move the pin back. The endpoint returns ``{space_id, role}``
+so a replay of an older cert can never move the pin back. From v_49 the
+issuer also puts the redeeming household's OWN ``writer_cert`` into the ACK's
+``space_meta`` (issued after its instance row exists — on the §D2b leg, the
+``space_session`` seat — so the v_49 gate reads what it advertised); the
+receiver stores it on the epoch's ``space_keys`` row once it verifies against
+the stub's pinned space key and its own identity key. See
+[`spaces.md`](./spaces.md#writer-certificates-v_49). The endpoint returns ``{space_id, role}``
 like the local path; on DENY returns 422 with the reason; on timeout 504.
 
 **§CP.F1 age gate:** the receiver enforces the host's ``min_age`` (carried
@@ -629,6 +635,12 @@ side drops its mirror. The receiver re-derives the same answer from its
 own `space_instances` rows rather than trusting the sender, so a household
 that shares two spaces and leaves one cannot tear down the seat the other
 still needs.
+
+A link-joined member that leaves (v_49) tells the host with
+`SPACE_INSTANCE_LEFT {space_id, user_id}` over the same connection-server
+relay as every other envelope; the host ends that household's seat, drops
+its `space_instances` row with its last seat, rotates the content key, and
+then revokes the §D2b seat. See [`spaces.md`](./spaces.md#member-leave-v_49).
 
 No `PairingConfirmed` is published either — that event kicks off the
 user-roster sync, the DM-history backfill and the public-space snapshot,

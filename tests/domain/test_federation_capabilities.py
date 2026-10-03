@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 48
+    assert fc.OURS == 49
 
 
 def test_space_authority_rotation_capability_threshold():
@@ -30,10 +30,12 @@ def test_space_authority_rotation_capability_threshold():
         "Space key epoch echo",
         "Role changes from member households",
         "Host-sequenced shared pages",
+        "Space writer certificates",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
         "Host-sequenced shared pages",
+        "Space writer certificates",
     ]
 
 
@@ -54,6 +56,7 @@ def test_authority_epoch_echo_capability_threshold():
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
         "Host-sequenced shared pages",
+        "Space writer certificates",
     ]
 
 
@@ -498,7 +501,10 @@ def test_forwarded_role_change_capability_threshold():
         "Role changes from member households",
         "Host-sequenced shared pages",
     ]
-    assert fc.features_missing_below(47) == ["Host-sequenced shared pages"]
+    assert fc.features_missing_below(47) == [
+        "Host-sequenced shared pages",
+        "Space writer certificates",
+    ]
 
 
 def test_host_sequenced_pages_capability_threshold():
@@ -510,4 +516,15 @@ def test_host_sequenced_pages_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.space_features_missing_below(47) == ["Host-sequenced shared pages"]
-    assert fc.features_missing_below(48) == []
+    assert fc.features_missing_below(48) == ["Space writer certificates"]
+
+
+def test_member_gfs_publish_capability_threshold():
+    """v_49 — space writer certificates. Not space-scoped: an older member
+    household simply keeps the host-signed relay path for its items."""
+    assert fc.FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH == 49
+    assert fc.FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(49) == []

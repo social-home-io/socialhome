@@ -60,6 +60,24 @@ forwarded-admin path pins it) — exposing a space's content to strangers is not
 delegated-admin decision. Members are unaffected either way: they receive content
 through ``broadcast_to_space_members``, not the GFS.
 
+Writer certificates (v_49): the relayed inner carries the author
+household's ``writer_cert`` — the space authority key's per-epoch statement
+that this household may write (:mod:`socialhome.writer_cert`). On the
+local-author path a seed holder attaches its own (self-issued) cert for the
+epoch it encrypts under. On the remote-author path a cert in the
+``public_relay`` is checked first (signature against the pinned space key,
+names the author's ``author_pk``, ``write`` scope, this space): a cert that
+fails is a v_49 author's item that must not travel — it is dropped with a
+WARNING. A valid cert is then RE-STAMPED for the epoch this relay encrypts
+under, but only while the author household still holds a seat in our roster
+that permits the item (never a ``comment`` cert onto a post) — a household
+removed since its cert was issued is not relayed. An inner with NO cert is
+relayed as before, on this seed holder's authority signature alone, only
+from an origin below v_49 whose pinned identity key is the inner's
+``author_pk`` (a v_49 author always attaches its cert, so its absence is a
+stripped cert). That no-cert branch is the
+migration tripwire — once every member ships v_49 it can become a refusal.
+
 This service is the encryption boundary: the cleartext post never leaves
 in a GFS-bound envelope (CLAUDE.md Encryption-First Rule). If the space
 has no content key, :meth:`SpaceContentEncryption.encrypt` raises
@@ -79,11 +97,13 @@ from ..authority_sig import (
 )
 from ..domain.events import SpacePostCreated
 from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.writer_cert import WRITER_SCOPE_WRITE, scope_permits
 from ..infrastructure.event_bus import EventBus
 from .space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
 )
+from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -106,6 +126,7 @@ class SpacePublicOutbound:
         "_own_instance_id",
         "_own_instance_pk",
         "_own_identity_seed",
+        "_writer_certs",
     )
 
     def __init__(
@@ -133,6 +154,12 @@ class SpacePublicOutbound:
         #: the subscriber). The producer only relays its own household's
         #: locally-authored posts, so this seed can always author-sign them.
         self._own_identity_seed: bytes = b""
+        #: v_49 writer certs — ``None`` keeps the pre-v_49 relay unchanged.
+        self._writer_certs: SpaceWriterCertService | None = None
+
+    def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
+        """Wire the v_49 writer-cert service (see the module docstring)."""
+        self._writer_certs = writer_certs
 
     def attach_identity(
         self,
@@ -225,10 +252,11 @@ class SpacePublicOutbound:
             author_identity_anchor=author.identity_anchor,
         )
         # Encrypt under the existing per-space epoch key. Raises if no key —
-        # we never relay plaintext (Encryption-First Rule).
+        # we never relay plaintext (Encryption-First Rule). v_49: our own
+        # writer cert for exactly the epoch we encrypt under rides inside.
         try:
-            epoch, ct = await self._crypto.encrypt(
-                event.space_id, json.dumps(inner).encode("utf-8")
+            epoch, ct = await self._encrypt_with_cert(
+                event.space_id, inner, self._own_instance_id
             )
         except RuntimeError:
             log.warning(
@@ -325,10 +353,43 @@ class SpacePublicOutbound:
                 event.space_id,
             )
             return
+        restamp_for: str | None = None
+        if relay.get(WRITER_CERT_FIELD) is not None:
+            # v_49 author: its cert must hold before anything travels.
+            if not self._remote_cert_ok(space, relay):
+                log.warning(
+                    "space_public.outbound: writer cert in public_relay failed "
+                    "verification for space=%s — not relaying",
+                    event.space_id,
+                )
+                return
+            restamp_for = event.origin_instance_id
+        elif self._writer_certs is not None and not await self._legacy_hint_ok(
+            event.origin_instance_id, relay
+        ):
+            return
         try:
-            epoch, ct = await self._crypto.encrypt(
-                event.space_id, json.dumps(relay).encode("utf-8")
+            if restamp_for is not None:
+                epoch, ct = await self._encrypt_with_cert(
+                    event.space_id,
+                    relay,
+                    restamp_for,
+                    expect_pk=str(relay.get("author_pk") or ""),
+                    required=True,
+                )
+            else:
+                epoch, ct = await self._crypto.encrypt(
+                    event.space_id, json.dumps(relay).encode("utf-8")
+                )
+        except _NoWriterCert:
+            log.warning(
+                "space_public.outbound: author household %s holds no writer "
+                "seat that permits a post — writer cert not re-stamped, not relaying "
+                "(space=%s)",
+                restamp_for,
+                event.space_id,
             )
+            return
         except RuntimeError:
             log.warning(
                 "space_public.outbound: no content key for space %s — "
@@ -359,3 +420,128 @@ class SpacePublicOutbound:
                 "space_public.outbound: remote-author relay failed for space=%s",
                 event.space_id,
             )
+
+    # ── v_49 writer certs ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _remote_cert_ok(space, relay: dict) -> bool:
+        """The cert a remote author attached: authority-signed for this
+        space, naming the inner's ``author_pk``, at ``write`` scope. Checked
+        at the epoch it names — the relay re-stamps it for the current one."""
+        raw = relay.get(WRITER_CERT_FIELD)
+        try:
+            author_pk = bytes.fromhex(str(relay.get("author_pk") or ""))
+            epoch = int(raw["epoch"]) if isinstance(raw, dict) else -1
+        except ValueError, TypeError, KeyError:
+            return False
+        return SpaceWriterCertService.check_item_cert(
+            space,
+            raw,
+            epoch=epoch,
+            author_pk=author_pk,
+            required_scope=WRITER_SCOPE_WRITE,
+        )
+
+    async def _legacy_hint_ok(self, origin: str | None, relay: dict) -> bool:
+        """A hint with NO cert: only from a pre-v_49 origin (a v_49 one
+        always attaches it — its absence is a stripped cert), and only when
+        its ``author_pk`` is the origin household's key — the one we pin for
+        it, or for a mesh-only household (no row) the key its instance id
+        derives from, as the v_31 routed-origin check verified it."""
+        assert self._writer_certs is not None
+        if not origin:
+            return False
+        if await self._writer_certs.peer_is_cert_aware(origin):
+            log.warning(
+                "space_public.outbound: v_49 household %s sent a public_relay "
+                "without a writer cert — not relaying",
+                origin,
+            )
+            return False
+        try:
+            claimed = bytes.fromhex(str(relay.get("author_pk") or ""))
+        except ValueError:
+            claimed = None
+        verified = await self._writer_certs.verified_instance_pk(
+            origin, claimed=claimed
+        )
+        if verified is None or verified != claimed:
+            log.warning(
+                "space_public.outbound: public_relay author_pk is not %s's "
+                "identity key — not relaying",
+                origin,
+            )
+            return False
+        return True
+
+    async def _encrypt_with_cert(
+        self,
+        space_id: str,
+        inner: dict,
+        instance_id: str,
+        *,
+        expect_pk: str = "",
+        required: bool = False,
+        required_scope: str = WRITER_SCOPE_WRITE,
+    ) -> tuple[int, str]:
+        """Encrypt ``inner`` with ``instance_id``'s writer cert for the epoch
+        it is encrypted under (re-read once if a rotation lands in between).
+        Without a cert service, or with no cert for that household that
+        permits ``required_scope``, the inner goes as is — unless ``required``
+        (a re-stamp), which raises :class:`_NoWriterCert`. ``expect_pk`` pins the cert to the author key
+        the inner names. Raises ``RuntimeError`` when there is no content key.
+        """
+        if self._writer_certs is None:
+            if required:
+                raise _NoWriterCert(instance_id)
+            return await self._crypto.encrypt(
+                space_id, json.dumps(inner).encode("utf-8")
+            )
+        for _attempt in range(2):
+            current = await self._crypto.get_current_epoch(space_id)
+            if current is None:
+                raise RuntimeError(f"no content key for space {space_id}")
+            if instance_id == self._own_instance_id:
+                cert = await self._writer_certs.own_cert(space_id, current)
+            else:
+                hint: bytes | None
+                try:
+                    hint = bytes.fromhex(expect_pk) if expect_pk else None
+                except ValueError:
+                    hint = None
+                cert = await self._writer_certs.issue_for_instance(
+                    space_id, instance_id, epoch=current, instance_pk_hint=hint
+                )
+            if cert is not None and expect_pk:
+                named = SpaceWriterCertService.cert_instance_pk(cert.to_wire())
+                if named is None or named.hex() != expect_pk:
+                    cert = None
+            # Never put a cert on an item it does not authorize (a comment
+            # cert on a post).
+            if cert is not None and not scope_permits(cert.scope, required_scope):
+                cert = None
+            if cert is None and required:
+                raise _NoWriterCert(instance_id)
+            body = dict(inner)
+            body.pop(WRITER_CERT_FIELD, None)
+            if cert is not None:
+                body[WRITER_CERT_FIELD] = cert.to_wire()
+            epoch, ct = await self._crypto.encrypt(
+                space_id, json.dumps(body).encode("utf-8")
+            )
+            if cert is None or epoch == cert.epoch:
+                return epoch, ct
+        log.warning(
+            "space_public.outbound: content epoch kept moving for space %s — "
+            "relaying without a writer cert",
+            space_id,
+        )
+        if required:
+            raise _NoWriterCert(instance_id)
+        body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
+        return await self._crypto.encrypt(space_id, json.dumps(body).encode("utf-8"))
+
+
+class _NoWriterCert(Exception):
+    """A required writer-cert re-stamp was impossible (the household holds
+    no writer seat, or its key does not match the inner's author)."""

@@ -960,6 +960,114 @@ inside the encrypted `SPACE_POST_CREATED` payload:
   removes that link (`domain.link_preview.card_survives_edit`, derived
   from content both sides hold — no new field, no re-fetch).
 
+## Writer certificates (v_49)
+
+A **writer certificate** is the space authority key's per-epoch statement
+that one household may write (`scope: "write"`) or only comment (`scope:
+"comment"`) in a space. It is the foundation for members publishing over the
+connection server without the host signing every post: one host-side
+signature per seat per epoch, never per item. Format and suite:
+[`../crypto.md`](../crypto.md) ("Space writer certificate"); code:
+`socialhome/writer_cert.py`, `socialhome/domain/writer_cert.py`,
+`socialhome/services/space_writer_cert_service.py`.
+
+**Who issues, to whom.** Only a household holding the space seed — the
+owner, or a delegated admin — and only while that seed is the private half
+of the pinned space key (a seed left behind by a v_44 rotation mints
+nothing). Entitlement is derived from the issuer's own roster, never stored:
+owner / admin / moderator / member seats → `write`; a follower seat →
+`comment` only while `allow_subscriber_comment` is on; a household with
+several seats → one cert at its strongest scope; no live seat → no cert.
+
+**When.** On seating (the invite-link redeem ACK, and the roster snapshot a
+paired joiner receives), on a role change that alters the household's write /
+comment rights, on every content-key rotation (`SPACE_KEY_EXCHANGE_REKEY`)
+and on every authority rotation (`SPACE_AUTHORITY_ROTATED`, signed with the
+new key), plus the v_49 upgrade and the periodic roster-snapshot tick.
+
+**Delivery — existing channels only.** Each household is delivered ITS OWN
+cert, inside that household's encrypted per-peer envelope (a cert is not
+secret — once its holder posts, it rides in the item's encrypted
+`public_relay` to every member and on to subscribers — but nobody is handed
+a cert for another household to store):
+
+| Channel | Who it reaches | Where the cert sits |
+|---|---|---|
+| `SPACE_INVITE_TOKEN_REDEEM_ACK` (and the §D2b relayed ACK) | the redeeming household, link-joined ones included | `space_meta.writer_cert` |
+| `SPACE_KEY_EXCHANGE_REKEY` | every member household, link-joined ones via the relay | top-level `writer_cert`, outside the authority-signed `space_content_key` (`broadcast_to_space_members(per_peer=…)` decorates each copy) |
+| `SPACE_ROSTER_SNAPSHOT` (owner host) | the one household the snapshot is for | top-level `writer_cert` |
+| `SPACE_AUTHORITY_ROTATED` (owner host) | each member household, per peer | top-level `writer_cert` |
+
+Every channel is gated on `peer_supports(…, MIN_FOR_MEMBER_GFS_PUBLISH)`
+(v_49). The receiver keeps a cert only when it verifies against its pinned
+space key, names its own identity key and this space, and it holds the
+content key for that epoch — then on that epoch's `space_keys.writer_cert`.
+It takes certs only from the owner (redeem ACK, roster snapshot, rotation
+bundle) or a proven seed holder (an authority-signed rekey), and a stored
+cert is replaced only by a newer one (`issued_at`; `write` wins a tie).
+
+**Carried by items.** An author household puts its cert for the current
+epoch in the relayed public-post inner (`public_relay.writer_cert`). It is
+not part of the author signature — it authenticates itself against the
+space key, and older subscribers ignore it.
+
+```mermaid
+sequenceDiagram
+    participant H as Host (seed holder)
+    participant M as Member household
+    participant G as GFS subscribers
+    H->>M: redeem ACK / rekey / roster snapshot {writer_cert for M only}
+    M->>M: verify vs pinned space key, own pk, epoch key held → store
+    M->>H: SPACE_POST_CREATED {public_relay {…, author_sig, writer_cert}}
+    H->>H: verify cert (space key, author_pk, write) → re-stamp for current epoch if M still seated
+    H->>G: space_post_public (authority-signed, inner sealed under epoch key)
+    G->>G: verify authority sig → decrypt → author_sig → writer_cert (epoch, author_pk, write)
+```
+
+**Verification and the migration tripwire.** A receiver that finds a cert
+(`SpacePublicInbound`, and the relaying seed holder in
+`SpacePublicOutbound._relay_remote_authored`) checks the suite, the
+signature against the pinned space key, the space, the envelope's epoch, that
+`instance_pk` equals the inner's `author_pk`, and `write` scope. A present
+cert that fails drops the item with a WARNING. The relaying host re-stamps a
+cert only while the author household still holds a seat that permits a post
+(never a `comment` cert onto a post). An item with NO cert is a pre-v_49
+author and keeps today's behaviour — authorized by the host's authority
+signature — but the host relays such a hint only from an origin below v_49
+whose pinned identity key is the inner's `author_pk` (a v_49 author always
+attaches its cert; a hint without one is a stripped cert). For a mesh-only
+origin we hold no `remote_instances` row for, the household key is the
+`author_pk` that derives to its instance id — the same self-authentication
+the v_31 routed-origin check verified its envelope with — so mesh members
+keep the relay and can be re-stamped. That no-cert
+branch is the migration tripwire: once every member household ships v_49 it
+can become a refusal.
+
+**Epoch freshness.** A cert is valid for its whole epoch, so receivers bound
+the epoch too: a **member-authorized** (cert-only) item is accepted only at
+the newest content epoch the receiver holds, or at the previous one for
+`WRITER_CERT_EPOCH_GRACE_S` (10 min) after the newest key arrived there
+(`space_keys.created_at`) — `SpaceWriterCertService.check_item`. The grace
+lets a post sealed just before a rotation land; it needs no seed holder
+online (an expiry on the cert would). A **host-signed** item — every
+GFS-relayed item today, which the host re-stamped at its own current epoch —
+skips the gate: the authority signature is the authorizer, and a stale epoch
+there is late delivery, not revocation. A catch-up or backfill path must not
+run the gate either.
+
+**Revocation = rotation.** Any change that weakens a household's rights
+rotates the content key, so its old cert dies with the epoch: a role change
+from write to comment or none (remote or local), a household leaving the
+space (`SPACE_INSTANCE_LEFT`, see "Member leave (v_49)"),
+`allow_subscriber_comment` turned off while a follower seat exists,
+and — as before — every kick and ban. Promotions do not rotate; the new
+cert is delivered in a roster snapshot, and turning follower comments on
+sends each follower household its `comment` cert at once.
+
+**Residuals.** A revoked writer can still post until the rotation reaches a
+receiver, plus the 10-minute grace — and if no seed holder is online to
+rotate, until one is. Before this release demotion did not rotate at all.
+
 ## Flow — rekey
 
 Triggered on every member-removal path (#121, PR #432): local kick,
@@ -2105,9 +2213,51 @@ sequenceDiagram
 ```
 
 Owner cannot be kicked through this path — same invariant as
-`remove_member`. Self-leaves on a remote space still run the local
-path (the user is dropping their own stub membership; the host
-learns via the existing `SPACE_MEMBER_LEFT` outbound).
+`remove_member`. Self-leaves on a remote space run the local path (the
+user drops their own stub membership) and then tell the host — see
+"Member leave (v_49)" below.
+
+### Member leave (v_49)
+
+Before v_49 a member household's leave never reached the host: the local
+path only emitted roster gossip, which needs the space seed. The host kept
+the seat and the `space_instances` row, kept sending content keys, and kept
+issuing the household a write cert. Now `SpaceService.remove_member` on a
+member household (self-leave, space hosted elsewhere) sends the host
+`SPACE_INSTANCE_LEFT {space_id, user_id}` — an existing event type, inside
+the encrypted payload, authenticated by the envelope's signed
+`from_instance`. A link-joined household sends it over the
+connection-server relay (`/gfs/envelope`) like any other envelope.
+
+The host (`SpaceService.on_remote_member_left`, dispatched by
+`SpaceMembershipInboundHandlers._on_instance_left`) only ever ends seats
+of the authenticated sender — a leave naming another household's user
+changes nothing. It tombstones the seat(s); when the household's last seat
+goes it removes the `space_instances` row **before** rotating, so the new
+key never reaches the household that left; it gossips the roster change
+(`SPACE_MEMBER_LEFT`); and it rotates the content key once — or, when an
+admin seat ended under `delegated_admin_authority`, leaves that to the v_44
+authority rotation (one epoch, not two). A link-joined household's §D2b
+seat is then revoked like on a kick. Off the host the event keeps its old
+meaning (stop fanning out to that household).
+
+Gated on `peer_supports(host, MIN_FOR_MEMBER_GFS_PUBLISH)` (v_49): a host
+below v_49 would read the event as "the whole household left" and drop the
+row while other users of that household may still be seated, ending no
+seat — so an older host is sent nothing, as before.
+
+```mermaid
+sequenceDiagram
+    participant M as Member household
+    participant H as Host
+    participant O as Other members
+    M->>M: remove_member(self) — drop local membership
+    M->>H: SPACE_INSTANCE_LEFT {space_id, user_id} (signed from_instance)
+    H->>H: tombstone M's seat; last seat → remove space_instances(M)
+    H->>O: SPACE_MEMBER_LEFT (authority-signed gossip)
+    H->>O: SPACE_KEY_EXCHANGE_REKEY (epoch N+1, each with its own writer_cert)
+    Note over M: gets neither the new key nor a cert
+```
 
 ### Cross-household admin actions (v_15+)
 

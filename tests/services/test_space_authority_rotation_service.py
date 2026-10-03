@@ -1007,3 +1007,92 @@ async def test_pending_gate_warns_once_per_boot(env, caplog):
         assert await env.svc._restore_review_pending()
     hits = [r for r in caplog.records if "has not completed" in r.getMessage()]
     assert len(hits) == 1 and hits[0].levelname == "WARNING"
+
+
+# ─── v_49: the rotation bundle re-issues each household's writer cert ────
+
+
+class _Certs:
+    def __init__(self):
+        self.asked: list[tuple[str, str, int | None]] = []
+        self.accepted: list[tuple[str, object]] = []
+
+    async def cert_for_peer(self, space_id, instance_id, *, epoch=None):
+        self.asked.append((space_id, instance_id, epoch))
+        return {"for": instance_id, "epoch": epoch}
+
+    async def accept(self, space_id, raw):
+        self.accepted.append((space_id, raw))
+        return True
+
+
+async def test_rotation_bundle_carries_each_households_own_cert(env):
+    certs = _Certs()
+    env.svc.attach_writer_certs(certs)
+    await env.svc.rotate(SPACE)
+    bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+    epoch = bundle["space_content_key"]["epoch"]
+    assert bundle["writer_cert"] == {"for": "v44", "epoch": epoch}
+    mesh = _sent(env, "mesh", FET.SPACE_AUTHORITY_ROTATED)[0]
+    assert mesh["writer_cert"] == {"for": "mesh", "epoch": epoch}
+    # The legacy (below v44) rekey path carries no cert.
+    legacy = _sent(env, "v43", FET.SPACE_KEY_EXCHANGE_REKEY)[0]
+    assert "writer_cert" not in legacy
+
+
+async def test_rotation_bundle_without_a_cert_has_no_field(env):
+    certs = _Certs()
+
+    async def _none(*_a, **_k):
+        return None
+
+    certs.cert_for_peer = _none  # type: ignore[method-assign]
+    env.svc.attach_writer_certs(certs)
+    await env.svc.rotate(SPACE)
+    assert "writer_cert" not in _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+
+
+async def test_member_stores_the_cert_from_the_bundle(env):
+    await env.svc.rotate(SPACE)
+    bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+    member, handler = await _member_env(env)
+    certs = _Certs()
+    member.attach_writer_certs(certs)
+    # Make the space look hosted elsewhere for the member-side handler.
+    await env.db.enqueue(
+        "UPDATE spaces SET owner_instance_id=? WHERE id=?",
+        (env.fed.own_instance_id, SPACE),
+    )
+    cert = {"for": "member-household"}
+    await handler(
+        FederationEvent(
+            msg_id=str(uuid.uuid4()),
+            event_type=FET.SPACE_AUTHORITY_ROTATED,
+            from_instance=env.fed.own_instance_id,
+            to_instance="member-household",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            payload={**bundle, "writer_cert": cert},
+            space_id=SPACE,
+        )
+    )
+    assert certs.accepted == [(SPACE, cert)]
+
+
+async def test_member_ignores_a_bundle_cert_from_a_non_owner(env):
+    await env.svc.rotate(SPACE)
+    bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+    member, handler = await _member_env(env)
+    certs = _Certs()
+    member.attach_writer_certs(certs)
+    await handler(
+        FederationEvent(
+            msg_id=str(uuid.uuid4()),
+            event_type=FET.SPACE_AUTHORITY_ROTATED,
+            from_instance="not-the-owner",
+            to_instance="member-household",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            payload={**bundle, "writer_cert": {"x": 1}},
+            space_id=SPACE,
+        )
+    )
+    assert certs.accepted == []

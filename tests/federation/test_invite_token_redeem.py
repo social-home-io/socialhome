@@ -2724,3 +2724,81 @@ async def test_a_retry_over_the_event_path_is_acked_again():
     assert first == again == {"space_id": "sp-retry", "role": "member"}
     assert repo.tokens["good-token"]["uses_remaining"] == 0
     assert len(members.added) == 1
+
+
+# ── v_49 writer cert in the redeem ACK ──────────────────────────────────
+
+
+class _FakeWriterCerts:
+    """Issues a marker cert naming the household it is asked for; records
+    every cert handed to :meth:`accept`."""
+
+    def __init__(self):
+        self.accepted: list[tuple[str, object]] = []
+        self.asked: list[tuple[str, str]] = []
+
+    async def cert_for_peer(self, space_id, instance_id, *, epoch=None):
+        self.asked.append((space_id, instance_id))
+        return {"for": instance_id, "space": space_id}
+
+    async def accept(self, space_id, raw):
+        self.accepted.append((space_id, raw))
+        return True
+
+
+async def test_redeem_ack_carries_the_redeemers_own_writer_cert():
+    sender, issuer, *_rest, issuer_repo, _im = _wire_pair(
+        {"space_id": "sp-meta", "created_by": "owner", "uses_remaining": 1},
+    )
+    issuer_repo.space_rows_for_get["sp-meta"] = _a_space("sp-meta")
+    issuer_certs, sender_certs = _FakeWriterCerts(), _FakeWriterCerts()
+    issuer.attach_writer_certs(issuer_certs)
+    sender.attach_writer_certs(sender_certs)
+    await sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    # Issued for the redeeming household only, and stored by it.
+    assert issuer_certs.asked == [("sp-meta", "sender-1")]
+    assert sender_certs.accepted == [
+        ("sp-meta", {"for": "sender-1", "space": "sp-meta"})
+    ]
+
+
+async def test_redeem_ack_without_a_cert_service_carries_none():
+    sender, _issuer, *_rest, issuer_repo, _im = _wire_pair(
+        {"space_id": "sp-meta", "created_by": "owner", "uses_remaining": 1},
+    )
+    issuer_repo.space_rows_for_get["sp-meta"] = _a_space("sp-meta")
+    sender_certs = _FakeWriterCerts()
+    sender.attach_writer_certs(sender_certs)
+    await sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    assert sender_certs.accepted == []
+
+
+async def test_bootstrap_ack_carries_the_link_joined_households_cert():
+    """A link-joined household (§D2b) gets its cert in the relayed ACK —
+    issued after its space-session row exists, so the v_49 gate can read
+    the version it advertised."""
+    env = _bootstrap_pair()
+    issuer_certs, redeemer_certs = _FakeWriterCerts(), _FakeWriterCerts()
+    seated_first: list[bool] = []
+
+    async def _cert_for_peer(space_id, instance_id, *, epoch=None):
+        seated_first.append(any(r.id == instance_id for r in env.issuer_repo.saved))
+        return {"for": instance_id}
+
+    issuer_certs.cert_for_peer = _cert_for_peer  # type: ignore[method-assign]
+    env.issuer.attach_writer_certs(issuer_certs)
+    env.redeemer.attach_writer_certs(redeemer_certs)
+    await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert seated_first == [True]
+    assert redeemer_certs.accepted == [
+        ("space-1", {"for": env.redeemer_party.instance_id})
+    ]

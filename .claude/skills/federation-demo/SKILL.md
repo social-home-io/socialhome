@@ -208,6 +208,13 @@ That single command runs the full sequence:
      for c, so it landed on the derived-key path — and that no household's
      log shows the legacy window ("unsigned moment from pre-v_35") or a
      relayed-moment refusal ("relayed by … — refusing (moment=").
+   - **v_49 writer certificates.** Every confirmed peer must advertise
+     ``OURS`` = 49 (the check above), and — when the ``gfs-invite-link``
+     chain has run — the link-joined household **e** must hold a writer
+     cert for the invite space on its ``space_keys`` row (migration 0074)
+     that verifies against the pinned space key, names **e**'s own identity
+     key and grants ``write``. **a** (the host) issued it in the redeem ACK
+     ``space_meta``; a rekey re-issues it for the new epoch.
    - **v_36 creator-bound ids.** ``verify`` asserts every moment id
      ``traffic`` minted, b's bazaar wrapper post and b's space calendar
      event carry an owner-bound id that verifies for the creating user

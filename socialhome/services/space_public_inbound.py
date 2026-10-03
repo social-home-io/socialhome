@@ -27,6 +27,16 @@ trusted by the receiver:
    before any write (the dedupe below would usually catch it, but only while
    the local row still exists — an echo arriving after a local delete would
    otherwise resurrect the post from our own copy).
+4b. **Writer cert (v_49)** — when the inner carries the author household's
+   ``writer_cert``, it must verify against the pinned space key, name this
+   space and the envelope's epoch, name the inner's ``author_pk`` and grant
+   ``write``; otherwise the item is dropped (WARNING). No epoch freshness
+   gate here: the frame's authority signature is the authorizer and the host
+   re-stamped the cert at its own current epoch, so an old epoch is late
+   delivery (freshness applies to member-authorized items, PR 2). An inner
+   with NO cert
+   is a pre-v_49 author and keeps today's behaviour (authorized by the
+   relaying seed holder's authority signature) — the migration tripwire.
 5. **Dedupe** — the GFS relay is at-least-once and keeps no replay cache
    (it's content-blind, it can't see the post id). Drop if a post with
    this id already exists locally (idempotent — the content-layer replay
@@ -59,6 +69,7 @@ from ..authority_sig import (
 from ..domain.events import SpacePostCreated
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
+from ..domain.writer_cert import WRITER_SCOPE_WRITE
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
@@ -69,6 +80,7 @@ from .space_public_author import (
     verified_link_preview,
     verify_signed_author_inner,
 )
+from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
     from .space_authority_pin import AuthorityPinRefresher
@@ -91,6 +103,7 @@ class SpacePublicInbound:
         "_own_instance_id",
         "_mentions",
         "_pin_refresher",
+        "_writer_certs",
     )
 
     def __init__(
@@ -111,6 +124,14 @@ class SpacePublicInbound:
         #: household's view of the space's members. ``None`` → no mentions.
         self._mentions = mention_resolver
         self._pin_refresher: "AuthorityPinRefresher | None" = None
+        #: v_49 — the writer-cert service. Host-signed frames (all of them
+        #: today) skip its epoch-freshness gate; member-authorized items
+        #: (PR 2) will run it.
+        self._writer_certs: SpaceWriterCertService | None = None
+
+    def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
+        """Wire the v_49 writer-cert service."""
+        self._writer_certs = writer_certs
 
     def attach_pin_refresher(self, refresher: "AuthorityPinRefresher") -> None:
         """Wire the lazy pin heal (v_44): on an authority failure the
@@ -158,6 +179,7 @@ class SpacePublicInbound:
                 reason,
             )
             return
+        pinned_pk_hex = space.identity_public_key
         if not self._verify_authority(space_id, envelope, space.identity_public_key):
             # v_44 — the owner may have rotated the space authority key
             # since we pinned it: heal from the GFS listing's owner cert
@@ -175,6 +197,7 @@ class SpacePublicInbound:
                     space_id,
                 )
                 return
+            pinned_pk_hex = healed.identity_public_key
         epoch = envelope.get("epoch")
         ciphertext = envelope.get("encrypted_payload")
         if not isinstance(epoch, int) or not isinstance(ciphertext, str):
@@ -247,6 +270,18 @@ class SpacePublicInbound:
                 post_id,
             )
             return
+        # v_49 — a v_49 author's item carries its household's writer cert;
+        # present means it MUST hold (an absent one is a pre-v_49 author).
+        if inner.get(WRITER_CERT_FIELD) is not None and not await self._writer_cert_ok(
+            space, inner, epoch=epoch, pinned_pk_hex=pinned_pk_hex
+        ):
+            log.warning(
+                "space_public.inbound: writer cert failed for space %s post %s "
+                "— dropped",
+                space_id,
+                post_id,
+            )
+            return
         # Dedupe by post id — the GFS relay is at-least-once.
         if await self._posts.get(post_id) is not None:
             log.debug("space_public.inbound: duplicate post %s — dropped", post_id)
@@ -276,6 +311,29 @@ class SpacePublicInbound:
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────
+
+    async def _writer_cert_ok(
+        self, space, inner: dict, *, epoch: int, pinned_pk_hex: str
+    ) -> bool:
+        try:
+            author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
+        except ValueError:
+            return False
+        # Every frame on this path is authority-signed by a seed holder, which
+        # re-stamped the cert at ITS current epoch: the authority signature is
+        # the authorizer here, and an old epoch means late delivery, not
+        # revocation — so NO freshness gate. Freshness
+        # (``SpaceWriterCertService.check_item``) is for member-authorized,
+        # cert-only items (PR 2). Any future catch-up / backfill path must not
+        # run the freshness gate either: replayed history is old by design.
+        return SpaceWriterCertService.check_item_cert(
+            space,
+            inner.get(WRITER_CERT_FIELD),
+            epoch=epoch,
+            author_pk=author_pk,
+            required_scope=WRITER_SCOPE_WRITE,
+            space_pubkey_hex=pinned_pk_hex,
+        )
 
     def _verify_authority(
         self, space_id: str, envelope: dict, space_public_key_hex: str

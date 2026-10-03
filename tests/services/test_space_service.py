@@ -18,6 +18,7 @@ from PIL import Image
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
     SpaceModerationQueued,
     SpacePostCreated,
@@ -47,6 +48,7 @@ from socialhome.domain.space import (
     Space,
     SpaceFeatureAccess,
     SpaceFeatures,
+    SpaceMember,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
@@ -74,6 +76,18 @@ from socialhome.services.space_service import (
     normalize_category,
 )
 from socialhome.services.user_service import UserService
+import os
+from socialhome.crypto import ed25519_public_key
+from socialhome.domain.space_key import SpaceKey
+from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+from socialhome.services.space_writer_cert_service import (
+    SpaceWriterCertService,
+)
+from socialhome.domain.writer_cert import WriterCert
+from socialhome.crypto import b64url_encode
+from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.services.space_crypto_service import SpaceContentEncryption
+from socialhome.domain.events import PeerProtoVersionRaised
 
 
 @pytest.fixture
@@ -8967,3 +8981,521 @@ async def test_banning_a_remote_user_tombstones_their_seat(stack):
     await stack.space_svc.ban(space.id, actor_username="anna", user_id="ru")
     assert await remote.get(space.id, "peer-x", "ru") is None
     assert await stack.space_repo.is_banned(space.id, "ru")
+
+
+# ─── v_49: space writer certificates ──────────────────────────────────────
+
+
+async def _cert_space(stack, *, version: int = 49):
+    """A hosted space with a content epoch, a v_``version`` federation double
+    and a REAL :class:`SpaceWriterCertService` over the stack's repos.
+    Returns ``(space, fed, remote, peer_pk)``."""
+
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    keys = SqliteSpaceKeyRepo(stack.db)
+    await keys.save(SpaceKey(space_id=space.id, epoch=0, content_key_hex="k"))
+    peer_pks = {
+        "peer-a": ed25519_public_key(os.urandom(32)),
+        "peer-b": ed25519_public_key(os.urandom(32)),
+    }
+
+    async def _supports(_iid, *, min_version):
+        return version >= min_version
+
+    async def _pk(iid):
+        return peer_pks.get(iid)
+
+    fed.peer_supports = _supports
+    fed.peer_identity_public_key = _pk
+    certs = SpaceWriterCertService(
+        space_repo=stack.space_repo,
+        remote_member_repo=remote,
+        space_key_repo=keys,
+        own_instance_id=stack.iid,
+        own_identity_pk=os.urandom(32),
+    )
+    certs.attach_federation(fed)
+    stack.space_svc.attach_writer_certs(certs)
+    return space, fed, remote, peer_pks
+
+
+def _cert_of(payload):
+    return WriterCert.from_wire(payload["writer_cert"])
+
+
+async def test_roster_snapshot_carries_only_the_recipients_writer_cert(stack):
+    space, fed, remote, pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await _seat(remote, space.id, "peer-b", "u-b")
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["event_type"] is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    cert = _cert_of(kw["payload"])
+    assert cert.instance_pk == b64url_encode(pks["peer-a"])
+    assert cert.scope == "write" and cert.epoch == 0
+    # Exactly one cert, and it names the recipient — never peer-b.
+    assert b64url_encode(pks["peer-b"]) not in str(kw["payload"])
+
+
+async def test_roster_snapshot_has_no_cert_below_v49(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=48)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
+    assert "writer_cert" not in fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+
+
+async def test_seating_a_household_delivers_its_cert_with_the_snapshot(stack):
+    space, fed, remote, pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id, instance_id="peer-a", user_id="u-a", user_pk=None, display_name="A"
+    )
+    snaps = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("to_instance_id") == "peer-a"
+    ]
+    assert snaps and "writer_cert" in snaps[-1]["payload"]
+
+
+async def test_rekey_fan_out_decorates_each_member_with_its_own_cert(stack):
+    space, fed, remote, pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    stack.space_svc._space_crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(stack.db),
+        KeyManager(b"\x0a" * 32),
+        own_instance_id=stack.iid,
+    )
+    await stack.space_svc._rotate_and_distribute_space_key(space.id)
+    call = fed.broadcast_to_space_members.await_args
+    hook = call.kwargs["per_peer"]
+    epoch = call.args[2]["space_content_key"]["epoch"]
+    assert epoch == 1
+    decorated = await hook("peer-a", call.args[2])
+    cert = _cert_of(decorated)
+    assert cert.epoch == 1
+    assert "writer_cert" not in call.args[2]
+    # A household with no seat gets nothing.
+    assert "writer_cert" not in await hook("peer-b", call.args[2])
+
+
+async def test_role_change_that_alters_rights_redelivers_the_cert(stack):
+    space, fed, remote, pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role=SpaceRole.SUBSCRIBER.value)
+    target = await remote.get(space.id, "peer-a", "u-a")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="member"
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("to_instance_id") == "peer-a"
+        and "writer_cert" in c.kwargs["payload"]
+    ]
+    assert len(sent) == 1
+    assert _cert_of(sent[0]["payload"]).scope == "write"
+
+
+async def test_role_change_keeping_rights_sends_no_extra_snapshot(stack):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role="member")
+    target = await remote.get(space.id, "peer-a", "u-a")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="moderator"
+    )
+    assert _snapshots(fed, to="peer-a") == []
+
+
+async def test_an_upgrade_to_v49_delivers_the_cert(stack):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    await stack.space_svc.on_peer_proto_version_raised(
+        PeerProtoVersionRaised(instance_id="peer-a", old_version=48, new_version=49)
+    )
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "peer-a"
+    assert "writer_cert" in kw["payload"]
+
+
+async def _rekeys(stack, monkeypatch):
+    """Record every forward-secrecy rotation the service starts."""
+    calls: list[str] = []
+
+    async def _spy(_self, space_id):
+        calls.append(space_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "_rotate_and_distribute_space_key", _spy)
+    return calls
+
+
+async def test_a_scope_reducing_remote_role_change_rotates(stack, monkeypatch):
+    """write → comment: the household's old write cert must die with the
+    epoch, so the content key rotates."""
+
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (space.id,)
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    target = await remote.get(space.id, "peer-a", "u-a")
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id),
+        target=target,
+        role=SpaceRole.SUBSCRIBER.value,
+    )
+    assert rekeys == [space.id]
+
+
+async def test_a_promotion_does_not_rotate(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    target = await remote.get(space.id, "peer-a", "u-a")
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="member"
+    )
+    assert rekeys == []
+
+
+async def test_a_scope_reducing_local_role_change_rotates(stack, monkeypatch):
+    """The local role path checks our own household's scope before and after
+    the write (today's local roles all write — the guard is for any future
+    one that does not)."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    member = await stack.provision_user("loc")
+    await stack.space_svc.add_member(
+        space.id, actor_username="hosty", user_id=member.user_id
+    )
+    scopes = iter(["write", "comment"])
+
+    class _Certs:
+        async def scope_for_instance(self, _space, _iid):
+            return next(scopes)
+
+    stack.space_svc.attach_writer_certs(_Certs())  # type: ignore[arg-type]
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc._apply_local_role(
+        await stack.space_repo.get(space.id),
+        user_id=member.user_id,
+        old_role="member",
+        role="moderator",
+    )
+    assert rekeys == [space.id]
+
+
+async def test_rotate_if_scope_weakened_needs_a_weaker_scope(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    svc = stack.space_svc
+    assert not await svc.rotate_if_writer_scope_weakened(space.id, "peer-a", "write")
+    await remote.remove(space.id, "peer-a", "u-a")
+    assert await svc.rotate_if_writer_scope_weakened(space.id, "peer-a", "write")
+    assert not await svc.rotate_if_writer_scope_weakened("nope", "peer-a", "write")
+    assert rekeys == [space.id]
+
+
+async def test_comment_rights_off_with_followers_rotates(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_comment_rights_off_without_followers_does_not_rotate(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == []
+
+
+async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if "writer_cert" in c.kwargs.get("payload", {})
+    ]
+    assert [k["to_instance_id"] for k in sent] == ["peer-a"]
+    assert _cert_of(sent[0]["payload"]).scope == "comment"
+
+
+# ─── v_49: a member household's leave reaches the host ────────────────────
+
+
+async def _stub_space_with_member(stack, *, host_version: int = 49):
+    """A space hosted on ``host-h``, with a local plain member ``leaver``."""
+    owner = await stack.provision_user("stubowner")
+    space = await stack.space_svc.create_space(owner_username="stubowner", name="S")
+    leaver = await stack.provision_user("leaver")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id, user_id=leaver.user_id, role="member", joined_at="t"
+        )
+    )
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='host-h' WHERE id=?", (space.id,)
+    )
+    await stack.db.enqueue(
+        "UPDATE spaces SET identity_private_key=NULL WHERE id=?", (space.id,)
+    )
+    fed, fed_repo = _invite_fed()
+
+    async def _supports(_iid, *, min_version):
+        return host_version >= min_version
+
+    fed.peer_supports = _supports
+    stack.space_svc.attach_federation(
+        federation_service=fed,
+        federation_repo=fed_repo,
+        remote_member_repo=await _wire_remote_members(stack),
+    )
+    return space, leaver, fed, owner
+
+
+def _leaves(fed):
+    return [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_INSTANCE_LEFT
+    ]
+
+
+async def test_self_leave_on_a_stub_tells_the_host(stack):
+    space, leaver, fed, _owner = await _stub_space_with_member(stack)
+    await stack.space_svc.remove_member(
+        space.id, actor_username="leaver", user_id=leaver.user_id
+    )
+    sent = _leaves(fed)
+    assert len(sent) == 1
+    assert sent[0]["to_instance_id"] == "host-h"
+    assert sent[0]["payload"] == {"space_id": space.id, "user_id": leaver.user_id}
+    assert sent[0]["space_id"] == space.id
+
+
+async def test_self_leave_does_not_notify_a_host_below_v49(stack):
+    space, leaver, fed, _owner = await _stub_space_with_member(stack, host_version=48)
+    await stack.space_svc.remove_member(
+        space.id, actor_username="leaver", user_id=leaver.user_id
+    )
+    assert _leaves(fed) == []
+
+
+async def test_host_applies_a_leave_tombstone_drop_instance_then_rotate(
+    stack, monkeypatch
+):
+    """The household's last seat goes: tombstone, ``space_instances`` row
+    removed BEFORE the rotation (so the new key never reaches the leaver),
+    one rotation, and no cert for the leaver any more."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    seen_at_rotation: list[list[str]] = []
+
+    async def _spy(_self, space_id):
+        seen_at_rotation.append(await stack.space_repo.list_member_instances(space_id))
+
+    monkeypatch.setattr(type(stack.space_svc), "_rotate_and_distribute_space_key", _spy)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await remote.get(space.id, "peer-a", "u-a") is None
+    assert "peer-a" not in await stack.space_repo.list_member_instances(space.id)
+    assert len(seen_at_rotation) == 1
+    assert "peer-a" not in seen_at_rotation[0]
+    certs = stack.space_svc._writer_certs
+    assert await certs.issue_for_instance(space.id, "peer-a") is None
+    # The LEFT gossip went out for the seat.
+    assert any(
+        c.args[1] is FederationEventType.SPACE_MEMBER_LEFT
+        for c in fed.broadcast_to_space_members.await_args_list
+    )
+
+
+async def test_a_forged_leave_for_another_households_seat_changes_nothing(
+    stack, monkeypatch
+):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    # peer-b (the authenticated sender) names peer-a's user.
+    # Handled (we host) — but nothing of peer-a's moves.
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-b", "u-a")
+    assert await remote.get(space.id, "peer-a", "u-a") is not None
+    assert "peer-a" in await stack.space_repo.list_member_instances(space.id)
+    assert rekeys == []
+
+
+async def test_a_leave_with_another_seat_left_keeps_the_household(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await _seat(remote, space.id, "peer-a", "u-a2")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert "peer-a" in await stack.space_repo.list_member_instances(space.id)
+    assert rekeys == []  # still a writer — no scope drop
+
+
+async def test_a_leave_ending_the_last_admin_seat_rotates_once(stack, monkeypatch):
+    """Delegation on: the v_44 authority rotation rotates the content key, so
+    the scope-drop rotation is skipped (one epoch, not two)."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?", (space.id,)
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="admin")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    revoked: list = []
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, revoked.append)
+    rekeys = await _rekeys(stack, monkeypatch)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert [e.instance_id for e in revoked] == ["peer-a"]
+    assert rekeys == []
+
+
+async def test_a_leave_for_a_space_we_do_not_host_is_not_ours(stack):
+    space, leaver, fed, _owner = await _stub_space_with_member(stack)
+    assert not await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u")
+
+
+async def test_admin_demotion_with_v44_rotation_skips_the_scope_rotation(
+    stack, monkeypatch
+):
+    """Minor: when an admin seat ends together with a scope drop and the v_44
+    rotation will rotate anyway, the scope rotation is skipped."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=1, allow_subscriber_comment=1"
+        " WHERE id=?",
+        (space.id,),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="admin")
+    rekeys = await _rekeys(stack, monkeypatch)
+    target = await remote.get(space.id, "peer-a", "u-a")
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="subscriber"
+    )
+    assert rekeys == []
+
+
+# ─── Round 4: the deferred rotation never fails open ──────────────────────
+
+
+async def _crypto_space(stack, *, delegation: bool, shared_seed: bool = False):
+    """A cert space with a real content key, an admin seat on peer-a."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    stack.space_svc._space_crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(stack.db),
+        KeyManager(b"\x0a" * 32),
+        own_instance_id=stack.iid,
+    )
+    await stack.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=?,"
+        " authority_seed_shared_epoch=? WHERE id=?",
+        (int(delegation), 0 if shared_seed else None, space.id),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="admin")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    return space
+
+
+async def _epoch(stack, space_id):
+    return await stack.space_svc._space_crypto.get_current_epoch(space_id)
+
+
+async def test_a_failing_authority_rotation_still_rotates_the_content_key(stack):
+    """The bus swallows handler errors: when the v_44 rotation the leave
+    deferred to fails, the content epoch must still advance."""
+    space = await _crypto_space(stack, delegation=True)
+    before = await _epoch(stack, space.id)
+
+    async def _boom(_event):
+        raise RuntimeError("authority rotation failed")
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _boom)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await _epoch(stack, space.id) == before + 1
+
+
+async def test_a_working_authority_rotation_is_the_only_rotation(stack):
+    space = await _crypto_space(stack, delegation=True)
+    before = await _epoch(stack, space.id)
+    crypto = stack.space_svc._space_crypto
+
+    async def _v44(event):
+        await crypto.rotate_epoch(event.space_id)
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _v44)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await _epoch(stack, space.id) == before + 1
+
+
+async def test_delegation_off_but_seed_shared_is_one_epoch(stack):
+    """Delegation off, yet a seed was shared at the current key epoch: the
+    v_44 rotation still runs, so the scope rotation is deferred to it."""
+    space = await _crypto_space(stack, delegation=False, shared_seed=True)
+    before = await _epoch(stack, space.id)
+    crypto = stack.space_svc._space_crypto
+
+    async def _v44(event):
+        await crypto.rotate_epoch(event.space_id)
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _v44)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await _epoch(stack, space.id) == before + 1
+
+
+async def test_delegation_off_no_seed_rotates_itself(stack):
+    space = await _crypto_space(stack, delegation=False)
+    before = await _epoch(stack, space.id)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await _epoch(stack, space.id) == before + 1
+
+
+async def test_failing_authority_rotation_on_demotion_still_rotates(stack):
+    space = await _crypto_space(stack, delegation=True)
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (space.id,)
+    )
+    before = await _epoch(stack, space.id)
+
+    async def _boom(_event):
+        raise RuntimeError("authority rotation failed")
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _boom)
+    target = await stack.space_svc._remote_members.get(space.id, "peer-a", "u-a")
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="subscriber"
+    )
+    assert await _epoch(stack, space.id) == before + 1

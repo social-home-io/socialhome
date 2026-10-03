@@ -195,6 +195,16 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # space, the delegation flag's caller and the peer's version; no
         # actor to authorize, no route reaches it.
         "share_admin_signing_seed",
+        # v_49 writer certs — a read of the roster-derived scope, and the
+        # forward-secrecy rotation the private-invite handler runs on the
+        # host when a household leaves. Both act on state the host already
+        # holds; no actor to authorize, no route reaches them.
+        "writer_scope",
+        "rotate_if_writer_scope_weakened",
+        # v_49 — a member household's SPACE_INSTANCE_LEFT on the host. The
+        # authorization is the §24.11-authenticated sender: only ITS seats
+        # end. No actor, no route.
+        "on_remote_member_left",
         "send_hosted_roster_snapshots",
         "on_peer_proto_version_raised",
         # Internal seam the invite-redeem coordinator calls after it has
