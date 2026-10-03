@@ -1681,6 +1681,10 @@ class PageCreated(DomainEvent):
     #: v_48: a member's local draft, sent to the host as a proposal by the
     #: forwarder — never broadcast.
     proposal: bool = False
+    #: v_48: a last-write-wins create from a household that does not (yet)
+    #: see its host as v_48 still says it is a create (``base_seq: 0``), so
+    #: a v_48 host sequences it as one.
+    base: dict | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

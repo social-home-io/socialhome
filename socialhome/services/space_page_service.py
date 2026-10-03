@@ -250,6 +250,7 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                 content=page.content,
                 actor_user_id=actor_user_id,
                 proposal=mode is PageMode.MEMBER,
+                base={"base_seq": 0} if mode is PageMode.LEGACY else None,
             )
         )
         return page

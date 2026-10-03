@@ -100,8 +100,13 @@ REFUSALS_PER_SENDER_PER_MINUTE = 30
 #: own copy, and nothing of the page is revealed to the sender.
 _STATELESS_REFUSALS = frozenset({"rate_limited", "archived"})
 
-#: The largest ``seq`` a proposal may claim (a JSON-safe integer).
+#: The largest ``seq`` anyone commits or accepts (a JSON-safe integer).
 MAX_SEQ = 2**53
+
+#: How far one proposal may raise a (restored) host's seq floor. A larger
+#: claim is a lie or a corrupt copy: it does not move ``seq`` — the edit is
+#: kept as a side one step up — so nobody can push a page to ``MAX_SEQ``.
+MAX_FLOOR_STEP = 2**20
 
 #: ``resolve_conflict`` resolutions. ``side`` keeps a version by hash;
 #: ``mine`` / ``theirs`` are the two-way names (the shown body / the newest
@@ -506,7 +511,7 @@ def canonical_from_wire(p: Mapping[str, Any]) -> CanonicalVersion | None:
     """Parse a host version; ``None`` when malformed. A record without
     ``seq`` is not a v_48 host version."""
     seq = _int(p.get("seq"))
-    if seq is None or seq < 0:
+    if seq is None or seq < 0 or seq > MAX_SEQ:
         return None
     raw_conflict = p.get("conflict", [])
     if not isinstance(raw_conflict, list) or len(raw_conflict) > MAX_CONFLICT_SIDES:
@@ -653,14 +658,6 @@ class PageConflictService(BusPublisherMixin):
         self._own_instance_id = ""
         self._spaces: "AbstractSpaceRepo | None" = None
         self._limiter = RateLimiter()
-
-    async def speaks_sequencing(self, instance_id: str) -> bool:
-        """Does ``instance_id`` speak v_48 host-sequenced pages?"""
-        if self._federation is None or not instance_id:
-            return False
-        return await self._federation.peer_supports(
-            instance_id, min_version=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES
-        )
 
     def attach_federation(
         self,
@@ -954,8 +951,24 @@ class PageConflictService(BusPublisherMixin):
             and not (proposal.base_seq is not None and proposal.base_seq > page.seq)
         ):
             return SequenceResult(SequenceOutcome.DUPLICATE, None, page)
-        regressed = proposal.base_seq is not None and proposal.base_seq > page.seq
-        if regressed:
+        claimed = proposal.base_seq if proposal.base_seq is not None else page.seq
+        regressed = claimed > page.seq
+        if regressed and claimed - page.seq > MAX_FLOOR_STEP:
+            # Beyond any plausible restore: the claim moves nothing. The
+            # edit is kept as a side one step up (its base is not ours).
+            log.warning(
+                "page %s in space %s: a proposal claims seq %s, %s past ours "
+                "— beyond the floor step; kept as a side, seq not raised",
+                page.id,
+                space_id,
+                claimed,
+                claimed - page.seq,
+            )
+            proposal = replace(proposal, base_seq=page.seq, base_hash=None)
+            beyond_step = True
+        else:
+            beyond_step = False
+        if regressed and not beyond_step:
             # The member holds a newer seq than ours: we were restored from
             # a backup. seq must never regress — raise the floor above it
             # and commit (merged, or as a side), so every member takes it.
@@ -967,7 +980,9 @@ class PageConflictService(BusPublisherMixin):
                 proposal.base_seq,
                 page.seq,
             )
-            page = replace(page, seq=int(proposal.base_seq or 0))
+            page = replace(page, seq=min(int(proposal.base_seq or 0), MAX_SEQ - 1))
+        if page.seq >= MAX_SEQ:
+            return SequenceResult(SequenceOutcome.REFUSED, "bad_base", page)
         new_body: tuple[str, str, str | None] | None = None
         as_side = False
         absorbed = False
@@ -1487,17 +1502,39 @@ class PageConflictService(BusPublisherMixin):
                 settled = await self._settle_refusal(space_id, page, version, seq_)
                 changed = True
             elif version.seq > page.seq or (answers_draft and version.seq >= page.seq):
+                # A newer version settles our draft when it answers it — or,
+                # whatever order versions arrive in, when it already holds
+                # the draft: as its body, or as one of its sides.
+                held = draft_hash is not None and (
+                    await asyncio.to_thread(
+                        version_hash,
+                        version.title,
+                        version.content,
+                        version.cover_image_url,
+                    )
+                    == draft_hash
+                    or draft_hash in {s.hash for s in version.conflict}
+                )
+                settles = answers_draft or held
                 await self._mirror_apply(
                     space_id,
                     page,
                     version,
-                    keep_draft=draft_hash is not None and not answers_draft,
+                    keep_draft=draft_hash is not None and not settles,
                 )
                 changed = True
-                if ours and seq_ is not None:
-                    # Our draft's answer — or, when we kept editing, an
-                    # earlier proposal's: the forwarder rebases the newer
-                    # draft on what it sent and proposes it.
+                if settles and draft_hash is not None:
+                    settled = PageProposalSettled(
+                        page_id=page_id,
+                        space_id=space_id,
+                        proposal_hash=draft_hash,
+                        outcome="applied",
+                        seq=version.seq,
+                    )
+                elif ours and seq_ is not None:
+                    # An earlier proposal's answer (we kept editing): the
+                    # forwarder rebases the newer draft on what it sent and
+                    # proposes it.
                     settled = PageProposalSettled(
                         page_id=page_id,
                         space_id=space_id,
@@ -1506,7 +1543,20 @@ class PageConflictService(BusPublisherMixin):
                         reason=seq_.reason,
                         seq=version.seq,
                     )
-            elif ours and seq_ is not None and not answers_draft:
+            elif answers_draft and seq_ is not None:
+                # Our draft's answer arriving AFTER a newer version (out of
+                # order): the draft is sequenced, and the newer version —
+                # already here, kept in history under the draft — is current.
+                await self._settle_late(space_id, page)
+                changed = True
+                settled = PageProposalSettled(
+                    page_id=page_id,
+                    space_id=space_id,
+                    proposal_hash=seq_.proposal_hash,
+                    outcome="applied",
+                    seq=version.seq,
+                )
+            elif ours and seq_ is not None:
                 # An answer about an older proposal, nothing new to apply.
                 settled = PageProposalSettled(
                     page_id=page_id,
@@ -1519,6 +1569,24 @@ class PageConflictService(BusPublisherMixin):
         if settled is not None:
             await self._emit(settled)
         return changed
+
+    async def _settle_late(self, space_id: str, page: Page) -> None:
+        """Drop a draft the host already sequenced, showing the newest host
+        version we mirrored while it was pending (the newest history row:
+        a member writes history only when it mirrors a host version)."""
+        versions = await self._pages.list_versions(page.id, space_id=space_id)
+        newest = max(versions, key=lambda v: v.version, default=None)
+        settled = replace(page, pending_base_seq=None)
+        if newest is not None:
+            settled = replace(
+                settled,
+                title=newest.title,
+                content=newest.content,
+                cover_image_url=newest.cover_image_url,
+                last_editor_user_id=newest.edited_by or page.last_editor_user_id,
+            )
+        await self._pages.save(settled, space_id=space_id)
+        await self._pages.clear_draft_base(page.id, space_id=space_id)
 
     async def _mirror_create(
         self, space_id: str, page_id: str, version: CanonicalVersion

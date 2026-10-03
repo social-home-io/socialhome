@@ -904,9 +904,10 @@ class SpaceContentInboundHandlers:
     ) -> None:
         """The host: a member household proposes a version of a page.
 
-        A replay is not a proposal: a payload carrying ``seq`` (a version
-        shape) or a ``SPACE_PAGE_CREATED`` without ``base_seq`` (the resume
-        replay) never changes a page held here. A live update without
+        A replay is not a proposal: a resume replay (``replay: true``), a
+        payload carrying ``seq`` (a version shape) or, for a page held here,
+        a ``SPACE_PAGE_CREATED`` without ``base_seq`` never changes — or
+        creates — a page here. A live update without
         ``base_seq`` is a pre-v_48 (or not-yet-upgraded) sender's — based on
         the current version. The named actor must be seated on the sender
         at EVERY access level (no other household's user is ever a page's
@@ -918,11 +919,14 @@ class SpaceContentInboundHandlers:
         if "sequenced" in p:
             log.debug("a host takes no host versions (page %s) — ignored", page_id)
             return
-        if existing is not None and (
-            "seq" in p
-            or (
-                event.event_type is FederationEventType.SPACE_PAGE_CREATED
-                and "base_seq" not in p
+        if p.get("replay") is True or (
+            existing is not None
+            and (
+                "seq" in p
+                or (
+                    event.event_type is FederationEventType.SPACE_PAGE_CREATED
+                    and "base_seq" not in p
+                )
             )
         ):
             log.debug(
@@ -951,17 +955,6 @@ class SpaceContentInboundHandlers:
                 proposal_hash=_payload_hash(p),
                 proposer_instance=event.from_instance,
                 reason="bad_base",
-            )
-            return
-        if (
-            existing is None
-            and "base_seq" not in p
-            and await engine.speaks_sequencing(event.from_instance)
-        ):
-            # A v_48 household proposes with ``base_seq``; a base-less create
-            # from one is a replay (e.g. of a page deleted here) — ignored.
-            log.debug(
-                "page %s: a base-less create from a v_48 sender — ignored", page_id
             )
             return
         if existing is None and (proposal.base_seq or 0) > 0:

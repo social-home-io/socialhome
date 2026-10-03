@@ -164,6 +164,11 @@ class PageProposalForwarder:
         """Send the page's draft unless one is already outstanding. ``True``
         when a proposal went out."""
         key = (space_id, page_id)
+        proposal = await self._conflicts.proposal_for(space_id, page_id)
+        if proposal is None:
+            # Nothing pending (settled, refused or deleted): nothing waits.
+            self._outstanding.pop(key, None)
+            return False
         if key in self._outstanding:
             return False
         mode, host = await self._conflicts.mode(space_id)
@@ -171,9 +176,6 @@ class PageProposalForwarder:
             return False
         instance = await self._federation_repo.get_instance(host)
         if instance is not None and not instance.is_reachable():
-            return False
-        proposal = await self._conflicts.proposal_for(space_id, page_id)
-        if proposal is None:
             return False
         payload: dict[str, Any] = {
             "id": page_id,

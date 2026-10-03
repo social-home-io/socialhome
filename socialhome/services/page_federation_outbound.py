@@ -86,10 +86,13 @@ class PageFederationOutbound:
                 creates=True,
             )
 
+        def _with_base() -> dict:
+            return {**_payload(), **(event.base or {})}
+
         await self._fan_out_versioned(
             event.space_id,
             FederationEventType.SPACE_PAGE_CREATED,
-            _payload,
+            _with_base if event.canonical is None else _payload,
             event.canonical,
         )
 

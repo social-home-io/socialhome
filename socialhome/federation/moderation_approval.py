@@ -82,6 +82,7 @@ _PAGE_SEQUENCING = frozenset(
         "updated_at",
         "base_seq",
         "base_hash",
+        "replay",
     }
 )
 

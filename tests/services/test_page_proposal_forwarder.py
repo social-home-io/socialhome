@@ -229,3 +229,22 @@ async def test_start_flushes_and_stop_ends_the_loop(env):
     assert len(env.fed.sent) == 1
     await env.fwd.stop()
     assert env.fwd._task is None
+
+
+async def test_a_settled_draft_frees_the_page(env):
+    """The draft settled without the answer to the very proposal we sent
+    (out of order): the stale outstanding entry must not block the page."""
+    env.conflicts.drafts["pg"] = _draft("one")
+    await env.fwd.kick(SID, "pg")
+    env.conflicts.drafts.clear()
+    await env.bus.publish(
+        PageProposalSettled(
+            page_id="pg",
+            space_id=SID,
+            proposal_hash="sha256:" + "e" * 64,
+            outcome="applied",
+        )
+    )
+    assert env.fwd.outstanding() == {}
+    env.conflicts.drafts["pg"] = _draft("later")
+    assert await env.fwd.kick(SID, "pg")

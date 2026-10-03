@@ -1352,3 +1352,148 @@ async def test_a_legacy_mode_broadcast_carries_its_base_and_is_merged(mesh):
     await _pump(mesh)
     # Merged at the host, never an overwrite of hanna's newer edit.
     assert await _content(h, pid) == _with(BASE, p1="anna", p5="hanna")
+
+
+# ── Review round 4 ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("claim", [2**53, 2**53 - 1, 2**20 + 5])
+async def test_r3_1_a_huge_base_seq_cannot_wedge_the_page(mesh, claim):
+    a, b, h = mesh["A"], mesh["B"], mesh["H"]
+    pid = await _create(mesh)
+    evil = {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "Rules",
+        "content": _with(BASE, p5="bert"),
+        "actor_user_id": b.user_id,
+        "base_seq": claim,
+        "base_hash": version_hash("Rules", BASE),
+    }
+    await _receive(h, _event(b, FET.SPACE_PAGE_UPDATED, evil, h))
+    await _pump(mesh)
+    # The claim does not move seq: kept as bert's side one step up.
+    assert await _seq(h, pid) == 2
+    assert await _seq(a, pid) == 2
+    await _edit(a, pid, _with(BASE, p1="anna"))
+    await _pump(mesh)
+    assert await _pending(a, pid) is None
+    assert "anna" in await _content(h, pid)
+    assert await _content(a, pid) == await _content(h, pid)
+
+
+async def test_r3_1_a_host_version_above_max_seq_is_malformed(mesh):
+    from socialhome.services.page_conflict_service import MAX_SEQ
+
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    forged = {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "Rules",
+        "content": "x",
+        "seq": MAX_SEQ + 1,
+        "conflict": [],
+    }
+    await _receive(a, _event(h, FET.SPACE_PAGE_UPDATED, forged, a))
+    assert (await _content(a, pid), await _seq(a, pid)) == (BASE, 1)
+
+
+async def test_r3_2_a_stale_view_members_live_create_reaches_everyone(mesh):
+    a, b, h = mesh["A"], mesh["B"], mesh["H"]
+    VERSIONS[h.iid] = 1  # A has not seen H's v_48 yet; H knows A is v_48
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Anna's", "content": "hello"},
+        headers=a.headers,
+    )
+    assert r.status == 201
+    pid = (await r.json())["id"]
+    (to_h,) = _sent_to(a, h, FET.SPACE_PAGE_CREATED)
+    assert to_h["base_seq"] == 0
+    await _pump(mesh)
+    VERSIONS.pop(h.iid)
+    assert await _content(h, pid) == "hello"
+    assert await _seq(h, pid) == 1
+    await _pump(mesh)
+    assert await _content(b, pid) == "hello"
+
+
+async def test_r3_2_a_resume_replay_is_marked_as_one(mesh, monkeypatch):
+    monkeypatch.setattr(FederationService, "send_event", _fake_send_event)
+    a, h = mesh["A"], mesh["H"]
+    await _create(mesh)
+    VERSIONS[h.iid] = 1
+    await _receive(
+        a,
+        _event(
+            h,
+            FET.SPACE_SYNC_RESUME,
+            {"space_id": SID, "since": "1970-01-01T00:00:00+00:00"},
+            a,
+        ),
+    )
+    replays = [p for t, e, p in a.sent if t == h.iid and e is FET.SPACE_PAGE_CREATED]
+    assert replays and all(p.get("replay") is True for p in replays)
+
+
+# ── The proposer sees versions out of order (demo `all` finding) ────────
+
+
+async def _deliver_reversed(sender: House, to: House) -> None:
+    for et, payload in reversed(_take(sender, to)):
+        await _receive(to, _event(sender, et, payload, to))
+
+
+async def test_a_draft_settles_when_n_plus_1_arrives_before_its_ack(mesh):
+    """Carol's proposal fast-forwards (seq 2); Alice's becomes a side
+    (seq 3). Carol hears seq 3 before seq 2: her draft is already the body
+    of seq 3, so it settles — nothing stays pending."""
+    a, c, h = mesh["A"], mesh["C"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(c, pid, _with(BASE, p2="Two by Carol."))
+    await _edit(a, pid, _with(BASE, p2="Two by Alice."))
+    await _deliver(c, h)
+    await _deliver(a, h)
+    await _deliver_reversed(h, c)
+    assert await _pending(c, pid) is None
+    await _pump(mesh)
+    content, sides, seq, pending = _converged(await _states(mesh, pid))
+    assert (content, seq, pending) == (_with(BASE, p2="Two by Carol."), 3, None)
+    assert len(sides) == 1
+
+
+async def test_a_draft_settles_when_its_ack_is_lost(mesh):
+    a, c, h = mesh["A"], mesh["C"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(c, pid, _with(BASE, p2="Two by Carol."))
+    await _edit(a, pid, _with(BASE, p2="Two by Alice."))
+    await _deliver(c, h)
+    await _deliver(a, h)
+    to_c = _take(h, c)
+    assert len(to_c) == 2
+    et, payload = to_c[-1]  # seq 3 only; the seq-2 ack is lost
+    await _receive(c, _event(h, et, payload, c))
+    assert await _pending(c, pid) is None
+    assert await _seq(c, pid) == 3
+
+
+async def test_a_merged_draft_settles_on_its_late_ack(mesh):
+    """Carol's draft is MERGED into a different body (seq 3), then the host
+    edits again (seq 4). Carol hears seq 4, then her late ack: the draft
+    settles and seq 4 — the newest — is what she shows."""
+    b, c, h = mesh["B"], mesh["C"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(b, pid, _with(BASE, p1="bert"))
+    await _edit(c, pid, _with(BASE, p3="carol"))
+    await _deliver(b, h)  # seq 2
+    await _deliver(c, h)  # seq 3: merged
+    await _edit(h, pid, _with(BASE, p1="bert", p3="carol", p5="hanna"))  # seq 4
+    await _deliver_reversed(h, c)
+    assert await _pending(c, pid) is None
+    assert await _content(c, pid) == _with(BASE, p1="bert", p3="carol", p5="hanna")
+    assert await _seq(c, pid) == 4
+    await _pump(mesh)
+    _converged(await _states(mesh, pid))

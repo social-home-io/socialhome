@@ -108,10 +108,11 @@ does that.
 `PageConflictService.sequence` (and `commit_local`, the host's own edits)
 runs these steps in order:
 
-1. **Replays are not proposals.** For a page the host holds, a payload
-   carrying `seq` (a version shape) or a `SPACE_PAGE_CREATED` without
-   `base_seq` (a resume replay) is ignored — a member can never roll the
-   host back. A live `SPACE_PAGE_UPDATED` without `base_seq` is a
+1. **Replays are not proposals.** A resume replay (marked
+   `replay: true`) is ignored, held page or not — a member can never roll
+   the host back nor bring back a page deleted here. So is, for a page the
+   host holds, a payload carrying `seq` (a version shape) or a
+   `SPACE_PAGE_CREATED` without `base_seq`. A live `SPACE_PAGE_UPDATED` without `base_seq` is a
    pre-v_48 (or not-yet-upgraded) sender's update, based on the current
    version.
 2. **Gates.** Malformed → `bad_base`. A page this household no longer
@@ -120,8 +121,7 @@ runs these steps in order:
    on the sender (`acts_for`, every access level — held, not refused,
    while the roster gossip catches up; a demoted, read-only author still
    edits their own page) and the space's `pages` access level; a refusal
-   is `refused`/`access`. A base-less create from a v_48 sender is a
-   replay (e.g. of a page deleted here) and is ignored.
+   is `refused`/`access`.
 3. **Rate limit.** 120 proposals per minute per (proposer household,
    space) (`rate_limiter.py`). Beyond that it is `refused`/`rate_limited`.
 4. Under the **per-page lock**:
@@ -198,9 +198,14 @@ and `proposal_hash` is the hash of the draft.
 | Incoming | No draft | Draft, not answered | Draft answered |
 |---|---|---|---|
 | refusal | — | — | settle (any `seq`): `rate_limited` keeps the draft; `gone` keeps the words but stops proposing; anything else restores the host's version (or the draft's base when the refusal carries no state) |
-| `seq` > local | apply; previous body → history; sides := `conflict` | keep the draft on top; the host's version → history; `seq` updated; sides := `conflict` | apply; draft and its base cleared; sides := `conflict` |
+| `seq` > local | apply; previous body → history; sides := `conflict` | if the version already holds the draft (as its body or as one of its sides) → settle like an answer; else keep the draft on top, the host's version → history, `seq` updated, sides := `conflict` | apply; draft and its base cleared; sides := `conflict` |
 | `seq` == local | ignored | ignored (an answer to an older proposal only releases the next draft) | apply / settle |
-| `seq` < local | ignored | ignored | ignored |
+| `seq` < local | ignored | ignored | **late answer** (it arrived after a newer version): settle — the draft is sequenced; the newest host version mirrored meanwhile (the newest history row) is shown |
+
+So a draft settles whatever order the host's versions arrive in, and even
+if its own answer is lost (a resent proposal the host already absorbed is
+answered `applied` at the current `seq`). A forwarder entry for a page with
+no pending draft is dropped, so a settle never strands the page.
 
 - Only the **host's** versions are mirrored. A version from another
   member household of a page held here is ignored (DEBUG). An unknown page
@@ -302,6 +307,14 @@ forced. See [`moderation.md`](./moderation.md).
   gate, which tells the page sequencer: the host answers a member's
   proposal `refused`/`archived`, and the member restores the canonical
   version and stops waiting (local writes in an archived space are 403).
+- **Seq bounds**: no `seq` above `2**53` is committed or accepted, and one
+  proposal can raise a restored host's floor by at most `2**20`; a larger
+  claim moves nothing (the edit is kept as a side one step up), so nobody
+  can wedge a page at the ceiling.
+- **Resume replays are marked** (`replay: true`): a v_48 host never takes
+  one for a proposal, never lets one create a page. A last-write-wins
+  create from a household with a stale view of its host carries
+  `base_seq: 0`, so the host sequences it as the create it is.
 - **Ownership transfer while drafts are pending** *(known limitation)*:
   a member's draft is proposed to whichever household hosts the space
   when the forwarder sends it. If the space's host changes while drafts

@@ -435,6 +435,9 @@ class SpaceSyncResumeProvider:
                     seq=base.seq,
                 )
             payload = _page_to_payload(page)
+            # A replay says so: a v_48 host never takes it for a proposal
+            # (it could roll the host back, or bring a deleted page back).
+            payload["replay"] = True
             if sequenced:
                 sides = await self._page_repo.list_conflict_sides(
                     page.id, space_id=space_id

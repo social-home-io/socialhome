@@ -994,3 +994,47 @@ async def test_draft_resolves_keep_only_open_sides_up_to_the_cap(member):
     assert gone not in base.resolves
     assert len(base.resolves) <= mod.MAX_RESOLVES
     assert set(base.resolves) == {s.hash for s in sides}
+
+
+# ─── Review round 4: the floor is bounded ────────────────────────────────
+
+
+async def test_a_claim_beyond_the_floor_step_moves_nothing(env):
+    r = await _propose(env, "x", base_seq=1 + mod.MAX_FLOOR_STEP + 1, base=BASE)
+    assert r.outcome is SequenceOutcome.SIDE
+    assert (await _page(env)).seq == 2
+
+
+async def test_a_claim_within_the_floor_step_raises_it(env):
+    r = await _propose(env, "x", base_seq=1 + mod.MAX_FLOOR_STEP, base="unknown")
+    assert r.outcome is SequenceOutcome.SIDE
+    assert (await _page(env)).seq == 2 + mod.MAX_FLOOR_STEP
+
+
+async def test_the_host_never_commits_above_max_seq(env):
+    page = await _page(env)
+    await env.repo.save(replace(page, seq=mod.MAX_SEQ), space_id=SID)
+    r = await _propose(env, "x", base_seq=mod.MAX_SEQ, base=BASE)
+    assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "bad_base")
+    assert (await _page(env)).seq == mod.MAX_SEQ
+
+
+def test_parsers_bound_seq():
+    assert canonical_from_wire({"title": "T", "seq": mod.MAX_SEQ}) is not None
+    assert canonical_from_wire({"title": "T", "seq": mod.MAX_SEQ + 1}) is None
+    assert proposal_from_wire({"title": "T", "base_seq": mod.MAX_SEQ + 1}) is None
+
+
+async def test_a_newer_version_holding_the_draft_as_a_side_settles_it(member):
+    env = member
+    await _draft(env, "mine")
+    page = await _page(env)
+    side = PageConflictSide(
+        hash=version_hash("T", "mine"), title="T", content="mine", by="u-me", at="t1"
+    )
+    await env.svc.mirror(
+        space_id=SID, page_id=env.pid, version=_version(page, "other", 3, sides=[side])
+    )
+    page = await _page(env)
+    assert (page.content, page.pending_base_seq) == ("other", None)
+    assert env.bus.of(PageProposalSettled)[-1].proposal_hash == side.hash
