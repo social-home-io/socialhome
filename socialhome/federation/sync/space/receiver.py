@@ -71,6 +71,7 @@ from ...owner_bound_id import (
 )
 from ....services.inbound_media_store import local_media_ref, local_media_refs
 from ....services.link_preview_service import wire_link_preview
+from ....services.page_conflict_service import PageMode, canonical_from_wire
 from ...space_scope import archive_refusal
 from .exporter import (
     ALLOWED_RESOURCES,
@@ -98,6 +99,7 @@ if TYPE_CHECKING:
     from ....repositories.sticky_repo import AbstractStickyRepo
     from ....repositories.task_repo import AbstractSpaceTaskRepo
     from ....repositories.timetable_repo import AbstractSpaceTimetableRepo
+    from ....services.page_conflict_service import PageConflictService
     from ....services.pending_decrypts_cache import PendingDecryptsCache
     from ....services.space_crypto_service import SpaceContentEncryption
     from ...encoder import FederationEncoder
@@ -137,6 +139,7 @@ class SpaceSyncReceiver:
         "_authorship",
         "_gallery_tombstones",
         "_timetable_repo",
+        "_page_conflicts",
     )
 
     def __init__(
@@ -161,9 +164,14 @@ class SpaceSyncReceiver:
         authorship: "SpaceAuthorship | None" = None,
         gallery_tombstones: "GalleryAlbumTombstones | None" = None,
         timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
+        page_conflicts: "PageConflictService | None" = None,
     ) -> None:
         self._bus = bus
         self._timetable_repo = timetable_repo
+        #: v_48 — a ``pages`` record for a page held here (only the host's
+        #: chunks get that far) is another version of it: fast-forward,
+        #: stale, merge or conflict. ``None``: upserted (last write wins).
+        self._page_conflicts = page_conflicts
         #: Space albums deleted here — a sync from a household that missed
         #: the delete must not bring one (or its items) back.
         self._gallery_tombstones = gallery_tombstones
@@ -572,9 +580,11 @@ class SpaceSyncReceiver:
         elif resource == "pages":
             for r in records:
                 page = _page_from_record(r, space_id)
-                if page is not None and not await self._page_repo.save(
-                    page, space_id=space_id
-                ):
+                if page is None:
+                    continue
+                if await self._apply_page_version(page, r, space_id, provider):
+                    continue
+                if not await self._page_repo.save(page, space_id=space_id):
                     _log_sync_refusal("page", page.id, space_id)
         elif resource == "stickies":
             for r in records:
@@ -924,6 +934,44 @@ class SpaceSyncReceiver:
                 provider,
                 space_id,
             )
+
+    async def _apply_page_version(
+        self, page: Page, r: dict[str, Any], space_id: str, provider: str
+    ) -> bool:
+        """v_48 host-sequenced pages. ``True`` when handled here:
+
+        * on the **host** every page record is ignored — it is the pages'
+          sequencer; a member's new page reaches it as a create proposal,
+          never as an unsequenced row it would hold but never broadcast;
+        * a record streamed by the space's host carrying ``seq`` is the
+          host's version: mirrored by ``seq`` (newer applies, older never
+          reverts) — even when we have not seen the host's v_48
+          capabilities yet;
+        * any other record never updates a page held here and lands
+          unsequenced (``seq`` 0 — a member cannot forge the host's order);
+        * under a pre-v_48 host a record without ``seq`` is taken as before.
+        """
+        engine = self._page_conflicts
+        if engine is None:
+            return False
+        mode, host = await engine.mode(space_id)
+        if mode is PageMode.HOST:
+            return True
+        if host and provider == host and "seq" in r:
+            version = canonical_from_wire(r)
+            if version is None:
+                log.warning(
+                    "space sync: page %s in %s — malformed host version; skipped",
+                    page.id,
+                    space_id,
+                )
+                return True
+            await engine.mirror(space_id=space_id, page_id=page.id, version=version)
+            return True
+        if mode is PageMode.LEGACY:
+            return False
+        held = await self._page_repo.get_space_page(page.id, space_id=space_id)
+        return held is not None
 
     # ─── Who may stream what (§24.11 authorship) ─────────────────────
 

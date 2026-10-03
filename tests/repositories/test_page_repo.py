@@ -172,7 +172,7 @@ async def test_insert_snapshot_caps_per_page(env, monkeypatch):
             space_id=None,
             body=f"body-{i}",
             author_user_id="u1",
-            side="base",
+            side="mine",
             conflict=False,
         )
     assert await _snapshot_count(env, p.id) == 3
@@ -194,7 +194,7 @@ async def test_delete_removes_page_snapshots(env):
         space_id=None,
         body="b",
         author_user_id="u1",
-        side="base",
+        side="mine",
         conflict=False,
     )
     assert await _snapshot_count(env, p.id) == 1
@@ -333,7 +333,7 @@ async def test_page_delete_drops_only_its_own_space_snapshots(scoped):
             space_id=sid,
             body="snap",
             author_user_id="uid-owner",
-            side="base",
+            side="mine",
             conflict=False,
         )
     assert await scoped.page_repo.delete("pg-b", space_id="space-a") is False
@@ -439,3 +439,239 @@ async def test_page_update_stores_the_writers_updated_at(scoped, sid):
     )
     stored = (await _page_row(scoped, table, pid))["updated_at"]
     assert datetime.fromisoformat(stored).tzinfo is not None
+
+
+# ─── v_48: history cap + conflict sides ───────────────────────────────
+
+
+async def _snap(repo, *, pid, sid, body, conflict, title=None, by="u1"):
+    await repo.insert_snapshot(
+        page_id=pid,
+        space_id=sid,
+        body=body,
+        author_user_id=by,
+        side="mine",
+        conflict=conflict,
+        title=title,
+    )
+
+
+async def test_snapshot_prune_never_drops_an_open_conflict_side(scoped, monkeypatch):
+    """The prune keeps the newest RESOLVED rows; an open side (conflict=1)
+    is never pruned, however many resolved rows follow it."""
+    import socialhome.repositories.page_repo as mod
+
+    monkeypatch.setattr(mod, "MAX_PAGE_SNAPSHOTS", 2)
+    repo = scoped.page_repo
+    await _snap(repo, pid="pg-a", sid="space-a", body="open", conflict=True, title="T")
+    for i in range(4):
+        await _snap(repo, pid="pg-a", sid="space-a", body=f"old-{i}", conflict=False)
+    sides = await repo.list_conflict_sides("pg-a", space_id="space-a")
+    assert [s.content for s in sides] == ["open"]
+    rows = await scoped.db.fetchall(
+        "SELECT body FROM space_page_snapshots WHERE conflict=0 ORDER BY snapshot_at"
+    )
+    assert [r["body"] for r in rows] == ["old-2", "old-3"]
+
+
+async def test_snapshot_prune_is_scoped_to_its_space(scoped, monkeypatch):
+    """Rows of another scope sharing the page id never count against, or
+    get pruned by, this scope's cap."""
+    import socialhome.repositories.page_repo as mod
+
+    monkeypatch.setattr(mod, "MAX_PAGE_SNAPSHOTS", 1)
+    repo = scoped.page_repo
+    await _snap(repo, pid="shared", sid="space-b", body="b-row", conflict=False)
+    for i in range(3):
+        await _snap(repo, pid="shared", sid="space-a", body=f"a-{i}", conflict=False)
+    rows = await scoped.db.fetchall(
+        "SELECT space_id, body FROM space_page_snapshots WHERE page_id='shared'"
+        " ORDER BY space_id"
+    )
+    assert [(r["space_id"], r["body"]) for r in rows] == [
+        ("space-a", "a-2"),
+        ("space-b", "b-row"),
+    ]
+
+
+async def test_conflict_sides_round_trip_with_their_titles(scoped):
+    from socialhome.domain.page_version import version_hash
+
+    repo = scoped.page_repo
+    await _snap(
+        repo, pid="pg-a", sid="space-a", body="one", conflict=True, title="T1", by="u1"
+    )
+    await _snap(
+        repo, pid="pg-a", sid="space-a", body="two", conflict=True, title="T2", by="u2"
+    )
+    sides = await repo.list_conflict_sides("pg-a", space_id="space-a")
+    assert [(s.title, s.content, s.by) for s in sides] == [
+        ("T1", "one", "u1"),
+        ("T2", "two", "u2"),
+    ]
+    assert sides[0].hash == version_hash("T1", "one")
+    # Another space sees none of them.
+    assert await repo.list_conflict_sides("pg-a", space_id="space-b") == []
+    assert await repo.space_pages_in_conflict("space-a") == {"pg-a"}
+    assert await repo.space_pages_in_conflict("space-b") == set()
+
+
+async def test_a_legacy_bare_side_reads_under_the_page_title(scoped):
+    repo = scoped.page_repo
+    await _snap(repo, pid="pg-a", sid="space-a", body="{not json", conflict=True)
+    await _snap(repo, pid="pg-a", sid="space-a", body='{"x": 1}', conflict=True)
+    sides = await repo.list_conflict_sides("pg-a", space_id="space-a")
+    assert [(s.title, s.content) for s in sides] == [
+        ("title-pg-a", "{not json"),
+        ("title-pg-a", '{"x": 1}'),
+    ]
+
+
+async def test_set_conflict_sides_is_exact_and_atomic(scoped):
+    from socialhome.domain.page_version import PageConflictSide, version_hash
+
+    repo = scoped.page_repo
+
+    def side(content, at, by="u1", base_seq=0, cover=None):
+        return PageConflictSide(
+            hash=version_hash("T", content, cover),
+            title="T",
+            content=content,
+            by=by,
+            at=at,
+            cover_image_url=cover,
+            base_seq=base_seq,
+        )
+
+    one, two = (
+        side("one", "t1", base_seq=3, cover="/c.webp"),
+        side("two", "t2", by="u2"),
+    )
+    await repo.set_conflict_sides("pg-a", space_id="space-a", sides=[one, two])
+    assert await repo.list_conflict_sides("pg-a", space_id="space-a") == [one, two]
+    # Replacing keeps exactly the new set — the same ``at`` may come back.
+    await repo.set_conflict_sides("pg-a", space_id="space-a", sides=[two])
+    assert await repo.list_conflict_sides("pg-a", space_id="space-a") == [two]
+    await repo.clear_conflict_flag("pg-a", space_id="space-a")
+    assert not await repo.has_active_conflict("pg-a", space_id="space-a")
+
+
+async def test_a_draft_base_round_trips_and_is_never_pruned(scoped, monkeypatch):
+    import socialhome.repositories.page_repo as mod
+    from socialhome.domain.page_version import DraftBase
+
+    monkeypatch.setattr(mod, "MAX_PAGE_SNAPSHOTS", 1)
+    repo = scoped.page_repo
+    base = DraftBase(
+        title="T", content="c", seq=4, by="u1", cover_image_url="/x", resolves=("h",)
+    )
+    await repo.set_draft_base("pg-a", space_id="space-a", base=base)
+    for i in range(3):
+        await _snap(repo, pid="pg-a", sid="space-a", body=f"old-{i}", conflict=False)
+    assert await repo.get_draft_base("pg-a", space_id="space-a") == base
+    await repo.set_draft_base("pg-a", space_id="space-a", base=replace_seq(base, 5))
+    assert (await repo.get_draft_base("pg-a", space_id="space-a")).seq == 5
+    await repo.clear_draft_base("pg-a", space_id="space-a")
+    assert await repo.get_draft_base("pg-a", space_id="space-a") is None
+
+
+def replace_seq(base, seq):
+    from dataclasses import replace
+
+    return replace(base, seq=seq)
+
+
+async def test_seq_and_pending_base_seq_round_trip(scoped):
+    from dataclasses import replace
+
+    repo = scoped.page_repo
+    page = await repo.get_space_page("pg-a", space_id="space-a")
+    assert (page.seq, page.pending_base_seq) == (0, None)
+    await repo.save(replace(page, seq=7, pending_base_seq=6), space_id="space-a")
+    page = await repo.get_space_page("pg-a", space_id="space-a")
+    assert (page.seq, page.pending_base_seq) == (7, 6)
+    assert await repo.list_pending_drafts() == [("space-a", "pg-a")]
+    assert await repo.list_pending_drafts(space_id="space-b") == []
+    household = await repo.get_household_page("pg-hh")
+    assert (household.seq, household.pending_base_seq) == (0, None)
+
+
+def _version(pid, sid, n):
+    return PageVersion(
+        id=uuid.uuid4().hex,
+        page_id=pid,
+        version=n,
+        title="T",
+        content=f"v{n}",
+        edited_by="u1",
+        edited_at=f"2026-01-01T00:00:{n:02d}+00:00",
+        space_id=sid,
+    )
+
+
+async def test_space_page_history_keeps_fifty_household_five(scoped):
+    from socialhome.repositories.page_repo import MAX_HISTORY, MAX_SPACE_HISTORY
+
+    repo = scoped.page_repo
+    assert (MAX_HISTORY, MAX_SPACE_HISTORY) == (5, 50)
+    for n in range(1, 56):
+        await repo.save_version(_version("pg-a", "space-a", n))
+    for n in range(1, 26):
+        await repo.save_version(_version("pg-hh", None, 100 + n))
+    space_rows = await repo.list_versions("pg-a", space_id="space-a")
+    assert [v.version for v in space_rows] == list(range(6, 56))
+    household = await repo.list_versions("pg-hh", space_id=None)
+    assert [v.version for v in household] == list(range(121, 126))
+
+
+async def test_history_prune_is_scoped_to_its_space(scoped, monkeypatch):
+    import socialhome.repositories.page_repo as mod
+
+    monkeypatch.setattr(mod, "MAX_SPACE_HISTORY", 1)
+    repo = scoped.page_repo
+    await repo.save_version(_version("shared", "space-b", 1))
+    await repo.save_version(_version("shared", "space-a", 2))
+    await repo.save_version(_version("shared", "space-a", 3))
+    assert [
+        v.version for v in await repo.list_versions("shared", space_id="space-b")
+    ] == [1]
+    assert [
+        v.version for v in await repo.list_versions("shared", space_id="space-a")
+    ] == [3]
+
+
+async def test_commit_version_is_atomic_and_scoped(scoped):
+    from dataclasses import replace
+
+    from socialhome.domain.page_version import PageConflictSide, version_hash
+
+    repo = scoped.page_repo
+    page = await repo.get_space_page("pg-a", space_id="space-a")
+    side = PageConflictSide(
+        hash=version_hash("T", "s"), title="T", content="s", by="u", at="t1"
+    )
+    history = [_version("pg-a", "space-a", 0), _version("pg-a", "space-a", 0)]
+    assert await repo.commit_version(
+        replace(page, content="new", seq=2),
+        space_id="space-a",
+        history=history,
+        sides=[side],
+    )
+    got = await repo.get_space_page("pg-a", space_id="space-a")
+    assert (got.content, got.seq) == ("new", 2)
+    assert [
+        v.version for v in await repo.list_versions("pg-a", space_id="space-a")
+    ] == [1, 2]
+    assert await repo.list_conflict_sides("pg-a", space_id="space-a") == [side]
+    # Another space's id: nothing written, history rolled back too.
+    other = await repo.get_space_page("pg-b", space_id="space-b")
+    assert not await repo.commit_version(
+        replace(other, content="stolen"),
+        space_id="space-a",
+        history=[_version("pg-b", "space-a", 0)],
+        sides=[],
+    )
+    assert (
+        await repo.get_space_page("pg-b", space_id="space-b")
+    ).content == "body-pg-b"
+    assert await repo.list_versions("pg-b", space_id="space-a") == []

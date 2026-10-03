@@ -594,3 +594,102 @@ def test_calendar_page_and_post_releases_are_compared_on_every_key():
     _sweep(page, FET.SPACE_PAGE_CREATED, page_wire)
     post = _item("posts", "create", POST_CREATE)
     _sweep(post, FET.SPACE_POST_CREATED, POST_WIRE)
+
+
+# ── v_48: page ancestry + resolutions by version ─────────────────────────
+
+
+_SEQUENCING = {
+    "seq",
+    "version_hash",
+    "conflict",
+    "sequenced",
+    "last_editor_user_id",
+    "cover_image_url",
+    "updated_at",
+}
+
+
+def test_page_sequencing_fields_ride_freely_on_creates_and_updates():
+    """v_48 host-sequencing bookkeeping may ride on a release; the retired
+    ``ancestors`` may not."""
+    for et in (FET.SPACE_PAGE_CREATED, FET.SPACE_PAGE_UPDATED):
+        assert _SEQUENCING <= FREE_KEYS[et]
+        assert "ancestors" not in FREE_KEYS[et]
+    assert not _SEQUENCING & FREE_KEYS[FET.SPACE_PAGE_DELETED]
+    edit = _item(
+        "pages",
+        "edit",
+        {"entity": "page", "target_id": "pg-1", "patch": {"content": "new"}},
+    )
+    held = {"title": "Wiki", "content": "old", "cover_image_url": None}
+    wire = {
+        "id": "pg-1",
+        "page_id": "pg-1",
+        "space_id": "sp",
+        "title": "Wiki",
+        "content": "new",
+        "actor_user_id": "u-a",
+        "seq": 5,
+        "conflict": [],
+    }
+    _sweep(edit, FET.SPACE_PAGE_UPDATED, wire, held=held)
+    # The cover rides freely but is still compared: a changed one refuses.
+    assert not item_matches_event(
+        edit,
+        FET.SPACE_PAGE_UPDATED,
+        {**wire, "cover_image_url": "/sneaky.webp"},
+        held=held,
+    )
+
+
+def _resolution(**extra) -> SpaceModerationItem:
+    return _item(
+        "pages",
+        "edit",
+        {"entity": "page", "target_id": "pg-1", "op": "resolve_conflict", **extra},
+    )
+
+
+def test_a_side_resolution_is_bound_to_the_kept_version():
+    from socialhome.domain.page_version import version_hash
+
+    side = version_hash("Other title", "theirs")
+    item = _resolution(resolution="side", side=side)
+    held = {"title": "Wiki", "content": "mine", "created_by": "u-h"}
+    wire = {
+        "id": "pg-1",
+        "page_id": "pg-1",
+        "space_id": "sp",
+        "title": "Other title",
+        "content": "theirs",
+        "actor_user_id": "u-a",
+        "seq": 7,
+        "conflict": [],
+    }
+    _sweep(item, FET.SPACE_PAGE_UPDATED, wire, held=held)
+    # Any other body — even the other side — is not this release.
+    assert not item_matches_event(
+        item, FET.SPACE_PAGE_UPDATED, {**wire, "content": "mine"}, held=held
+    )
+    assert not item_matches_event(
+        _resolution(resolution="side", side="nope"),
+        FET.SPACE_PAGE_UPDATED,
+        wire,
+        held=held,
+    )
+
+
+def test_a_merged_resolution_keeps_the_held_title():
+    item = _resolution(resolution="merged_content", merged_content="joined")
+    held = {"title": "Wiki", "content": "mine", "created_by": "u-h"}
+    wire = {
+        "id": "pg-1",
+        "page_id": "pg-1",
+        "space_id": "sp",
+        "title": "Wiki",
+        "content": "joined",
+        "actor_user_id": "u-a",
+        "seq": 3,
+    }
+    _sweep(item, FET.SPACE_PAGE_UPDATED, wire, held=held)

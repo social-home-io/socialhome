@@ -318,6 +318,7 @@ from .services.app_service import AppService
 from .services.resync_on_upgrade import request_capability_resync_if_upgraded
 from .services.preferences_service import PreferencesService
 from .services.page_conflict_service import PageConflictService
+from .services.page_proposal_forwarder import PageProposalForwarder
 from .services.space_page_service import PageModerationHandler, SpacePageService
 from .services.space_moderation_federation import SpaceModerationFederation
 from .services.space_moderation_service import SpaceModerationService
@@ -922,6 +923,7 @@ def _wire_federation_stack(
     user_repo,
     profile_picture_repo,
     page_repo,
+    page_conflict_service,
     sticky_repo,
     highlight_repo,
     moment_repo,
@@ -1258,6 +1260,9 @@ def _wire_federation_stack(
         media_dir=pathlib.Path(config.media_path),
         media_refs=media_reference_repo,
         gallery_tombstones=gallery_tombstones,
+        # v_48: another household's version of a held page — fast-forward,
+        # merge or conflict instead of last write wins.
+        page_conflicts=page_conflict_service,
     ).attach_to(federation_service)
     PersonalCalendarInboundHandlers(
         bus=bus,
@@ -1327,6 +1332,7 @@ def _wire_federation_stack(
         authorship=space_authorship,
         gallery_tombstones=gallery_tombstones,
         timetable_repo=space_timetable_repo,
+        page_conflicts=page_conflict_service,
     )
     federation_service.attach_space_sync(
         service=space_sync_service,
@@ -1376,6 +1382,23 @@ def _wire_federation_stack(
         federation_service=federation_service,
     )
     page_federation_outbound.wire()
+    # v_48 host-sequenced pages: the conflict service sequences pages this
+    # household hosts and mirrors the host's versions of the others; the
+    # forwarder proposes this household's drafts to their host.
+    page_conflict_service.attach_federation(
+        federation_service,
+        own_instance_id=identity.instance_id,
+        space_repo=space_repo,
+    )
+    page_proposal_forwarder = PageProposalForwarder(
+        page_repo=page_repo,
+        conflicts=page_conflict_service,
+        federation_service=federation_service,
+        federation_repo=federation_repo,
+        bus=bus,
+    )
+    page_proposal_forwarder.wire()
+    app[K.page_proposal_forwarder_key] = page_proposal_forwarder
 
     # §23.8.6 — fan a household PresenceUpdated out to opted-in spaces
     # as a GPS-only WS frame + sealed federation event. ``zone_name`` is
@@ -2272,7 +2295,10 @@ def create_app(config: Config | None = None) -> web.Application:
     )
 
     # ── Page conflict resolution (§4.4.4.1) ─────────────────────────────
-    page_conflict_service = PageConflictService(page_repo)
+    # Built before the federation stack: the inbound handler and the
+    # §25.6 sync receiver apply other households' versions through it
+    # (v_48), sharing its per-page lock with local edits.
+    page_conflict_service = PageConflictService(page_repo, bus=bus)
     # Space wiki writes: scope, writer seat, ``pages`` access level (§4.3).
     space_page_service = SpacePageService(
         page_repo,
@@ -2986,6 +3012,7 @@ def create_app(config: Config | None = None) -> web.Application:
             user_repo=user_repo,
             profile_picture_repo=profile_picture_repo,
             page_repo=page_repo,
+            page_conflict_service=page_conflict_service,
             sticky_repo=sticky_repo,
             highlight_repo=highlight_repo,
             moment_repo=moment_repo,
@@ -3541,6 +3568,12 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         await replay_cache_scheduler.start()
 
+        # v_48: page drafts waiting for their host — flushed now, then on a
+        # tick and whenever a host answers again.
+        page_forwarder = app.get(K.page_proposal_forwarder_key)
+        if page_forwarder is not None:
+            await page_forwarder.start()
+
         # App-pending-session pruner — sweeps TTL-expired inbound app-session
         # invites so the table can't accumulate abandoned invites forever
         # (the per-pair cap bounds a flood; this clears the slow leak).
@@ -3813,6 +3846,9 @@ def create_app(config: Config | None = None) -> web.Application:
         await moment_public_signaling_handler.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        page_forwarder = app.get(K.page_proposal_forwarder_key)
+        if page_forwarder is not None:
+            await page_forwarder.stop()
         if moderation_expiry_scheduler is not None:
             await moderation_expiry_scheduler.stop()
         if app_pending_session_scheduler is not None:

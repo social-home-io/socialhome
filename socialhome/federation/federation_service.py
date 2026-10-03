@@ -258,6 +258,7 @@ class FederationService:
         "_deferred_mesh_tasks",
         "_deferred_mesh_cap_logged",
         "_stopping",
+        "_archived_write_listeners",
     )
 
     def __init__(
@@ -315,6 +316,9 @@ class FederationService:
         self._space_repo = None
         self._space_remote_member_repo = None
         self._pending_seat_buffer: "PendingSeatBuffer | None" = None
+        #: Hear writes the archived-space gate refused (v_48 pages answer a
+        #: member's proposal ``refused/archived``).
+        self._archived_write_listeners: list = []
         # §D2 PR2 mesh-routing primitives — set via :meth:`attach_mesh`.
         # When wired, :meth:`send_with_mesh_fallback` discovers a path
         # through the federation graph and ships SPACE_ROUTED when a
@@ -502,7 +506,12 @@ class FederationService:
         if self._space_repo is not None:
             # Before the writer gate: a write into an archived space is
             # refused outright, never held for a seat.
-            steps.append(make_check_space_archived(space_repo=self._space_repo))
+            steps.append(
+                make_check_space_archived(
+                    space_repo=self._space_repo,
+                    on_refused=self._notify_archived_write,
+                )
+            )
         if self._space_repo is not None and self._space_remote_member_repo is not None:
             steps.append(
                 make_check_space_writer(
@@ -512,6 +521,15 @@ class FederationService:
                 ),
             )
         return steps
+
+    def add_archived_write_listener(self, listener) -> None:
+        """Call ``listener(event, space)`` for every write the archived-space
+        gate refuses."""
+        self._archived_write_listeners.append(listener)
+
+    async def _notify_archived_write(self, event, space) -> None:
+        for listener in list(self._archived_write_listeners):
+            await listener(event, space)
 
     # ─── Wiring helpers ──────────────────────────────────────────────────
 

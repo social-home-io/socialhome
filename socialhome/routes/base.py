@@ -71,7 +71,10 @@ from ..services.child_protection_service import (
     UserNotFoundError as CpUserNotFoundError,
 )
 from ..services.gallery_service import GalleryNotFoundError, GalleryPermissionError
-from ..services.page_conflict_service import NoActiveConflictError
+from ..services.page_conflict_service import (
+    NoActiveConflictError,
+    PageConflictStaleError,
+)
 from ..services.poll_service import PollClosedError, PollNotFoundError
 from ..services.presence_service import UserNotFoundError as PresenceUserNotFoundError
 from ..services.space_zone_service import (
@@ -423,6 +426,13 @@ class BaseView(web.View):
             )
         except NoActiveConflictError as exc:
             return error_response(409, "NO_CONFLICT", str(exc))
+        except PageConflictStaleError as exc:
+            return error_response(
+                409,
+                "STALE",
+                "The conflicting versions changed. Reload and pick again.",
+                extra={"sides": exc.sides},
+            )
         except PageLockError as exc:
             return error_response(409, "LOCKED", str(exc))
         except AccessAdminOnlyError as exc:

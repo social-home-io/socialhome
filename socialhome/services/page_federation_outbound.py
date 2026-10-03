@@ -20,6 +20,13 @@ creator, so a receiver can only file a new page it can attribute. A write
 released from the moderation queue adds the ``moderation`` approval block
 (v_43, :mod:`.moderation_release`).
 
+Pages are host-sequenced (v_48): the host's canonical versions carry
+``seq``, ``version_hash``, ``conflict`` and ``sequenced`` to member
+households at v_48 or above (older ones get the plain fields); a member
+household's own drafts are ``proposal`` events this bridge never sends —
+:class:`~.page_proposal_forwarder.PageProposalForwarder` proposes them to
+the host alone.
+
 Sibling of :class:`TaskFederationOutbound` /
 :class:`StickyFederationOutbound`; identical shape, different
 event types.
@@ -28,10 +35,12 @@ event types.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.federation import FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from ..infrastructure.event_bus import EventBus
 from .moderation_release import with_release
 
@@ -61,12 +70,11 @@ class PageFederationOutbound:
         self._bus.subscribe(PageDeleted, self._on_deleted)
 
     async def _on_created(self, event: PageCreated) -> None:
-        if event.space_id is None:
-            return
-        await self._fan_out(
-            event.space_id,
-            FederationEventType.SPACE_PAGE_CREATED,
-            _with_actor(
+        if event.space_id is None or event.proposal:
+            return  # household page / a member's draft (the forwarder's)
+
+        def _payload() -> dict:
+            return _with_actor(
                 {
                     "id": event.page_id,
                     "page_id": event.page_id,
@@ -76,16 +84,24 @@ class PageFederationOutbound:
                 },
                 event.actor_user_id,
                 creates=True,
-            ),
+            )
+
+        def _with_base() -> dict:
+            return {**_payload(), **(event.base or {})}
+
+        await self._fan_out_versioned(
+            event.space_id,
+            FederationEventType.SPACE_PAGE_CREATED,
+            _with_base if event.canonical is None else _payload,
+            event.canonical,
         )
 
     async def _on_updated(self, event: PageUpdated) -> None:
-        if event.space_id is None:
+        if event.space_id is None or event.proposal:
             return
-        await self._fan_out(
-            event.space_id,
-            FederationEventType.SPACE_PAGE_UPDATED,
-            _with_actor(
+
+        def _payload() -> dict:
+            return _with_actor(
                 {
                     "id": event.page_id,
                     "page_id": event.page_id,
@@ -94,7 +110,39 @@ class PageFederationOutbound:
                     "content": event.content,
                 },
                 event.actor_user_id,
-            ),
+            )
+
+        def _with_base() -> dict:
+            return {**_payload(), **(event.base or {})}
+
+        await self._fan_out_versioned(
+            event.space_id,
+            FederationEventType.SPACE_PAGE_UPDATED,
+            _with_base if event.canonical is None else _payload,
+            event.canonical,
+        )
+
+    async def _fan_out_versioned(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: Callable[[], dict],
+        canonical: dict | None,
+    ) -> None:
+        """A host's canonical version (v_48) carries its ``seq``, hash and
+        conflict list to v_48 members, and the plain fields to older ones
+        (``legacy_payload``: their release check refuses unknown keys).
+        Anything else — a write under a pre-v_48 host — goes out as before."""
+        if canonical is None:
+            await self._fan_out(space_id, event_type, payload())
+            return
+        base = payload()
+        await self._fan_out(
+            space_id,
+            event_type,
+            {**base, **canonical},
+            legacy_payload=payload(),
+            legacy_below=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
         )
 
     async def _on_deleted(self, event: PageDeleted) -> None:
@@ -118,13 +166,23 @@ class PageFederationOutbound:
         space_id: str,
         event_type: FederationEventType,
         payload: dict,
+        *,
+        legacy_payload: dict | None = None,
+        legacy_below: int | None = None,
     ) -> None:
         try:
-            await self._federation.broadcast_to_space_members(
-                space_id,
-                event_type,
-                payload,
-            )
+            if legacy_payload is None:
+                await self._federation.broadcast_to_space_members(
+                    space_id, event_type, payload
+                )
+            else:
+                await self._federation.broadcast_to_space_members(
+                    space_id,
+                    event_type,
+                    payload,
+                    legacy_payload=legacy_payload,
+                    legacy_below=legacy_below,
+                )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(
                 "page-outbound: broadcast failed for space=%s: %s",

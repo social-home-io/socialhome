@@ -25,12 +25,16 @@ export interface SpacePagesTabProps {
   /** Show the "only admins can …" note. */
   adminOnly: boolean
   archived: boolean
+  /** The space's host household (v_48: it sequences the pages). */
+  hostInstanceId?: string | null
 }
 
 export function SpacePagesTab({
-  spaceId, role, level, writable, adminOnly, archived,
+  spaceId, role, level, writable, adminOnly, archived, hostInstanceId,
 }: SpacePagesTabProps) {
-  const scope = spacePageScope({ spaceId, role, level, writable, archived })
+  const scope = spacePageScope({
+    spaceId, role, level, writable, archived, hostInstanceId,
+  })
   return (
     <div class="sh-space-pages">
       <PagesView

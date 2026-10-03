@@ -45,6 +45,8 @@ from ..repositories.page_repo import (
     new_page,
 )
 from ..security import error_response
+from ..domain.page_version import PageConflictSide, version_hash
+from ..services.page_conflict_service import RESOLUTIONS
 from ..services.space_page_service import PageStaleError, snapshot_page_version
 from .base import BaseView
 
@@ -96,6 +98,44 @@ def _page_dict(page, *, signer: MediaUrlSigner | None = None) -> dict:
         "locked_by": page.locked_by,
         "locked_at": page.locked_at,
         "lock_expires_at": page.lock_expires_at,
+        # v_48 host-sequenced space pages: the host's sequence number of
+        # this version, and — while this household's own edit waits for the
+        # host — the version it was based on.
+        "seq": page.seq,
+        "base_seq": page.pending_base_seq,
+        "pending": page.pending_base_seq is not None,
+    }
+
+
+def _conflict_dict(
+    request: web.Request, page, sides: list[PageConflictSide]
+) -> dict | None:
+    """An open conflict as the SPA shows it: every side (signed media,
+    author, when it was recorded) and the hash of the displayed body —
+    ``None`` without one."""
+    if not sides:
+        return None
+    signer = request.app.get(media_signer_key)
+
+    def _signed(content: str) -> str:
+        if signer is None or not content:
+            return content
+        return sign_media_urls_in_markdown(content, signer) or content
+
+    return {
+        "sides": [
+            {
+                "hash": s.hash,
+                "title": s.title,
+                "content": _signed(s.content),
+                "cover_image_url": s.cover_image_url,
+                "by": s.by,
+                "at": s.at,
+                "base_seq": s.base_seq,
+            }
+            for s in sides
+        ],
+        "current_hash": version_hash(page.title, page.content, page.cover_image_url),
     }
 
 
@@ -497,8 +537,18 @@ class SpacePageCollectionView(_SpacePagesBase):
         space_id = self.match("id")
         if not await self._require_space_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        pages = await self.svc(space_page_service_key).list(space_id)
-        return web.json_response([_signed_page_dict(self.request, p) for p in pages])
+        svc = self.svc(space_page_service_key)
+        pages = await svc.list(space_id)
+        conflicted = await svc.pages_in_conflict(space_id)
+        return web.json_response(
+            [
+                {
+                    **_signed_page_dict(self.request, p),
+                    "in_conflict": p.id in conflicted,
+                }
+                for p in pages
+            ]
+        )
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -528,8 +578,16 @@ class SpacePageDetailView(_SpacePagesBase):
         space_id = self.match("id")
         if not await self._require_space_member(space_id, ctx.user_id):
             return error_response(403, "FORBIDDEN", "Not a space member.")
-        p = await self.svc(space_page_service_key).get(space_id, self.match("pid"))
-        return web.json_response(_signed_page_dict(self.request, p))
+        svc = self.svc(space_page_service_key)
+        p = await svc.get(space_id, self.match("pid"))
+        sides = await svc.conflict_sides(space_id, p.id)
+        return web.json_response(
+            {
+                **_signed_page_dict(self.request, p),
+                "in_conflict": bool(sides),
+                "conflict": _conflict_dict(self.request, p, sides),
+            }
+        )
 
     async def patch(self) -> web.Response:
         ctx = self.user
@@ -606,7 +664,14 @@ class SpacePageVersionView(_SpacePagesBase):
 
 
 class PageConflictView(_SpacePagesBase):
-    """POST /api/spaces/{id}/pages/{pid}/resolve-conflict (section 4.4.4.1)."""
+    """POST /api/spaces/{id}/pages/{pid}/resolve-conflict (section 4.4.4.1).
+
+    Body: ``resolution`` — ``"side"`` with ``side`` (the kept version's
+    hash), ``"merged_content"`` with ``content``, or the two-way
+    ``"mine"`` / ``"theirs"``; optional ``sides``, the hashes the user saw
+    (409 ``STALE`` when the conflict holds others now). 409
+    ``NO_CONFLICT`` without an open conflict; 202 when held for review.
+    """
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -617,23 +682,40 @@ class PageConflictView(_SpacePagesBase):
         body = await self.body()
         resolution = str(body.get("resolution") or "")
         merged = body.get("content")
-        if resolution not in ("mine", "theirs", "merged_content"):
+        side = body.get("side")
+        sides = body.get("sides")
+        if resolution not in RESOLUTIONS:
             return error_response(
                 422,
                 "UNPROCESSABLE",
-                "resolution must be 'mine', 'theirs', or 'merged_content'.",
+                "resolution must be 'side', 'merged_content', 'mine' or 'theirs'.",
             )
-        if resolution == "merged_content" and not merged:
+        if resolution == "merged_content" and not (isinstance(merged, str) and merged):
             return error_response(
                 422,
                 "UNPROCESSABLE",
                 "content is required when resolution is 'merged_content'.",
             )
-        new_body = await self.svc(space_page_service_key).resolve_conflict(
+        if resolution == "side" and not isinstance(side, str):
+            return error_response(
+                422, "UNPROCESSABLE", "side is required when resolution is 'side'."
+            )
+        if sides is not None and not (
+            isinstance(sides, list) and all(isinstance(h, str) for h in sides)
+        ):
+            return error_response(
+                422, "UNPROCESSABLE", "sides must be a list of version hashes."
+            )
+        page = await self.svc(space_page_service_key).resolve_conflict(
             space_id,
             page_id,
             actor_user_id=ctx.user_id,
             resolution=resolution,
-            merged_content=merged,
+            merged_content=merged if resolution == "merged_content" else None,
+            side=side if resolution == "side" else None,
+            sides=sides,
         )
-        return web.json_response({"ok": True, "content": new_body})
+        signed = _signed_page_dict(self.request, page)
+        return web.json_response(
+            {"ok": True, "content": signed["content"], "page": signed}
+        )

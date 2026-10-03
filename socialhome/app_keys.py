@@ -81,6 +81,7 @@ dm_history_scheduler_key: AppKey = AppKey("dm_history_scheduler")
 report_repo_key: AppKey = AppKey("report_repo")
 report_service_key: AppKey = AppKey("report_service")
 page_conflict_service_key: AppKey = AppKey("page_conflict_service")
+page_proposal_forwarder_key: AppKey = AppKey("page_proposal_forwarder")
 space_page_service_key: AppKey = AppKey("space_page_service")
 #: The §4.3 space moderation queue (every MODERATED feature, host-local).
 space_moderation_service_key: AppKey = AppKey("space_moderation_service")

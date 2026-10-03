@@ -36,6 +36,12 @@ class Page:
     delete_requested_at: str | None = None
     delete_approved_by: str | None = None
     delete_approved_at: str | None = None
+    #: Space pages (v_48): the host's sequence number of the version this
+    #: row holds — 0 for a version the host has not sequenced.
+    seq: int = 0
+    #: Space pages (v_48): ``None`` unless this household holds an
+    #: unacknowledged local draft; then the ``seq`` it was based on.
+    pending_base_seq: int | None = None
 
 
 @dataclass(slots=True, frozen=True)

@@ -114,7 +114,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Discovery](./discovery.md) — GFS-brokered public-space directory.
 - **Content**
   - [Feeds](./feeds.md) — posts, comments, reactions.
-  - [Pages](./pages.md) — space pages (wiki-style, lock-protected).
+  - [Pages](./pages.md) — space pages (wiki-style; host-sequenced — the host merges or keeps conflicting edits, v_48).
   - [Tasks](./tasks.md) — task lists and tasks.
   - [Calendar](./calendar.md) — calendar events and RSVPs.
   - [Space timetables](./timetables.md) — admin-maintained shared timetables (a class *Stundenplan*), one upserted aggregate per timetable, member households only (capability v_39).

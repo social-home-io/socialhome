@@ -19,6 +19,8 @@ from socialhome.domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    PageConflictEmitted,
+    PageProposalSettled,
     PeerTransportChanged,
     PeerUnpaired,
     PostCreated,
@@ -536,6 +538,53 @@ async def test_space_zone_deleted_fans_with_action_delete(env):
     assert parsed["data"]["action"] == "delete"
     assert parsed["data"]["zone_id"] == "z_office"
     assert parsed["data"]["zone"] is None
+
+
+@pytest.mark.parametrize("federated", [False, True])
+async def test_page_conflict_frame_says_whether_it_came_from_a_household(
+    env, federated
+):
+    """v_48: a conflict recorded from another household's edit carries
+    ``federated`` so an open viewer refetches the page."""
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(
+        PageConflictEmitted(
+            page_id="pg-1",
+            space_id="sp-1",
+            theirs="their body",
+            theirs_by="u2",
+            federated=federated,
+        )
+    )
+    [frame] = [m for m in sock.sent if "page.conflict" in m]
+    data = json.loads(frame)
+    assert data["page_id"] == "pg-1"
+    assert data["federated"] is federated
+
+
+async def test_page_sequenced_frame_reaches_the_space(env):
+    """v_48: the host answered this household's page edit."""
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(
+        PageProposalSettled(
+            page_id="pg-1",
+            space_id="sp-1",
+            proposal_hash="sha256:" + "a" * 64,
+            outcome="refused",
+            reason="gone",
+        )
+    )
+    [frame] = [m for m in sock.sent if "page.sequenced" in m]
+    data = json.loads(frame)
+    assert (data["page_id"], data["outcome"], data["reason"]) == (
+        "pg-1",
+        "refused",
+        "gone",
+    )
 
 
 def _task(*, status=TaskStatus.TODO, assignees=()):

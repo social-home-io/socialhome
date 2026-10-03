@@ -19,6 +19,20 @@
  *   - A 409 (someone saved meanwhile) opens the side-by-side conflict view:
  *     keep mine (saved over the newer version), keep theirs, or merge by
  *     hand.
+ *   - Host-sequenced space pages (v_48): the space's host household orders
+ *     every version. On a member household a save is stored here at once
+ *     and proposed to the host — until the host answers, a "Saved here ·
+ *     waiting for {host}" pill shows (viewer and editor) and the list card
+ *     says "Not yet shared". WS ``page.sequenced`` refetches; a refusal
+ *     shows a notice with its reason — ``gone`` (deleted at the host)
+ *     offers "Save as new page".
+ *   - Federated conflicts: edits the host could not merge are kept as
+ *     versions beside the page. The viewer (and the editor) shows a banner
+ *     — Resolve for writers, a note for everyone else; editing stays
+ *     possible meanwhile. The resolve view (``PageConflictView``) keeps one
+ *     version, or merges by hand in the editor; either posts
+ *     ``resolve-conflict`` with the versions the user saw (``sides``). A WS
+ *     ``page.conflict`` with ``federated`` refetches.
  *   - Held for review (§4.3 "Reviewed", ``scope.reviewed``): no autosave —
  *     every save would queue another item — one "Submit for review" sends
  *     the edit; the 202 toasts and refreshes the pending strip
@@ -53,6 +67,7 @@ import { extractHeadings } from '@/utils/markdown'
 import { normaliseTimestamp, relativeDocsTime } from '@/utils/relativeTime'
 import type { EditLock, Page } from '@/types'
 import type { PageScope } from './scope'
+import { PageConflictView, conflictMarkers, type ConflictPanel } from './PageConflictView'
 
 interface ConflictData {
   mine: string
@@ -61,6 +76,14 @@ interface ConflictData {
 }
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
+/** Why the space's host refused this household's edit (WS
+ *  ``page.sequenced``). */
+type RefusalReason = 'access' | 'archived' | 'gone' | 'rate_limited' | 'bad_base'
+
+const REFUSAL_REASONS: readonly RefusalReason[] = [
+  'access', 'archived', 'gone', 'rate_limited', 'bad_base',
+]
 type SaveOutcome = 'saved' | 'queued' | 'conflict' | 'error'
 
 /** A server timestamp as epoch ms — naive SQLite stamps are UTC. */
@@ -78,6 +101,13 @@ const AUTOSAVE_MS = 1500
 
 function errMessage(err: unknown): string {
   return String((err as Error)?.message ?? err)
+}
+
+/** The ``ApiError.code`` of a failed request (``STALE``…), ``null`` for
+ *  anything else. */
+function errCode(err: unknown): string | null {
+  const code = (err as { code?: unknown } | null)?.code
+  return typeof code === 'string' ? code : null
 }
 
 function isStale(err: unknown): boolean {
@@ -105,6 +135,15 @@ export function PagesView({ scope, header }: {
   const mobileView = useSignal<'edit' | 'preview'>('edit')
   const saveStatus = useSignal<SaveStatus>('idle')
   const submitting = useSignal(false)
+  // Federated conflict resolve view: open (with the unsaved draft, if a
+  // save ran into the conflict) or ``null``.
+  const resolveView = useSignal<{ draft: string | null } | null>(null)
+  // Merging a federated conflict by hand in the editor: the versions the
+  // user saw. Saving then posts the resolution instead of a PATCH.
+  const resolvingSides = useSignal<string[] | null>(null)
+  const resolving = useSignal(false)
+  // The host refused this household's last edit of a page (v_48).
+  const refusal = useSignal<{ pageId: string; reason: RefusalReason } | null>(null)
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const saveTimer = useRef<number | null>(null)
@@ -121,6 +160,27 @@ export function PagesView({ scope, header }: {
   const itemPath = (id: string) => `${scope.base}/${id}`
   const tabIds = `sh-page-editor-${scope.key.replace(/[^a-z0-9-]/gi, '-')}`
   const reviewed = (p: Page | null) => !!p && scope.reviewed(p)
+
+  /** Refresh the list without the loading state (a WS nudge). */
+  const refreshList = () => {
+    api.get(scope.base).then((rows: Page[]) => { pages.value = rows }).catch(() => {})
+  }
+
+  /** Re-read the open page (its conflict state included). */
+  const refetchViewing = async (): Promise<Page | null> => {
+    const open = viewing.value
+    if (!open) return null
+    try {
+      const latest = await api.get(itemPath(open.id)) as Page
+      if (viewing.value?.id !== open.id) return null
+      viewing.value = latest
+      pages.value = pages.value.map(p => p.id === latest.id
+        ? { ...p, ...latest, in_conflict: !!latest.conflict } : p)
+      return latest
+    } catch {
+      return null
+    }
+  }
 
   const loadList = () => {
     loading.value = true
@@ -153,7 +213,14 @@ export function PagesView({ scope, header }: {
     })
     const offConflict = ws.on('page.conflict', (evt) => {
       const data = evt.data as {
-        page_id: string; theirs: string; theirs_by: string;
+        page_id: string; theirs: string; theirs_by: string; federated?: boolean;
+      }
+      if (data.federated) {
+        // Another household's edit opened (or grew) a conflict here. An
+        // open editor keeps going — its banner offers the resolution.
+        refreshList()
+        if (viewing.value?.id === data.page_id) void refetchViewing()
+        return
       }
       if (
         viewing.value?.id === data.page_id
@@ -167,8 +234,24 @@ export function PagesView({ scope, header }: {
         }
       }
     })
+    const offSequenced = ws.on('page.sequenced', (evt) => {
+      const data = evt.data as {
+        page_id: string; outcome?: string; reason?: string | null;
+      }
+      // The host answered this household's edit: the pill clears, or the
+      // refusal is explained.
+      refreshList()
+      const open = viewing.value?.id === data.page_id
+      if (open) void refetchViewing()
+      if (data.outcome === 'refused' && open) {
+        const reason = REFUSAL_REASONS.find(r => r === data.reason) ?? 'access'
+        refusal.value = { pageId: data.page_id, reason }
+      } else if (refusal.value?.pageId === data.page_id) {
+        refusal.value = null
+      }
+    })
     return () => {
-      offLock(); offUnlock(); offConflict()
+      offLock(); offUnlock(); offConflict(); offSequenced()
       clearSaveTimer()
       stopHeartbeat()
       flushOnUnmount()
@@ -219,6 +302,12 @@ export function PagesView({ scope, header }: {
     const page = viewing.value
     if (!page || !editing.value) return 'error'
     if (conflict.value) return 'conflict'    // don't thrash while resolving
+    if (resolvingSides.value) {
+      const ok = await resolveFederated({
+        resolution: 'merged_content', content: editContent.value,
+      })
+      return ok
+    }
     const patch = pendingPatch(page)
     if (!patch) return 'saved'
     saveStatus.value = 'saving'
@@ -232,8 +321,10 @@ export function PagesView({ scope, header }: {
         return 'queued'
       }
       const updated = res.data
-      viewing.value = updated
-      pages.value = pages.value.map(p => p.id === updated.id ? updated : p)
+      // The PATCH answer carries no conflict detail — keep the open one.
+      viewing.value = { ...updated, conflict: updated.conflict ?? page.conflict ?? null }
+      pages.value = pages.value.map(p => p.id === updated.id
+        ? { ...p, ...updated, in_conflict: p.in_conflict } : p)
       saveStatus.value = 'saved'
       window.setTimeout(() => {
         if (saveStatus.value === 'saved') saveStatus.value = 'idle'
@@ -252,8 +343,9 @@ export function PagesView({ scope, header }: {
   }
 
   const scheduleAutosave = () => {
-    // Held for review: one explicit submit, never an autosave.
-    if (reviewed(viewing.value)) return
+    // Held for review: one explicit submit, never an autosave. Merging a
+    // federated conflict by hand: one explicit save of the resolution.
+    if (reviewed(viewing.value) || resolvingSides.value) return
     clearSaveTimer()
     saveTimer.current = window.setTimeout(() => {
       saveTimer.current = null
@@ -318,7 +410,8 @@ export function PagesView({ scope, header }: {
     const scopeNow = scopeRef.current
     const send = () => {
       const page = viewing.value ?? open
-      const patch = conflict.value || scopeNow.reviewed(page) ? null : pendingPatch(page)
+      const patch = conflict.value || resolvingSides.value || resolveView.value
+        || scopeNow.reviewed(page) ? null : pendingPatch(page)
       const save = patch
         ? api.patch(`${scopeNow.base}/${page.id}`,
           { ...patch, base_updated_at: page.updated_at }, { keepalive: true }).catch(() => {})
@@ -337,24 +430,38 @@ export function PagesView({ scope, header }: {
     editTitle.value = page.title
     editing.value = true
     conflict.value = null
+    resolveView.value = null
+    resolvingSides.value = null
     saveStatus.value = 'idle'
     mobileView.value = 'edit'
     void acquireAndHeartbeat(page.id)
   }
 
-  const createPage = async (title: string, content: string) => {
+  const createPage = async (title: string, content: string): Promise<Page | null> => {
     try {
       const res = await contentWrite<Page>(
         api.post(scope.base, { title, content }),
         { spaceId: scope.spaceId },
       )
       showNew.value = false
-      if (res.queued) return
+      if (res.queued) return null
       const page = res.data
       pages.value = [page, ...pages.value]
       openEditor(page)
+      return page
     } catch (err: unknown) {
       showToast(t('pages.create_failed', { error: errMessage(err) }), 'error')
+      return null
+    }
+  }
+
+  /** The host no longer has this page (deleted there): keep the words as a
+   *  new page of this space. */
+  const saveAsNewPage = async (page: Page) => {
+    const created = await createPage(page.title, page.content)
+    if (created) {
+      refusal.value = null
+      showToast(t('pages.refused.saved_as_new'), 'info')
     }
   }
 
@@ -367,6 +474,8 @@ export function PagesView({ scope, header }: {
       editing.value = false
       editLock.value = null
       conflict.value = null
+      resolveView.value = null
+      resolvingSides.value = null
       showHistory.value = false
       if (scope.locks) {
         try {
@@ -387,6 +496,7 @@ export function PagesView({ scope, header }: {
     editing.value = false
     saveStatus.value = 'idle'
     conflict.value = null
+    resolvingSides.value = null
   }
 
   /** "Save & close" / "Submit for review": close only once it's stored
@@ -407,6 +517,11 @@ export function PagesView({ scope, header }: {
   const close = async () => {
     const page = viewing.value
     if (!page) return
+    if (resolvingSides.value) {
+      if (!await confirmDialog(t('pages.discard_confirm'), { destructive: true })) return
+      closeEditor()
+      return
+    }
     if (pendingPatch(page)) {
       if (reviewed(page)) {
         if (!await confirmDialog(t('pages.discard_confirm'), { destructive: true })) return
@@ -459,39 +574,143 @@ export function PagesView({ scope, header }: {
     }
   }
 
+  // ─── Federated conflicts (v_48) ──────────────────────────────────────
+
+  /** Post a resolution of the open federated conflict, naming the
+   *  versions the user saw. ``'saved'`` (or queued for review: the view
+   *  closes, the toast says so), ``'conflict'`` when the versions changed
+   *  meanwhile (refetched — pick again), ``'error'``. */
+  const resolveFederated = async (
+    body: { resolution: 'side'; side: string } | { resolution: 'merged_content'; content: string },
+  ): Promise<SaveOutcome> => {
+    const page = viewing.value
+    const sides = page?.conflict?.sides.map(s => s.hash)
+    if (!page || !sides || resolving.value) return 'error'
+    resolving.value = true
+    try {
+      const res = await contentWrite<{ ok: boolean; page?: Page }>(
+        api.post(`${itemPath(page.id)}/resolve-conflict`, { ...body, sides }),
+        { spaceId: scope.spaceId },
+      )
+      resolveView.value = null
+      if (editing.value) closeEditor()
+      if (res.queued) return 'queued'
+      // On a member household the resolution goes to the host first.
+      showToast(res.data.page?.pending
+        ? t('pages.pending.resolution_sent', { host: scope.hostName() })
+        : t('pages.conflict.federated_resolved'), 'info')
+      await refetchViewing()
+      return 'saved'
+    } catch (err: unknown) {
+      if (errCode(err) === 'STALE') {
+        showToast(t('pages.conflict.federated_stale'), 'info')
+        await refetchViewing()
+        if (editing.value && resolvingSides.value) {
+          // Back to the versions as they are now.
+          closeEditor()
+          resolveView.value = { draft: null }
+        }
+        return 'conflict'
+      }
+      showToast(t('pages.save_failed_detail', { error: errMessage(err) }), 'error')
+      return 'error'
+    } finally {
+      resolving.value = false
+    }
+  }
+
+  /** "Merge by hand": every version (and the draft) into the editor. */
+  const mergeFederatedByHand = () => {
+    const page = viewing.value
+    const c = page?.conflict
+    if (!page || !c) return
+    const draft = resolveView.value?.draft ?? null
+    const versions = c.sides.map(s => ({
+      label: scope.nameOf(s.by), content: s.content,
+    }))
+    if (draft !== null) versions.push({ label: t('pages.conflict.federated_draft'), content: draft })
+    editTitle.value = page.title
+    editContent.value = conflictMarkers(versions)
+    resolvingSides.value = c.sides.map(s => s.hash)
+    resolveView.value = null
+    conflict.value = null
+    editing.value = true
+    saveStatus.value = 'idle'
+    mobileView.value = 'edit'
+    showToast(t('pages.conflict.merge_ready'), 'info')
+  }
+
   if (loading.value && pages.value.length === 0 && !viewing.value) return <Spinner />
 
   // ─── Render ──────────────────────────────────────────────────────────
 
-  // 1. Conflict view takes precedence over everything else.
+  // 1. Conflict views take precedence over everything else.
+  if (viewing.value && resolveView.value && viewing.value.conflict) {
+    const page = viewing.value
+    const c = page.conflict!
+    const draft = resolveView.value.draft
+    const panels: ConflictPanel[] = c.sides.map(side => ({
+      key: side.hash,
+      heading: t('pages.conflict.federated_by', { user: scope.nameOf(side.by) }),
+      meta: (
+        <>
+          <time dateTime={side.at} title={tsTitle(side.at)}>{relativeDocsTime(side.at)}</time>
+          {side.hash === c.current_hash && <> · {t('pages.conflict.federated_shown')}</>}
+        </>
+      ),
+      content: side.content,
+      keepLabel: t('pages.conflict.federated_keep'),
+      shown: side.hash === c.current_hash,
+      onKeep: () => { void resolveFederated({ resolution: 'side', side: side.hash }) },
+    }))
+    if (draft !== null) {
+      panels.push({
+        key: 'draft',
+        heading: t('pages.conflict.federated_draft'),
+        meta: t('pages.conflict.federated_draft_note'),
+        content: draft,
+        keepLabel: t('pages.conflict.federated_keep_draft'),
+        onKeep: () => { void resolveFederated({ resolution: 'merged_content', content: draft }) },
+      })
+    }
+    return (
+      <PageConflictView
+        testId="page-federated-conflict"
+        title={t('pages.conflict_title', { title: page.title })}
+        message={t('pages.conflict.federated_message', { count: String(c.sides.length) })}
+        panels={panels}
+        busy={resolving.value}
+        onMerge={mergeFederatedByHand}
+        onCancel={() => {
+          void (async () => {
+            if (draft !== null && draft !== page.content
+              && !await confirmDialog(t('pages.discard_confirm'), { destructive: true })) return
+            resolveView.value = null
+            if (editing.value) closeEditor()
+          })()
+        }}
+      />
+    )
+  }
+
   if (viewing.value && editing.value && conflict.value) {
     const c = conflict.value
     return (
-      <div class="sh-page-conflict">
-        <div class="sh-page-header">
-          <h1>{t('pages.conflict_title', { title: viewing.value.title })}</h1>
-        </div>
-        <p class="sh-conflict-banner" role="alert">
-          {t('pages.conflict_message', { user: c.theirs_by })}
-        </p>
-        <div class="sh-conflict-panels">
-          <div class="sh-conflict-panel">
-            <h3>{t('pages.your_version')}</h3>
-            <MarkdownView src={c.mine} />
-            <Button onClick={() => resolveConflict('mine')}>{t('pages.keep_mine')}</Button>
-          </div>
-          <div class="sh-conflict-panel">
-            <h3>{t('pages.their_version')}</h3>
-            <MarkdownView src={c.theirs} />
-            <Button onClick={() => resolveConflict('theirs')}>{t('pages.keep_theirs')}</Button>
-          </div>
-        </div>
-        <div class="sh-form-actions">
-          <Button variant="secondary" onClick={() => resolveConflict('merge')}>
-            {t('pages.conflict.merge')}
-          </Button>
-        </div>
-      </div>
+      <PageConflictView
+        title={t('pages.conflict_title', { title: viewing.value.title })}
+        message={t('pages.conflict_message', { user: c.theirs_by })}
+        panels={[
+          {
+            key: 'mine', heading: t('pages.your_version'), content: c.mine,
+            keepLabel: t('pages.keep_mine'), onKeep: () => resolveConflict('mine'),
+          },
+          {
+            key: 'theirs', heading: t('pages.their_version'), content: c.theirs,
+            keepLabel: t('pages.keep_theirs'), onKeep: () => resolveConflict('theirs'),
+          },
+        ]}
+        onMerge={() => resolveConflict('merge')}
+      />
     )
   }
 
@@ -499,6 +718,7 @@ export function PagesView({ scope, header }: {
   if (viewing.value && editing.value) {
     const page = viewing.value
     const forReview = reviewed(page)
+    const merging = !!resolvingSides.value
     const status = saveStatus.value
     const statusLabel =
       status === 'saving' ? t('pages.status.saving') :
@@ -536,12 +756,36 @@ export function PagesView({ scope, header }: {
                 </span>
               )
             )}
+            {page.pending && status !== 'saving' && (
+              <PendingPill host={scope.hostName()} />
+            )}
             <Button variant="secondary" onClick={() => void close()}>{t('common.close')}</Button>
-            <Button loading={submitting.value} onClick={() => void saveAndClose()}>
-              {forReview ? t('pages.submit_review') : t('pages.save_close')}
+            <Button loading={submitting.value || resolving.value} onClick={() => void saveAndClose()}>
+              {merging ? t('pages.conflict.federated_save_merge')
+                : forReview ? t('pages.submit_review') : t('pages.save_close')}
             </Button>
           </div>
         </div>
+        {merging && (
+          <p class="sh-page-review-note" role="note">{t('pages.conflict.federated_merge_note')}</p>
+        )}
+        {!merging && page.conflict && (
+          <ConflictBanner
+            count={page.conflict.sides.length}
+            canWrite={scope.canWrite}
+            onResolve={() => { resolveView.value = { draft: editContent.value } }}
+          />
+        )}
+        {refusal.value?.pageId === page.id && (
+          <RefusalNotice
+            reason={refusal.value.reason}
+            host={scope.hostName()}
+            onSaveAsNew={() => void saveAsNewPage({
+              ...page, title: editTitle.value.trim() || page.title, content: editContent.value,
+            })}
+            onDismiss={() => { refusal.value = null }}
+          />
+        )}
         {forReview && (
           <p class="sh-page-review-note" role="note">{t('pages.review_note')}</p>
         )}
@@ -621,6 +865,7 @@ export function PagesView({ scope, header }: {
                   {relativeDocsTime(editedAt)}
                 </time>
               </div>
+              {page.pending && <PendingPill host={scope.hostName()} />}
             </div>
             <div class="sh-row sh-page-viewer-actions">
               <Button
@@ -667,6 +912,21 @@ export function PagesView({ scope, header }: {
           )}
           {scope.canWrite && reviewed(page) && !pendingEdit && !pendingDelete && (
             <p class="sh-page-review-note" role="note">{t('pages.review_note')}</p>
+          )}
+          {page.conflict && (
+            <ConflictBanner
+              count={page.conflict.sides.length}
+              canWrite={scope.canWrite}
+              onResolve={() => { resolveView.value = { draft: null } }}
+            />
+          )}
+          {refusal.value?.pageId === page.id && (
+            <RefusalNotice
+              reason={refusal.value.reason}
+              host={scope.hostName()}
+              onSaveAsNew={() => void saveAsNewPage(page)}
+              onDismiss={() => { refusal.value = null }}
+            />
           )}
           {editLock.value && (
             <div class="sh-edit-lock-banner" role="alert">
@@ -772,6 +1032,16 @@ export function PagesView({ scope, header }: {
               >
                 <div class="sh-page-card-main">
                   <strong>{p.title}</strong>
+                  {p.in_conflict && (
+                    <span class="sh-badge sh-badge--conflict">
+                      {t('pages.conflict.federated_badge')}
+                    </span>
+                  )}
+                  {p.pending && (
+                    <span class="sh-badge sh-badge--pending" data-testid="page-not-shared">
+                      {t('pages.pending.badge')}
+                    </span>
+                  )}
                   {/* A ~160-char snippet of the body with the Markdown
                    *  noise (and a leading H1 repeating the title) stripped,
                    *  so it reads as body copy rather than source. */}
@@ -802,7 +1072,7 @@ export function PagesView({ scope, header }: {
         open={showNew.value}
         reviewed={scope.reviewedCreate}
         onCancel={() => { showNew.value = false }}
-        onCreate={(title, content) => createPage(title, content)}
+        onCreate={async (title, content) => { await createPage(title, content) }}
       />
     </div>
   )
@@ -847,5 +1117,85 @@ function MarkdownBasics() {
         <li><code>[[Page Title]]</code> — {t('pages.md.page_link')}</li>
       </ul>
     </details>
+  )
+}
+
+
+/** "Saved here · waiting for {host}" — this household's edit of a space
+ *  page that the host has not sequenced yet (v_48). */
+function PendingPill({ host }: { host: string }) {
+  return (
+    <span
+      class="sh-page-pending-pill"
+      role="status"
+      data-testid="page-pending-host"
+      title={t('pages.pending.hint', { host })}
+    >
+      {t('pages.pending.pill', { host })}
+    </span>
+  )
+}
+
+/** Concurrent edits the host could not merge — kept beside the page. */
+function ConflictBanner({ count, canWrite, onResolve }: {
+  count: number
+  canWrite: boolean
+  onResolve: () => void
+}) {
+  return (
+    <div
+      class="sh-conflict-banner sh-page-conflict-banner"
+      role="status"
+      data-testid="page-conflict-banner"
+    >
+      <div>
+        <strong>{t('pages.conflict.federated_banner')}</strong>{' '}
+        <span>
+          {canWrite
+            ? t('pages.conflict.federated_banner_hint', { count: String(count) })
+            : t('pages.conflict.federated_read_only')}
+        </span>
+      </div>
+      {canWrite && (
+        <Button onClick={onResolve}>{t('pages.conflict.federated_resolve')}</Button>
+      )}
+    </div>
+  )
+}
+
+function refusalText(reason: RefusalReason): string {
+  switch (reason) {
+    case 'access': return t('pages.refused.access')
+    case 'archived': return t('pages.refused.archived')
+    case 'gone': return t('pages.refused.gone')
+    case 'rate_limited': return t('pages.refused.rate_limited')
+    case 'bad_base': return t('pages.refused.bad_base')
+  }
+}
+
+/** The host refused this household's edit — why, and what to do now. */
+function RefusalNotice({ reason, host, onSaveAsNew, onDismiss }: {
+  reason: RefusalReason
+  host: string
+  onSaveAsNew: () => void
+  onDismiss: () => void
+}) {
+  return (
+    <div
+      class="sh-page-refusal"
+      role="alert"
+      data-testid="page-refusal"
+    >
+      <p>
+        <strong>{t('pages.refused.title', { host })}</strong>{' '}
+        <span>{refusalText(reason)}</span>
+      </p>
+      <div class="sh-row sh-page-refusal-actions">
+        {reason === 'gone' && (
+          <Button onClick={onSaveAsNew}>{t('pages.refused.save_as_new')}</Button>
+        )}
+        <Button variant="secondary" onClick={onDismiss}>{t('pages.refused.dismiss')}</Button>
+      </div>
+    </div>
   )
 }

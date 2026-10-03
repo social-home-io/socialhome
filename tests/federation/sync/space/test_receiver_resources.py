@@ -154,10 +154,15 @@ class _TaskRepoStub:
 class _PageRepoStub:
     def __init__(self, collector):
         self._c = collector
+        #: Pages "held here", by (id, space) — for the v_48 engine path.
+        self.held: dict[tuple[str, str], object] = {}
 
     async def save(self, page, *, space_id):
         self._c.pages.append(page)
         return True
+
+    async def get_space_page(self, page_id, *, space_id):
+        return self.held.get((page_id, space_id))
 
 
 class _StickyRepoStub:
@@ -668,6 +673,90 @@ async def test_pages(setup):
     )
     assert len(c.pages) == 1
     assert c.pages[0].id == "pg-1"
+
+
+class _FakeConflicts:
+    """The v_48 engine: mode + recorded mirrors."""
+
+    def __init__(self, mode: str = "member", host: str = "peer-a") -> None:
+        from socialhome.services.page_conflict_service import PageMode
+
+        self.mode_ = PageMode(mode)
+        self.host = host
+        self.mirrored: list[dict] = []
+
+    async def mode(self, space_id):
+        return self.mode_, self.host
+
+    async def mirror(self, **kwargs):
+        self.mirrored.append(kwargs)
+
+
+_PAGE_RECORD = {
+    "id": "pg-1",
+    "title": "Welcome",
+    "content": "Hi again",
+    "created_by": "u-1",
+    "last_editor_user_id": "u-2",
+    "created_at": "2026-04-18T00:00:00+00:00",
+    "updated_at": "2026-04-19T00:00:00+00:00",
+}
+
+
+async def test_a_host_record_with_seq_is_mirrored_by_seq(setup):
+    """v_48: the host's chunk is its version — mirrored by ``seq`` (never
+    an overwrite, never a revert)."""
+    r, c, kp = setup
+    conflicts = _FakeConflicts()
+    r._page_conflicts = conflicts
+    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": 7, "conflict": []}])
+    assert c.pages == []
+    (call,) = conflicts.mirrored
+    assert call["version"].seq == 7 and call["version"].content == "Hi again"
+
+
+async def test_a_malformed_host_record_is_skipped(setup):
+    r, c, kp = setup
+    conflicts = _FakeConflicts()
+    r._page_conflicts = conflicts
+    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": -3}])
+    assert conflicts.mirrored == [] and c.pages == []
+
+
+async def test_a_record_from_a_non_host_never_updates_a_held_page(setup):
+    r, c, kp = setup
+    conflicts = _FakeConflicts(host="someone-else")
+    r._page_conflicts = conflicts
+    r._page_repo.held[("pg-1", "sp-1")] = object()
+    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": 99}])
+    assert conflicts.mirrored == [] and c.pages == []
+
+
+async def test_a_new_page_from_a_non_host_lands_unsequenced(setup):
+    r, c, kp = setup
+    r._page_conflicts = _FakeConflicts(host="someone-else")
+    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": 99}])
+    (page,) = c.pages
+    assert (page.id, page.seq) == ("pg-1", 0)
+
+
+async def test_under_a_legacy_host_records_are_taken_whole(setup):
+    r, c, kp = setup
+    conflicts = _FakeConflicts("legacy")
+    r._page_conflicts = conflicts
+    await _send(r, kp, "pages", [_PAGE_RECORD])
+    assert [p.content for p in c.pages] == ["Hi again"]
+    # … but a record from the host WITH ``seq`` is its version, mirrored
+    # even before we saw its v_48 capabilities.
+    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": 3}])
+    assert [m["version"].seq for m in conflicts.mirrored] == [3]
+
+
+async def test_the_host_takes_no_page_record(setup):
+    r, c, kp = setup
+    r._page_conflicts = _FakeConflicts("host", host="self")
+    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": 3}, _PAGE_RECORD])
+    assert c.pages == []
 
 
 async def test_stickies(setup):

@@ -937,6 +937,317 @@ async def test_page_saved_missing_title_drops(repos, handlers):
     assert repos["page"].saved == []
 
 
+class _FakeConflicts:
+    """The v_48 engine, recording what the handler asked of it."""
+
+    def __init__(self, mode: str = "member", host: str = "host-iid") -> None:
+        from socialhome.services.page_conflict_service import PageMode
+
+        self.mode_ = PageMode(mode)
+        self.host = host
+        self.sequenced: list[dict] = []
+        self.mirrored: list[dict] = []
+        self.refused: list[dict] = []
+        self.legacy: list[tuple] = []
+
+    async def mode(self, space_id):
+        return self.mode_, self.host
+
+    async def sequence(self, **kwargs):
+        self.sequenced.append(kwargs)
+
+    async def mirror(self, **kwargs):
+        self.mirrored.append(kwargs)
+
+    async def refuse(self, **kwargs):
+        self.refused.append(kwargs)
+
+    async def legacy_apply(self, page, incoming, *, space_id):
+        self.legacy.append((page.id, incoming.content))
+
+
+def _page_handlers(bus, repos, conflicts, *, auth=None):
+    return SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=auth or repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        page_conflicts=conflicts,
+    )
+
+
+def _held(repos, page_id="p-1"):
+    """Hold ``page_id`` as a real Page row (the handler reads ``created_by``)."""
+    repos["page"].rows.claim(page_id, "sp-1")
+
+
+_H = "sha256:" + "a" * 64
+
+
+async def test_the_host_sequences_a_members_proposal(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": "new",
+                "actor_user_id": "u-ed",
+                "base_seq": 2,
+                "base_hash": _H,
+            },
+            space_id="sp-1",
+        )
+    )
+    (call,) = engine.sequenced
+    assert call["proposer_instance"] == "peer-a"
+    assert (call["proposal"].base_seq, call["proposal"].base_hash) == (2, _H)
+    assert repos["page"].saved == []
+
+
+async def test_the_host_refuses_an_access_refused_proposal(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine, auth=_AllowAuthorship(access=False))
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {"id": "p-1", "title": "T", "content": "x", "base_seq": 1},
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == []
+    (refusal,) = engine.refused
+    assert refusal["reason"] == "access" and refusal["proposer_instance"] == "peer-a"
+
+
+async def test_the_host_answers_gone_for_an_unknown_page(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {"id": "p-9", "title": "T", "content": "x", "base_seq": 3},
+            space_id="sp-1",
+        )
+    )
+    assert [r["reason"] for r in engine.refused] == ["gone"]
+
+
+@pytest.mark.parametrize(
+    "bad", [{"base_seq": -1}, {"base_seq": 1, "base_hash": "nope"}, {"resolves": "x"}]
+)
+async def test_the_host_refuses_a_malformed_proposal_bad_base(bus, repos, bad):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {"id": "p-1", "title": "T", "content": "x", **bad},
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == []
+    assert [r["reason"] for r in engine.refused] == ["bad_base"]
+
+
+async def test_the_host_ignores_a_replay_of_a_held_page(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    for et, extra in (
+        (FederationEventType.SPACE_PAGE_CREATED, {}),
+        (FederationEventType.SPACE_PAGE_UPDATED, {"seq": 3}),
+    ):
+        await h._on_page_saved(
+            _event(
+                et,
+                {"id": "p-1", "title": "T", "content": "x", **extra},
+                space_id="sp-1",
+            )
+        )
+    assert engine.sequenced == [] and engine.refused == []
+
+
+async def test_the_host_refuses_an_unbound_actor(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine, auth=_AllowAuthorship(answer=False))
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": "x",
+                "base_seq": 1,
+                "actor_user_id": "u-x",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == []
+    assert [r["reason"] for r in engine.refused] == ["access"]
+
+
+async def test_the_host_sends_no_refusal_for_a_held_write(bus, repos):
+    class _Holds(_AllowAuthorship):
+        async def hold_or_refuse(self, event, *, space_id, what, row_id, user_id):
+            return True
+
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine, auth=_Holds(answer=False))
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": "x",
+                "base_seq": 1,
+                "actor_user_id": "u-new",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == [] and engine.refused == []
+
+
+async def test_the_host_takes_no_host_version(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "seq": 9,
+                "sequenced": {
+                    "proposer_instance": "x",
+                    "proposal_hash": _H,
+                    "outcome": "applied",
+                },
+            },
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == [] and engine.mirrored == []
+
+
+async def test_a_member_mirrors_the_hosts_version(bus, repos):
+    engine = _FakeConflicts("member", host="peer-a")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {"id": "p-1", "title": "T", "content": "x", "seq": 4, "conflict": []},
+            space_id="sp-1",
+        )
+    )
+    (call,) = engine.mirrored
+    assert call["version"].seq == 4
+
+
+async def test_a_member_mirrors_a_stateless_refusal(bus, repos):
+    engine = _FakeConflicts("member", host="peer-a")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "seq": 0,
+                "sequenced": {
+                    "proposer_instance": "self",
+                    "proposal_hash": _H,
+                    "outcome": "refused",
+                    "reason": "gone",
+                },
+            },
+            space_id="sp-1",
+        )
+    )
+    (call,) = engine.mirrored
+    assert not call["version"].has_state
+
+
+async def test_a_member_ignores_a_malformed_host_version(bus, repos):
+    engine = _FakeConflicts("member", host="peer-a")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {"id": "p-1", "title": "T", "content": "x", "seq": "nine"},
+            space_id="sp-1",
+        )
+    )
+    assert engine.mirrored == []
+
+
+async def test_a_member_ignores_another_members_version_of_a_held_page(bus, repos):
+    engine = _FakeConflicts("member", host="host-iid")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {"id": "p-1", "title": "T", "content": "forged", "seq": 99},
+            space_id="sp-1",
+        )
+    )
+    assert engine.mirrored == [] and repos["page"].saved == []
+
+
+async def test_a_member_stores_another_members_new_page_unsequenced(bus, repos):
+    engine = _FakeConflicts("member", host="host-iid")
+    h = _page_handlers(bus, repos, engine)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_CREATED,
+            {"id": "p-9", "title": "T", "content": "x", "created_by": "u-1", "seq": 99},
+            space_id="sp-1",
+        )
+    )
+    (saved,) = repos["page"].saved
+    assert (saved.id, saved.seq) == ("p-9", 0)
+    # … but not an update of a page it never held.
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {"id": "p-8", "title": "T", "content": "x"},
+            space_id="sp-1",
+        )
+    )
+    assert len(repos["page"].saved) == 1
+
+
+async def test_under_a_legacy_host_a_held_page_is_last_write_wins(bus, repos):
+    engine = _FakeConflicts("legacy", host="host-iid")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {"id": "p-1", "title": "T", "content": "lww"},
+            space_id="sp-1",
+        )
+    )
+    assert engine.legacy == [("p-1", "lww")]
+
+
 async def test_page_deleted(repos, handlers):
     repos["page"].rows.claim("p-1", "sp-1")
     await handlers._on_page_deleted(
@@ -4411,3 +4722,41 @@ def test_deleter_prefers_the_approver_then_the_actor():
     )
     assert _deleter(ev({"moderation": "junk", "actor_user_id": "u-a"})) == "u-a"
     assert _deleter(ev({})) == ""
+
+
+async def test_the_archived_listener_answers_writers_only(bus, repos):
+    class _Engine(_FakeConflicts):
+        def __init__(self):
+            super().__init__("host", host="self")
+            self.archived: list = []
+
+        async def on_archived_write(self, event, space):
+            self.archived.append(event.from_instance)
+
+    class _Fed(_FakeFederationService):
+        def __init__(self):
+            super().__init__()
+            self.listeners: list = []
+
+        def add_archived_write_listener(self, cb):
+            self.listeners.append(cb)
+
+    engine = _Engine()
+    fed = _Fed()
+    h = _page_handlers(bus, repos, engine)
+    h.attach_to(fed)
+    (listener,) = fed.listeners
+    space = SimpleNamespace(id="sp-1", owner_instance_id="self")
+    ev = _event(FederationEventType.SPACE_PAGE_UPDATED, {"id": "p-1"}, space_id="sp-1")
+    await listener(ev, space)
+    assert engine.archived == ["peer-a"]
+    # A household without a writer seat hears nothing; nor a non-page write.
+    h._authorship = _AllowAuthorship(answer=False)
+    await listener(ev, space)
+    h._authorship = repos["auth"]
+    await listener(
+        _event(FederationEventType.SPACE_STICKY_UPDATED, {"id": "s"}, space_id="sp-1"),
+        space,
+    )
+    await listener(ev, None)
+    assert engine.archived == ["peer-a"]

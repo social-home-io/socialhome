@@ -431,6 +431,24 @@ That single command runs the full sequence:
    (from **c**) and **a**'s try to make an admin both answer 403, and the
    target stays a member on **b**.
 
+9c4. ``page-concurrent-edit`` (v_48 host-sequenced pages) — **b** hosts a
+   fresh "Wiki club" and seats **a** and **c**; **b** is the only
+   sequencer of its pages. **a** creates a three-paragraph page; once every
+   household holds it (``seq`` ≥ 1), **a** edits paragraph 1, **c**
+   paragraph 3 and **b** appends a paragraph, all at once. **a** and **c**
+   propose to **b** alone; **b** merges and broadcasts canonical versions,
+   so **a**, **b** and **c** end on the same ``seq`` and body with all
+   three edits and no conflict. Then **a** and **c** rewrite paragraph 2
+   at once: **b** keeps one and makes the other a conflict side — every
+   household holds the identical ``conflict`` (same side hashes, same
+   ``current_hash``); a ``PATCH`` while conflicted answers 200 (conflicts
+   never block). Both edits start from the same settled version, so the
+   conflict forms in whichever order **b** sees them. The step polls every
+   3 s and backs off on 429 (every ``/api/spaces/…`` request of a user
+   shares one 60 / min bucket). **a** resolves with ``resolution: "side"`` + ``sides`` and all
+   three converge on one ``seq`` with no conflict. The ``verify`` step's
+   ``proto_version >= OURS`` check covers the v_48 round-trip.
+
 9d. ``admin-revoke-rotation`` (v_44 space authority key rotation) — **a**
    creates a private space with ``delegated_admin_authority`` on, invites
    **b** and **c**, promotes **b** to admin and waits until **b** holds the
@@ -486,7 +504,8 @@ invite-redeem-routed → remote-invite-routed → space-post-routed →
 space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
-space-report → forwarded-role-change → admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
+space-report → forwarded-role-change → page-concurrent-edit →
+admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
 unpair-offline`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /

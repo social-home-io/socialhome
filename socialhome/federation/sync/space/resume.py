@@ -43,11 +43,15 @@ re-emitted event with no special-case logic and dedups by primary key.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ....domain.federation import FederationEventType
+from ....domain.federation_capabilities import FederationCapability
 from ....domain.link_preview import link_preview_to_dict
+from ....domain.page_version import version_hash
+from ....services.page_conflict_service import side_to_wire
 from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
@@ -397,15 +401,62 @@ class SpaceSyncResumeProvider:
     ) -> int:
         if self._page_repo is None:
             return 0
+        sequenced = await self._federation.peer_supports(
+            to, min_version=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES
+        )
+        space = await self._space_repo.get(space_id)
+        if sequenced and space is not None and space.owner_instance_id == to:
+            # v_48: the host sequences the pages — a replay to it could only
+            # roll it back. Our own drafts reach it as proposals (forwarder).
+            return 0
         pages = await self._page_repo.list_since(
             space_id,
             since,
             limit=MAX_PER_RESOURCE,
         )
+        # v_48: each replayed page carries the host's ``seq`` (and, from the
+        # host, its version hash + conflict list), so a member mirrors it by
+        # sequence; a replay from anyone but the host never updates a page
+        # the receiver holds. An unacknowledged local draft is never
+        # replayed — the canonical version it was made from is (or nothing,
+        # for an unsequenced create). An older peer gets the plain fields.
+        payloads: dict[str, dict] = {}
+        replayed = []
+        for page in pages:
+            if page.pending_base_seq is not None:
+                base = await self._page_repo.get_draft_base(page.id, space_id=space_id)
+                if base is None or not base.title:
+                    continue
+                page = replace(
+                    page,
+                    title=base.title,
+                    content=base.content,
+                    cover_image_url=base.cover_image_url,
+                    seq=base.seq,
+                )
+            payload = _page_to_payload(page)
+            # A replay says so: a v_48 host never takes it for a proposal
+            # (it could roll the host back, or bring a deleted page back).
+            payload["replay"] = True
+            if sequenced:
+                sides = await self._page_repo.list_conflict_sides(
+                    page.id, space_id=space_id
+                )
+                payload.update(
+                    seq=page.seq,
+                    version_hash=version_hash(
+                        page.title, page.content, page.cover_image_url
+                    ),
+                    last_editor_user_id=page.last_editor_user_id or page.created_by,
+                    conflict=[side_to_wire(s) for s in sides],
+                )
+            payloads[page.id] = payload
+            replayed.append(page)
+        pages = replayed
         return await self._send_each(
             pages,
             FederationEventType.SPACE_PAGE_CREATED,
-            _page_to_payload,
+            lambda page: payloads[page.id],
             space_id=space_id,
             to=to,
         )

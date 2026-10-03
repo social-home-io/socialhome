@@ -731,7 +731,19 @@ from __future__ import annotations
 #:   roster gossip. **Gated, no fallback**: a host below v_47 drops the
 #:   unknown action silently, so a stub refuses the request with 409
 #:   ``HOST_TOO_OLD`` instead of reporting it as sent.
-OURS: int = 47
+#: * **v_48** (2026-10-02) — host-sequenced space pages. The space's host
+#:   is the only sequencer of a page: a member household sends its edit to
+#:   the host alone as a proposal (``SPACE_PAGE_UPDATED`` / ``_CREATED`` with
+#:   ``base_seq`` + ``base_hash`` + optional ``resolves``); the host merges it
+#:   (bounded paragraph diff3) or keeps it as a conflict side, bumps the
+#:   page's ``seq`` and broadcasts the canonical version with ``seq``,
+#:   ``version_hash``, ``conflict`` and ``sequenced`` (all sealed); members
+#:   mirror by ``seq``. Sync / resume records carry ``seq``. **Gated,
+#:   degraded fallback**: under a host below v_48 everyone stays last write
+#:   wins; a v_48 host sends a member below v_48 the canonical version
+#:   without the new fields (``legacy_payload``) and treats that member's
+#:   ancestry-less update as a proposal based on the current version.
+OURS: int = 48
 
 
 class FederationCapability:
@@ -1139,6 +1151,11 @@ class FederationCapability:
     #: change (409 ``HOST_TOO_OLD``) rather than claim it was sent.
     MIN_FOR_FORWARDED_ROLE_CHANGE = 47
 
+    #: Host-sequenced space pages (v_48): members propose to the host, the
+    #: host sequences (``seq``) and broadcasts the canonical version with its
+    #: conflict list. Under an older host pages stay last write wins.
+    MIN_FOR_HOST_SEQUENCED_PAGES = 48
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1283,6 +1300,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE,
         "Role changes from member households",
     ),
+    (
+        FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
+        "Host-sequenced shared pages",
+    ),
 ]
 
 
@@ -1355,6 +1376,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE,
         FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO,
         FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE,
+        FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
     }
 )
 

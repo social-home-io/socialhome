@@ -183,6 +183,42 @@ rule in `access_admits` for edits / deletes:
   it the same way.
 - Accepted from the host, a release moves the held row to approved.
 
+#### Space pages (v_48, host-sequenced)
+
+Pages are sequenced by the space's host, and the host alone applies a
+page queue item. An `edit` item (a patch, or `op: "resolve_conflict"`)
+stores the `base_seq` the submitter saw.
+
+- **Stale / force.** On approval, if the page's `seq` moved since the
+  item was submitted, the host answers 409 `STALE` (an item without
+  `base_seq`, from before v_48, falls back to `base_updated_at`).
+  **Force** applies the item's patch as a **fast-forward** over the current
+  version, never as a merge, so the approval stays bound to exactly that
+  patch. A conflict never blocks an approved edit.
+- **Resolutions.** The item carries `resolution` (`side` /
+  `merged_content` / `mine` / `theirs`), `side` (the kept version's
+  `sha256:` hash) and `sides` (the hashes the submitter saw). It also
+  carries `merged_content`, and `side_content`, which is the kept side's
+  body for the reviewer's preview only and never compared. `validate()`
+  keeps exactly these fields and refuses a `side` resolution without a
+  well-formed hash or a malformed `sides`. A resolution with no open
+  conflict is refused at submit. On apply, sides that changed since the
+  item was submitted give 409 `STALE` **even when forced**. A conflict
+  resolved meanwhile gives 410 `TARGET_GONE`.
+- **Release binding** (`_page_resolution`). A `side` resolution's wire
+  `title` + `content` + `cover_image_url` must hash to exactly the item's
+  `side`. A `merged_content` resolution carries the item's text under the
+  held title and cover. `mine` / `theirs` (two-way, pre-v_48) leave the
+  content uncompared.
+- **Free keys.** The host-sequencing bookkeeping is free on
+  `SPACE_PAGE_CREATED` / `SPACE_PAGE_UPDATED`: `seq`, `version_hash`,
+  `conflict`, `sequenced`, `last_editor_user_id`, `cover_image_url`,
+  `updated_at`. The rules still compare `cover_image_url` whenever the
+  wire carries it. `ancestors` (an earlier v_48 draft) is no longer free.
+- **Member check.** Members don't re-run the access level on a host
+  version. When the moderation block is present they still run the
+  release check against the item they hold.
+
 A create's owner-bound id still binds to the author. A plain member's
 create (or edit of someone else's row) without a valid block is refused
 under `moderated` on every v_43 receiver — posts included, whatever

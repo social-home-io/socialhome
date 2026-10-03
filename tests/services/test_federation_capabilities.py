@@ -22,7 +22,8 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 47
+    assert OURS == 48
+    assert FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES == 48
     assert FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE == 47
     assert FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO == 46
     assert FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION == 44
@@ -160,6 +161,7 @@ def test_space_features_missing_below_v13():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
 
 
@@ -189,6 +191,7 @@ def test_space_features_missing_below_v16():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
 
 
@@ -215,6 +218,7 @@ def test_space_features_missing_below_v22():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
 
 
@@ -239,6 +243,7 @@ def test_space_features_missing_below_v23():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
 
 
@@ -264,6 +269,7 @@ def test_space_features_missing_below_v24():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(27) == [
         "Mesh route-stale nack",
@@ -283,6 +289,7 @@ def test_space_features_missing_below_v24():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
 
 
@@ -310,6 +317,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(29) == [
         "Cross-household Follower seats",
@@ -327,6 +335,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(30) == [
         "Authenticated mesh-routed origin",
@@ -343,6 +352,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(31) == [
         "Space roster snapshot",
@@ -358,6 +368,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(32) == [
         "Shared gallery albums",
@@ -372,6 +383,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(33) == [
         "Creator-bound album ids",
@@ -385,6 +397,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(34) == [
         "Creator-bound content ids",
@@ -397,6 +410,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(35) == [
         "Creator-bound content ids",
@@ -409,6 +423,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(36) == [
         "Space timetables",
@@ -420,6 +435,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(38) == [
         "Space timetables",
@@ -431,6 +447,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(39) == [
         "Task priority and labels",
@@ -441,6 +458,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(40) == [
         "Space moderators",
@@ -450,6 +468,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(41) == [
         "Admin-only space features",
@@ -458,6 +477,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(42) == [
         "Reviewed across households",
@@ -465,23 +485,30 @@ def test_space_features_missing_below_v32_is_empty():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(43) == [
         "Space key rotation on revoke",
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(44) == [
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert space_features_missing_below(45) == [
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
-    assert space_features_missing_below(46) == ["Role changes from member households"]
+    assert space_features_missing_below(46) == [
+        "Role changes from member households",
+        "Host-sequenced shared pages",
+    ]
 
 
 def test_space_scoped_min_versions_are_capability_constants():
