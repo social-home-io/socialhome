@@ -14,7 +14,7 @@ answer.
 identity-free relay body (:class:`GfsPublish`). There is no slot for
 ``from_instance`` or a household signature, so a retry cannot add identity
 by construction; the sender re-checks ``anonymous_publish`` before every
-retry and drops the item rather than fall back to the identified body.
+retry and drops the item if the GFS cannot take the identity-free body.
 
 **Why in memory, not the durable outbox or a new table.** The outbox
 (``federation_outbox``) is keyed by a recipient *instance* and stores a

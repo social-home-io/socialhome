@@ -255,7 +255,6 @@ class SpacePublicOutbound:
                 space_id=event.space_id,
                 event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
                 payload=envelope,
-                from_instance=self._own_instance_id,
             )
         except Exception:
             log.exception(
@@ -354,7 +353,6 @@ class SpacePublicOutbound:
                 space_id=event.space_id,
                 event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
                 payload=envelope,
-                from_instance=self._own_instance_id,
             )
         except Exception:
             log.exception(

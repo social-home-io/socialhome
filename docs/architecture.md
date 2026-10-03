@@ -420,8 +420,9 @@ the target's negative route cooldown, plus a 5 s margin — roughly 35 s,
 a cooldown is a fresh route discovery. A **route learned** for that member
 (`RouteDiscoveryService.add_route_learned_listener` →
 `FederationService.on_route_learned`, fired whenever a route is cached,
-including a late `SPACE_ROUTE_FOUND`) cuts the current wait short, so the
-queue drains the moment a path exists. Progress resets the budget (it is per
+including a late `SPACE_ROUTE_FOUND`) or the member **coming back online**
+(`ConnectionReachable` for that household — it is a direct peer again)
+cuts the current wait short, so the queue drains the moment a path exists. Progress resets the budget (it is per
 outage); after four re-sends in a row miss, the whole queue is given up with
 one WARNING naming each lost event and its space. Before each send it
 re-reads membership, so a household that left or was removed meanwhile gets
@@ -451,11 +452,14 @@ unfollowed redirect, is permanent and not retried. While a connection has
 retries pending, a new publish to it queues behind them, so subscribers see
 order. A queued item is exactly `{space_id, event_type, payload}` — there is
 no slot for `from_instance` or a household signature, so a retry cannot add
-identity. Before each retry the sender re-checks that the space is still
-published to that connection and that the GFS has proved `anonymous_publish`
-under its signed capability block; an unreachable `/gfs/info` waits, and a
-GFS that does not support the identity-free body has the item dropped rather
-than re-sent with the legacy identified body. **Why in memory:** the outbox
+identity. **There is no identified body at all any more:** a publish goes
+only to a GFS that has proved `anonymous_publish` under its signed capability
+block. A cold cache with `/gfs/info` unreachable puts the publish straight
+into the retry queue (nothing is sent until the capability is proven); a
+reachable GFS without the proof — an older build — **receives no space
+publishes until it upgrades**, with one WARNING per connection. Before each
+retry the sender re-checks that the space is still published to that
+connection and re-checks the capability the same way. **Why in memory:** the outbox
 row is keyed by a recipient instance and re-signed on redelivery — a GFS
 publish has neither — so carrying it there, or in a new table, would be a
 migration for a payload that is already authority-signed public ciphertext,

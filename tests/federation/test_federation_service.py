@@ -4604,3 +4604,28 @@ def test_attach_mesh_subscribes_to_learned_routes():
     route = MagicMock()
     svc.attach_mesh(route_service=route, routed_handler=MagicMock())
     route.add_route_learned_listener.assert_called_once_with(svc.on_route_learned)
+
+
+@pytest.mark.asyncio
+async def test_a_member_coming_back_online_drains_its_deferred_queue(monkeypatch):
+    """``ConnectionReachable`` for a member with a deferred queue (it became
+    a direct peer and answered again) re-sends at once instead of after the
+    backoff. The event for another household wakes nothing."""
+    monkeypatch.setattr(federation_service_mod, "MESH_DEFERRED_SEND_MARGIN_S", 600.0)
+    route = _NoRouteUntilLearnedRouteService()
+    svc, _repo, routed = _mesh_svc_with_route(route)
+    await svc.broadcast_to_space_members(
+        "space-1",
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "space-1", "post_id": "p1"},
+    )
+    assert svc._deferred_mesh_tasks
+
+    route.known = True
+    await svc._bus.publish(ConnectionReachable(instance_id="someone-else"))
+    await asyncio.sleep(0.02)
+    assert routed.sent == []
+    await svc._bus.publish(ConnectionReachable(instance_id="mesh-only-peer"))
+    await _drain_deferred(svc)
+
+    assert [s[1] for s in routed.sent] == ["space_post_created"]

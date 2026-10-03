@@ -115,8 +115,8 @@ class GfsInfoView(GfsBaseView):
         else:
             log.warning(
                 "GET /gfs/info: no cluster signing key wired — serving an "
-                "UNSIGNED capability block; paired households will keep "
-                "sending the identified (legacy) relay body",
+                "UNSIGNED capability block; paired households will not "
+                "relay space events to this server until it is signed",
             )
         return web.json_response(body)
 

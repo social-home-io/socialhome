@@ -424,6 +424,8 @@ class FederationService:
             LocalHomeLocationUpdated,
             self._on_local_home_location_updated,
         )
+        # A member coming back online drains its deferred mesh queue now.
+        self._bus.subscribe(ConnectionReachable, self._on_connection_reachable)
 
     def _build_inbound_pipeline(self):
         """Lazily construct the §24.11 validation middleware chain.
@@ -2314,6 +2316,15 @@ class FederationService:
         by :meth:`attach_mesh`. Synchronous and cheap — it only wakes the
         target's drain task, if one is waiting.
         """
+        self._wake_deferred_mesh_send(target)
+
+    async def _on_connection_reachable(self, event: ConnectionReachable) -> None:
+        """A peer answered again after being unreachable: if broadcasts to
+        it are deferred, re-send them now rather than after the backoff
+        (:meth:`send_with_mesh_fallback` takes the direct path for it)."""
+        self._wake_deferred_mesh_send(event.instance_id)
+
+    def _wake_deferred_mesh_send(self, target: str) -> None:
         wake = self._deferred_mesh_wake.get(target)
         if wake is not None:
             wake.set()
@@ -2334,7 +2345,7 @@ class FederationService:
         the next one goes; a :data:`DEFERRABLE_MESH_ERRORS` miss keeps the
         head where it is — nothing overtakes it — and backs off
         (:meth:`_mesh_retry_delay_s`). ``wake`` (a route to ``target`` was
-        learned) cuts a wait short. After
+        learned, or ``target`` became reachable again) cuts a wait short. After
         ``len(MESH_DEFERRED_RETRY_BACKOFF_S)`` re-sends in a row miss, the
         whole queue is given up with one WARNING naming each event and its
         space. A non-snapshot item re-reads membership before every attempt
