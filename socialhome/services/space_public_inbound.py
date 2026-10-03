@@ -30,7 +30,10 @@ trusted by the receiver:
 4b. **Writer cert (v_49)** — when the inner carries the author household's
    ``writer_cert``, it must verify against the pinned space key, name this
    space and the envelope's epoch, name the inner's ``author_pk`` and grant
-   ``write``; otherwise the item is dropped (WARNING). An inner with NO cert
+   ``write``, and the epoch must still be open here — the newest content
+   epoch we hold, or the previous one for ``WRITER_CERT_EPOCH_GRACE_S``
+   after the newest key arrived; otherwise the item is dropped (WARNING). An
+   inner with NO cert
    is a pre-v_49 author and keeps today's behaviour (authorized by the
    relaying seed holder's authority signature) — the migration tripwire.
 5. **Dedupe** — the GFS relay is at-least-once and keeps no replay cache
@@ -65,12 +68,12 @@ from ..authority_sig import (
 from ..domain.events import SpacePostCreated
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
+from ..domain.writer_cert import WRITER_SCOPE_WRITE
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
 from .inbound_media_store import local_media_ref, local_media_refs
 from .link_preview_service import wire_link_preview
-from ..domain.writer_cert import WRITER_SCOPE_WRITE
 from .space_public_author import (
     UnsupportedLinkPreviewSigSuite,
     verified_link_preview,
@@ -99,6 +102,7 @@ class SpacePublicInbound:
         "_own_instance_id",
         "_mentions",
         "_pin_refresher",
+        "_writer_certs",
     )
 
     def __init__(
@@ -119,6 +123,13 @@ class SpacePublicInbound:
         #: household's view of the space's members. ``None`` → no mentions.
         self._mentions = mention_resolver
         self._pin_refresher: "AuthorityPinRefresher | None" = None
+        #: v_49 — adds epoch freshness to the writer-cert check. Without it
+        #: a cert is still verified, just not against the epoch window.
+        self._writer_certs: SpaceWriterCertService | None = None
+
+    def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
+        """Wire the v_49 writer-cert service (epoch freshness)."""
+        self._writer_certs = writer_certs
 
     def attach_pin_refresher(self, refresher: "AuthorityPinRefresher") -> None:
         """Wire the lazy pin heal (v_44): on an authority failure the
@@ -259,7 +270,7 @@ class SpacePublicInbound:
             return
         # v_49 — a v_49 author's item carries its household's writer cert;
         # present means it MUST hold (an absent one is a pre-v_49 author).
-        if inner.get(WRITER_CERT_FIELD) is not None and not self._writer_cert_ok(
+        if inner.get(WRITER_CERT_FIELD) is not None and not await self._writer_cert_ok(
             space, inner, epoch=epoch, pinned_pk_hex=pinned_pk_hex
         ):
             log.warning(
@@ -299,12 +310,22 @@ class SpacePublicInbound:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _writer_cert_ok(space, inner: dict, *, epoch: int, pinned_pk_hex: str) -> bool:
+    async def _writer_cert_ok(
+        self, space, inner: dict, *, epoch: int, pinned_pk_hex: str
+    ) -> bool:
         try:
             author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
         except ValueError:
             return False
+        if self._writer_certs is not None:
+            return await self._writer_certs.check_item(
+                space,
+                inner.get(WRITER_CERT_FIELD),
+                epoch=epoch,
+                author_pk=author_pk,
+                required_scope=WRITER_SCOPE_WRITE,
+                space_pubkey_hex=pinned_pk_hex,
+            )
         return SpaceWriterCertService.check_item_cert(
             space,
             inner.get(WRITER_CERT_FIELD),

@@ -69,10 +69,13 @@ epoch it encrypts under. On the remote-author path a cert in the
 names the author's ``author_pk``, ``write`` scope, this space): a cert that
 fails is a v_49 author's item that must not travel — it is dropped with a
 WARNING. A valid cert is then RE-STAMPED for the epoch this relay encrypts
-under, but only while the author household still holds a writer seat in our
-roster — a household removed since its cert was issued is not relayed. An
-inner with NO cert is a pre-v_49 author: relayed exactly as before, on this
-seed holder's authority signature alone. That no-cert branch is the
+under, but only while the author household still holds a seat in our roster
+that permits the item (never a ``comment`` cert onto a post) — a household
+removed since its cert was issued is not relayed. An inner with NO cert is
+relayed as before, on this seed holder's authority signature alone, only
+from an origin below v_49 whose pinned identity key is the inner's
+``author_pk`` (a v_49 author always attaches its cert, so its absence is a
+stripped cert). That no-cert branch is the
 migration tripwire — once every member ships v_49 it can become a refusal.
 
 This service is the encryption boundary: the cleartext post never leaves
@@ -94,7 +97,7 @@ from ..authority_sig import (
 )
 from ..domain.events import SpacePostCreated
 from ..domain.space import PUBLIC_SPACE_TIERS
-from ..domain.writer_cert import WRITER_SCOPE_WRITE
+from ..domain.writer_cert import WRITER_SCOPE_WRITE, scope_permits
 from ..infrastructure.event_bus import EventBus
 from .space_public_author import (
     build_signed_author_inner,
@@ -361,6 +364,10 @@ class SpacePublicOutbound:
                 )
                 return
             restamp_for = event.origin_instance_id
+        elif self._writer_certs is not None and not await self._legacy_hint_ok(
+            event.origin_instance_id, relay
+        ):
+            return
         try:
             if restamp_for is not None:
                 epoch, ct = await self._encrypt_with_cert(
@@ -377,7 +384,7 @@ class SpacePublicOutbound:
         except _NoWriterCert:
             log.warning(
                 "space_public.outbound: author household %s holds no writer "
-                "seat any more — writer cert not re-stamped, not relaying "
+                "seat that permits a post — writer cert not re-stamped, not relaying "
                 "(space=%s)",
                 restamp_for,
                 event.space_id,
@@ -435,6 +442,30 @@ class SpacePublicOutbound:
             required_scope=WRITER_SCOPE_WRITE,
         )
 
+    async def _legacy_hint_ok(self, origin: str | None, relay: dict) -> bool:
+        """A hint with NO cert: only from a pre-v_49 origin (a v_49 one
+        always attaches it — its absence is a stripped cert), and only when
+        its ``author_pk`` is the origin household's pinned key."""
+        assert self._writer_certs is not None
+        if not origin:
+            return False
+        if await self._writer_certs.peer_is_cert_aware(origin):
+            log.warning(
+                "space_public.outbound: v_49 household %s sent a public_relay "
+                "without a writer cert — not relaying",
+                origin,
+            )
+            return False
+        pinned = await self._writer_certs.pinned_instance_pk(origin)
+        if pinned is None or pinned.hex() != str(relay.get("author_pk") or ""):
+            log.warning(
+                "space_public.outbound: public_relay author_pk is not the key "
+                "we pin for %s — not relaying",
+                origin,
+            )
+            return False
+        return True
+
     async def _encrypt_with_cert(
         self,
         space_id: str,
@@ -443,12 +474,13 @@ class SpacePublicOutbound:
         *,
         expect_pk: str = "",
         required: bool = False,
+        required_scope: str = WRITER_SCOPE_WRITE,
     ) -> tuple[int, str]:
         """Encrypt ``inner`` with ``instance_id``'s writer cert for the epoch
         it is encrypted under (re-read once if a rotation lands in between).
-        Without a cert service, or with no cert for that household, the inner
-        goes as is — unless ``required`` (a re-stamp), which raises
-        :class:`_NoWriterCert`. ``expect_pk`` pins the cert to the author key
+        Without a cert service, or with no cert for that household that
+        permits ``required_scope``, the inner goes as is — unless ``required``
+        (a re-stamp), which raises :class:`_NoWriterCert`. ``expect_pk`` pins the cert to the author key
         the inner names. Raises ``RuntimeError`` when there is no content key.
         """
         if self._writer_certs is None:
@@ -471,6 +503,10 @@ class SpacePublicOutbound:
                 named = SpaceWriterCertService.cert_instance_pk(cert.to_wire())
                 if named is None or named.hex() != expect_pk:
                     cert = None
+            # Never put a cert on an item it does not authorize (a comment
+            # cert on a post).
+            if cert is not None and not scope_permits(cert.scope, required_scope):
+                cert = None
             if cert is None and required:
                 raise _NoWriterCert(instance_id)
             body = dict(inner)

@@ -52,6 +52,7 @@ from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_mentions import SpaceMentionResolver
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_inbound import SpacePublicInbound
+from socialhome.writer_cert import sign_writer_cert
 
 
 @pytest.fixture
@@ -717,8 +718,6 @@ async def test_old_key_post_is_refused_after_the_heal(env):
 
 
 async def _cert(env, **over):
-    from socialhome.writer_cert import sign_writer_cert
-
     kw = dict(
         space_seed=env["space_kp"].private_key,
         space_id="sp-1",

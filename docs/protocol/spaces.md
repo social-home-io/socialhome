@@ -985,8 +985,11 @@ comment rights, on every content-key rotation (`SPACE_KEY_EXCHANGE_REKEY`)
 and on every authority rotation (`SPACE_AUTHORITY_ROTATED`, signed with the
 new key), plus the v_49 upgrade and the periodic roster-snapshot tick.
 
-**Delivery — existing channels only, one household each.** A cert travels
-only to the household it names, inside that household's encrypted envelope:
+**Delivery — existing channels only.** Each household is delivered ITS OWN
+cert, inside that household's encrypted per-peer envelope (a cert is not
+secret — once its holder posts, it rides in the item's encrypted
+`public_relay` to every member and on to subscribers — but nobody is handed
+a cert for another household to store):
 
 | Channel | Who it reaches | Where the cert sits |
 |---|---|---|
@@ -999,6 +1002,9 @@ Every channel is gated on `peer_supports(…, MIN_FOR_MEMBER_GFS_PUBLISH)`
 (v_49). The receiver keeps a cert only when it verifies against its pinned
 space key, names its own identity key and this space, and it holds the
 content key for that epoch — then on that epoch's `space_keys.writer_cert`.
+It takes certs only from the owner (redeem ACK, roster snapshot, rotation
+bundle) or a proven seed holder (an authority-signed rekey), and a stored
+cert is replaced only by a newer one (`issued_at`; `write` wins a tie).
 
 **Carried by items.** An author household puts its cert for the current
 epoch in the relayed public-post inner (`public_relay.writer_cert`). It is
@@ -1023,16 +1029,34 @@ sequenceDiagram
 `SpacePublicOutbound._relay_remote_authored`) checks the suite, the
 signature against the pinned space key, the space, the envelope's epoch, that
 `instance_pk` equals the inner's `author_pk`, and `write` scope. A present
-cert that fails drops the item with a WARNING. An item with NO cert is a
-pre-v_49 author and keeps today's behaviour — authorized by the host's
-authority signature. That no-cert branch is the migration tripwire: once
-every member household ships v_49 it can become a refusal.
+cert that fails drops the item with a WARNING. The relaying host re-stamps a
+cert only while the author household still holds a seat that permits a post
+(never a `comment` cert onto a post). An item with NO cert is a pre-v_49
+author and keeps today's behaviour — authorized by the host's authority
+signature — but the host relays such a hint only from an origin below v_49
+whose pinned identity key is the inner's `author_pk` (a v_49 author always
+attaches its cert; a hint without one is a stripped cert). That no-cert
+branch is the migration tripwire: once every member household ships v_49 it
+can become a refusal.
 
-**Residuals.** A cert stays valid for its whole epoch: a household demoted
-to a follower, or one whose follower comment rights were switched off, keeps
-its old cert until the next content-key rotation (kicks and bans always
-rotate). The relaying host re-checks the roster before re-stamping, so
-nothing a removed writer sends travels through a v_49 host.
+**Epoch freshness.** A cert is valid for its whole epoch, so receivers bound
+the epoch too: a cert-authorized item is accepted only at the newest content
+epoch the receiver holds, or at the previous one for
+`WRITER_CERT_EPOCH_GRACE_S` (10 min) after the newest key arrived there
+(`space_keys.created_at`). The grace lets a post sealed just before a
+rotation land; it needs no seed holder online (an expiry on the cert would).
+
+**Revocation = rotation.** Any change that weakens a household's rights
+rotates the content key, so its old cert dies with the epoch: a role change
+from write to comment or none (remote or local), a household leaving the
+space, `allow_subscriber_comment` turned off while a follower seat exists,
+and — as before — every kick and ban. Promotions do not rotate; the new
+cert is delivered in a roster snapshot, and turning follower comments on
+sends each follower household its `comment` cert at once.
+
+**Residuals.** A revoked writer can still post until the rotation reaches a
+receiver, plus the 10-minute grace — and if no seed holder is online to
+rotate, until one is. Before this release demotion did not rotate at all.
 
 ## Flow — rekey
 

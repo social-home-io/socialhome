@@ -74,6 +74,18 @@ from socialhome.services.space_service import (
     normalize_category,
 )
 from socialhome.services.user_service import UserService
+import os
+from socialhome.crypto import ed25519_public_key
+from socialhome.domain.space_key import SpaceKey
+from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+from socialhome.services.space_writer_cert_service import (
+    SpaceWriterCertService,
+)
+from socialhome.domain.writer_cert import WriterCert
+from socialhome.crypto import b64url_encode
+from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.services.space_crypto_service import SpaceContentEncryption
+from socialhome.domain.events import PeerProtoVersionRaised
 
 
 @pytest.fixture
@@ -8976,14 +8988,6 @@ async def _cert_space(stack, *, version: int = 49):
     """A hosted space with a content epoch, a v_``version`` federation double
     and a REAL :class:`SpaceWriterCertService` over the stack's repos.
     Returns ``(space, fed, remote, peer_pk)``."""
-    import os
-
-    from socialhome.crypto import ed25519_public_key
-    from socialhome.domain.space_key import SpaceKey
-    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
-    from socialhome.services.space_writer_cert_service import (
-        SpaceWriterCertService,
-    )
 
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     keys = SqliteSpaceKeyRepo(stack.db)
@@ -9014,15 +9018,10 @@ async def _cert_space(stack, *, version: int = 49):
 
 
 def _cert_of(payload):
-    from socialhome.domain.writer_cert import WriterCert
-
     return WriterCert.from_wire(payload["writer_cert"])
 
 
 async def test_roster_snapshot_carries_only_the_recipients_writer_cert(stack):
-    from socialhome.crypto import b64url_encode
-    from socialhome.domain.federation import FederationEventType
-
     space, fed, remote, pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     await _seat(remote, space.id, "peer-b", "u-b")
@@ -9058,10 +9057,6 @@ async def test_seating_a_household_delivers_its_cert_with_the_snapshot(stack):
 
 
 async def test_rekey_fan_out_decorates_each_member_with_its_own_cert(stack):
-    from socialhome.infrastructure.key_manager import KeyManager
-    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
-    from socialhome.services.space_crypto_service import SpaceContentEncryption
-
     space, fed, remote, pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     stack.space_svc._space_crypto = SpaceContentEncryption(
@@ -9083,8 +9078,6 @@ async def test_rekey_fan_out_decorates_each_member_with_its_own_cert(stack):
 
 
 async def test_role_change_that_alters_rights_redelivers_the_cert(stack):
-    from socialhome.domain.space import SpaceRole
-
     space, fed, remote, pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a", role=SpaceRole.SUBSCRIBER.value)
     target = await remote.get(space.id, "peer-a", "u-a")
@@ -9114,8 +9107,6 @@ async def test_role_change_keeping_rights_sends_no_extra_snapshot(stack):
 
 
 async def test_an_upgrade_to_v49_delivers_the_cert(stack):
-    from socialhome.domain.events import PeerProtoVersionRaised
-
     space, fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     await stack.space_repo.add_space_instance(space.id, "peer-a")
@@ -9125,3 +9116,134 @@ async def test_an_upgrade_to_v49_delivers_the_cert(stack):
     kw = fed.send_with_mesh_fallback.await_args.kwargs
     assert kw["to_instance_id"] == "peer-a"
     assert "writer_cert" in kw["payload"]
+
+
+async def _rekeys(stack, monkeypatch):
+    """Record every forward-secrecy rotation the service starts."""
+    calls: list[str] = []
+
+    async def _spy(_self, space_id):
+        calls.append(space_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "_rotate_and_distribute_space_key", _spy)
+    return calls
+
+
+async def test_a_scope_reducing_remote_role_change_rotates(stack, monkeypatch):
+    """write → comment: the household's old write cert must die with the
+    epoch, so the content key rotates."""
+
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (space.id,)
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    target = await remote.get(space.id, "peer-a", "u-a")
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id),
+        target=target,
+        role=SpaceRole.SUBSCRIBER.value,
+    )
+    assert rekeys == [space.id]
+
+
+async def test_a_promotion_does_not_rotate(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    target = await remote.get(space.id, "peer-a", "u-a")
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="member"
+    )
+    assert rekeys == []
+
+
+async def test_a_scope_reducing_local_role_change_rotates(stack, monkeypatch):
+    """The local role path checks our own household's scope before and after
+    the write (today's local roles all write — the guard is for any future
+    one that does not)."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    member = await stack.provision_user("loc")
+    await stack.space_svc.add_member(
+        space.id, actor_username="hosty", user_id=member.user_id
+    )
+    scopes = iter(["write", "comment"])
+
+    class _Certs:
+        async def scope_for_instance(self, _space, _iid):
+            return next(scopes)
+
+    stack.space_svc.attach_writer_certs(_Certs())  # type: ignore[arg-type]
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc._apply_local_role(
+        await stack.space_repo.get(space.id),
+        user_id=member.user_id,
+        old_role="member",
+        role="moderator",
+    )
+    assert rekeys == [space.id]
+
+
+async def test_rotate_if_scope_weakened_needs_a_weaker_scope(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    svc = stack.space_svc
+    assert not await svc.rotate_if_writer_scope_weakened(space.id, "peer-a", "write")
+    await remote.remove(space.id, "peer-a", "u-a")
+    assert await svc.rotate_if_writer_scope_weakened(space.id, "peer-a", "write")
+    assert not await svc.rotate_if_writer_scope_weakened("nope", "peer-a", "write")
+    assert rekeys == [space.id]
+
+
+async def test_comment_rights_off_with_followers_rotates(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_comment_rights_off_without_followers_does_not_rotate(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == []
+
+
+async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if "writer_cert" in c.kwargs.get("payload", {})
+    ]
+    assert [k["to_instance_id"] for k in sent] == ["peer-a"]
+    assert _cert_of(sent[0]["payload"]).scope == "comment"

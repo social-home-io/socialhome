@@ -462,8 +462,14 @@ other. Suite `cert_suite` validated against `SUPPORTED_WRITER_CERT_SUITES`
 space_pubkey, space_id, epoch, author_pk, required_scope)` checks the suite,
 the signature against the pinned space key, `space_id` and `epoch` equal,
 `instance_pk == author_pk`, and that `scope` permits the action (`write`
-implies `comment`); every failure raises. The cert travels only inside
-encrypted payloads, only to the household it names. No new key: it is
+implies `comment`); every failure raises. Receivers additionally require
+the item's epoch to be the newest they hold, or the previous one for
+`WRITER_CERT_EPOCH_GRACE_S` (600 s) after the newest key arrived, so an
+old epoch's cert cannot authorize items forever; any scope-reducing change
+rotates the content epoch. A cert is not secret, but it always travels
+inside encrypted payloads: each household is delivered its own, and once it
+posts, the cert rides in the item to every member and on to subscribers. No
+new key: it is
 signed by the space authority key every member already pins, and binds the
 household identity key every peer already pins.
 

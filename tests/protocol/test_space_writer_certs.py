@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -40,6 +41,9 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import SpacePostCreated
+from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -47,9 +51,16 @@ from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.space_crypto_service import SpaceContentEncryption
-from socialhome.services.space_public_author import author_signing_bytes
+from socialhome.services.space_public_author import (
+    author_signing_bytes,
+    build_signed_author_inner,
+)
 from socialhome.services.space_public_inbound import SpacePublicInbound
-from socialhome.services.space_writer_cert_service import SpaceWriterCertService
+from socialhome.services.space_public_outbound import SpacePublicOutbound
+from socialhome.services.space_writer_cert_service import (
+    WRITER_CERT_EPOCH_GRACE_S,
+    SpaceWriterCertService,
+)
 from socialhome.writer_cert import sign_writer_cert
 
 pytestmark = pytest.mark.security
@@ -69,11 +80,14 @@ class _Seats:
 
 
 class _Fed:
-    def __init__(self, pks: dict[str, bytes]):
+    def __init__(self, pks: dict[str, bytes], versions: dict[str, int] | None = None):
         self.pks = pks
+        self.versions = versions
 
     async def peer_supports(self, iid, *, min_version):
-        return True
+        if self.versions is None:
+            return True
+        return self.versions.get(iid, 0) >= min_version
 
     async def peer_identity_public_key(self, iid):
         return self.pks.get(iid)
@@ -110,6 +124,15 @@ async def env(tmp_dir):
         bus=EventBus(), space_repo=spaces, space_crypto=crypto, space_post_repo=posts
     )
     inbound.attach_identity(own_instance_id="us.home")
+    # The receiver's writer-cert service: epoch freshness reads its keys.
+    holder = SpaceWriterCertService(
+        space_repo=spaces,
+        remote_member_repo=_Seats({}),
+        space_key_repo=keys,
+        own_instance_id="us.home",
+        own_identity_pk=os.urandom(32),
+    )
+    inbound.attach_writer_certs(holder)
     yield SimpleNamespace(
         db=db,
         spaces=spaces,
@@ -138,6 +161,19 @@ async def _cert(env, **over) -> dict:
 
 async def _relay(env, cert: dict | None, *, post_id: str = "p-1") -> None:
     """Deliver one relayed public post (authority-signed by the host)."""
+    await _deliver(env, await _envelope(env, cert, post_id=post_id))
+
+
+async def _deliver(env, envelope: dict) -> None:
+    await env.inbound.handle(
+        {"event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC, "payload": envelope}
+    )
+
+
+async def _envelope(
+    env, cert: dict | None, *, post_id: str = "p-1", sign: bool = True
+) -> dict:
+    """One relayed public post envelope at the CURRENT epoch."""
     uid = derive_user_id(env.author_kp.public_key, "bob")
     inner = {
         "post_id": post_id,
@@ -157,17 +193,16 @@ async def _relay(env, cert: dict | None, *, post_id: str = "p-1") -> None:
         inner["writer_cert"] = cert
     epoch, ct = await env.crypto.encrypt(SPACE, json.dumps(inner).encode())
     envelope = {"space_id": SPACE, "epoch": epoch, "encrypted_payload": ct}
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=SPACE,
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=env.space_kp.private_key,
+    if sign:
+        envelope.update(
+            sign_authority_event(
+                event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+                space_id=SPACE,
+                payload=strip_authority_sig_fields(envelope),
+                space_seed=env.space_kp.private_key,
+            )
         )
-    )
-    await env.inbound.handle(
-        {"event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC, "payload": envelope}
-    )
+    return envelope
 
 
 async def _landed(env, post_id: str = "p-1") -> bool:
@@ -338,3 +373,215 @@ async def test_a_holder_stores_only_a_cert_naming_it(env):
     # The genuine one is kept.
     assert await holder.accept(SPACE, await _cert(env, instance_pk=me.public_key))
     assert await env.keys.get_writer_cert(SPACE, epoch) is not None
+
+
+# ── Adversarial review (second pass) ─────────────────────────────────────
+
+
+async def test_no_cert_and_no_authority_signature_never_lands(env):
+    """Neither a cert nor an authority signature → dropped."""
+    await _deliver(env, await _envelope(env, None, sign=False))
+    assert not await _landed(env)
+    await _deliver(env, await _envelope(env, await _cert(env), sign=False))
+    assert not await _landed(env)
+
+
+async def test_previous_epoch_cert_lands_within_the_grace(env):
+    """An item sealed just before a rotation still lands while the new key
+    is younger than WRITER_CERT_EPOCH_GRACE_S."""
+    envelope = await _envelope(env, await _cert(env))
+    await env.crypto.rotate_epoch(SPACE)
+    await _deliver(env, envelope)
+    assert await _landed(env)
+
+
+async def test_previous_epoch_cert_is_dropped_after_the_grace(env):
+    """R5: an old-epoch cert does not verify forever — once the new key is
+    older than the grace, the previous epoch is closed."""
+    envelope = await _envelope(env, await _cert(env))
+    new_epoch = await env.crypto.rotate_epoch(SPACE)
+    old = datetime.now(timezone.utc) - timedelta(seconds=WRITER_CERT_EPOCH_GRACE_S + 60)
+    await env.db.enqueue(
+        "UPDATE space_keys SET created_at=? WHERE space_id=? AND epoch=?",
+        (old.isoformat(), SPACE, new_epoch),
+    )
+    await _deliver(env, envelope)
+    assert not await _landed(env)
+
+
+async def test_two_epochs_back_is_always_dropped(env):
+    envelope = await _envelope(env, await _cert(env))
+    await env.crypto.rotate_epoch(SPACE)
+    await env.crypto.rotate_epoch(SPACE)
+    await _deliver(env, envelope)
+    assert not await _landed(env)
+
+
+async def test_a_weaker_older_cert_never_replaces_ours(env):
+    """R2: a replayed older comment cert does not overwrite our write cert."""
+    me = generate_identity_keypair()
+    holder = _issuer(env, own_pk=me.public_key)
+    epoch = await env.crypto.get_current_epoch(SPACE)
+    write = await _cert(env, instance_pk=me.public_key, issued_at=200)
+    comment = await _cert(
+        env, instance_pk=me.public_key, scope="comment", issued_at=100
+    )
+    assert await holder.accept(SPACE, write)
+    await holder.accept(SPACE, comment)
+    assert (await holder.own_cert(SPACE, epoch)).scope == "write"  # type: ignore[union-attr]
+    # Same issued_at: write is preferred.
+    tie = await _cert(env, instance_pk=me.public_key, scope="comment", issued_at=200)
+    await holder.accept(SPACE, tie)
+    assert (await holder.own_cert(SPACE, epoch)).scope == "write"  # type: ignore[union-attr]
+    # A genuinely newer cert does replace it.
+    newer = await _cert(env, instance_pk=me.public_key, scope="comment", issued_at=300)
+    assert await holder.accept(SPACE, newer)
+    assert (await holder.own_cert(SPACE, epoch)).scope == "comment"  # type: ignore[union-attr]
+
+
+async def test_own_cert_signed_by_a_retired_key_is_not_handed_out(env):
+    """R4: after a re-pin, the stored cert (old key) is not ours any more."""
+    me = generate_identity_keypair()
+    holder = _issuer(env, own_pk=me.public_key)
+    epoch = await env.crypto.get_current_epoch(SPACE)
+    assert await holder.accept(SPACE, await _cert(env, instance_pk=me.public_key))
+    k2 = generate_space_keypair()
+    await env.db.enqueue(
+        "UPDATE spaces SET identity_public_key=? WHERE id=?",
+        (k2.public_key.hex(), SPACE),
+    )
+    assert await holder.own_cert(SPACE, epoch) is None
+    # A seed holder for the NEW key self-issues instead.
+    await env.spaces.set_space_seed(SPACE, k2.private_key)
+    await env.db.enqueue(
+        "INSERT OR IGNORE INTO space_members(space_id, user_id, role, joined_at)"
+        " VALUES(?, 'me', 'owner', '2026-01-01')",
+        (SPACE,),
+    )
+    fresh = await holder.own_cert(SPACE, epoch)
+    assert fresh is not None and fresh.instance_pk == b64url_encode(me.public_key)
+
+
+# ── Host relay (SpacePublicOutbound) ─────────────────────────────────────
+
+
+class _CaptureGfs:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def publish_space_event(self, *, space_id, event_type, payload) -> int:
+        self.calls.append(payload)
+        return 1
+
+
+@pytest.fixture
+async def host(env):
+    """The space's host: holds the seed and relays remote-authored posts."""
+    await env.spaces.set_space_seed(SPACE, env.space_kp.private_key)
+    space = await env.spaces.get(SPACE)
+    await env.spaces.save(
+        replace(space, features=replace(space.features, allow_subscribers=True))
+    )
+    gfs = _CaptureGfs()
+    out = SpacePublicOutbound(
+        bus=EventBus(),
+        space_repo=env.spaces,
+        space_crypto=env.crypto,
+        user_repo=SimpleNamespace(),
+        gfs_service=gfs,
+    )
+    host_kp = generate_identity_keypair()
+    out.attach_identity(
+        own_instance_id="host.home",
+        own_instance_public_key=host_kp.public_key,
+        own_identity_seed=host_kp.private_key,
+    )
+
+    def _certs(seats, pks, versions=None):
+        svc = SpaceWriterCertService(
+            space_repo=env.spaces,
+            remote_member_repo=_Seats(seats),
+            space_key_repo=env.keys,
+            own_instance_id="host.home",
+            own_identity_pk=host_kp.public_key,
+        )
+        svc.attach_federation(_Fed(pks, versions or {}))
+        out.attach_writer_certs(svc)
+
+    return SimpleNamespace(out=out, gfs=gfs, certs=_certs)
+
+
+def _relay_hint(env, *, cert: dict | None) -> dict:
+    uid = derive_user_id(env.author_kp.public_key, "bob")
+    post = Post(
+        id="p-h",
+        author=uid,
+        type=PostType.TEXT,
+        content="hi",
+        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+    inner = build_signed_author_inner(
+        post=post,
+        space_id=SPACE,
+        author_username="bob",
+        author_pk=env.author_kp.public_key,
+        author_identity_seed=env.author_kp.private_key,
+        origin_instance_id="author.home",
+    )
+    if cert is not None:
+        inner["writer_cert"] = cert
+    return inner
+
+
+async def _host_relays(env, host, inner) -> bool:
+    await host.out._on_space_post_created(
+        SpacePostCreated(
+            post=Post(
+                id="p-h",
+                author=inner["author_user_id"],
+                type=PostType.TEXT,
+                content="hi",
+                created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+            ),
+            space_id=SPACE,
+            origin_instance_id="author.home",
+            public_relay=inner,
+        )
+    )
+    return bool(host.gfs.calls)
+
+
+async def test_host_never_restamps_a_comment_cert_onto_a_post(env, host):
+    """R1: the household now holds only a follower seat (comments on) — the
+    host must not mint a comment cert onto its post."""
+    space = await env.spaces.get(SPACE)
+    await env.spaces.save(
+        replace(space, features=replace(space.features, allow_subscriber_comment=True))
+    )
+    host.certs(
+        {"author.home": ["subscriber"]}, {"author.home": env.author_kp.public_key}
+    )
+    assert not await _host_relays(env, host, _relay_hint(env, cert=await _cert(env)))
+
+
+async def test_host_restamps_a_live_writer(env, host):
+    host.certs({"author.home": ["member"]}, {"author.home": env.author_kp.public_key})
+    assert await _host_relays(env, host, _relay_hint(env, cert=await _cert(env)))
+
+
+async def test_stripping_the_cert_does_not_bypass_the_host(env, host):
+    """R3: a v_49 origin's hint without a cert is refused; a legacy hint is
+    bound to the origin's pinned key."""
+    v49 = FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH
+    host.certs({}, {"author.home": env.author_kp.public_key}, {"author.home": v49})
+    assert not await _host_relays(env, host, _relay_hint(env, cert=None))
+
+
+async def test_legacy_hint_must_name_the_origins_key(env, host):
+    host.certs({}, {"author.home": generate_space_keypair().public_key})
+    assert not await _host_relays(env, host, _relay_hint(env, cert=None))
+
+
+async def test_legacy_hint_from_a_pre_v49_origin_still_relays(env, host):
+    host.certs({}, {"author.home": env.author_kp.public_key}, {"author.home": 48})
+    assert await _host_relays(env, host, _relay_hint(env, cert=None))

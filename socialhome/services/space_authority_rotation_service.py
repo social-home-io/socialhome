@@ -1169,11 +1169,15 @@ class SpaceAuthorityRotationService:
         # the original) must not interleave their resets.
         async with self._lock(space_id):
             await self._apply_bundle(space_id, p, event.from_instance)
-            # v_49 — our writer cert under the (now pinned) new key. The cert
-            # authenticates itself against the pin, so this runs whatever the
-            # baseline outcome was; an unverifiable one is refused there.
+            # v_49 — our writer cert under the (now pinned) new key, from the
+            # owner household only (the bundle's sender). The cert also
+            # authenticates itself against the pin in ``accept``.
             if p.get("writer_cert") is not None and self._writer_certs is not None:
-                await self._writer_certs.accept(space_id, p.get("writer_cert"))
+                space = await self._spaces.get(space_id)
+                if space is not None and event.from_instance == (
+                    space.owner_instance_id
+                ):
+                    await self._writer_certs.accept(space_id, p.get("writer_cert"))
 
     async def _apply_bundle(self, space_id: str, p: dict, sender: str) -> None:
         space = await self._spaces.get(space_id)

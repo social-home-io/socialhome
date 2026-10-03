@@ -795,12 +795,29 @@ class PrivateSpaceInviteHandler:
         if not space_id or not user_id:
             return
         prior = await self._remote_members.get(space_id, event.from_instance, user_id)
+        hosted = await self._space_repo.get(space_id)
+        we_host = (
+            hosted is not None
+            and bool(self._own_instance_id)
+            and hosted.owner_instance_id == self._own_instance_id
+        )
+        # v_49 — what the leaving household could write before it left.
+        scope_before = (
+            await self._space_service.writer_scope(hosted, event.from_instance)
+            if we_host and prior is not None and self._space_service is not None
+            else None
+        )
         await self._remote_members.remove(
             space_id,
             event.from_instance,
             user_id,
         )
-        hosted = await self._space_repo.get(space_id)
+        if scope_before is not None and self._space_service is not None:
+            # Its writer cert is valid for the whole epoch: if this was the
+            # household's last writing seat, start a new epoch now.
+            await self._space_service.rotate_if_writer_scope_weakened(
+                space_id, event.from_instance, scope_before
+            )
         if (
             prior is not None
             and prior.role == SpaceRole.ADMIN
@@ -1315,6 +1332,8 @@ class PrivateSpaceInviteHandler:
         )
         # v_49 — the rotator's per-peer copy carries our writer cert for the
         # new epoch, right after its key (which the cert needs to be kept).
+        # Reached only from the owner or a proven seed holder (the
+        # authority-signed rekey above), never from an arbitrary peer.
         if (
             event.payload.get("writer_cert") is not None
             and self._writer_certs is not None
@@ -1753,10 +1772,16 @@ class PrivateSpaceInviteHandler:
             )
             if outcome is AuthorityCertOutcome.APPLIED:
                 space = await self._space_repo.get(space_id) or space
-        # v_49 — our own writer cert for the current epoch. Verified against
-        # the (just re-pinned) space key and our own identity key; the sender
-        # is irrelevant, the space key is the authority.
-        if p.get("writer_cert") is not None and self._writer_certs is not None:
+        # v_49 — our own writer cert for the current epoch, from the HOST
+        # only (snapshots are the owner's; any other sender could replay a
+        # cert it saw). Verified against the (just re-pinned) space key and
+        # our own identity key.
+        if (
+            p.get("writer_cert") is not None
+            and self._writer_certs is not None
+            and space.owner_instance_id
+            and event.from_instance == space.owner_instance_id
+        ):
             await self._writer_certs.accept(space_id, p.get("writer_cert"))
         if not candidates:
             return

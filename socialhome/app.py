@@ -2980,6 +2980,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # publisher to exclude it any more) — our own id is what the self-echo
         # guard drops on.
         space_public_inbound.attach_identity(own_instance_id=real_instance_id)
+        space_public_inbound.attach_writer_certs(writer_certs)
         # v_44 — a relayed frame signed by a rotated authority key heals the
         # subscriber's pin from the GFS listing's owner cert, then retries.
         gfs_space_mirror.attach_identity(own_instance_id=real_instance_id)

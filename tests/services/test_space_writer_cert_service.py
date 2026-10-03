@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -25,7 +26,11 @@ from socialhome.domain.writer_cert import (
     WriterCert,
 )
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
-from socialhome.services.space_writer_cert_service import SpaceWriterCertService
+from socialhome.services.space_writer_cert_service import (
+    WRITER_CERT_EPOCH_GRACE_S,
+    SpaceWriterCertService,
+    scope_weakened,
+)
 from socialhome.writer_cert import sign_writer_cert, verify_writer_cert
 
 SEED = os.urandom(32)
@@ -72,19 +77,30 @@ class _Remote:
     async def list_for_instance(
         self, space_id, instance_id, *, include_tombstoned=True
     ):
-        return [r for r in self.rows if r.instance_id == instance_id]
+        return [
+            r
+            for r in self.rows
+            if r.instance_id == instance_id and (include_tombstoned or not r.tombstoned)
+        ]
 
 
 class _Keys:
-    def __init__(self, epoch: int | None = 2):
+    def __init__(self, epoch: int | None = 2, *, previous: int | None = None):
         self.epoch = epoch
+        self.previous = previous
+        self.arrived = datetime.now(timezone.utc).isoformat()
         self.certs: dict[tuple[str, int], str] = {}
         self.epochs = {epoch} if epoch is not None else set()
 
     async def get_latest(self, space_id):
         if self.epoch is None:
             return None
-        return SimpleNamespace(epoch=self.epoch)
+        return SimpleNamespace(epoch=self.epoch, created_at=self.arrived)
+
+    async def get_previous(self, space_id, epoch):
+        if self.previous is None:
+            return None
+        return SimpleNamespace(epoch=self.previous, created_at=None)
 
     async def set_writer_cert(self, space_id, epoch, cert_json):
         if epoch not in self.epochs:
@@ -108,9 +124,15 @@ class _Fed:
         return self.pks.get(instance_id)
 
 
-def _remote(inst: str, role: str, user: str = "u") -> SpaceRemoteMember:
+def _remote(
+    inst: str, role: str, user: str = "u", *, tombstoned: bool = False
+) -> SpaceRemoteMember:
     return SpaceRemoteMember(
-        space_id="sp-1", instance_id=inst, user_id=f"{user}@{inst}", role=role
+        space_id="sp-1",
+        instance_id=inst,
+        user_id=f"{user}@{inst}",
+        role=role,
+        tombstoned=tombstoned,
     )
 
 
@@ -407,3 +429,103 @@ async def test_without_federation_nothing_is_delivered():
     )
     assert await svc.cert_for_peer("sp-1", "peer") is None
     assert await svc.issue_for_instance("sp-1", "peer") is None
+
+
+# ── Second review pass ───────────────────────────────────────────────────
+
+
+async def test_tombstoned_seat_gets_no_cert():
+    svc, _ = _svc(remote_rows=[_remote("peer", "member", tombstoned=True)])
+    assert await svc.issue_for_instance("sp-1", "peer") is None
+
+
+def test_scope_weakened():
+    assert scope_weakened("write", "comment")
+    assert scope_weakened("write", None)
+    assert scope_weakened("comment", None)
+    assert not scope_weakened("comment", "write")
+    assert not scope_weakened(None, "comment")
+    assert not scope_weakened("write", "write")
+
+
+async def test_accept_keeps_a_newer_or_stronger_cert():
+    svc, keys = _svc(seed=None)
+    assert await svc.accept("sp-1", _issued(issued_at=200))
+    # Older → kept out.
+    assert not await svc.accept("sp-1", _issued(issued_at=100, scope="comment"))
+    # Same age, weaker → kept out; same age, write → in.
+    assert not await svc.accept("sp-1", _issued(issued_at=200, scope="comment"))
+    assert await svc.accept("sp-1", _issued(issued_at=200))
+    # Newer → in, even weaker.
+    assert await svc.accept("sp-1", _issued(issued_at=300, scope="comment"))
+    assert (await svc.own_cert("sp-1", 2)).scope == "comment"  # type: ignore[union-attr]
+
+
+async def test_a_stored_cert_from_a_retired_key_is_replaced_or_dropped():
+    svc, keys = _svc(seed=None)
+    assert await svc.accept("sp-1", _issued(issued_at=500))
+    seed2 = os.urandom(32)
+    svc._spaces.space = replace(  # type: ignore[attr-defined]
+        svc._spaces.space,  # type: ignore[attr-defined]
+        identity_public_key=ed25519_public_key(seed2).hex(),
+    )
+    assert await svc.own_cert("sp-1", 2) is None
+    # An older cert under the NEW key replaces the stale one.
+    assert await svc.accept("sp-1", _issued(space_seed=seed2, issued_at=1))
+    assert await svc.own_cert("sp-1", 2) is not None
+
+
+async def test_own_cert_with_unreadable_storage_falls_back():
+    svc, keys = _svc(seed=None)
+    keys.certs[("sp-1", 2)] = "{not json"
+    assert await svc.own_cert("sp-1", 2) is None
+
+
+async def test_epoch_freshness():
+    svc, keys = _svc(keys=_Keys(epoch=5, previous=3))
+    assert await svc.epoch_is_fresh("sp-1", 5)
+    assert await svc.epoch_is_fresh("sp-1", 3)
+    assert not await svc.epoch_is_fresh("sp-1", 4)
+    assert not await svc.epoch_is_fresh("sp-1", 1)
+    late = datetime.now(timezone.utc) + timedelta(seconds=WRITER_CERT_EPOCH_GRACE_S + 1)
+    assert not await svc.epoch_is_fresh("sp-1", 3, now=late)
+    keys.arrived = "2020-01-01 10:00:00"  # SQLite's naive UTC shape parses
+    assert not await svc.epoch_is_fresh("sp-1", 3)
+    keys.arrived = "garbage"
+    assert not await svc.epoch_is_fresh("sp-1", 3)
+    svc2, _ = _svc(keys=_Keys(epoch=None))
+    assert not await svc2.epoch_is_fresh("sp-1", 0)
+    svc3, _ = _svc(keys=_Keys(epoch=5))
+    assert not await svc3.epoch_is_fresh("sp-1", 3)
+
+
+async def test_check_item_adds_freshness():
+    svc, _ = _svc(keys=_Keys(epoch=5, previous=3))
+    space = _space()
+    fresh = _issued(pk=PEER_PK, epoch=5)
+    assert await svc.check_item(
+        space, fresh, epoch=5, author_pk=PEER_PK, required_scope="write"
+    )
+    stale = _issued(pk=PEER_PK, epoch=4)
+    assert not await svc.check_item(
+        space, stale, epoch=4, author_pk=PEER_PK, required_scope="write"
+    )
+    assert not await svc.check_item(
+        space, "junk", epoch=5, author_pk=PEER_PK, required_scope="write"
+    )
+
+
+async def test_peer_helpers():
+    svc, _ = _svc()
+    assert await svc.peer_is_cert_aware("peer")
+    assert not await svc.peer_is_cert_aware("old")
+    assert await svc.pinned_instance_pk("peer") == PEER_PK
+    assert await svc.pinned_instance_pk("own") == OWN_PK
+    bare = SpaceWriterCertService(
+        space_repo=_Spaces(_space(), SEED, ()),
+        remote_member_repo=_Remote([]),
+        space_key_repo=_Keys(),
+        own_instance_id="own",
+        own_identity_pk=OWN_PK,
+    )
+    assert not await bare.peer_is_cert_aware("peer")

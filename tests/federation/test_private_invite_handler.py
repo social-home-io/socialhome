@@ -27,6 +27,7 @@ from socialhome.domain.events import (
 from socialhome.domain.space import RemoteAdminOutcome, SpaceRole
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.infrastructure.event_bus import EventBus
+import base64
 
 
 class _RecordingBus:
@@ -1888,8 +1889,6 @@ def _cert_handler(space=None):
 
 
 async def test_rekey_hands_the_writer_cert_to_the_holder_after_the_key():
-    import base64
-
     h, certs, crypto = _cert_handler()
     order: list[str] = []
     crypto.import_key = AsyncMock(side_effect=lambda *a, **k: order.append("key"))
@@ -1913,8 +1912,6 @@ async def test_rekey_hands_the_writer_cert_to_the_holder_after_the_key():
 
 
 async def test_rekey_without_a_cert_touches_no_cert():
-    import base64
-
     h, certs, _crypto = _cert_handler()
     await h._on_key_exchange_rekey(
         _event(
@@ -1949,3 +1946,76 @@ async def test_roster_snapshot_without_cert_or_entries_is_a_no_op():
         _event("SPACE_ROSTER_SNAPSHOT", {"space_id": "sp-c", "entries": []})
     )
     certs.accept.assert_not_awaited()
+
+
+async def test_roster_snapshot_cert_from_a_non_host_is_ignored():
+    """Snapshots are the host's; a cert another member relays (a replay of
+    one it saw) is not stored."""
+    h, certs, _crypto = _cert_handler()
+    await h._on_space_roster_snapshot(
+        _event(
+            "SPACE_ROSTER_SNAPSHOT",
+            {"space_id": "sp-c", "entries": [], "writer_cert": {"cert": 3}},
+            from_instance="peer-2",
+        )
+    )
+    certs.accept.assert_not_awaited()
+
+
+async def test_rekey_cert_from_an_unauthorised_sender_is_ignored():
+    """A non-owner rekey without an authority signature is dropped whole —
+    its cert with it."""
+    h, certs, _crypto = _cert_handler()
+    await h._on_key_exchange_rekey(
+        _event(
+            "SPACE_KEY_EXCHANGE_REKEY",
+            {
+                "space_id": "sp-c",
+                "space_content_key": {
+                    "epoch": 3,
+                    "key_suite": "aesgcm-256",
+                    "key_base64": base64.b64encode(bytes(32)).decode("ascii"),
+                },
+                "writer_cert": {"cert": 4},
+            },
+            from_instance="peer-2",
+        )
+    )
+    certs.accept.assert_not_awaited()
+
+
+async def test_a_household_leaving_a_space_we_host_rotates_if_it_could_write(
+    handler,
+):
+    """v_49 — a voluntary leave ends a writer seat: its cert is valid for the
+    epoch, so the host checks the scope before and after and rotates when it
+    got weaker."""
+    handler.h._own_instance_id = "host-me"
+    space = SimpleNamespace(owner_instance_id="host-me", id="sp-c")
+    handler.space_repo.get = AsyncMock(return_value=space)
+    handler.remote_members.get = AsyncMock(return_value=SimpleNamespace(role="member"))
+    svc = AsyncMock()
+    svc.writer_scope = AsyncMock(return_value="write")
+    svc.rotate_if_writer_scope_weakened = AsyncMock(return_value=True)
+    handler.h.attach_space_service(svc)
+    await handler.h._on_member_removed(
+        _event("SPACE_REMOTE_MEMBER_REMOVED", {"space_id": "sp-c", "user_id": "u"})
+    )
+    svc.writer_scope.assert_awaited_once_with(space, "peer-1")
+    svc.rotate_if_writer_scope_weakened.assert_awaited_once_with(
+        "sp-c", "peer-1", "write"
+    )
+
+
+async def test_a_leave_from_a_space_we_do_not_host_never_rotates(handler):
+    handler.h._own_instance_id = "me"
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id="other", id="sp-c")
+    )
+    handler.remote_members.get = AsyncMock(return_value=SimpleNamespace(role="member"))
+    svc = AsyncMock()
+    handler.h.attach_space_service(svc)
+    await handler.h._on_member_removed(
+        _event("SPACE_REMOTE_MEMBER_REMOVED", {"space_id": "sp-c", "user_id": "u"})
+    )
+    svc.rotate_if_writer_scope_weakened.assert_not_awaited()

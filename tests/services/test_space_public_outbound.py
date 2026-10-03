@@ -43,6 +43,12 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_outbound import SpacePublicOutbound
+from types import SimpleNamespace
+from socialhome.domain.space import SpaceMember
+from socialhome.services.space_writer_cert_service import SpaceWriterCertService
+from socialhome.writer_cert import verify_writer_cert
+from socialhome.domain.writer_cert import WriterCert
+from socialhome.writer_cert import sign_writer_cert
 
 
 class _CaptureGfs:
@@ -660,26 +666,24 @@ class _Seats:
     async def list_for_instance(
         self, space_id, instance_id, *, include_tombstoned=True
     ):
-        from types import SimpleNamespace
-
         return [SimpleNamespace(role=r) for r in self.seats.get(instance_id, [])]
 
 
 class _PeerKeys:
-    def __init__(self, pks: dict[str, bytes]):
+    def __init__(self, pks: dict[str, bytes], versions: dict[str, int] | None = None):
         self.pks = pks
+        self.versions = versions
 
     async def peer_identity_public_key(self, iid):
         return self.pks.get(iid)
 
     async def peer_supports(self, iid, *, min_version):
-        return True
+        if self.versions is None:
+            return True
+        return self.versions.get(iid, 0) >= min_version
 
 
-async def _with_certs(env, *, seats=None, pks=None):
-    from socialhome.domain.space import SpaceMember
-    from socialhome.services.space_writer_cert_service import SpaceWriterCertService
-
+async def _with_certs(env, *, seats=None, pks=None, versions=None):
     certs = SpaceWriterCertService(
         space_repo=env["space_repo"],
         remote_member_repo=_Seats(seats or {}),
@@ -687,7 +691,7 @@ async def _with_certs(env, *, seats=None, pks=None):
         own_instance_id=env["own_iid"],
         own_identity_pk=env["own_pk"],
     )
-    certs.attach_federation(_PeerKeys(pks or {}))
+    certs.attach_federation(_PeerKeys(pks or {}, versions))
     env["sub"].attach_writer_certs(certs)
     return certs, SpaceMember
 
@@ -701,10 +705,6 @@ async def _decrypted(env, space_id):
 
 
 async def test_local_author_inner_carries_our_writer_cert(env):
-    from socialhome.domain.space import SpaceMember
-    from socialhome.writer_cert import verify_writer_cert
-    from socialhome.domain.writer_cert import WriterCert
-
     skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
     await env["space_repo"].save_member(
         SpaceMember(
@@ -734,8 +734,6 @@ async def test_local_author_inner_carries_our_writer_cert(env):
 
 
 async def _remote_cert(skp, author_pk, *, epoch, space_id="sp-pub", scope="write"):
-    from socialhome.writer_cert import sign_writer_cert
-
     return sign_writer_cert(
         space_seed=skp.private_key,
         space_id=space_id,
@@ -746,9 +744,6 @@ async def _remote_cert(skp, author_pk, *, epoch, space_id="sp-pub", scope="write
 
 
 async def test_remote_author_cert_is_restamped_for_the_current_epoch(env):
-    from socialhome.domain.writer_cert import WriterCert
-    from socialhome.writer_cert import verify_writer_cert
-
     skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
     author_kp, author_user_id, relay = _remote_relay()
     await _with_certs(
@@ -840,10 +835,13 @@ async def test_remote_author_whose_seat_is_gone_is_not_relayed(env, caplog):
 
 
 async def test_pre_v49_author_without_a_cert_keeps_the_host_path(env):
-    """The migration tripwire: no cert → today's host-signed relay."""
+    """The migration tripwire: no cert from a pre-v49 origin whose pinned
+    key is the inner's author key → today's host-signed relay."""
     await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
-    _author_kp, author_user_id, relay = _remote_relay()
-    await _with_certs(env)
+    author_kp, author_user_id, relay = _remote_relay()
+    await _with_certs(
+        env, pks={"beta.home": author_kp.public_key}, versions={"beta.home": 48}
+    )
     await env["bus"].publish(
         SpacePostCreated(
             post=_post(author_user_id),
@@ -854,3 +852,43 @@ async def test_pre_v49_author_without_a_cert_keeps_the_host_path(env):
     )
     _envelope, inner = await _decrypted(env, "sp-pub")
     assert inner == relay
+
+
+async def test_v49_origin_without_a_cert_is_not_relayed(env, caplog):
+    """A v49 household always attaches its cert; a hint without one is a
+    stripped cert, not an older author."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    author_kp, author_user_id, relay = _remote_relay()
+    await _with_certs(
+        env, pks={"beta.home": author_kp.public_key}, versions={"beta.home": 49}
+    )
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+    assert "without a writer cert" in caplog.text
+
+
+async def test_legacy_hint_naming_another_key_is_not_relayed(env, caplog):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    _author_kp, author_user_id, relay = _remote_relay()
+    await _with_certs(
+        env,
+        pks={"beta.home": generate_identity_keypair().public_key},
+        versions={"beta.home": 48},
+    )
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+    assert "not the key" in caplog.text

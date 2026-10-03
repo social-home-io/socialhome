@@ -184,6 +184,7 @@ from .space_authority_pin import owner_authority_cert_via
 from .space_member_guard import SpaceMemberGuardMixin
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
+from .space_writer_cert_service import scope_weakened
 
 
 log = logging.getLogger(__name__)
@@ -2130,7 +2131,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         delegated_admin_just_enabled = False
         delegated_admin_just_disabled = False
         subscribers_just_disabled = False
+        comment_just_disabled = False
+        comment_just_enabled = False
         if features is not None:
+            # v_49 — follower comment rights decide the ``comment`` writer
+            # certs: OFF must retire them (rotation), ON issues them.
+            comment_just_disabled = (
+                space.features.allow_subscriber_comment
+                and not features.allow_subscriber_comment
+            )
+            comment_just_enabled = (
+                not space.features.allow_subscriber_comment
+                and features.allow_subscriber_comment
+            )
             location_mode_changed = (
                 features.location_mode != space.features.location_mode
             )
@@ -2328,6 +2341,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 space_id
             ):
                 await self.share_admin_signing_seed(updated, instance_id=admin_instance)
+        if comment_just_disabled or comment_just_enabled:
+            await self._writer_certs_after_comment_toggle(
+                space_id, enabled=comment_just_enabled
+            )
         # Delegated-admin authority just flipped OFF on the space we host:
         # every seed ever shared is now unauthorized. Rotate the authority
         # key and re-share it with nobody (v_44).
@@ -2337,6 +2354,32 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         ):
             await self._bus.publish(SpaceAdminAuthorityRevoked(space_id=space_id))
         return updated
+
+    async def _writer_certs_after_comment_toggle(
+        self, space_id: str, *, enabled: bool
+    ) -> None:
+        """v_49 — ``allow_subscriber_comment`` flipped. OFF with at least one
+        follower seat: rotate, so every ``comment`` cert dies with the epoch.
+        ON: deliver the follower households their ``comment`` cert right
+        away, in a roster snapshot to each (the owner's channel)."""
+        if self._writer_certs is None or self._remote_members is None:
+            return
+        followers = {
+            r.instance_id
+            for r in await self._remote_members.list_for_space(space_id)
+            if r.role == SpaceRole.SUBSCRIBER.value and r.instance_id
+        }
+        local_follower = any(
+            m.role == SpaceRole.SUBSCRIBER
+            for m in await self._spaces.list_members(space_id)
+        )
+        if not enabled:
+            if followers or local_follower:
+                await self._rotate_and_distribute_space_key(space_id)
+            return
+        for instance_id in sorted(followers):
+            if instance_id != self._own_instance_id:
+                await self.send_roster_snapshot(space_id, to_instance_id=instance_id)
 
     # ── Membership ─────────────────────────────────────────────────────
 
@@ -2704,6 +2747,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """Write a host-local member's new role and federate it. Every check
         (actor authority, matrix, owner refusal, we host) already passed."""
         space_id = space.id
+        own = self._own_instance_id or ""
+        scope_before = await self.writer_scope(space, own)
         await self._spaces.set_role(space_id, user_id, role)
         evt = role_change_event_type(old_role, role)
         # A role change is a ROSTER mutation, not a config edit — it must NOT
@@ -2733,6 +2778,42 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             role=role,
             tombstoned=False,
         )
+        # v_49 — our own household's write right just got weaker: rotate so
+        # its old writer cert dies with the epoch.
+        await self.rotate_if_writer_scope_weakened(space_id, own, scope_before)
+
+    async def writer_scope(self, space: Space, instance_id: str) -> str | None:
+        """Household ``instance_id``'s writer-cert scope (v_49), or ``None``
+        without a cert service."""
+        if self._writer_certs is None:
+            return None
+        return await self._writer_certs.scope_for_instance(space, instance_id)
+
+    async def rotate_if_writer_scope_weakened(
+        self, space_id: str, instance_id: str, scope_before: str | None
+    ) -> bool:
+        """Rotate the content key when household ``instance_id`` now holds a
+        weaker writer scope than ``scope_before`` (write → comment, any →
+        none). A writer cert is valid for its whole epoch, so a reduction of
+        rights only takes effect at the next epoch — this makes that epoch
+        start now. Promotions never rotate. Returns whether it rotated."""
+        if self._writer_certs is None:
+            return False
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return False
+        after = await self._writer_certs.scope_for_instance(space, instance_id)
+        if not scope_weakened(scope_before, after):
+            return False
+        log.info(
+            "space %s: household %s writer scope %s → %s — rotating the content key",
+            space_id,
+            instance_id,
+            scope_before,
+            after,
+        )
+        await self._rotate_and_distribute_space_key(space_id)
+        return True
 
     @staticmethod
     def _check_role_change(actor_role: str, target_role: str, role: str) -> None:
@@ -3535,12 +3616,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             role=role,
             tombstoned=False,
         )
-        # v_49 — a change that alters the household's write / comment rights
-        # (a follower made a member) re-delivers its writer cert at the new
-        # scope, in a roster snapshot addressed to that household alone.
-        if self._writer_certs is not None and (
-            await self._writer_certs.scope_for_instance(space, instance_id)
-            != scope_before
+        # v_49 — a change that alters the household's write / comment rights.
+        # Weaker (write → comment, any → none): rotate the content key, so
+        # the cert it already holds dies with the epoch and every household
+        # gets a fresh one at its current scope. Stronger (a follower made a
+        # member): re-deliver its cert at the new scope, in a roster snapshot
+        # addressed to that household alone. No rotation for a promotion.
+        if (
+            not await self.rotate_if_writer_scope_weakened(
+                space_id, instance_id, scope_before
+            )
+            and self._writer_certs is not None
+            and (
+                await self._writer_certs.scope_for_instance(space, instance_id)
+                != scope_before
+            )
         ):
             await self.send_roster_snapshot(space_id, to_instance_id=instance_id)
         # Delegated-admin authority (v_22): when the owner has opted in and

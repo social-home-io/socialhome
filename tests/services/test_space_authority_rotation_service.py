@@ -1076,3 +1076,23 @@ async def test_member_stores_the_cert_from_the_bundle(env):
         )
     )
     assert certs.accepted == [(SPACE, cert)]
+
+
+async def test_member_ignores_a_bundle_cert_from_a_non_owner(env):
+    await env.svc.rotate(SPACE)
+    bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+    member, handler = await _member_env(env)
+    certs = _Certs()
+    member.attach_writer_certs(certs)
+    await handler(
+        FederationEvent(
+            msg_id=str(uuid.uuid4()),
+            event_type=FET.SPACE_AUTHORITY_ROTATED,
+            from_instance="not-the-owner",
+            to_instance="member-household",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            payload={**bundle, "writer_cert": {"x": 1}},
+            space_id=SPACE,
+        )
+    )
+    assert certs.accepted == []

@@ -38,6 +38,7 @@ class AbstractSpaceKeyRepo(Protocol):
     async def set_writer_cert(
         self, space_id: str, epoch: int, cert_json: str
     ) -> bool: ...
+    async def get_previous(self, space_id: str, epoch: int) -> SpaceKey | None: ...
     async def get_writer_cert(self, space_id: str, epoch: int) -> str | None: ...
 
 
@@ -171,7 +172,8 @@ class SqliteSpaceKeyRepo:
                 ON CONFLICT(space_id, epoch) DO UPDATE SET
                     content_key_hex=excluded.content_key_hex,
                     rotated_by=excluded.rotated_by,
-                    authority_epoch=excluded.authority_epoch
+                    authority_epoch=excluded.authority_epoch,
+                    writer_cert=NULL
                 """,
                 (
                     key.space_id,
@@ -195,6 +197,15 @@ class SqliteSpaceKeyRepo:
             (cert_json, space_id, epoch),
         )
         return changed > 0
+
+    async def get_previous(self, space_id: str, epoch: int) -> SpaceKey | None:
+        """The newest key BELOW ``epoch`` (epochs may jump), or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT * FROM space_keys WHERE space_id=? AND epoch<?"
+            " ORDER BY epoch DESC LIMIT 1",
+            (space_id, epoch),
+        )
+        return _row(row) if row else None
 
     async def get_writer_cert(self, space_id: str, epoch: int) -> str | None:
         """The stored writer cert JSON for ``(space, epoch)``, or ``None``."""

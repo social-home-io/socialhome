@@ -6,15 +6,22 @@
 -- per epoch by a seed holder (owner or delegated admin) and lets a member's
 -- own signed item be authorized without the host signing every post.
 --
--- Each household keeps the ONE cert it holds for each (space, epoch). It
--- lives on the epoch's existing ``space_keys`` row — the cert is bound to
--- exactly that epoch, arrives with (or right after) that epoch's content
--- key, and goes away with it (an authority-rotation reset or the space's
--- ON DELETE CASCADE). Seed holders store nothing extra: what they issued is
--- re-derived from the roster at every rotation.
+-- Each household keeps the ONE cert it holds for each (space, epoch) on that
+-- epoch's existing ``space_keys`` row: the cert is bound to exactly that
+-- epoch and arrives with (or right after) that epoch's content key. It is
+-- written only onto an existing row, replaced only by a newer cert (or one
+-- of equal age granting more), and cleared when the row's key is replaced by
+-- a v_44 authority-rotation baseline reset (signed by a retired key); epochs
+-- the reset deletes, and the space's ON DELETE CASCADE, take it with them.
+-- A same-epoch key replacement by the Phase-4b ``rotated_by`` tiebreak keeps
+-- it: the cert is bound to the epoch, not the key bytes. Seed holders store
+-- nothing about the certs they issue — they re-derive them from the roster.
+--
+-- Epoch freshness (an item is accepted at the newest epoch held, or at the
+-- previous one for a short grace after the newest key arrived) needs no new
+-- column: ``space_keys.created_at`` already records when a key was minted
+-- or imported here.
 --
 -- Additive, NULL default: every existing key row simply holds no cert,
--- which is exactly the pre-v_49 state (items keep the host-signed path).
--- A same-epoch key replacement (the Phase-4b ``rotated_by`` tiebreak) does
--- not touch the column: the cert is bound to the epoch, not the key bytes.
+-- which is exactly the pre-v_49 state.
 ALTER TABLE space_keys ADD COLUMN writer_cert TEXT;

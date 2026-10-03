@@ -749,15 +749,20 @@ from __future__ import annotations
 #:   (``{cert_suite, space_id, epoch, instance_pk, scope, issued_at,
 #:   cert_sig}``, :mod:`socialhome.writer_cert`): ``scope: "write"`` for
 #:   owner / admin / moderator / member seats, ``"comment"`` for a follower
-#:   seat while ``allow_subscriber_comment`` is on. It reaches only the
-#:   household it names, inside the encrypted payload of channels that
-#:   already exist: the redeem ACK ``space_meta``, the per-peer
-#:   ``SPACE_KEY_EXCHANGE_REKEY`` fan-out, ``SPACE_ROSTER_SNAPSHOT`` and the
-#:   ``SPACE_AUTHORITY_ROTATED`` bundle. An author household puts its cert
-#:   in the relayed public-post inner (``public_relay``); a receiver drops an
-#:   item whose cert is present but fails verification. **Gated, degraded
-#:   fallback**: certs go only to v_49 households; an item with no cert
-#:   (a pre-v_49 author) keeps today's host-authority-signed path.
+#:   seat while ``allow_subscriber_comment`` is on. Each household is
+#:   delivered its own cert, inside the per-peer encrypted payload of
+#:   channels that already exist: the redeem ACK ``space_meta``, the
+#:   per-peer ``SPACE_KEY_EXCHANGE_REKEY`` fan-out, ``SPACE_ROSTER_SNAPSHOT``
+#:   and the ``SPACE_AUTHORITY_ROTATED`` bundle. An author household puts its
+#:   cert in the relayed public-post inner (``public_relay``), so it then
+#:   travels — encrypted — to every member and on to subscribers. A
+#:   scope-reducing change (a seat lost, comment rights turned off) rotates
+#:   the content key; receivers accept a cert-authorized item only at the
+#:   newest epoch they hold (or the previous one for a short grace) and drop
+#:   one whose cert fails. **Gated, degraded fallback**: certs go only to
+#:   v_49 households; an item with no cert from a pre-v_49 author keeps
+#:   today's host-authority-signed path (a v_49 author's hint without one
+#:   is refused).
 OURS: int = 49
 
 
