@@ -895,56 +895,75 @@ POST /gfs/member-publish
   signature; a follower that dresses a post up as a `space_item` is relayed
   and then dropped everywhere.
 - **Epoch freshness at the GFS.** Receivers accept only the newest content
-  epoch they hold (or the previous one for 600 s). The GFS learns epochs
-  only from authority-signed statements: a verified writer cert, the
-  plaintext `epoch` of an authorized `space_post_public` relay, and a seed
-  holder's **epoch notice** — `POST /gfs/spaces/{id}/epoch` with a
-  space-authority signature over `{space_id, epoch}` under
-  `space_epoch_notice`, sent when the content key rotates. It relays a cert
-  of the newest known epoch or exactly one newer, or of an older one back
-  to the previous epoch for 600 s after the newer one was first seen (the
-  first epoch learned gets `epoch − 1` as predecessor). **Inflation bound:**
-  any seed holder can sign a cert, a notice or a relay — a demoted one too,
-  until the authority re-pin — so a cert may raise the epoch by one step
-  only, and a notice or relay no further than `max(current + 1000, now +
-  1 day)` (the v_44 post-restore jump to unix seconds still lands). Without the
-  notice the GFS would keep relaying a writer removed at the last rotation
-  until somebody else happened to publish; receivers would still drop the
-  items, but the relay would be an amplifier for them. The state is stored
-  per space (GFS migration `0014`), monotonic, and cleared when the space
-  authority key is re-pinned.
+  epoch they hold (or the previous one for 600 s). The GFS can tell the
+  space **owner** apart (its registered household key) but not a legitimate
+  delegated admin from a demoted one whose seed still matches until the
+  re-pin, so it keeps two tiers (GFS migration `0014`):
+  - the **confirmed** epoch moves only on the owner's household-signed
+    notice — `POST /gfs/spaces/{id}/epoch` with `{owning_instance,
+    gfs_instance_id, epoch, ts, signature}` — by any amount up to
+    `max(confirmed + 1000, now + 1 day)` (the v_44 post-restore jump to unix
+    seconds lands). The confirmed epoch before it stays open for 600 s;
+  - the **current** epoch is raised by seed-only statements — a delegated
+    admin's notice (`{epoch, authority_sig, authority_sig_suite}`, signed
+    over `{space_id, epoch}` under `space_epoch_notice`) or the plaintext
+    `epoch` of an authorized `space_post_public` relay — by exactly +1, at
+    most once a minute, and only once the owner confirmed an epoch;
+  - **writer certs never raise anything.**
+
+  A cert is relayed from the confirmed epoch up to `current + 1`, or back to
+  the previous confirmed epoch during the grace. No seed holder can lock
+  writers out: seed-only raises never move the floor, and certs never move
+  anything (two +1 certs used to raise `previous` past the real writers).
+  **The cost, stated plainly:** a writer removed by a *delegated admin's*
+  rotation stays relayable here — receivers still drop its items — until
+  the owner confirms the new epoch, which an owner household does on every
+  GFS (re)connection. The state is cleared when the space authority key is
+  re-pinned.
 - **Fan-out** runs in the background after the 200 (bounded workers and
   backlog — `503` when full, at most 8 live pushes in flight) and goes to
   every active subscriber except the publisher, as
   `{type:"relay", space_id, event_type:"space_item", epoch, writer_cert,
   payload}` — no `from_instance`: receivers authenticate the item by the
-  cert and the inner author signature. An offline subscriber's frame waits
-  in the GFS queue for 24 h (shared with `/gfs/envelope`, separately capped
-  per recipient and server-wide) and is drained on its next hello — but only
-  for a subscriber whose WS session was seen within those 24 h, so
-  self-subscribed households that never connect cannot multiply each item
-  into stored copies. Subscribers dedupe by item id, as for
+  cert and the inner author signature. Each space is pinned to one worker,
+  so its items go out in publish order, and one space may hold only a
+  bounded share of the backlog. An offline subscriber's frame waits in the
+  GFS queue for 24 h (shared with `/gfs/envelope`, separately capped) and is
+  drained on its next hello — but only for a subscriber that held a WS
+  session for at least 60 s within those 24 h (a bare hello earns nothing).
+  Room is made by fair-share eviction: a recipient's own oldest item at its
+  per-recipient cap, the largest holder's oldest item at the server-wide
+  cap, in the same transaction as the insert. One registered household may
+  hold at most 500 subscriptions. Subscribers dedupe by item id, as for
   host-relayed copies.
 
 **Hard requirements on households** (the GFS check is only as sound as
 these; adversarial review of PR 2):
 
-1. **Epoch notice at every rotation.** A seed holder sends the
-   `space_epoch_notice` for the new epoch to EVERY GFS the space is listed
-   on, at every content-key rotation — kick, ban, leave, scope drop
+1. **Epoch notice at every rotation.** A seed holder sends the epoch
+   notice for the new epoch — the owner's household-signed form when the
+   owner rotates (it may jump), a delegated admin's authority-signed form
+   (+1) otherwise — to EVERY GFS the space is listed on, at every content-key rotation — kick, ban, leave, scope drop
    (demotion, follower comments turned off) — through the GFS publish retry
    queue, and BEFORE it re-seals the content key to subscribers. Until the
    notice lands, a writer removed by that rotation can still be relayed
    (receivers drop its items, but the relay amplifies them).
-2. **Re-send after every authority re-pin.** A re-pin clears the GFS epoch
-   state, so the owner re-sends the current epoch's notice right after any
-   authority-key rotation.
+2. **Re-send after every authority re-pin, and on every GFS connection.**
+   A re-pin clears the GFS epoch state, so the owner re-sends the current
+   epoch's (owner-signed) notice right after any authority-key rotation,
+   and on each GFS (re)connect, which also confirms rotations a delegated
+   admin made while the owner was away.
 3. **`gfs_instance_id` in every signed request** — the id pinned from that
    server's `/gfs/info`, never a value from another server.
 4. **Strict mode (PR 4) moves `writer_cert` inside the ciphertext.** In
    trusted mode it is plaintext only because the server authorizes with it;
    strict mode authorizes with the writer group key, so the cert (which
    names the household) must not stay visible.
+5. **Edit and delete over this relay (PR 3) must not depend on arrival
+   order.** The GFS delivers one space's items in publish order, but the
+   host path, the queue and space sync interleave with it, so a receiver
+   must tolerate a delete (or an edit) that arrives before its create —
+   e.g. a tombstone that a later create honours.
 
 ```mermaid
 sequenceDiagram
@@ -952,8 +971,8 @@ sequenceDiagram
     participant G as GFS
     participant S as Subscriber / member
     participant O as Seed holder
-    O->>G: POST /gfs/spaces/{id}/epoch {epoch, authority_sig}
-    Note over G: epoch advances (monotonic)
+    O->>G: POST /gfs/spaces/{id}/epoch {owning_instance, epoch, ts, signature}
+    Note over G: owner confirms the epoch (monotonic)
     M->>M: encrypt {real type, author-signed inner} under epoch key
     M->>G: POST /gfs/member-publish {instance_id, ts, signature,<br/>target, space_item, epoch, writer_cert, payload}
     G->>G: household sig, rate limit, space, verify_writer_cert, epoch fresh

@@ -324,66 +324,88 @@ class GfsQueuedEnvelope:
     frame_type: str = "envelope"
 
 
-#: Largest raise of a space's proven content epoch one authority statement
-#: (an epoch notice or an authorized host relay) may make beyond the stored
-#: one — unless it stays within :data:`MAX_EPOCH_CLOCK_LEAD_S` of wall-clock
-#: now, which is how far a v_44 post-restore rotation (epoch lifted to unix
-#: seconds) may legitimately jump.
+#: How far an OWNER epoch notice may raise a space's confirmed content epoch
+#: beyond the stored one — unless it stays within
+#: :data:`MAX_EPOCH_CLOCK_LEAD_S` of wall-clock now, which is how far a v_44
+#: post-restore rotation (epoch lifted to unix seconds) may legitimately jump.
 MAX_EPOCH_STEP: int = 1000
 
-#: How far ahead of wall-clock now (seconds) a proven epoch may ever be.
+#: How far ahead of wall-clock now (seconds) an owner may ever set the epoch.
 MAX_EPOCH_CLOCK_LEAD_S: int = 24 * 60 * 60
+
+#: Minimum spacing (seconds) between two raises of ``current`` that do NOT
+#: come from the owner (a delegated admin's notice, an authorized host relay).
+MIN_EPOCH_STEP_INTERVAL_S: int = 60
 
 
 def epoch_ceiling(current: int | None, now: int) -> int:
-    """The highest content epoch an authority statement may raise a space to.
+    """The highest content epoch an OWNER notice may confirm.
 
-    ``max(current + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)`` — so one
-    seed holder (say, a demoted one whose seed still matches until the
-    re-pin) cannot sign an epoch near 2^63 and lock every writer out, while a
-    restored owner's wall-clock epoch still lands. A verified writer cert is
-    held to a tighter rule (+1, see ``member_publish``)."""
+    ``max(current + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)`` — the
+    restored owner's wall-clock epoch still lands, an absurd value does not.
+    Nobody but the owner raises by more than +1 (see :class:`GfsSpaceEpoch`)."""
     base = current if current is not None else 0
     return max(base + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)
 
 
 @dataclass(slots=True, frozen=True)
 class GfsSpaceEpoch:
-    """The newest space content epoch this server has seen proven (v_49).
+    """What this server knows about a space's content epoch (v_49).
 
-    Learned only from space-AUTHORITY-signed statements: a writer cert that
-    verified at ``/gfs/member-publish``, the ``epoch`` of an authority-signed
-    ``space_post_public`` relay, or an authority-signed epoch notice. Kept off
-    :class:`GlobalSpace` on purpose so the public directory (which serialises
-    that dataclass) never shows it. Reset whenever the space authority key is
-    re-pinned — certs under the old key stop verifying anyway, and a revoked
-    seed holder must not leave an inflated epoch behind.
+    Two tiers, because the GFS can tell the space OWNER apart (its registered
+    household key) but cannot tell a legitimate delegated admin from a
+    demoted one whose seed still matches until the re-pin:
+
+    * ``confirmed`` — the epoch the OWNER last announced (owner-signed
+      notice). Only the owner moves it, by any amount up to
+      :func:`epoch_ceiling`; ``previous`` is the confirmed epoch before it
+      and ``confirmed_at`` when it was confirmed.
+    * ``current`` — the newest epoch seen at all (``>= confirmed``). Seed-only
+      statements (a delegated admin's notice, an authorized host relay) raise
+      it by exactly +1, at most once per :data:`MIN_EPOCH_STEP_INTERVAL_S`
+      (``raised_at``); writer certs never raise anything.
+
+    Kept off :class:`GlobalSpace` so the public directory never shows it,
+    and reset whenever the space authority key is re-pinned.
     """
 
     space_id: str
     current: int
-    #: The epoch that was current before ``current``; ``current - 1`` for the
-    #: first epoch learned, so its predecessor gets the same grace. ``None``
-    #: only for rows written before that rule.
+    confirmed: int
     previous: int | None
-    #: Unix seconds at which ``current`` was first seen.
-    current_seen_at: int
+    confirmed_at: int
+    raised_at: int
 
     def admits(self, epoch: int, *, now: int, grace_s: int) -> bool:
         """Whether a cert for ``epoch`` is fresh enough to relay.
 
-        The newest known epoch (or a newer one — the cert itself proves the
-        authority issued it) is always fresh. An older one is fresh only while
-        the newest is younger than ``grace_s`` and only back to ``previous``:
-        a member whose new cert is still in flight keeps publishing, a
-        household removed at the last rotation stops once the grace runs out.
+        * never beyond ``current + 1`` (one rotation may be in flight);
+        * anything from ``confirmed`` up is admitted — seed-only raises move
+          ``current`` but never the floor, so no seed holder can strand the
+          writers on the owner's real epoch (a cert can't either: certs never
+          raise);
+        * an epoch below ``confirmed`` is admitted back to ``previous`` only
+          for ``grace_s`` after the owner confirmed the newer one — that is
+          what retires a writer the owner's rotation removed.
+
         Receivers apply their own (exact) freshness rule on top.
         """
-        if epoch >= self.current:
+        if epoch > self.current + 1:
+            return False
+        if epoch >= self.confirmed:
             return True
         if self.previous is None or epoch < self.previous:
             return False
-        return now - self.current_seen_at <= grace_s
+        return now - self.confirmed_at <= grace_s
+
+    def may_step(self, epoch: int, *, now: int) -> bool:
+        """Whether a seed-only statement may raise ``current`` to ``epoch``:
+        exactly +1, and not within :data:`MIN_EPOCH_STEP_INTERVAL_S` of the
+        last raise."""
+        return (
+            epoch == self.current + 1
+            and now - self.raised_at >= MIN_EPOCH_STEP_INTERVAL_S
+        )
 
 
 @dataclass(slots=True, frozen=True)

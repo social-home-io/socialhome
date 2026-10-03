@@ -60,10 +60,19 @@ class MemberPublishView(GfsBaseView):
 
 
 class SpaceEpochNoticeView(GfsBaseView):
-    """``POST /gfs/spaces/{space_id}/epoch`` — body ``{epoch, authority_sig,
-    authority_sig_suite}``, the signature over ``{space_id, epoch}`` under
-    ``space_epoch_notice``. Anonymous like ``/gfs/publish``: authorized by
-    the space-authority signature alone, so it names no household."""
+    """``POST /gfs/spaces/{space_id}/epoch`` — a content-epoch notice, in one
+    of two forms:
+
+    * **owner** ``{owning_instance, gfs_instance_id, epoch, ts, signature}``
+      — the space owner's household signature (see
+      ``owner_epoch_notice_signing_payload``); confirms the epoch, any raise
+      up to the plausibility ceiling;
+    * **seed-only** ``{epoch, authority_sig, authority_sig_suite}`` — the
+      space-authority signature over ``{space_id, epoch}`` under
+      ``space_epoch_notice`` (a delegated admin); anonymous like
+      ``/gfs/publish``, and it may raise the epoch by +1 at most, once a
+      minute, never the owner-confirmed floor.
+    """
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_member_publish_key)
@@ -72,16 +81,30 @@ class SpaceEpochNoticeView(GfsBaseView):
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(reason="expected a JSON object")
         try:
-            epoch = body["epoch"]
-            authority_sig = body["authority_sig"]
-            authority_sig_suite = body["authority_sig_suite"]
-        except KeyError as exc:
-            raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
-        try:
-            await svc.note_epoch(
-                space_id, epoch, str(authority_sig), str(authority_sig_suite)
-            )
+            if "owning_instance" in body:
+                await svc.note_owner_epoch(
+                    space_id,
+                    owning_instance=str(_field(body, "owning_instance")),
+                    gfs_instance_id=str(_field(body, "gfs_instance_id")),
+                    epoch=_field(body, "epoch"),
+                    ts=str(_field(body, "ts")),
+                    signature=str(_field(body, "signature")),
+                )
+            else:
+                await svc.note_epoch(
+                    space_id,
+                    _field(body, "epoch"),
+                    str(_field(body, "authority_sig")),
+                    str(_field(body, "authority_sig_suite")),
+                )
         except PermissionError as exc:
             log.debug("GFS epoch notice refused for space %s: %s", space_id, exc)
             return web.json_response(_REFUSED_NOTICE, status=403)
         return web.json_response({"status": "ok"})
+
+
+def _field(body: dict, name: str) -> object:
+    try:
+        return body[name]
+    except KeyError as exc:
+        raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc

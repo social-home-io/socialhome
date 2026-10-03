@@ -37,9 +37,12 @@
 --       a discriminator so the drain knows which frame to rebuild; and storing
 --       the discriminator inside the JSON blob was rejected because that
 --       column is opaque by contract and a DB-level CHECK beats a convention.
---   (3) Smallest possible change: four additive ``ADD COLUMN``s and one
---       index. The three
---       epoch columns are NULL-defaulted (NULL = no epoch learned yet; no
+--       For "recently seen", ``rtc_connections.last_ping_at`` was rejected:
+--       a bare WS hello touches it, so it costs a sybil nothing; the new
+--       ``client_instances.relay_seen_at`` is written only for a session held
+--       for a minimum duration.
+--   (3) Smallest possible change: additive ``ADD COLUMN``s and one index.
+--       The five epoch columns and ``client_instances.relay_seen_at`` are NULL-defaulted (NULL = no epoch learned yet; no
 --       backfill). ``frame_type`` defaults to ``'envelope'``, which is what
 --       every existing row is, so no row is rewritten.
 --
@@ -47,9 +50,17 @@
 -- authority-signed relays: that the space's content key rotated, and when.
 -- They are never served on the public directory (``GlobalSpace`` does not
 -- carry them) and are cleared whenever the authority key is re-pinned.
+-- ``content_epoch_confirmed`` / ``_prev`` / ``_seen_at``: the epoch the space
+-- OWNER last announced (owner-household-signed notice), the one before it,
+-- and when (unix seconds). Only the owner moves them. ``content_epoch``: the
+-- newest epoch seen at all, raised by seed-only statements (+1, at most once
+-- a minute — ``content_epoch_raised_at``) — the GFS cannot tell a delegated
+-- admin from a demoted one whose seed still matches until the re-pin.
 ALTER TABLE global_spaces ADD COLUMN content_epoch INTEGER;
+ALTER TABLE global_spaces ADD COLUMN content_epoch_confirmed INTEGER;
 ALTER TABLE global_spaces ADD COLUMN content_epoch_prev INTEGER;
 ALTER TABLE global_spaces ADD COLUMN content_epoch_seen_at INTEGER;
+ALTER TABLE global_spaces ADD COLUMN content_epoch_raised_at INTEGER;
 
 -- ``'envelope'``: a sealed §D2b blob, drained as ``{type: "envelope",
 -- sealed}``. ``'relay'``: a member-published space item, ``sealed_json``
@@ -63,3 +74,9 @@ ALTER TABLE gfs_envelope_queue ADD COLUMN frame_type TEXT NOT NULL
 -- publish fan-out; this keeps that read off the envelope rows.
 CREATE INDEX IF NOT EXISTS idx_gfs_envelope_queue_kind
     ON gfs_envelope_queue(frame_type, expires_at);
+
+-- When a household last held its ``/gfs/ws`` session for at least
+-- ``RELAY_SEEN_MIN_SESSION_S`` (unix seconds). Offline member-published items
+-- are queued only for households seen this way within the queue TTL — a bare
+-- hello costs nothing, so it must not earn disk. NULL = never.
+ALTER TABLE client_instances ADD COLUMN relay_seen_at INTEGER;

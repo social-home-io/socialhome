@@ -48,6 +48,7 @@ from aiohttp import WSMsgType, web
 
 from ... import crypto
 from .. import app_keys as K
+from ..envelope_relay import RELAY_SEEN_MIN_SESSION_S
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,16 @@ TIMESTAMP_WINDOW_SECONDS = 300
 WS_CLOSE_AUTH_FAILED = 4401
 WS_CLOSE_HELLO_TIMEOUT = 4408
 WS_CLOSE_PROTOCOL_VIOLATION = 4400
+
+
+async def _mark_seen_after(
+    fed_repo, instance_id: str, ws: web.WebSocketResponse
+) -> None:
+    """Mark *instance_id* relay-seen once its socket has stayed open for
+    :data:`RELAY_SEEN_MIN_SESSION_S`."""
+    await asyncio.sleep(RELAY_SEEN_MIN_SESSION_S)
+    if not ws.closed:
+        await fed_repo.mark_relay_seen(instance_id, at=int(time.time()))
 
 
 class GfsWebSocketView(web.View):
@@ -93,6 +104,15 @@ class GfsWebSocketView(web.View):
         # order; bounded by ENVELOPE_QUEUE_MAX_PER_RECIPIENT, and the SH sends
         # no application frames of its own, so nothing is missed meanwhile.
         await self.request.app[K.gfs_envelope_relay_key].drain(instance_id)
+        # v_49 — a session held long enough marks the household "seen": only
+        # seen households get member-published items queued while offline (a
+        # bare hello must not earn disk). Marked from a timer WHILE the socket
+        # is open, never from the ``finally`` below, which aiohttp may cancel
+        # mid-way when the peer drops.
+        seen_timer = asyncio.create_task(
+            _mark_seen_after(fed_repo, instance_id, ws),
+            name=f"gfs-ws-seen-{instance_id}",
+        )
 
         try:
             async for msg in ws:
@@ -121,8 +141,10 @@ class GfsWebSocketView(web.View):
                 exc,
             )
         finally:
+            seen_timer.cancel()
             await registry.unregister(instance_id, ws)
             await fed_repo.upsert_rtc_connection(instance_id, transport="https")
+
         return ws
 
     # ─── Hello-frame authentication ──────────────────────────────────────

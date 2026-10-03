@@ -665,16 +665,25 @@ async def test_relay_items_have_their_own_cap_and_never_crowd_out_envelopes(
     assert sum(1 for r in rows if r.frame_type == QUEUE_KIND_ENVELOPE) == 2
 
 
-async def test_relay_queue_tail_drops_at_its_cap(wiring, monkeypatch, caplog):
+async def test_the_relay_queue_keeps_the_newest_at_its_cap(wiring, monkeypatch):
     _fed, queue_repo, _registry, relay = wiring
     monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_PER_RECIPIENT", 1)
     assert await _send(relay, _item("first")) == 1
-    with caplog.at_level(logging.WARNING, logger="socialhome.global_server"):
-        assert await _send(relay, _item("second")) == 0
+    assert await _send(relay, _item("second")) == 1
     rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
-    assert [r.sealed["payload"] for r in rows] == ["first"]
-    assert "relay queue full" in caplog.text
-    assert "second" not in caplog.text
+    assert [r.sealed["payload"] for r in rows] == ["second"]
+
+
+async def test_an_item_over_the_caps_on_its_own_is_not_queued(
+    wiring, monkeypatch, caplog
+):
+    _fed, queue_repo, _registry, relay = wiring
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT", 10)
+    with caplog.at_level(logging.WARNING, logger="socialhome.global_server"):
+        assert await _send(relay, _item("big")) == 0
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
+    assert "exceeds the relay queue caps" in caplog.text
+    assert "big" not in caplog.text
 
 
 async def test_a_corrupt_frame_type_is_refused_by_the_database(gfs_db):
@@ -694,17 +703,15 @@ async def test_a_target_not_in_queue_ok_gets_no_row(wiring):
     assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
 
 
-async def test_the_server_wide_relay_byte_cap_stops_queueing(
-    wiring, monkeypatch, caplog
-):
+async def test_the_server_wide_relay_byte_cap_holds_by_eviction(wiring, monkeypatch):
     _fed, queue_repo, _registry, relay = wiring
     one = len(orjson.dumps(_item("x")))
     monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_TOTAL_BYTES", one + 1)
     assert await _send(relay, _item("x")) == 1
-    with caplog.at_level(logging.WARNING, logger="socialhome.global_server"):
-        assert await _send(relay, _item("y")) == 0
-    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 1
-    assert "server-wide relay queue cap" in caplog.text
+    assert await _send(relay, _item("y")) == 1
+    rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
+    assert [r.sealed["payload"] for r in rows] == ["y"]
+    assert await queue_repo.relay_bytes(0) <= one + 1
 
 
 async def test_live_pushes_run_concurrently_but_bounded(wiring, monkeypatch):

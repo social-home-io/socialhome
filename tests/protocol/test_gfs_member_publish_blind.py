@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -130,7 +131,7 @@ async def gfs(tmp_dir):
         await fed.add_subscriber(
             space_id=SPACE_ID, instance_id=tc.subscriber.instance_id
         )
-        await fed.upsert_rtc_connection(tc.subscriber.instance_id, transport="https")
+        await fed.mark_relay_seen(tc.subscriber.instance_id, at=int(time.time()))
         yield tc
 
 

@@ -871,48 +871,69 @@ async def test_space_epoch_is_none_until_one_is_learned(gfs_db):
     assert await epochs.get("unknown") is None
 
 
-async def test_space_epoch_advances_monotonically_and_keeps_the_previous(gfs_db):
+async def _epochs(gfs_db, **space_kw):
     repo = SqliteGfsFederationRepo(gfs_db)
     await _owner_row(repo)
-    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
-    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
+    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o", **space_kw))
+    return repo, SqliteGfsSpaceEpochRepo(gfs_db)
 
-    assert await epochs.advance("sp", 3, seen_at=100)
+
+async def test_owner_confirm_is_monotonic_and_keeps_the_previous(gfs_db):
+    _repo, epochs = await _epochs(gfs_db)
+    assert await epochs.confirm("sp", 3, now=100)
     state = await epochs.get("sp")
-    # The first epoch learned gets ``epoch - 1`` as its predecessor (grace).
-    assert (state.current, state.previous, state.current_seen_at) == (3, 2, 100)
-
-    assert await epochs.advance("sp", 5, seen_at=200)
+    # The first epoch confirmed gets ``epoch - 1`` as its predecessor (grace).
+    assert (state.current, state.confirmed, state.previous, state.confirmed_at) == (
+        3,
+        3,
+        2,
+        100,
+    )
+    assert await epochs.confirm("sp", 5, now=200)
     state = await epochs.get("sp")
-    assert (state.current, state.previous, state.current_seen_at) == (5, 3, 200)
-
+    assert (state.confirmed, state.previous, state.confirmed_at) == (5, 3, 200)
     # Equal or older never moves it (a replayed notice can't roll it back).
-    assert not await epochs.advance("sp", 5, seen_at=300)
-    assert not await epochs.advance("sp", 4, seen_at=300)
+    assert not await epochs.confirm("sp", 5, now=300)
+    assert not await epochs.confirm("sp", 4, now=300)
+    assert (await epochs.get("sp")).confirmed == 5
+
+
+async def test_a_step_raises_current_by_one_once_a_minute_never_the_floor(gfs_db):
+    _repo, epochs = await _epochs(gfs_db)
+    # Nothing to step from before the owner confirmed an epoch.
+    assert not await epochs.step("sp", 1, now=10_000, min_interval_s=60)
+    assert await epochs.get("sp") is None
+    await epochs.confirm("sp", 3, now=100)
+    assert not await epochs.step("sp", 5, now=10_000, min_interval_s=60)
+    assert not await epochs.step("sp", 4, now=150, min_interval_s=60)
+    assert await epochs.step("sp", 4, now=160, min_interval_s=60)
+    assert not await epochs.step("sp", 5, now=200, min_interval_s=60)
     state = await epochs.get("sp")
-    assert (state.current, state.previous, state.current_seen_at) == (5, 3, 200)
+    assert (state.current, state.confirmed, state.previous) == (4, 3, 2)
+
+
+async def test_owner_confirm_never_lowers_current(gfs_db):
+    _repo, epochs = await _epochs(gfs_db)
+    await epochs.confirm("sp", 3, now=100)
+    await epochs.step("sp", 4, now=200, min_interval_s=60)
+    await epochs.confirm("sp", 4, now=300)
+    state = await epochs.get("sp")
+    assert (state.current, state.confirmed, state.previous) == (4, 4, 3)
 
 
 async def test_space_epoch_survives_a_publish_refresh(gfs_db):
-    repo = SqliteGfsFederationRepo(gfs_db)
-    await _owner_row(repo)
-    space = GlobalSpace(space_id="sp", owning_instance="o")
-    await repo.upsert_space(space)
-    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
-    await epochs.advance("sp", 7, seen_at=1)
-    await repo.upsert_space(replace(space, name="renamed"))
-    assert (await epochs.get("sp")).current == 7
+    repo, epochs = await _epochs(gfs_db)
+    await epochs.confirm("sp", 7, now=1)
+    await repo.upsert_space(
+        GlobalSpace(space_id="sp", owning_instance="o", name="renamed")
+    )
+    assert (await epochs.get("sp")).confirmed == 7
 
 
 async def test_space_epoch_is_forgotten_when_the_authority_key_is_repinned(gfs_db):
     """A revoked seed holder must not leave an inflated epoch behind."""
-    repo = SqliteGfsFederationRepo(gfs_db)
-    await _owner_row(repo)
-    await repo.upsert_space(
-        GlobalSpace(space_id="sp", owning_instance="o", identity_public_key="aa" * 32)
-    )
-    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
-    await epochs.advance("sp", 2**40, seen_at=1)
+    repo, epochs = await _epochs(gfs_db, identity_public_key="aa" * 32)
+    await epochs.confirm("sp", 2**40, now=1)
     assert await repo.set_space_authority(
         "sp",
         expected_pk="aa" * 32,
@@ -924,11 +945,8 @@ async def test_space_epoch_is_forgotten_when_the_authority_key_is_repinned(gfs_d
 
 
 async def test_the_first_epoch_zero_has_predecessor_zero(gfs_db):
-    repo = SqliteGfsFederationRepo(gfs_db)
-    await _owner_row(repo)
-    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
-    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
-    await epochs.advance("sp", 0, seen_at=1)
+    _repo, epochs = await _epochs(gfs_db)
+    await epochs.confirm("sp", 0, now=1)
     assert (await epochs.get("sp")).previous == 0
 
 
@@ -946,7 +964,7 @@ async def test_relay_bytes_sums_only_unexpired_relay_rows(gfs_db):
     assert await queue.relay_bytes(0) == 12
 
 
-async def test_recently_seen_subscribers_need_a_recent_ws_session(gfs_db):
+async def test_recently_seen_subscribers_need_a_held_ws_session(gfs_db):
     repo = SqliteGfsFederationRepo(gfs_db)
     await _owner_row(repo)
     await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
@@ -966,10 +984,66 @@ async def test_recently_seen_subscribers_need_a_recent_ws_session(gfs_db):
             )
         )
         await repo.add_subscriber(space_id="sp", instance_id=iid)
-    for iid in ("seen", "old", "banned"):
-        await repo.upsert_rtc_connection(iid, transport="https")
-    await gfs_db.enqueue(
-        "UPDATE rtc_connections SET last_ping_at=datetime('now','-2 days')"
-        " WHERE instance_id='old'",
-    )
+    now = int(time.time())
+    for iid in ("seen", "banned"):
+        await repo.mark_relay_seen(iid, at=now)
+    await repo.mark_relay_seen("old", at=now - 2 * 86400)
+    # A bare hello (rtc_connections) earns nothing.
+    await repo.upsert_rtc_connection("never", transport="websocket")
     assert await repo.list_recently_seen_subscribers("sp", within_s=86400) == {"seen"}
+
+
+async def _relay(queue, to, body, *, now=0, rows=10, per=10**6, total=10**6):
+    return await queue.enqueue_relay(
+        to,
+        body,
+        created_at=now,
+        expires_at=now + 100,
+        max_per_recipient=rows,
+        max_bytes_per_recipient=per,
+        max_total_bytes=total,
+    )
+
+
+async def _relay_rows(queue, to):
+    return [r for r in await queue.list_for(to, now=0) if r.frame_type == "relay"]
+
+
+async def test_enqueue_relay_evicts_the_recipients_own_oldest_at_its_caps(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    for i in range(3):
+        assert await _relay(queue, "a" * 32, f'{{"n":{i}}}', rows=2)
+    assert [r.sealed["n"] for r in await _relay_rows(queue, "a" * 32)] == [1, 2]
+
+
+async def test_enqueue_relay_makes_room_from_the_largest_holder(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    blob = '{"x":"' + "h" * 90 + '"}'
+    for _ in range(3):
+        assert await _relay(queue, "h" * 32, blob, total=300)
+    assert await _relay(queue, "l" * 32, blob, total=300)
+    assert len(await _relay_rows(queue, "l" * 32)) == 1
+    assert len(await _relay_rows(queue, "h" * 32)) == 2
+    assert await queue.relay_bytes(0) <= 300
+
+
+async def test_enqueue_relay_never_touches_envelope_rows(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    await queue.enqueue(
+        "a" * 32,
+        '{"e":"' + "e" * 44 + '"}',
+        created_at=0,
+        expires_at=100,
+        max_per_recipient=10,
+        max_bytes_per_recipient=10**6,
+    )
+    assert await _relay(queue, "a" * 32, '{"r":"' + "r" * 44 + '"}', total=60)
+    rows = await queue.list_for("a" * 32, now=0)
+    assert sorted(r.frame_type for r in rows) == ["envelope", "relay"]
+
+
+async def test_enqueue_relay_refuses_an_item_bigger_than_a_cap(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    assert not await _relay(queue, "a" * 32, "r" * 50, per=10)
+    assert not await _relay(queue, "a" * 32, "r" * 50, total=10)
+    assert not await _relay(queue, "a" * 32, "r" * 5, rows=0)

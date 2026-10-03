@@ -184,20 +184,26 @@ QUEUE_KIND_RELAY: str = RELAY_FRAME_TYPE
 
 #: Per-recipient caps for queued RELAY items (member-published space items,
 #: ``POST /gfs/member-publish``). Counted separately from the envelope caps
-#: above so a busy public space can never tail-drop a household's sealed
-#: invite / link-federation envelopes. 1000 items or 16 MiB a day is far more
-#: than a household follows in real spaces; past it the NEW item is dropped
-#: (tail-drop, same reasoning as for envelopes) and the household catches up
-#: through space sync.
-RELAY_QUEUE_MAX_PER_RECIPIENT: int = 1000
-RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 16 * 1024 * 1024
+#: above so a busy public space can never crowd out a household's sealed
+#: invite / link-federation envelopes. Past either cap the recipient's OWN
+#: oldest relay item is evicted (``enqueue_relay``) — only authenticated
+#: writers fill this queue, and the newest items matter most; anything
+#: evicted is caught up through space sync.
+RELAY_QUEUE_MAX_PER_RECIPIENT: int = 250
+RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 4 * 1024 * 1024
 
 #: Server-wide ceiling on bytes held in queued RELAY rows. The per-recipient
-#: caps bound one household; this bounds the sum, so N self-subscribed
-#: households cannot turn every publish into N stored copies without limit.
-#: Past it, offline subscribers simply get no queued copy (live pushes are
-#: unaffected) and catch up through space sync.
+#: caps bound one household; this bounds the sum. Past it, room is made by
+#: evicting the oldest item of the LARGEST holder (fair share), never by
+#: refusing the new one — so a group of recipients cannot capture the cap
+#: and starve the rest. Live pushes are unaffected.
 RELAY_QUEUE_MAX_TOTAL_BYTES: int = 256 * 1024 * 1024
+
+#: How long a ``/gfs/ws`` session must last before the household counts as
+#: "seen" for offline relay queueing (``client_instances.relay_seen_at``). A
+#: bare hello is free, so it must not earn a household queued copies of
+#: every item; a real household keeps its socket open for hours.
+RELAY_SEEN_MIN_SESSION_S: float = 60.0
 
 #: Max simultaneous live pushes for one member-published item.
 RELAY_FAN_OUT_CONCURRENCY: int = 8
@@ -329,7 +335,8 @@ class GfsEnvelopeRelay:
         A target without a live socket gets the frame queued for
         :data:`ENVELOPE_QUEUE_TTL_SECONDS` ONLY when it is in *queue_ok* (seen
         recently — the caller decides), under the per-recipient RELAY caps
-        and the server-wide :data:`RELAY_QUEUE_MAX_TOTAL_BYTES`. Callers pass
+        and the server-wide :data:`RELAY_QUEUE_MAX_TOTAL_BYTES`, with room
+        made by fair-share eviction in the same transaction as the insert. Callers pass
         only active subscribers. Returns how many targets were pushed or
         queued."""
         push = {"type": RELAY_FRAME_TYPE, **frame}
@@ -350,32 +357,22 @@ class GfsEnvelopeRelay:
             return reached
         blob = orjson.dumps(frame).decode()
         now = int(time.time())
-        total = await self._queue_repo.relay_bytes(now)
         for target in to_queue:
-            if total + len(blob) > RELAY_QUEUE_MAX_TOTAL_BYTES:
-                log.warning(
-                    "gfs.envelope: server-wide relay queue cap reached — not "
-                    "queueing a space item for %d offline subscriber(s); they "
-                    "catch up through space sync",
-                    len(to_queue) - to_queue.index(target),
-                )
-                break
-            queued = await self._queue_repo.enqueue(
+            queued = await self._queue_repo.enqueue_relay(
                 target,
                 blob,
                 created_at=now,
                 expires_at=now + self._ttl,
                 max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
                 max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
-                frame_type=QUEUE_KIND_RELAY,
+                max_total_bytes=RELAY_QUEUE_MAX_TOTAL_BYTES,
             )
             if queued:
-                total += len(blob)
                 reached += 1
             else:
                 log.warning(
-                    "gfs.envelope: relay queue full for %s — dropping a queued "
-                    "space item; the subscriber catches up through space sync",
+                    "gfs.envelope: a space item for %s exceeds the relay "
+                    "queue caps on its own — not queued",
                     target,
                 )
         return reached

@@ -45,23 +45,34 @@ per-recipient and server-wide byte caps (``GfsEnvelopeRelay.fan_out_relay``)
 names the publisher.
 
 **Epoch freshness.** A writer cert binds one content epoch; receivers accept
-only the newest epoch they hold (or the previous one for 10 minutes). This
-server learns epochs only from authority-signed statements — a verified writer
-cert, the plaintext ``epoch`` of an authority-signed ``space_post_public``
-relay, and the authority-signed epoch NOTICE a seed holder posts to
-``POST /gfs/spaces/{id}/epoch`` on rotation (:meth:`GfsMemberPublishService
-.note_epoch`). Because ANY seed holder — a demoted one too, until the
-authority re-pin — can sign those, no statement may inflate the epoch
-without bound: a cert raises it by one step at most, and a notice or relay
-no further than :func:`~.domain.epoch_ceiling` (``current + 1000`` or a day
-past wall clock, which keeps the v_44 post-restore jump to unix seconds
-working). The state is cleared whenever the space authority key is
-re-pinned, so seed holders re-send the current notice right after one.
+only the newest epoch they hold (or the previous one for 10 minutes). The GFS
+keeps two tiers (:class:`~.domain.GfsSpaceEpoch`), because it can tell the
+space OWNER apart (its registered household key) but not a legitimate
+delegated admin from a demoted one whose seed still matches until the
+re-pin:
+
+* the **confirmed** epoch moves only on the OWNER's household-signed notice
+  (``POST /gfs/spaces/{id}/epoch`` with ``owning_instance``), by any amount
+  up to :func:`~.domain.epoch_ceiling` (the v_44 post-restore jump to unix
+  seconds lands); the confirmed epoch before it stays open for the grace;
+* the **current** epoch is raised by seed-only statements — a delegated
+  admin's authority-signed notice, the plaintext ``epoch`` of an authorized
+  ``space_post_public`` relay — by exactly +1, at most once a minute;
+* writer certs never raise anything.
+
+A cert is admitted from ``confirmed`` up to ``current + 1``, or back to the
+previous confirmed epoch during the grace. So no seed holder can lock writers
+out: seed-only raises never move the floor. The cost is stated plainly: a
+writer removed by a DELEGATED ADMIN's rotation stays relayable here (receivers
+still drop it) until the owner confirms the new epoch, which a household does
+on its next GFS connection. The state is cleared whenever the space authority
+key is re-pinned, so the owner re-sends the current notice right after one.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections.abc import Callable
@@ -77,6 +88,7 @@ from ..domain.gfs_member_publish import (
     MEMBER_PUBLISH_EPOCH_GRACE_S,
     MEMBER_PUBLISH_ROUTE,
     MemberPublishRequest,
+    owner_epoch_notice_signing_payload,
 )
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH, WRITER_SCOPE_COMMENT
 from ..writer_cert import (
@@ -84,7 +96,7 @@ from ..writer_cert import (
     UnsupportedWriterCertSuite,
     verify_writer_cert,
 )
-from .domain import epoch_ceiling
+from .domain import MIN_EPOCH_STEP_INTERVAL_S, epoch_ceiling
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import SeenPayloadCache
 from .public import ClientIpResolver, SlidingWindowCounter, build_window_limiter
@@ -116,11 +128,19 @@ MEMBER_PUBLISH_MAX_PER_MINUTE_PER_IP: int = 120
 #: Route of the authority-signed content-epoch notice.
 EPOCH_NOTICE_ROUTE: str = "/gfs/spaces/{space_id}/epoch"
 
-#: Background fan-out workers, and how many accepted items may wait for them.
-#: Past the backlog the route answers 503 (the household's retry queue backs
-#: off) instead of holding the request open.
+#: Background fan-out workers. Each space is pinned to one worker (by a hash
+#: of its id), so one space's items go out in publish order.
 FAN_OUT_WORKERS: int = 2
-FAN_OUT_BACKLOG: int = 256
+
+#: Accepted items one worker may hold, and the share of that one SPACE may
+#: take. Past either the route answers 503 (the household's retry queue
+#: backs off) — so one busy space can't refuse every other space.
+FAN_OUT_BACKLOG: int = 128
+FAN_OUT_BACKLOG_PER_SPACE: int = 16
+
+#: How long :meth:`GfsMemberPublishService.stop` waits for accepted items to
+#: go out before giving up on the rest (seconds).
+FAN_OUT_STOP_DRAIN_S: float = 5.0
 
 #: How often an idle worker re-checks the stop event (seconds).
 FAN_OUT_IDLE_POLL_S: float = 0.5
@@ -146,21 +166,25 @@ class _FanOutJob:
 
 class GfsMemberPublishService:
     """Authorize trusted-mode member publishes, fan them out in the
-    background, and track the proven content epoch.
+    background, and track the space content epoch.
 
     Lifecycle follows the CLAUDE.md scheduler pattern: :meth:`start` spawns
     :data:`FAN_OUT_WORKERS` workers that loop ``while not self._stop
-    .is_set()``; :meth:`stop` sets the event and waits for them, so a worker
-    finishes the item it is on instead of being cancelled mid-write."""
+    .is_set()``; :meth:`stop` first stops accepting (``_closing``), lets the
+    workers drain what was accepted (bounded by :data:`FAN_OUT_STOP_DRAIN_S`),
+    then sets ``_stop`` and waits for them — a worker always finishes the
+    item it is on instead of being cancelled mid-write."""
 
     __slots__ = (
         "_clock",
+        "_closing",
         "_epoch_repo",
         "_fed_repo",
         "_federation",
         "_gfs_instance_id",
         "_limiter",
-        "_queue",
+        "_pending",
+        "_queues",
         "_relay",
         "_seen",
         "_space_limiter",
@@ -192,7 +216,12 @@ class GfsMemberPublishService:
         self._seen = SeenPayloadCache()
         self._clock = clock
         self._stop = asyncio.Event()
-        self._queue: asyncio.Queue[_FanOutJob] = asyncio.Queue(maxsize=FAN_OUT_BACKLOG)
+        self._closing = asyncio.Event()
+        self._queues: list[asyncio.Queue[_FanOutJob]] = [
+            asyncio.Queue(maxsize=FAN_OUT_BACKLOG) for _ in range(FAN_OUT_WORKERS)
+        ]
+        #: Accepted-but-not-yet-sent items per space (the per-space share).
+        self._pending: dict[str, int] = {}
         self._tasks: list[asyncio.Task[None]] = []
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -201,48 +230,70 @@ class GfsMemberPublishService:
         if self._tasks:
             return
         self._stop.clear()
+        self._closing.clear()
         self._tasks = [
-            asyncio.create_task(self._worker(), name=f"gfs-member-fanout-{i}")
-            for i in range(FAN_OUT_WORKERS)
+            asyncio.create_task(self._worker(q), name=f"gfs-member-fanout-{i}")
+            for i, q in enumerate(self._queues)
         ]
 
     async def stop(self) -> None:
-        """Stop the workers after their current item. Items still waiting
-        are dropped (logged): their subscribers catch up through space sync,
-        and the households' own retries re-deliver what was not yet fanned
-        out."""
-        self._stop.set()
+        """Stop accepting, drain accepted items for up to
+        :data:`FAN_OUT_STOP_DRAIN_S`, then stop the workers. Items that
+        still could not go out are counted at WARNING (their subscribers
+        catch up through space sync)."""
+        self._closing.set()
         tasks, self._tasks = self._tasks, []
+        if tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(q.join() for q in self._queues)),
+                    timeout=FAN_OUT_STOP_DRAIN_S,
+                )
+            except TimeoutError:
+                pass
+        self._stop.set()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         dropped = 0
-        while not self._queue.empty():
-            self._queue.get_nowait()
-            self._queue.task_done()
-            dropped += 1
+        for q in self._queues:
+            while not q.empty():
+                q.get_nowait()
+                q.task_done()
+                dropped += 1
+        self._pending.clear()
         if dropped:
-            log.info("gfs.member_publish: dropped %d unsent item(s) on stop", dropped)
+            log.warning(
+                "gfs.member_publish: %d accepted item(s) not fanned out before "
+                "shutdown — their subscribers catch up through space sync",
+                dropped,
+            )
 
     async def wait_idle(self) -> None:
         """Wait until every accepted item has been fanned out (tests, and a
         graceful drain)."""
-        await self._queue.join()
+        await asyncio.gather(*(q.join() for q in self._queues))
+
+    @staticmethod
+    def _worker_index(space_id: str) -> int:
+        digest = hashlib.blake2b(space_id.encode("utf-8"), digest_size=8).digest()
+        return int.from_bytes(digest, "big") % FAN_OUT_WORKERS
 
     def _submit(self, job: _FanOutJob) -> bool:
-        if self._stop.is_set() or not self._tasks:
+        if self._closing.is_set() or not self._tasks:
+            return False
+        if self._pending.get(job.space_id, 0) >= FAN_OUT_BACKLOG_PER_SPACE:
             return False
         try:
-            self._queue.put_nowait(job)
+            self._queues[self._worker_index(job.space_id)].put_nowait(job)
         except asyncio.QueueFull:
             return False
+        self._pending[job.space_id] = self._pending.get(job.space_id, 0) + 1
         return True
 
-    async def _worker(self) -> None:
+    async def _worker(self, queue: "asyncio.Queue[_FanOutJob]") -> None:
         while not self._stop.is_set():
             try:
-                job = await asyncio.wait_for(
-                    self._queue.get(), timeout=FAN_OUT_IDLE_POLL_S
-                )
+                job = await asyncio.wait_for(queue.get(), timeout=FAN_OUT_IDLE_POLL_S)
             except TimeoutError:
                 continue
             try:
@@ -250,7 +301,12 @@ class GfsMemberPublishService:
             except Exception:
                 log.exception("gfs.member_publish: fan-out failed")
             finally:
-                self._queue.task_done()
+                left = self._pending.get(job.space_id, 1) - 1
+                if left > 0:
+                    self._pending[job.space_id] = left
+                else:
+                    self._pending.pop(job.space_id, None)
+                queue.task_done()
 
     async def _fan_out(self, job: _FanOutJob) -> None:
         subscribers = await self._fed_repo.list_subscribers(job.space_id)
@@ -334,28 +390,61 @@ class GfsMemberPublishService:
         return True
 
     async def _check_cert_epoch(self, space_id: str, epoch: int) -> None:
-        """Epoch freshness for a verified writer cert, and the +1 rule.
-
-        A cert is the authority's statement that its epoch exists, but any
-        seed holder (a demoted one too, until the re-pin) can issue one — so
-        a cert may raise the proven epoch by ONE step only, and a first cert
-        no further than :func:`epoch_ceiling`. Bigger jumps (a v_44 restore)
-        come from the epoch notice or a host relay."""
-        now = int(self._clock())
+        """Epoch freshness for a verified writer cert. A cert never raises
+        the stored epoch: any seed holder (a demoted one too, until the
+        re-pin) can issue one, so letting certs raise would let them strand
+        the writers on the real epoch. Without any owner-confirmed epoch yet
+        the cert passes (receivers enforce freshness exactly)."""
         state = await self._epoch_repo.get(space_id)
         if state is None:
-            if epoch > epoch_ceiling(None, now):
-                raise PermissionError("writer cert epoch is implausibly far ahead")
-            await self._epoch_repo.advance(space_id, epoch, seen_at=now)
             return
-        if epoch > state.current + 1:
-            raise PermissionError("writer cert epoch skips ahead of the proven one")
-        if not state.admits(epoch, now=now, grace_s=MEMBER_PUBLISH_EPOCH_GRACE_S):
-            raise PermissionError("writer cert epoch is stale")
-        if epoch > state.current:
-            await self._epoch_repo.advance(space_id, epoch, seen_at=now)
+        if not state.admits(
+            epoch, now=int(self._clock()), grace_s=MEMBER_PUBLISH_EPOCH_GRACE_S
+        ):
+            raise PermissionError("writer cert epoch is not open here")
 
-    # ── Epoch notice ──────────────────────────────────────────────────────
+    # ── Epoch notices ─────────────────────────────────────────────────────
+
+    async def note_owner_epoch(
+        self,
+        space_id: str,
+        *,
+        owning_instance: str,
+        gfs_instance_id: str,
+        epoch: object,
+        ts: str,
+        signature: str,
+    ) -> None:
+        """The space OWNER's household-signed epoch notice: confirms
+        ``epoch`` (any raise up to :func:`epoch_ceiling`). Signed over
+        :func:`owner_epoch_notice_signing_payload` with ``ts`` (±300 s) and
+        this server's id, verified against the owner's REGISTERED key; the
+        signer must be the space's ``owning_instance``. Raises
+        :class:`PermissionError` on any refusal."""
+        epoch_int = _valid_epoch(epoch)
+        if gfs_instance_id != self._gfs_instance_id:
+            raise PermissionError("notice is addressed to another server")
+        await self._federation.verify_signed_request(
+            owning_instance,
+            owner_epoch_notice_signing_payload(
+                owning_instance=owning_instance,
+                gfs_instance_id=gfs_instance_id,
+                space_id=space_id,
+                epoch=epoch_int,
+                ts=ts,
+            ),
+            signature=signature,
+        )
+        space = await self._fed_repo.get_space(space_id)
+        if space is None or space.status == "banned":
+            raise PermissionError("space not published or banned")
+        if space.owning_instance != owning_instance:
+            raise PermissionError("only the space owner may confirm an epoch")
+        now = int(self._clock())
+        state = await self._epoch_repo.get(space_id)
+        if epoch_int > epoch_ceiling(state.confirmed if state else None, now):
+            raise PermissionError("epoch notice is implausibly far ahead")
+        await self._epoch_repo.confirm(space_id, epoch_int, now=now)
 
     async def note_epoch(
         self,
@@ -364,19 +453,12 @@ class GfsMemberPublishService:
         authority_sig: str,
         authority_sig_suite: str,
     ) -> None:
-        """Record an authority-signed content-epoch notice (monotonic).
-
-        The notice is ``{space_id, epoch}`` signed with the space seed under
-        :data:`AUTHORITY_EVENT_SPACE_EPOCH_NOTICE`. It carries no timestamp on
-        purpose: replaying one can never move the epoch backwards. A raise
-        past :func:`epoch_ceiling` is refused. Raises :class:`PermissionError`
-        on any refusal."""
-        if (
-            not isinstance(epoch, int)
-            or isinstance(epoch, bool)
-            or not 0 <= epoch <= MAX_WRITER_CERT_EPOCH
-        ):
-            raise PermissionError("invalid epoch")
+        """A seed-only (space-authority-signed) epoch notice — what a
+        delegated admin sends. It may raise ``current`` by exactly +1, at
+        most once a minute, and never the owner-confirmed floor; anything
+        else is a 200 that changes nothing (a replay, a delegated rotation
+        racing another). Raises :class:`PermissionError` on a bad signature."""
+        epoch_int = _valid_epoch(epoch)
         space = await self._fed_repo.get_space(space_id)
         if space is None or space.status == "banned":
             raise PermissionError("space not published or banned")
@@ -386,7 +468,7 @@ class GfsMemberPublishService:
             ok = verify_authority_event(
                 event_type=AUTHORITY_EVENT_SPACE_EPOCH_NOTICE,
                 space_id=space_id,
-                payload={"space_id": space_id, "epoch": epoch},
+                payload={"space_id": space_id, "epoch": epoch_int},
                 authority_sig=authority_sig,
                 authority_sig_suite=authority_sig_suite,
                 space_public_key=bytes.fromhex(space.identity_public_key),
@@ -395,11 +477,12 @@ class GfsMemberPublishService:
             raise PermissionError(f"epoch notice refused: {exc}") from exc
         if not ok:
             raise PermissionError("invalid authority signature")
-        now = int(self._clock())
-        state = await self._epoch_repo.get(space_id)
-        if epoch > epoch_ceiling(state.current if state else None, now):
-            raise PermissionError("epoch notice is implausibly far ahead")
-        await self._epoch_repo.advance(space_id, epoch, seen_at=now)
+        await self._epoch_repo.step(
+            space_id,
+            epoch_int,
+            now=int(self._clock()),
+            min_interval_s=MIN_EPOCH_STEP_INTERVAL_S,
+        )
 
     async def _readable_space(self, space_id: str) -> "GlobalSpace":
         space = await self._fed_repo.get_space(space_id)
@@ -414,6 +497,16 @@ class GfsMemberPublishService:
         if not space.identity_public_key:
             raise PermissionError("no pinned authority key for this space")
         return space
+
+
+def _valid_epoch(epoch: object) -> int:
+    if (
+        not isinstance(epoch, int)
+        or isinstance(epoch, bool)
+        or not 0 <= epoch <= MAX_WRITER_CERT_EPOCH
+    ):
+        raise PermissionError("invalid epoch")
+    return epoch
 
 
 def _is_member_publish_path(path: str) -> bool:

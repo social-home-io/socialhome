@@ -55,6 +55,9 @@ SPACE_ITEM_EVENT_TYPE: str = "space_item"
 #: Domain separator inside the signed bytes (see the module docstring).
 MEMBER_PUBLISH_ACTION: str = "gfs-member-publish:v1"
 
+#: Domain separator of the space OWNER's household-signed epoch notice.
+OWNER_EPOCH_NOTICE_ACTION: str = "gfs-owner-epoch-notice:v1"
+
 #: Route the GFS mounts the trusted member-publish endpoint at.
 MEMBER_PUBLISH_ROUTE: str = "/gfs/member-publish"
 
@@ -96,6 +99,28 @@ MEMBER_PUBLISH_REQUEST_KEYS: frozenset[str] = frozenset(
 MEMBER_PUBLISH_FRAME_KEYS: frozenset[str] = frozenset(
     {"space_id", "event_type", "epoch", "writer_cert", "payload"}
 )
+
+
+def owner_epoch_notice_signing_payload(
+    *,
+    owning_instance: str,
+    gfs_instance_id: str,
+    space_id: str,
+    epoch: int,
+    ts: str,
+) -> dict:
+    """What the space OWNER's household signs to confirm a content epoch at
+    one connection server (``POST /gfs/spaces/{id}/epoch``). Canonical JSON of
+    this dict (sorted keys, compact) is the signed message; ``action`` is the
+    domain separator and ``gfs_instance_id`` binds it to one server."""
+    return {
+        "action": OWNER_EPOCH_NOTICE_ACTION,
+        "owning_instance": owning_instance,
+        "gfs_instance_id": gfs_instance_id,
+        "space_id": space_id,
+        "epoch": epoch,
+        "ts": ts,
+    }
 
 
 class InvalidMemberPublish(ValueError):

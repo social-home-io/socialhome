@@ -244,9 +244,9 @@ carries its writer cert in plaintext. **What it concedes, exactly:**
 - **Subscribers learn nothing new from the frame.** The fan-out frame names
   no publisher id; it carries the writer cert (the author's household key,
   which every receiver needs anyway to verify the author signature inside).
-- **It learns when the space content key rotates** — from the
-  authority-signed epoch notice and from cert epochs — as it already could
-  from the `epoch` of authority-signed post relays.
+- **It learns when the space content key rotates** — from the owner's
+  (household-signed) and delegated admins' (authority-signed) epoch notices
+  — as it already could from the `epoch` of authority-signed post relays.
 - **It is trusted with metadata, not with authenticity.** It can drop or
   delay items; it cannot forge one, because every receiver re-verifies the
   cert against its own pinned space key and the author's signature.

@@ -490,11 +490,16 @@ key with `author_pk` = that same registered key and scope `comment` (the
 item type is hidden in the ciphertext; receivers enforce the real scope).
 `payload` is AES-256-GCM under the existing per-space epoch content key —
 the GFS holds no key. **Content-epoch notice** — `POST
-/gfs/spaces/{id}/epoch` carries a space-authority signature (`authority_sig.py`,
-suite `authority_sig_suite`) over `{space_id, epoch}` under the new event
-type `space_epoch_notice`, which is deliberately outside
+/gfs/spaces/{id}/epoch`, two forms. The OWNER's: its household identity
+signature (Ed25519, the registered key) over canonical JSON of `{action:
+"gfs-owner-epoch-notice:v1", owning_instance, gfs_instance_id, space_id,
+epoch, ts}` — only this form may move the epoch by more than one. A
+delegated admin's: a space-authority signature (`authority_sig.py`, suite
+`authority_sig_suite`) over `{space_id, epoch}` under the new event type
+`space_epoch_notice`, which is deliberately outside
 `AUTHORITY_RELAY_EVENT_TYPES` so neither a notice nor a relay payload can be
-lifted onto the other path.
+lifted onto the other path; it raises the epoch by +1 at most. No new key
+or suite.
 
 **GFS capability block** (`capabilities_sig.py`) — `GET
 /gfs/info` is unauthenticated, so the capability that decides whether a
