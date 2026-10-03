@@ -189,6 +189,7 @@ from .services.moment_public_service import MomentPublicService
 from .services.profile_sync_service import ProfileSyncService
 from .services.moment_public_outbound import MomentPublicOutbound
 from .services.space_config_outbound import SpaceConfigOutbound
+from .services.gfs_member_publish_service import GfsMemberPublishService
 from .services.space_post_outbound import SpacePostOutbound
 from .services.space_authority_rotation_service import SpaceAuthorityRotationService
 from .services.space_public_inbound import SpacePublicInbound
@@ -302,6 +303,7 @@ from .federation.sync.dm_history import (
     DmHistoryScheduler,
 )
 from .domain.events import PeerProtoVersionRaised
+from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from .domain.space import ContentAction
 from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.space_authorship import SpaceAuthorship
@@ -790,7 +792,8 @@ async def dispatch_gfs_relay_frame(
     # consumer verifies + decrypts + dedupes; other event types remain
     # logged-only until their consumers land.
     if (
-        frame.get("event_type") == AUTHORITY_EVENT_SPACE_POST_PUBLIC
+        frame.get("event_type")
+        in (AUTHORITY_EVENT_SPACE_POST_PUBLIC, SPACE_ITEM_EVENT_TYPE)
         and space_public_inbound is not None
     ):
         await space_public_inbound.handle(frame)
@@ -2443,6 +2446,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # ``space_crypto`` (SpaceContentEncryption), which is only built once
     # the identity seed + KEK are available at startup.
     space_public_outbound: SpacePublicOutbound | None = None
+    gfs_member_publish: GfsMemberPublishService | None = None
     space_public_inbound: SpacePublicInbound | None = None
     space_authority_rotation: SpaceAuthorityRotationService | None = None
     # Phase 5b-b: deliver the per-space content key to a GFS subscriber so it
@@ -2955,6 +2959,26 @@ def create_app(config: Config | None = None) -> web.Application:
         # ``space_crypto``, which only exists once the seed/KEK are wired.
         nonlocal space_public_outbound, space_public_inbound
         nonlocal space_subscriber_key_outbound, space_subscriber_key_inbound
+        nonlocal gfs_member_publish
+        # v_49 trusted-mode member publish (household side): our own posts
+        # to each capable GFS, epoch notices on rotation, member subscriptions.
+        gfs_member_publish = GfsMemberPublishService(
+            gfs=gfs_connection_service,
+            conn_repo=repos.gfs_connection,
+            space_repo=space_repo,
+            space_crypto=space_crypto,
+            writer_certs=writer_certs,
+            own_instance_id=real_instance_id,
+            own_identity_seed=identity_seed,
+        )
+        real_space_service.attach_member_gfs(gfs_member_publish)
+        _member = gfs_member_publish
+
+        async def _announce_after_repin(space_id: str, gfs_id: str) -> object:
+            return await _member.announce_epoch(space_id, only=gfs_id)
+
+        gfs_connection_service.attach_on_repinned(_announce_after_repin)
+        gfs_member_publish.wire(bus)
         space_public_outbound = SpacePublicOutbound(
             bus=bus,
             space_repo=space_repo,
@@ -3125,6 +3149,10 @@ def create_app(config: Config | None = None) -> web.Application:
             held_rows=space_moderation.held_row,
             on_release=space_moderation.note_release,
         )
+        # v_49 — member households check a member-published ``space_item``
+        # against their own roster and access levels too.
+        if space_public_inbound is not None:
+            space_public_inbound.attach_authorship(fed.space_authorship)
         nonlocal moderation_expiry_scheduler
         moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
         await moderation_expiry_scheduler.start()
@@ -3154,6 +3182,8 @@ def create_app(config: Config | None = None) -> web.Application:
             subscriber_key_outbound=space_subscriber_key_outbound,
             writer_certs=writer_certs,
         )
+        if gfs_member_publish is not None:
+            space_authority_rotation.attach_member_gfs(gfs_member_publish)
         app[K.space_authority_rotation_key] = space_authority_rotation
         # v_46: a member's BEGIN to a space's owner echoes its held
         # authority epochs, so a restored owner learns what it forgot.
@@ -3288,6 +3318,8 @@ def create_app(config: Config | None = None) -> web.Application:
             own_identity_seed=identity_seed,
         )
         space_post_outbound.attach_writer_certs(writer_certs)
+        if gfs_member_publish is not None:
+            space_post_outbound.attach_member_gfs(gfs_member_publish)
         # Federate per-edit config changes (rename, emoji, feature
         # toggles, location_mode flips, retention bumps) to remote
         # member stubs in realtime. Before this, SPACE_CONFIG_CHANGED
@@ -3490,6 +3522,18 @@ def create_app(config: Config | None = None) -> web.Application:
             # The GFS-side subscribe is an upsert, so re-POSTing is free.
             # Fail-soft per space (never raises).
             await gfs_space_mirror.resubscribe_all(gfs_id)
+            # v_49 — member publish: subscribe to the fan-out of the spaces we
+            # write in (other members' items arrive live), and re-announce the
+            # current epoch of every seed-held space (the owner's notice also
+            # confirms what a delegated admin rotated meanwhile). Fail-soft.
+            if gfs_member_publish is not None:
+                try:
+                    await gfs_member_publish.subscribe_member_spaces(gfs_id)
+                    await gfs_member_publish.announce_held_epochs(gfs_id)
+                except Exception:
+                    log.exception(
+                        "gfs: member publish reconnect hook failed for %s", gfs_id
+                    )
             # v_44 — and re-check each mirrored subscription's authority pin
             # against the listing's owner cert (a rotation while we were
             # disconnected). Fail-soft per space.
@@ -3604,6 +3648,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # Failed GFS publishes (``POST /gfs/publish``) wait in an in-memory,
         # bounded retry queue owned by the connection service.
         await gfs_connection_service.start()
+        if gfs_member_publish is not None:
+            await gfs_member_publish.start()
 
         # v_48: page drafts waiting for their host — flushed now, then on a
         # tick and whenever a host answers again.
@@ -3879,6 +3925,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_ws_supervisor.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()
+        if gfs_member_publish is not None:
+            await gfs_member_publish.stop()
         gfs_publish_session = gfs_connection_service.publish_client()
         if gfs_publish_session is not None:
             await gfs_publish_session.close()

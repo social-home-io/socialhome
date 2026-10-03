@@ -21,6 +21,12 @@ metadata, not content.
 Join-request events belong to the [invites](./invites.md) flow but
 ride on the same `_VIA` relay pattern.
 
+GFS fan-out event types (connection-server wire, not
+`FederationEventType`): `space_post_public` and
+`space_subscriber_key_handoff` (authority-relayed via `/gfs/publish`), and
+`space_item` (v_49, a member-published item via `/gfs/member-publish` — the
+real item type is inside the ciphertext).
+
 ## Transport (SH ↔ GFS)
 
 The Social Home ↔ GFS link is split by direction:
@@ -845,6 +851,214 @@ WebSocket. WebRTC stays for §4.2.3 SH↔SH direct sync and §26 calls
 (both genuinely peer-to-peer). See spec §24.12 for the full transport
 specification.
 
+### Member publish, trusted mode (v_49)
+
+Before v_49 only a seed holder (the host or a delegated admin) could put a
+space item on the GFS relay, so a member's post reached subscribers only
+when a seed holder was online to re-sign it, and a link-joined member
+reached nobody but the host live. With a **writer cert** (the space
+authority key's per-epoch statement that a household may write — see
+[`crypto.md`](../crypto.md)) a member household publishes its own items.
+
+**Trusted mode** is the owner-decided default: the request is identified by
+the household's registered GFS identity, and the GFS authorizes it with the
+plaintext writer cert. The GFS learns *which household published into which
+space, at which epoch, and when* — never the content or the real item type
+(signed off in [`principles.md`](../principles.md)). A household uses this
+path only against a GFS whose signed `/gfs/info` block carries
+`member_publish_trusted: true`.
+
+```
+POST /gfs/member-publish
+{instance_id, gfs_instance_id, ts, signature, target: <space_id>, event_type: "space_item",
+ epoch, writer_cert: {…}, payload: <ciphertext>}
+```
+
+- `payload` is AES-256-GCM under the space's epoch content key and carries
+  the real item type plus the author-signed inner. The outer type is always
+  `space_item`.
+- `signature` is the household identity signature over canonical JSON of
+  the other fields plus `action: "gfs-member-publish:v1"`.
+  `gfs_instance_id` is the server id pinned from `/gfs/info`; the server
+  refuses any other, so a request can't be replayed to another GFS.
+- The GFS checks, in order: the household signature against its registered
+  key (±300 s, instance active, addressed to this server); a
+  per-(household, space) and a per-space rate limit; the
+  space is listed, not banned, publicly readable and pinned;
+  `verify_writer_cert(cert, space_pubkey=pinned, space_id=target,
+  epoch=epoch, author_pk=<registered key>, required_scope="comment")`;
+  epoch freshness. Every refusal is the same 403.
+- **Scope is the receivers' job.** The GFS cannot see whether a
+  `space_item` is a post (needs `write`) or a comment (needs `comment`), so
+  it requires only `comment`. Receivers decrypt, read the real type and run
+  the full writer-cert check for it (cert, freshness, scope) plus the author
+  signature; a follower that dresses a post up as a `space_item` is relayed
+  and then dropped everywhere.
+- **Epoch freshness at the GFS.** Receivers accept only the newest content
+  epoch they hold (or the previous one for 600 s). The GFS can tell the
+  space **owner** apart (its registered household key) but not a legitimate
+  delegated admin from a demoted one whose seed still matches until the
+  re-pin, so it keeps two tiers (GFS migration `0014`):
+  - the **confirmed** epoch moves only on the owner's household-signed
+    notice — `POST /gfs/spaces/{id}/epoch` with `{owning_instance,
+    gfs_instance_id, epoch, ts, signature}` — by any amount up to
+    `max(confirmed + 1000, now + 1 day)` (the v_44 post-restore jump to unix
+    seconds lands). The confirmed epoch before it stays open for 600 s;
+  - the **current** epoch is raised by seed-only statements — a delegated
+    admin's notice (`{epoch, authority_sig, authority_sig_suite}`, signed
+    over `{space_id, epoch}` under `space_epoch_notice`) or the plaintext
+    `epoch` of an authorized `space_post_public` relay — by exactly +1, at
+    most once a minute, and only once the owner confirmed an epoch;
+  - **writer certs never raise anything.**
+
+  A cert is relayed from the confirmed epoch up to `current + 1`, or back to
+  the previous confirmed epoch during the grace. No seed holder can lock
+  writers out: seed-only raises never move the floor, and certs never move
+  anything (two +1 certs used to raise `previous` past the real writers).
+  **The cost, stated plainly:** a writer removed by a *delegated admin's*
+  rotation stays relayable here — receivers still drop its items — until
+  the owner confirms the new epoch, which an owner household does on every
+  GFS (re)connection. The state is cleared when the space authority key is
+  re-pinned.
+- **Fan-out** runs in the background after the 200 (bounded workers and
+  backlog — `503` when full, at most 8 live pushes in flight) and goes to
+  every active subscriber except the publisher, as
+  `{type:"relay", space_id, event_type:"space_item", epoch, writer_cert,
+  payload}` — no `from_instance`: receivers authenticate the item by the
+  cert and the inner author signature. Each space is pinned to one worker,
+  so its items go out in publish order, and one space may hold only a
+  bounded share of the backlog. An offline subscriber's frame waits in the
+  GFS queue for 24 h (shared with `/gfs/envelope`, separately capped) and is
+  drained on its next hello — but only for a subscriber that held a WS
+  session for at least 60 s within those 24 h (a bare hello earns nothing).
+  Room is made by fair-share eviction: a recipient's own oldest item at its
+  per-recipient cap, the largest holder's oldest item at the server-wide
+  cap, in the same transaction as the insert. One registered household may
+  hold at most 500 subscriptions. Subscribers dedupe by item id, as for
+  host-relayed copies.
+
+**Household side** (`services/gfs_member_publish_service.py`):
+
+- **Who publishes.** A household NOT holding the space seed (seed holders
+  keep relaying with the authority signature) whose cert for the current
+  epoch lets THIS author post — `write` scope and a v2 user binding naming
+  them — the binding itself rides only inside the ciphertext; the plaintext
+  `writer_cert` the server sees is the v1 fields alone, and the server
+  refuses any other key — (so a plain member of a `MODERATED` or `ADMIN_ONLY` space never
+  member-publishes: its post goes to the host, into the queue or refused) —
+  in a PUBLIC/GLOBAL space with `allow_subscribers`, to every active
+  connection server that lists the space AND proves
+  `member_publish_trusted` in its signed capability block. "Lists" is read
+  from the server's WHOLE public directory (`GET /gfs/spaces`, cached 10 min,
+  over the cookie-less publish session) — never a space-specific probe,
+  which would tell a server which spaces the household cares about. Without the capability nothing identified is
+  sent: the post takes today's path — the member broadcast, from which a
+  seed holder relays it.
+- **What it sends.** The ciphertext of `{"item_type": "post", "inner":
+  <an author-signed inner that ALSO binds `item_type` and `item_target` in
+  the author signature, + our writer cert for the sealing epoch>}`. Each attempt is signed afresh (`ts`,
+  `gfs_instance_id` = the id pinned from that server's `/gfs/info`);
+  transient failures (transport, 408, 429, 5xx incl. a busy GFS's 503) are
+  retried through a `GfsPublishRetryQueue`.
+- **The host relays as before; receivers dedupe.** The member publish runs
+  in the background after the member broadcast (post creation never waits
+  on a connection server). The host keeps relaying the post to every GFS as
+  `space_post_public`, because followers on an older build ignore
+  `space_item` and read only that copy. A follower that reads both gets the
+  post twice and drops the second by post id — one duplicate frame per
+  post. This can be revisited (the host skipping servers the author
+  published to) once followers advertise `space_item` support.
+- **Auto-subscribe.** A household with a local writer seat (and no seed)
+  subscribes to the fan-out of the space on every capable server listing it
+  — when the seat is created (`SpaceMemberJoined`), when it first
+  publishes, and on every GFS (re)connect — so other members' items arrive
+  live.
+- **Receiving** a `space_item` (`SpacePublicInbound`): decrypt; read the
+  real type (only `post` in this release — anything else is dropped); drop
+  our own echo; verify the author signature, self-cert and owner-bound post
+  id; require the author-bound `item_type` / `item_target` to match; require
+  `origin_instance_id == derive_instance_id(author_pk)` (also on the host
+  relay path); require the inner cert's v1 fields to equal the frame cert, and run
+  `SpaceWriterCertService.check_item` — signature against the pinned space
+  key, this space, the frame's epoch, the inner's `author_pk`, the scope the
+  REAL type needs (`write` for a post) and epoch freshness; require the v2
+  user binding (on the inner copy) to name the author; on a MEMBER household (it holds the
+  roster and the access levels) also require the author's own seat to let
+  them post (`SpaceAuthorship.item_access_admits`); then dedupe by post id
+  against the federated / host-relayed copy.
+- **Epoch notices** (`announce_epoch`): sent before the subscriber
+  re-seal at every content-key rotation (`SpaceService
+  ._rotate_and_distribute_space_key` — kick, ban, leave, scope drop), right
+  after an authority re-pin (`SpaceAuthorityRotationService._refresh_gfs`),
+  and for every seed-held space on each GFS (re)connect. The owner sends the
+  household-signed form, a delegated admin the authority-signed one. Any
+  publish that re-pins the space key at a server (it carries the owner's
+  authority cert) is followed at once by the epoch notice to that server,
+  whichever path made the re-pin land (the rotation, a later retry, the
+  reconnect heal).
+
+**Operator notes (connection server).**
+
+- **Public servers: turn `auto_accept_clients` off** (`[policy]` in
+  `global_server.toml`) and approve households in the admin console. Every
+  registered household can subscribe to listed spaces; registrations are
+  the unit every per-household limit counts.
+- **Offline delivery is best effort.** Queued member items are shared
+  fairly — the largest holder's oldest item makes room at the server-wide
+  cap — but a crowd of registered, connected households that subscribe to
+  many spaces still dilutes every recipient's share. What is evicted is
+  caught up through space sync; live delivery is unaffected. This residual
+  is accepted, not a guarantee.
+
+**Hard requirements on households** (the GFS check is only as sound as
+these; adversarial review of PR 2):
+
+1. **Epoch notice at every rotation.** A seed holder sends the epoch
+   notice for the new epoch — the owner's household-signed form when the
+   owner rotates (it may jump), a delegated admin's authority-signed form
+   (+1) otherwise — to EVERY GFS the space is listed on, at every content-key rotation — kick, ban, leave, scope drop
+   (demotion, follower comments turned off) — through the GFS publish retry
+   queue, and BEFORE it re-seals the content key to subscribers. Until the
+   notice lands, a writer removed by that rotation can still be relayed
+   (receivers drop its items, but the relay amplifies them).
+2. **Re-send after every authority re-pin, and on every GFS connection.**
+   A re-pin clears the GFS epoch state, so the owner re-sends the current
+   epoch's (owner-signed) notice right after any authority-key rotation,
+   and on each GFS (re)connect, which also confirms rotations a delegated
+   admin made while the owner was away.
+3. **`gfs_instance_id` in every signed request** — the id pinned from that
+   server's `/gfs/info`, never a value from another server.
+4. **Strict mode (PR 4) moves `writer_cert` inside the ciphertext.** In
+   trusted mode it is plaintext only because the server authorizes with it;
+   strict mode authorizes with the writer group key, so the cert (which
+   names the household) must not stay visible. Strict mode must also not
+   auto-subscribe with identified requests — a signed subscribe names the
+   household, which is exactly what strict mode withholds.
+5. **Edit and delete over this relay (PR 3) must not depend on arrival
+   order.** The GFS delivers one space's items in publish order, but the
+   host path, the queue and space sync interleave with it, so a receiver
+   must tolerate a delete (or an edit) that arrives before its create —
+   e.g. a tombstone that a later create honours.
+
+```mermaid
+sequenceDiagram
+    participant M as Member household
+    participant G as GFS
+    participant S as Subscriber / member
+    participant O as Seed holder
+    O->>G: POST /gfs/spaces/{id}/epoch {owning_instance, epoch, ts, signature}
+    Note over G: owner confirms the epoch (monotonic)
+    M->>M: encrypt {real type, author-signed inner} under epoch key
+    M->>G: POST /gfs/member-publish {instance_id, ts, signature,<br/>target, space_item, epoch, writer_cert, payload}
+    G->>G: household sig, rate limit, space, verify_writer_cert, epoch fresh
+    alt subscriber online
+        G-->>S: WS {type:relay, space_id, space_item, epoch, writer_cert, payload}
+    else offline
+        G->>G: queue (24 h), drain on next hello
+    end
+    S->>S: decrypt, check cert + scope for the real type, author_sig, dedupe
+```
+
 ## Flow — publish + browse + join
 
 ```mermaid
@@ -916,6 +1130,12 @@ contest a ban.
 - `socialhome/services/space_subscriber_key_outbound.py`,
   `socialhome/services/space_subscriber_key_inbound.py` — Phase 5b-b
   subscriber content-key handoff (seal + relay / unseal + import).
+- `socialhome/domain/gfs_member_publish.py` — v_49 trusted-mode
+  member-publish wire codec (request, signing bytes, `space_item` frame).
+- `socialhome/global_server/member_publish.py`,
+  `socialhome/global_server/routes/member_publish.py` — GFS side of
+  `/gfs/member-publish` and the epoch notice; queued delivery via
+  `GfsEnvelopeRelay.fan_out_relay` (`envelope_relay.py`).
 - `socialhome/federation/keywrap_seal.py` — `seal_to_keywrap` /
   `open_keywrap` / `verify_keywrap_binding` (static-recipient sealed box).
 - `socialhome/global_server/routes/public.py`,

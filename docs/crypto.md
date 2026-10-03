@@ -466,12 +466,71 @@ implies `comment`); every failure raises. Receivers additionally require
 the item's epoch to be the newest they hold, or the previous one for
 `WRITER_CERT_EPOCH_GRACE_S` (600 s) after the newest key arrived, so an
 old epoch's cert cannot authorize items forever; any scope-reducing change
-rotates the content epoch. A cert is not secret, but it always travels
-inside encrypted payloads: each household is delivered its own, and once it
-posts, the cert rides in the item to every member and on to subscribers. No
+rotates the content epoch. A cert is not secret. It is delivered to each
+household inside encrypted payloads and rides inside the encrypted item to
+every member and subscriber — with one deliberate exception: a trusted-mode
+member publish (below) carries it in PLAINTEXT to the connection server and
+in the fan-out frame, because the server authorizes the publish with it. No
 new key: it is
 signed by the space authority key every member already pins, and binds the
 household identity key every peer already pins.
+
+**Writer-cert user binding (v2)** — the household's writer users
+(`writer_user_ids`, sorted, at most 64) signed by the space authority seed
+in a SECOND Ed25519 signature: `users_sig` over
+`b"space-writer-cert:v2:users:"` + canonical JSON of `{cert_sig, space_id,
+epoch, instance_pk, writer_user_ids, users_sig_suite}`. Binding the cert's own
+signature ties it to exactly this cert (it cannot be lifted onto another).
+Its own suite tag `users_sig_suite` (`WRITER_USERS_SUITE_ED25519 =
+"ed25519"`, `SUPPORTED_WRITER_USERS_SUITES`, unknown →
+`UnsupportedWriterUsersSuite`, never a default). Kept apart from `cert_sig`
+on purpose: the v1 signing bytes (`space-writer-cert:v1:` over the six v1
+fields) are unchanged, so a v1 verifier — which ignores the extra fields —
+still accepts a bound cert. `verify_writer_users` requires the binding and
+the author's user id in it; a member-published `space_item` must carry it,
+the host-relay path does not. **The binding never travels in plaintext**:
+it names the household's users, so it rides only inside the encrypted inner.
+The `writer_cert` a connection server sees (request, fan-out frame, queue)
+is the v1 fields alone — the codec serializes nothing else, and the GFS
+refuses a request whose cert carries any other key; the receiver checks
+that the frame's v1 cert equals the inner cert's v1 fields and verifies the
+binding on the inner copy. A household with more than 64 writer users gets
+the first 64 bound (logged once per space and household); the rest post
+through the host.
+
+**Author-bound item type (v_49 `space_item`)** — an inner built for a
+member publish signs two extra fields with the author signature,
+`item_type` and `item_target` (the id the item acts on — the post itself for
+a post), present-or-absent like `identity_anchor` so host-relay inners keep
+their exact v_25 bytes. Receivers require both to match the decrypted item,
+so nobody holding the content key can re-wrap a signed post as another kind
+of item.
+
+**Trusted-mode member publish** (`domain/gfs_member_publish.py`,
+`global_server/member_publish.py`, v_49) — `POST /gfs/member-publish`. The
+household signs canonical JSON (sorted keys, compact — the encoding every
+signed household→GFS request uses) of `{action: "gfs-member-publish:v1",
+instance_id, gfs_instance_id, ts, target, event_type: "space_item", epoch, writer_cert,
+payload}` with its Ed25519 identity seed; the GFS verifies it against the
+registered `client_instances.public_key` with the ±300 s `ts` window. The
+`action` value is the domain separator — distinct from `subscribe` /
+`unsubscribe` / `unpublish` — so the signature cannot be replayed as any
+other request, and `gfs_instance_id` (the server id the household pinned from `/gfs/info`, refused unless it is the receiving server's) binds it to one server so it cannot be replayed to another; no new key or suite (it is the household identity signature,
+`ed25519`). The GFS then runs `verify_writer_cert` against the pinned space
+key with `author_pk` = that same registered key and scope `comment` (the
+item type is hidden in the ciphertext; receivers enforce the real scope).
+`payload` is AES-256-GCM under the existing per-space epoch content key —
+the GFS holds no key. **Content-epoch notice** — `POST
+/gfs/spaces/{id}/epoch`, two forms. The OWNER's: its household identity
+signature (Ed25519, the registered key) over canonical JSON of `{action:
+"gfs-owner-epoch-notice:v1", owning_instance, gfs_instance_id, space_id,
+epoch, ts}` — only this form may move the epoch by more than one. A
+delegated admin's: a space-authority signature (`authority_sig.py`, suite
+`authority_sig_suite`) over `{space_id, epoch}` under the new event type
+`space_epoch_notice`, which is deliberately outside
+`AUTHORITY_RELAY_EVENT_TYPES` so neither a notice nor a relay payload can be
+lifted onto the other path; it raises the epoch by +1 at most. No new key
+or suite.
 
 **GFS capability block** (`capabilities_sig.py`) — `GET
 /gfs/info` is unauthenticated, so the capability that decides whether a

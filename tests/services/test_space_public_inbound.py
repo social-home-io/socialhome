@@ -24,6 +24,7 @@ from socialhome.authority_sig import (
 )
 from socialhome.crypto import (
     b64url_encode,
+    derive_instance_id,
     derive_user_id,
     generate_identity_keypair,
     generate_space_keypair,
@@ -47,12 +48,16 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_mentions import SpaceMentionResolver
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_inbound import SpacePublicInbound
-from socialhome.writer_cert import sign_writer_cert
+from socialhome.services.space_writer_cert_service import SpaceWriterCertService
+from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 
 @pytest.fixture
@@ -69,6 +74,9 @@ async def env(tmp_dir):
     # The remote author household's identity (the one that signed the post).
     author_kp = generate_identity_keypair()
     author_user_id = derive_user_id(author_kp.public_key, "bob")
+    # The author's household: its instance id is the fingerprint of the key
+    # that signs the inner (the relay paths require exactly that).
+    author_origin = derive_instance_id(author_kp.public_key)
     # The space identity (seed lives on the relaying household, only the
     # public key is mirrored locally here).
     space_kp = generate_space_keypair()
@@ -113,6 +121,7 @@ async def env(tmp_dir):
         "inbound": inbound,
         "author_kp": author_kp,
         "author_user_id": author_user_id,
+        "author_origin": author_origin,
         "space_kp": space_kp,
         "events": events,
     }
@@ -159,7 +168,7 @@ async def _make_envelope(
         "type": "text",
         "content": content,
         "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
-        "origin_instance_id": "remote.home",
+        "origin_instance_id": env["author_origin"],
     }
     if identity_anchor is not None:
         inner["identity_anchor"] = identity_anchor
@@ -210,7 +219,7 @@ async def test_valid_relay_decrypts_persists_and_publishes(env):
     assert post.content == "secret space content"
     assert post.author == env["author_user_id"]
     assert len(env["events"]) == 1
-    assert env["events"][0].origin_instance_id == "remote.home"
+    assert env["events"][0].origin_instance_id == env["author_origin"]
 
 
 async def test_relayed_post_resolves_mentions_against_local_member_view(env):
@@ -386,7 +395,7 @@ async def test_malformed_author_sig_dropped(env):
         "type": "text",
         "content": "secret space content",
         "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
-        "origin_instance_id": "remote.home",
+        "origin_instance_id": env["author_origin"],
         "author_sig": "!!!not base64!!!",
     }
     epoch, ct = await env["crypto"].encrypt("sp-1", json.dumps(inner).encode())
@@ -500,7 +509,7 @@ async def test_cross_space_inner_dropped(env):
         "type": "text",
         "content": "secret space content",
         "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
-        "origin_instance_id": "remote.home",
+        "origin_instance_id": env["author_origin"],
     }
     inner["author_sig"] = b64url_encode(
         sign_ed25519(env["author_kp"].private_key, author_signing_bytes(inner))
@@ -553,7 +562,7 @@ async def test_frame_without_from_instance_uses_inner_origin(env):
     assert got is not None
     assert got[1].content == "secret space content"
     assert len(env["events"]) == 1
-    assert env["events"][0].origin_instance_id == "remote.home"
+    assert env["events"][0].origin_instance_id == env["author_origin"]
 
 
 async def test_spoofed_outer_from_instance_is_ignored(env, caplog):
@@ -569,7 +578,7 @@ async def test_spoofed_outer_from_instance_is_ignored(env, caplog):
     got = await env["post_repo"].get("post-1")
     assert got is not None
     assert len(env["events"]) == 1
-    assert env["events"][0].origin_instance_id == "remote.home"
+    assert env["events"][0].origin_instance_id == env["author_origin"]
     assert "victim.home" not in repr(got)
     leaked = [
         r.getMessage()
@@ -717,7 +726,9 @@ async def test_old_key_post_is_refused_after_the_heal(env):
 # ─── v_49: a relayed item's writer cert is verified when present ────────
 
 
-async def _cert(env, **over):
+async def _cert(env, *, users: object = "author", **over):
+    """A cert for the author household — v2 (user-bound to the author) by
+    default; ``users=None`` gives a v1 cert, a list binds those users."""
     kw = dict(
         space_seed=env["space_kp"].private_key,
         space_id="sp-1",
@@ -726,7 +737,14 @@ async def _cert(env, **over):
         scope="write",
     )
     kw.update(over)
-    return sign_writer_cert(**kw).to_wire()
+    cert = sign_writer_cert(**kw)
+    if users is not None:
+        cert = bind_writer_users(
+            cert,
+            space_seed=kw["space_seed"],
+            user_ids=[env["author_user_id"]] if users == "author" else users,
+        )
+    return cert.to_wire()
 
 
 async def test_relayed_post_with_a_valid_writer_cert_is_accepted(env):
@@ -768,3 +786,358 @@ async def test_relayed_post_without_a_cert_keeps_todays_path(env):
     envelope = await _make_envelope(env)
     await env["inbound"].handle(_frame(envelope))
     assert await env["post_repo"].get("post-1") is not None
+
+
+# ─── v_49: member-published ``space_item`` frames (trusted mode) ────────
+
+
+@pytest.fixture
+async def item_env(env):
+    """``env`` with the real writer-cert service attached — the space_item
+    path refuses to persist anything without it."""
+    certs = SpaceWriterCertService(
+        space_repo=env["space_repo"],
+        remote_member_repo=SqliteSpaceRemoteMemberRepo(env["db"]),
+        space_key_repo=SqliteSpaceKeyRepo(env["db"]),
+        own_instance_id="us.home",
+        own_identity_pk=generate_identity_keypair().public_key,
+    )
+    env["inbound"].attach_writer_certs(certs)
+    env["certs"] = certs
+    return env
+
+
+def _signed_inner(
+    env,
+    *,
+    post_id="post-1",
+    space_id="sp-1",
+    origin=None,
+    item_type="post",
+    target=None,
+):
+    origin = origin or env["author_origin"]
+    inner = {
+        "post_id": post_id,
+        "space_id": space_id,
+        "author_user_id": env["author_user_id"],
+        "author_pk": env["author_kp"].public_key.hex(),
+        "author_username": "bob",
+        "type": "text",
+        "content": "member-published content",
+        "created_at": datetime(2026, 6, 10, tzinfo=timezone.utc).isoformat(),
+        "origin_instance_id": origin,
+    }
+    if item_type is not None:
+        inner["item_type"] = item_type
+        inner["item_target"] = target or post_id
+    inner["author_sig"] = b64url_encode(
+        sign_ed25519(env["author_kp"].private_key, author_signing_bytes(inner))
+    )
+    return inner
+
+
+def _v1(cert: dict) -> dict:
+    return {
+        k: v
+        for k, v in cert.items()
+        if k not in ("writer_user_ids", "users_sig", "users_sig_suite")
+    }
+
+
+async def _item_frame(
+    env,
+    *,
+    inner: dict | None = None,
+    cert: dict | None = None,
+    frame_cert: dict | None = None,
+    item_type: str = "post",
+    epoch: int | None = None,
+    plaintext: bytes | None = None,
+) -> dict:
+    inner = dict(inner if inner is not None else _signed_inner(env))
+    cert = cert if cert is not None else await _cert(env)
+    inner["writer_cert"] = cert
+    sealed_epoch, ct = await env["crypto"].encrypt(
+        "sp-1",
+        plaintext
+        if plaintext is not None
+        else json.dumps({"item_type": item_type, "inner": inner}).encode(),
+    )
+    return {
+        "type": "relay",
+        "space_id": "sp-1",
+        "event_type": "space_item",
+        "epoch": sealed_epoch if epoch is None else epoch,
+        # The frame carries only the v1 fields — never the user binding.
+        "writer_cert": frame_cert if frame_cert is not None else _v1(cert),
+        "payload": ct,
+    }
+
+
+async def test_a_member_published_post_with_a_valid_cert_is_persisted(item_env):
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None
+    space_id, post = got
+    assert (space_id, post.content) == ("sp-1", "member-published content")
+    assert item_env["events"][0].origin_instance_id == item_env["author_origin"]
+
+
+async def test_a_duplicate_of_the_federated_copy_is_dropped(item_env):
+    frame = await _item_frame(item_env)
+    await item_env["inbound"].handle(frame)
+    await item_env["inbound"].handle(frame)
+    assert len(item_env["events"]) == 1
+
+
+async def test_our_own_echo_is_dropped(item_env):
+    frame = await _item_frame(item_env, inner=_signed_inner(item_env, origin="us.home"))
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+@pytest.mark.parametrize(
+    "case", ["forged", "other_space", "other_household", "comment_scope"]
+)
+async def test_a_bad_cert_drops_the_item(item_env, case, caplog):
+    over: dict = {
+        "forged": {"space_seed": generate_space_keypair().private_key},
+        "other_space": {"space_id": "sp-2"},
+        "other_household": {"instance_pk": generate_identity_keypair().public_key},
+        # The GFS can only require ``comment``: the real type (a post) needs
+        # ``write``, enforced here.
+        "comment_scope": {"scope": "comment"},
+    }[case]
+    frame = await _item_frame(item_env, cert=await _cert(item_env, **over))
+    with caplog.at_level(logging.WARNING):
+        await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_a_stale_epoch_is_dropped_by_the_freshness_gate(item_env, caplog):
+    old_epoch = await item_env["crypto"].get_current_epoch("sp-1")
+    old_cert = await _cert(item_env)
+    inner = dict(_signed_inner(item_env))
+    inner["writer_cert"] = old_cert
+    _e, ct = await item_env["crypto"].encrypt(
+        "sp-1", json.dumps({"item_type": "post", "inner": inner}).encode()
+    )
+    # Two rotations later the old epoch is no longer open (not even the grace).
+    await item_env["crypto"].rotate_epoch("sp-1")
+    await item_env["crypto"].rotate_epoch("sp-1")
+    frame = {
+        "type": "relay",
+        "space_id": "sp-1",
+        "event_type": "space_item",
+        "epoch": old_epoch,
+        "writer_cert": _v1(old_cert),
+        "payload": ct,
+    }
+    with caplog.at_level(logging.WARNING):
+        await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+    assert "no longer open" in caplog.text
+
+
+async def test_a_frame_cert_differing_from_the_inner_cert_is_dropped(item_env):
+    other = await _cert(item_env, issued_at=1)
+    frame = await _item_frame(item_env, frame_cert=other)
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_a_forged_author_signature_is_dropped(item_env):
+    inner = _signed_inner(item_env)
+    inner["content"] = "edited after signing"
+    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_an_inner_for_another_space_is_dropped(item_env):
+    inner = _signed_inner(item_env, space_id="sp-2")
+    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_an_owner_bound_id_claimed_by_another_author_is_dropped(item_env):
+    """A household can't announce a post id bound to someone else's user."""
+    other_user = derive_user_id(generate_identity_keypair().public_key, "eve")
+    bound = mint_owner_bound_id(
+        SPACE_POST_KIND, space_id="sp-1", owner_user_id=other_user
+    )
+    inner = _signed_inner(item_env, post_id=bound)
+    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    assert await item_env["post_repo"].get(bound) is None
+
+
+async def test_an_owner_bound_id_of_the_author_is_accepted(item_env):
+    bound = mint_owner_bound_id(
+        SPACE_POST_KIND, space_id="sp-1", owner_user_id=item_env["author_user_id"]
+    )
+    inner = _signed_inner(item_env, post_id=bound)
+    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    assert await item_env["post_repo"].get(bound) is not None
+
+
+@pytest.mark.parametrize(
+    "plaintext",
+    [
+        b"not json",
+        b"[1]",
+        json.dumps({"item_type": "comment", "inner": {}}).encode(),
+        json.dumps({"item_type": "post", "inner": "x"}).encode(),
+    ],
+)
+async def test_an_unsupported_or_malformed_item_is_dropped(item_env, plaintext):
+    await item_env["inbound"].handle(await _item_frame(item_env, plaintext=plaintext))
+    assert item_env["events"] == []
+
+
+async def test_a_malformed_frame_is_dropped(item_env):
+    await item_env["inbound"].handle(
+        {"type": "relay", "event_type": "space_item", "space_id": "sp-1"}
+    )
+    assert item_env["events"] == []
+
+
+async def test_an_undecryptable_item_is_dropped(item_env):
+    frame = await _item_frame(item_env)
+    frame["epoch"] = 999
+    await item_env["inbound"].handle(frame)
+    assert item_env["events"] == []
+
+
+async def test_an_item_for_an_unknown_space_is_dropped(item_env):
+    frame = await _item_frame(item_env)
+    frame["space_id"] = "sp-unknown"
+    await item_env["inbound"].handle(frame)
+    assert item_env["events"] == []
+
+
+async def test_without_the_cert_service_nothing_is_persisted(env):
+    frame = {
+        "type": "relay",
+        "space_id": "sp-1",
+        "event_type": "space_item",
+        "epoch": 0,
+        "writer_cert": await _cert(env),
+        "payload": "x",
+    }
+    await env["inbound"].handle(frame)
+    assert env["events"] == []
+
+
+# ─── v_49 v2: user binding, bound item type, origin, access levels ──────
+
+
+async def test_a_v1_cert_without_a_user_binding_is_refused(item_env):
+    frame = await _item_frame(item_env, cert=await _cert(item_env, users=None))
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_an_author_outside_the_cert_binding_is_refused(item_env):
+    """P3: the household holds a write cert, but its binding does not name
+    this author (no seat, kicked, banned, or a follower-only user)."""
+    frame = await _item_frame(
+        item_env, cert=await _cert(item_env, users=["someone-else"])
+    )
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+@pytest.mark.parametrize(
+    ("item_type", "target"),
+    [(None, None), ("comment", None), ("post", "another-post")],
+)
+async def test_the_item_type_and_target_must_be_author_bound(
+    item_env, item_type, target
+):
+    """A signed post can't be re-wrapped as another type (or for another
+    target) by anybody holding the content key."""
+    inner = _signed_inner(item_env, item_type=item_type, target=target)
+    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_an_origin_not_derived_from_the_author_key_is_refused(item_env):
+    """P4: a signed inner can't be credited to another household."""
+    inner = _signed_inner(item_env, origin="victim.home")
+    await item_env["inbound"].handle(await _item_frame(item_env, inner=inner))
+    assert item_env["events"] == []
+
+
+async def test_the_host_relay_path_also_binds_the_origin(env):
+    envelope = await _make_envelope(env)
+    pt = await env["crypto"].decrypt(
+        "sp-1", envelope["epoch"], envelope["encrypted_payload"]
+    )
+    inner = json.loads(pt)
+    assert inner["origin_instance_id"] == env["author_origin"]
+    bad = dict(inner, origin_instance_id="victim.home")
+    bad["author_sig"] = b64url_encode(
+        sign_ed25519(env["author_kp"].private_key, author_signing_bytes(bad))
+    )
+    epoch, ct = await env["crypto"].encrypt("sp-1", json.dumps(bad).encode())
+    env2 = {"space_id": "sp-1", "epoch": epoch, "encrypted_payload": ct}
+    env2.update(
+        sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            space_id="sp-1",
+            payload=strip_authority_sig_fields(env2),
+            space_seed=env["space_kp"].private_key,
+        )
+    )
+    await env["inbound"].handle(_frame(env2))
+    assert env["events"] == []
+
+
+class _Access:
+    def __init__(self, admits: bool) -> None:
+        self.admits = admits
+        self.calls: list[dict] = []
+
+    async def item_access_admits(self, **kw):
+        self.calls.append(kw)
+        return self.admits
+
+
+async def _seat_us(env, role: str) -> None:
+    await env["space_repo"].save_member(
+        SpaceMember(space_id="sp-1", user_id="us-user", role=role, joined_at="x")
+    )
+
+
+@pytest.mark.parametrize("level", ["admin_only", "moderated"])
+async def test_a_member_household_applies_the_posts_access_level(item_env, level):
+    """P1 / P2 defence in depth: a member household (it holds the roster
+    and the levels) refuses a member-published post its own rules refuse."""
+    await _seat_us(item_env, "member")
+    access = _Access(False)
+    item_env["inbound"].attach_authorship(access)
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    assert await item_env["post_repo"].get("post-1") is None
+    assert access.calls[0] == {
+        "origin_instance_id": item_env["author_origin"],
+        "space_id": "sp-1",
+        "feature": "posts",
+        "author_user_id": item_env["author_user_id"],
+    }
+
+
+async def test_a_member_household_admits_what_its_rules_admit(item_env):
+    await _seat_us(item_env, "member")
+    item_env["inbound"].attach_authorship(_Access(True))
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    assert await item_env["post_repo"].get("post-1") is not None
+
+
+async def test_a_follower_household_relies_on_the_cert_alone(item_env):
+    """A follower holds no roster: the access check is not asked."""
+    await _seat_us(item_env, "subscriber")
+    access = _Access(False)
+    item_env["inbound"].attach_authorship(access)
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    assert await item_env["post_repo"].get("post-1") is not None
+    assert access.calls == []

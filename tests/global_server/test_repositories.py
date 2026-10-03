@@ -16,8 +16,10 @@ from socialhome.global_server.domain import (
 )
 from socialhome.global_server.repositories import (
     SqliteGfsAdminRepo,
+    SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
     SqliteGfsInviteRepo,
+    SqliteGfsSpaceEpochRepo,
 )
 
 
@@ -855,3 +857,250 @@ async def test_authority_rotation_seq_is_capped_at_int64_max(gfs_db):
     row = await repo.get_space("sp")
     assert row.authority_rotation_seq == cap
     assert isinstance(row.authority_rotation_seq, int)
+
+
+# ── Space content epochs (v_49, migration 0014) ──────────────────────
+
+
+async def test_space_epoch_is_none_until_one_is_learned(gfs_db):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
+    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
+    assert await epochs.get("sp") is None
+    assert await epochs.get("unknown") is None
+
+
+async def _epochs(gfs_db, **space_kw):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o", **space_kw))
+    return repo, SqliteGfsSpaceEpochRepo(gfs_db)
+
+
+async def test_owner_confirm_is_monotonic_and_keeps_the_previous(gfs_db):
+    _repo, epochs = await _epochs(gfs_db)
+    assert await epochs.confirm("sp", 3, now=100)
+    state = await epochs.get("sp")
+    # The first epoch confirmed gets ``epoch - 1`` as its predecessor (grace).
+    assert (state.current, state.confirmed, state.previous, state.confirmed_at) == (
+        3,
+        3,
+        2,
+        100,
+    )
+    assert await epochs.confirm("sp", 5, now=200)
+    state = await epochs.get("sp")
+    assert (state.confirmed, state.previous, state.confirmed_at) == (5, 3, 200)
+    # Equal or older never moves it (a replayed notice can't roll it back).
+    assert not await epochs.confirm("sp", 5, now=300)
+    assert not await epochs.confirm("sp", 4, now=300)
+    assert (await epochs.get("sp")).confirmed == 5
+
+
+async def test_a_step_raises_current_by_one_once_a_minute_never_the_floor(gfs_db):
+    _repo, epochs = await _epochs(gfs_db)
+    # Nothing to step from before the owner confirmed an epoch.
+    assert not await epochs.step("sp", 1, now=10_000, min_interval_s=60)
+    assert await epochs.get("sp") is None
+    await epochs.confirm("sp", 3, now=100)
+    assert not await epochs.step("sp", 5, now=10_000, min_interval_s=60)
+    assert not await epochs.step("sp", 4, now=150, min_interval_s=60)
+    assert await epochs.step("sp", 4, now=160, min_interval_s=60)
+    assert not await epochs.step("sp", 5, now=200, min_interval_s=60)
+    state = await epochs.get("sp")
+    assert (state.current, state.confirmed, state.previous) == (4, 3, 2)
+
+
+async def test_owner_confirm_never_lowers_current(gfs_db):
+    _repo, epochs = await _epochs(gfs_db)
+    await epochs.confirm("sp", 3, now=100)
+    await epochs.step("sp", 4, now=200, min_interval_s=60)
+    await epochs.confirm("sp", 4, now=300)
+    state = await epochs.get("sp")
+    assert (state.current, state.confirmed, state.previous) == (4, 4, 3)
+
+
+async def test_space_epoch_survives_a_publish_refresh(gfs_db):
+    repo, epochs = await _epochs(gfs_db)
+    await epochs.confirm("sp", 7, now=1)
+    await repo.upsert_space(
+        GlobalSpace(space_id="sp", owning_instance="o", name="renamed")
+    )
+    assert (await epochs.get("sp")).confirmed == 7
+
+
+async def test_space_epoch_is_forgotten_when_the_authority_key_is_repinned(gfs_db):
+    """A revoked seed holder must not leave an inflated epoch behind."""
+    repo, epochs = await _epochs(gfs_db, identity_public_key="aa" * 32)
+    await epochs.confirm("sp", 2**40, now=1)
+    assert await repo.set_space_authority(
+        "sp",
+        expected_pk="aa" * 32,
+        expected_cert=None,
+        new_pk="bb" * 32,
+        cert={"key_epoch": 1},
+    )
+    assert await epochs.get("sp") is None
+
+
+async def test_the_first_epoch_zero_has_predecessor_zero(gfs_db):
+    _repo, epochs = await _epochs(gfs_db)
+    await epochs.confirm("sp", 0, now=1)
+    assert (await epochs.get("sp")).previous == 0
+
+
+async def test_relay_bytes_sums_only_unexpired_relay_rows(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    kw = dict(max_per_recipient=10, max_bytes_per_recipient=10**6)
+    await queue.enqueue("a" * 32, "x" * 10, created_at=0, expires_at=100, **kw)
+    await queue.enqueue(
+        "a" * 32, "y" * 7, created_at=0, expires_at=100, frame_type="relay", **kw
+    )
+    await queue.enqueue(
+        "a" * 32, "z" * 5, created_at=0, expires_at=50, frame_type="relay", **kw
+    )
+    assert await queue.relay_bytes(60) == 7
+    assert await queue.relay_bytes(0) == 12
+
+
+async def test_recently_seen_subscribers_need_a_held_ws_session(gfs_db):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
+    for iid, status in (
+        ("seen", "active"),
+        ("never", "active"),
+        ("old", "active"),
+        ("banned", "banned"),
+    ):
+        await repo.upsert_instance(
+            ClientInstance(
+                instance_id=iid,
+                display_name=iid,
+                public_key="ab" * 32,
+                inbox_url="http://x",
+                status=status,
+            )
+        )
+        await repo.add_subscriber(space_id="sp", instance_id=iid)
+    now = int(time.time())
+    for iid in ("seen", "banned"):
+        await repo.mark_relay_seen(iid, at=now)
+    await repo.mark_relay_seen("old", at=now - 2 * 86400)
+    # A bare hello (rtc_connections) earns nothing.
+    await repo.upsert_rtc_connection("never", transport="websocket")
+    assert await repo.list_recently_seen_subscribers("sp", within_s=86400) == {"seen"}
+
+
+async def _relay(queue, to, body, *, now=0, rows=10, per=10**6, total=10**6):
+    return await queue.enqueue_relay(
+        to,
+        body,
+        created_at=now,
+        expires_at=now + 100,
+        max_per_recipient=rows,
+        max_bytes_per_recipient=per,
+        max_total_bytes=total,
+    )
+
+
+async def _relay_rows(queue, to):
+    return [r for r in await queue.list_for(to, now=0) if r.frame_type == "relay"]
+
+
+async def test_enqueue_relay_evicts_the_recipients_own_oldest_at_its_caps(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    for i in range(3):
+        assert await _relay(queue, "a" * 32, f'{{"n":{i}}}', rows=2)
+    assert [r.sealed["n"] for r in await _relay_rows(queue, "a" * 32)] == [1, 2]
+
+
+async def test_enqueue_relay_makes_room_from_the_largest_holder(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    blob = '{"x":"' + "h" * 90 + '"}'
+    for _ in range(3):
+        assert await _relay(queue, "h" * 32, blob, total=300)
+    assert await _relay(queue, "l" * 32, blob, total=300)
+    assert len(await _relay_rows(queue, "l" * 32)) == 1
+    assert len(await _relay_rows(queue, "h" * 32)) == 2
+    assert await queue.relay_bytes(0) <= 300
+
+
+async def test_enqueue_relay_never_touches_envelope_rows(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    await queue.enqueue(
+        "a" * 32,
+        '{"e":"' + "e" * 44 + '"}',
+        created_at=0,
+        expires_at=100,
+        max_per_recipient=10,
+        max_bytes_per_recipient=10**6,
+    )
+    assert await _relay(queue, "a" * 32, '{"r":"' + "r" * 44 + '"}', total=60)
+    rows = await queue.list_for("a" * 32, now=0)
+    assert sorted(r.frame_type for r in rows) == ["envelope", "relay"]
+
+
+async def test_enqueue_relay_refuses_an_item_bigger_than_a_cap(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    assert not await _relay(queue, "a" * 32, "r" * 50, per=10)
+    assert not await _relay(queue, "a" * 32, "r" * 50, total=10)
+    assert not await _relay(queue, "a" * 32, "r" * 5, rows=0)
+
+
+_RELAY_SUM_QUERIES = (
+    "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+    " WHERE frame_type='relay' AND expires_at > 0 AND to_instance='a'",
+    "SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+    " WHERE frame_type='relay' AND expires_at > 0",
+    "SELECT to_instance FROM gfs_envelope_queue"
+    " WHERE frame_type='relay' AND expires_at > 0 GROUP BY to_instance"
+    " ORDER BY SUM(size_bytes) DESC, to_instance = 'a' ASC LIMIT 1",
+)
+
+
+@pytest.mark.parametrize("sql", _RELAY_SUM_QUERIES)
+async def test_relay_cap_queries_read_only_the_covering_index(gfs_db, sql):
+    """The relay caps are summed inside the writer transaction on every
+    insert — they must never read the stored blobs (round-3 review)."""
+    rows = await gfs_db.fetchall("EXPLAIN QUERY PLAN " + sql)
+    plan = " ".join(str(dict(r).get("detail", "")) for r in rows)
+    assert "USING COVERING INDEX idx_gfs_envelope_queue_relay_size" in plan, plan
+
+
+async def test_relay_insert_cost_stays_flat_at_a_full_cap(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    blob = "x" * (64 * 1024)
+    cap = 40 * 4 * len(blob)
+
+    async def _put(to: str) -> float:
+        started = time.perf_counter()
+        assert await _relay(queue, to, blob, rows=250, per=4 * len(blob), total=cap)
+        return time.perf_counter() - started
+
+    early = [await _put(f"r{i % 40}") for i in range(20)]
+    for i in range(20, 160):
+        await _put(f"r{i % 40}")
+    at_cap = [await _put(f"new{i}") for i in range(20)]
+    assert await queue.relay_bytes(0) <= cap
+    # Flat: the full-cap insert (eviction included) costs about what an
+    # insert into a near-empty queue does, never orders of magnitude more.
+    assert sorted(at_cap)[10] < max(5 * sorted(early)[10], 0.02)
+
+
+async def test_size_bytes_is_written_for_every_row(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    await _relay(queue, "a" * 32, '{"r":1}')
+    await queue.enqueue(
+        "a" * 32,
+        '{"e":2}',
+        created_at=0,
+        expires_at=100,
+        max_per_recipient=10,
+        max_bytes_per_recipient=10**6,
+    )
+    rows = await gfs_db.fetchall(
+        "SELECT size_bytes, LENGTH(sealed_json) AS n FROM gfs_envelope_queue"
+    )
+    assert all(r["size_bytes"] == r["n"] for r in rows)

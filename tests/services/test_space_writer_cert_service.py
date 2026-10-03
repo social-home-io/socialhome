@@ -15,6 +15,7 @@ from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.space import (
     JoinMode,
     Space,
+    SpaceFeatureAccess,
     SpaceFeatures,
     SpaceMember,
     SpaceRole,
@@ -24,6 +25,7 @@ from socialhome.domain.writer_cert import (
     WRITER_SCOPE_COMMENT,
     WRITER_SCOPE_WRITE,
     WriterCert,
+    WriterEntitlement,
 )
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 from socialhome.services.space_writer_cert_service import (
@@ -31,7 +33,12 @@ from socialhome.services.space_writer_cert_service import (
     SpaceWriterCertService,
     scope_weakened,
 )
-from socialhome.writer_cert import sign_writer_cert, verify_writer_cert
+from socialhome.writer_cert import (
+    InvalidWriterCert,
+    sign_writer_cert,
+    verify_writer_cert,
+    verify_writer_users,
+)
 
 SEED = os.urandom(32)
 SPACE_PK = ed25519_public_key(SEED)
@@ -553,3 +560,96 @@ async def test_a_mesh_only_household_key_is_bound_by_its_instance_id():
     _check(cert, mesh_pk, WRITER_SCOPE_WRITE)
     # Without a verifiable key: nothing.
     assert await svc.issue_for_instance("sp-1", mesh_id) is None
+
+
+# ── v2: posts access level + the user binding ────────────────────────────
+
+
+def _posts(level: SpaceFeatureAccess) -> Space:
+    return _space(posts_access=level)
+
+
+@pytest.mark.parametrize(
+    ("level", "role", "scope"),
+    [
+        (SpaceFeatureAccess.ADMIN_ONLY, SpaceRole.MEMBER, WRITER_SCOPE_COMMENT),
+        (SpaceFeatureAccess.ADMIN_ONLY, SpaceRole.MODERATOR, WRITER_SCOPE_COMMENT),
+        (SpaceFeatureAccess.ADMIN_ONLY, SpaceRole.ADMIN, WRITER_SCOPE_WRITE),
+        (SpaceFeatureAccess.MODERATED, SpaceRole.MEMBER, WRITER_SCOPE_COMMENT),
+        (SpaceFeatureAccess.MODERATED, SpaceRole.MODERATOR, WRITER_SCOPE_WRITE),
+        (SpaceFeatureAccess.MODERATED, SpaceRole.ADMIN, WRITER_SCOPE_WRITE),
+        (SpaceFeatureAccess.OPEN, SpaceRole.MEMBER, WRITER_SCOPE_WRITE),
+    ],
+)
+async def test_write_scope_follows_the_posts_access_level(level, role, scope):
+    """P1 / P2: a plain member never gets ``write`` where it may not post
+    directly — its posts keep going through the host (refusal / review)."""
+    svc, _ = _svc(space=_posts(level), remote_rows=[_remote("peer", role.value)])
+    cert = await svc.issue_for_instance("sp-1", "peer")
+    assert cert is not None and cert.scope == scope
+
+
+async def test_the_cert_binds_exactly_the_users_holding_its_scope():
+    svc, _ = _svc(
+        space=_posts(SpaceFeatureAccess.ADMIN_ONLY),
+        remote_rows=[
+            _remote("peer", SpaceRole.ADMIN.value, "boss"),
+            _remote("peer", SpaceRole.MEMBER.value, "pleb"),
+            _remote("peer", SpaceRole.ADMIN.value, "gone", tombstoned=True),
+        ],
+    )
+    cert = await svc.issue_for_instance("sp-1", "peer")
+    assert cert.writer_user_ids == ("boss@peer",)
+    verify_writer_users(cert, space_pubkey=SPACE_PK, author_user_id="boss@peer")
+    with pytest.raises(InvalidWriterCert):
+        verify_writer_users(cert, space_pubkey=SPACE_PK, author_user_id="pleb@peer")
+    # v1 verifiers still accept it.
+    _check(cert, PEER_PK, WRITER_SCOPE_WRITE)
+
+
+async def test_our_own_cert_binds_our_local_writers():
+    local = [
+        SpaceMember(space_id="sp-1", user_id="anna", role="owner", joined_at="x"),
+        SpaceMember(space_id="sp-1", user_id="fan", role="subscriber", joined_at="x"),
+    ]
+    svc, _ = _svc(local=local)
+    cert = await svc.issue_for_instance("sp-1", "own")
+    assert cert.writer_user_ids == ("anna",)
+
+
+async def test_entitlement_reports_scope_and_users():
+    svc, _ = _svc(
+        remote_rows=[
+            _remote("peer", SpaceRole.MEMBER.value, "a"),
+            _remote("peer", SpaceRole.MEMBER.value, "b"),
+        ]
+    )
+    ent = await svc.entitlement_for_instance(_space(), "peer")
+    assert ent == WriterEntitlement(WRITER_SCOPE_WRITE, frozenset({"a@peer", "b@peer"}))
+    assert (await svc.entitlement_for_instance(_space(), "nobody")).scope is None
+
+
+def test_scope_weakened_counts_a_shrinking_user_set():
+    two = WriterEntitlement(WRITER_SCOPE_WRITE, frozenset({"a", "b"}))
+    one = WriterEntitlement(WRITER_SCOPE_WRITE, frozenset({"a"}))
+    assert scope_weakened(two, one)
+    assert not scope_weakened(one, two)
+    assert scope_weakened(
+        two, WriterEntitlement(WRITER_SCOPE_COMMENT, frozenset({"a", "b"}))
+    )
+    assert not scope_weakened(two, two)
+    # A swap (one leaves, another joins) still retires the leaver.
+    assert scope_weakened(
+        two, WriterEntitlement(WRITER_SCOPE_WRITE, frozenset({"a", "c"}))
+    )
+
+
+async def test_a_truncated_binding_warns_once_per_space_and_household(caplog):
+    rows = [_remote("peer", SpaceRole.MEMBER.value, f"u{i:03d}") for i in range(70)]
+    svc, _ = _svc(remote_rows=rows)
+    with caplog.at_level("WARNING"):
+        first = await svc.issue_for_instance("sp-1", "peer")
+        await svc.issue_for_instance("sp-1", "peer")
+    assert len(first.writer_user_ids) == 64
+    warnings = [r for r in caplog.records if "binding only the first" in r.message]
+    assert len(warnings) == 1

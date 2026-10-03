@@ -666,7 +666,10 @@ class _Seats:
     async def list_for_instance(
         self, space_id, instance_id, *, include_tombstoned=True
     ):
-        return [SimpleNamespace(role=r) for r in self.seats.get(instance_id, [])]
+        return [
+            SimpleNamespace(role=r, user_id=f"{instance_id}-u{i}")
+            for i, r in enumerate(self.seats.get(instance_id, []))
+        ]
 
 
 class _PeerKeys:
@@ -892,3 +895,23 @@ async def test_legacy_hint_naming_another_key_is_not_relayed(env, caplog):
     )
     assert env["gfs"].calls == []
     assert "identity key" in caplog.text
+
+
+# ─── v_49: no host dedupe — older followers read only the host's copy ───
+
+
+async def test_a_member_published_post_is_still_relayed_by_the_host(env):
+    """The author also publishes the post over the GFS itself, but the host
+    keeps relaying it: followers on an older build ignore ``space_item``,
+    and receivers that read both dedupe by post id."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    _kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert len(env["gfs"].calls) == 1

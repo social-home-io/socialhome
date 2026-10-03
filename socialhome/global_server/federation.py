@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from ..authority_sig import (
+    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
     AUTHORITY_RELAY_EVENT_TYPES,
     UnsupportedAuthoritySuite,
@@ -40,6 +41,7 @@ from ..authority_cert import (
 from ..crypto import b64url_decode, verify_ed25519
 from ..peer_http import post_to_peer
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
+from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from ..domain.space import (
     normalize_category,
     normalize_join_mode,
@@ -48,12 +50,13 @@ from .domain import (
     ClientInstance,
     GfsSubscriber,
     GfsSubscriberWithKeys,
+    MIN_EPOCH_STEP_INTERVAL_S,
     GlobalSpace,
 )
 from .repositories import AbstractGfsFederationRepo
 
 if TYPE_CHECKING:
-    from .repositories import AbstractGfsInviteRepo
+    from .repositories import AbstractGfsInviteRepo, AbstractGfsSpaceEpochRepo
     from .ws_registry import GfsWebSocketRegistry
 
 log = logging.getLogger(__name__)
@@ -143,6 +146,11 @@ _TIMING_UNIFORM_DUMMY_SIG: bytes = bytes(64)
 #: ``ts`` further than this from now is treated as a replay and rejected —
 #: same ±300 s tolerance the §24.11 inbound pipeline uses.
 INSTANCE_UPDATE_TS_SKEW_SECONDS: int = 300
+
+#: Max space subscriptions one registered household may hold (v_49). Far
+#: above what a family follows; it bounds how many fan-out targets — and
+#: queued member items — one registration can stand for.
+MAX_SUBSCRIPTIONS_PER_INSTANCE: int = 500
 
 #: Max ``new_subscriber`` re-notifies triggered by a SINGLE subscriber
 #: (re)connect (Phase 5b-d). A household subscribed to hundreds of spaces must
@@ -340,6 +348,7 @@ class GfsFederationService:
     """
 
     __slots__ = (
+        "_epoch_repo",
         "_invite_repo",
         "_reconnect_tasks",
         "_repo",
@@ -352,8 +361,13 @@ class GfsFederationService:
         repo: AbstractGfsFederationRepo,
         ws_registry: "GfsWebSocketRegistry | None" = None,
         invite_repo: "AbstractGfsInviteRepo | None" = None,
+        epoch_repo: "AbstractGfsSpaceEpochRepo | None" = None,
     ) -> None:
         self._repo = repo
+        # Optional (v_49): when wired, the plaintext ``epoch`` of an
+        # authority-signed ``space_post_public`` relay advances the space's
+        # proven content epoch, which member publishes are checked against.
+        self._epoch_repo = epoch_repo
         self._ws_registry = ws_registry
         # Optional: only :meth:`hide_space` touches it, to take a withdrawn
         # space's public invite pages down with the listing. ``None`` in the
@@ -482,6 +496,7 @@ class GfsFederationService:
         # receiving the relay, so ``withdrawn`` is deliberately not a reject.
 
         self._authorize_authority_relay(space_id, event_type, payload, existing)
+        await self._learn_epoch(space_id, event_type, payload)
 
         # Replay suppression — AFTER authorization, never before. Recording a
         # rejected payload would let a forged frame mute the legitimate relay
@@ -519,6 +534,33 @@ class GfsFederationService:
         )
 
         return await self._fan_out(subscribers, event_body, session)
+
+    async def _learn_epoch(
+        self, space_id: str, event_type: str, payload: object
+    ) -> None:
+        """Advance the space's proven content epoch from an AUTHORIZED
+        ``space_post_public`` relay — its ``epoch`` is inside the authority
+        signature that just verified, so it is the authority's own statement.
+        Seed-only, so it may raise ``current`` by +1 at most (once a minute)
+        and never the owner-confirmed epoch; a malformed or out-of-step
+        value is ignored — the relay itself proceeds."""
+        if self._epoch_repo is None or event_type != AUTHORITY_EVENT_SPACE_POST_PUBLIC:
+            return
+        epoch = payload.get("epoch") if isinstance(payload, dict) else None
+        if (
+            not isinstance(epoch, int)
+            or isinstance(epoch, bool)
+            or not 0 <= epoch <= MAX_WRITER_CERT_EPOCH
+        ):
+            return
+        # Any seed holder signs these relays — +1 at most, once a minute,
+        # never the owner-confirmed floor (``GfsSpaceEpoch``).
+        await self._epoch_repo.step(
+            space_id,
+            epoch,
+            now=int(time.time()),
+            min_interval_s=MIN_EPOCH_STEP_INTERVAL_S,
+        )
 
     async def _verify_legacy_publish_sig(
         self,
@@ -833,6 +875,15 @@ class GfsFederationService:
         if not existing.allow_subscribers:
             raise PermissionError("space is not publicly readable")
 
+        # v_49 — one registered household holds at most
+        # MAX_SUBSCRIPTIONS_PER_INSTANCE seats: every seat is a fan-out target
+        # (and, while it stays "seen", a queued copy of each member item), so
+        # an unbounded count would let one registration multiply itself.
+        held = {
+            s.space_id for s in await self._repo.list_subscribed_spaces(instance_id)
+        }
+        if space_id not in held and len(held) >= MAX_SUBSCRIPTIONS_PER_INSTANCE:
+            raise PermissionError("subscription limit reached")
         await self._repo.add_subscriber(
             space_id=space_id,
             instance_id=instance_id,

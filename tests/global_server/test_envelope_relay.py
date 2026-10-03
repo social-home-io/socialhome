@@ -10,11 +10,14 @@ server never learns or reveals who is talking to whom, and it never opens
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
+import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id
+from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.envelope_relay import (
     ENVELOPE_FRAME_TYPE,
@@ -24,6 +27,9 @@ from socialhome.global_server.envelope_relay import (
     ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT,
     ENVELOPE_QUEUE_MAX_PER_RECIPIENT,
     ENVELOPE_QUEUE_TTL_SECONDS,
+    QUEUE_KIND_ENVELOPE,
+    QUEUE_KIND_RELAY,
+    RELAY_FRAME_TYPE,
     GfsEnvelopeRelay,
     InvalidEnvelope,
     validate_envelope,
@@ -589,3 +595,141 @@ def test_validate_envelope_accepts_a_real_derived_instance_id():
         {"to_instance": real, "sealed": _sealed()},
     )
     assert to_instance == real
+
+
+# ── Relay frames: member-published space items (migration 0014) ──────────
+
+
+def _item(marker: str = "ct") -> dict:
+    return {
+        "space_id": "sp-1",
+        "event_type": "space_item",
+        "epoch": 3,
+        "writer_cert": {"cert_suite": "ed25519"},
+        "payload": marker,
+    }
+
+
+async def _send(relay, frame, *, queue_ok=True) -> int:
+    target = "recipient2home2222222222222222aa"
+    return await relay.fan_out_relay(
+        [target], queue_ok={target} if queue_ok else set(), frame=frame
+    )
+
+
+async def test_relay_frame_goes_to_a_live_socket_as_a_relay_frame(wiring):
+    _fed, queue_repo, registry, relay = wiring
+    registry.online.add("recipient2home2222222222222222aa")
+
+    assert await _send(relay, _item()) == 1
+
+    assert registry.sent == [
+        ("recipient2home2222222222222222aa", {"type": RELAY_FRAME_TYPE, **_item()})
+    ]
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
+
+
+async def test_relay_frame_is_queued_offline_and_drained_as_a_relay_frame(wiring):
+    _fed, queue_repo, registry, relay = wiring
+    await relay.accept("recipient2home2222222222222222aa", _sealed("env-0"))
+    assert await _send(relay, _item("item-1")) == 1
+    queued = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
+    assert [q.frame_type for q in queued] == [QUEUE_KIND_ENVELOPE, QUEUE_KIND_RELAY]
+
+    registry.online.add("recipient2home2222222222222222aa")
+    assert await relay.drain("recipient2home2222222222222222aa") == 2
+
+    assert [frame for _t, frame in registry.sent] == [
+        {"type": ENVELOPE_FRAME_TYPE, "sealed": _sealed("env-0")},
+        {"type": RELAY_FRAME_TYPE, **_item("item-1")},
+    ]
+
+
+async def test_relay_items_have_their_own_cap_and_never_crowd_out_envelopes(
+    wiring,
+):
+    _fed, queue_repo, _registry, _relay = wiring
+    relay = GfsEnvelopeRelay(
+        fed_repo=_fed,
+        queue_repo=queue_repo,
+        ws_registry=_registry,
+        max_queued_per_recipient=2,
+    )
+    for i in range(2):
+        await relay.accept("recipient2home2222222222222222aa", _sealed(f"e{i}"))
+    # The envelope budget is exhausted, yet a relay item still queues …
+    assert await _send(relay, _item()) == 1
+    # … and a relay item never consumed envelope budget.
+    await relay.accept("recipient2home2222222222222222aa", _sealed("e-late"))
+    rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
+    assert sum(1 for r in rows if r.frame_type == QUEUE_KIND_ENVELOPE) == 2
+
+
+async def test_the_relay_queue_keeps_the_newest_at_its_cap(wiring, monkeypatch):
+    _fed, queue_repo, _registry, relay = wiring
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_PER_RECIPIENT", 1)
+    assert await _send(relay, _item("first")) == 1
+    assert await _send(relay, _item("second")) == 1
+    rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
+    assert [r.sealed["payload"] for r in rows] == ["second"]
+
+
+async def test_an_item_over_the_caps_on_its_own_is_not_queued(
+    wiring, monkeypatch, caplog
+):
+    _fed, queue_repo, _registry, relay = wiring
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT", 10)
+    with caplog.at_level(logging.WARNING, logger="socialhome.global_server"):
+        assert await _send(relay, _item("big")) == 0
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
+    assert "exceeds the relay queue caps" in caplog.text
+    assert "big" not in caplog.text
+
+
+async def test_a_corrupt_frame_type_is_refused_by_the_database(gfs_db):
+    with pytest.raises(Exception):
+        await gfs_db.transact(
+            lambda conn: conn.execute(
+                "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
+                " created_at, expires_at, frame_type) VALUES(?,?,?,?,?)",
+                ("x" * 32, "{}", 0, 1, "bogus"),
+            )
+        )
+
+
+async def test_a_target_not_in_queue_ok_gets_no_row(wiring):
+    _fed, queue_repo, _registry, relay = wiring
+    assert await _send(relay, _item(), queue_ok=False) == 0
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
+
+
+async def test_the_server_wide_relay_byte_cap_holds_by_eviction(wiring, monkeypatch):
+    _fed, queue_repo, _registry, relay = wiring
+    one = len(orjson.dumps(_item("x")))
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_TOTAL_BYTES", one + 1)
+    assert await _send(relay, _item("x")) == 1
+    assert await _send(relay, _item("y")) == 1
+    rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
+    assert [r.sealed["payload"] for r in rows] == ["y"]
+    assert await queue_repo.relay_bytes(0) <= one + 1
+
+
+async def test_live_pushes_run_concurrently_but_bounded(wiring, monkeypatch):
+    _fed, _queue, _registry, relay = wiring
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_FAN_OUT_CONCURRENCY", 3)
+    in_flight = 0
+    peak = 0
+
+    class _Slow:
+        async def send(self, instance_id, payload):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return True
+
+    relay._ws_registry = _Slow()
+    targets = [f"t{i}" for i in range(12)]
+    assert await relay.fan_out_relay(targets, queue_ok=set(), frame=_item()) == 12
+    assert 1 < peak <= 3

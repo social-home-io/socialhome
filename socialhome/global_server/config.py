@@ -329,6 +329,11 @@ landing_markdown  = ""
 header_image_file = ""
 
 [policy]
+# On a PUBLIC server (anyone can obtain a pairing token), set this to false
+# and approve households in the admin console: every registered household
+# can subscribe to spaces, and a flood of self-registered ones dilutes the
+# offline-delivery share of member-published items (best effort, see
+# docs/protocol/discovery.md "Operator notes").
 auto_accept_clients = true
 auto_accept_spaces  = false
 fraud_threshold     = 5

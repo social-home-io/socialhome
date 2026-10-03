@@ -77,6 +77,17 @@ AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF: str = "space_subscriber_key_handof
 AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY: str = "space_subscribers_query"
 
 
+#: Authority event-type for the v_49 content-epoch NOTICE: a seed-holder
+#: signs ``{space_id, epoch}`` with the space seed when the space content key
+#: rotates and posts it to ``POST /gfs/spaces/{id}/epoch``, so the GFS stops
+#: relaying member items under the old epoch's writer certs even while nobody
+#: else publishes. Like the subscribers query it is NOT a relay — kept out of
+#: ``AUTHORITY_RELAY_EVENT_TYPES`` so a notice can never be fanned out, and a
+#: relay payload can never be accepted as a notice (the signing bytes bind the
+#: event type).
+AUTHORITY_EVENT_SPACE_EPOCH_NOTICE: str = "space_epoch_notice"
+
+
 #: The set of event types the GFS will authorize on the space-authority relay
 #: path (a NON-owner seed-holder relaying content the GFS stays blind to). Both
 #: are space-authority-signed and content-blind to the GFS; anything else is

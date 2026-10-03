@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable
+from dataclasses import replace
 
 from .crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
 from .domain.writer_cert import (
     MAX_WRITER_CERT_EPOCH,
+    MAX_WRITER_USERS,
     WRITER_SCOPES,
     WriterCert,
     scope_permits,
@@ -39,10 +42,25 @@ SUPPORTED_WRITER_CERT_SUITES: frozenset[str] = frozenset({WRITER_CERT_SUITE_ED25
 #: Domain-separation prefix of the signing bytes.
 _WRITER_CERT_PREFIX: bytes = b"space-writer-cert:v1:"
 
+#: Suite of the v2 USER-BINDING signature (the space authority's second
+#: signature over the household's writer users). Its own suite tag, so it
+#: can move to a hybrid suite independently.
+WRITER_USERS_SUITE_ED25519: str = "ed25519"
+SUPPORTED_WRITER_USERS_SUITES: frozenset[str] = frozenset({WRITER_USERS_SUITE_ED25519})
+
+#: Domain-separation prefix of the user-binding signing bytes — distinct
+#: from the cert's own (``space-writer-cert:v1:``) and the authority relay's.
+_WRITER_USERS_PREFIX: bytes = b"space-writer-cert:v2:users:"
+
 
 class UnsupportedWriterCertSuite(ValueError):
     """The cert names a signature suite this build does not know. Receivers
     MUST reject — no default fallback, or a downgrade becomes possible."""
+
+
+class UnsupportedWriterUsersSuite(ValueError):
+    """The user binding names a suite this build does not know — rejected,
+    never defaulted."""
 
 
 class InvalidWriterCert(ValueError):
@@ -55,6 +73,53 @@ def writer_cert_signing_bytes(cert: WriterCert) -> bytes:
     return _WRITER_CERT_PREFIX + json.dumps(
         cert.signing_body(), separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
+
+
+def writer_users_signing_bytes(cert: WriterCert) -> bytes:
+    """Canonical, domain-separated bytes the user binding signs."""
+    return _WRITER_USERS_PREFIX + json.dumps(
+        cert.users_signing_body(), separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+
+
+def bind_writer_users(
+    cert: WriterCert, *, space_seed: bytes, user_ids: Iterable[str]
+) -> WriterCert:
+    """Return ``cert`` with the v2 user binding: ``user_ids`` (the
+    household's users holding the cert's scope) signed by the space
+    authority seed over the cert's own signature."""
+    users = tuple(sorted(set(user_ids)))
+    if len(users) > MAX_WRITER_USERS:
+        raise ValueError("too many writer users for one household")
+    unsigned = replace(
+        cert,
+        writer_user_ids=users,
+        users_sig="",
+        users_sig_suite=WRITER_USERS_SUITE_ED25519,
+    )
+    sig = sign_ed25519(space_seed, writer_users_signing_bytes(unsigned))
+    return replace(unsigned, users_sig=b64url_encode(sig))
+
+
+def verify_writer_users(
+    cert: WriterCert, *, space_pubkey: bytes, author_user_id: str
+) -> None:
+    """Verify the v2 user binding of an ALREADY verified ``cert`` names
+    ``author_user_id``. Raises :class:`UnsupportedWriterUsersSuite` /
+    :class:`InvalidWriterCert` — a v1 cert (no binding) fails: a
+    member-published item requires v2."""
+    if not cert.users_sig:
+        raise InvalidWriterCert("cert carries no user binding (v1)")
+    if cert.users_sig_suite not in SUPPORTED_WRITER_USERS_SUITES:
+        raise UnsupportedWriterUsersSuite(cert.users_sig_suite)
+    try:
+        sig = b64url_decode(cert.users_sig)
+    except Exception as exc:
+        raise InvalidWriterCert("user binding is not base64url") from exc
+    if not verify_ed25519(space_pubkey, writer_users_signing_bytes(cert), sig):
+        raise InvalidWriterCert("user binding does not verify against the space key")
+    if author_user_id not in cert.writer_user_ids:
+        raise InvalidWriterCert("author is not one of the household's writers")
 
 
 def sign_writer_cert(

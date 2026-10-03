@@ -37,6 +37,7 @@ from .domain import (
     GfsInviteToken,
     GfsMomentFollow,
     GfsQueuedEnvelope,
+    GfsSpaceEpoch,
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GfsUserPicture,
@@ -140,6 +141,10 @@ class AbstractGfsFederationRepo(Protocol):
     ) -> None: ...
     async def purge_subscribers(self, space_id: str) -> int: ...
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]: ...
+    async def list_recently_seen_subscribers(
+        self, space_id: str, *, within_s: int
+    ) -> set[str]: ...
+    async def mark_relay_seen(self, instance_id: str, *, at: int) -> None: ...
     async def list_subscribers_with_keys(
         self,
         space_id: str,
@@ -335,6 +340,12 @@ class SqliteGfsFederationRepo:
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE global_spaces SET identity_public_key=?, authority_cert=?,"
+            # v_49: the proven content epoch belongs to the OLD authority key
+            # (certs under it stop verifying now) — a revoked seed holder must
+            # not leave an inflated epoch behind, so it is forgotten here.
+            " content_epoch=NULL, content_epoch_confirmed=NULL,"
+            " content_epoch_prev=NULL, content_epoch_seen_at=NULL,"
+            " content_epoch_raised_at=NULL,"
             " authority_rotation_seq=CASE WHEN authority_rotation_seq >= ?"
             " THEN ? ELSE authority_rotation_seq + 1 END"
             " WHERE space_id=? AND COALESCE(identity_public_key, '')=?"
@@ -547,6 +558,33 @@ class SqliteGfsFederationRepo:
             )
             for r in rows
         ]
+
+    async def list_recently_seen_subscribers(
+        self, space_id: str, *, within_s: int
+    ) -> set[str]:
+        """Active subscribers of *space_id* that held a ``/gfs/ws`` session
+        for the minimum duration within the last *within_s* seconds
+        (``client_instances.relay_seen_at``, migration 0014). Only these get
+        offline items queued: a bare hello costs nothing, so it earns no
+        disk."""
+        rows = await self._db.fetchall(
+            """
+            SELECT ss.instance_id
+            FROM space_subscribers ss
+            JOIN client_instances ci USING (instance_id)
+            WHERE ss.space_id = ? AND ci.status = 'active'
+              AND ci.relay_seen_at IS NOT NULL AND ci.relay_seen_at >= ?
+            """,
+            (space_id, int(time.time()) - int(within_s)),
+        )
+        return {r["instance_id"] for r in rows}
+
+    async def mark_relay_seen(self, instance_id: str, *, at: int) -> None:
+        """Record that *instance_id* held its WS session long enough."""
+        await self._db.enqueue(
+            "UPDATE client_instances SET relay_seen_at=? WHERE instance_id=?",
+            (at, instance_id),
+        )
 
     async def list_subscribers_with_keys(
         self,
@@ -1849,6 +1887,7 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         expires_at: int,
         max_per_recipient: int,
         max_bytes_per_recipient: int,
+        frame_type: str = "envelope",
     ) -> bool: ...
 
     async def list_for(
@@ -1861,6 +1900,20 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
     async def delete(self, envelope_id: int) -> int: ...
 
     async def prune_expired(self, now: int) -> int: ...
+
+    async def relay_bytes(self, now: int) -> int: ...
+
+    async def enqueue_relay(
+        self,
+        to_instance: str,
+        frame_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> bool: ...
 
     async def count_for(self, to_instance: str) -> int: ...
 
@@ -1887,8 +1940,13 @@ class SqliteGfsEnvelopeQueueRepo:
         expires_at: int,
         max_per_recipient: int,
         max_bytes_per_recipient: int,
+        frame_type: str = "envelope",
     ) -> bool:
         """Append one envelope unless this recipient is at cap.
+
+        ``frame_type`` (migration 0014) is ``"envelope"`` or ``"relay"``; the
+        two ceilings apply per frame type, so member-published relay items
+        can never crowd a household's sealed envelopes out of its queue.
 
         Returns ``True`` when the row was written, ``False`` when it was
         **tail-dropped** — the caller answers the same uniform ``202``
@@ -1913,8 +1971,9 @@ class SqliteGfsEnvelopeQueueRepo:
         def _run(conn) -> bool:
             row = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(LENGTH(sealed_json)), 0) "
-                "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ?",
-                (to_instance, created_at),
+                "FROM gfs_envelope_queue "
+                "WHERE to_instance=? AND frame_type=? AND expires_at > ?",
+                (to_instance, frame_type, created_at),
             ).fetchone()
             count = int(row[0] or 0)
             total_bytes = int(row[1] or 0)
@@ -1924,9 +1983,16 @@ class SqliteGfsEnvelopeQueueRepo:
                 return False
             conn.execute(
                 "INSERT INTO gfs_envelope_queue("
-                "to_instance, sealed_json, created_at, expires_at"
-                ") VALUES(?,?,?,?)",
-                (to_instance, sealed_json, created_at, expires_at),
+                "to_instance, sealed_json, created_at, expires_at, frame_type,"
+                " size_bytes) VALUES(?,?,?,?,?,?)",
+                (
+                    to_instance,
+                    sealed_json,
+                    created_at,
+                    expires_at,
+                    frame_type,
+                    len(sealed_json),
+                ),
             )
             return True
 
@@ -1945,7 +2011,8 @@ class SqliteGfsEnvelopeQueueRepo:
         blob whose TTL has already run out.
         """
         rows = await self._db.fetchall(
-            "SELECT id, to_instance, sealed_json, created_at, expires_at "
+            "SELECT id, to_instance, sealed_json, created_at, expires_at, "
+            "frame_type "
             "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ? "
             "ORDER BY created_at ASC, id ASC",
             (to_instance, now),
@@ -1971,6 +2038,7 @@ class SqliteGfsEnvelopeQueueRepo:
                     sealed=sealed,
                     created_at=int(d["created_at"]),
                     expires_at=int(d["expires_at"]),
+                    frame_type=str(d.get("frame_type") or "envelope"),
                 )
             )
         return out
@@ -1995,6 +2063,108 @@ class SqliteGfsEnvelopeQueueRepo:
 
         return await self._db.transact(_run)
 
+    async def enqueue_relay(
+        self,
+        to_instance: str,
+        frame_json: str,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_per_recipient: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> bool:
+        """Queue one member-published RELAY item, making room fairly.
+
+        Everything happens in ONE transaction, so concurrent fan-outs can't
+        both see room and overshoot. Room is made by EVICTION, never by
+        refusing the new item: first this recipient's own oldest relay rows
+        down to its caps, then — while the server-wide relay total would
+        exceed ``max_total_bytes`` — the oldest relay row of whichever
+        recipient holds the most relay bytes. A household that floods its
+        own seat therefore only ever evicts itself, and no group of
+        recipients can starve another below a fair share. Envelope rows are
+        never touched. Returns ``False`` only when the item alone exceeds a
+        cap."""
+        size = len(frame_json)
+        if (
+            max_per_recipient <= 0
+            or size > max_bytes_per_recipient
+            or size > max_total_bytes
+        ):
+            return False
+
+        # Every sum and the largest-holder pick read ``size_bytes`` through
+        # the covering index ``idx_gfs_envelope_queue_relay_size`` (0014) —
+        # never the blobs — so this transaction stays short at a full cap.
+        def _run(conn) -> bool:
+            live = "frame_type='relay' AND expires_at > ?"
+            while True:
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)"
+                    f" FROM gfs_envelope_queue WHERE {live} AND to_instance=?",
+                    (created_at, to_instance),
+                ).fetchone()
+                if (
+                    int(row[0]) < max_per_recipient
+                    and int(row[1]) + size <= max_bytes_per_recipient
+                ):
+                    break
+                cur = conn.execute(
+                    "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
+                    f" gfs_envelope_queue WHERE to_instance=? AND {live}"
+                    " ORDER BY created_at ASC, id ASC LIMIT 1)",
+                    (to_instance, created_at),
+                )
+                if not cur.rowcount:
+                    return False
+            while True:
+                total = conn.execute(
+                    "SELECT COALESCE(SUM(size_bytes), 0)"
+                    f" FROM gfs_envelope_queue WHERE {live}",
+                    (created_at,),
+                ).fetchone()[0]
+                if int(total) + size <= max_total_bytes:
+                    break
+                # The largest holder; on a tie, someone other than the
+                # recipient being written to (it must not evict itself while
+                # an equal holder exists).
+                biggest = conn.execute(
+                    "SELECT to_instance FROM gfs_envelope_queue"
+                    f" WHERE {live} GROUP BY to_instance"
+                    " ORDER BY SUM(size_bytes) DESC, to_instance = ? ASC"
+                    " LIMIT 1",
+                    (created_at, to_instance),
+                ).fetchone()
+                if biggest is None:
+                    return False
+                conn.execute(
+                    "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
+                    f" gfs_envelope_queue WHERE to_instance=? AND {live}"
+                    " ORDER BY created_at ASC, id ASC LIMIT 1)",
+                    (biggest[0], created_at),
+                )
+            conn.execute(
+                "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
+                " created_at, expires_at, frame_type, size_bytes)"
+                " VALUES(?,?,?,?, 'relay', ?)",
+                (to_instance, frame_json, created_at, expires_at, size),
+            )
+            return True
+
+        return await self._db.transact(_run)
+
+    async def relay_bytes(self, now: int) -> int:
+        """Bytes held in unexpired RELAY rows across every recipient — what
+        the server-wide relay cap (``RELAY_QUEUE_MAX_TOTAL_BYTES``) bounds."""
+        row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(size_bytes), 0) AS n "
+            "FROM gfs_envelope_queue WHERE frame_type='relay' AND expires_at > ?",
+            (now,),
+        )
+        d = _as_dict(row)
+        return int(d["n"]) if d else 0
+
     async def count_for(self, to_instance: str) -> int:
         row = await self._db.fetchone(
             "SELECT COUNT(*) AS n FROM gfs_envelope_queue WHERE to_instance=?",
@@ -2002,6 +2172,90 @@ class SqliteGfsEnvelopeQueueRepo:
         )
         d = _as_dict(row)
         return int(d["n"]) if d else 0
+
+
+# ─── Space content epochs (member publish, v_49) ─────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsSpaceEpochRepo(Protocol):
+    """What the GFS knows about a space's content epoch (migration 0014)."""
+
+    async def get(self, space_id: str) -> GfsSpaceEpoch | None: ...
+
+    async def confirm(self, space_id: str, epoch: int, *, now: int) -> bool: ...
+
+    async def step(
+        self, space_id: str, epoch: int, *, now: int, min_interval_s: int
+    ) -> bool: ...
+
+
+class SqliteGfsSpaceEpochRepo:
+    """SQLite-backed :class:`AbstractGfsSpaceEpochRepo` over the
+    ``global_spaces.content_epoch*`` columns. Each write is one conditional
+    statement, so concurrent writers can't interleave. The reset on an
+    authority re-pin lives in :meth:`SqliteGfsFederationRepo
+    .set_space_authority`, in the same statement as the re-pin."""
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def get(self, space_id: str) -> GfsSpaceEpoch | None:
+        row = _as_dict(
+            await self._db.fetchone(
+                "SELECT content_epoch, content_epoch_confirmed, content_epoch_prev,"
+                " content_epoch_seen_at, content_epoch_raised_at"
+                " FROM global_spaces WHERE space_id=?",
+                (space_id,),
+            )
+        )
+        if not row or row.get("content_epoch_confirmed") is None:
+            return None
+        prev = row.get("content_epoch_prev")
+        confirmed = int(row["content_epoch_confirmed"])
+        return GfsSpaceEpoch(
+            space_id=space_id,
+            current=max(int(row.get("content_epoch") or confirmed), confirmed),
+            confirmed=confirmed,
+            previous=int(prev) if prev is not None else None,
+            confirmed_at=int(row.get("content_epoch_seen_at") or 0),
+            raised_at=int(row.get("content_epoch_raised_at") or 0),
+        )
+
+    async def confirm(self, space_id: str, epoch: int, *, now: int) -> bool:
+        """The OWNER announced ``epoch``: it becomes the confirmed epoch
+        (the old one, or ``epoch - 1`` the first time, becomes ``previous``)
+        iff it is newer than the confirmed one. Callers bound it first
+        (``domain.epoch_ceiling``). Returns whether the row changed."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE global_spaces SET"
+            " content_epoch_prev=COALESCE(content_epoch_confirmed, MAX(? - 1, 0)),"
+            " content_epoch_confirmed=?,"
+            " content_epoch=MAX(COALESCE(content_epoch, ?), ?),"
+            " content_epoch_seen_at=?, content_epoch_raised_at=?"
+            " WHERE space_id=?"
+            " AND (content_epoch_confirmed IS NULL OR content_epoch_confirmed < ?)",
+            (epoch, epoch, epoch, epoch, now, now, space_id, epoch),
+        )
+        return changed > 0
+
+    async def step(
+        self, space_id: str, epoch: int, *, now: int, min_interval_s: int
+    ) -> bool:
+        """A seed-only statement raises ``current`` to ``epoch`` — only when
+        the owner already confirmed an epoch, ``epoch`` is exactly one above
+        ``current``, and the last raise is at least ``min_interval_s`` old.
+        Never touches the confirmed tier. Returns whether the row changed."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE global_spaces SET content_epoch=?, content_epoch_raised_at=?"
+            " WHERE space_id=? AND content_epoch_confirmed IS NOT NULL"
+            " AND content_epoch = ? - 1"
+            " AND COALESCE(content_epoch_raised_at, 0) <= ?",
+            (epoch, now, space_id, epoch, now - min_interval_s),
+        )
+        return changed > 0
 
 
 # ─── Invite tokens ───────────────────────────────────────────────────────

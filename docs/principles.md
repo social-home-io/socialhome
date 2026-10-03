@@ -220,6 +220,51 @@ no code: pair with the other household normally (QR / trust relay), at
 which point the peer row is no longer `space_session` and traffic moves
 back to RTC / HTTPS, or decline invite-link joins.
 
+### Sign-off: in trusted mode the connection server learns who published (v_49)
+
+**Owner decision (2026-10-03), the default for every public/global space.**
+A space member household can publish its own posts over the connection
+server without the host signing them (`POST /gfs/member-publish`), so the
+host is no longer a single point of failure and a link-joined member reaches
+every subscriber live. In the default **trusted** mode that request is
+*identified*: the household signs it with its registered GFS identity and
+carries its writer cert in plaintext. **What it concedes, exactly:**
+
+- **The GFS learns which household published into which listed space, at
+  which content epoch, and when** — per item. That is the publishing
+  household's identity tied to a space and a timing, which the
+  identity-free `/gfs/publish` relay above deliberately withholds. It is
+  the reason this mode needs a sign-off at all.
+- **It never learns content or the item type.** The payload is ciphertext
+  under the space content key; the outer type is always the generic
+  `space_item`, with the real type (post, comment, …) inside the
+  ciphertext. The request has an exact key set, so nothing can ride
+  alongside the ciphertext in plaintext (pinned by
+  `tests/protocol/test_gfs_member_publish_blind.py`).
+- **Subscribers learn nothing new from the frame.** The fan-out frame names
+  no publisher id; it carries the writer cert (the author's household key,
+  which every receiver needs anyway to verify the author signature inside).
+- **It learns every writer household's membership, even one that never
+  posts.** A household with a writer seat auto-subscribes to the fan-out of
+  each of its public/global spaces on every capable server (so other
+  members' items reach it live), and a subscribe is household-signed — so
+  the server learns which households are writers in which spaces. Strict
+  mode (PR 4) must not auto-subscribe with identified requests.
+- **It learns when the space content key rotates** — from the owner's
+  (household-signed) and delegated admins' (authority-signed) epoch notices
+  — as it already could from the `epoch` of authority-signed post relays.
+- **It is trusted with metadata, not with authenticity.** It can drop or
+  delay items; it cannot forge one, because every receiver re-verifies the
+  cert against its own pinned space key and the author's signature.
+
+**Why this is accepted:** the owner judged that a host-independent space is
+worth the GFS knowing the publisher, never the content. Owners who disagree
+get an opt-in **strict** mode (a later change) where the GFS authorizes
+anonymously with a per-epoch writer group key and learns only that *some*
+writer posted. Until a household's GFS advertises `member_publish_trusted`
+in its signed capability block, nothing identified is sent to it at all and
+posts take today's host path.
+
 ### Sign-off: per-user routing on the app channel (§FIX-I2 relaxed, v_18)
 
 `APP_SESSION` and `APP_MESSAGE` events may carry `to_user` (the target user's

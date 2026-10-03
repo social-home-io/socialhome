@@ -18,11 +18,13 @@ from PIL import Image
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    SpaceRemoteSeatLive,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
     SpaceModerationQueued,
     SpacePostCreated,
 )
+from socialhome.domain.writer_cert import WriterEntitlement
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
@@ -9173,8 +9175,8 @@ async def test_a_scope_reducing_local_role_change_rotates(stack, monkeypatch):
     scopes = iter(["write", "comment"])
 
     class _Certs:
-        async def scope_for_instance(self, _space, _iid):
-            return next(scopes)
+        async def entitlement_for_instance(self, _space, _iid):
+            return WriterEntitlement(next(scopes), frozenset({member.user_id}))
 
     stack.space_svc.attach_writer_certs(_Certs())  # type: ignore[arg-type]
     rekeys = await _rekeys(stack, monkeypatch)
@@ -9357,6 +9359,8 @@ async def test_a_forged_leave_for_another_households_seat_changes_nothing(
 
 
 async def test_a_leave_with_another_seat_left_keeps_the_household(stack, monkeypatch):
+    """The household keeps its seat, but its cert's user binding shrank
+    (u-a left) — rotate, so u-a can no longer post under the old cert."""
     space, fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     await _seat(remote, space.id, "peer-a", "u-a2")
@@ -9364,7 +9368,7 @@ async def test_a_leave_with_another_seat_left_keeps_the_household(stack, monkeyp
     rekeys = await _rekeys(stack, monkeypatch)
     assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
     assert "peer-a" in await stack.space_repo.list_member_instances(space.id)
-    assert rekeys == []  # still a writer — no scope drop
+    assert rekeys == [space.id]
 
 
 async def test_a_leave_ending_the_last_admin_seat_rotates_once(stack, monkeypatch):
@@ -9499,3 +9503,164 @@ async def test_failing_authority_rotation_on_demotion_still_rotates(stack):
         await stack.space_repo.get(space.id), target=target, role="subscriber"
     )
     assert await _epoch(stack, space.id) == before + 1
+
+
+# ─── v_49: every rotation announces the new epoch to the GFS first ──────
+
+
+async def _removal_with_member_gfs(stack, member_gfs):
+    _anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    order: list[str] = []
+    space_crypto = AsyncMock()
+    space_crypto.rotate_epoch = AsyncMock(return_value=7)
+    space_crypto.export_current_key = AsyncMock(return_value=(7, bytes(range(32))))
+    federation = AsyncMock()
+
+    async def _broadcast(_space_id, event_type, *a, **kw):
+        if event_type == FederationEventType.SPACE_KEY_EXCHANGE_REKEY:
+            order.append("rekey")
+
+    federation.broadcast_to_space_members = AsyncMock(side_effect=_broadcast)
+    subscriber_keys = AsyncMock()
+
+    async def _reseal(space_id):
+        order.append("reseal")
+
+    subscriber_keys.reconcile_space_everywhere = AsyncMock(side_effect=_reseal)
+
+    async def _announce(space_id):
+        order.append("notice")
+        if isinstance(member_gfs, Exception):
+            raise member_gfs
+        return 1
+
+    gfs = AsyncMock()
+    gfs.announce_epoch = AsyncMock(side_effect=_announce)
+    stack.space_svc.attach_space_crypto_service(space_crypto)
+    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
+    stack.space_svc.attach_member_gfs(gfs)
+    stack.space_svc._federation = federation
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    return space, bob, order, gfs
+
+
+async def test_a_rotation_sends_the_gfs_epoch_notice_before_rekey_and_reseal(stack):
+    space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
+    gfs.announce_epoch.assert_awaited_once_with(space.id)
+    assert order == ["notice", "rekey", "reseal"]
+
+
+async def test_a_failing_epoch_notice_never_breaks_the_rotation(stack):
+    space, bob, order, _gfs = await _removal_with_member_gfs(
+        stack, RuntimeError("gfs down")
+    )
+    assert order == ["notice", "rekey", "reseal"]
+    assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+
+
+# ─── v_49 v2: the posts access level decides who a writer cert lets post ─
+
+
+async def _posts_cert_space(stack):
+    out = await _cert_space(stack)
+    # The access-level change consults the space's peer versions.
+    stack.space_svc._federation_repo.list_instances_in_space = AsyncMock(
+        return_value=[]
+    )
+    return out
+
+
+async def test_narrowing_posts_access_rotates(stack, monkeypatch):
+    """OPEN → ADMIN_ONLY: a plain member household's ``write`` cert must die
+    with the epoch, or it keeps posting over the GFS (P1)."""
+    space, fed, remote, _pks = await _posts_cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_moderating_posts_rotates_for_plain_members(stack, monkeypatch):
+    space, fed, remote, _pks = await _posts_cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_opening_posts_does_not_rotate_but_re_issues(stack, monkeypatch):
+    space, fed, remote, _pks = await _posts_cert_space(stack)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    snapshots: list[str] = []
+
+    async def _snapshot(self, space_id, *, to_instance_id):
+        snapshots.append(to_instance_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "send_roster_snapshot", _snapshot)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.OPEN),
+    )
+    assert rekeys == []
+    assert snapshots == ["peer-a"]
+
+
+async def test_a_new_seat_in_a_seated_household_re_issues_its_cert(stack, monkeypatch):
+    """v2: the household's cert binding does not name a newly seated user
+    yet — the host sends it a roster snapshot (with the re-issued cert)."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    snapshots: list[str] = []
+
+    async def _snapshot(self, space_id, *, to_instance_id):
+        snapshots.append(to_instance_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "send_roster_snapshot", _snapshot)
+    await stack.bus.publish(
+        SpaceRemoteSeatLive(space_id=space.id, instance_id="peer-a", user_id="u-a")
+    )
+    assert snapshots == []  # its first seat: the cert came with the seat
+    await _seat(remote, space.id, "peer-a", "u-b")
+    await stack.bus.publish(
+        SpaceRemoteSeatLive(space_id=space.id, instance_id="peer-a", user_id="u-b")
+    )
+    assert snapshots == ["peer-a"]
+
+
+async def test_a_new_seat_in_a_space_we_do_not_host_re_issues_nothing(
+    stack, monkeypatch
+):
+    space, leaver, fed, _owner = await _stub_space_with_member(stack)
+    await _cert_space(stack)
+    snapshots: list[str] = []
+
+    async def _snapshot(self, space_id, *, to_instance_id):
+        snapshots.append(to_instance_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "send_roster_snapshot", _snapshot)
+    await stack.bus.publish(
+        SpaceRemoteSeatLive(space_id=space.id, instance_id="peer-a", user_id="u")
+    )
+    assert snapshots == []

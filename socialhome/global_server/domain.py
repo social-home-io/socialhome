@@ -313,9 +313,99 @@ class GfsQueuedEnvelope:
 
     id: int
     to_instance: str
-    sealed: dict[str, str]
+    sealed: dict
     created_at: int
     expires_at: int
+    #: ``"envelope"`` (a §D2b sealed blob, pushed as ``{type: "envelope",
+    #: sealed}``) or ``"relay"`` (a member-published space item, migration
+    #: 0014 — ``sealed`` then holds the identity-free fan-out frame, pushed as
+    #: ``{type: "relay", **frame}``). Opaque either way: never parsed for
+    #: content, never logged.
+    frame_type: str = "envelope"
+
+
+#: How far an OWNER epoch notice may raise a space's confirmed content epoch
+#: beyond the stored one — unless it stays within
+#: :data:`MAX_EPOCH_CLOCK_LEAD_S` of wall-clock now, which is how far a v_44
+#: post-restore rotation (epoch lifted to unix seconds) may legitimately jump.
+MAX_EPOCH_STEP: int = 1000
+
+#: How far ahead of wall-clock now (seconds) an owner may ever set the epoch.
+MAX_EPOCH_CLOCK_LEAD_S: int = 24 * 60 * 60
+
+#: Minimum spacing (seconds) between two raises of ``current`` that do NOT
+#: come from the owner (a delegated admin's notice, an authorized host relay).
+MIN_EPOCH_STEP_INTERVAL_S: int = 60
+
+
+def epoch_ceiling(current: int | None, now: int) -> int:
+    """The highest content epoch an OWNER notice may confirm.
+
+    ``max(current + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)`` — the
+    restored owner's wall-clock epoch still lands, an absurd value does not.
+    Nobody but the owner raises by more than +1 (see :class:`GfsSpaceEpoch`)."""
+    base = current if current is not None else 0
+    return max(base + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)
+
+
+@dataclass(slots=True, frozen=True)
+class GfsSpaceEpoch:
+    """What this server knows about a space's content epoch (v_49).
+
+    Two tiers, because the GFS can tell the space OWNER apart (its registered
+    household key) but cannot tell a legitimate delegated admin from a
+    demoted one whose seed still matches until the re-pin:
+
+    * ``confirmed`` — the epoch the OWNER last announced (owner-signed
+      notice). Only the owner moves it, by any amount up to
+      :func:`epoch_ceiling`; ``previous`` is the confirmed epoch before it
+      and ``confirmed_at`` when it was confirmed.
+    * ``current`` — the newest epoch seen at all (``>= confirmed``). Seed-only
+      statements (a delegated admin's notice, an authorized host relay) raise
+      it by exactly +1, at most once per :data:`MIN_EPOCH_STEP_INTERVAL_S`
+      (``raised_at``); writer certs never raise anything.
+
+    Kept off :class:`GlobalSpace` so the public directory never shows it,
+    and reset whenever the space authority key is re-pinned.
+    """
+
+    space_id: str
+    current: int
+    confirmed: int
+    previous: int | None
+    confirmed_at: int
+    raised_at: int
+
+    def admits(self, epoch: int, *, now: int, grace_s: int) -> bool:
+        """Whether a cert for ``epoch`` is fresh enough to relay.
+
+        * never beyond ``current + 1`` (one rotation may be in flight);
+        * anything from ``confirmed`` up is admitted — seed-only raises move
+          ``current`` but never the floor, so no seed holder can strand the
+          writers on the owner's real epoch (a cert can't either: certs never
+          raise);
+        * an epoch below ``confirmed`` is admitted back to ``previous`` only
+          for ``grace_s`` after the owner confirmed the newer one — that is
+          what retires a writer the owner's rotation removed.
+
+        Receivers apply their own (exact) freshness rule on top.
+        """
+        if epoch > self.current + 1:
+            return False
+        if epoch >= self.confirmed:
+            return True
+        if self.previous is None or epoch < self.previous:
+            return False
+        return now - self.confirmed_at <= grace_s
+
+    def may_step(self, epoch: int, *, now: int) -> bool:
+        """Whether a seed-only statement may raise ``current`` to ``epoch``:
+        exactly +1, and not within :data:`MIN_EPOCH_STEP_INTERVAL_S` of the
+        last raise."""
+        return (
+            epoch == self.current + 1
+            and now - self.raised_at >= MIN_EPOCH_STEP_INTERVAL_S
+        )
 
 
 @dataclass(slots=True, frozen=True)

@@ -54,6 +54,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
 import aiohttp
@@ -186,10 +187,12 @@ class GfsConnectionService:
         "_info_failed_at",
         "_envelope_relay",
         "_invite_links",
+        "_member_publish_trusted",
         "_authority_rotation",
         "_rotation_warned",
         "_publish_retry",
         "_publish_client",
+        "_on_repinned",
     )
 
     def __init__(
@@ -251,6 +254,11 @@ class GfsConnectionService:
         # Same discipline again, for the ``invite_links`` capability
         # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
         self._invite_links: dict[str, bool] = {}
+        # Same again for ``member_publish_trusted`` (v_49): whether the GFS
+        # carries the identified ``POST /gfs/member-publish`` and the
+        # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
+        # to a GFS that has not proved it under a valid signature.
+        self._member_publish_trusted: dict[str, bool] = {}
         # Same again for ``authority_rotation`` (v_44): whether the GFS
         # re-pins a space's authority key from an owner cert. A GFS without
         # it keeps the OLD key — and so keeps honouring a revoked admin's
@@ -260,6 +268,13 @@ class GfsConnectionService:
         # Failed ``POST /gfs/publish`` calls wait here for a retry —
         # identity-free bodies only, in memory, bounded (see the module).
         self._publish_retry = GfsPublishRetryQueue(self._retry_publish)
+        #: v_49 — called after a publish that carried the owner's authority
+        #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
+        self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
+
+    def attach_on_repinned(self, hook: Callable[[str, str], Awaitable[object]]) -> None:
+        """Wire the v_49 epoch re-announce run after a re-pinning publish."""
+        self._on_repinned = hook
 
     async def start(self) -> None:
         """Start the GFS publish retry loop (app ``on_startup``)."""
@@ -673,6 +688,20 @@ class GfsConnectionService:
             self._invite_links,
         )
 
+    async def member_publish_trusted_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``member_publish_trusted`` on /gfs/info.
+
+        Gates every identified member publish and every epoch notice
+        (:mod:`socialhome.services.gfs_member_publish_service`): a household
+        sends its identity to a connection server only after that server's
+        signed capability block proved it agreed to the trusted-mode
+        contract."""
+        return await self._signed_capability_supported(
+            conn,
+            "member_publish_trusted",
+            self._member_publish_trusted,
+        )
+
     async def _signed_capability_supported(
         self,
         conn: GfsConnection,
@@ -808,7 +837,22 @@ class GfsConnectionService:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         status = data.get("status") or "active"
-        return await self._repo.publish_space(space_id, gfs_id, status=status)
+        publication = await self._repo.publish_space(space_id, gfs_id, status=status)
+        if "authority_cert" in body and self._on_repinned is not None:
+            # v_49: a publish carrying the owner's cert re-pins the space key
+            # at the GFS, which clears its epoch state — re-announce the
+            # current epoch right away, whichever path (rotation, a later
+            # retry, the reconnect heal) made the re-pin land.
+            try:
+                await self._on_repinned(space_id, gfs_id)
+            except Exception:
+                log.exception(
+                    "publish_space: epoch re-announce after the re-pin failed "
+                    "for space %s on gfs %s",
+                    space_id,
+                    gfs_id,
+                )
+        return publication
 
     def _warn_no_authority_rotation(self, conn: GfsConnection) -> None:
         """WARN once per connection: this GFS cannot re-pin a rotated key."""

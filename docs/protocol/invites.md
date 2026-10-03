@@ -808,6 +808,14 @@ a post's *text* reaches the member, its *image* does not. Closing this
 needs either a chunker that respects a per-transport maximum or a larger
 relay cap, and is deliberately out of scope here.
 
+**Posting without the host (v_49).** A link-joined member's own posts in a
+PUBLIC/GLOBAL space no longer depend on the host being online: the member
+publishes them to the space's connection server itself, with its writer
+cert (trusted-mode member publish, see
+[`discovery.md`](./discovery.md#member-publish-trusted-mode-v_49)), and
+subscribes to the space's fan-out to receive the other members' items.
+The `space_session` relay above still carries everything else.
+
 ### Token lifetime
 
 Invite tokens minted through the SPA now carry a default expiry

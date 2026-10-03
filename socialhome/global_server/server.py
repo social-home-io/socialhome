@@ -50,6 +50,7 @@ from .config import (
 from .federation import GfsFederationService
 from .invites import INVITE_MINT_MAX_PER_MINUTE, GfsInviteService
 from .maintenance import GfsMaintenanceScheduler
+from .member_publish import GfsMemberPublishService, build_member_publish_rate_limit
 from .public import (
     ClientIpResolver,
     PairingTokenService,
@@ -62,6 +63,7 @@ from .repositories import (
     SqliteClusterRepo,
     SqliteGfsAdminRepo,
     SqliteGfsEnvelopeQueueRepo,
+    SqliteGfsSpaceEpochRepo,
     SqliteGfsInviteRepo,
     SqliteGfsFederationRepo,
     SqliteGfsHighlightPublicationRepo,
@@ -282,6 +284,7 @@ class GfsApp:
             moment_public_follows=SqliteGfsMomentFollowRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
+            space_epochs=SqliteGfsSpaceEpochRepo(db),
             invites=SqliteGfsInviteRepo(db),
         )
 
@@ -298,6 +301,8 @@ class GfsApp:
             # So withdrawing a listing takes its public invite pages down with
             # it rather than leaving a working side door.
             invite_repo=repos.invites,
+            # v_49: learn the content epoch from authority-signed post relays.
+            epoch_repo=repos.space_epochs,
         )
         # Owner-minted invite links (§24.8.5): a bulletin board holding an
         # opaque blob this server never parses and never counts fetches of.
@@ -357,6 +362,16 @@ class GfsApp:
             queue_repo=repos.envelope_queue,
             ws_registry=ws_registry,
         )
+        # Trusted-mode member publish (v_49): writer-cert-authorized items
+        # fanned out through the same push-or-queue path as envelopes.
+        member_publish = GfsMemberPublishService(
+            federation=federation,
+            fed_repo=repos.federation,
+            epoch_repo=repos.space_epochs,
+            relay=envelope_relay,
+            # What households pin from ``/gfs/info`` and sign into each request.
+            gfs_instance_id=config.instance_id,
+        )
         # Periodic retention sweep — purges expired admin sessions, expired
         # highlight publications, aged pair tokens, and envelopes whose TTL
         # ran out (the GFS otherwise has no recurring cleanup loop; these
@@ -380,6 +395,7 @@ class GfsApp:
             highlight_pubs=highlight_pubs,
             moment_public=moment_public,
             envelope_relay=envelope_relay,
+            member_publish=member_publish,
             invites=invites,
         )
 
@@ -390,6 +406,7 @@ class GfsApp:
             build_public_rtc_rate_limit(self.client_ip),
             build_publish_rate_limit(self.client_ip),
             build_envelope_rate_limit(self.client_ip),
+            build_member_publish_rate_limit(self.client_ip),
         ]
         return web.Application(middlewares=middlewares)
 
@@ -419,6 +436,8 @@ class GfsApp:
         a[K.gfs_user_picture_repo_key] = self.repos.moment_public_pictures
         a[K.gfs_envelope_queue_repo_key] = self.repos.envelope_queue
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
+        a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs
+        a[K.gfs_member_publish_key] = self.services.member_publish
         a[K.gfs_invite_repo_key] = self.repos.invites
         a[K.gfs_invite_service_key] = self.services.invites
         # Non-typed helpers the admin module reads directly.
@@ -464,10 +483,12 @@ class GfsApp:
         # Recurring retention sweep — runs the purge again on its first tick
         # then hourly (the boot purge above stays for an immediate clean).
         await self.services.maintenance.start()
+        await self.services.member_publish.start()
 
     async def _on_cleanup(self, app: web.Application) -> None:
         log.info("GFS: shutting down")
         await self.services.maintenance.stop()
+        await self.services.member_publish.stop()
         await self.services.cluster.stop()
         await self.services.ws_registry.close_all()
         session = app.get(K.gfs_http_session_key)

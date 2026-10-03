@@ -1059,3 +1059,102 @@ async def test_relay_hint_carries_our_writer_cert_outside_the_author_sig():
 async def test_relay_hint_without_a_cert_has_no_field():
     assert "writer_cert" not in await _relay_hint_with(_FakeCerts(None))
     assert "writer_cert" not in await _relay_hint_with(None)
+
+
+# ─── v_49: trusted-mode member publish ─────────────────────────────────
+
+
+class _MemberGfs:
+    def __init__(self, *, raises=False):
+        self.raises = raises
+        self.order: list[str] = []
+        self.scheduled: list[tuple] = []
+
+    def schedule_post(self, space_id, author_user_id, inner):
+        self.order.append("schedule")
+        if self.raises:
+            raise RuntimeError("boom")
+        self.scheduled.append((space_id, author_user_id, dict(inner)))
+        return True
+
+
+def _member_setup(member_gfs):
+    bus = EventBus()
+    federation = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+
+    async def _broadcast(*a, **kw):
+        member_gfs.order.append("broadcast")
+
+    federation.broadcast_to_space_members = AsyncMock(side_effect=_broadcast)
+    outbound = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(space_type=SpaceType.PUBLIC)}),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    outbound.attach_member_gfs(member_gfs)
+    post = Post(
+        id="post-m",
+        author=uid,
+        type=PostType.TEXT,
+        content="member hello",
+        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+    return bus, federation, post
+
+
+async def test_the_member_publish_is_scheduled_after_the_broadcast():
+    """The broadcast (and so the host's relay) goes out unchanged; our own
+    GFS publish is handed to the background publisher afterwards."""
+    member = _MemberGfs()
+    bus, federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert "gfs_published" not in relay  # no host-dedupe hint any more
+    assert member.order == ["broadcast", "schedule"]
+    space_id, author, inner = member.scheduled[0]
+    assert (space_id, author, inner["post_id"]) == ("sp-1", post.author, "post-m")
+    # The GFS copy binds the real item type and its target in the signature;
+    # the member-broadcast hint does not.
+    assert (inner["item_type"], inner["item_target"]) == ("post", "post-m")
+    assert verify_signed_author_inner(inner)
+    assert "item_type" not in relay
+
+
+async def test_a_scheduling_failure_is_swallowed():
+    member = _MemberGfs(raises=True)
+    bus, federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    federation.broadcast_to_space_members.assert_awaited_once()
+
+
+async def test_a_private_space_post_schedules_nothing():
+    member = _MemberGfs()
+    bus = EventBus()
+    federation = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+    outbound = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(space_type=SpaceType.PRIVATE)}),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    outbound.attach_member_gfs(member)
+    await bus.publish(
+        SpacePostCreated(
+            post=Post(
+                id="p",
+                author=uid,
+                type=PostType.TEXT,
+                content="x",
+                created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+            ),
+            space_id="sp-1",
+        )
+    )
+    assert member.scheduled == []

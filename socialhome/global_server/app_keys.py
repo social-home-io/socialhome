@@ -14,6 +14,7 @@ from .config import GfsConfig
 from .envelope_relay import GfsEnvelopeRelay
 from .federation import GfsFederationService
 from .invites import GfsInviteService
+from .member_publish import GfsMemberPublishService
 from .repositories import (
     AbstractClusterRepo,
     AbstractGfsAdminRepo,
@@ -23,6 +24,7 @@ from .repositories import (
     AbstractGfsHighlightTokenRepo,
     AbstractGfsInviteRepo,
     AbstractGfsMomentFollowRepo,
+    AbstractGfsSpaceEpochRepo,
     AbstractGfsUserPictureRepo,
     AbstractGfsUserRegistrationRepo,
 )
@@ -91,3 +93,10 @@ gfs_invite_repo_key: AppKey[AbstractGfsInviteRepo] = AppKey("gfs_invite_repo")
 #: reads THROUGH this (never around it into the database) so the "a fetch
 #: writes nothing" rule has exactly one place it could be broken.
 gfs_invite_service_key: AppKey[GfsInviteService] = AppKey("gfs_invite_service")
+
+#: Newest proven content epoch per space (v_49 member publish).
+gfs_space_epoch_repo_key: AppKey[AbstractGfsSpaceEpochRepo] = AppKey(
+    "gfs_space_epoch_repo"
+)
+#: Trusted-mode member publish + the authority-signed epoch notice (v_49).
+gfs_member_publish_key: AppKey[GfsMemberPublishService] = AppKey("gfs_member_publish")

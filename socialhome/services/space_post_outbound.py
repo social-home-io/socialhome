@@ -41,13 +41,16 @@ from ..domain.federation import FederationEventType
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
+from .gfs_member_publish_service import ITEM_TYPE_POST
 from .moderation_release import current_release, with_release
 from .space_public_author import build_signed_author_inner
 
 if TYPE_CHECKING:
+    from ..domain.post import Post
     from ..federation.federation_service import FederationService
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .gfs_member_publish_service import GfsMemberPublishService
     from .space_media_sync_service import SpaceMediaSyncService
     from .space_writer_cert_service import SpaceWriterCertService
 
@@ -68,6 +71,7 @@ class SpacePostOutbound:
         "_own_instance_pk",
         "_own_identity_seed",
         "_writer_certs",
+        "_member_gfs",
     )
 
     def __init__(
@@ -95,6 +99,9 @@ class SpacePostOutbound:
         #: v_49 — when wired, the relay hint carries this household's writer
         #: cert for the current epoch (a seed holder re-checks + re-stamps it).
         self._writer_certs: "SpaceWriterCertService | None" = None
+        #: v_49 — when wired, a non-seed-holding writer household publishes
+        #: its own public/global post to the GFS itself (trusted mode).
+        self._member_gfs: "GfsMemberPublishService | None" = None
         #: Optional — when wired, ``SPACE_POST_CREATED`` broadcasts
         #: are followed by per-peer outbox enqueues for every
         #: referenced media URL. The sync service's scheduler reads
@@ -121,6 +128,10 @@ class SpacePostOutbound:
         """Wire the v_49 writer-cert holder for the relay hint."""
         self._writer_certs = writer_certs
 
+    def attach_member_gfs(self, member_gfs: "GfsMemberPublishService") -> None:
+        """Wire the v_49 trusted-mode member publisher."""
+        self._member_gfs = member_gfs
+
     def attach_identity(
         self,
         *,
@@ -134,6 +145,33 @@ class SpacePostOutbound:
         self._own_instance_id = own_instance_id
         self._own_instance_pk = own_instance_public_key
         self._own_identity_seed = own_identity_seed
+
+    async def _schedule_gfs_publish(self, space_id: str, post: Post) -> None:
+        """Build the GFS inner of our own post and hand it to the member
+        publisher's background queue (v_49 trusted mode). Never raises."""
+        assert self._member_gfs is not None
+        try:
+            author = await self._users.get_by_user_id(post.author)
+            if author is None:
+                return
+            inner = build_signed_author_inner(
+                post=post,
+                space_id=space_id,
+                author_username=author.username,
+                author_pk=self._own_instance_pk,
+                author_identity_seed=self._own_identity_seed,
+                origin_instance_id=self._own_instance_id,
+                author_identity_anchor=author.identity_anchor,
+                item_type=ITEM_TYPE_POST,
+                item_target=post.id,
+            )
+            self._member_gfs.schedule_post(space_id, post.author, inner)
+        except Exception:
+            log.exception(
+                "member GFS publish could not be scheduled for space=%s post=%s",
+                space_id,
+                post.id,
+            )
 
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
         """Fan ``SPACE_POST_CREATED`` to every member household.
@@ -286,6 +324,15 @@ class SpacePostOutbound:
                 event.space_id,
                 post.id,
             )
+        # v_49 — trusted member publish: hand our own post to the member
+        # publisher, which publishes it to each capable connection server in
+        # the BACKGROUND (post creation never waits on a GFS). The host keeps
+        # relaying the post as before — older followers only read the host's
+        # copy — and receivers dedupe the two by post id. The GFS copy
+        # carries its own inner, with the real item type and target bound
+        # inside the author signature.
+        if self._member_gfs is not None and "public_relay" in payload:
+            await self._schedule_gfs_publish(event.space_id, post)
         # Hand off the bytes-federation to SpaceMediaSyncService.
         # SPACE_POST_CREATED carries only the URL strings; without
         # the outbox-driven SPACE_MEDIA_BLOB stream the receiver's

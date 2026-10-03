@@ -732,9 +732,23 @@ python .claude/skills/federation-demo/harness.py gfs-authority-rotate
 python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
 python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
+python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
+
+### ``gfs-member-publish`` — a member posts with the host offline (v_49)
+
+Needs ``gfs-space-subscribe`` (d follows a's global space) and
+``gfs-invite-link`` + ``-content`` (e holds a link-joined member seat in
+that same space). Stops **a** — the host and only seed holder — and has e
+post. e publishes the post itself (``POST /gfs/member-publish``, signed by
+its household key, authorized by its writer cert), so follower d receives
+it decrypted while a is down; the GFS log shows the member-publish fan-out
+and never the post text. Then a restarts, catches e's post up over the
+member path and relays it to the GFS as before (older followers read only
+the host's copy); d receives it twice and holds exactly ONE copy (receiver
+dedupe by post id). Polls every 3 s.
 
 ### ``gfs-cluster`` — a multi-process GFS on one shared DB
 

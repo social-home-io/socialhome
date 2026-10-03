@@ -1096,3 +1096,30 @@ async def test_member_ignores_a_bundle_cert_from_a_non_owner(env):
         )
     )
     assert certs.accepted == []
+
+
+async def test_a_re_pin_re_announces_the_epoch_before_the_reseal(env):
+    """v_49: the re-pin clears the GFS epoch state — the owner re-announces
+    the current epoch right after the republish, before the re-seal."""
+    calls: list[str] = []
+
+    class _Gfs:
+        async def republish_space(self, space_id):
+            calls.append("republish")
+            return 1
+
+    class _Keys:
+        async def reconcile_space_everywhere(self, space_id):
+            calls.append("reseal")
+
+    class _Member:
+        async def announce_epoch(self, space_id):
+            calls.append("notice")
+            raise RuntimeError("fail-soft")
+
+    env.svc.attach_gfs(_Gfs())
+    env.svc.attach_subscriber_keys(_Keys())
+    env.svc.attach_member_gfs(_Member())
+    await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
+    await env.svc.rotate(SPACE)
+    assert calls == ["republish", "notice", "reseal"]
