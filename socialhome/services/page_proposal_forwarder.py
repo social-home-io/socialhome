@@ -136,7 +136,7 @@ class PageProposalForwarder:
                 await self._conflicts.rebase_draft(
                     event.space_id, event.page_id, sent=sent, seq=event.seq
                 )
-        if event.outcome == "refused" and event.reason == "rate_limited":
+        if event.outcome == "refused" and event.reason in ("rate_limited", "bad_base"):
             return  # retried on the next tick
         await self.kick(event.space_id, event.page_id)
 

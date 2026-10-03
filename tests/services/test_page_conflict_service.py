@@ -399,10 +399,28 @@ async def test_a_duplicate_is_acknowledged_without_a_new_seq(env):
     assert ack["seq"] == 1
 
 
-async def test_a_base_ahead_of_the_host_is_refused(env):
-    r = await _propose(env, "x", base_seq=9)
-    assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "bad_base")
-    assert env.fed.sent[-1][2]["sequenced"]["reason"] == "bad_base"
+async def test_a_base_ahead_of_the_host_raises_the_seq_floor(env):
+    """A restored host never regresses: a proposal based on a seq ahead of
+    ours raises the floor and commits above it — as a side, since its base
+    is not our copy."""
+    r = await _propose(env, "x", base_seq=9, base="a copy we never held")
+    assert r.outcome is SequenceOutcome.SIDE
+    page = await _page(env)
+    assert (page.seq, page.content) == (10, BASE)
+    assert env.bus.of(PageUpdated)[-1].canonical["seq"] == 10
+
+
+async def test_a_duplicate_ahead_of_the_host_still_commits_above_it(env):
+    r = await _propose(env, BASE, base_seq=7)
+    assert r.outcome is SequenceOutcome.APPLIED
+    assert (await _page(env)).seq == 8
+
+
+async def test_a_base_ahead_matching_our_copy_fast_forwards(env):
+    r = await _propose(env, "new", base_seq=7, base=BASE)
+    assert r.outcome is SequenceOutcome.APPLIED
+    page = await _page(env)
+    assert (page.seq, page.content) == (8, "new")
 
 
 async def test_an_older_base_merges(env):
@@ -699,7 +717,7 @@ async def test_mirror_replaces_the_conflict_list_exactly(member):
     ("reason", "content", "pending"),
     [
         ("access", BASE, None),
-        ("bad_base", BASE, None),
+        ("bad_base", "mine", 1),
         ("gone", "mine", None),
         ("rate_limited", "mine", 1),
     ],

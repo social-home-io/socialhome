@@ -92,6 +92,17 @@ MAX_RESOLVES = 5
 #: Proposals the host takes per (household, space) per minute.
 PROPOSALS_PER_MINUTE = 120
 
+#: Refusals the host sends per (household, space) per minute — on top of
+#: one per (household, page) — so varying the page id floods nobody.
+REFUSALS_PER_SENDER_PER_MINUTE = 30
+
+#: Refusals that carry no page state: the proposer keeps (or restores) its
+#: own copy, and nothing of the page is revealed to the sender.
+_STATELESS_REFUSALS = frozenset({"rate_limited", "archived"})
+
+#: The largest ``seq`` a proposal may claim (a JSON-safe integer).
+MAX_SEQ = 2**53
+
 #: ``resolve_conflict`` resolutions. ``side`` keeps a version by hash;
 #: ``mine`` / ``theirs`` are the two-way names (the shown body / the newest
 #: other side).
@@ -436,7 +447,7 @@ def proposal_from_wire(p: Mapping[str, Any]) -> Proposal | None:
     base_hash: str | None = None
     if "base_seq" in p:
         base_seq = _int(p.get("base_seq"))
-        if base_seq is None or base_seq < 0:
+        if base_seq is None or base_seq < 0 or base_seq > MAX_SEQ:
             return None
         raw_hash = p.get("base_hash")
         if raw_hash is not None:
@@ -642,6 +653,14 @@ class PageConflictService(BusPublisherMixin):
         self._own_instance_id = ""
         self._spaces: "AbstractSpaceRepo | None" = None
         self._limiter = RateLimiter()
+
+    async def speaks_sequencing(self, instance_id: str) -> bool:
+        """Does ``instance_id`` speak v_48 host-sequenced pages?"""
+        if self._federation is None or not instance_id:
+            return False
+        return await self._federation.peer_supports(
+            instance_id, min_version=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES
+        )
 
     def attach_federation(
         self,
@@ -932,10 +951,23 @@ class PageConflictService(BusPublisherMixin):
             (ph == cur_hash or ph in side_hashes)
             and not state.retired
             and not unsequenced
+            and not (proposal.base_seq is not None and proposal.base_seq > page.seq)
         ):
             return SequenceResult(SequenceOutcome.DUPLICATE, None, page)
-        if proposal.base_seq is not None and proposal.base_seq > page.seq:
-            return SequenceResult(SequenceOutcome.REFUSED, "bad_base", page)
+        regressed = proposal.base_seq is not None and proposal.base_seq > page.seq
+        if regressed:
+            # The member holds a newer seq than ours: we were restored from
+            # a backup. seq must never regress — raise the floor above it
+            # and commit (merged, or as a side), so every member takes it.
+            log.warning(
+                "page %s in space %s: a proposal is based on seq %s, ahead of "
+                "ours (%s) — restored host; raising the floor",
+                page.id,
+                space_id,
+                proposal.base_seq,
+                page.seq,
+            )
+            page = replace(page, seq=int(proposal.base_seq or 0))
         new_body: tuple[str, str, str | None] | None = None
         as_side = False
         absorbed = False
@@ -947,7 +979,10 @@ class PageConflictService(BusPublisherMixin):
             state.sides = [s for s in state.sides if s.hash != ph]
         elif proposal.base_seq is None or (
             proposal.base_seq == page.seq
-            and (proposal.base_hash is None or proposal.base_hash == cur_hash)
+            and (
+                proposal.base_hash == cur_hash
+                or (proposal.base_hash is None and not regressed)
+            )
         ):
             new_body = (proposal.title, proposal.content, proposal.cover_image_url)
         else:
@@ -971,7 +1006,7 @@ class PageConflictService(BusPublisherMixin):
             page.cover_image_url,
         )
         changed_sides = [s.hash for s in state.sides] != before_sides
-        if not changed_body and not changed_sides and not unsequenced:
+        if not changed_body and not changed_sides and not unsequenced and not regressed:
             return SequenceResult(SequenceOutcome.DUPLICATE, None, page)
         now = _now()
         history = [self._version_of(page, side, space_id) for side in state.retired]
@@ -1138,17 +1173,22 @@ class PageConflictService(BusPublisherMixin):
     ) -> None:
         """Tell ``proposer_instance`` its proposal was refused (``reason``) —
         at most once per (sender, page) per minute, so a flood of bad
-        proposals cannot turn the host into an amplifier. ``rate_limited``
-        carries no page state (the proposer keeps its draft for a retry)."""
+        proposals cannot turn the host into an amplifier, and at most
+        :data:`REFUSALS_PER_SENDER_PER_MINUTE` per (sender, space).
+        ``rate_limited`` and ``archived`` carry no page state."""
         if not self._limiter.is_allowed(
             f"page-refusals:{proposer_instance}:{space_id}:{page_id}",
             limit=1,
+            window_s=60,
+        ) or not self._limiter.is_allowed(
+            f"page-refusals:{proposer_instance}:{space_id}",
+            limit=REFUSALS_PER_SENDER_PER_MINUTE,
             window_s=60,
         ):
             return
         page = (
             None
-            if reason == "rate_limited"
+            if reason in _STATELESS_REFUSALS
             else await self._pages.get_space_page(page_id, space_id=space_id)
         )
         await self._ack(
@@ -1166,8 +1206,10 @@ class PageConflictService(BusPublisherMixin):
 
     async def on_archived_write(self, event: Any, space: Any) -> None:
         """The archived-space gate refused a write. A member's page proposal
-        to us (the host) is answered ``refused/archived`` so the member
-        stops waiting for it."""
+        to us (the host) is answered ``refused/archived`` — without page
+        state — so the member stops waiting for it. The CALLER has checked
+        that the sender holds a live writer seat (anyone else hears
+        nothing: no oracle)."""
         if space is None or space.owner_instance_id != self._own_instance_id:
             return
         if event.event_type not in (
@@ -1560,16 +1602,19 @@ class PageConflictService(BusPublisherMixin):
     async def _settle_refusal(
         self, space_id: str, page: Page, version: CanonicalVersion, seq_: Sequenced
     ) -> PageProposalSettled:
-        """The host refused our draft: ``rate_limited`` keeps it for a
-        retry, ``gone`` keeps the words (to save as a new page) but stops
-        proposing them, anything else restores the host's version."""
+        """The host refused our draft: ``rate_limited`` and ``bad_base``
+        keep it for a retry (a restored host raises its seq floor instead
+        of refusing, so the draft is never lost to its regression), ``gone``
+        keeps the words (to save as a new page) but stops proposing them,
+        anything else restores the host's version (or, without state, our
+        own draft base)."""
         reason = seq_.reason or "access"
         if reason == "gone":
             await self._pages.save(
                 replace(page, pending_base_seq=None), space_id=space_id
             )
             await self._pages.clear_draft_base(page.id, space_id=space_id)
-        elif reason != "rate_limited":
+        elif reason not in ("rate_limited", "bad_base"):
             if version.has_state and version.seq >= page.seq:
                 await self._mirror_apply(space_id, page, version, keep_draft=False)
             else:

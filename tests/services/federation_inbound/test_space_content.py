@@ -4722,3 +4722,41 @@ def test_deleter_prefers_the_approver_then_the_actor():
     )
     assert _deleter(ev({"moderation": "junk", "actor_user_id": "u-a"})) == "u-a"
     assert _deleter(ev({})) == ""
+
+
+async def test_the_archived_listener_answers_writers_only(bus, repos):
+    class _Engine(_FakeConflicts):
+        def __init__(self):
+            super().__init__("host", host="self")
+            self.archived: list = []
+
+        async def on_archived_write(self, event, space):
+            self.archived.append(event.from_instance)
+
+    class _Fed(_FakeFederationService):
+        def __init__(self):
+            super().__init__()
+            self.listeners: list = []
+
+        def add_archived_write_listener(self, cb):
+            self.listeners.append(cb)
+
+    engine = _Engine()
+    fed = _Fed()
+    h = _page_handlers(bus, repos, engine)
+    h.attach_to(fed)
+    (listener,) = fed.listeners
+    space = SimpleNamespace(id="sp-1", owner_instance_id="self")
+    ev = _event(FederationEventType.SPACE_PAGE_UPDATED, {"id": "p-1"}, space_id="sp-1")
+    await listener(ev, space)
+    assert engine.archived == ["peer-a"]
+    # A household without a writer seat hears nothing; nor a non-page write.
+    h._authorship = _AllowAuthorship(answer=False)
+    await listener(ev, space)
+    h._authorship = repos["auth"]
+    await listener(
+        _event(FederationEventType.SPACE_STICKY_UPDATED, {"id": "s"}, space_id="sp-1"),
+        space,
+    )
+    await listener(ev, None)
+    assert engine.archived == ["peer-a"]

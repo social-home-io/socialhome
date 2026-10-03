@@ -1701,6 +1701,11 @@ class PageUpdated(DomainEvent):
     #: v_48: a member's local draft, sent to the host as a proposal by the
     #: forwarder — never broadcast.
     proposal: bool = False
+    #: v_48: a last-write-wins update from a household that does not (yet)
+    #: see its host as v_48 still names the version it was made from
+    #: (``base_seq`` / ``base_hash``), so a v_48 host merges it instead of
+    #: letting a delayed copy overwrite newer edits.
+    base: dict | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

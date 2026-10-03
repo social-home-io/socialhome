@@ -86,11 +86,12 @@ above. It carries the current state and `seq`, plus `sequenced` with
 | `access` | the gates refused it: the named `actor_user_id` is not seated on the sending household (checked at **every** access level, so no household ever edits as — or evicts the side of — another household's user), the owner-bound id, or the space's `pages` access level. Not sent when the write is *held* for an actor whose seat has not reached the host yet (it is replayed when it does) |
 | `gone` | the page no longer exists on the host (`base_seq ≥ 1`); the payload carries no state, `seq: 0` |
 | `rate_limited` | more than 120 proposals / minute from that household for that space; carries **no page state** (the member keeps its draft for the next tick) |
-| `bad_base` | `base_seq` is ahead of the host's `seq`, or the proposal is malformed (bad `base_seq` / `base_hash` / `resolves`, a missing or over-long title) |
-| `archived` | the space is archived on the host: the post-decrypt archived gate refuses the write and tells the page sequencer, which answers it (`FederationService.add_archived_write_listener`) |
+| `bad_base` | the proposal is malformed (bad `base_seq` / `base_hash` / `resolves`, a missing or over-long title). The member keeps its draft (retried on the tick) — never discarded |
+| `archived` | the space is archived on the host: the post-decrypt archived gate refuses the write and tells the page handler (`FederationService.add_archived_write_listener`). Only a sender holding a **live writer seat** hears back — anyone else gets silence, so the refusal is no oracle — and the answer carries **no page state**; the member restores its own draft base |
 
-At most **one refusal per (sender, page) per minute** goes out, so bad
-proposals cannot turn the host into an amplifier.
+At most **one refusal per (sender, page) per minute**, and at most 30 per
+(sender, space) per minute, go out, so bad proposals cannot turn the host
+into an amplifier.
 
 ## Version identity
 
@@ -117,8 +118,10 @@ runs these steps in order:
    holds, proposed with `base_seq ≥ 1` → `gone`. Then the owner-bound id
    (creates; a create must be its creator's own write), the actor's seat
    on the sender (`acts_for`, every access level — held, not refused,
-   while the roster gossip catches up) and the space's `pages` access
-   level; a refusal is `refused`/`access`.
+   while the roster gossip catches up; a demoted, read-only author still
+   edits their own page) and the space's `pages` access level; a refusal
+   is `refused`/`access`. A base-less create from a v_48 sender is a
+   replay (e.g. of a page deleted here) and is ignored.
 3. **Rate limit.** 120 proposals per minute per (proposer household,
    space) (`rate_limiter.py`). Beyond that it is `refused`/`rate_limited`.
 4. Under the **per-page lock**:
@@ -129,7 +132,16 @@ runs these steps in order:
      `applied` ack — unless the page was never sequenced (`seq` 0, a
      pre-v_48 row): then it is committed as `seq` 1 and broadcast as
      `SPACE_PAGE_CREATED`, so every member household gets it.
-   - **Base check.** `base_seq > seq` → `bad_base`. A proposal that is
+   - **Seq floor.** `base_seq > seq` means the member holds a newer seq
+     than the host: the host was **restored from a backup**. `seq` never
+     regresses: the host raises its floor to `base_seq` and commits the
+     proposal above it (`base_seq + 1`) — fast-forward only when its
+     `base_hash` is the host's current copy, else merged against a known
+     base or kept as a side, a duplicate still committed — so every member
+     takes the result. Until a member proposes, the restored host's own
+     edits sit below the members' seq and are not mirrored (they reach
+     members with the next proposal's commit).
+   - **Base check.** A proposal that is
      the current body (a resolution keeping it) changes no body. One
      equal to an open side makes that side current. With
      `base_seq == seq` and the base hash matching the current version (or
@@ -273,6 +285,9 @@ forced. See [`moderation.md`](./moderation.md).
 - **Host below v_48**: last write wins everywhere, exactly as before.
   Edits broadcast to every member household, and a held page takes the
   newest write; the replaced body goes to history.
+- **A v_48 member that sees its host as older** broadcasts last write
+  wins, but still names its base (`base_seq` / `base_hash`), so a v_48
+  host merges a delayed copy instead of letting it overwrite newer edits.
 - **Host at v_48 with a member below**: the host sends that member the
   plain fields. The member's own update, broadcast without `base_seq`, is
   taken by the host as a proposal based on the current version (last

@@ -1390,11 +1390,6 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
         space_repo=space_repo,
     )
-    # A member's page proposal into a space archived here is answered
-    # ``refused/archived`` (the archived gate drops it before the handler).
-    federation_service.add_archived_write_listener(
-        page_conflict_service.on_archived_write
-    )
     page_proposal_forwarder = PageProposalForwarder(
         page_repo=page_repo,
         conflicts=page_conflict_service,

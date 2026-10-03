@@ -442,8 +442,10 @@ That single command runs the full sequence:
    at once: **b** keeps one and makes the other a conflict side — every
    household holds the identical ``conflict`` (same side hashes, same
    ``current_hash``); a ``PATCH`` while conflicted answers 200 (conflicts
-   never block). A round whose edits serialised is retried, up to three
-   times. **a** resolves with ``resolution: "side"`` + ``sides`` and all
+   never block). Both edits start from the same settled version, so the
+   conflict forms in whichever order **b** sees them. The step polls every
+   3 s and backs off on 429 (every ``/api/spaces/…`` request of a user
+   shares one 60 / min bucket). **a** resolves with ``resolution: "side"`` + ``sides`` and all
    three converge on one ``seq`` with no conflict. The ``verify`` step's
    ``proto_version >= OURS`` check covers the v_48 round-trip.
 

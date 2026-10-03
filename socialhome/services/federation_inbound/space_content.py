@@ -261,6 +261,11 @@ class SpaceContentInboundHandlers:
         )
 
         # Pages
+        if self._page_conflicts is not None:
+            # A member's page proposal into a space archived here is
+            # answered ``refused/archived`` (the archived gate drops it
+            # before any handler runs).
+            federation_service.add_archived_write_listener(self._on_archived_page_write)
         registry.register(FederationEventType.SPACE_PAGE_CREATED, self._on_page_saved)
         registry.register(FederationEventType.SPACE_PAGE_UPDATED, self._on_page_saved)
         registry.register(FederationEventType.SPACE_PAGE_DELETED, self._on_page_deleted)
@@ -874,6 +879,22 @@ class SpaceContentInboundHandlers:
             row_owner=page.created_by if existing is None else existing.created_by,
         )
 
+    async def _on_archived_page_write(self, event: "FederationEvent", space) -> None:
+        """The archived gate refused a write. Only a household holding a
+        live writer seat in the space hears back about a page proposal —
+        anyone else gets silence, so the refusal is no oracle — and the
+        answer carries no page state."""
+        if self._page_conflicts is None or space is None:
+            return
+        if event.event_type not in (
+            FederationEventType.SPACE_PAGE_CREATED,
+            FederationEventType.SPACE_PAGE_UPDATED,
+        ):
+            return
+        if not await self._authorship.writes_here(event, str(space.id)):
+            return
+        await self._page_conflicts.on_archived_write(event, space)
+
     async def _on_page_proposal(
         self,
         event: "FederationEvent",
@@ -932,6 +953,17 @@ class SpaceContentInboundHandlers:
                 reason="bad_base",
             )
             return
+        if (
+            existing is None
+            and "base_seq" not in p
+            and await engine.speaks_sequencing(event.from_instance)
+        ):
+            # A v_48 household proposes with ``base_seq``; a base-less create
+            # from one is a replay (e.g. of a page deleted here) — ignored.
+            log.debug(
+                "page %s: a base-less create from a v_48 sender — ignored", page_id
+            )
+            return
         if existing is None and (proposal.base_seq or 0) > 0:
             await engine.refuse(
                 space_id=space_id,
@@ -949,7 +981,13 @@ class SpaceContentInboundHandlers:
         ):
             return
         actor = proposal.actor_user_id
-        bound = await self._authorship.acts_for(event, space_id, actor)
+        # A demoted (read-only) author still edits their own page, as locally.
+        bound = await self._authorship.acts_for(
+            event,
+            space_id,
+            actor,
+            any_role=existing is not None and actor == existing.created_by,
+        )
         if bound and existing is None and proposal.created_by != actor:
             bound = False  # a create is its creator's own write
         if not bound:

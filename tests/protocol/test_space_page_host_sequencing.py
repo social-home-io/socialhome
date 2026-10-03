@@ -745,7 +745,10 @@ async def test_an_archived_host_takes_no_proposal(mesh):
     assert await _seq(h, pid) == 1
 
 
-async def test_a_bad_base_is_refused(mesh):
+async def test_a_base_ahead_of_the_host_raises_its_floor_never_overwrites(mesh):
+    """A base ahead of the host (a restored host, or a lie) never refuses
+    the edit and never fast-forwards over the host's copy: the host raises
+    its seq floor above it and keeps the proposal as a side."""
     a, h = mesh["A"], mesh["H"]
     pid = await _create(mesh)
     forged = {
@@ -759,9 +762,9 @@ async def test_a_bad_base_is_refused(mesh):
     }
     await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, forged, h))
     assert await _content(h, pid) == BASE
-    (ack,) = _sent_to(h, a)
-    assert ack["sequenced"]["outcome"] == "refused"
-    assert ack["sequenced"]["reason"] == "bad_base"
+    assert await _seq(h, pid) == 51
+    sides = (await _page(h, pid))["conflict"]["sides"]
+    assert [s["content"] for s in sides] == ["ahead of the host"]
 
 
 # ── MODERATED: stale, and force fast-forwards ────────────────────────────
@@ -862,7 +865,8 @@ async def test_under_a_v47_host_pages_stay_last_write_wins(mesh):
     await _edit(a, pid, _with(BASE, p1="anna"))
     # Broadcast to everyone, the old way, no sequencing fields.
     to_b = _sent_to(a, b, FET.SPACE_PAGE_UPDATED)
-    assert to_b and "base_seq" not in to_b[0]
+    # The old way — but naming its base, so a v_48 host would merge it.
+    assert to_b and to_b[0]["base_seq"] == 1 and "seq" not in to_b[0]
     await _pump(mesh)
     for house in (a, b):
         assert await _content(house, pid) == _with(BASE, p1="anna"), house.name
@@ -1153,3 +1157,198 @@ async def test_m5_an_overlong_title_is_refused(mesh):
     }
     await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, long, h))
     assert (await _page(h, pid))["title"] == "Rules"
+
+
+# ── Review round 3 ───────────────────────────────────────────────────────
+
+STRANGER = "x" * 52
+
+
+async def _archived_proposal(h, pid, *, sender: str, actor: str):
+    now = datetime.now(timezone.utc).isoformat()
+    return FederationEvent(
+        msg_id=f"m-{next(_IDS)}",
+        event_type=FET.SPACE_PAGE_UPDATED,
+        from_instance=sender,
+        to_instance=h.iid,
+        timestamp=now,
+        payload={
+            "id": pid,
+            "page_id": pid,
+            "space_id": SID,
+            "title": "x",
+            "content": "y",
+            "actor_user_id": actor,
+            "base_seq": 1,
+        },
+        space_id=SID,
+    )
+
+
+async def test_c1_an_archived_refusal_reaches_no_non_member_and_carries_no_page(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh, "secret wiki text")
+    now = datetime.now(timezone.utc).isoformat()
+    await h.db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source, proto_version, capabilities_seen_at)"
+        " VALUES(?, 'X', ?, '00', '00', 'https://x.test/inbox/x', 'x_local',"
+        " 'confirmed', 'manual', 48, ?)",
+        (STRANGER, "cd" * 32, now),
+    )
+    await h.db.enqueue("UPDATE spaces SET archived=1 WHERE id=?", (SID,))
+    await _receive(h, await _archived_proposal(h, pid, sender=STRANGER, actor="u-x"))
+    assert [p for t, _e, p in h.sent if t == STRANGER] == []  # silence, no oracle
+    await _receive(h, await _archived_proposal(h, pid, sender=a.iid, actor=a.user_id))
+    (refusal,) = _sent_to(h, a)
+    assert refusal["sequenced"]["reason"] == "archived"
+    assert "content" not in refusal and "title" not in refusal
+    assert "conflict" not in refusal or refusal["conflict"] == []
+
+
+async def test_c1_a_member_restores_its_own_base_on_an_archived_refusal(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    await h.db.enqueue("UPDATE spaces SET archived=1 WHERE id=?", (SID,))
+    await _edit(a, pid, _with(BASE, p1="late"))
+    await _pump(mesh)
+    assert (await _content(a, pid), await _pending(a, pid)) == (BASE, None)
+
+
+async def test_a_stale_capability_resume_never_resurrects_a_deleted_page(
+    mesh, monkeypatch
+):
+    monkeypatch.setattr(FederationService, "send_event", _fake_send_event)
+    a, b, h = mesh["A"], mesh["B"], mesh["H"]
+    pid = await _create(mesh)
+    r = await h.tc.delete(f"/api/spaces/{SID}/pages/{pid}", headers=h.headers)
+    assert r.status == 200
+    h.sent[:] = [(t, e, p) for t, e, p in h.sent if t != a.iid]  # A misses it
+    await _pump(mesh)
+    assert await _content(b, pid) is None and await _content(a, pid) is not None
+    VERSIONS[h.iid] = 1  # A has not seen H's v48 yet: it replays its pages
+    await _receive(
+        a,
+        _event(
+            h,
+            FET.SPACE_SYNC_RESUME,
+            {"space_id": SID, "since": "1970-01-01T00:00:00+00:00"},
+            a,
+        ),
+    )
+    VERSIONS.pop(h.iid)
+    await _pump(mesh)
+    assert await _content(h, pid) is None and await _content(b, pid) is None
+
+
+async def test_i6_a_host_restored_from_backup_converges_again(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    for i in range(4):
+        await _edit(h, pid, _with(BASE, p1=f"v{i}"))
+    await _pump(mesh)
+    assert await _seq(a, pid) == 5
+    # The host restores a backup taken at seq 2.
+    await h.db.enqueue(
+        "UPDATE space_pages SET seq=2, content=? WHERE id=?",
+        (_with(BASE, p1="v0"), pid),
+    )
+    await _edit(h, pid, _with(BASE, p1="after restore"))
+    await _pump(mesh)
+    await _edit(a, pid, _with(BASE, p1="after restore", p5="anna"))
+    await _pump(mesh)
+    assert await _content(a, pid) == await _content(h, pid)
+    assert await _seq(a, pid) == await _seq(h, pid) > 5
+    assert await _pending(a, pid) is None
+    # Anna's edit was not lost: it is current or kept as her side.
+    kept = [
+        await _content(h, pid),
+        *[
+            s["content"]
+            for s in ((await _page(h, pid))["conflict"] or {"sides": []})["sides"]
+        ],
+    ]
+    assert _with(BASE, p1="after restore", p5="anna") in kept
+
+
+async def test_m7_a_demoted_author_still_edits_their_own_page(mesh):
+    a, h = mesh["A"], mesh["H"]
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Anna's", "content": "hello"},
+        headers=a.headers,
+    )
+    pid = (await r.json())["id"]
+    await _pump(mesh)
+    # Anna is demoted to a read-only seat; her household keeps a writer.
+    await h.db.enqueue(
+        "UPDATE space_remote_members SET role='subscriber' WHERE user_id=?",
+        (a.user_id,),
+    )
+    await h.db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role,"
+        " display_name) VALUES(?, ?, 'u-anton', 'member', 'Anton')",
+        (SID, a.iid),
+    )
+    proposal = {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "Anna's",
+        "content": "edited",
+        "actor_user_id": a.user_id,
+        "base_seq": 1,
+        "base_hash": version_hash("Anna's", "hello"),
+    }
+    await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, proposal, h))
+    assert await _content(h, pid) == "edited"
+    # … but not somebody else's page.
+    other = await _create(mesh)
+    theirs = {
+        "id": other,
+        "page_id": other,
+        "space_id": SID,
+        "title": "Rules",
+        "content": "nope",
+        "actor_user_id": a.user_id,
+        "base_seq": 1,
+        "base_hash": version_hash("Rules", BASE),
+    }
+    await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, theirs, h))
+    assert await _content(h, other) == BASE
+
+
+async def test_m8_refusals_per_sender_are_capped_across_pages(mesh, monkeypatch):
+    monkeypatch.setattr(page_conflict_service, "REFUSALS_PER_SENDER_PER_MINUTE", 3)
+    a, h = mesh["A"], mesh["H"]
+    for i in range(10):
+        gone = {
+            "id": f"pg-gone-{i}",
+            "page_id": f"pg-gone-{i}",
+            "space_id": SID,
+            "title": "T",
+            "content": "x",
+            "actor_user_id": a.user_id,
+            "base_seq": 4,
+        }
+        await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, gone, h))
+    assert len(_sent_to(h, a)) == 3
+
+
+async def test_a_legacy_mode_broadcast_carries_its_base_and_is_merged(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(h, pid, _with(BASE, p5="hanna"))  # A misses this one
+    _take(h, a)
+    await _pump(mesh)
+    VERSIONS[h.iid] = 47  # A sees the host as pre-v_48: last write wins mode
+    await _edit(a, pid, _with(BASE, p1="anna"))
+    (legacy,) = _sent_to(a, h, FET.SPACE_PAGE_UPDATED)
+    assert legacy["base_seq"] == 1 and legacy["base_hash"] == version_hash(
+        "Rules", BASE
+    )
+    VERSIONS.pop(h.iid)
+    await _pump(mesh)
+    # Merged at the host, never an overwrite of hanna's newer edit.
+    assert await _content(h, pid) == _with(BASE, p1="anna", p5="hanna")

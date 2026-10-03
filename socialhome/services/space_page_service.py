@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
-from ..domain.page_version import PageConflictSide, is_version_hash
+from ..domain.page_version import PageConflictSide, is_version_hash, version_hash
 from ..domain.space import (
     AccessDecision,
     ContentAction,
@@ -355,6 +355,7 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                 precheck=_check,
             )
         now_iso = datetime.now(timezone.utc).isoformat()
+        base: dict | None = None
         async with self._page_lock(space_id, page_id):
             page = await self.get(space_id, page_id)
             await _check(page)
@@ -375,6 +376,12 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                     resolves=resolves or (),
                 )
             else:
+                base = {
+                    "base_seq": page.seq,
+                    "base_hash": version_hash(
+                        page.title, page.content, page.cover_image_url
+                    ),
+                }
                 await self._pages.save(updated, space_id=space_id)
                 # The stored row is the answer: the upsert stamps its own
                 # ``updated_at``, and the editor sends exactly that back as
@@ -397,6 +404,7 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                 content=updated.content,
                 actor_user_id=actor_user_id,
                 proposal=mode is PageMode.MEMBER,
+                base=base if mode is PageMode.LEGACY else None,
             )
         )
         return updated

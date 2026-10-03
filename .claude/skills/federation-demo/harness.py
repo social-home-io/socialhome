@@ -11027,8 +11027,8 @@ def cmd_page_concurrent_edit() -> None:
        host keeps the first and makes the second a conflict side: **all
        three hold the identical conflict** (same side hashes, same
        ``current_hash``). A conflict never blocks edits: a ``PATCH`` on a
-       conflicted page answers 200. (If the two edits happen to serialise —
-       no concurrency — the round is retried, up to three times.)
+       conflicted page answers 200. Both edits start from the same settled
+       version, so a conflict forms whichever order the host sees them in.
     3. **Resolution.** a resolves with ``resolution: "side"`` + ``sides``;
        it is a proposal like any edit, the host retires every side and
        broadcasts: a, b and c converge on one ``seq``, no conflict left.
@@ -11103,18 +11103,76 @@ def cmd_page_concurrent_edit() -> None:
     )
     page_id = _must("page create(a)", s, page, ok=(201,))["id"]
 
-    def _get(label: str) -> dict | None:
-        base, token = houses[label]
-        s, body = _request(f"{base}{pages}/{page_id}", token=token)
-        return body if s == 200 else None
+    # Every ``/api/spaces/...`` request of one user shares ONE rate-limit
+    # bucket (60 / 60 s, keyed on the first two path segments). So this step
+    # polls every 3 s (3 reads per poll, one per household = 20 reads / min
+    # per household's admin, well under 60 with the few writes), and a read
+    # that still meets a 429 backs off (``Retry-After``) instead of passing
+    # ``None`` along.
+    poll_s = 3.0
 
-    def _all() -> dict[str, dict | None]:
+    def _http(label: str, method: str, path: str, body: dict | None = None):
+        base, token = houses[label]
+        for _attempt in range(10):
+            req = urllib.request.Request(
+                f"{base}{path}",
+                data=json.dumps(body).encode() if body is not None else None,
+                method=method,
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {token}",
+                    **({"Content-Type": "application/json"} if body is not None else {}),
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15.0) as r:
+                    raw = r.read().decode() or "{}"
+                    return r.status, json.loads(raw)
+            except urllib.error.HTTPError as exc:
+                raw = exc.read().decode()
+                if exc.code == 429:
+                    try:
+                        wait = float(exc.headers.get("Retry-After") or 5)
+                    except ValueError:
+                        wait = 5.0
+                    time.sleep(min(max(wait, 1.0), 30.0))
+                    continue
+                try:
+                    return exc.code, json.loads(raw)
+                except ValueError:
+                    return exc.code, {"_raw": raw}
+        raise SystemExit(f"page-concurrent-edit: {label} {method} {path} still 429")
+
+    def _get(label: str) -> dict:
+        st, body = _http(label, "GET", f"{pages}/{page_id}")
+        if st != 200:  # once every household holds the page, never 404
+            raise SystemExit(f"page-concurrent-edit: reading the page on {label} answered {st} {body!r}")
+        return body
+
+    def _all() -> dict[str, dict]:
         return {k: _get(k) for k in houses}
 
-    _wait_for(
+    def _poll(what: str, check, *, timeout: float) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check():
+                return
+            time.sleep(poll_s)
+        raise SystemExit(f"page-concurrent-edit: timed out waiting for {what}")
+
+    def _arrived(label: str) -> bool:
+        # The list, not the detail: a detail read before the host's version
+        # arrives is a 404 the ``verify`` log audit would flag.
+        st, body = _http(label, "GET", pages)
+        if st != 200:
+            raise SystemExit(f"page-concurrent-edit: listing on {label} answered {st} {body!r}")
+        hit = next((p for p in body if p.get("id") == page_id), None)
+        return bool(hit) and hit.get("seq", 0) >= 1 and not hit.get("pending")
+
+    _poll(
         "every household to hold the host-sequenced page",
-        lambda: all(p and p.get("seq", 0) >= 1 and not p.get("pending") for p in _all().values()),
-        timeout=60.0,
+        lambda: all(_arrived(k) for k in houses),
+        timeout=90.0,
     )
     print(f"  a: page {page_id[:8]} created, sequenced by b, held by a/b/c")
 
@@ -11122,13 +11180,7 @@ def cmd_page_concurrent_edit() -> None:
         statuses: dict[str, int] = {}
 
         def _one(label: str, content: str) -> None:
-            base, token = houses[label]
-            st, _b = _request(
-                f"{base}{pages}/{page_id}",
-                token=token,
-                method="PATCH",
-                body={"content": content},
-            )
+            st, _b = _http(label, "PATCH", f"{pages}/{page_id}", {"content": content})
             statuses[label] = st
 
         threads = [threading.Thread(target=_one, args=kv) for kv in edits.items()]
@@ -11140,8 +11192,6 @@ def cmd_page_concurrent_edit() -> None:
 
     def _same(check) -> bool:
         ps = _all()
-        if not all(ps.values()):
-            return False
         vals = list(ps.values())
         first = vals[0]
         return all(
@@ -11162,7 +11212,7 @@ def cmd_page_concurrent_edit() -> None:
     )
     if any(st != 200 for st in statuses.values()):
         raise SystemExit(f"page-concurrent-edit: edits answered {statuses}")
-    _wait_for(
+    _poll(
         "a, b and c to hold the same seq and merged body",
         lambda: _same(
             lambda ps: all(
@@ -11175,6 +11225,17 @@ def cmd_page_concurrent_edit() -> None:
     print(f"  concurrent edits: a/b/c on seq {_get('b')['seq']} with one merged body ✓")
 
     # 2. Same paragraph → the identical conflict on all three.
+    #
+    # Always a conflict, whatever order the host sees them in: both drafts
+    # are made from the SAME settled version (seq N — the reads happen before
+    # either PATCH, and both members hold seq N after step 1). The first
+    # proposal the host takes is based on its current version → it
+    # fast-forwards (seq N+1). The second is based on seq N too, whose body
+    # the host finds in its history → a three-way merge in which both sides
+    # rewrote paragraph two differently → a conflict side. No rebase can
+    # intervene: a draft is rebased only on its OWN earlier proposal (when a
+    # household keeps editing while one is outstanding), never on another
+    # household's version.
     def _conflicted(ps: dict) -> bool:
         cs = [p.get("conflict") for p in ps.values()]
         if not all(cs):
@@ -11182,51 +11243,54 @@ def cmd_page_concurrent_edit() -> None:
         key = lambda cf: (cf["current_hash"], sorted(x["hash"] for x in cf["sides"]))  # noqa: E731
         return all(key(cf) == key(cs[0]) for cf in cs)
 
-    for attempt in range(1, 4):
-        _patch_all(
-            {
-                "a": _get("a")["content"].replace("Para two.", f"Two by Alice #{attempt}."),
-                "c": _get("c")["content"].replace("Para two.", f"Two by Carol #{attempt}."),
-            }
-        )
-        try:
-            _wait_for("a, b and c to hold the same conflict", lambda: _same(_conflicted), timeout=45.0)
-            break
-        except SystemExit:
-            print(f"  same paragraph: edits serialised (attempt {attempt}) — retrying")
-    else:
-        raise SystemExit("page-concurrent-edit: never produced a concurrent conflict")
+    settled = _all()
+    if len({p["seq"] for p in settled.values()}) != 1:
+        raise SystemExit(f"page-concurrent-edit: not settled before step 2: {settled}")
+    statuses = _patch_all(
+        {
+            "a": settled["a"]["content"].replace("Para two.", "Two by Alice."),
+            "c": settled["c"]["content"].replace("Para two.", "Two by Carol."),
+        }
+    )
+    if any(st != 200 for st in statuses.values()):
+        raise SystemExit(f"page-concurrent-edit: same-paragraph edits answered {statuses}")
+    _poll("a, b and c to hold the same conflict", lambda: _same(_conflicted), timeout=90.0)
     print("  same paragraph: a/b/c hold the identical conflict ✓")
-    base, token = houses["b"]
     current = _get("b")
-    st, body = _request(
-        f"{base}{pages}/{page_id}",
-        token=token,
-        method="PATCH",
-        body={"content": current["content"] + "\n\nEdited while conflicted."},
+    st, body = _http(
+        "b",
+        "PATCH",
+        f"{pages}/{page_id}",
+        {"content": current["content"] + "\n\nEdited while conflicted."},
     )
     if st != 200:
         raise SystemExit(
             f"page-concurrent-edit: PATCH while conflicted answered {st} {body!r}"
         )
-    _wait_for("the edit to reach a and c", lambda: _same(_conflicted), timeout=60.0)
+    _poll(
+        "the edit to reach a and c",
+        lambda: _same(
+            lambda ps: _conflicted(ps) and "Edited while conflicted." in ps["b"]["content"]
+        ),
+        timeout=90.0,
+    )
     print("  PATCH on a conflicted page: 200, the conflict stays ✓")
 
     # 3. a resolves by side; everyone converges, no conflict left.
     conflict = _get("a")["conflict"]
     keep = conflict["sides"][0]
-    s, body = _request(
-        f"{base_of['a']}{pages}/{page_id}/resolve-conflict",
-        token=a["token"],
-        method="POST",
-        body={
+    s, body = _http(
+        "a",
+        "POST",
+        f"{pages}/{page_id}/resolve-conflict",
+        {
             "resolution": "side",
             "side": keep["hash"],
             "sides": [x["hash"] for x in conflict["sides"]],
         },
     )
     _must("a: resolve-conflict", s, body)
-    _wait_for(
+    _poll(
         "a, b and c to converge on the resolution",
         lambda: _same(
             lambda ps: not any(p.get("conflict") for p in ps.values())

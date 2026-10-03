@@ -80,6 +80,8 @@ _PAGE_SEQUENCING = frozenset(
         "last_editor_user_id",
         "cover_image_url",
         "updated_at",
+        "base_seq",
+        "base_hash",
     }
 )
 
