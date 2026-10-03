@@ -21,7 +21,10 @@ Resource types replayed today:
   A held list's create applies as a rename, so a missed rename heals; a
   list unchanged since ``since`` is not re-sent, so a co-member that
   missed a rename cannot revert it with its old name.
-* ``SPACE_TASK_CREATED``         — task rows.
+* ``SPACE_TASK_DELETED``         — the space's tasks deleted since
+  ``since`` (their tombstones, migration 0071), with the deleter as
+  ``actor_user_id``, sent after the lists and before the live tasks.
+* ``SPACE_TASK_CREATED``         — live task rows (tombstones excluded).
 * ``SPACE_PAGE_CREATED``         — wiki-style pages.
 * ``SPACE_STICKY_CREATED``       — corkboard notes.
 * ``SPACE_CALENDAR_EVENT_CREATED`` — calendar events (RRULEs included).
@@ -49,6 +52,7 @@ from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
     task_to_wire_dict,
+    task_tombstone_to_wire_dict,
 )
 
 if TYPE_CHECKING:
@@ -225,6 +229,7 @@ class SpaceSyncResumeProvider:
         # Lists before tasks: a task is only filed under a list held here.
         sent += await self._replay_task_list_deletes(space_id, since, to=instance_id)
         sent += await self._replay_task_lists(space_id, since, to=instance_id)
+        sent += await self._replay_task_deletes(space_id, since, to=instance_id)
         sent += await self._replay_tasks(space_id, since, to=instance_id)
         sent += await self._replay_pages(space_id, since, to=instance_id)
         sent += await self._replay_stickies(space_id, since, to=instance_id)
@@ -335,6 +340,28 @@ class SpaceSyncResumeProvider:
             lists,
             FederationEventType.SPACE_TASK_LIST_CREATED,
             lambda task_list: task_list_to_wire_dict(task_list, space_id),
+            space_id=space_id,
+            to=to,
+        )
+
+    async def _replay_task_deletes(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        to: str,
+    ) -> int:
+        if self._space_task_repo is None:
+            return 0
+        tombstones = await self._space_task_repo.list_task_tombstones(
+            space_id,
+            since=since,
+            limit=MAX_PER_RESOURCE,
+        )
+        return await self._send_each(
+            tombstones,
+            FederationEventType.SPACE_TASK_DELETED,
+            lambda tombstone: task_tombstone_to_wire_dict(tombstone, space_id),
             space_id=space_id,
             to=to,
         )

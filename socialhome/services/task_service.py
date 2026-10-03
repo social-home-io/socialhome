@@ -1387,7 +1387,12 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
                 payload={"entity": "task", "target_id": task.id, "op": "delete"},
                 snapshot=_task_dict(task),
             )
-        await self._repo.delete(task_id, space_id=space_id)
+        # Tombstoned (migration 0071); ``deleted_by`` is who authorised it
+        # — the approver for a reviewed delete — so a replay of the
+        # tombstone passes the space's level on a household that missed it.
+        await self._repo.delete(
+            task_id, space_id=space_id, deleted_by=approved_by or actor_user_id
+        )
         await self._emit(
             TaskDeleted(
                 task_id=task_id,

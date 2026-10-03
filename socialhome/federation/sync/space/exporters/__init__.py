@@ -25,6 +25,7 @@ from .stickies import StickiesExporter
 from .task_lists import TaskListsExporter
 from .task_lists_deleted import TaskListsDeletedExporter
 from .tasks import TasksExporter
+from .tasks_deleted import TasksDeletedExporter
 from .tasks_archived import TasksArchivedExporter
 from .timetables import TimetablesExporter
 from .zones import ZonesExporter
@@ -46,6 +47,7 @@ __all__ = [
     "TaskListsExporter",
     "TasksExporter",
     "TasksArchivedExporter",
+    "TasksDeletedExporter",
     "TimetablesExporter",
     "ZonesExporter",
 ]

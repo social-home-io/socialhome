@@ -59,6 +59,7 @@ class _FakeRepos:
         self.tasks = []
         self.task_lists = []
         self.deleted_list_ids: set[str] = set()
+        self.deleted_task_ids: set[str] = set()
         self.held_tasks: dict = {}
         self.pages = []
         self.stickies = []
@@ -142,6 +143,9 @@ class _TaskRepoStub:
 
     async def is_list_deleted(self, list_id, *, space_id):
         return list_id in self._c.deleted_list_ids
+
+    async def is_task_deleted(self, task_id, *, space_id):
+        return task_id in self._c.deleted_task_ids
 
     async def get(self, task_id):
         return self._c.held_tasks.get(task_id)
@@ -480,6 +484,29 @@ async def test_tasks(setup):
     assert len(c.tasks) == 1
     _, task = c.tasks[0]
     assert task.id == "t-1"
+
+
+async def test_a_task_deleted_here_is_skipped(setup):
+    """Migration 0071: a tombstoned task id never comes back via the
+    ``tasks`` / ``tasks_archived`` streams of a provider that missed it."""
+    r, c, kp = setup
+    c.deleted_task_ids.add("t-gone")
+    for resource in ("tasks", "tasks_archived"):
+        await _send(
+            r,
+            kp,
+            resource,
+            [
+                {
+                    "id": "t-gone",
+                    "list_id": "list-1",
+                    "title": "X",
+                    "status": "todo",
+                    "created_by": "u-1",
+                },
+            ],
+        )
+    assert c.tasks == []
 
 
 async def test_task_lists(setup):

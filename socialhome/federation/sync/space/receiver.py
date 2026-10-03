@@ -45,7 +45,7 @@ from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import ContentAction, SpaceMember, SpaceZone
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
-from ....domain.events import TaskListDeleted, TimetableSaved
+from ....domain.events import TaskDeleted, TaskListDeleted, TimetableSaved
 from ....domain.timetable import (
     Timetable,
     from_wire_dict,
@@ -534,6 +534,8 @@ class SpaceSyncReceiver:
             await self._persist_task_list_tombstones(
                 records, space_id, provider=provider
             )
+        elif resource == "tasks_deleted":
+            await self._persist_task_tombstones(records, space_id, provider=provider)
         elif resource in ("tasks", "tasks_archived"):
             for r in records:
                 # A member household may only add ids not held here (see
@@ -543,6 +545,14 @@ class SpaceSyncReceiver:
                 # fields its inbound lost sent as null) would wipe the
                 # priority / labels / due date / archive every tick.
                 rid = str(r.get("id") or r.get("task_id") or "")
+                if rid and await self._space_task_repo.is_task_deleted(
+                    rid, space_id=space_id
+                ):
+                    # Deleted here — a provider that missed the delete still
+                    # streams it; the tombstone wins (its id is never
+                    # reused), and its own tombstone stream will tell it.
+                    log.debug("sync: task %s was deleted here — skipped", rid)
+                    continue
                 held = await self._space_task_repo.get(rid) if rid else None
                 existing = held[1] if held is not None and held[0] == space_id else None
                 task = task_from_wire_dict(r, existing=existing)
@@ -742,8 +752,8 @@ class SpaceSyncReceiver:
         """Apply streamed list deletes (``task_lists_deleted``).
 
         A list held live here in this space is tombstoned (``deleted_by``
-        from the record's ``actor_user_id``); its tasks go with it
-        (migration-0069 trigger), and ``TaskListDeleted`` is published as
+        from the record's ``actor_user_id``); its tasks are tombstoned with
+        it (the list-tombstone trigger, 0069 / 0071), and ``TaskListDeleted`` is published as
         for a live ``SPACE_TASK_LIST_DELETED``. A member household's records
         were admitted only for such lists (:meth:`_authored_record`).
 
@@ -812,6 +822,104 @@ class SpaceSyncReceiver:
                 "space sync: %d task list tombstone(s) from %s for %s name a "
                 "list never held here whose id is not bound to this space — "
                 "no stub recorded",
+                unbound,
+                provider,
+                space_id,
+            )
+
+    async def _persist_task_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed single-task deletes (``tasks_deleted``).
+
+        A task held live here in this space is tombstoned (``deleted_by``
+        from the record's ``actor_user_id``) and ``TaskDeleted`` is
+        published as for a live ``SPACE_TASK_DELETED``. A member
+        household's records were admitted only for such tasks
+        (:meth:`_authored_record`).
+
+        From the **host**, an id we never held gets a stub tombstone, so a
+        stale copy another household streams later cannot create it — but
+        only when the id is owner-bound to its ``created_by`` in THIS space
+        (task ids are global: a stub for another space's id would block
+        that space's real task here forever), and only under a list live
+        here in this space (``space_tasks.list_id`` is a FK). A task under
+        a list tombstoned here needs nothing: the list's delete already
+        tombstoned every task of it (0071 trigger) and keeps new ones out. Refusals are summarised
+        once per chunk.
+        """
+        space = await self._space_repo.get(space_id)
+        from_host = space is not None and space.owner_instance_id == provider
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            task_id = str(r.get("id") or r.get("task_id") or "")
+            if not task_id:
+                continue
+            deleted_by = str(r.get("actor_user_id") or "")
+            held = await self._space_task_repo.get(task_id)
+            if held is not None:
+                if held[0] != space_id:
+                    cross_space.append(task_id)
+                elif await self._space_task_repo.delete(
+                    task_id, space_id=space_id, deleted_by=deleted_by
+                ):
+                    await self._bus.publish(
+                        TaskDeleted(
+                            task_id=task_id,
+                            list_id=held[1].list_id,
+                            space_id=space_id,
+                            origin_instance_id=provider,
+                        )
+                    )
+                continue
+            if not from_host or await self._space_task_repo.is_task_deleted(
+                task_id, space_id=space_id
+            ):
+                continue
+            list_id = str(r.get("list_id") or "")
+            if not list_id or await self._space_task_repo.is_list_deleted(
+                list_id, space_id=space_id
+            ):
+                continue  # gone with its list; the list tombstone wins
+            created_by = str(r.get("created_by") or "")
+            if (
+                check_owner_bound_id(
+                    SPACE_TASK_KIND,
+                    task_id,
+                    space_id=space_id,
+                    owner_user_id=created_by,
+                )
+                is not OwnerBinding.VALID
+            ):
+                unbound += 1
+                continue
+            if not await self._space_task_repo.tombstone(
+                task_id,
+                space_id=space_id,
+                list_id=list_id,
+                created_by=created_by,
+                deleted_by=deleted_by,
+            ):
+                unbound += 1  # its list is not held live in this space
+        if cross_space:
+            log.warning(
+                "space sync: %d task tombstone(s) from %s for %s name a task "
+                "held in another space — refused: %s",
+                len(cross_space),
+                provider,
+                space_id,
+                ", ".join(cross_space[:5]),
+            )
+        if unbound:
+            log.info(
+                "space sync: %d task tombstone(s) from %s for %s name a task "
+                "never held here whose id is not bound to this space, or "
+                "whose list is not held here — no stub recorded",
                 unbound,
                 provider,
                 space_id,
@@ -1008,9 +1116,38 @@ class SpaceSyncReceiver:
                     row_owner=held[1].created_by,
                     quiet=True,
                 )
+            case "tasks_deleted":
+                # The live SPACE_TASK_DELETED rule, as for
+                # ``task_lists_deleted``: a writer household removes a task
+                # held live here IN THIS SPACE, if the space's ``tasks``
+                # level admits the delete for the user who made it
+                # (``actor_user_id``), who must be seated on the provider.
+                # Refusals are counted in :meth:`_admit`'s one summary line.
+                rid = rid or str(r.get("task_id") or "")
+                held_task = await self._space_task_repo.get(rid) if rid else None
+                if held_task is None or held_task[0] != space_id:
+                    return False
+                if not await auth.writes_here(event, space_id):
+                    return False
+                actor = str(r.get("actor_user_id") or "") or None
+                if actor is not None and not await auth.acts_for(
+                    event, space_id, actor, any_role=True
+                ):
+                    return False
+                return await auth.access_admits(
+                    event,
+                    space_id,
+                    "tasks",
+                    ContentAction.DELETE,
+                    actor=actor,
+                    row_owner=held_task[1].created_by,
+                    quiet=True,
+                )
             case "tasks" | "tasks_archived":
                 if not rid or await self._space_task_repo.get(rid) is not None:
                     return False
+                if await self._space_task_repo.is_task_deleted(rid, space_id=space_id):
+                    return False  # deleted here; the tombstone wins
                 return await auth.may_author(
                     event, space_id, str(r.get("created_by") or "")
                 )

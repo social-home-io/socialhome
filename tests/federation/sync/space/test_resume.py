@@ -16,6 +16,7 @@ from socialhome.domain.post import Comment, CommentType, LocationData, Post, Pos
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import (
     TaskListTombstone,
+    TaskTombstone,
     Task,
     TaskList,
     TaskPriority,
@@ -100,11 +101,13 @@ class _FakeListSinceRepo:
         method: str = "list_since",
         lists: list | None = None,
         tombstones: list | None = None,
+        task_tombstones: list | None = None,
     ) -> None:
         self._rows = rows
         self._method = method
         self._lists = lists or []
         self._tombstones = tombstones or []
+        self._task_tombstones = task_tombstones or []
 
     def __getattr__(self, name):  # type: ignore[no-redef]
         if name == "list_list_tombstones":
@@ -113,6 +116,12 @@ class _FakeListSinceRepo:
                 return self._tombstones[:limit]
 
             return _tombstones
+        if name == "list_task_tombstones":
+
+            async def _task_tombstones(space_id, *, since=None, limit=500):
+                return self._task_tombstones[:limit]
+
+            return _task_tombstones
         if name == "list_lists_since":
 
             async def _lists(space_id, since, *, limit=500):
@@ -528,6 +537,59 @@ async def test_handle_request_replays_list_deletes_before_lists_and_tasks():
     assert fed.sent[0]["payload"] == {
         "id": "l-gone",
         "space_id": "sp-1",
+        "created_by": "u-1",
+        "actor_user_id": "u-adm",
+    }
+
+
+async def test_handle_request_replays_task_deletes_after_lists_before_tasks():
+    """Migration 0071: a task deleted since ``since`` goes out as
+    SPACE_TASK_DELETED after the lists (its list is held by then) and
+    before the live tasks, naming the deleter as ``actor_user_id``."""
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    fed = _FakeFederation()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(),
+        space_task_repo=_FakeListSinceRepo(
+            [
+                Task(
+                    id="t-live",
+                    list_id="l-1",
+                    title="Live",
+                    status=TaskStatus.TODO,
+                    position=0,
+                    created_by="u-1",
+                    created_at=base + timedelta(hours=1),
+                    updated_at=base + timedelta(hours=1),
+                )
+            ],
+            lists=[TaskList(id="l-1", name="Chores", created_by="u-1")],
+            task_tombstones=[
+                TaskTombstone(
+                    id="t-gone",
+                    list_id="l-1",
+                    deleted_at="2026-04-02",
+                    created_by="u-1",
+                    deleted_by="u-adm",
+                )
+            ],
+        ),
+    )
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert sent == 3
+    assert [s["type"] for s in fed.sent] == [
+        FederationEventType.SPACE_TASK_LIST_CREATED,
+        FederationEventType.SPACE_TASK_DELETED,
+        FederationEventType.SPACE_TASK_CREATED,
+    ]
+    assert fed.sent[1]["payload"] == {
+        "id": "t-gone",
+        "space_id": "sp-1",
+        "list_id": "l-1",
         "created_by": "u-1",
         "actor_user_id": "u-adm",
     }

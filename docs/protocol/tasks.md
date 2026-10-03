@@ -35,8 +35,8 @@ first-come squat one space's legacy list id under the other.
 **Deletes, renames and catch-up.** A list delete keeps the row as a
 tombstone (`space_task_lists.deleted_at`, migration `0069`) recording
 who authorised it (`deleted_by`: the deleting user, or the approver of a
-reviewed delete) and drops the list's tasks (a trigger, as the FK
-cascade did for the old hard delete). A tombstoned id never comes back
+reviewed delete) and takes the list's tasks with it (a trigger; since
+`0071` it tombstones them in place, see below). A tombstoned id never comes back
 in its space — an upsert, a live or replayed `SPACE_TASK_LIST_CREATED`
 (DEBUG, "deleted here"), and a sync record of the list or of a task
 filed under it all skip it. A household that missed a delete learns it
@@ -87,9 +87,53 @@ never, since a space deleting 500+ lists between two syncs is not a
 real workload, and the bound keeps a chunk small. Tombstones are **never
 pruned**, like `space_timetables` tombstones: a row is a few dozen
 bytes, and pruning one would let a household offline past the window
-resurrect the list. They cascade away with the space. Single-task
-deletes still have no tombstone: a household that missed a
-`SPACE_TASK_DELETED` can re-announce that task.
+resurrect the list. They cascade away with the space.
+
+**Single-task deletes** follow the same design (migration `0071`). A
+task delete keeps the row as a tombstone (`space_tasks.deleted_at`,
+`deleted_by` as for lists) with its content blanked — title,
+description, assignees, labels, priority, due date and recurrence are gone; only
+the id, list, creator and timestamps stay. An archived task is the same
+row, so it tombstones alike. A tombstoned id never comes back in its
+space: an upsert, a live or replayed `SPACE_TASK_CREATED` /
+`_UPDATED` (DEBUG, "deleted here"), and a `tasks` / `tasks_archived`
+sync record all skip it. A household that missed a delete learns it
+two ways, both carrying `{id, space_id, list_id, created_by,
+actor_user_id}` (the live `SPACE_TASK_DELETED` shape plus
+`created_by`; `actor_user_id` = `deleted_by`):
+
+- the **`tasks_deleted`** §25.6 sync resource, streamed after
+  `task_lists_deleted` and before `tasks`, with the same rules as
+  `task_lists_deleted`: a task held live in that space is tombstoned
+  (from a member household only under the live delete rule — writer
+  household, actor seated on it, the `tasks` level admitting the delete
+  with the task's creator as row owner; refusals one line per chunk);
+  from the **host** only, a never-held id gets a stub if it is
+  owner-bound (kind `space-task`) to `created_by` in **this** space
+  **and** its `list_id` is a list live here in this space
+  (`space_tasks.list_id` is a FK — the `task_lists` stream ahead of it
+  normally delivers the list first); a task named in another space is
+  refused (WARNING). It lands in a space archived here, and an older
+  household drops the unknown resource (at DEBUG, before decrypting) —
+  no capability bump: a v_N peer that never streams it just doesn't heal
+  others, and a v_N receiver keeps the pre-0071 behaviour.
+- the **`SPACE_SYNC_RESUME`** replay, which sends every task deleted at
+  or after `since` as `SPACE_TASK_DELETED` after the lists and before the
+  live tasks (tombstones are never replayed as `SPACE_TASK_CREATED`),
+  judged by the live handler like any delete. An older receiver applies
+  it as a plain delete and ignores `created_by`.
+
+**With list tombstones.** Since `0071` a list delete's trigger
+tombstones the list's live tasks **in place** (the list's `deleted_at` /
+`deleted_by`, content blanked) instead of deleting them, as `0069` did —
+a hard-deleted task id could be re-filed by its owner under another live
+list of the space. A task tombstoned before its list keeps its own
+`deleted_by`. Tasks of a deleted list are not streamed or replayed as
+task tombstones: the list's tombstone covers them, and its trigger
+tombstones them on the receiver too, so nothing is shipped twice. A
+task tombstone naming a list tombstoned here is a quiet no-op. Same limits as lists: the stream carries the newest
+**500** task tombstones, the replay at most 500 since `since`, and
+they are never pruned (they cascade away with their list or space).
 
 **Received text is sanitised** like REST input (control / bidi /
 spoofing characters removed) and cut to fit — title ≤ 200, list name
@@ -228,9 +272,9 @@ first-come rule. See [`spaces.md`](./spaces.md) and the v_36 row in
 - `socialhome/services/federation_inbound/space_content.py` —
   `SPACE_TASK_*` inbound handlers.
 - `socialhome/federation/sync/space/exporters/tasks.py`,
-  `tasks_archived.py`, `task_lists.py`, `task_lists_deleted.py`,
-  `receiver.py`, `resume.py` — §25.6 sync (list tombstones included) and
-  the resume replay.
+  `tasks_archived.py`, `tasks_deleted.py`, `task_lists.py`,
+  `task_lists_deleted.py`, `receiver.py`, `resume.py` — §25.6 sync (list
+  and task tombstones included) and the resume replay.
 - `socialhome/repositories/task_repo.py` — `SqliteTaskRepo`,
   `SqliteSpaceTaskRepo`.
 - `socialhome/routes/tasks.py` — REST endpoints.
