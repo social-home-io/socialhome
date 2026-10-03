@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from socialhome.domain.federation import (
     ARCHIVED_ALLOWED_REMOVAL_TYPES,
+    DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
     BroadcastResult,
     DecryptedPayload,
@@ -53,6 +54,17 @@ def test_broadcast_result_terminal_failures_excludes_queued():
     only_queued = BroadcastResult(attempted=1, succeeded=0, failed=1, results=(queued,))
     assert only_queued.failed == 1
     assert only_queued.terminal_failures == ()
+
+
+def test_broadcast_result_terminal_failures_excludes_a_deferred_mesh_send():
+    """A mesh member in its route cooldown has one re-send armed — late, not
+    lost — so it is not a terminal failure (the re-send warns on its own)."""
+    deferred = DeliveryResult(
+        instance_id="mesh", ok=False, error=DELIVERY_ERROR_MESH_DEFERRED
+    )
+    r = BroadcastResult(attempted=1, succeeded=0, failed=1, results=(deferred,))
+    assert r.failed == 1
+    assert r.terminal_failures == ()
 
 
 def test_delivery_result():

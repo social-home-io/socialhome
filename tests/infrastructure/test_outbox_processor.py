@@ -11,8 +11,10 @@ from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     JITTER_RATIO,
     MAX_ATTEMPTS,
+    MAX_RETRY_AFTER_S,
     DeliveryOutcome,
     OutboxProcessor,
+    RetryAfter,
 )
 from socialhome.repositories.outbox_repo import OutboxEntry
 from socialhome.domain.federation import FederationEventType
@@ -414,3 +416,105 @@ async def test_prune_once_purges_rows_of_households_that_are_gone():
     proc = OutboxProcessor(repo, AsyncMock(), after_prune=_hook)
     assert await proc.prune_once() == 3
     assert order == ["orphans", "hook"]
+
+
+# ── RetryAfter (a 429's Retry-After) ──────────────────────────────────────
+
+
+def _next_at_delay_s(repo) -> float:
+    """Seconds between now and the ``next_at`` the processor rescheduled to."""
+    (_entry_id, next_at), kwargs = repo.reschedule.await_args
+    return (
+        datetime.fromisoformat(next_at) - datetime.now(timezone.utc)
+    ).total_seconds()
+
+
+async def test_retry_after_floors_the_backoff_delay():
+    """A peer that says "come back in 120 s" is not retried in 5 s: the
+    Retry-After is a floor on the ordinary backoff, never a shortcut."""
+    entry = _make_entry(attempts=0)
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[entry])
+    repo.reschedule = AsyncMock()
+
+    async def _deliver(e):
+        return RetryAfter(seconds=120.0)
+
+    proc = OutboxProcessor(repo, _deliver, rng=lambda: 0.5)
+    await proc.drain_once()
+
+    # rng 0.5 → floor jittered up by 15 %: 138 s, never below the 120 asked.
+    assert 136.0 <= _next_at_delay_s(repo) <= 139.0
+    assert repo.reschedule.await_args.kwargs["attempts"] == 1
+
+
+async def test_retry_after_shorter_than_the_backoff_keeps_the_backoff():
+    entry = _make_entry(attempts=6)  # 7th attempt: base delay 320 s
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[entry])
+    repo.reschedule = AsyncMock()
+
+    async def _deliver(e):
+        return RetryAfter(seconds=1.0)
+
+    proc = OutboxProcessor(repo, _deliver, rng=lambda: 0.5)
+    await proc.drain_once()
+
+    assert 318.0 <= _next_at_delay_s(repo) <= 321.0
+
+
+async def test_retry_after_is_capped_so_a_peer_cannot_park_an_entry():
+    entry = _make_entry(attempts=0)
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[entry])
+    repo.reschedule = AsyncMock()
+
+    async def _deliver(e):
+        return RetryAfter(seconds=10_000_000.0)
+
+    proc = OutboxProcessor(repo, _deliver, rng=lambda: 0.5)
+    await proc.drain_once()
+
+    assert _next_at_delay_s(repo) <= MAX_RETRY_AFTER_S * (1 + JITTER_RATIO) + 1.0
+
+
+async def test_retry_after_floor_is_jittered_up_never_down():
+    """Every envelope one burst throttled must not come back on the same
+    tick: the floor is spread upward by up to JITTER_RATIO, never below."""
+
+    async def _deliver(e):
+        return RetryAfter(seconds=100.0)
+
+    delays = []
+    for sample in (0.0, 0.999):
+        repo = MagicMock()
+        repo.list_due = AsyncMock(return_value=[_make_entry(attempts=0)])
+        repo.reschedule = AsyncMock()
+        proc = OutboxProcessor(repo, _deliver, rng=lambda sample=sample: sample)
+        await proc.drain_once()
+        delays.append(_next_at_delay_s(repo))
+
+    low, high = delays
+    assert 98.0 <= low <= 101.0
+    assert 128.0 <= high <= 131.0
+
+
+async def test_retry_after_still_spends_the_attempt_budget():
+    """A peer that 429s forever cannot grow the outbox without bound: each
+    Retry-After costs an attempt like any transient failure, so an ordinary
+    envelope is given up on at MAX_ATTEMPTS (the 7-day TTL and the per-peer
+    pending cap bound it on top)."""
+    entry = _make_entry(attempts=MAX_ATTEMPTS - 1)
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[entry])
+    repo.mark_failed = AsyncMock()
+    repo.reschedule = AsyncMock()
+
+    async def _deliver(e):
+        return RetryAfter(seconds=30.0)
+
+    proc = OutboxProcessor(repo, _deliver)
+    await proc.drain_once()
+
+    repo.mark_failed.assert_awaited_once_with(entry.id)
+    repo.reschedule.assert_not_called()

@@ -382,6 +382,50 @@ outbox. NEVER_DROP rows are never evicted — if the backlog is entirely
 NEVER_DROP the new row is still inserted over the cap rather than dropping
 a security/structural event.
 
+**What a redelivery response means.** 2xx is delivered. 5xx, a timeout or
+a network error is transient (backoff). **429 is transient too** — a rate
+limit is back-pressure ("later"), never a refusal: the receiving inbox
+answers its per-IP throttle with a delta-seconds `Retry-After`, and the
+outbox honours it as a *floor* on the next backoff delay (never sooner than
+the peer asked; capped at the 4 h ceiling so a peer cannot park an entry,
+then jittered upward by up to 30 % so a throttled burst does not come back on
+one tick). A 429 still costs an attempt, so a
+peer that throttles forever is bounded exactly like an offline one —
+`MAX_ATTEMPTS`, the 7-day TTL and the per-peer pending cap — and a 429 never
+paints the household unreachable. Every other 4xx (410 replay / skew, 403
+banned / bad signature, 400 malformed) is permanent and dropped; 404 is
+retried briefly for the pair-window race (`PAIR_WINDOW_404_ATTEMPTS`).
+Treating 429 as permanent once turned a single echo storm into the silent
+loss of unrelated envelopes (an `UNPAIR`, a replayed highlight).
+
+**The mesh path has no outbox.** A space broadcast to a mesh-only member
+(`broadcast_to_space_members` → `send_with_mesh_fallback` →
+`SPACE_ROUTED`) gets one attempt. The one exception is `route_cooldown`:
+route discovery was inside its 30 s negative cooldown, so the attempt never
+reached the wire. The broadcast then opens a **per-target FIFO** for that
+member and reports it as `mesh_retry_scheduled` (not a terminal failure).
+While the FIFO exists, every later broadcast to the same member queues
+behind it instead of overtaking, so the member sees events in broadcast
+order. One task per target wakes after the cooldown plus a 5 s margin and
+sends the queue in order, one attempt per item, on a private copy of the
+exact payload variant that member was sent (legacy / relay variants
+included). Before each send it re-reads membership, so a household that left
+meanwhile gets no space content (the drop logs a WARNING) — except for the
+two broadcast events that remove their own recipient (`SPACE_DISSOLVED`,
+`SPACE_MEMBER_LEFT`), which go to the members as they were at broadcast time
+minus any household banned since: `dissolve_space` purges `space_instances`
+right after its broadcast, and a re-read would lose the very event that tells
+the member. A mesh miss on the re-send drops the rest of that target's queue
+with one WARNING naming each lost event and space (the route is still down);
+an exception costs only that item. Concurrent broadcasts that hit the cooldown
+together join the same queue — one queue and one drain task per target, ever. Bounds: 64 queued sends per target and 256
+deferred targets — past either, the broadcast reports `mesh_retry_queue_full`
+as a terminal miss, logged once per target. `FederationService.stop()`
+cancels pending queues and refuses new ones; app cleanup runs it before the
+routed handler and the transport stop. Other mesh failures (`no_route` after
+a real probe, `routed_send_failed`) stay single-attempt and are healed by
+§25.6 sync.
+
 ### Bulk sync
 
 Initial content sync after pairing (and recovery sync after a long

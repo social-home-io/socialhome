@@ -16,12 +16,14 @@ shared session keys and ``RemoteInstance`` row.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import logging
 import time
 import uuid
-from dataclasses import replace
+from collections import deque
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -54,6 +56,8 @@ from ..domain.federation_capabilities import FederationCapability
 from ..domain.media_validator import validate_inbound_media_meta
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
+    DELIVERY_ERROR_MESH_DEFER_FULL,
+    DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
@@ -129,6 +133,57 @@ _PAIRING_TTL_SECONDS = 300
 #: Length of the SAS verification code (digits).
 _SAS_DIGITS = 6
 
+#: Margin after a mesh member's negative route cooldown lifts before the ONE
+#: deferred re-send of a space broadcast to it. The cooldown is what made the
+#: first attempt never reach the wire (``route_cooldown`` — no probe at all),
+#: so the retry waits it out plus this margin, then probes afresh. Same value
+#: and reasoning as the routed handler's ``_DEFERRED_RETRANSMIT_DELAY_S``.
+MESH_DEFERRED_SEND_MARGIN_S: float = 5.0
+
+#: Ceiling on mesh targets with a deferred-send queue at once. There is one
+#: task per target (a FIFO drained in order), so this also bounds tasks.
+MAX_DEFERRED_MESH_TARGETS: int = 256
+
+#: Ceiling on queued broadcasts per target. Each lives at most the cooldown
+#: (30 s) plus the margin plus the sends ahead of it. Past either cap the
+#: miss is reported as terminal (logged once per target), so a busy space
+#: plus a dead route cannot grow memory without bound.
+MAX_DEFERRED_MESH_SENDS_PER_TARGET: int = 64
+
+#: Broadcast events whose own effect takes the recipient out of
+#: ``space_instances`` right after the broadcast: ``dissolve_space`` purges
+#: every row once its ``SPACE_DISSOLVED`` fan-out returns, and a leave whose
+#: ``SPACE_MEMBER_LEFT`` gossip retires the household's last seat drops it
+#: too. A deferred re-send of one of these is delivered to the target as it
+#: was at broadcast time instead of re-reading membership — the re-read
+#: would find the target gone and silently lose the very event that tells
+#: it so. Only these two: the other removals do not ride
+#: ``broadcast_to_space_members`` to the household they remove
+#: (``SPACE_REMOTE_MEMBER_REMOVED`` is a direct send after the host already
+#: dropped the row; bans are not broadcast this way at all). They carry
+#: lifecycle / roster state, never space content, and a household that was
+#: instance-BANNED meanwhile is still skipped (see :meth:`_deferred_send_one`).
+#: Every other event re-reads membership.
+DEFERRED_SEND_SNAPSHOT_EVENTS: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.SPACE_DISSOLVED,
+        FederationEventType.SPACE_MEMBER_LEFT,
+    }
+)
+
+
+@dataclass(slots=True, frozen=True)
+class _DeferredMeshSend:
+    """One broadcast waiting in a mesh target's deferred FIFO. Process-local
+    queue item, never persisted or sent."""
+
+    space_id: str
+    event_type: FederationEventType
+    #: A private deep copy taken when queued — the caller's dict may change.
+    payload: dict
+    #: Deliver without re-reading membership (:data:`DEFERRED_SEND_SNAPSHOT_EVENTS`).
+    snapshot: bool
+
 
 class FederationService:
     """Core federation handler — outbound delivery and inbound dispatch.
@@ -199,6 +254,10 @@ class FederationService:
         "_relay_accepted_at",
         "_routed_handler",
         "_app_fed",
+        "_deferred_mesh_queues",
+        "_deferred_mesh_tasks",
+        "_deferred_mesh_cap_logged",
+        "_stopping",
     )
 
     def __init__(
@@ -277,6 +336,18 @@ class FederationService:
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
         # dropped (no app bridge wired on this instance).
         self._app_fed = None
+        #: Per mesh target: the FIFO of broadcasts waiting out its route
+        #: cooldown (see :meth:`_defer_mesh_send`). A target present here is
+        #: "pending": every later broadcast to it queues behind, so delivery
+        #: order is kept. One drain task per target (strong ref here — an
+        #: unreferenced task can be GC'd mid-flight); it removes both entries
+        #: when its queue is empty. :meth:`stop` cancels the rest.
+        self._deferred_mesh_queues: dict[str, deque[_DeferredMeshSend]] = {}
+        self._deferred_mesh_tasks: dict[str, asyncio.Task[None]] = {}
+        #: Targets whose cap overflow was already logged (reset on drain).
+        self._deferred_mesh_cap_logged: set[str] = set()
+        #: Set by :meth:`stop`; no new deferred work is armed after it.
+        self._stopping = False
         # Envelope crypto delegate (encrypt/decrypt/sign/verify). Keeps the
         # AES-256-GCM + Ed25519 surface unit-testable in isolation. When
         # the hybrid suite is configured the PQ signer is attached so
@@ -1163,12 +1234,13 @@ class FederationService:
             )
 
         # Delivery failed — mark and enqueue for retry.
-        if transport_error != DELIVERY_ERROR_RELAY_THROTTLED:
-            # A relay 429 is back-pressure on US, not evidence about the
-            # peer: the relay is up and the blob is fine. Flipping the
-            # household to unreachable on it (and firing
-            # ConnectionUnreachable at the SPA) would paint a red dot
-            # for a household that is perfectly fine, on a busy minute.
+        if transport_error != DELIVERY_ERROR_RELAY_THROTTLED and status_code != 429:
+            # A 429 — from the relay or from the peer's own inbox — is
+            # back-pressure on US, not evidence about the peer: whoever
+            # answered is up and the blob is fine. Flipping the household
+            # to unreachable on it (and firing ConnectionUnreachable at the
+            # SPA) would paint a red dot for a household that is perfectly
+            # fine, on a busy minute. The envelope is still queued below.
             await self._federation_repo.mark_unreachable(to_instance_id)
             if not was_unreachable:
                 # reachable → unreachable edge only (mirrors the reachable
@@ -1990,12 +2062,41 @@ class FederationService:
                     and instance.source is InstanceSource.SPACE_SESSION
                 ):
                     peer_payload = relay_payload
+            if iid in self._deferred_mesh_queues:
+                # A deferred send to this target is still pending: queue
+                # behind it rather than overtake it, so the target sees
+                # events in the order they were broadcast. (Two broadcasts
+                # racing each other — both past this check, interleaved at
+                # the send's ``await`` — have no defined relative order to
+                # keep: a cooldown result joins the existing queue in
+                # ``_defer_mesh_send``, and a send that got through is
+                # already on the wire and cannot be pulled back.)
+                results.append(
+                    self._enqueue_deferred_mesh_send(
+                        iid,
+                        space_id=space_id,
+                        event_type=event_type,
+                        payload=peer_payload,
+                    )
+                )
+                continue
             result = await self.send_with_mesh_fallback(
                 to_instance_id=iid,
                 event_type=event_type,
                 payload=peer_payload,
                 space_id=space_id,
             )
+            if not result.ok and result.error == DELIVERY_ERROR_ROUTE_COOLDOWN:
+                # Never on the wire — the negative cooldown short-circuited
+                # discovery — and the mesh path has no outbox, so without a
+                # retry this member never gets the event. Wait the window
+                # out and send once more.
+                result = self._defer_mesh_send(
+                    result,
+                    space_id=space_id,
+                    event_type=event_type,
+                    payload=peer_payload,
+                )
             results.append(result)
         succeeded = sum(1 for r in results if r.ok)
         broadcast = BroadcastResult(
@@ -2018,10 +2119,14 @@ class FederationService:
             #   "not reached". Those are deliberately excluded here; warning
             #   for them was false and noisy.
             # * Mesh path (``no_route`` / ``unknown_instance`` /
-            #   ``not_confirmed`` / ``routed_send_failed`` /
-            #   ``route_cooldown``): there is NO outbox, so a failed target is
-            #   a permanent, invisible loss, and for a mesh-only member that
-            #   is the ONLY delivery attempt the event ever gets. A durable
+            #   ``not_confirmed`` / ``routed_send_failed``): there is NO
+            #   outbox, so a failed target is a permanent, invisible loss,
+            #   and for a mesh-only member that is the ONLY delivery attempt
+            #   the event ever gets. (``route_cooldown`` is the exception:
+            #   the attempt never reached the wire, so one deferred re-send
+            #   is armed above and reported as
+            #   :data:`DELIVERY_ERROR_MESH_DEFERRED`, which is not terminal;
+            #   it stays here only when the deferral cap is full.) A durable
             #   outbox for space gossip is a larger design change; until then
             #   a WARNING naming the space, the event and each such peer is
             #   the minimum bar, so the loss is diagnosable rather than
@@ -2036,6 +2141,218 @@ class FederationService:
                 ", ".join(f"{r.instance_id}={r.error}" for r in terminal),
             )
         return broadcast
+
+    def _defer_mesh_send(
+        self,
+        result: DeliveryResult,
+        *,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+    ) -> DeliveryResult:
+        """Start a deferred FIFO for a member in its route cooldown.
+
+        Arms the target's single drain task to wake after the cooldown plus
+        :data:`MESH_DEFERRED_SEND_MARGIN_S`, with this broadcast first in
+        line. Returns the result to report for that member: a
+        :data:`DELIVERY_ERROR_MESH_DEFERRED` result when queued, else
+        ``result`` unchanged (stopping, or the target ceiling is full — the
+        miss is terminal and the broadcast's WARNING names it).
+        """
+        target = result.instance_id
+        if self._stopping:
+            return result
+        if target in self._deferred_mesh_queues:
+            # A concurrent broadcast to the same target opened the queue
+            # while this one awaited its send: join it, never replace it
+            # (replacing orphaned the first queue's items and its task).
+            return self._enqueue_deferred_mesh_send(
+                target, space_id=space_id, event_type=event_type, payload=payload
+            )
+        if len(self._deferred_mesh_queues) >= MAX_DEFERRED_MESH_TARGETS:
+            self._log_deferred_cap(target, "the deferred-target ceiling is full")
+            return result
+        delay_s = max(result.retry_after_s or 0.0, 0.0) + MESH_DEFERRED_SEND_MARGIN_S
+        queue: deque[_DeferredMeshSend] = deque()
+        self._deferred_mesh_queues[target] = queue
+        queued = self._enqueue_deferred_mesh_send(
+            target, space_id=space_id, event_type=event_type, payload=payload
+        )
+        task = asyncio.create_task(
+            self._drain_deferred_mesh_sends(target, queue, delay_s=delay_s),
+            name=f"fed-mesh-deferred-send[{target}]",
+        )
+        self._deferred_mesh_tasks[target] = task
+        log.info(
+            "broadcast_to_space_members: space=%s event=%s — %s is in its"
+            " route cooldown; re-sending in %.1fs",
+            space_id,
+            event_type.value,
+            target,
+            delay_s,
+        )
+        return replace(queued, retry_after_s=delay_s)
+
+    def _enqueue_deferred_mesh_send(
+        self,
+        target: str,
+        *,
+        space_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+    ) -> DeliveryResult:
+        """Append a broadcast to ``target``'s pending FIFO (which must exist)."""
+        queue = self._deferred_mesh_queues[target]
+        if self._stopping or len(queue) >= MAX_DEFERRED_MESH_SENDS_PER_TARGET:
+            if not self._stopping:
+                self._log_deferred_cap(target, "its deferred queue is full")
+            return DeliveryResult(
+                instance_id=target, ok=False, error=DELIVERY_ERROR_MESH_DEFER_FULL
+            )
+        queue.append(
+            _DeferredMeshSend(
+                space_id=space_id,
+                event_type=event_type,
+                payload=copy.deepcopy(payload),
+                snapshot=event_type in DEFERRED_SEND_SNAPSHOT_EVENTS,
+            )
+        )
+        return DeliveryResult(
+            instance_id=target, ok=False, error=DELIVERY_ERROR_MESH_DEFERRED
+        )
+
+    def _log_deferred_cap(self, target: str, why: str) -> None:
+        if target in self._deferred_mesh_cap_logged:
+            return
+        self._deferred_mesh_cap_logged.add(target)
+        log.warning(
+            "broadcast_to_space_members: not deferring more sends to %s —"
+            " %s; further broadcasts to it are lost until it drains",
+            target,
+            why,
+        )
+
+    async def _drain_deferred_mesh_sends(
+        self,
+        target: str,
+        queue: deque[_DeferredMeshSend],
+        *,
+        delay_s: float,
+    ) -> None:
+        """The one drain task for ``target``: wait, then send its FIFO in order.
+
+        ``queue`` is handed in, not looked up, so this task only ever drains
+        the queue it was created for. Each item gets one attempt. A
+        non-snapshot item first re-reads membership (space content goes to
+        members only). A mesh miss means the route is still down, so the rest
+        of the queue is dropped with one WARNING naming what was lost; an
+        exception costs only that item. Never raises out of the task except
+        ``CancelledError`` from :meth:`stop`.
+        """
+        try:
+            await asyncio.sleep(delay_s)
+            while queue:
+                item = queue.popleft()
+                if not await self._deferred_send_one(target, item):
+                    if queue:
+                        log.warning(
+                            "broadcast_to_space_members: dropping %d more"
+                            " deferred send(s) to %s — the route is still"
+                            " down: %s",
+                            len(queue),
+                            target,
+                            ", ".join(
+                                f"{q.event_type.value}@{q.space_id}" for q in queue
+                            ),
+                        )
+                    queue.clear()
+        finally:
+            # No ``await`` between the empty check above and this: a
+            # broadcast cannot slip an item into a queue we are discarding.
+            # Only the task that owns the slot clears it — never a stale one.
+            if self._deferred_mesh_tasks.get(target) is asyncio.current_task():
+                self._deferred_mesh_queues.pop(target, None)
+                self._deferred_mesh_tasks.pop(target, None)
+                self._deferred_mesh_cap_logged.discard(target)
+
+    async def _deferred_send_one(self, target: str, item: _DeferredMeshSend) -> bool:
+        """Send one deferred item. ``False`` only on a mesh miss (route down)."""
+        try:
+            if item.snapshot:
+                # Delivered as of broadcast time — but never to a household
+                # banned from the space since.
+                if await self._federation_repo.is_instance_banned_from_space(
+                    item.space_id, target
+                ):
+                    log.warning(
+                        "broadcast_to_space_members: space=%s event=%s — %s"
+                        " was banned meanwhile; dropping the deferred re-send",
+                        item.space_id,
+                        item.event_type.value,
+                        target,
+                    )
+                    return True
+            else:
+                # ``list_member_instance_ids`` already excludes bans.
+                members = await self._federation_repo.list_member_instance_ids(
+                    item.space_id
+                )
+                if target not in members:
+                    log.warning(
+                        "broadcast_to_space_members: space=%s event=%s — %s is"
+                        " no longer a member; dropping the deferred re-send",
+                        item.space_id,
+                        item.event_type.value,
+                        target,
+                    )
+                    return True
+            result = await self.send_with_mesh_fallback(
+                to_instance_id=target,
+                event_type=item.event_type,
+                payload=item.payload,
+                space_id=item.space_id,
+            )
+        except Exception:
+            log.warning(
+                "broadcast_to_space_members: space=%s event=%s — deferred"
+                " re-send to %s failed",
+                item.space_id,
+                item.event_type.value,
+                target,
+                exc_info=True,
+            )
+            return True
+        # QUEUED: the member became a direct peer meanwhile and the durable
+        # outbox owns it now — not a loss.
+        if result.ok or result.error == DELIVERY_ERROR_QUEUED:
+            return True
+        log.warning(
+            "broadcast_to_space_members: space=%s event=%s did not reach"
+            " member household %s on the deferred re-send either: %s",
+            item.space_id,
+            item.event_type.value,
+            target,
+            result.error,
+        )
+        return False
+
+    async def stop(self) -> None:
+        """Refuse new deferred sends, cancel pending ones, wait for them.
+
+        Idempotent. Like ``SpaceRoutedHandler.stop`` this is cancel-and-gather
+        over ad-hoc, self-removing tasks — there is no loop to drain. App
+        cleanup awaits it before the routed handler and the transport stop,
+        since a deferred send rides both.
+        """
+        self._stopping = True
+        tasks = [t for t in self._deferred_mesh_tasks.values() if not t.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._deferred_mesh_queues.clear()
+        self._deferred_mesh_tasks.clear()
+        self._deferred_mesh_cap_logged.clear()
 
     # ─── Inbound ──────────────────────────────────────────────────────────
 

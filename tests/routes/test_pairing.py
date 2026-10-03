@@ -313,6 +313,9 @@ class _SendRecorder:
     def __init__(self) -> None:
         self.sent: list[dict] = []
 
+    async def stop(self) -> None:
+        """App cleanup cancels deferred mesh re-sends; nothing to cancel."""
+
     async def send_event(self, *, to_instance_id, event_type, payload):
         self.sent.append(
             {"to": to_instance_id, "type": event_type, "payload": payload},
@@ -693,6 +696,9 @@ async def test_visible_users_patch_hides_user_and_sends_user_removed(client):
     captured: list[dict] = []
 
     class _Recorder:
+        async def stop(self) -> None:
+            """App cleanup cancels deferred mesh re-sends; nothing to cancel."""
+
         async def send_event(self, *, to_instance_id, event_type, payload):
             captured.append(
                 {"to": to_instance_id, "type": event_type, "payload": payload},
@@ -743,6 +749,9 @@ async def test_visible_users_patch_unhide_sends_user_updated(client):
     captured: list[dict] = []
 
     class _Recorder:
+        async def stop(self) -> None:
+            """App cleanup cancels deferred mesh re-sends; nothing to cancel."""
+
         async def send_event(self, *, to_instance_id, event_type, payload):
             captured.append({"type": event_type, "payload": payload})
 
@@ -774,6 +783,9 @@ async def test_visible_users_patch_no_op_when_already_in_target_state(client):
     captured: list[dict] = []
 
     class _Recorder:
+        async def stop(self) -> None:
+            """App cleanup cancels deferred mesh re-sends; nothing to cancel."""
+
         async def send_event(self, *, to_instance_id, event_type, payload):
             captured.append({})
 
@@ -1604,6 +1616,9 @@ class _StubConfirmSvc:
 
     def __init__(self, inst) -> None:
         self._inst = inst
+
+    async def stop(self) -> None:
+        """App cleanup cancels deferred mesh re-sends; nothing to cancel."""
 
     async def confirm_pairing(self, token: str, code: str):
         return self._inst

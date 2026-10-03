@@ -5,6 +5,7 @@ All tests use in-memory stubs — no network, no real disk.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -23,6 +24,8 @@ from socialhome.crypto import (
     generate_x25519_keypair,
 )
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_MESH_DEFER_FULL,
+    DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
@@ -37,6 +40,7 @@ from socialhome.domain.federation import (
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.events import ConnectionReachable
 from socialhome.federation import FederationService
+from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
 from socialhome.federation.transport import _TransportSendResult
 from socialhome.federation.encoder import FederationEncoder
@@ -3453,6 +3457,558 @@ async def test_broadcast_to_space_members_mixed_names_only_terminal_peer(caplog)
     assert "did not reach 1/3" in caplog.text
 
 
+def _broadcast_svc_with_scripted_results(
+    script: dict[str, list[Any]],
+) -> tuple[FederationService, str, Any, list[tuple[str, str, dict]]]:
+    """Like :func:`_broadcast_svc_with_per_peer_results`, but each target
+    answers from a script, one entry per call (a ``DeliveryResult``, or an
+    exception to raise) — so a test sees what a deferred re-send of the same
+    target gets. Returns the call log: ``(target, event_type, payload)``."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    space_id = "space-deferred"
+    for iid in script:
+        fed_repo.add_space_member(space_id, iid)
+    calls: list[tuple[str, str, dict]] = []
+
+    async def _fake_send(
+        *, to_instance_id: str, event_type, payload, **_kw: Any
+    ) -> DeliveryResult:
+        calls.append((to_instance_id, event_type.value, payload))
+        nxt = script[to_instance_id].pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    patcher = patch.object(
+        FederationService,
+        "send_with_mesh_fallback",
+        AsyncMock(side_effect=_fake_send),
+    )
+    return svc, space_id, patcher, calls
+
+
+def _cooldown(iid: str = "mesh-only-peer", after: float = 0.01) -> DeliveryResult:
+    return DeliveryResult(
+        instance_id=iid,
+        ok=False,
+        error=DELIVERY_ERROR_ROUTE_COOLDOWN,
+        retry_after_s=after,
+    )
+
+
+async def _drain_deferred(svc: FederationService) -> None:
+    for _ in range(100):
+        if not svc._deferred_mesh_tasks:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("deferred mesh send never finished")
+
+
+@pytest.fixture
+def no_margin(monkeypatch):
+    monkeypatch.setattr(federation_service_mod, "MESH_DEFERRED_SEND_MARGIN_S", 0.0)
+
+
+class _CooldownRouteService:
+    """Real-shaped route discovery with a scripted clock: the negative
+    cooldown reads ``cooldown_s`` on the first look and has lifted on every
+    later one — no wall-clock countdown to race. Drives the unmocked
+    ``send_with_mesh_fallback`` mesh branch."""
+
+    def __init__(self, cooldown_s: float) -> None:
+        self._remaining = [cooldown_s]
+        self.discoveries = 0
+
+    def cooldown_remaining(self, target: str) -> float:
+        return self._remaining.pop(0) if self._remaining else 0.0
+
+    async def discover_route(self, target: str):
+        self.discoveries += 1
+        return ["self", "relay", target], "eph-pk"
+
+    def cached_target_identity_pk(self, target: str) -> str:
+        return "aa" * 32
+
+    async def invalidate(self, target: str) -> None:  # pragma: no cover
+        return None
+
+
+class _RecordingRoutedHandler:
+    def __init__(self) -> None:
+        self.sent: list[tuple[list[str], str, dict]] = []
+
+    async def send_routed(
+        self, *, path, target_eph_pk_b64, inner_event_type, inner_payload, **_kw
+    ) -> str:
+        self.sent.append((path, inner_event_type.value, inner_payload))
+        return "route-id"
+
+
+@pytest.mark.asyncio
+async def test_a_post_in_route_cooldown_reaches_the_mesh_member_after_it(
+    caplog, no_margin
+):
+    """End to end through the real ``send_with_mesh_fallback``: the member
+    has no direct pairing, discovery is in its negative cooldown, so the
+    first attempt never reaches the wire (the demo flake where d's post
+    never reached c). The broadcast queues it, waits ``retry_after_s`` out,
+    and ships it over SPACE_ROUTED once the cooldown lifts."""
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo)
+    fed_repo.add_space_member("space-1", "mesh-only-peer")
+    route = _CooldownRouteService(cooldown_s=0.01)
+    routed = _RecordingRoutedHandler()
+    svc._route_service = route
+    svc._routed_handler = routed
+
+    with caplog.at_level(logging.INFO, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            "space-1",
+            FederationEventType.SPACE_POST_CREATED,
+            {"space_id": "space-1", "post_id": "p1"},
+        )
+        (only,) = result.results
+        assert only.error == DELIVERY_ERROR_MESH_DEFERRED
+        assert only.retry_after_s == 0.01
+        assert result.terminal_failures == ()
+        assert routed.sent == [] and route.discoveries == 0
+        await _drain_deferred(svc)
+
+    assert routed.sent == [
+        (
+            ["self", "relay", "mesh-only-peer"],
+            "space_post_created",
+            {"space_id": "space-1", "post_id": "p1"},
+        )
+    ]
+    assert "did not reach" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_broadcasts_into_one_cooldown_lose_nothing(no_margin):
+    """Two broadcasts to the same mesh member run concurrently (``gather``)
+    and both hit the cooldown across an ``await``. The second used to
+    overwrite the first's queue and task — an orphaned drain then popped the
+    live entries — so one post was lost. Both must reach the member, in
+    broadcast order, through ONE drain task."""
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=_make_kek_manager())
+    fed_repo.add_space_member("s", "peer")
+    sent: list[str] = []
+    cooldowns_left = [2]
+
+    async def _fake_send(*, to_instance_id, event_type, payload, **_kw):
+        await asyncio.sleep(0)  # a real send awaits a DB read first
+        if cooldowns_left[0]:
+            cooldowns_left[0] -= 1
+            return _cooldown("peer", after=0.01)
+        sent.append(payload["post_id"])
+        return DeliveryResult(instance_id="peer", ok=True)
+
+    with patch.object(
+        FederationService,
+        "send_with_mesh_fallback",
+        AsyncMock(side_effect=_fake_send),
+    ):
+        results = await asyncio.gather(
+            *(
+                svc.broadcast_to_space_members(
+                    "s",
+                    FederationEventType.SPACE_POST_CREATED,
+                    {"space_id": "s", "post_id": post},
+                )
+                for post in ("p1", "p2")
+            )
+        )
+        assert [r.results[0].error for r in results] == [
+            DELIVERY_ERROR_MESH_DEFERRED,
+            DELIVERY_ERROR_MESH_DEFERRED,
+        ]
+        assert len(svc._deferred_mesh_tasks) == 1
+        named = [t for t in asyncio.all_tasks() if t.get_name().startswith("fed-mesh")]
+        assert len(named) == 1
+        await _drain_deferred(svc)
+
+    assert sent == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_mesh_send_that_fails_again_warns(caplog, no_margin):
+    """One attempt, not a loop: a second miss is a loss and says so."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(),
+                DeliveryResult(
+                    instance_id="mesh-only-peer", ok=False, error="no_route"
+                ),
+            ],
+        }
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+        await _drain_deferred(svc)
+
+    assert [c[0] for c in calls] == ["mesh-only-peer", "mesh-only-peer"]
+    assert "mesh-only-peer" in caplog.text
+    assert "no_route" in caplog.text
+    assert space_id in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_mesh_send_that_raises_warns_and_keeps_draining(
+    caplog, no_margin
+):
+    """An exception costs only that item; the next one still goes out."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(),
+                RuntimeError("boom"),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+            ],
+        }
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        for post in ("A", "B"):
+            await svc.broadcast_to_space_members(
+                space_id=space_id,
+                event_type=FederationEventType.SPACE_POST_CREATED,
+                payload={"space_id": space_id, "post_id": post},
+            )
+        await _drain_deferred(svc)
+
+    assert [c[2]["post_id"] for c in calls] == ["A", "A", "B"]
+    assert "deferred re-send to mesh-only-peer failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_mesh_send_that_lands_in_the_outbox_is_not_a_loss(
+    caplog, no_margin
+):
+    """The member paired directly meanwhile: the re-send went to the durable
+    outbox (QUEUED), which owns it now — no WARNING."""
+    svc, space_id, patcher, _calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(),
+                DeliveryResult(
+                    instance_id="mesh-only-peer",
+                    ok=False,
+                    error=DELIVERY_ERROR_QUEUED,
+                ),
+            ],
+        }
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+        await _drain_deferred(svc)
+
+    assert caplog.records == []
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_re_send_carries_the_legacy_variant_the_peer_got(
+    no_margin,
+):
+    """A member below ``legacy_below`` was sent ``legacy_payload``; the
+    re-send must be that same variant, not the modern payload."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+            ],
+        }
+    )
+    with patcher:
+        await svc.broadcast_to_space_members(
+            space_id,
+            FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+            {"space_id": space_id, "role": "moderator"},
+            legacy_payload={"space_id": space_id, "role": "member"},
+            legacy_below=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+        )
+        await _drain_deferred(svc)
+
+    assert [c[2]["role"] for c in calls] == ["member", "member"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_sends_keep_broadcast_order_per_target(no_margin):
+    """While a deferred send to a target is pending, a later broadcast to it
+    queues behind (it does not overtake on a route that just came back):
+    A is delivered before B."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(after=0.05),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+            ],
+        }
+    )
+    with patcher:
+        first = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "A"},
+        )
+        second = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_UPDATED,
+            payload={"space_id": space_id, "post_id": "B"},
+        )
+        # B was queued without a send of its own.
+        assert len(calls) == 1
+        assert first.results[0].error == DELIVERY_ERROR_MESH_DEFERRED
+        assert second.results[0].error == DELIVERY_ERROR_MESH_DEFERRED
+        assert len(svc._deferred_mesh_tasks) == 1  # one task per target
+        await _drain_deferred(svc)
+
+    assert [(c[1], c[2]["post_id"]) for c in calls] == [
+        ("space_post_created", "A"),
+        ("space_post_created", "A"),
+        ("space_post_updated", "B"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_send_skips_a_household_that_left_the_space(caplog, no_margin):
+    """Space content goes to members only: a household that stopped being a
+    member while the retry waited does not get the post — and the drop is a
+    WARNING, not a silent INFO."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {"mesh-only-peer": [_cooldown(after=0.05)]}
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+        svc._federation_repo._space_members.discard((space_id, "mesh-only-peer"))
+        await _drain_deferred(svc)
+
+    assert len(calls) == 1
+    assert "no longer a member" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_space_dissolved_still_reaches_the_purged_member(
+    no_margin,
+):
+    """``dissolve_space`` purges ``space_instances`` right after its
+    broadcast, so a membership re-read would find nobody and silently lose
+    the one event that tells the member the space is gone. Structural
+    removal events are delivered to the members as they were at broadcast
+    time."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(after=0.05),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+            ],
+        }
+    )
+    with patcher:
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_DISSOLVED,
+            payload={"space_id": space_id},
+        )
+        # What dissolve_space's purge does next.
+        svc._federation_repo._space_members.clear()
+        await _drain_deferred(svc)
+
+    assert [c[1] for c in calls] == ["space_dissolved", "space_dissolved"]
+
+
+def test_snapshot_events_are_the_broadcast_removals():
+    """Only events that ride ``broadcast_to_space_members`` AND take their
+    recipient out of ``space_instances`` skip the membership re-read."""
+    assert federation_service_mod.DEFERRED_SEND_SNAPSHOT_EVENTS == {
+        FederationEventType.SPACE_DISSOLVED,
+        FederationEventType.SPACE_MEMBER_LEFT,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_snapshot_event_skips_a_household_banned_meanwhile(
+    caplog, no_margin
+):
+    """Snapshot delivery is "members as of broadcast time" — minus anyone the
+    space has banned since."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {"mesh-only-peer": [_cooldown(after=0.05)]}
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_DISSOLVED,
+            payload={"space_id": space_id},
+        )
+        await svc._federation_repo.ban_instance_from_space(
+            space_id, "mesh-only-peer", reason="test"
+        )
+        await _drain_deferred(svc)
+
+    assert len(calls) == 1
+    assert "banned meanwhile" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_dropping_the_rest_of_a_queue_names_what_was_lost(caplog, no_margin):
+    """After a re-send misses, the rest of the target's queue is dropped; the
+    WARNING names each lost event and its space, not just a count."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(after=0.05),
+                DeliveryResult(
+                    instance_id="mesh-only-peer", ok=False, error="no_route"
+                ),
+            ],
+        }
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        for event_type in (
+            FederationEventType.SPACE_POST_CREATED,
+            FederationEventType.SPACE_POST_UPDATED,
+            FederationEventType.SPACE_COMMENT_CREATED,
+        ):
+            await svc.broadcast_to_space_members(
+                space_id=space_id,
+                event_type=event_type,
+                payload={"space_id": space_id, "post_id": "p1"},
+            )
+        await _drain_deferred(svc)
+
+    assert len(calls) == 2  # the first send, then one re-send that missed
+    assert "dropping 2 more deferred send(s) to mesh-only-peer" in caplog.text
+    assert f"space_post_updated@{space_id}" in caplog.text
+    assert f"space_comment_created@{space_id}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_payload_is_a_private_copy(no_margin):
+    """The caller's dict may be reused or mutated after the broadcast
+    returns; the queued re-send must ship what was broadcast."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(after=0.05),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+            ],
+        }
+    )
+    payload = {"space_id": space_id, "post_id": "p1", "tags": ["a"]}
+    with patcher:
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload=payload,
+        )
+        payload["post_id"] = "mutated"
+        payload["tags"].append("b")
+        await _drain_deferred(svc)
+
+    assert calls[-1][2] == {"space_id": space_id, "post_id": "p1", "tags": ["a"]}
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_deferred_sends_and_refuses_new_ones():
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {"mesh-only-peer": [_cooldown(after=30.0), _cooldown(after=30.0)]}
+    )
+    with patcher:
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+        assert len(svc._deferred_mesh_tasks) == 1
+        await svc.stop()
+        assert svc._deferred_mesh_tasks == {}
+        assert svc._deferred_mesh_queues == {}
+        # After stop nothing new is armed: the miss is reported as terminal.
+        late = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p2"},
+        )
+        assert svc._deferred_mesh_tasks == {}
+        assert [r.error for r in late.terminal_failures] == [
+            DELIVERY_ERROR_ROUTE_COOLDOWN
+        ]
+        await svc.stop()  # idempotent
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_full_deferred_queue_is_a_terminal_miss_logged_once(
+    caplog, monkeypatch
+):
+    """A long cooldown plus a busy space cannot park unbounded work: past the
+    per-target cap the broadcast is reported as a terminal miss, and the
+    overflow is logged once for that target, not per broadcast."""
+    monkeypatch.setattr(federation_service_mod, "MAX_DEFERRED_MESH_SENDS_PER_TARGET", 1)
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {"mesh-only-peer": [_cooldown(after=30.0)]}
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        results = [
+            await svc.broadcast_to_space_members(
+                space_id=space_id,
+                event_type=FederationEventType.SPACE_POST_CREATED,
+                payload={"space_id": space_id, "post_id": f"p{i}"},
+            )
+            for i in range(3)
+        ]
+        await svc.stop()
+
+    assert len(calls) == 1
+    assert results[0].terminal_failures == ()
+    for later in results[1:]:
+        assert [r.error for r in later.terminal_failures] == [
+            DELIVERY_ERROR_MESH_DEFER_FULL
+        ]
+    assert caplog.text.count("not deferring more sends to mesh-only-peer") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_target_ceiling_is_a_terminal_miss(caplog, monkeypatch):
+    monkeypatch.setattr(federation_service_mod, "MAX_DEFERRED_MESH_TARGETS", 1)
+    svc, space_id, patcher, _calls = _broadcast_svc_with_scripted_results(
+        {
+            "peer-a": [_cooldown("peer-a", after=30.0)],
+            "peer-b": [_cooldown("peer-b", after=30.0)],
+        }
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+        await svc.stop()
+
+    assert len(result.terminal_failures) == 1
+    assert result.terminal_failures[0].error == DELIVERY_ERROR_ROUTE_COOLDOWN
+    assert "deferred-target ceiling is full" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_broadcast_to_space_members_skips_own_instance(caplog):
     """``create_space`` adds the host's OWN row to ``space_instances``, so
@@ -3740,6 +4296,42 @@ async def test_a_relay_throttle_queues_the_event_but_does_not_condemn_the_peer()
     # Durable — a throttle costs a delay, never an event.
     assert len(outbox_repo.enqueued) == 1
     # …and the household keeps its reachability state.
+    assert fed_repo.unreachable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_inbox_429_queues_the_event_but_does_not_condemn_the_peer():
+    """The peer's own inbox rate-limiting us (HTTP 429 over HTTPS) is the
+    same back-pressure as a relay 429: the peer answered, so it is up. The
+    envelope is parked in the outbox, and the household is not painted
+    unreachable over a busy minute."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    peer_kp = generate_identity_keypair()
+    inst, _ = _make_remote_instance(km, peer_kp=peer_kp)
+    await fed_repo.save_instance(inst)
+
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+    )
+    svc.attach_transport(
+        _RelayResultTransport(
+            _TransportSendResult(ok=False, via="https", status_code=429),
+        ),
+    )
+
+    result = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.USER_UPDATED,
+        payload={"user_id": "abc"},
+    )
+
+    assert result.ok is False
+    assert result.error == DELIVERY_ERROR_QUEUED
+    assert len(outbox_repo.enqueued) == 1
     assert fed_repo.unreachable_calls == []
 
 

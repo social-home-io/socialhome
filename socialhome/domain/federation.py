@@ -1200,11 +1200,26 @@ DELIVERY_ERROR_RELAY_TOO_LARGE: str = "relay_too_large"
 #: only AFTER the envelope is queued, so the outbox drainer redelivers once
 #: the direct peer is reachable again. The literal stays ``"delivery_failed"``
 #: for log consumers that already match it; the name carries the semantics.
-#: It is the one ``ok=False`` reason that is *not* terminal — the mesh path
-#: (``no_route`` / ``unknown_instance`` / ``not_confirmed`` /
-#: ``routed_send_failed`` / :data:`DELIVERY_ERROR_ROUTE_COOLDOWN`) has no
-#: outbox, so every other reason is a single-attempt, permanent loss.
+#: It and :data:`DELIVERY_ERROR_MESH_DEFERRED` are the ``ok=False`` reasons
+#: that are *not* terminal — the mesh path (``no_route`` /
+#: ``unknown_instance`` / ``not_confirmed`` / ``routed_send_failed`` /
+#: :data:`DELIVERY_ERROR_ROUTE_COOLDOWN`) has no outbox, so every other
+#: reason is a single-attempt, permanent loss.
 DELIVERY_ERROR_QUEUED: str = "delivery_failed"
+
+
+#: :attr:`DeliveryResult.error` value meaning "queued in the mesh target's
+#: deferred FIFO" — NOT a loss yet. ``FederationService.broadcast_to_space_members``
+#: reports it for a mesh-only member in its negative route cooldown, and for
+#: every later broadcast to that member while its queue is pending (so order
+#: is kept). The queue drains once after the cooldown, one attempt per item,
+#: and logs a WARNING itself for anything that misses again.
+DELIVERY_ERROR_MESH_DEFERRED: str = "mesh_retry_scheduled"
+
+#: :attr:`DeliveryResult.error` value meaning "the mesh target's deferred
+#: queue (or the global ceiling on deferred targets) is full" — a terminal
+#: miss, reported by ``broadcast_to_space_members``' WARNING.
+DELIVERY_ERROR_MESH_DEFER_FULL: str = "mesh_retry_queue_full"
 
 
 @dataclass(slots=True, frozen=True)
@@ -1277,12 +1292,17 @@ class BroadcastResult:
 
         Excludes :data:`DELIVERY_ERROR_QUEUED` — a direct-peer send that
         ``send_event`` already parked in the durable outbox and that
-        redelivers on its own. What remains is the mesh-path subset (no
-        outbox, single attempt), i.e. what a caller should warn about.
-        ``failed`` keeps counting every ``ok=False`` result regardless.
+        redelivers on its own — and :data:`DELIVERY_ERROR_MESH_DEFERRED`, a
+        mesh send with one re-send armed for after the route cooldown (that
+        retry warns on its own if it misses). What remains is the mesh-path
+        subset that got its only attempt, i.e. what a caller should warn
+        about. ``failed`` keeps counting every ``ok=False`` result regardless.
         """
         return tuple(
-            r for r in self.results if not r.ok and r.error != DELIVERY_ERROR_QUEUED
+            r
+            for r in self.results
+            if not r.ok
+            and r.error not in (DELIVERY_ERROR_QUEUED, DELIVERY_ERROR_MESH_DEFERRED)
         )
 
 
