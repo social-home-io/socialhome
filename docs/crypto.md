@@ -173,8 +173,10 @@ already pins. The relay is **anonymous**: the household sends no
 authority signature already authorizes the relay and `space_id` already
 routes it. The fan-out therefore reaches *every* subscriber (the GFS can
 no longer exclude the publisher); a subscriber that gets its own post back
-drops it on the post-id / self-echo guard. A legacy identified body from
-an older household is still accepted — verified, then discarded: it never
+drops it on the post-id / self-echo guard. A current household never sends
+the legacy identified body (a GFS that cannot prove `anonymous_publish` gets
+no publish at all); one from an older household is still accepted by the
+GFS — verified, then discarded: it never
 authorizes, is never forwarded and is never logged. Receivers take
 attribution (`origin_instance_id`) from the encrypted, authority-signed
 inner only; an outer `from_instance` from an old GFS is never read.
@@ -453,8 +455,9 @@ default). Signing bytes are `b"gfs-capabilities:v1:"` + canonical JSON
 instance id inside the signed bytes stops a block from being replayed by
 another server, the prefix stops it from being lifted onto another statement
 that key signs. The household additionally **ratchets** a verified `true`
-(in-process) so a stripped-on-path response can't downgrade it back to the
-identified relay body.
+(in-process) so a stripped-on-path response can't stop the relay mid-life.
+There is no identified fallback: a GFS without a verified `true` receives no
+publish.
 
 The suite-tag retrofit promised in earlier revisions of this doc is
 shipped — every cryptographic wire format in the federation surface

@@ -203,22 +203,22 @@ The Social Home ↔ GFS link is split by direction:
     top-level `anonymous_publish` mirror stays for readability and is
     **informational only**.
 
-    **Why signed:** without it the capability bit is strip-able on-path, and
-    stripping it doesn't fail closed — it forces the household back to the
-    legacy identified body, whose household transport signature is a
-    third-party-provable "household X relayed into space Y" artefact. The
-    downgrade *is* the attack, so it has to be authenticated away.
+    **There is no identified fallback — the household fails closed.** A
+    household never sends `from_instance` or a household transport signature
+    to a GFS, whatever `/gfs/info` says. On a COLD cache it cannot tell a
+    stripping MITM from an old GFS (both show no verifiable block), so both
+    get the same answer: **no publish**, plus one WARNING per connection
+    naming the GFS. An old GFS build therefore receives no space publishes
+    until it upgrades. An unreachable `/gfs/info` is "unknown", not "no": the
+    publish waits in the household's retry queue, which re-checks the
+    capability before every attempt and sends the identity-free body once it
+    is proven. Stripping on-path now buys an attacker a denied relay, never
+    an identity.
 
-    **What signing buys, precisely: detection and a ratchet — not
-    fail-closed.** On a COLD cache the household cannot tell a stripping MITM
-    from an old GFS, because both look identical: no verifiable block. So the
-    first `/gfs/info` after an HFS boot — and the one at pair time — still
-    falls back to the legacy identified body plus a WARNING, exactly as it
-    would against a genuinely older server. The signature makes the strip
-    *visible* (an operator sees the warning, and a tampered-but-present block
-    is named as tampering rather than age) and makes it *un-repeatable* (once
-    a valid `true` is seen, it latches — see the ratchet below). It does not
-    make a stripped response fail closed.
+    **What signing buys:** the capability cannot be *forged* toward a GFS
+    that would `403` the anonymous body, a tampered-but-present block is
+    named as tampering rather than age, and a valid `true` latches (the
+    ratchet below), so a later strip cannot stop the relay mid-life.
 
     A GFS **rollback** to a pre-capability build interacts with that latch the
     other way: a household that already latched `true` keeps sending the
@@ -234,7 +234,7 @@ The Social Home ↔ GFS link is split by direction:
     guard the cache:
 
     - **Only a verified block sets it.** Missing block, bad signature or an
-      unknown suite → `False` (legacy body) plus **one** WARNING per
+      unknown suite → `False` (no publish) plus **one** WARNING per
       connection, worded so an operator can tell "older GFS / stripped in
       transit" from "block FAILED verification against the pinned key".
     - **It ratchets up.** Once seen `true` under a valid signature, a later
@@ -589,11 +589,32 @@ sequenceDiagram
     SH->>SH: verify author_sig + self-cert + space_id binding
     SH->>SH: encrypt inner under space content key + authority-sign envelope
     SH->>G: POST /gfs/publish {space_id, event_type, payload}<br/>(no from_instance; authority-signed ciphertext)
+    opt transient failure (network, timeout, 408, 429, 5xx)
+        SH->>SH: queue {space_id, event_type, payload}<br/>(in memory, FIFO per GFS)
+        SH->>G: POST /gfs/publish — byte-identical body<br/>after backoff or the 429's Retry-After
+    end
     G->>G: verify authority sig vs pinned pubkey<br/>(the ONLY authenticator)
     G->>SUB: {type:"relay", space_id, event_type, payload}<br/>(to every subscriber)
     SUB->>SUB: re-verify authority sig + decrypt + self-cert + author_sig
     SUB->>SUB: dedupe by post_id, persist
 ```
+
+**A failed publish is retried, identity-free.** A transient failure of
+`POST /gfs/publish` (transport error, timeout, 408, 429, 5xx) is queued per
+GFS connection and re-POSTed with backoff (5 s, 30 s, 2 min, 10 min),
+honouring a 429's `Retry-After`; any other 4xx is permanent and not retried.
+The queue holds exactly `{space_id, event_type, payload}` — a retry is the
+byte-identical identity-free body and can never add `from_instance` or a
+household signature. Before each retry the household re-checks that the
+space is still published there and that the GFS has proved
+`anonymous_publish`; a GFS that does not support it gets no retry at all
+(it never got the first attempt either). A retry whose first attempt did land
+is a no-op on the GFS (the 5-minute replay dedupe) and on subscribers (the
+`post_id` dedupe). The publish and its retries ride a separate cookie-less HTTP session
+(`aiohttp.DummyCookieJar`), so a sticky load-balancer cookie from the
+household's authenticated GFS calls cannot link them. The queue is in
+memory and bounded (`services/gfs_publish_retry.py`); see
+[`architecture.md`](../architecture.md#outbox-and-retries).
 
 The HTTPS-inbox fallback for relayed `space_post_public` events is a
 follow-up; today the consumer is wired on the WebSocket path (mirroring

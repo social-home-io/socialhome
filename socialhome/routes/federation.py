@@ -120,7 +120,6 @@ _STATUS_CODE_RULES: tuple[tuple[str, int], ...] = (
     ("Timestamp skew too large", 410),  # gone — too old
     ("Replay detected", 410),  # gone — already saw this msg_id
     ("Invalid envelope signature", 403),
-    ("banned from space", 403),
     ("Failed to decrypt", 400),
     ("Decrypted payload", 400),
     ("Malformed encrypted payload", 400),

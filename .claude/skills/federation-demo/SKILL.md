@@ -707,6 +707,7 @@ The canonical chain, in order:
 python .claude/skills/federation-demo/harness.py up
 python .claude/skills/federation-demo/harness.py pair
 python .claude/skills/federation-demo/harness.py traffic
+python .claude/skills/federation-demo/harness.py calendar   # verify checks what it creates (roster, moderator, access levels)
 python .claude/skills/federation-demo/harness.py gfs-up
 python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-traffic

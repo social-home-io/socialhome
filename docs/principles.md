@@ -137,13 +137,20 @@ space-authority signature sealed inside the opaque payload; the fan-out
 frame to subscribers is identity-free too. The relaying household's
 identity is not **required, stored, logged or forwarded**.
 
-The fallback to the older identified body is itself authenticated away: a
-household relays identity-free only while the GFS's `GET /gfs/info`
-capability block verifies against the GFS identity key that household pinned
-at pair time, the answer **ratchets** (a capability cannot be un-advertised
-mid-life), and a public GFS URL must be `https://`. Stripping the capability
-on-path would otherwise force the identified body back — whose household
-signature is exactly the third-party-provable artefact this section removes.
+There is **no identified fallback on the relay**: a household never sends
+`from_instance` or a household signature on `POST /gfs/publish`, and the
+publish rides a separate cookie-less HTTP session so no load-balancer cookie
+from its authenticated GFS calls links the two. (Those other calls are
+identified by design and still are: pairing, the GFS WebSocket, appeals,
+signaling-node requests, signed subscribe/unsubscribe.) It relays only to a GFS
+whose `GET /gfs/info` capability block proves `anonymous_publish` under the
+GFS identity key the household pinned at pair time (the answer **ratchets** —
+a capability cannot be un-advertised mid-life — and a public GFS URL must be
+`https://`). A GFS that cannot prove it — an older build, or a response
+stripped on-path — gets no space publishes at all until it upgrades, with one
+WARNING per connection; an unreachable one gets the publish later, from the
+household's retry queue, once it proves the capability. Fail closed: a strip
+costs a relay, never an identity.
 
 The honest residual: this is not "the GFS cannot learn it". A household
 normally holds an authenticated WebSocket to the same server from the same

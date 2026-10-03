@@ -17,28 +17,26 @@ The pairing flow (simpler than HFS):
    GFS requires admin approval).
 
 Relaying space content (:meth:`GfsConnectionService.publish_space_event`) is
-**identity-free by default**: a connection server must not learn WHICH
-household relayed a public/global-space event. ``GET /gfs/info`` is the
-capability channel for the GFS↔HFS leg (it has no ``proto_version``
-negotiation), so a GFS advertising ``anonymous_publish`` receives
-``{space_id, event_type, payload}`` and authorizes the relay purely on the
-space-authority signature inside the opaque payload. A GFS that did not
-advertise it — an older build, or one whose ``/gfs/info`` was unreachable —
-still gets the legacy identified body, once per connection with a WARNING:
-unknown → legacy is the safe default, because the legacy body is accepted by
-both an old and a new GFS while the identity-free one would 403 on an old one.
+**always identity-free**: a connection server must not learn WHICH household
+relayed a public/global-space event. ``GET /gfs/info`` is the capability
+channel for the GFS↔HFS leg (it has no ``proto_version`` negotiation), so a
+GFS proving ``anonymous_publish`` receives ``{space_id, event_type,
+payload}`` and authorizes the relay purely on the space-authority signature
+inside the opaque payload. There is no identified fallback any more: a GFS
+whose ``/gfs/info`` is unreachable gets the publish later, from the retry
+queue, once it proves the capability; a GFS that answers without it (an
+older build) gets no space publishes at all until it upgrades, with one
+WARNING per connection.
 
-That fallback is also the attack surface, so the capability must be
-*authenticated*, not merely read:
+The capability is *authenticated*, not merely read — otherwise an on-path
+attacker could fake it toward a GFS that cannot authorize the anonymous
+body, or strip it to deny the relay:
 
 * **Only a signed block counts.** The capability is trusted only when
   ``capabilities`` + ``capabilities_sig`` + ``capabilities_sig_suite`` verify
   against the GFS identity key this household pinned at pair time
   (:mod:`socialhome.capabilities_sig`). The bare top-level
-  ``anonymous_publish`` mirror is informational — acting on it would let an
-  on-path attacker strip the flag and force the legacy body, whose household
-  transport signature is a third-party-provable "household X relayed into
-  space Y" artefact.
+  ``anonymous_publish`` mirror is informational and never acted on.
 * **The cache ratchets up.** Once verified, a later fetch without the block
   does not downgrade it for the rest of the process — a GFS cannot lose a
   capability its build has.
@@ -56,6 +54,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
 import aiohttp
 
@@ -71,6 +70,12 @@ from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from .gfs_publish_retry import (
+    GfsPublish,
+    GfsPublishRetryQueue,
+    PublishOutcome,
+    classify_publish_status,
+)
 from .space_authority_pin import owner_authority_cert
 
 log = logging.getLogger(__name__)
@@ -88,12 +93,12 @@ MAX_REMOTE_DETAIL_CHARS = 200
 _REMOTE_DETAIL_READ_BYTES = 8192
 
 #: How long a FAILED ``GET /gfs/info`` probe suppresses the next one, in
-#: seconds. The answer itself is still never cached as ``False`` — the privacy
-#: reasoning holds: an unreachable descriptor must not downgrade a household
-#: to the identified relay body for the rest of the process. This TTL only
-#: stops the *stall*: a GFS whose ``/gfs/info`` is down while ``/gfs/publish``
-#: is up otherwise cost a full 10 s connect timeout on EVERY publish. Short
-#: enough that a GFS coming back is picked up within seconds.
+#: seconds. The answer itself is never cached as ``False``: an unreachable
+#: descriptor is "unknown", so publishes wait in the retry queue instead of
+#: being skipped for the rest of the process. This TTL only stops the
+#: *stall*: a GFS whose ``/gfs/info`` is down otherwise cost a full 10 s
+#: connect timeout on EVERY publish. Short enough that a GFS coming back is
+#: picked up within seconds.
 GFS_INFO_NEGATIVE_TTL_S: float = 30.0
 
 
@@ -146,9 +151,8 @@ def _require_secure_url(url: str, *, field: str) -> None:
     ``GET /gfs/info`` carries the signed capability block and the TOFU-pinned
     GFS public key; ``POST /gfs/publish`` carries space content. Over plain
     ``http://`` on the public internet an on-path attacker can strip the
-    capability block (forcing every relay back to the identified body, which
-    carries a household-signed "household X relayed into space Y" artefact)
-    or swap the pinned key on the first fetch. A LAN / loopback GFS — how the
+    capability block (which stops every relay to that GFS) or swap the pinned
+    key on the first fetch. A LAN / loopback GFS — how the
     federation demo harness and most home deployments run — keeps plain HTTP:
     there is no public path to sit on and usually no certificate to serve.
 
@@ -184,6 +188,8 @@ class GfsConnectionService:
         "_invite_links",
         "_authority_rotation",
         "_rotation_warned",
+        "_publish_retry",
+        "_publish_client",
     )
 
     def __init__(
@@ -191,9 +197,17 @@ class GfsConnectionService:
         repo: AbstractGfsConnectionRepo,
         *,
         http_client: aiohttp.ClientSession | None = None,
+        publish_client: aiohttp.ClientSession | None = None,
     ) -> None:
         self._repo = repo
         self._http_client = http_client
+        # The session ``POST /gfs/publish`` (and its retries) rides — a
+        # SEPARATE, cookie-less one (``aiohttp.DummyCookieJar``), so a sticky
+        # load-balancer cookie the GFS set on this household's authenticated
+        # calls (pairing, WS, signed queries) can never be replayed on an
+        # anonymous publish and link it back. No fallback to the shared
+        # session: without it, nothing is published.
+        self._publish_client = publish_client
         # Attached lazily after construction (the space repo + identity
         # aren't available at the same wiring step as the GFS-connection
         # repo). When unset, ``publish_space`` falls back to a metadata-
@@ -210,10 +224,10 @@ class GfsConnectionService:
         # go stale the moment an operator upgrades their GFS. It is
         # (re)learned from the SIGNED capability block on ``GET /gfs/info``
         # at pair time and on every GFS-WS (re)connect, plus once on demand
-        # when a publish finds it unknown. Missing key = unknown → the legacy
-        # body, which BOTH an old and a new GFS accept, so the safe default
-        # can never strand a household. Once ``True`` under a verified
-        # signature the entry RATCHETS (see :meth:`_apply_capability`).
+        # when a publish finds it unknown. Only a verified ``True`` lets a
+        # publish go out; anything else sends nothing (never an identified
+        # body). Once ``True`` under a verified signature the entry RATCHETS
+        # (see :meth:`_apply_capability`).
         self._anon_publish: dict[str, bool] = {}
         # Connections already warned about the privacy downgrade — one
         # WARNING per connection per process, not one per publish.
@@ -243,6 +257,17 @@ class GfsConnectionService:
         # relays — so a household publishing a cert there warns, once.
         self._authority_rotation: dict[str, bool] = {}
         self._rotation_warned: set[str] = set()
+        # Failed ``POST /gfs/publish`` calls wait here for a retry —
+        # identity-free bodies only, in memory, bounded (see the module).
+        self._publish_retry = GfsPublishRetryQueue(self._retry_publish)
+
+    async def start(self) -> None:
+        """Start the GFS publish retry loop (app ``on_startup``)."""
+        await self._publish_retry.start()
+
+    async def stop(self) -> None:
+        """Stop the GFS publish retry loop (app ``on_cleanup``)."""
+        await self._publish_retry.stop()
 
     def attach_publish_context(
         self,
@@ -279,6 +304,15 @@ class GfsConnectionService:
         """
         if self._http_client is None:
             self._http_client = session
+
+    def attach_publish_session(self, session: aiohttp.ClientSession) -> None:
+        """Provide the cookie-less publish session (``app._on_startup``)."""
+        if self._publish_client is None:
+            self._publish_client = session
+
+    def publish_client(self) -> aiohttp.ClientSession | None:
+        """The cookie-less session ``/gfs/publish`` rides (app cleanup closes it)."""
+        return self._publish_client
 
     def client(self) -> aiohttp.ClientSession:
         """The shared session, for the sibling services that relay through a
@@ -481,10 +515,8 @@ class GfsConnectionService:
         """Update the capability cache for *conn* from a ``/gfs/info`` body.
 
         The bare top-level ``anonymous_publish`` flag is IGNORED: it rides an
-        unauthenticated endpoint, so acting on it would let an on-path
-        attacker strip it and force every relay back to the identified legacy
-        body — the household-signed, third-party-provable artefact the
-        anonymous relay exists to avoid. Only the signed block counts.
+        unauthenticated endpoint, so an on-path attacker could forge or strip
+        it. Only the signed block counts.
         """
         self._apply_capability(conn, self._verified_anonymous_publish(conn, info))
 
@@ -552,8 +584,8 @@ class GfsConnectionService:
         is a property of its build, and builds don't travel backwards. So once
         a connection has been seen advertising it under a VALID signature,
         a later fetch that lacks it is an attack (or a broken proxy) and is
-        ignored for the rest of the process rather than silently downgrading
-        every future relay to the identified body. The ratchet is RAM-only:
+        ignored for the rest of the process rather than silently stopping
+        every future relay to that GFS. The ratchet is RAM-only:
         a restart legitimately starts from "unknown" again.
         """
         if verified:
@@ -583,8 +615,8 @@ class GfsConnectionService:
             return
         self._caps_warned.add(conn.id)
         log.warning(
-            "GFS %r (%s) %s. Relays to it keep carrying this household's "
-            "instance id until a verifiable capability block appears.",
+            "GFS %r (%s) %s. No space events are relayed to it until a "
+            "verifiable capability block appears.",
             conn.display_name,
             conn.inbox_url,
             detail,
@@ -595,9 +627,9 @@ class GfsConnectionService:
 
         Answers from the cache when it is warm (filled at pair time and on
         every WS reconnect). On a cold miss — the first publish after a boot
-        that hasn't seen a reconnect yet — probe ``/gfs/info`` ONCE rather
-        than spuriously downgrading to the identified body. An unreachable
-        GFS answers ``False`` for this publish only, and its failure is
+        that hasn't seen a reconnect yet — probe ``/gfs/info`` ONCE. An
+        unreachable GFS answers ``False`` (and lands in ``_info_failed_at``,
+        which :meth:`_publish_capability` reads as "unknown"), and its failure is
         suppressed for :data:`GFS_INFO_NEGATIVE_TTL_S` so a burst of publishes
         doesn't pay the connect timeout each time.
         """
@@ -1359,7 +1391,6 @@ class GfsConnectionService:
         space_id: str,
         event_type: str,
         payload: dict,
-        from_instance: str,
     ) -> int:
         """Relay a single space-content event to a space's GFS subscribers.
 
@@ -1370,123 +1401,181 @@ class GfsConnectionService:
         the GFS stays content-blind and authorizes the relay via the embedded
         space-authority signature (see :class:`SpacePublicOutbound`).
 
-        **The body shape depends on what the GFS advertised.** A GFS whose
-        ``GET /gfs/info`` carries ``anonymous_publish: true`` authorizes the
-        relay on that embedded space-authority signature ALONE, so it gets the
-        identity-free body — exactly ``{space_id, event_type, payload}``, with
-        no ``from_instance`` and no household transport signature. That is the
-        point of the change: a connection server must not learn WHICH
-        household relayed a public/global-space event.
+        **The body is always identity-free** — exactly ``{space_id,
+        event_type, payload}``, never ``from_instance`` or a household
+        signature: a connection server must not learn WHICH household relayed
+        a public/global-space event. There is no identified fallback, so the
+        method takes no household identity at all. What a GFS gets depends
+        on what its SIGNED ``GET /gfs/info`` capability block proves
+        (:meth:`_publish_capability`):
 
-        A GFS that did not advertise it (an older build, or one whose
-        ``/gfs/info`` we couldn't reach) still gets the legacy
-        ``{space_id, event_type, payload, from_instance, signature}`` body,
-        where ``signature`` is THIS household's Ed25519 *transport* signature
-        over the canonical body. Unknown → legacy is the safe default: the
-        legacy body is accepted by BOTH an old and a new GFS, while the
-        identity-free one would 403 on an old server. The privacy downgrade is
-        logged once per connection (:meth:`_warn_identified_publish`).
+        * ``anonymous_publish`` proven → the POST.
+        * ``/gfs/info`` unreachable (cold cache, GFS down) → nothing yet;
+          the publish waits in the retry queue, which re-checks the
+          capability before every attempt.
+        * reachable but not proven (an older build, or a stripped / unsigned
+          block) → skipped, with one WARNING per connection per process
+          (:meth:`_warn_publish_unsupported`). Such a GFS gets no space
+          publishes until it upgrades.
 
-        *from_instance* is therefore only used for the legacy body; on the
-        anonymous path it is never serialized.
-
-        Fail-closed: with no signing identity wired, nothing is sent (returns
-        ``0`` — the legacy fallback would be unsignable, and a household with
-        no identity has nothing to relay). A per-GFS transport/HTTP failure is
-        logged and skipped so one unreachable server doesn't abort the
-        fan-out. Returns the number of GFS instances the event was accepted by.
+        A per-GFS failure never aborts the fan-out. A *transient* one
+        (transport error, timeout, 408, 429, 5xx) is queued for a backed-off
+        retry, honouring a 429's ``Retry-After``
+        (:class:`~socialhome.services.gfs_publish_retry.GfsPublishRetryQueue`);
+        a *permanent* one (any other 4xx) is logged and dropped. While a GFS
+        has retries pending, a new publish to it queues behind them so it
+        cannot overtake. Returns the number of GFS instances the event was
+        accepted by on this first attempt.
         """
-        if self._http_client is None or not self._own_signing_key:
+        if (
+            self._http_client is None
+            or self._publish_client is None
+            or not self._own_signing_key
+        ):
+            # No publish context (``attach_publish_context`` / the cookie-less
+            # publish session) — nothing to relay with. Nothing is signed
+            # with the identity here.
             log.warning(
-                "publish_space_event: no signing identity wired — "
-                "dropping relay for space %s",
+                "publish_space_event: publish context not wired — dropping"
+                " relay for space %s",
                 space_id,
             )
             return 0
         conns = await self._repo.list_gfs_for_space(space_id)
         if not conns:
             return 0
-        anonymous_body = {
-            "space_id": space_id,
-            "event_type": event_type,
-            "payload": payload,
-        }
-        legacy_body: dict | None = None
+        item = GfsPublish(space_id=space_id, event_type=event_type, payload=payload)
         delivered = 0
         for conn in conns:
             if conn.status != "active":
                 continue
-            if await self._anonymous_publish_supported(conn):
-                body = anonymous_body
-            else:
-                self._warn_identified_publish(conn)
-                if legacy_body is None:
-                    legacy_body = self._legacy_publish_body(
-                        space_id,
-                        event_type,
-                        payload,
-                        from_instance,
-                    )
-                body = legacy_body
-            url = f"{conn.inbox_url}/gfs/publish"
-            try:
-                async with self._http_client.post(
-                    url,
-                    allow_redirects=False,
-                    json=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status < 300:
-                        delivered += 1
-                    else:
-                        log.warning(
-                            "publish_space_event: GFS %s rejected relay "
-                            "for space %s — HTTP %d",
-                            conn.id,
-                            space_id,
-                            resp.status,
-                        )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                log.warning(
-                    "publish_space_event: GFS %s relay failed for space %s: %s",
-                    conn.id,
-                    space_id,
-                    exc,
-                )
+            if self._publish_retry.pending(conn.id):
+                # Earlier publishes to this GFS are waiting for a retry:
+                # join them rather than overtake (subscribers see order).
+                self._queue_publish_retry(conn, item, None)
+                continue
+            capability = await self._publish_capability(conn)
+            if capability == "unknown":
+                self._queue_publish_retry(conn, item, None)
+                continue
+            if capability == "unsupported":
+                self._warn_publish_unsupported(conn)
+                continue
+            outcome = await self._post_publish(conn, item.body(), space_id=space_id)
+            if outcome.kind == "delivered":
+                delivered += 1
+            elif outcome.kind == "transient":
+                self._queue_publish_retry(conn, item, outcome.retry_after_s)
         return delivered
 
-    def _legacy_publish_body(
-        self,
-        space_id: str,
-        event_type: str,
-        payload: dict,
-        from_instance: str,
-    ) -> dict:
-        """The pre-anonymous-publish relay body, byte-for-byte as before.
+    async def _publish_capability(
+        self, conn: GfsConnection
+    ) -> Literal["anonymous", "unsupported", "unknown"]:
+        """Whether ``conn`` may be sent the identity-free relay body.
 
-        ``{space_id, event_type, payload, from_instance}`` plus this
-        household's Ed25519 transport ``signature`` over their canonical JSON.
-        Only sent to a GFS that did not advertise ``anonymous_publish`` — that
-        server can't authorize the relay without it.
+        ``anonymous`` — its signed capability block proved
+        ``anonymous_publish``. ``unknown`` — ``/gfs/info`` could not be
+        reached (the negative TTL is live), so ask again later.
+        ``unsupported`` — it answered without the proof.
         """
-        body = {
-            "space_id": space_id,
-            "event_type": event_type,
-            "payload": payload,
-            "from_instance": from_instance,
-        }
-        canonical = json.dumps(
-            body,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        body["signature"] = b64url_encode(
-            sign_ed25519(self._own_signing_key, canonical),
-        )
-        return body
+        if await self._anonymous_publish_supported(conn):
+            return "anonymous"
+        # "unknown" only while there is no answer at all: a GFS already seen
+        # without the proof stays "unsupported" even if a later refresh
+        # blipped, or its publishes would wait in the queue forever.
+        if self._anon_publish.get(conn.id) is None and conn.id in self._info_failed_at:
+            return "unknown"
+        return "unsupported"
 
-    def _warn_identified_publish(self, conn: GfsConnection) -> None:
-        """Warn ONCE per connection per process about the privacy downgrade.
+    async def _post_publish(
+        self, conn: GfsConnection, body: dict, *, space_id: str
+    ) -> PublishOutcome:
+        """One ``POST /gfs/publish`` of ``body`` to ``conn``, classified."""
+        assert self._publish_client is not None
+        url = f"{conn.inbox_url}/gfs/publish"
+        try:
+            async with self._publish_client.post(
+                url,
+                allow_redirects=False,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                outcome = classify_publish_status(
+                    resp.status, resp.headers.get("Retry-After")
+                )
+                if outcome.kind != "delivered":
+                    log.warning(
+                        "publish_space_event: GFS %s rejected relay for space"
+                        " %s — HTTP %d (%s)",
+                        conn.id,
+                        space_id,
+                        resp.status,
+                        outcome.kind,
+                    )
+                return outcome
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning(
+                "publish_space_event: GFS %s relay failed for space %s: %s",
+                conn.id,
+                space_id,
+                exc or type(exc).__name__,
+            )
+            return PublishOutcome.transient()
+
+    def _queue_publish_retry(
+        self,
+        conn: GfsConnection,
+        item: GfsPublish,
+        retry_after_s: float | None,
+    ) -> None:
+        if not self._publish_retry.enqueue(conn.id, item, retry_after_s=retry_after_s):
+            log.warning(
+                "publish_space_event: %s@%s to GFS %s is lost — the retry"
+                " queue refused it",
+                item.event_type,
+                item.space_id,
+                conn.id,
+            )
+
+    async def _retry_publish(self, conn_id: str, item: GfsPublish) -> PublishOutcome:
+        """One retry of ``item`` to ``conn_id`` — the retry queue's sender.
+
+        Re-reads before every attempt: the space must still be published
+        to that connection and the connection active, or the item is
+        dropped (the owner withdrew it). The body is the identity-free
+        ``{space_id, event_type, payload}`` and goes only to a GFS that has
+        proved ``anonymous_publish`` (:meth:`_publish_capability`): while
+        ``/gfs/info`` is unreachable the item waits; a GFS that answers
+        without the proof has it dropped.
+        """
+        if self._http_client is None or self._publish_client is None:
+            return PublishOutcome.permanent()
+        conn = next(
+            (
+                c
+                for c in await self._repo.list_gfs_for_space(item.space_id)
+                if c.id == conn_id
+            ),
+            None,
+        )
+        if conn is None or conn.status != "active":
+            log.info(
+                "publish retry: %s@%s is no longer published to GFS %s — dropping it",
+                item.event_type,
+                item.space_id,
+                conn_id,
+            )
+            return PublishOutcome.permanent()
+        capability = await self._publish_capability(conn)
+        if capability == "unknown":
+            return PublishOutcome.transient()
+        if capability == "unsupported":
+            self._warn_publish_unsupported(conn)
+            return PublishOutcome.permanent()
+        return await self._post_publish(conn, item.body(), space_id=item.space_id)
+
+    def _warn_publish_unsupported(self, conn: GfsConnection) -> None:
+        """Warn ONCE per connection per process that a GFS gets no publishes.
 
         A household posting fifty times must not emit fifty warnings, so the
         connection id lands in ``_anon_warned`` on the first one. The message
@@ -1498,10 +1587,10 @@ class GfsConnectionService:
             return
         self._anon_warned.add(conn.id)
         log.warning(
-            "GFS %r (%s) does not advertise anonymous_publish — relays to it "
-            "still carry this household's instance id, so that connection "
-            "server learns which household relayed each public-space event. "
-            "Ask its operator to upgrade.",
+            "GFS %r (%s) does not prove anonymous_publish in a signed"
+            " capability block — space events are NOT relayed to it (that"
+            " would tell the connection server which household relayed"
+            " them). Ask its operator to upgrade.",
             conn.display_name,
             conn.inbox_url,
         )

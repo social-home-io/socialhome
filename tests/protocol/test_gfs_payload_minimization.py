@@ -25,11 +25,13 @@ shape is the one below.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+import aiohttp
 import pytest
 
 from socialhome.authority_sig import (
@@ -145,6 +147,7 @@ KEY_HANDOFF_CLEARTEXT_KEYS: frozenset[str] = frozenset(
 class _RecordingResp:
     def __init__(self) -> None:
         self.status = 200
+        self.headers: dict[str, str] = {}
 
     async def __aenter__(self):
         return self
@@ -181,15 +184,12 @@ class _CaptureGfs:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def publish_space_event(
-        self, *, space_id, event_type, payload, from_instance
-    ) -> int:
+    async def publish_space_event(self, *, space_id, event_type, payload) -> int:
         self.calls.append(
             {
                 "space_id": space_id,
                 "event_type": event_type,
                 "payload": payload,
-                "from_instance": from_instance,
             }
         )
         return 1
@@ -433,7 +433,7 @@ async def _publish_anonymously(tmp_dir, payload: dict, event_type: str) -> dict:
         )
         await repo.publish_space(SPACE_ID, "gfs-1")
         session = _RecordingSession()
-        svc = GfsConnectionService(repo, http_client=session)
+        svc = GfsConnectionService(repo, http_client=session, publish_client=session)
         svc.attach_publish_context(
             space_repo=None,
             own_instance_id=PUBLISHER_INSTANCE,
@@ -445,7 +445,6 @@ async def _publish_anonymously(tmp_dir, payload: dict, event_type: str) -> dict:
             space_id=SPACE_ID,
             event_type=event_type,
             payload=payload,
-            from_instance=PUBLISHER_INSTANCE,
         )
         assert delivered == 1
         assert len(session.posts) == 1
@@ -467,6 +466,107 @@ async def test_publish_body_is_exactly_the_three_anonymous_keys(tmp_dir, post_pa
         tmp_dir, post_payload, AUTHORITY_EVENT_SPACE_POST_PUBLIC
     )
     assert set(body) == {"space_id", "event_type", "payload"}
+
+
+class _CapabilitySession:
+    """A GFS whose ``/gfs/info`` is in one of the capability states a
+    household can meet: ``old`` (no capability block), ``stripped`` (the
+    bare flag without its signature), ``down`` (unreachable, then back as
+    ``old``). Records every ``/gfs/publish`` body."""
+
+    def __init__(self, state: str) -> None:
+        self.state = state
+        self.posts: list[dict] = []
+
+    def get(self, url, **_kw):
+        if self.state == "down":
+            raise aiohttp.ClientError("gfs down")
+        info = {"server_name": "GFS"}
+        if self.state == "stripped":
+            info["anonymous_publish"] = True
+        return _InfoResp(info)
+
+    def post(self, url, *, json=None, **_kw):
+        self.posts.append(json or {})
+        return _RecordingResp()
+
+
+class _InfoResp(_RecordingResp):
+    def __init__(self, body: dict) -> None:
+        super().__init__()
+        self._body = body
+
+    async def json(self, **_kw):
+        return self._body
+
+
+_IDENTITY_KEYS = frozenset({"from_instance", "signature", "ts", "instance_id"})
+
+
+@pytest.mark.parametrize("state", ["old", "stripped", "down", "anonymous"])
+async def test_no_publish_body_ever_carries_identity(
+    tmp_dir, post_payload, monkeypatch, state
+):
+    """Whatever the GFS advertises — nothing, a stripped flag, an
+    unreachable ``/gfs/info``, or the signed capability — no
+    ``/gfs/publish`` body the household sends, first attempt or retry,
+    carries ``from_instance``, a household signature or any other identity
+    field. There is no identified fallback left to reach."""
+    from socialhome.services import gfs_publish_retry
+
+    monkeypatch.setattr(
+        gfs_publish_retry, "GFS_PUBLISH_RETRY_BACKOFF_S", (0.0, 0.0, 0.0, 0.0)
+    )
+    db = AsyncDatabase(tmp_dir / "caps.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        repo = SqliteGfsConnectionRepo(db)
+        await repo.save(
+            GfsConnection(
+                id="gfs-1",
+                gfs_instance_id="gfs-inst",
+                display_name="GFS",
+                public_key="ab" * 32,
+                inbox_url="https://gfs.example",
+                status="active",
+                paired_at="2026-01-01T00:00:00+00:00",
+            )
+        )
+        await repo.publish_space(SPACE_ID, "gfs-1")
+        session = _CapabilitySession(state)
+        svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+        svc.attach_publish_context(
+            space_repo=None,
+            own_instance_id=PUBLISHER_INSTANCE,
+            own_signing_key=generate_identity_keypair().private_key,
+        )
+        if state == "anonymous":
+            svc._anon_publish["gfs-1"] = True  # noqa: SLF001
+        await svc.start()
+        await svc.publish_space_event(
+            space_id=SPACE_ID,
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            payload=post_payload,
+        )
+        if state == "down":
+            session.state = "old"  # back, but still without the capability
+            svc._info_failed_at.clear()  # noqa: SLF001
+        for _ in range(100):
+            if not svc._publish_retry._queues:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.01)
+        await svc.stop()
+    finally:
+        await db.shutdown()
+
+    if state == "anonymous":
+        assert len(session.posts) == 1
+    else:
+        assert session.posts == []
+    for body in session.posts:
+        assert set(body) == {"space_id", "event_type", "payload"}
+        assert not _IDENTITY_KEYS & set(body)
+        assert PUBLISHER_INSTANCE not in json.dumps(body)
 
 
 async def test_publish_body_leaks_no_identity_or_content(

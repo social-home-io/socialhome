@@ -1179,6 +1179,9 @@ class _Route:
     async def invalidate(self, instance_id):
         return None
 
+    def add_route_learned_listener(self, listener):
+        return None
+
 
 class _Routed:
     def __init__(self) -> None:

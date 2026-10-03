@@ -219,6 +219,7 @@ class RouteDiscoveryService:
         "_inflight",
         "_negative_until",
         "_origin_requests",
+        "_route_learned_listeners",
     )
 
     def __init__(
@@ -282,6 +283,9 @@ class RouteDiscoveryService:
         #: SPACE_ROUTE_FOUND, and cache the priv so the inbound
         #: SPACE_ROUTED carrying the matching pub can be unsealed.
         self._target_eph_state: dict[str, tuple[str, float]] = {}
+        #: Called with the target id whenever a route to it is cached
+        #: (:meth:`add_route_learned_listener`).
+        self._route_learned_listeners: list[Callable[[str], None]] = []
 
     # ── Attach ─────────────────────────────────────────────────────────
 
@@ -296,6 +300,18 @@ class RouteDiscoveryService:
             FederationEventType.SPACE_ROUTE_FOUND,
             self._on_route_found,
         )
+
+    def add_route_learned_listener(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener(target_instance_id)`` whenever a route is cached.
+
+        Fires on a fresh discovery and on a late ``SPACE_ROUTE_FOUND`` that
+        warms the cache — not on a cache hit. The listener must be cheap and
+        synchronous; one that raises is logged and does not stop the others.
+        :meth:`FederationService.attach_mesh` registers
+        :meth:`FederationService.on_route_learned` so a broadcast deferred
+        for lack of a route is re-sent the moment one exists.
+        """
+        self._route_learned_listeners.append(listener)
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -521,6 +537,15 @@ class RouteDiscoveryService:
             expires_at=anchored_at + self._cache_ttl_s,
         )
         self._negative_until.pop(target_instance_id, None)
+        for listener in self._route_learned_listeners:
+            try:
+                listener(target_instance_id)
+            except Exception:
+                log.warning(
+                    "route discovery: route-learned listener failed for %s",
+                    target_instance_id,
+                    exc_info=True,
+                )
 
     def cached_target_identity_pk(self, target_instance_id: str) -> str | None:
         """Hex identity pk pinned on the live cached route to

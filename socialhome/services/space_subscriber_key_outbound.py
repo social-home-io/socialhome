@@ -283,7 +283,6 @@ class SpaceSubscriberKeyOutbound:
                 space_id=space_id,
                 event_type=AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
                 payload=envelope,
-                from_instance=self._own_instance_id,
             )
         except Exception:
             log.exception(

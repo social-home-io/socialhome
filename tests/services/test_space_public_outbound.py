@@ -51,15 +51,12 @@ class _CaptureGfs:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def publish_space_event(
-        self, *, space_id, event_type, payload, from_instance
-    ) -> int:
+    async def publish_space_event(self, *, space_id, event_type, payload) -> int:
         self.calls.append(
             {
                 "space_id": space_id,
                 "event_type": event_type,
                 "payload": payload,
-                "from_instance": from_instance,
             }
         )
         return 1
@@ -158,7 +155,7 @@ async def test_public_post_relayed_encrypted_and_authority_signed(env):
     assert len(env["gfs"].calls) == 1
     call = env["gfs"].calls[0]
     assert call["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    assert call["from_instance"] == env["own_iid"]
+    assert "from_instance" not in call
     envelope = call["payload"]
     # GFS-blind: wire envelope carries ONLY routing + ciphertext + sig.
     assert set(envelope) == {
@@ -285,7 +282,7 @@ async def test_remote_authored_relay_happy_path(env):
     assert len(env["gfs"].calls) == 1
     call = env["gfs"].calls[0]
     assert call["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-    assert call["from_instance"] == env["own_iid"]
+    assert "from_instance" not in call
     envelope = call["payload"]
     assert set(envelope) == {
         "space_id",

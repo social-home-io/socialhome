@@ -754,8 +754,13 @@ one decision, `federation/space_scope.archive_refusal`, shared by:
   of a `SPACE_ROUTED` unwrap, a held write replayed when its seat lands,
   and the §25.6 resume replay (which re-sends live events). It runs
   **before** `check_space_writer`, so such a write is refused, never held.
-  The envelope is answered `{"status": "ok", "dropped": "archived-space"}`
-  so the sender's outbox stops redelivering; the refusal is logged at INFO;
+  The envelope is answered plain `{"status": "ok"}` — the same body every
+  accepted envelope gets, dispatched or dropped — so the sender's outbox
+  stops redelivering without learning that the space exists, is hosted
+  here, or is archived (a distinct `dropped` reason was an oracle to any
+  signed sender). The refusal is logged at INFO; a member's page proposal
+  still gets its `refused/archived` answer, sent only to a household with a
+  live writer seat;
 - the §25.6 sync receiver (`SpaceSyncReceiver._admit`) for every resource
   except the roster (`ROSTER_RESOURCES`: `members`, `bans`,
   `member_pictures`);

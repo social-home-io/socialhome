@@ -393,38 +393,92 @@ one tick). A 429 still costs an attempt, so a
 peer that throttles forever is bounded exactly like an offline one —
 `MAX_ATTEMPTS`, the 7-day TTL and the per-peer pending cap — and a 429 never
 paints the household unreachable. Every other 4xx (410 replay / skew, 403
-banned / bad signature, 400 malformed) is permanent and dropped; 404 is
+bad signature, 400 malformed) is permanent and dropped; 404 is
 retried briefly for the pair-window race (`PAIR_WINDOW_404_ATTEMPTS`).
 Treating 429 as permanent once turned a single echo storm into the silent
 loss of unrelated envelopes (an `UNPAIR`, a replayed highlight).
 
 **The mesh path has no outbox.** A space broadcast to a mesh-only member
 (`broadcast_to_space_members` → `send_with_mesh_fallback` →
-`SPACE_ROUTED`) gets one attempt. The one exception is `route_cooldown`:
-route discovery was inside its 30 s negative cooldown, so the attempt never
-reached the wire. The broadcast then opens a **per-target FIFO** for that
-member and reports it as `mesh_retry_scheduled` (not a terminal failure).
-While the FIFO exists, every later broadcast to the same member queues
-behind it instead of overtaking, so the member sees events in broadcast
-order. One task per target wakes after the cooldown plus a 5 s margin and
-sends the queue in order, one attempt per item, on a private copy of the
-exact payload variant that member was sent (legacy / relay variants
-included). Before each send it re-reads membership, so a household that left
-meanwhile gets no space content (the drop logs a WARNING) — except for the
-two broadcast events that remove their own recipient (`SPACE_DISSOLVED`,
+`SPACE_ROUTED`) that the mesh cannot reach right now is **deferred, not
+lost**. Three misses qualify (`DEFERRABLE_MESH_ERRORS`): `route_cooldown`
+(route discovery was inside its 30 s negative cooldown, so the attempt never
+reached the wire), `no_route` (a real probe found nothing — a relay may come
+back, or the member reconnect, seconds later) and `routed_send_failed` (a
+route was found but the relay failed on the cached and on a freshly probed
+path). The broadcast then opens a **per-target FIFO** for that member and
+reports it as `mesh_retry_scheduled` (not a terminal failure). While the
+FIFO exists, every later broadcast to the same member queues behind it
+instead of overtaking, so the member sees events in broadcast order. One
+task per target sends the queue in order from the head, on a private copy of
+the exact payload variant that member was sent (legacy / relay variants
+included). A delivered item is popped and the next goes; a deferrable miss
+keeps the head first and **backs off**: re-send *n* waits at least
+`MESH_DEFERRED_RETRY_BACKOFF_S[n-1]` (0 s, 60 s, 120 s, 240 s), never inside
+the target's negative route cooldown, plus a 5 s margin — roughly 35 s,
+65 s, 125 s, 245 s after a `no_route`, ~8 minutes in all. Each re-send after
+a cooldown is a fresh route discovery. A **route learned** for that member
+(`RouteDiscoveryService.add_route_learned_listener` →
+`FederationService.on_route_learned`, fired whenever a route is cached,
+including a late `SPACE_ROUTE_FOUND`) or the member **coming back online**
+(`ConnectionReachable` for that household — it is a direct peer again)
+cuts the current wait short, so the queue drains the moment a path exists. Progress resets the budget (it is per
+outage); after four re-sends in a row miss, the whole queue is given up with
+one WARNING naming each lost event and its space. Before each send it
+re-reads membership, so a household that left or was removed meanwhile gets
+no space content (the drop logs a WARNING) — except for the two broadcast
+events that remove their own recipient (`SPACE_DISSOLVED`,
 `SPACE_MEMBER_LEFT`), which go to the members as they were at broadcast time
 minus any household banned since: `dissolve_space` purges `space_instances`
 right after its broadcast, and a re-read would lose the very event that tells
-the member. A mesh miss on the re-send drops the rest of that target's queue
-with one WARNING naming each lost event and space (the route is still down);
-an exception costs only that item. Concurrent broadcasts that hit the cooldown
-together join the same queue — one queue and one drain task per target, ever. Bounds: 64 queued sends per target and 256
-deferred targets — past either, the broadcast reports `mesh_retry_queue_full`
-as a terminal miss, logged once per target. `FederationService.stop()`
-cancels pending queues and refuses new ones; app cleanup runs it before the
-routed handler and the transport stop. Other mesh failures (`no_route` after
-a real probe, `routed_send_failed`) stay single-attempt and are healed by
-§25.6 sync.
+the member. A re-send that fails for a reason waiting cannot fix
+(`not_confirmed`) or raises costs only that item. Concurrent broadcasts that
+miss together join the same queue — one queue and one drain task per target,
+ever. Bounds: 64 queued sends per target, 256 deferred targets and a 16 MiB
+byte budget across all queues (serialized payload size); a single payload
+over 256 KiB is never deferred (WARNING). Past any of them the broadcast
+reports `mesh_retry_queue_full` as a terminal miss, logged once per target.
+A wake raised by the drain's OWN re-send (its re-discovery caches a route and
+fires `on_route_learned` for the same target) is ignored — the wake event is
+cleared after each pass — so the backoff is never skipped by itself. `FederationService.stop()` cancels pending queues and
+refuses new ones; app cleanup runs it before the routed handler and the
+transport stop. What the budget does not bridge is healed by §25.6 sync.
+
+**GFS publishes are retried in memory.** `POST /gfs/publish`
+(`GfsConnectionService.publish_space_event`, the identity-free relay of a
+public/global space event) is not a peer envelope, so the outbox does not
+carry it. A *transient* failure — transport error, timeout, 408, 429, 5xx —
+goes to `services/gfs_publish_retry.py`'s `GfsPublishRetryQueue`: a
+per-connection FIFO retried with backoff (5 s, 30 s, 2 min, 10 min — four
+retries, ~13 minutes), honouring a 429's delta-seconds `Retry-After` as the
+floor of the next wait (capped at 15 minutes). Any other 4xx, or an
+unfollowed redirect, is permanent and not retried. While a connection has
+retries pending, a new publish to it queues behind them, so subscribers see
+order. A queued item is exactly `{space_id, event_type, payload}` — there is
+no slot for `from_instance` or a household signature, so a retry cannot add
+identity. **There is no identified body at all any more:** a publish goes
+only to a GFS that has proved `anonymous_publish` under its signed capability
+block. A cold cache with `/gfs/info` unreachable puts the publish straight
+into the retry queue (nothing is sent until the capability is proven); a
+reachable GFS without the proof — an older build — **receives no space
+publishes until it upgrades**, with one WARNING per connection. Before each
+retry the sender re-checks that the space is still published to that
+connection and re-checks the capability the same way. **Why in memory:** the outbox
+row is keyed by a recipient instance and re-signed on redelivery — a GFS
+publish has neither — so carrying it there, or in a new table, would be a
+migration for a payload that is already authority-signed public ciphertext,
+deduped by post id on the subscriber side, and only worth retrying for
+minutes. A restart loses the queue (logged), which costs no more than before
+the queue existed. Bounded at 256 pending publishes, at most 64 per
+connection so one dead GFS cannot crowd out the others. A GFS already known
+to lack the capability stays "unsupported" even if a later `/gfs/info`
+refresh fails; only a connection with no answer at all is "unknown". The
+publish and its retries ride a **separate cookie-less `aiohttp` session**
+(`DummyCookieJar`), so a sticky load-balancer cookie from the household's
+authenticated GFS calls can never be replayed on an anonymous publish. The
+loop follows the
+`_stop: asyncio.Event` scheduler pattern and is started / stopped with the
+app.
 
 ### Bulk sync
 

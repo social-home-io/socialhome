@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -132,7 +134,8 @@ async def env(tmp_dir):
 
 
 async def test_inbound_idempotency_drops_duplicates(env):
-    """Same idempotency_key sent twice → second call returns deduped flag."""
+    """Same idempotency_key sent twice → the second is not dispatched, and
+    its answer is the same generic ``ok`` (no dedupe echo on the wire)."""
     body = _build_inbound(
         own_iid=env["own_iid"],
         own_pk=env["own_pk"],
@@ -152,8 +155,12 @@ async def test_inbound_idempotency_drops_duplicates(env):
         payload={"idempotency_key": "ik-1", "user_id": "alice"},
         msg_id="msg-2",  # distinct msg_id so replay cache doesn't trip
     )
-    out2 = await env["svc"].handle_inbound_envelope(env["peer"].local_inbox_id, body2)
-    assert out2.get("deduped") is True
+    with patch.object(FederationService, "_dispatch_event", AsyncMock()) as disp:
+        out2 = await env["svc"].handle_inbound_envelope(
+            env["peer"].local_inbox_id, body2
+        )
+    assert out2 == {"status": "ok"}
+    disp.assert_not_awaited()
 
 
 async def test_inbound_no_idempotency_key_processes_normally(env):

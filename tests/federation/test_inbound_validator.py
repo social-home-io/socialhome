@@ -261,7 +261,8 @@ async def test_idempotency_duplicate_short_circuits():
         payload={"idempotency_key": "ik-1"},
     )
     await step(ctx)
-    assert ctx.early_response == {"status": "ok", "deduped": True}
+    assert ctx.drop_reason == "deduped"
+    assert ctx.early_response == {"status": "ok"}
 
 
 # ─── Step 9: ban_check ──────────────────────────────────────────────────
@@ -289,7 +290,9 @@ async def test_ban_check_passes_allowed():
     await step(ctx)  # not banned
 
 
-async def test_ban_check_rejects_banned():
+async def test_ban_check_drops_banned_with_the_generic_answer():
+    """A ban is a drop like every other gate: the sender gets the same
+    ``ok`` an accepted envelope gets, not a ``403`` naming the ban."""
     step = make_ban_check(
         federation_repo=_FakeBanRepo(
             banned_combos=[("sp-1", "remote-iid")],
@@ -297,8 +300,9 @@ async def test_ban_check_rejects_banned():
     )
     ctx = InboundContext()
     ctx.envelope = _minimal_envelope(space_id="sp-1")
-    with pytest.raises(ValueError, match="banned"):
-        await step(ctx)
+    await step(ctx)
+    assert ctx.drop_reason == "banned-from-space"
+    assert ctx.early_response == {"status": "ok"}
 
 
 async def test_ban_check_judges_the_payload_space_when_routing_is_absent():
@@ -310,8 +314,8 @@ async def test_ban_check_judges_the_payload_space_when_routing_is_absent():
     ctx = InboundContext()
     ctx.envelope = _minimal_envelope()
     ctx.event = SimpleNamespace(payload={"space_id": "sp-1"})
-    with pytest.raises(ValueError, match="banned"):
-        await step(ctx)
+    await step(ctx)
+    assert ctx.drop_reason == "banned-from-space"
 
 
 async def test_ban_check_judges_both_spaces_when_they_differ():
@@ -321,8 +325,8 @@ async def test_ban_check_judges_both_spaces_when_they_differ():
     ctx = InboundContext()
     ctx.envelope = _minimal_envelope(space_id="sp-1")
     ctx.event = SimpleNamespace(payload={"space_id": "sp-2"})
-    with pytest.raises(ValueError, match="banned"):
-        await step(ctx)
+    await step(ctx)
+    assert ctx.drop_reason == "banned-from-space"
 
 
 async def test_ban_check_passes_unbanned_payload_space():
@@ -397,10 +401,8 @@ async def test_deprovisioned_author_drops_user_scoped_event():
         {"author_user_id": "u-hidden", "content": "should be dropped"},
     )
     await step(ctx)
-    assert ctx.early_response == {
-        "status": "ok",
-        "dropped": "deprovisioned-author",
-    }
+    assert ctx.drop_reason == "deprovisioned-author"
+    assert ctx.early_response == {"status": "ok"}
 
 
 async def test_deprovisioned_author_passes_active_user():
@@ -910,7 +912,7 @@ _WRITE_SAMPLES = [
     (FederationEventType.SPACE_ZONE_DELETED, {"id": "z1"}),
 ]
 
-REFUSED = {"status": "ok", "dropped": "subscriber-write"}
+REFUSED = "subscriber-write"
 
 
 def _writer_step(
@@ -966,7 +968,7 @@ async def test_space_writer_refuses_every_write_family_from_a_follower(
     ``*_UPDATED`` / ``*_DELETED`` sibling are refused exactly like a post.
     """
     ctx = await _run(_writer_step(), event_type, payload)
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 @pytest.mark.parametrize("role", ["member", "moderator", "admin"])
@@ -995,7 +997,7 @@ async def test_space_writer_refuses_a_spoofed_author():
         FederationEventType.SPACE_POST_CREATED,
         {"author": "u-nobody-has-ever-heard-of", "content": "hi"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_refuses_an_unresolvable_space():
@@ -1014,7 +1016,7 @@ async def test_space_writer_refuses_an_unresolvable_space():
         {"author": "u-follower", "post_id": "p1"},
     )
     await _writer_step()(ctx)
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_reads_the_space_id_out_of_the_payload():
@@ -1027,7 +1029,7 @@ async def test_space_writer_reads_the_space_id_out_of_the_payload():
         {"space_id": "sp-1", "author": "u-follower"},
     )
     await _writer_step()(ctx)
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_refuses_a_household_with_only_tombstoned_seats():
@@ -1042,7 +1044,7 @@ async def test_space_writer_refuses_a_household_with_only_tombstoned_seats():
         FederationEventType.SPACE_POST_CREATED,
         {"author": "u-follower"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_passes_a_household_holding_one_live_member():
@@ -1081,7 +1083,7 @@ async def test_space_writer_refuses_a_household_we_hold_no_row_for():
         FederationEventType.SPACE_POST_CREATED,
         {"author": "u-follower"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_refuses_a_seatless_media_blob():
@@ -1090,7 +1092,7 @@ async def test_space_writer_refuses_a_seatless_media_blob():
         FederationEventType.SPACE_MEDIA_BLOB,
         {"filename": "x.webp"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_passes_the_host_without_a_mirrored_seat():
@@ -1115,7 +1117,7 @@ async def test_space_writer_refuses_when_the_host_lookup_fails():
         remote_member_repo=_FakeRemoteMemberRepo({("sp-1", "peer-x"): []}),
     )
     ctx = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_enforces_on_a_household_that_does_not_host():
@@ -1131,7 +1133,7 @@ async def test_space_writer_enforces_on_a_household_that_does_not_host():
         FederationEventType.SPACE_POST_CREATED,
         {"author": "u-follower"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_allows_a_comment_only_with_the_opt_in():
@@ -1142,7 +1144,7 @@ async def test_space_writer_allows_a_comment_only_with_the_opt_in():
         FederationEventType.SPACE_COMMENT_CREATED,
         {"author": "u-follower", "content": "nice"},
     )
-    assert blocked.early_response == REFUSED
+    assert blocked.drop_reason == REFUSED
 
     allowed = await _run(
         _writer_step(allow_comment=True),
@@ -1161,7 +1163,7 @@ async def test_space_writer_binds_the_comment_opt_in_to_a_real_seat():
         FederationEventType.SPACE_COMMENT_CREATED,
         {"author": "u-somebody-else", "content": "nice"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_never_extends_the_comment_opt_in_to_a_post():
@@ -1172,7 +1174,7 @@ async def test_space_writer_never_extends_the_comment_opt_in_to_a_post():
         FederationEventType.SPACE_POST_CREATED,
         {"author": "u-follower"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_refuses_a_comment_opt_in_on_an_unknown_space():
@@ -1189,7 +1191,7 @@ async def test_space_writer_refuses_a_comment_opt_in_on_an_unknown_space():
         FederationEventType.SPACE_COMMENT_CREATED,
         {"author": "u-follower"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_skips_reader_event_types():
@@ -1213,7 +1215,7 @@ async def test_space_writer_refuses_an_authorless_comment_under_the_opt_in():
         FederationEventType.SPACE_COMMENT_CREATED,
         {"content": "nice"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_space_writer_keeps_the_refusal_when_the_features_read_fails():
@@ -1235,12 +1237,12 @@ async def test_space_writer_keeps_the_refusal_when_the_features_read_fails():
         FederationEventType.SPACE_COMMENT_CREATED,
         {"author": "u-follower"},
     )
-    assert ctx.early_response == REFUSED
+    assert ctx.drop_reason == REFUSED
 
 
 async def test_post_decrypt_gates_treat_a_raising_step_as_a_refusal():
-    """The ban check rejects by raising ``ValueError``, so the mesh seam
-    has to read that as "drop", not let it escape into the unwrap."""
+    """A step that rejects by raising ``ValueError`` must read as "drop" at
+    the mesh seam, not escape into the unwrap."""
 
     async def _ban(ctx):
         raise ValueError("Instance 'peer-x' is banned from space 'sp-1'")
@@ -1398,12 +1400,12 @@ async def test_space_writer_holds_a_seatless_write_when_a_buffer_is_wired():
         pending=buf,
     )
     held = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
-    assert held.early_response == {"status": "ok", "held": "awaiting-seat"}
+    assert held.drop_reason == "awaiting-seat"
     assert len(buf) == 1
     full = await _run(step, FederationEventType.SPACE_POST_CREATED, {"author": "u"})
-    assert full.early_response == REFUSED
+    assert full.drop_reason == REFUSED
     blob = await _run(step, FederationEventType.SPACE_MEDIA_BLOB, {"filename": "f"})
-    assert blob.early_response == REFUSED
+    assert blob.drop_reason == REFUSED
 
 
 # ─── Step 12a: check_space_archived (an archived space is read-only) ─────
@@ -1455,7 +1457,8 @@ async def test_archived_gate_refuses_a_write_into_an_archived_space():
     step = make_check_space_archived(space_repo=_ArchiveSpaceRepo(_archived_space()))
     ctx = _archived_ctx()
     await step(ctx)
-    assert ctx.early_response == {"status": "ok", "dropped": "archived-space"}
+    assert ctx.drop_reason == "archived-space"
+    assert ctx.early_response == {"status": "ok"}
 
 
 async def test_archived_gate_reads_the_payload_space_id_when_unrouted():

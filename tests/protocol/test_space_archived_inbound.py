@@ -93,7 +93,7 @@ from .test_space_routed_security import (
 pytestmark = pytest.mark.security
 
 FET = FederationEventType
-ARCHIVED = {"status": "ok", "dropped": "archived-space"}
+ARCHIVED = "archived-space"
 
 
 @pytest.fixture
@@ -376,7 +376,10 @@ async def _run(step, event_type, *, sender="house-author"):
         space_id=SP,
     )
     await step(ctx)
-    return ctx.early_response
+    # The wire answer is the generic ``ok`` for every drop (no archive
+    # oracle); the reason is server-side only.
+    assert ctx.early_response in (None, {"status": "ok"})
+    return ctx.drop_reason
 
 
 async def test_every_write_type_is_refused_into_an_archived_space(gate):
