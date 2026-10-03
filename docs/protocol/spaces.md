@@ -960,6 +960,80 @@ inside the encrypted `SPACE_POST_CREATED` payload:
   removes that link (`domain.link_preview.card_survives_edit`, derived
   from content both sides hold — no new field, no re-fetch).
 
+## Writer certificates (v_49)
+
+A **writer certificate** is the space authority key's per-epoch statement
+that one household may write (`scope: "write"`) or only comment (`scope:
+"comment"`) in a space. It is the foundation for members publishing over the
+connection server without the host signing every post: one host-side
+signature per seat per epoch, never per item. Format and suite:
+[`../crypto.md`](../crypto.md) ("Space writer certificate"); code:
+`socialhome/writer_cert.py`, `socialhome/domain/writer_cert.py`,
+`socialhome/services/space_writer_cert_service.py`.
+
+**Who issues, to whom.** Only a household holding the space seed — the
+owner, or a delegated admin — and only while that seed is the private half
+of the pinned space key (a seed left behind by a v_44 rotation mints
+nothing). Entitlement is derived from the issuer's own roster, never stored:
+owner / admin / moderator / member seats → `write`; a follower seat →
+`comment` only while `allow_subscriber_comment` is on; a household with
+several seats → one cert at its strongest scope; no live seat → no cert.
+
+**When.** On seating (the invite-link redeem ACK, and the roster snapshot a
+paired joiner receives), on a role change that alters the household's write /
+comment rights, on every content-key rotation (`SPACE_KEY_EXCHANGE_REKEY`)
+and on every authority rotation (`SPACE_AUTHORITY_ROTATED`, signed with the
+new key), plus the v_49 upgrade and the periodic roster-snapshot tick.
+
+**Delivery — existing channels only, one household each.** A cert travels
+only to the household it names, inside that household's encrypted envelope:
+
+| Channel | Who it reaches | Where the cert sits |
+|---|---|---|
+| `SPACE_INVITE_TOKEN_REDEEM_ACK` (and the §D2b relayed ACK) | the redeeming household, link-joined ones included | `space_meta.writer_cert` |
+| `SPACE_KEY_EXCHANGE_REKEY` | every member household, link-joined ones via the relay | top-level `writer_cert`, outside the authority-signed `space_content_key` (`broadcast_to_space_members(per_peer=…)` decorates each copy) |
+| `SPACE_ROSTER_SNAPSHOT` (owner host) | the one household the snapshot is for | top-level `writer_cert` |
+| `SPACE_AUTHORITY_ROTATED` (owner host) | each member household, per peer | top-level `writer_cert` |
+
+Every channel is gated on `peer_supports(…, MIN_FOR_MEMBER_GFS_PUBLISH)`
+(v_49). The receiver keeps a cert only when it verifies against its pinned
+space key, names its own identity key and this space, and it holds the
+content key for that epoch — then on that epoch's `space_keys.writer_cert`.
+
+**Carried by items.** An author household puts its cert for the current
+epoch in the relayed public-post inner (`public_relay.writer_cert`). It is
+not part of the author signature — it authenticates itself against the
+space key, and older subscribers ignore it.
+
+```mermaid
+sequenceDiagram
+    participant H as Host (seed holder)
+    participant M as Member household
+    participant G as GFS subscribers
+    H->>M: redeem ACK / rekey / roster snapshot {writer_cert for M only}
+    M->>M: verify vs pinned space key, own pk, epoch key held → store
+    M->>H: SPACE_POST_CREATED {public_relay {…, author_sig, writer_cert}}
+    H->>H: verify cert (space key, author_pk, write) → re-stamp for current epoch if M still seated
+    H->>G: space_post_public (authority-signed, inner sealed under epoch key)
+    G->>G: verify authority sig → decrypt → author_sig → writer_cert (epoch, author_pk, write)
+```
+
+**Verification and the migration tripwire.** A receiver that finds a cert
+(`SpacePublicInbound`, and the relaying seed holder in
+`SpacePublicOutbound._relay_remote_authored`) checks the suite, the
+signature against the pinned space key, the space, the envelope's epoch, that
+`instance_pk` equals the inner's `author_pk`, and `write` scope. A present
+cert that fails drops the item with a WARNING. An item with NO cert is a
+pre-v_49 author and keeps today's behaviour — authorized by the host's
+authority signature. That no-cert branch is the migration tripwire: once
+every member household ships v_49 it can become a refusal.
+
+**Residuals.** A cert stays valid for its whole epoch: a household demoted
+to a follower, or one whose follower comment rights were switched off, keeps
+its old cert until the next content-key rotation (kicks and bans always
+rotate). The relaying host re-checks the roster before re-stamping, so
+nothing a removed writer sends travels through a v_49 host.
+
 ## Flow — rekey
 
 Triggered on every member-removal path (#121, PR #432): local kick,

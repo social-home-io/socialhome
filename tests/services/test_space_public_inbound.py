@@ -132,6 +132,7 @@ async def _make_envelope(
     link_preview: dict | None = None,
     tamper_preview: dict | None = None,
     preview_suite: str = "ed25519",
+    writer_cert: dict | None = None,
 ):
     """Build a relayed envelope.
 
@@ -173,6 +174,8 @@ async def _make_envelope(
         )
         if tamper_preview is not None:
             inner["link_preview"] = tamper_preview
+    if writer_cert is not None:
+        inner["writer_cert"] = writer_cert
     epoch, ct = await env["crypto"].encrypt(space_id, json.dumps(inner).encode())
     envelope = {"space_id": space_id, "epoch": epoch, "encrypted_payload": ct}
     envelope.update(
@@ -708,3 +711,61 @@ async def test_old_key_post_is_refused_after_the_heal(env):
     await env["inbound"].handle(_frame(await _make_envelope(env, space_seed=k1_seed)))
     assert refresher.calls == ["sp-1"]
     assert await env["post_repo"].get("post-1") is None
+
+
+# ─── v_49: a relayed item's writer cert is verified when present ────────
+
+
+async def _cert(env, **over):
+    from socialhome.writer_cert import sign_writer_cert
+
+    kw = dict(
+        space_seed=env["space_kp"].private_key,
+        space_id="sp-1",
+        epoch=await env["crypto"].get_current_epoch("sp-1"),
+        instance_pk=env["author_kp"].public_key,
+        scope="write",
+    )
+    kw.update(over)
+    return sign_writer_cert(**kw).to_wire()
+
+
+async def test_relayed_post_with_a_valid_writer_cert_is_accepted(env):
+    envelope = await _make_envelope(env, writer_cert=await _cert(env))
+    await env["inbound"].handle(_frame(envelope))
+    assert await env["post_repo"].get("post-1") is not None
+
+
+@pytest.mark.parametrize(
+    "case", ["forged", "old_epoch", "other_space", "other_household", "comment"]
+)
+async def test_relayed_post_with_a_bad_writer_cert_is_dropped(env, case, caplog):
+    over: dict = {
+        "forged": {"space_seed": generate_space_keypair().private_key},
+        "old_epoch": {"epoch": 0},
+        "other_space": {"space_id": "sp-2"},
+        "other_household": {"instance_pk": generate_identity_keypair().public_key},
+        "comment": {"scope": "comment"},
+    }[case]
+    if case == "old_epoch":
+        await env["crypto"].rotate_epoch("sp-1")
+    envelope = await _make_envelope(env, writer_cert=await _cert(env, **over))
+    with caplog.at_level(logging.WARNING):
+        await env["inbound"].handle(_frame(envelope))
+    assert await env["post_repo"].get("post-1") is None
+    assert env["events"] == []
+    assert "writer cert" in caplog.text
+
+
+async def test_relayed_post_with_a_malformed_writer_cert_is_dropped(env, caplog):
+    envelope = await _make_envelope(env, writer_cert={"cert_suite": "ed25519"})
+    with caplog.at_level(logging.WARNING):
+        await env["inbound"].handle(_frame(envelope))
+    assert await env["post_repo"].get("post-1") is None
+
+
+async def test_relayed_post_without_a_cert_keeps_todays_path(env):
+    """Pre-v49 author: no cert → accepted on the authority signature."""
+    envelope = await _make_envelope(env)
+    await env["inbound"].handle(_frame(envelope))
+    assert await env["post_repo"].get("post-1") is not None

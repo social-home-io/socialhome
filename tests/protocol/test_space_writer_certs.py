@@ -1,0 +1,340 @@
+"""Release-blocker protocol tests: space writer certificates (v_49).
+
+Marked ``@pytest.mark.security``.
+
+A writer cert is the space AUTHORITY key's per-epoch statement that one
+household may write. It must be impossible to:
+
+* forge one (any key but the pinned space key → refused);
+* mint one without the space seed (a member, a follower, a demoted admin
+  whose seed no longer matches the pin);
+* replay one into another space, or past the epoch it was issued for;
+* stretch a comment-scope cert into a post;
+* hand one household's cert to another (``instance_pk`` ≠ ``author_pk``);
+* store one addressed to a different household.
+
+The receiver tests run the REAL :class:`SpacePublicInbound` over real SQLite
+repos: a relayed public post carrying a bad cert never lands, while the same
+post with a good cert — or with no cert at all (a pre-v_49 author) — does.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+    sign_authority_event,
+    strip_authority_sig_fields,
+)
+from socialhome.crypto import (
+    b64url_encode,
+    derive_user_id,
+    generate_identity_keypair,
+    generate_space_keypair,
+    sign_ed25519,
+)
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.services.space_crypto_service import SpaceContentEncryption
+from socialhome.services.space_public_author import author_signing_bytes
+from socialhome.services.space_public_inbound import SpacePublicInbound
+from socialhome.services.space_writer_cert_service import SpaceWriterCertService
+from socialhome.writer_cert import sign_writer_cert
+
+pytestmark = pytest.mark.security
+
+SPACE = "sp-w"
+OTHER = "sp-x"
+
+
+class _Seats:
+    def __init__(self, seats: dict[str, list[str]]):
+        self.seats = seats
+
+    async def list_for_instance(
+        self, space_id, instance_id, *, include_tombstoned=True
+    ):
+        return [SimpleNamespace(role=r) for r in self.seats.get(instance_id, [])]
+
+
+class _Fed:
+    def __init__(self, pks: dict[str, bytes]):
+        self.pks = pks
+
+    async def peer_supports(self, iid, *, min_version):
+        return True
+
+    async def peer_identity_public_key(self, iid):
+        return self.pks.get(iid)
+
+
+@pytest.fixture
+async def env(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "w.db", batch_timeout_ms=10)
+    await db.startup()
+    kek = KeyManager.from_data_dir(tmp_dir)
+    spaces = SqliteSpaceRepo(db, key_manager=kek)
+    keys = SqliteSpaceKeyRepo(db)
+    crypto = SpaceContentEncryption(keys, kek)
+    posts = SqliteSpacePostRepo(db)
+    space_kp = generate_space_keypair()
+    other_kp = generate_space_keypair()
+    for sid, kp in ((SPACE, space_kp), (OTHER, other_kp)):
+        await spaces.save(
+            Space(
+                id=sid,
+                name="S",
+                owner_instance_id="host.home",
+                owner_username="h",
+                identity_public_key=kp.public_key.hex(),
+                config_sequence=0,
+                features=SpaceFeatures(),
+                space_type=SpaceType.PUBLIC,
+                join_mode=JoinMode.OPEN,
+            )
+        )
+        await crypto.initialise_for_space(sid)
+    author_kp = generate_identity_keypair()
+    inbound = SpacePublicInbound(
+        bus=EventBus(), space_repo=spaces, space_crypto=crypto, space_post_repo=posts
+    )
+    inbound.attach_identity(own_instance_id="us.home")
+    yield SimpleNamespace(
+        db=db,
+        spaces=spaces,
+        keys=keys,
+        crypto=crypto,
+        posts=posts,
+        space_kp=space_kp,
+        other_kp=other_kp,
+        author_kp=author_kp,
+        inbound=inbound,
+    )
+    await db.shutdown()
+
+
+async def _cert(env, **over) -> dict:
+    kw = dict(
+        space_seed=env.space_kp.private_key,
+        space_id=SPACE,
+        epoch=await env.crypto.get_current_epoch(SPACE),
+        instance_pk=env.author_kp.public_key,
+        scope="write",
+    )
+    kw.update(over)
+    return sign_writer_cert(**kw).to_wire()
+
+
+async def _relay(env, cert: dict | None, *, post_id: str = "p-1") -> None:
+    """Deliver one relayed public post (authority-signed by the host)."""
+    uid = derive_user_id(env.author_kp.public_key, "bob")
+    inner = {
+        "post_id": post_id,
+        "space_id": SPACE,
+        "author_user_id": uid,
+        "author_pk": env.author_kp.public_key.hex(),
+        "author_username": "bob",
+        "type": "text",
+        "content": "hello",
+        "created_at": datetime(2026, 10, 3, tzinfo=timezone.utc).isoformat(),
+        "origin_instance_id": "author.home",
+    }
+    inner["author_sig"] = b64url_encode(
+        sign_ed25519(env.author_kp.private_key, author_signing_bytes(inner))
+    )
+    if cert is not None:
+        inner["writer_cert"] = cert
+    epoch, ct = await env.crypto.encrypt(SPACE, json.dumps(inner).encode())
+    envelope = {"space_id": SPACE, "epoch": epoch, "encrypted_payload": ct}
+    envelope.update(
+        sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            space_id=SPACE,
+            payload=strip_authority_sig_fields(envelope),
+            space_seed=env.space_kp.private_key,
+        )
+    )
+    await env.inbound.handle(
+        {"event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC, "payload": envelope}
+    )
+
+
+async def _landed(env, post_id: str = "p-1") -> bool:
+    return await env.posts.get(post_id) is not None
+
+
+# ── Receiver: a relayed item's cert ──────────────────────────────────────
+
+
+async def test_valid_cert_lands(env):
+    await _relay(env, await _cert(env))
+    assert await _landed(env)
+
+
+async def test_pre_v49_author_without_cert_lands(env):
+    await _relay(env, None)
+    assert await _landed(env)
+
+
+async def test_forged_cert_is_dropped(env):
+    await _relay(env, await _cert(env, space_seed=os.urandom(32)))
+    assert not await _landed(env)
+
+
+async def test_cert_tampered_after_signing_is_dropped(env):
+    cert = await _cert(env, scope="comment")
+    cert["scope"] = "write"
+    await _relay(env, cert)
+    assert not await _landed(env)
+
+
+async def test_cert_from_a_non_seed_holder_is_dropped(env):
+    """A member signing with its own household key is no authority."""
+    await _relay(env, await _cert(env, space_seed=env.author_kp.private_key))
+    assert not await _landed(env)
+
+
+async def test_cross_space_replay_is_dropped(env):
+    """A genuine cert for space X, signed by X's authority, is useless in Y —
+    both because it names X and because X's key is not Y's pin."""
+    await _relay(
+        env, await _cert(env, space_id=OTHER, space_seed=env.other_kp.private_key)
+    )
+    assert not await _landed(env)
+    # Even re-labelled for this space, X's signature does not verify here.
+    await _relay(
+        env,
+        await _cert(env, space_seed=env.other_kp.private_key),
+        post_id="p-2",
+    )
+    assert not await _landed(env, "p-2")
+
+
+async def test_old_epoch_cert_is_dropped(env):
+    old = await _cert(env)
+    await env.crypto.rotate_epoch(SPACE)
+    await _relay(env, old)
+    assert not await _landed(env)
+
+
+async def test_comment_scope_cert_cannot_post(env):
+    await _relay(env, await _cert(env, scope="comment"))
+    assert not await _landed(env)
+
+
+async def test_another_households_cert_is_dropped(env):
+    await _relay(
+        env, await _cert(env, instance_pk=generate_identity_keypair().public_key)
+    )
+    assert not await _landed(env)
+
+
+async def test_unknown_suite_is_dropped(env):
+    await _relay(env, {**await _cert(env), "cert_suite": "ed25519+mldsa65"})
+    assert not await _landed(env)
+
+
+# ── Issuer: only a seed holder mints ─────────────────────────────────────
+
+
+def _issuer(env, *, own_pk: bytes, seats=None, pks=None) -> SpaceWriterCertService:
+    svc = SpaceWriterCertService(
+        space_repo=env.spaces,
+        remote_member_repo=_Seats(seats or {}),
+        space_key_repo=env.keys,
+        own_instance_id="us.home",
+        own_identity_pk=own_pk,
+    )
+    svc.attach_federation(_Fed(pks or {}))
+    return svc
+
+
+async def test_a_household_without_the_seed_mints_nothing(env):
+    svc = _issuer(
+        env,
+        own_pk=os.urandom(32),
+        seats={"author.home": ["member"]},
+        pks={"author.home": env.author_kp.public_key},
+    )
+    assert await svc.issue_for_instance(SPACE, "author.home") is None
+    assert await svc.cert_for_peer(SPACE, "author.home") is None
+
+
+async def test_a_stale_seed_mints_nothing(env):
+    """A demoted admin keeps the seed it was given, but after the v_44
+    rotation it no longer matches the pin — it must not mint."""
+    await env.spaces.set_space_seed(SPACE, generate_space_keypair().private_key)
+    svc = _issuer(
+        env,
+        own_pk=os.urandom(32),
+        seats={"author.home": ["member"]},
+        pks={"author.home": env.author_kp.public_key},
+    )
+    assert await svc.issue_for_instance(SPACE, "author.home") is None
+
+
+async def test_the_seed_holder_mints_a_verifying_cert(env):
+    await env.spaces.set_space_seed(SPACE, env.space_kp.private_key)
+    svc = _issuer(
+        env,
+        own_pk=os.urandom(32),
+        seats={"author.home": ["member"]},
+        pks={"author.home": env.author_kp.public_key},
+    )
+    wire = await svc.cert_for_peer(SPACE, "author.home")
+    assert wire is not None
+    await _relay(env, wire)
+    assert await _landed(env)
+
+
+async def test_a_follower_cannot_get_a_write_cert(env):
+    await env.spaces.set_space_seed(SPACE, env.space_kp.private_key)
+    svc = _issuer(
+        env,
+        own_pk=os.urandom(32),
+        seats={"author.home": ["subscriber"]},
+        pks={"author.home": env.author_kp.public_key},
+    )
+    assert await svc.issue_for_instance(SPACE, "author.home") is None
+
+
+# ── Holder: only our own cert is stored ──────────────────────────────────
+
+
+async def test_a_holder_stores_only_a_cert_naming_it(env):
+    me = generate_identity_keypair()
+    holder = _issuer(env, own_pk=me.public_key)
+    epoch = await env.crypto.get_current_epoch(SPACE)
+    # Another household's genuine cert.
+    assert not await holder.accept(SPACE, await _cert(env))
+    # Ours, but forged / for another space / for an epoch we hold no key for.
+    assert not await holder.accept(
+        SPACE, await _cert(env, instance_pk=me.public_key, space_seed=os.urandom(32))
+    )
+    assert not await holder.accept(
+        SPACE,
+        await _cert(
+            env,
+            instance_pk=me.public_key,
+            space_id=OTHER,
+            space_seed=env.other_kp.private_key,
+        ),
+    )
+    assert not await holder.accept(
+        SPACE, await _cert(env, instance_pk=me.public_key, epoch=epoch + 50)
+    )
+    assert await env.keys.get_writer_cert(SPACE, epoch) is None
+    # The genuine one is kept.
+    assert await holder.accept(SPACE, await _cert(env, instance_pk=me.public_key))
+    assert await env.keys.get_writer_cert(SPACE, epoch) is not None

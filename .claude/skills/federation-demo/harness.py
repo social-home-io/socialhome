@@ -2432,6 +2432,58 @@ def _join_body_from_blob(payload: dict) -> dict:
     return body
 
 
+def _check_writer_cert_on_e(state: dict, failures: list[str], cap) -> None:
+    """v_49 tripwire: link-joined **e** holds a verifying writer cert."""
+    import json as _json
+
+    from socialhome.crypto import b64url_decode
+    from socialhome.domain.writer_cert import WriterCert
+    from socialhome.writer_cert import verify_writer_cert
+
+    space_id = state["gfs_invite_space_id"]
+    try:
+        own = _rows("e", "SELECT identity_public_key FROM instance_identity")
+        pin = _rows("e", "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,))
+        certs = _rows(
+            "e",
+            "SELECT epoch, writer_cert FROM space_keys "
+            "WHERE space_id=? AND writer_cert IS NOT NULL ORDER BY epoch DESC",
+            (space_id,),
+        )
+    except Exception as exc:
+        failures.append(f"e: writer-cert read failed: {exc!r}")
+        return
+    if not own or not pin:
+        failures.append("e: no identity / space row for the invite space")
+        return
+    if not certs:
+        failures.append(
+            f"e: holds no writer cert for the invite space (v_"
+            f"{int(cap.MIN_FOR_MEMBER_GFS_PUBLISH)}) — the redeem ACK / rekey "
+            "did not deliver one"
+        )
+        return
+    epoch, raw = certs[0]
+    try:
+        cert = WriterCert.from_wire(_json.loads(raw))
+        verify_writer_cert(
+            cert,
+            space_pubkey=bytes.fromhex(pin[0][0]),
+            space_id=space_id,
+            epoch=int(epoch),
+            author_pk=bytes.fromhex(own[0][0]),
+            required_scope="write",
+        )
+    except Exception as exc:
+        failures.append(f"e: stored writer cert does not verify: {exc!r}")
+        return
+    assert b64url_decode(cert.instance_pk) == bytes.fromhex(own[0][0])
+    print(
+        f"  e holds a verifying writer cert for epoch {epoch} "
+        f"(scope={cert.scope}, v_{int(cap.MIN_FOR_MEMBER_GFS_PUBLISH)}) ✓"
+    )
+
+
 def _instance_row(label: str, instance_id: str) -> dict | None:
     """One ``remote_instances`` row on ``label`` as a dict, or ``None``.
 
@@ -4328,6 +4380,18 @@ def cmd_verify() -> None:
                 )
     else:
         print("  (v_29 bootstrap wire skipped — run 'gfs-invite-link')")
+
+    # 0d. v_49 writer certificates on the §D2b wire. The host issued the
+    #     link-joined household **e** its writer cert in the redeem ACK
+    #     ``space_meta`` (and re-issues it on every content-key rotation);
+    #     **e** keeps it on the epoch's ``space_keys`` row. Assert **e**
+    #     holds at least one cert for the invite space that verifies against
+    #     the pinned space key, names e's OWN identity key and grants
+    #     ``write`` — the round-trip a v_49 bump must deliver.
+    if state.get("gfs_invite_space_id"):
+        _check_writer_cert_on_e(state, failures, _Cap)
+    else:
+        print("  (v_49 writer-cert check skipped — run 'gfs-invite-link')")
 
     # 0b-bis. v_31 — the mesh-routed origin signature (#692). Every
     #     SPACE_ROUTED leg carries ``origin_sig`` inside its sealed blob

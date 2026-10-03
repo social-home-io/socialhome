@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_crypto_service import SpaceContentEncryption
     from .space_service import SpaceService
+    from .space_writer_cert_service import SpaceWriterCertService
 
 log = logging.getLogger(__name__)
 
@@ -164,6 +165,7 @@ class SpaceAuthorityRotationService:
         "_space_service",
         "_gfs",
         "_subscriber_keys",
+        "_writer_certs",
         "_locks",
         "_echo_reacted",
         "_echo_rotated",
@@ -192,6 +194,9 @@ class SpaceAuthorityRotationService:
         self._space_service: "SpaceService | None" = None
         self._gfs = None
         self._subscriber_keys = None
+        #: v_49 — re-issues each household's writer cert under the NEW
+        #: authority key (owner side) and stores ours (member side).
+        self._writer_certs: "SpaceWriterCertService | None" = None
         #: Per-space rotation / bundle locks. Weak values: a lock nobody holds
         #: or waits on is dropped, so the map never grows with the number of
         #: spaces ever touched.
@@ -239,6 +244,11 @@ class SpaceAuthorityRotationService:
     def attach_gfs(self, gfs_service) -> None:
         """Optional: re-publish public/global spaces so each GFS re-pins."""
         self._gfs = gfs_service
+
+    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+        """Optional (v_49): the bundle carries each household its own writer
+        cert signed with the new key; a member stores the one it receives."""
+        self._writer_certs = writer_certs
 
     def attach_subscriber_keys(self, subscriber_key_outbound) -> None:
         """Optional: re-seal the rotated content key to GFS subscribers."""
@@ -649,6 +659,29 @@ class SpaceAuthorityRotationService:
                         payload["forgotten_key_epoch"] = forgotten_key_epoch
                 if signed_key is not None:
                     payload["space_content_key"] = signed_key
+                # v_49 — this household's OWN writer cert, signed with the
+                # NEW authority key for the new content epoch: every cert
+                # signed with the retired key stops verifying at the re-pin.
+                if self._writer_certs is not None:
+                    try:
+                        writer_cert = await self._writer_certs.cert_for_peer(
+                            space.id,
+                            inst,
+                            epoch=(
+                                content_key.get("epoch")
+                                if content_key is not None
+                                else None
+                            ),
+                        )
+                    except Exception:
+                        log.exception(
+                            "authority rotation: writer cert for %s failed in %s",
+                            inst,
+                            space.id,
+                        )
+                        writer_cert = None
+                    if writer_cert is not None:
+                        payload["writer_cert"] = writer_cert
                 await self._send(
                     inst, FederationEventType.SPACE_AUTHORITY_ROTATED, payload, space.id
                 )
@@ -1136,6 +1169,11 @@ class SpaceAuthorityRotationService:
         # the original) must not interleave their resets.
         async with self._lock(space_id):
             await self._apply_bundle(space_id, p, event.from_instance)
+            # v_49 — our writer cert under the (now pinned) new key. The cert
+            # authenticates itself against the pin, so this runs whatever the
+            # baseline outcome was; an unverifiable one is refused there.
+            if p.get("writer_cert") is not None and self._writer_certs is not None:
+                await self._writer_certs.accept(space_id, p.get("writer_cert"))
 
     async def _apply_bundle(self, space_id: str, p: dict, sender: str) -> None:
         space = await self._spaces.get(space_id)

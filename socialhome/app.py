@@ -196,6 +196,7 @@ from .services.space_mentions import SpaceMentionResolver
 from .services.space_public_outbound import SpacePublicOutbound
 from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
 from .services.space_subscriber_key_outbound import SpaceSubscriberKeyOutbound
+from .services.space_writer_cert_service import SpaceWriterCertService
 from .services.moment_public_inbound import MomentPublicInbound
 from .repositories.moment_public_repo import (
     SqliteMomentPublicFollowRepo,
@@ -742,6 +743,7 @@ def _wire_space_authority_rotation(
     space_service,
     gfs_connection_service,
     subscriber_key_outbound,
+    writer_certs: SpaceWriterCertService | None = None,
 ) -> SpaceAuthorityRotationService:
     """Build + wire :class:`SpaceAuthorityRotationService` (v_44)."""
     svc = SpaceAuthorityRotationService(
@@ -757,6 +759,8 @@ def _wire_space_authority_rotation(
     svc.attach_gfs(gfs_connection_service)
     if subscriber_key_outbound is not None:
         svc.attach_subscriber_keys(subscriber_key_outbound)
+    if writer_certs is not None:
+        svc.attach_writer_certs(writer_certs)
     svc.wire()
     svc.attach_to(federation_service)
     return svc
@@ -2929,6 +2933,17 @@ def create_app(config: Config | None = None) -> web.Application:
         # receive. Without this, the joiner's local space_keys is
         # empty and every SPACE_POST_CREATED inbound raises.
         real_space_service.attach_space_crypto_service(space_crypto)
+        # v_49 — space writer certificates: issued by seed holders from the
+        # roster, held per (space, epoch) on ``space_keys``, carried in the
+        # relayed public-post inner. Federation is attached once it exists.
+        writer_certs = SpaceWriterCertService(
+            space_repo=space_repo,
+            remote_member_repo=repos.space_remote_member,
+            space_key_repo=space_key_repo,
+            own_instance_id=real_instance_id,
+            own_identity_pk=identity_pk,
+        )
+        real_space_service.attach_writer_certs(writer_certs)
 
         # Public space-content relay (Phase 5a2). Producer fans a
         # PUBLIC/GLOBAL space post out to the GFS as an encrypted,
@@ -2950,6 +2965,7 @@ def create_app(config: Config | None = None) -> web.Application:
             own_instance_public_key=identity_pk,
             own_identity_seed=identity_seed,
         )
+        space_public_outbound.attach_writer_certs(writer_certs)
         space_public_outbound.wire()
         space_public_inbound = SpacePublicInbound(
             bus=bus,
@@ -3069,6 +3085,8 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo=federation_repo,
             remote_member_repo=repos.space_remote_member,
         )
+        writer_certs.attach_federation(federation_service)
+        app[K.private_invite_handler_key].attach_writer_certs(writer_certs)
         # A space-session seat is dropped through the same purge as an
         # unpair, so its queued envelopes and mesh hints go with it.
         real_space_service.attach_instance_purger(app[K.peer_unpair_service_key])
@@ -3129,6 +3147,7 @@ def create_app(config: Config | None = None) -> web.Application:
             space_service=real_space_service,
             gfs_connection_service=gfs_connection_service,
             subscriber_key_outbound=space_subscriber_key_outbound,
+            writer_certs=writer_certs,
         )
         app[K.space_authority_rotation_key] = space_authority_rotation
         # v_46: a member's BEGIN to a space's owner echoes its held
@@ -3222,6 +3241,7 @@ def create_app(config: Config | None = None) -> web.Application:
             child_protection_service=child_protection_service,
         )
         invite_redeem_coordinator.attach_to(federation_service)
+        invite_redeem_coordinator.attach_writer_certs(writer_certs)
         real_space_service.attach_redeem_coordinator(invite_redeem_coordinator)
         # §D2b — redeeming an invite link from a household we have never
         # met. The sealed blob goes out through a connection server
@@ -3262,6 +3282,7 @@ def create_app(config: Config | None = None) -> web.Application:
             own_instance_public_key=identity_pk,
             own_identity_seed=identity_seed,
         )
+        space_post_outbound.attach_writer_certs(writer_certs)
         # Federate per-edit config changes (rename, emoji, feature
         # toggles, location_mode flips, retention bumps) to remote
         # member stubs in realtime. Before this, SPACE_CONFIG_CHANGED

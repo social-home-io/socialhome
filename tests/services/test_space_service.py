@@ -8967,3 +8967,161 @@ async def test_banning_a_remote_user_tombstones_their_seat(stack):
     await stack.space_svc.ban(space.id, actor_username="anna", user_id="ru")
     assert await remote.get(space.id, "peer-x", "ru") is None
     assert await stack.space_repo.is_banned(space.id, "ru")
+
+
+# ─── v_49: space writer certificates ──────────────────────────────────────
+
+
+async def _cert_space(stack, *, version: int = 49):
+    """A hosted space with a content epoch, a v_``version`` federation double
+    and a REAL :class:`SpaceWriterCertService` over the stack's repos.
+    Returns ``(space, fed, remote, peer_pk)``."""
+    import os
+
+    from socialhome.crypto import ed25519_public_key
+    from socialhome.domain.space_key import SpaceKey
+    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+    from socialhome.services.space_writer_cert_service import (
+        SpaceWriterCertService,
+    )
+
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    keys = SqliteSpaceKeyRepo(stack.db)
+    await keys.save(SpaceKey(space_id=space.id, epoch=0, content_key_hex="k"))
+    peer_pks = {
+        "peer-a": ed25519_public_key(os.urandom(32)),
+        "peer-b": ed25519_public_key(os.urandom(32)),
+    }
+
+    async def _supports(_iid, *, min_version):
+        return version >= min_version
+
+    async def _pk(iid):
+        return peer_pks.get(iid)
+
+    fed.peer_supports = _supports
+    fed.peer_identity_public_key = _pk
+    certs = SpaceWriterCertService(
+        space_repo=stack.space_repo,
+        remote_member_repo=remote,
+        space_key_repo=keys,
+        own_instance_id=stack.iid,
+        own_identity_pk=os.urandom(32),
+    )
+    certs.attach_federation(fed)
+    stack.space_svc.attach_writer_certs(certs)
+    return space, fed, remote, peer_pks
+
+
+def _cert_of(payload):
+    from socialhome.domain.writer_cert import WriterCert
+
+    return WriterCert.from_wire(payload["writer_cert"])
+
+
+async def test_roster_snapshot_carries_only_the_recipients_writer_cert(stack):
+    from socialhome.crypto import b64url_encode
+    from socialhome.domain.federation import FederationEventType
+
+    space, fed, remote, pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await _seat(remote, space.id, "peer-b", "u-b")
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["event_type"] is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    cert = _cert_of(kw["payload"])
+    assert cert.instance_pk == b64url_encode(pks["peer-a"])
+    assert cert.scope == "write" and cert.epoch == 0
+    # Exactly one cert, and it names the recipient — never peer-b.
+    assert b64url_encode(pks["peer-b"]) not in str(kw["payload"])
+
+
+async def test_roster_snapshot_has_no_cert_below_v49(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=48)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
+    assert "writer_cert" not in fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+
+
+async def test_seating_a_household_delivers_its_cert_with_the_snapshot(stack):
+    space, fed, remote, pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_svc.broadcast_remote_member_joined(
+        space.id, instance_id="peer-a", user_id="u-a", user_pk=None, display_name="A"
+    )
+    snaps = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("to_instance_id") == "peer-a"
+    ]
+    assert snaps and "writer_cert" in snaps[-1]["payload"]
+
+
+async def test_rekey_fan_out_decorates_each_member_with_its_own_cert(stack):
+    from socialhome.infrastructure.key_manager import KeyManager
+    from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
+    from socialhome.services.space_crypto_service import SpaceContentEncryption
+
+    space, fed, remote, pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    stack.space_svc._space_crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(stack.db),
+        KeyManager(b"\x0a" * 32),
+        own_instance_id=stack.iid,
+    )
+    await stack.space_svc._rotate_and_distribute_space_key(space.id)
+    call = fed.broadcast_to_space_members.await_args
+    hook = call.kwargs["per_peer"]
+    epoch = call.args[2]["space_content_key"]["epoch"]
+    assert epoch == 1
+    decorated = await hook("peer-a", call.args[2])
+    cert = _cert_of(decorated)
+    assert cert.epoch == 1
+    assert "writer_cert" not in call.args[2]
+    # A household with no seat gets nothing.
+    assert "writer_cert" not in await hook("peer-b", call.args[2])
+
+
+async def test_role_change_that_alters_rights_redelivers_the_cert(stack):
+    from socialhome.domain.space import SpaceRole
+
+    space, fed, remote, pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role=SpaceRole.SUBSCRIBER.value)
+    target = await remote.get(space.id, "peer-a", "u-a")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="member"
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("to_instance_id") == "peer-a"
+        and "writer_cert" in c.kwargs["payload"]
+    ]
+    assert len(sent) == 1
+    assert _cert_of(sent[0]["payload"]).scope == "write"
+
+
+async def test_role_change_keeping_rights_sends_no_extra_snapshot(stack):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role="member")
+    target = await remote.get(space.id, "peer-a", "u-a")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="moderator"
+    )
+    assert _snapshots(fed, to="peer-a") == []
+
+
+async def test_an_upgrade_to_v49_delivers_the_cert(stack):
+    from socialhome.domain.events import PeerProtoVersionRaised
+
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    await stack.space_svc.on_peer_proto_version_raised(
+        PeerProtoVersionRaised(instance_id="peer-a", old_version=48, new_version=49)
+    )
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "peer-a"
+    assert "writer_cert" in kw["payload"]

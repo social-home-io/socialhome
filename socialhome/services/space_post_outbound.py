@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .space_media_sync_service import SpaceMediaSyncService
+    from .space_writer_cert_service import SpaceWriterCertService
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class SpacePostOutbound:
         "_own_instance_id",
         "_own_instance_pk",
         "_own_identity_seed",
+        "_writer_certs",
     )
 
     def __init__(
@@ -90,6 +92,9 @@ class SpacePostOutbound:
         self._own_instance_id: str = ""
         self._own_instance_pk: bytes = b""
         self._own_identity_seed: bytes = b""
+        #: v_49 — when wired, the relay hint carries this household's writer
+        #: cert for the current epoch (a seed holder re-checks + re-stamps it).
+        self._writer_certs: "SpaceWriterCertService | None" = None
         #: Optional — when wired, ``SPACE_POST_CREATED`` broadcasts
         #: are followed by per-peer outbox enqueues for every
         #: referenced media URL. The sync service's scheduler reads
@@ -111,6 +116,10 @@ class SpacePostOutbound:
         self._bus.subscribe(CommentAdded, self._on_comment_added)
         self._bus.subscribe(CommentUpdated, self._on_comment_updated)
         self._bus.subscribe(CommentDeleted, self._on_comment_deleted)
+
+    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+        """Wire the v_49 writer-cert holder for the relay hint."""
+        self._writer_certs = writer_certs
 
     def attach_identity(
         self,
@@ -247,6 +256,23 @@ class SpacePostOutbound:
                     # so its signed bytes stay v_25-compatible.
                     author_identity_anchor=author.identity_anchor,
                 )
+                # v_49 — our household's writer cert, outside the author
+                # signature (it authenticates itself against the space key).
+                # Absent → a seed holder relays it on its own authority, as
+                # for a pre-v_49 author.
+                if self._writer_certs is not None:
+                    try:
+                        cert = await self._writer_certs.current_own_cert_wire(
+                            event.space_id
+                        )
+                    except Exception:
+                        log.exception(
+                            "public_relay: writer cert lookup failed for %s",
+                            event.space_id,
+                        )
+                        cert = None
+                    if cert is not None:
+                        payload["public_relay"]["writer_cert"] = cert
         with_release(payload)
         try:
             await self._federation.broadcast_to_space_members(

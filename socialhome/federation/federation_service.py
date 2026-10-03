@@ -23,7 +23,7 @@ import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -2062,8 +2062,16 @@ class FederationService:
         relay_payload: dict | None = None,
         legacy_payload: dict | None = None,
         legacy_below: int | None = None,
+        per_peer: Callable[[str, dict], Awaitable[dict]] | None = None,
     ) -> BroadcastResult:
         """Fan out to every member household of ``space_id``.
+
+        ``per_peer``, when given, is awaited with ``(instance_id, payload)``
+        for each target AFTER the legacy / relay variant is picked and
+        returns the copy that target receives. For content meant for ONE
+        household only — its own v_49 writer cert — so nothing addressed to
+        one member ever rides another member's envelope. It must return a
+        new dict, never mutate the one it is given.
 
         ``legacy_payload`` + ``legacy_below``, when both given, send
         ``legacy_payload`` INSTEAD of ``payload`` to a member household whose
@@ -2137,6 +2145,8 @@ class FederationService:
                     and instance.source is InstanceSource.SPACE_SESSION
                 ):
                     peer_payload = relay_payload
+            if per_peer is not None:
+                peer_payload = await per_peer(iid, peer_payload)
             if iid in self._deferred_mesh_queues:
                 # A deferred send to this target is still pending: queue
                 # behind it rather than overtake it, so the target sees

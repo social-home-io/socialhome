@@ -134,6 +134,7 @@ async def env(tmp_dir):
         "own_iid": own_iid,
         "own_pk": own_kp.public_key,
         "own_seed": own_kp.private_key,
+        "sub": sub,
     }
 
 
@@ -645,3 +646,211 @@ async def test_open_to_join_space_with_subscribers_off_does_not_relay(env):
         SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-open-private")
     )
     assert env["gfs"].calls == []
+
+
+# ─── v_49: the relayed inner carries the author household's writer cert ──
+
+
+class _Seats:
+    """Remote-member double: ``instance_id`` → list of role strings."""
+
+    def __init__(self, seats: dict[str, list[str]]):
+        self.seats = seats
+
+    async def list_for_instance(
+        self, space_id, instance_id, *, include_tombstoned=True
+    ):
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(role=r) for r in self.seats.get(instance_id, [])]
+
+
+class _PeerKeys:
+    def __init__(self, pks: dict[str, bytes]):
+        self.pks = pks
+
+    async def peer_identity_public_key(self, iid):
+        return self.pks.get(iid)
+
+    async def peer_supports(self, iid, *, min_version):
+        return True
+
+
+async def _with_certs(env, *, seats=None, pks=None):
+    from socialhome.domain.space import SpaceMember
+    from socialhome.services.space_writer_cert_service import SpaceWriterCertService
+
+    certs = SpaceWriterCertService(
+        space_repo=env["space_repo"],
+        remote_member_repo=_Seats(seats or {}),
+        space_key_repo=SqliteSpaceKeyRepo(env["db"]),
+        own_instance_id=env["own_iid"],
+        own_identity_pk=env["own_pk"],
+    )
+    certs.attach_federation(_PeerKeys(pks or {}))
+    env["sub"].attach_writer_certs(certs)
+    return certs, SpaceMember
+
+
+async def _decrypted(env, space_id):
+    envelope = env["gfs"].calls[-1]["payload"]
+    pt = await env["crypto"].decrypt(
+        space_id, envelope["epoch"], envelope["encrypted_payload"]
+    )
+    return envelope, json.loads(pt)
+
+
+async def test_local_author_inner_carries_our_writer_cert(env):
+    from socialhome.domain.space import SpaceMember
+    from socialhome.writer_cert import verify_writer_cert
+    from socialhome.domain.writer_cert import WriterCert
+
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["space_repo"].save_member(
+        SpaceMember(
+            space_id="sp-pub",
+            user_id=env["author_user_id"],
+            role="owner",
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    await _with_certs(env)
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    envelope, inner = await _decrypted(env, "sp-pub")
+    # Never on the wire in plaintext.
+    assert "writer_cert" not in envelope
+    verify_writer_cert(
+        WriterCert.from_wire(inner["writer_cert"]),
+        space_pubkey=skp.public_key,
+        space_id="sp-pub",
+        epoch=envelope["epoch"],
+        author_pk=env["own_pk"],
+        required_scope="write",
+    )
+    # The author signature still verifies — the cert is outside it.
+    assert verify_signed_author_inner(inner)
+
+
+async def _remote_cert(skp, author_pk, *, epoch, space_id="sp-pub", scope="write"):
+    from socialhome.writer_cert import sign_writer_cert
+
+    return sign_writer_cert(
+        space_seed=skp.private_key,
+        space_id=space_id,
+        epoch=epoch,
+        instance_pk=author_pk,
+        scope=scope,
+    ).to_wire()
+
+
+async def test_remote_author_cert_is_restamped_for_the_current_epoch(env):
+    from socialhome.domain.writer_cert import WriterCert
+    from socialhome.writer_cert import verify_writer_cert
+
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    author_kp, author_user_id, relay = _remote_relay()
+    await _with_certs(
+        env, seats={"beta.home": ["member"]}, pks={"beta.home": author_kp.public_key}
+    )
+    old_epoch = await env["crypto"].get_current_epoch("sp-pub")
+    relay["writer_cert"] = await _remote_cert(
+        skp, author_kp.public_key, epoch=old_epoch
+    )
+    await env["crypto"].rotate_epoch("sp-pub")
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    envelope, inner = await _decrypted(env, "sp-pub")
+    assert envelope["epoch"] == old_epoch + 1
+    verify_writer_cert(
+        WriterCert.from_wire(inner["writer_cert"]),
+        space_pubkey=skp.public_key,
+        space_id="sp-pub",
+        epoch=envelope["epoch"],
+        author_pk=author_kp.public_key,
+        required_scope="write",
+    )
+    assert verify_signed_author_inner(inner)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    ["forged", "other_household", "comment_scope", "other_space"],
+)
+async def test_remote_author_with_a_bad_cert_is_not_relayed(env, mutate, caplog):
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    author_kp, author_user_id, relay = _remote_relay()
+    await _with_certs(
+        env, seats={"beta.home": ["member"]}, pks={"beta.home": author_kp.public_key}
+    )
+    epoch = await env["crypto"].get_current_epoch("sp-pub")
+    if mutate == "forged":
+        relay["writer_cert"] = await _remote_cert(
+            generate_space_keypair(), author_kp.public_key, epoch=epoch
+        )
+    elif mutate == "other_household":
+        relay["writer_cert"] = await _remote_cert(
+            skp, generate_identity_keypair().public_key, epoch=epoch
+        )
+    elif mutate == "comment_scope":
+        relay["writer_cert"] = await _remote_cert(
+            skp, author_kp.public_key, epoch=epoch, scope="comment"
+        )
+    else:
+        relay["writer_cert"] = await _remote_cert(
+            skp, author_kp.public_key, epoch=epoch, space_id="sp-other"
+        )
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+    assert "writer cert" in caplog.text
+
+
+async def test_remote_author_whose_seat_is_gone_is_not_relayed(env, caplog):
+    """A valid cert from an earlier epoch no longer counts once the
+    household holds no writer seat — the host re-stamps only live writers."""
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    author_kp, author_user_id, relay = _remote_relay()
+    await _with_certs(env, seats={}, pks={"beta.home": author_kp.public_key})
+    epoch = await env["crypto"].get_current_epoch("sp-pub")
+    relay["writer_cert"] = await _remote_cert(skp, author_kp.public_key, epoch=epoch)
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+    assert "writer cert" in caplog.text
+
+
+async def test_pre_v49_author_without_a_cert_keeps_the_host_path(env):
+    """The migration tripwire: no cert → today's host-signed relay."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    _author_kp, author_user_id, relay = _remote_relay()
+    await _with_certs(env)
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    _envelope, inner = await _decrypted(env, "sp-pub")
+    assert inner == relay

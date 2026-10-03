@@ -3263,6 +3263,50 @@ async def test_broadcast_to_space_members_sends_the_legacy_payload_below_a_versi
 
 
 @pytest.mark.asyncio
+async def test_broadcast_to_space_members_per_peer_hook_decorates_each_copy(
+    monkeypatch,
+):
+    """``per_peer`` (v_49 writer certs) lets a caller put something meant
+    for ONE household — its own writer cert — into that household's copy
+    only. It runs after the legacy / relay variant is picked."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    a, _ = _make_remote_instance(km)
+    b, _ = _make_remote_instance(km)
+    a = dataclasses.replace(a, proto_version=41)
+    b = dataclasses.replace(b, proto_version=40)
+    await fed_repo.save_instance(a)
+    await fed_repo.save_instance(b)
+    fed_repo.add_space_member("sp", a.id)
+    fed_repo.add_space_member("sp", b.id)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    sent: dict[str, dict] = {}
+
+    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
+        sent[to_instance_id] = payload
+        return MagicMock(ok=True)
+
+    async def _hook(instance_id: str, payload: dict) -> dict:
+        return {**payload, "for": instance_id}
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+    base = {"v": "new"}
+    await svc.broadcast_to_space_members(
+        "sp",
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        base,
+        legacy_payload={"v": "old"},
+        legacy_below=41,
+        per_peer=_hook,
+    )
+    assert sent == {
+        a.id: {"v": "new", "for": a.id},
+        b.id: {"v": "old", "for": b.id},
+    }
+    assert base == {"v": "new"}
+
+
+@pytest.mark.asyncio
 async def test_broadcast_to_space_members_without_a_legacy_payload_sends_one_shape(
     monkeypatch,
 ):

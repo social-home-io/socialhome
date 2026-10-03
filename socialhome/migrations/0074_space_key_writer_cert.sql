@@ -1,0 +1,20 @@
+-- Space writer certificates (v_49) — ``space_keys.writer_cert``.
+--
+-- A writer cert is the space AUTHORITY key's statement "household X may
+-- write (or only comment) in this space during content epoch N"
+-- (``socialhome/writer_cert.py``). It is issued once per writer household
+-- per epoch by a seed holder (owner or delegated admin) and lets a member's
+-- own signed item be authorized without the host signing every post.
+--
+-- Each household keeps the ONE cert it holds for each (space, epoch). It
+-- lives on the epoch's existing ``space_keys`` row — the cert is bound to
+-- exactly that epoch, arrives with (or right after) that epoch's content
+-- key, and goes away with it (an authority-rotation reset or the space's
+-- ON DELETE CASCADE). Seed holders store nothing extra: what they issued is
+-- re-derived from the roster at every rotation.
+--
+-- Additive, NULL default: every existing key row simply holds no cert,
+-- which is exactly the pre-v_49 state (items keep the host-signed path).
+-- A same-epoch key replacement (the Phase-4b ``rotated_by`` tiebreak) does
+-- not touch the column: the cert is bound to the epoch, not the key bytes.
+ALTER TABLE space_keys ADD COLUMN writer_cert TEXT;

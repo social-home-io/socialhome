@@ -743,7 +743,22 @@ from __future__ import annotations
 #:   wins; a v_48 host sends a member below v_48 the canonical version
 #:   without the new fields (``legacy_payload``) and treats that member's
 #:   ancestry-less update as a proposal based on the current version.
-OURS: int = 48
+#: * **v_49** (2026-10-03) — space writer certificates. A seed holder (the
+#:   owner or a delegated admin) signs, with the space AUTHORITY key, one
+#:   ``writer_cert`` per writer household per content epoch
+#:   (``{cert_suite, space_id, epoch, instance_pk, scope, issued_at,
+#:   cert_sig}``, :mod:`socialhome.writer_cert`): ``scope: "write"`` for
+#:   owner / admin / moderator / member seats, ``"comment"`` for a follower
+#:   seat while ``allow_subscriber_comment`` is on. It reaches only the
+#:   household it names, inside the encrypted payload of channels that
+#:   already exist: the redeem ACK ``space_meta``, the per-peer
+#:   ``SPACE_KEY_EXCHANGE_REKEY`` fan-out, ``SPACE_ROSTER_SNAPSHOT`` and the
+#:   ``SPACE_AUTHORITY_ROTATED`` bundle. An author household puts its cert
+#:   in the relayed public-post inner (``public_relay``); a receiver drops an
+#:   item whose cert is present but fails verification. **Gated, degraded
+#:   fallback**: certs go only to v_49 households; an item with no cert
+#:   (a pre-v_49 author) keeps today's host-authority-signed path.
+OURS: int = 49
 
 
 class FederationCapability:
@@ -1156,6 +1171,12 @@ class FederationCapability:
     #: conflict list. Under an older host pages stay last write wins.
     MIN_FOR_HOST_SEQUENCED_PAGES = 48
 
+    #: Space writer certificates (v_49): a seed holder delivers each writer
+    #: household its authority-signed ``writer_cert`` per content epoch, and
+    #: an author's relayed item carries it. Older households get no cert and
+    #: their items keep the host-signed relay path.
+    MIN_FOR_MEMBER_GFS_PUBLISH = 49
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1303,6 +1324,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     (
         FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
         "Host-sequenced shared pages",
+    ),
+    (
+        FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH,
+        "Space writer certificates",
     ),
 ]
 

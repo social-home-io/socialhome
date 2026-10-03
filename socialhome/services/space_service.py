@@ -58,6 +58,7 @@ from ..federation.owner_bound_id import (
 
 if TYPE_CHECKING:
     from .space_moderation_service import ModerationSubmitter
+    from .space_writer_cert_service import SpaceWriterCertService
     import pathlib
 
     from ..federation.invite_bootstrap import InviteBootstrapHint
@@ -313,6 +314,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_space_crypto",
         "_gfs_mirror",
         "_subscriber_keys",
+        "_writer_certs",
         "_media_dir",
         "_media_refs",
         "_gallery",
@@ -353,6 +355,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._gfs = None
         self._gfs_mirror = None
         self._subscriber_keys = None
+        #: v_49 writer-cert issuer/holder (:class:`SpaceWriterCertService`).
+        #: Optional — absent, no cert rides any channel (pre-v_49 behaviour).
+        self._writer_certs: "SpaceWriterCertService | None" = None
         self._federation_repo = None
         self._instance_purger: "InstancePurger | None" = None
         self._federation = None
@@ -477,6 +482,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         paired — rotation then behaves exactly as before.
         """
         self._subscriber_keys = subscriber_key_outbound
+
+    def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
+        """Wire the v_49 writer-cert service: the roster snapshot and the
+        forward-secrecy rekey then carry each household its own cert."""
+        self._writer_certs = writer_certs
 
     def attach_federation(
         self,
@@ -1370,6 +1380,23 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         cert = owner_authority_cert_via(self._federation, space)
         if cert is not None:
             payload["authority_cert"] = cert
+        # v_49 — the recipient's OWN writer cert for the current epoch (and
+        # nobody else's): the snapshot goes to this one household, encrypted
+        # to it. Issued from the roster just signed above.
+        if self._writer_certs is not None:
+            try:
+                writer_cert = await self._writer_certs.cert_for_peer(
+                    space.id, to_instance_id
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: writer cert for %s failed in %s",
+                    to_instance_id,
+                    space.id,
+                )
+                writer_cert = None
+            if writer_cert is not None:
+                payload["writer_cert"] = writer_cert
         try:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=to_instance_id,
@@ -1526,9 +1553,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """A member household just upgraded past the roster-snapshot line:
         send it the roster of every space we host that it belongs to, so a
         mirror that never received the gossip heals right away."""
-        if (
-            event.old_version >= FederationCapability.MIN_FOR_ROSTER_SNAPSHOT
-            or event.new_version < FederationCapability.MIN_FOR_ROSTER_SNAPSHOT
+
+        def _crossed(line: int) -> bool:
+            return event.old_version < line <= event.new_version
+
+        # v_32 — the first snapshot it can take. v_49 — the snapshot now
+        # carries its writer cert, which it could not hold before.
+        if not (
+            _crossed(FederationCapability.MIN_FOR_ROSTER_SNAPSHOT)
+            or _crossed(FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH)
         ):
             return
         own = self._own_instance_id
@@ -3417,6 +3450,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         space_id = space.id
         instance_id = target.instance_id
         user_id = target.user_id
+        scope_before = (
+            await self._writer_certs.scope_for_instance(space, instance_id)
+            if self._writer_certs is not None
+            else None
+        )
         await self._remote_members.set_role(space_id, instance_id, user_id, role)
         evt = role_change_event_type(target.role, role)
         # A role change is a ROSTER mutation, not a config edit — it must NOT
@@ -3497,6 +3535,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             role=role,
             tombstoned=False,
         )
+        # v_49 — a change that alters the household's write / comment rights
+        # (a follower made a member) re-delivers its writer cert at the new
+        # scope, in a roster snapshot addressed to that household alone.
+        if self._writer_certs is not None and (
+            await self._writer_certs.scope_for_instance(space, instance_id)
+            != scope_before
+        ):
+            await self.send_roster_snapshot(space_id, to_instance_id=instance_id)
         # Delegated-admin authority (v_22): when the owner has opted in and
         # this newly-promoted remote member is an ADMIN, ship the space's
         # Ed25519 signing seed to that admin's household so it can sign
@@ -4390,11 +4436,20 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 },
                 "legacy_below": FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
             }
+        # v_49 — each member household's copy also carries ITS OWN writer
+        # cert for the new epoch (top level, outside the authority-signed key
+        # meta), so a revoked writer's old cert dies with the old epoch.
+        per_peer = (
+            self._writer_certs.peer_payload_hook(space_id, epoch=epoch)
+            if self._writer_certs is not None
+            else None
+        )
         try:
             await self._federation.broadcast_to_space_members(
                 space_id,
                 FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
                 payload,
+                per_peer=per_peer,
                 **legacy,
             )
         except Exception:

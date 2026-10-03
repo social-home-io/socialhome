@@ -35,6 +35,10 @@ class AbstractSpaceKeyRepo(Protocol):
     async def reset_to(
         self, key: SpaceKey, *, authority_epoch: int, older_than: int | None = None
     ) -> int: ...
+    async def set_writer_cert(
+        self, space_id: str, epoch: int, cert_json: str
+    ) -> bool: ...
+    async def get_writer_cert(self, space_id: str, epoch: int) -> str | None: ...
 
 
 class SqliteSpaceKeyRepo:
@@ -181,6 +185,26 @@ class SqliteSpaceKeyRepo:
             return int(cur.rowcount or 0)
 
         return await self._db.transact(_run)
+
+    async def set_writer_cert(self, space_id: str, epoch: int, cert_json: str) -> bool:
+        """Store the writer cert this household holds for ``(space, epoch)``
+        (v_49, migration 0074). Only onto an existing key row — ``False``
+        when we hold no key for that epoch (nothing is created)."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE space_keys SET writer_cert=? WHERE space_id=? AND epoch=?",
+            (cert_json, space_id, epoch),
+        )
+        return changed > 0
+
+    async def get_writer_cert(self, space_id: str, epoch: int) -> str | None:
+        """The stored writer cert JSON for ``(space, epoch)``, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT writer_cert FROM space_keys WHERE space_id=? AND epoch=?",
+            (space_id, epoch),
+        )
+        if row is None or row["writer_cert"] is None:
+            return None
+        return str(row["writer_cert"])
 
 
 def _row(row) -> SpaceKey:
