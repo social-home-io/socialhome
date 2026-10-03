@@ -1127,3 +1127,48 @@ async def test_access_admits_takes_a_valid_release_under_moderated() -> None:
     assert await a.access_admits(
         edit, SPACE, "tasks", ContentAction.EDIT, actor="u-author", row_owner="u-host"
     )
+
+
+# ─── item_access_admits: member-published space items (v_49) ───────────
+
+
+async def _item(auth, sender, author):
+    return await auth.item_access_admits(
+        origin_instance_id=sender,
+        space_id=SPACE,
+        feature="posts",
+        author_user_id=author,
+    )
+
+
+async def test_item_access_open_needs_a_writer_seat_on_the_origin():
+    auth = _access_authorship(posts="open")
+    assert await _item(auth, AUTHOR_HOUSE, "u-author")
+    # Another household's user, a follower seat, nobody at all.
+    assert not await _item(auth, AUTHOR_HOUSE, "u-admin")
+    assert not await _item(auth, AUTHOR_HOUSE, "u-sub")
+    assert not await _item(auth, AUTHOR_HOUSE, "u-unknown")
+
+
+async def test_item_access_admin_only_needs_an_admin_seat():
+    auth = _access_authorship(posts="admin_only")
+    assert await _item(auth, ADMIN_HOUSE, "u-admin")
+    assert not await _item(auth, ADMIN_HOUSE, "u-plain")
+    assert not await _item(auth, MOD_HOUSE, "u-mod")
+
+
+async def test_item_access_moderated_needs_content_authority():
+    auth = _access_authorship(posts="moderated")
+    assert await _item(auth, MOD_HOUSE, "u-mod")
+    assert await _item(auth, ADMIN_HOUSE, "u-admin")
+    assert not await _item(auth, AUTHOR_HOUSE, "u-author")
+
+
+async def test_item_access_for_an_unknown_space_is_refused():
+    auth = _access_authorship(posts="open")
+    assert not await auth.item_access_admits(
+        origin_instance_id=AUTHOR_HOUSE,
+        space_id="nope",
+        feature="posts",
+        author_user_id="u-author",
+    )

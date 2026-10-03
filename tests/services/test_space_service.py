@@ -23,6 +23,7 @@ from socialhome.domain.events import (
     SpaceModerationQueued,
     SpacePostCreated,
 )
+from socialhome.domain.writer_cert import WriterEntitlement
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
@@ -9173,8 +9174,8 @@ async def test_a_scope_reducing_local_role_change_rotates(stack, monkeypatch):
     scopes = iter(["write", "comment"])
 
     class _Certs:
-        async def scope_for_instance(self, _space, _iid):
-            return next(scopes)
+        async def entitlement_for_instance(self, _space, _iid):
+            return WriterEntitlement(next(scopes), frozenset({member.user_id}))
 
     stack.space_svc.attach_writer_certs(_Certs())  # type: ignore[arg-type]
     rekeys = await _rekeys(stack, monkeypatch)
@@ -9357,6 +9358,8 @@ async def test_a_forged_leave_for_another_households_seat_changes_nothing(
 
 
 async def test_a_leave_with_another_seat_left_keeps_the_household(stack, monkeypatch):
+    """The household keeps its seat, but its cert's user binding shrank
+    (u-a left) — rotate, so u-a can no longer post under the old cert."""
     space, fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a")
     await _seat(remote, space.id, "peer-a", "u-a2")
@@ -9364,7 +9367,7 @@ async def test_a_leave_with_another_seat_left_keeps_the_household(stack, monkeyp
     rekeys = await _rekeys(stack, monkeypatch)
     assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
     assert "peer-a" in await stack.space_repo.list_member_instances(space.id)
-    assert rekeys == []  # still a writer — no scope drop
+    assert rekeys == [space.id]
 
 
 async def test_a_leave_ending_the_last_admin_seat_rotates_once(stack, monkeypatch):
@@ -9559,3 +9562,65 @@ async def test_a_failing_epoch_notice_never_breaks_the_rotation(stack):
     )
     assert order == ["notice", "rekey", "reseal"]
     assert await stack.space_repo.get_member(space.id, bob.user_id) is None
+
+
+# ─── v_49 v2: the posts access level decides who a writer cert lets post ─
+
+
+async def _posts_cert_space(stack):
+    out = await _cert_space(stack)
+    # The access-level change consults the space's peer versions.
+    stack.space_svc._federation_repo.list_instances_in_space = AsyncMock(
+        return_value=[]
+    )
+    return out
+
+
+async def test_narrowing_posts_access_rotates(stack, monkeypatch):
+    """OPEN → ADMIN_ONLY: a plain member household's ``write`` cert must die
+    with the epoch, or it keeps posting over the GFS (P1)."""
+    space, fed, remote, _pks = await _posts_cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_moderating_posts_rotates_for_plain_members(stack, monkeypatch):
+    space, fed, remote, _pks = await _posts_cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.MODERATED),
+    )
+    assert rekeys == [space.id]
+
+
+async def test_opening_posts_does_not_rotate_but_re_issues(stack, monkeypatch):
+    space, fed, remote, _pks = await _posts_cert_space(stack)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.ADMIN_ONLY),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    snapshots: list[str] = []
+
+    async def _snapshot(self, space_id, *, to_instance_id):
+        snapshots.append(to_instance_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "send_roster_snapshot", _snapshot)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(posts_access=SpaceFeatureAccess.OPEN),
+    )
+    assert rekeys == []
+    assert snapshots == ["peer-a"]

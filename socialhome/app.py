@@ -2972,6 +2972,12 @@ def create_app(config: Config | None = None) -> web.Application:
             own_identity_seed=identity_seed,
         )
         real_space_service.attach_member_gfs(gfs_member_publish)
+        _member = gfs_member_publish
+
+        async def _announce_after_repin(space_id: str, gfs_id: str) -> object:
+            return await _member.announce_epoch(space_id, only=gfs_id)
+
+        gfs_connection_service.attach_on_repinned(_announce_after_repin)
         gfs_member_publish.wire(bus)
         space_public_outbound = SpacePublicOutbound(
             bus=bus,
@@ -3143,6 +3149,10 @@ def create_app(config: Config | None = None) -> web.Application:
             held_rows=space_moderation.held_row,
             on_release=space_moderation.note_release,
         )
+        # v_49 — member households check a member-published ``space_item``
+        # against their own roster and access levels too.
+        if space_public_inbound is not None:
+            space_public_inbound.attach_authorship(fed.space_authorship)
         nonlocal moderation_expiry_scheduler
         moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
         await moderation_expiry_scheduler.start()

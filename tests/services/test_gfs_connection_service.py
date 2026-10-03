@@ -3535,3 +3535,59 @@ async def test_publish_space_event_skips_servers_the_author_published_to(env):
     )
     assert delivered == 1
     assert [u for u, _ in session.posts] == ["https://g2.example/gfs/publish"]
+
+
+async def _repin_svc(env, monkeypatch, *, with_cert: bool):
+    _db, repo = env
+    await repo.save(_make_conn("rp-1", inbox_url="https://rp.example"))
+    session = _RecordingSession()
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+
+    async def _body(self, space_id, *, with_cert=True):
+        return {"name": "S", **({"authority_cert": {"k": 1}} if with_cert else {})}
+
+    async def _supported(self, conn, name, cache):
+        return True
+
+    monkeypatch.setattr(GfsConnectionService, "_build_publish_body", _body)
+    monkeypatch.setattr(
+        GfsConnectionService, "_signed_capability_supported", _supported
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def _hook(space_id, gfs_id):
+        calls.append((space_id, gfs_id))
+
+    svc.attach_on_repinned(_hook)
+    if not with_cert:
+
+        async def _plain(self, space_id, *, with_cert=True):
+            return {"name": "S"}
+
+        monkeypatch.setattr(GfsConnectionService, "_build_publish_body", _plain)
+    return svc, calls
+
+
+async def test_a_re_pinning_publish_re_announces_the_epoch(env, monkeypatch):
+    """v_49: whichever path makes a re-pin land (rotation, a later retry,
+    the reconnect heal), the epoch notice follows right after it."""
+    svc, calls = await _repin_svc(env, monkeypatch, with_cert=True)
+    await svc.publish_space("sp-r", "rp-1")
+    assert calls == [("sp-r", "rp-1")]
+
+
+async def test_a_plain_publish_does_not_re_announce(env, monkeypatch):
+    svc, calls = await _repin_svc(env, monkeypatch, with_cert=False)
+    await svc.publish_space("sp-r", "rp-1")
+    assert calls == []
+
+
+async def test_a_failing_re_announce_never_fails_the_publish(env, monkeypatch):
+    svc, _calls = await _repin_svc(env, monkeypatch, with_cert=True)
+
+    async def _boom(space_id, gfs_id):
+        raise RuntimeError("down")
+
+    svc.attach_on_repinned(_boom)
+    pub = await svc.publish_space("sp-r", "rp-1")
+    assert pub.space_id == "sp-r"

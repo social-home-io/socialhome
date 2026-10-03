@@ -974,10 +974,28 @@ signature per seat per epoch, never per item. Format and suite:
 **Who issues, to whom.** Only a household holding the space seed — the
 owner, or a delegated admin — and only while that seed is the private half
 of the pinned space key (a seed left behind by a v_44 rotation mints
-nothing). Entitlement is derived from the issuer's own roster, never stored:
-owner / admin / moderator / member seats → `write`; a follower seat →
-`comment` only while `allow_subscriber_comment` is on; a household with
-several seats → one cert at its strongest scope; no live seat → no cert.
+nothing). Entitlement is derived from the issuer's own roster and the
+space's `posts` access level, never stored: a seat gets `write` only where
+the level lets that role post directly — `OPEN`: owner / admin / moderator /
+member; `MODERATED`: owner / admin / moderator (a plain member's post keeps
+going through the host's review queue); `ADMIN_ONLY`: owner / admin. Other
+writer seats get `comment`; a follower seat gets `comment` only while
+`allow_subscriber_comment` is on; a household with several seats → one cert
+at its strongest scope; no live seat → no cert.
+
+**User binding (v2).** The cert also names the household's users that hold
+its scope — `writer_user_ids`, signed by the space authority in a SECOND
+signature (`users_sig`, suite `users_sig_suite`, see
+[`../crypto.md`](../crypto.md)). The cert's own signature is unchanged, so a
+v1 receiver still verifies it. A member-published `space_item` requires the
+binding and its author must be in it; the host-relay path keeps accepting a
+v1 cert. Because the binding lists users, the cert is re-issued at a new
+epoch whenever a household's set of writer users SHRINKS — a user's seat
+ending while the household keeps others, a demotion, or a `posts` access
+change that stops a role posting directly (`SpaceService
+.rotate_if_writer_scope_weakened` compares scope AND users; `update_config`
+rotates when `posts_access` narrows anyone, and re-delivers certs in roster
+snapshots when it widens).
 
 **When.** On seating (the invite-link redeem ACK, and the roster snapshot a
 paired joiner receives), on a role change that alters the household's write /

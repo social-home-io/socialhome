@@ -105,8 +105,9 @@ from .moderation_approval import (
     needs_held_row,
 )
 
+from ..domain.federation import FederationEvent, FederationEventType
+
 if TYPE_CHECKING:
-    from ..domain.federation import FederationEvent
     from ..domain.space import SpaceModerationItem
     from .pending_seat_buffer import PendingSeatBuffer
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -226,6 +227,46 @@ class SpaceAuthorship:
         if seat is None:
             return False
         return any_role or seat.role in _WRITER_ROLES
+
+    async def item_access_admits(
+        self,
+        *,
+        origin_instance_id: str,
+        space_id: str,
+        feature: str,
+        author_user_id: str,
+    ) -> bool:
+        """Does ``feature``'s access level, as THIS household holds it, admit
+        a NEW item by ``author_user_id`` published by household
+        ``origin_instance_id`` over the GFS (v_49 ``space_item``)?
+
+        The member-publish counterpart of :meth:`access_admits` for a write
+        that arrives with no federation envelope: the author must hold a
+        live writer seat on ``origin_instance_id``; ``ADMIN_ONLY`` needs an
+        admin seat, ``MODERATED`` content authority — a plain member's post
+        under review is never member-published (it waits in the host's
+        queue). Unlike :meth:`access_admits` it never holds the item for a
+        trailing seat: the same post also arrives over federation, where the
+        full rule (and the hold) applies. Defence in depth behind the writer
+        cert, whose scope and user binding already encode this."""
+        event = FederationEvent(
+            msg_id=f"space-item:{space_id}",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            from_instance=origin_instance_id,
+            to_instance="",
+            timestamp="",
+            payload={},
+            space_id=space_id,
+        )
+        space = await self._spaces.get(space_id)
+        if space is None or not await self.acts_for(event, space_id, author_user_id):
+            return False
+        level = space.features.access_level(feature)
+        if level is SpaceFeatureAccess.OPEN:
+            return True
+        if level is SpaceFeatureAccess.ADMIN_ONLY:
+            return await self.admin_as(event, space_id, author_user_id)
+        return await self.moderates_as(event, space_id, author_user_id)
 
     async def is_host(self, event: "FederationEvent", space_id: str) -> bool:
         """The sender is the household hosting ``space_id``."""

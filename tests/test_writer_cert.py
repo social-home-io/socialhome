@@ -19,9 +19,14 @@ from socialhome.domain.writer_cert import (
 )
 from socialhome.writer_cert import (
     SUPPORTED_WRITER_CERT_SUITES,
+    SUPPORTED_WRITER_USERS_SUITES,
     WRITER_CERT_SUITE_ED25519,
+    WRITER_USERS_SUITE_ED25519,
     InvalidWriterCert,
     UnsupportedWriterCertSuite,
+    UnsupportedWriterUsersSuite,
+    bind_writer_users,
+    verify_writer_users,
     sign_writer_cert,
     verify_writer_cert,
     writer_cert_signing_bytes,
@@ -177,3 +182,105 @@ def test_authority_relay_signature_cannot_pose_as_cert():
     ) != writer_cert_signing_bytes(cert)
     with pytest.raises(InvalidWriterCert, match="signature"):
         _verify(dataclasses.replace(cert, cert_sig=relay_sig))
+
+
+# ─── v2: the user binding ───────────────────────────────────────────────
+
+
+def _bound(users=("u-1", "u-2"), **over):
+    return bind_writer_users(_issue(**over), space_seed=SPACE_SEED, user_ids=users)
+
+
+def test_a_bound_cert_still_verifies_as_v1():
+    """The binding is a SECOND signature: a v1 verifier (which ignores the
+    extra fields) still accepts the cert."""
+    cert = _bound()
+    verify_writer_cert(
+        WriterCert.from_wire(cert.to_wire()),
+        space_pubkey=SPACE_PK,
+        space_id="sp-1",
+        epoch=4,
+        author_pk=AUTHOR_PK,
+        required_scope="write",
+    )
+    v1_view = {
+        k: v
+        for k, v in cert.to_wire().items()
+        if k in cert.signing_body() or k == "cert_sig"
+    }
+    verify_writer_cert(
+        WriterCert.from_wire(v1_view),
+        space_pubkey=SPACE_PK,
+        space_id="sp-1",
+        epoch=4,
+        author_pk=AUTHOR_PK,
+        required_scope="write",
+    )
+
+
+def test_the_binding_round_trips_and_names_its_users():
+    cert = WriterCert.from_wire(_bound(users=("u-2", "u-1", "u-1")).to_wire())
+    assert cert.writer_user_ids == ("u-1", "u-2")
+    verify_writer_users(cert, space_pubkey=SPACE_PK, author_user_id="u-1")
+
+
+def test_an_author_outside_the_binding_is_refused():
+    with pytest.raises(InvalidWriterCert):
+        verify_writer_users(_bound(), space_pubkey=SPACE_PK, author_user_id="u-9")
+
+
+def test_a_v1_cert_has_no_binding_and_is_refused():
+    with pytest.raises(InvalidWriterCert):
+        verify_writer_users(_issue(), space_pubkey=SPACE_PK, author_user_id="u-1")
+
+
+def test_a_tampered_user_list_breaks_the_binding():
+    wire = _bound().to_wire()
+    wire["writer_user_ids"] = ["u-1", "u-2", "u-evil"]
+    with pytest.raises(InvalidWriterCert):
+        verify_writer_users(
+            WriterCert.from_wire(wire), space_pubkey=SPACE_PK, author_user_id="u-evil"
+        )
+
+
+def test_a_binding_lifted_onto_another_cert_is_refused():
+    other = _issue(epoch=5)
+    lifted = dataclasses.replace(
+        other,
+        writer_user_ids=("u-1",),
+        users_sig=_bound(users=("u-1",)).users_sig,
+        users_sig_suite="ed25519",
+    )
+    with pytest.raises(InvalidWriterCert):
+        verify_writer_users(lifted, space_pubkey=SPACE_PK, author_user_id="u-1")
+
+
+def test_a_binding_by_another_key_is_refused():
+    forged = bind_writer_users(_issue(), space_seed=os.urandom(32), user_ids=["u-1"])
+    with pytest.raises(InvalidWriterCert):
+        verify_writer_users(forged, space_pubkey=SPACE_PK, author_user_id="u-1")
+
+
+def test_an_unknown_binding_suite_is_refused():
+    cert = dataclasses.replace(_bound(), users_sig_suite="ed25519+mldsa65")
+    with pytest.raises(UnsupportedWriterUsersSuite):
+        verify_writer_users(cert, space_pubkey=SPACE_PK, author_user_id="u-1")
+    assert WRITER_USERS_SUITE_ED25519 in SUPPORTED_WRITER_USERS_SUITES
+
+
+@pytest.mark.parametrize(
+    "users",
+    [None, "u-1", [1], [""], ["x" * 129], ["u"] * 0 + [f"u{i}" for i in range(65)]],
+)
+def test_a_malformed_binding_does_not_parse(users):
+    wire = _bound().to_wire()
+    wire["writer_user_ids"] = users
+    with pytest.raises(ValueError):
+        WriterCert.from_wire(wire)
+
+
+def test_too_many_users_cannot_be_bound():
+    with pytest.raises(ValueError):
+        bind_writer_users(
+            _issue(), space_seed=SPACE_SEED, user_ids=[f"u{i}" for i in range(65)]
+        )

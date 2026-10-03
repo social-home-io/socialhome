@@ -939,28 +939,36 @@ POST /gfs/member-publish
 
 **Household side** (`services/gfs_member_publish_service.py`):
 
-- **Who publishes.** A household holding a `write` writer cert for the
-  current epoch and NOT the space seed (seed holders keep relaying with the
-  authority signature), in a PUBLIC/GLOBAL space with `allow_subscribers`,
-  to every active connection server that lists the space (`GET
-  /gfs/spaces/{id}`, cached 10 min) AND proves `member_publish_trusted` in
-  its signed capability block. Without the capability nothing identified is
+- **Who publishes.** A household NOT holding the space seed (seed holders
+  keep relaying with the authority signature) whose cert for the current
+  epoch lets THIS author post — `write` scope and a v2 user binding naming
+  them (so a plain member of a `MODERATED` or `ADMIN_ONLY` space never
+  member-publishes: its post goes to the host, into the queue or refused) —
+  in a PUBLIC/GLOBAL space with `allow_subscribers`, to every active
+  connection server that lists the space AND proves
+  `member_publish_trusted` in its signed capability block. "Lists" is read
+  from the server's WHOLE public directory (`GET /gfs/spaces`, cached 10 min,
+  over the cookie-less publish session) — never a space-specific probe,
+  which would tell a server which spaces the household cares about. Without the capability nothing identified is
   sent: the post takes today's path — the member broadcast, from which a
   seed holder relays it.
 - **What it sends.** The ciphertext of `{"item_type": "post", "inner":
-  <the author-signed inner, as in the host relay hint, + our writer cert
-  for the sealing epoch>}`. Each attempt is signed afresh (`ts`,
+  <an author-signed inner that ALSO binds `item_type` and `item_target` in
+  the author signature, + our writer cert for the sealing epoch>}`. Each attempt is signed afresh (`ts`,
   `gfs_instance_id` = the id pinned from that server's `/gfs/info`);
   transient failures (transport, 408, 429, 5xx incl. a busy GFS's 503) are
   retried through a `GfsPublishRetryQueue`.
-- **Host dedupe rule.** Before the member broadcast goes out, the author
-  writes the `gfs_instance_id`s it is about to publish to into the encrypted
-  relay hint (`public_relay.gfs_published`, outside the author signature).
+- **Host dedupe rule.** The author publishes FIRST — every first attempt
+  concurrent and bounded (3 s) — and only then sends the member broadcast,
+  naming in the encrypted relay hint (`public_relay.gfs_published`, outside
+  the author signature) only the `gfs_instance_id`s that ACCEPTED the post.
   A seed holder relaying that post skips exactly those servers and relays
-  to the rest; the field never travels on. A v_48 author sends no field and
-  is relayed as before. If the author's own publish later fails
-  permanently, followers on that server catch the post up through space
-  sync; a duplicate would be harmless anyway (dedupe by post id).
+  to the rest, so a server where the author's publish failed or timed out
+  still gets the host's copy (the author's retry may add a duplicate there,
+  which receivers drop by post id); the field never travels on. A v_48
+  author sends no field and is relayed as before. The bounded wait is the
+  price of naming only accepting servers; post creation waits at most that
+  long.
 - **Auto-subscribe.** A household with a local writer seat (and no seed)
   subscribes to the fan-out of the space on every capable server listing it
   — when the seat is created (`SpaceMemberJoined`), when it first
@@ -969,17 +977,26 @@ POST /gfs/member-publish
 - **Receiving** a `space_item` (`SpacePublicInbound`): decrypt; read the
   real type (only `post` in this release — anything else is dropped); drop
   our own echo; verify the author signature, self-cert and owner-bound post
-  id; require the inner cert to equal the frame's, and run
+  id; require the author-bound `item_type` / `item_target` to match; require
+  `origin_instance_id == derive_instance_id(author_pk)` (also on the host
+  relay path); require the inner cert to equal the frame's, and run
   `SpaceWriterCertService.check_item` — signature against the pinned space
   key, this space, the frame's epoch, the inner's `author_pk`, the scope the
-  REAL type needs (`write` for a post) and epoch freshness; then dedupe by
-  post id against the federated / host-relayed copy.
+  REAL type needs (`write` for a post) and epoch freshness; require the v2
+  user binding to name the author; on a MEMBER household (it holds the
+  roster and the access levels) also require the author's own seat to let
+  them post (`SpaceAuthorship.item_access_admits`); then dedupe by post id
+  against the federated / host-relayed copy.
 - **Epoch notices** (`announce_epoch`): sent before the subscriber
   re-seal at every content-key rotation (`SpaceService
   ._rotate_and_distribute_space_key` — kick, ban, leave, scope drop), right
   after an authority re-pin (`SpaceAuthorityRotationService._refresh_gfs`),
   and for every seed-held space on each GFS (re)connect. The owner sends the
-  household-signed form, a delegated admin the authority-signed one.
+  household-signed form, a delegated admin the authority-signed one. Any
+  publish that re-pins the space key at a server (it carries the owner's
+  authority cert) is followed at once by the epoch notice to that server,
+  whichever path made the re-pin land (the rotation, a later retry, the
+  reconnect heal).
 
 **Operator notes (connection server).**
 
@@ -1015,7 +1032,9 @@ these; adversarial review of PR 2):
 4. **Strict mode (PR 4) moves `writer_cert` inside the ciphertext.** In
    trusted mode it is plaintext only because the server authorizes with it;
    strict mode authorizes with the writer group key, so the cert (which
-   names the household) must not stay visible.
+   names the household) must not stay visible. Strict mode must also not
+   auto-subscribe with identified requests — a signed subscribe names the
+   household, which is exactly what strict mode withholds.
 5. **Edit and delete over this relay (PR 3) must not depend on arrival
    order.** The GFS delivers one space's items in publish order, but the
    host path, the queue and space sync interleave with it, so a receiver

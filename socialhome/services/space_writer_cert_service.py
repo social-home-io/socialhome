@@ -41,17 +41,20 @@ from typing import TYPE_CHECKING
 
 from ..crypto import b64url_decode, derive_instance_id, ed25519_public_key
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.space import SpaceRole
+from ..domain.space import SpaceFeatureAccess, SpaceRole
 from ..domain.writer_cert import (
+    MAX_WRITER_USERS,
     WRITER_SCOPE_COMMENT,
     WRITER_SCOPE_WRITE,
     WriterCert,
+    WriterEntitlement,
     scope_permits,
     strongest_scope,
 )
 from ..writer_cert import (
     InvalidWriterCert,
     UnsupportedWriterCertSuite,
+    bind_writer_users,
     sign_writer_cert,
     verify_writer_cert,
 )
@@ -79,6 +82,17 @@ _WRITE_ROLES: frozenset[str] = frozenset(
     }
 )
 
+#: Seats that may POST directly, per ``posts`` access level.
+_POSTING_ROLES: dict[SpaceFeatureAccess, frozenset[str]] = {
+    SpaceFeatureAccess.OPEN: _WRITE_ROLES,
+    SpaceFeatureAccess.MODERATED: frozenset(
+        {SpaceRole.OWNER.value, SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value}
+    ),
+    SpaceFeatureAccess.ADMIN_ONLY: frozenset(
+        {SpaceRole.OWNER.value, SpaceRole.ADMIN.value}
+    ),
+}
+
 PeerPayloadHook = Callable[[str, dict], Awaitable[dict]]
 
 #: How long the PREVIOUS content epoch stays open for cert-authorized items
@@ -98,9 +112,24 @@ _SCOPE_RANK: dict[str | None, int] = {
 }
 
 
-def scope_weakened(before: str | None, after: str | None) -> bool:
-    """True when ``after`` grants less than ``before`` (write→comment, any→none)."""
-    return _SCOPE_RANK[after] < _SCOPE_RANK[before]
+def scope_weakened(
+    before: "str | None | WriterEntitlement", after: "str | None | WriterEntitlement"
+) -> bool:
+    """True when ``after`` grants less than ``before``: a weaker scope
+    (write→comment, any→none), or — for entitlements — the same scope held
+    by fewer users (a user's seat ended, or the access level stopped letting
+    them post, while the household keeps other seats)."""
+    b_scope = before.scope if isinstance(before, WriterEntitlement) else before
+    a_scope = after.scope if isinstance(after, WriterEntitlement) else after
+    if _SCOPE_RANK[a_scope] < _SCOPE_RANK[b_scope]:
+        return True
+    if (
+        isinstance(before, WriterEntitlement)
+        and isinstance(after, WriterEntitlement)
+        and a_scope == b_scope
+    ):
+        return bool(before.user_ids - after.user_ids)
+    return False
 
 
 def _parse_utc(value: object) -> datetime | None:
@@ -155,25 +184,49 @@ class SpaceWriterCertService:
     async def scope_for_instance(self, space: "Space", instance_id: str) -> str | None:
         """The strongest scope household ``instance_id`` holds in ``space``
         by our roster, or ``None`` (no live seat / no comment rights)."""
+        return (await self.entitlement_for_instance(space, instance_id)).scope
+
+    async def entitlement_for_instance(
+        self, space: "Space", instance_id: str
+    ) -> WriterEntitlement:
+        """Household ``instance_id``'s scope AND the users holding it (the
+        v2 user binding), by our roster and the space's ``posts`` access
+        level: a seat writes only where the level lets that role post
+        directly — ``ADMIN_ONLY``: owner / admin; ``MODERATED``: content
+        authority (owner / admin / moderator), so a plain member's post keeps
+        going through the host's review queue; ``OPEN``: every writer role.
+        A seat that may not post keeps ``comment`` (comments are judged per
+        item by the receivers); a follower seat gets ``comment`` only while
+        ``allow_subscriber_comment`` is on."""
         if instance_id == self._own_instance_id:
-            roles = [str(m.role) for m in await self._spaces.list_members(space.id)]
+            seats = [
+                (m.user_id, str(m.role))
+                for m in await self._spaces.list_members(space.id)
+            ]
         else:
-            roles = [
-                str(r.role)
+            seats = [
+                (r.user_id, str(r.role))
                 for r in await self._remote_members.list_for_instance(
                     space.id, instance_id, include_tombstoned=False
                 )
             ]
-        scopes: list[str] = []
-        for role in roles:
-            if role in _WRITE_ROLES:
-                scopes.append(WRITER_SCOPE_WRITE)
-            elif (
+        posting = _POSTING_ROLES[space.features.access_level("posts")]
+        by_scope: dict[str, set[str]] = {
+            WRITER_SCOPE_WRITE: set(),
+            WRITER_SCOPE_COMMENT: set(),
+        }
+        for user_id, role in seats:
+            if role in posting:
+                by_scope[WRITER_SCOPE_WRITE].add(user_id)
+            elif role in _WRITE_ROLES or (
                 role == SpaceRole.SUBSCRIBER.value
                 and space.features.allow_subscriber_comment
             ):
-                scopes.append(WRITER_SCOPE_COMMENT)
-        return strongest_scope(scopes)
+                by_scope[WRITER_SCOPE_COMMENT].add(user_id)
+        scope = strongest_scope(k for k, v in by_scope.items() if v)
+        if scope is None:
+            return WriterEntitlement(None)
+        return WriterEntitlement(scope, frozenset(by_scope[scope]))
 
     async def verified_instance_pk(
         self, instance_id: str, *, claimed: bytes | None = None
@@ -240,18 +293,25 @@ class SpaceWriterCertService:
             if latest is None:
                 return None
             epoch = latest.epoch
-        scope = await self.scope_for_instance(space, instance_id)
-        if scope is None:
+        entitlement = await self.entitlement_for_instance(space, instance_id)
+        if entitlement.scope is None:
             return None
         pk = await self.verified_instance_pk(instance_id, claimed=instance_pk_hint)
         if pk is None or len(pk) != 32:
             return None
-        return sign_writer_cert(
+        cert = sign_writer_cert(
             space_seed=seed,
             space_id=space_id,
             epoch=epoch,
             instance_pk=pk,
-            scope=scope,
+            scope=entitlement.scope,
+        )
+        # v2: bind the household's users holding that scope (a second
+        # signature — v1 verifiers still accept the cert unchanged).
+        return bind_writer_users(
+            cert,
+            space_seed=seed,
+            user_ids=sorted(entitlement.user_ids)[:MAX_WRITER_USERS],
         )
 
     async def cert_for_peer(

@@ -475,6 +475,29 @@ new key: it is
 signed by the space authority key every member already pins, and binds the
 household identity key every peer already pins.
 
+**Writer-cert user binding (v2)** — the household's writer users
+(`writer_user_ids`, sorted, at most 64) signed by the space authority seed
+in a SECOND Ed25519 signature: `users_sig` over
+`b"space-writer-cert:v2:users:"` + canonical JSON of `{cert_sig, space_id,
+epoch, instance_pk, writer_user_ids, users_sig_suite}`. Binding the cert's own
+signature ties it to exactly this cert (it cannot be lifted onto another).
+Its own suite tag `users_sig_suite` (`WRITER_USERS_SUITE_ED25519 =
+"ed25519"`, `SUPPORTED_WRITER_USERS_SUITES`, unknown →
+`UnsupportedWriterUsersSuite`, never a default). Kept apart from `cert_sig`
+on purpose: the v1 signing bytes (`space-writer-cert:v1:` over the six v1
+fields) are unchanged, so a v1 verifier — which ignores the extra fields —
+still accepts a bound cert. `verify_writer_users` requires the binding and
+the author's user id in it; a member-published `space_item` must carry it,
+the host-relay path does not.
+
+**Author-bound item type (v_49 `space_item`)** — an inner built for a
+member publish signs two extra fields with the author signature,
+`item_type` and `item_target` (the id the item acts on — the post itself for
+a post), present-or-absent like `identity_anchor` so host-relay inners keep
+their exact v_25 bytes. Receivers require both to match the decrypted item,
+so nobody holding the content key can re-wrap a signed post as another kind
+of item.
+
 **Trusted-mode member publish** (`domain/gfs_member_publish.py`,
 `global_server/member_publish.py`, v_49) — `POST /gfs/member-publish`. The
 household signs canonical JSON (sorted keys, compact — the encoding every

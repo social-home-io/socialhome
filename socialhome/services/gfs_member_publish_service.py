@@ -103,11 +103,27 @@ GFS_PUBLISHED_FIELD: str = "gfs_published"
 LISTING_TTL_S: float = 600.0
 LISTING_NEGATIVE_TTL_S: float = 60.0
 
+#: Bound on one first publish attempt, which runs before the member
+#: broadcast so the author names only servers that accepted the post.
+FIRST_ATTEMPT_TIMEOUT_S: float = 3.0
+
 #: Queue-item event types of the member retry queue.
 _KIND_ITEM = SPACE_ITEM_EVENT_TYPE
 _KIND_NOTICE = "space_epoch_notice"
 
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+
+def _cert_lets_post(cert: dict, author_user_id: str) -> bool:
+    """Whether our wire cert lets ``author_user_id`` post: ``write`` scope
+    and a v2 user binding naming them."""
+    users = cert.get("writer_user_ids")
+    return (
+        scope_permits(str(cert.get("scope") or ""), WRITER_SCOPE_WRITE)
+        and bool(cert.get("users_sig"))
+        and isinstance(users, list)
+        and author_user_id in users
+    )
 
 
 def build_item_plaintext(item_type: str, inner: dict) -> bytes:
@@ -166,8 +182,8 @@ class GfsMemberPublishService:
         self._writer_certs = writer_certs
         self._own_instance_id = own_instance_id
         self._own_identity_seed = own_identity_seed
-        #: (conn id, space id) → (listed?, monotonic time of the answer).
-        self._listing: dict[tuple[str, str], tuple[bool, float]] = {}
+        #: conn id → (space ids in its public directory, monotonic time).
+        self._listing: dict[str, tuple[frozenset[str], float]] = {}
         self._retry = GfsPublishRetryQueue(self._retry_send)
         #: (conn id, space id) pairs this process already subscribed.
         self._subscribed: set[tuple[str, str]] = set()
@@ -209,28 +225,40 @@ class GfsMemberPublishService:
         )
 
     async def _listed(self, conn: GfsConnection, space_id: str) -> bool:
-        """Whether *space_id* is listed on *conn* (``GET /gfs/spaces/{id}``),
-        cached. A space this household published there itself counts."""
-        key = (conn.id, space_id)
-        cached = self._listing.get(key)
+        """Whether *space_id* is in *conn*'s public directory
+        (``GET /gfs/spaces``, the WHOLE listing, cached per connection).
+        Never a space-specific probe — asking the server about one space
+        would tell it which spaces this household cares about — and over
+        the cookie-less publish session, so it links to nothing."""
+        cached = self._listing.get(conn.id)
         now = time.monotonic()
         if cached is not None:
-            listed, at = cached
-            if now - at < (LISTING_TTL_S if listed else LISTING_NEGATIVE_TTL_S):
-                return listed
-        listed = False
+            listed_ids, at = cached
+            if now - at < (LISTING_TTL_S if listed_ids else LISTING_NEGATIVE_TTL_S):
+                return space_id in listed_ids
+        client = self._gfs.publish_client()
+        if client is None:
+            return False
         try:
-            async with self._gfs.client().get(
-                f"{conn.inbox_url}/gfs/spaces/{space_id}",
+            async with client.get(
+                f"{conn.inbox_url}/gfs/spaces",
                 allow_redirects=False,
                 timeout=_HTTP_TIMEOUT,
             ) as resp:
-                listed = resp.status == 200
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            log.info("gfs.member_publish: listing probe to %s failed: %s", conn.id, exc)
+                body = await resp.json() if resp.status == 200 else {}
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            log.info(
+                "gfs.member_publish: directory fetch from %s failed: %s", conn.id, exc
+            )
             return False
-        self._listing[key] = (listed, now)
-        return listed
+        spaces = body.get("spaces") if isinstance(body, dict) else None
+        listed_ids = frozenset(
+            str(sp.get("space_id"))
+            for sp in (spaces if isinstance(spaces, list) else [])
+            if isinstance(sp, dict) and sp.get("space_id")
+        )
+        self._listing[conn.id] = (listed_ids, now)
+        return space_id in listed_ids
 
     async def _capable_listed(self, space_id: str) -> list[GfsConnection]:
         """Active connections that list *space_id* and proved
@@ -244,20 +272,23 @@ class GfsMemberPublishService:
                 out.append(conn)
         return out
 
-    async def plan_post(self, space_id: str) -> list[GfsConnection]:
-        """The connection servers this household will publish its own post
-        in *space_id* to, or ``[]`` — not public/readable, a seed holder (it
-        relays with the authority signature instead), no write-scoped cert
-        for the current epoch, or no capable server."""
+    async def plan_post(
+        self, space_id: str, author_user_id: str
+    ) -> list[GfsConnection]:
+        """The connection servers this household will publish
+        ``author_user_id``'s post in *space_id* to, or ``[]`` — not
+        public/readable, a seed holder (it relays with the authority
+        signature instead), or our cert for the current epoch does not let
+        THIS author post (no cert, ``comment`` scope, or the v2 user binding
+        does not name them — e.g. a plain member of a moderated space, whose
+        post must wait in the host's queue). ``[]`` means today's host path."""
         space = await self._spaces.get(space_id)
         if not self._publicly_readable(space):
             return []
         if await self._holds_seed(space_id):
             return []
         cert = await self._writer_certs.current_own_cert_wire(space_id)
-        if cert is None or not scope_permits(
-            str(cert.get("scope") or ""), WRITER_SCOPE_WRITE
-        ):
+        if cert is None or not _cert_lets_post(cert, author_user_id):
             return []
         targets = await self._capable_listed(space_id)
         # A writer that publishes wants the other members' items too.
@@ -267,24 +298,45 @@ class GfsMemberPublishService:
     # ── Publishing an item ────────────────────────────────────────────────
 
     async def publish_post(
-        self, space_id: str, inner: dict, targets: list[GfsConnection]
-    ) -> int:
-        """Encrypt the author-signed post *inner* with our writer cert for the
-        epoch it is sealed under and publish it to *targets*. Returns how many
-        accepted it on this first attempt (transient failures are retried)."""
+        self,
+        space_id: str,
+        inner: dict,
+        targets: list[GfsConnection],
+        *,
+        first_attempt_timeout_s: float = FIRST_ATTEMPT_TIMEOUT_S,
+    ) -> list[GfsConnection]:
+        """Encrypt the author-signed post *inner* (built with its bound
+        ``item_type`` / ``item_target``) with our writer cert for the epoch
+        it is sealed under and publish it to *targets*, concurrently and
+        each first attempt bounded by ``first_attempt_timeout_s``. Returns
+        the servers that ACCEPTED it on that first attempt — the only ones
+        the author may name in the host-dedupe hint. A transient failure or
+        a timeout goes to the retry queue (the host then relays there too;
+        a duplicate is harmless — receivers dedupe by post id)."""
         if not targets:
-            return 0
+            return []
         sealed = await self._seal(space_id, inner)
         if sealed is None:
-            return 0
+            return []
         epoch, cert, ciphertext = sealed
         data = {"epoch": epoch, "writer_cert": cert.to_wire(), "payload": ciphertext}
         item = GfsPublish(space_id=space_id, event_type=_KIND_ITEM, payload=data)
-        delivered = 0
-        for conn in targets:
-            if await self._first_attempt(conn, item):
-                delivered += 1
-        return delivered
+        results = await asyncio.gather(
+            *(
+                self._bounded_first_attempt(conn, item, first_attempt_timeout_s)
+                for conn in targets
+            )
+        )
+        return [conn for conn, ok in zip(targets, results, strict=True) if ok]
+
+    async def _bounded_first_attempt(
+        self, conn: GfsConnection, item: GfsPublish, timeout_s: float
+    ) -> bool:
+        try:
+            return await asyncio.wait_for(self._first_attempt(conn, item), timeout_s)
+        except TimeoutError:
+            self._retry.enqueue(conn.id, item)
+            return False
 
     async def _seal(
         self, space_id: str, inner: dict

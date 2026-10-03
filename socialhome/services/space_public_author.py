@@ -99,6 +99,8 @@ _SIGNED_FIELDS: tuple[str, ...] = (
     "location",
     "origin_instance_id",
     "hidden_from_feed",
+    "item_type",
+    "item_target",
 )
 
 
@@ -119,7 +121,16 @@ _SIGNED_FIELDS: tuple[str, ...] = (
 #: or an empty anchor) to "absent" — only an anchor that differs from the
 #: username (uuid4-provisioned users) writes the key, and those verify on
 #: v_26+ receivers only.
-_OPTIONAL_OMITTED_WHEN_ABSENT: frozenset[str] = frozenset({"identity_anchor"})
+#:
+#: ``item_type`` / ``item_target`` (v_49, member-published ``space_item``)
+#: are present-or-absent for the same reason: an inner built for the host
+#: relay carries neither, so its bytes are unchanged; an inner built for a
+#: member publish signs both, so the real item type (and the id it acts on)
+#: is bound to the author and nobody holding the content key can re-wrap a
+#: signed post as another kind of item.
+_OPTIONAL_OMITTED_WHEN_ABSENT: frozenset[str] = frozenset(
+    {"identity_anchor", "item_type", "item_target"}
+)
 
 
 def author_signing_bytes(inner: dict) -> bytes:
@@ -157,6 +168,8 @@ def build_signed_author_inner(
     author_identity_seed: bytes,
     origin_instance_id: str,
     author_identity_anchor: str | None = None,
+    item_type: str | None = None,
+    item_target: str | None = None,
 ) -> dict:
     """Build the per-author-signed inner payload for a public/global space
     post (the object the GFS relay encrypts + a subscriber verifies).
@@ -223,6 +236,10 @@ def build_signed_author_inner(
     # argument).
     if author_identity_anchor and author_identity_anchor != author_username:
         inner["identity_anchor"] = author_identity_anchor
+    # v_49 member publish: bind the real item type and its target id.
+    if item_type is not None:
+        inner["item_type"] = item_type
+        inner["item_target"] = item_target if item_target is not None else post.id
     inner["author_sig"] = b64url_encode(
         sign_ed25519(author_identity_seed, author_signing_bytes(inner))
     )

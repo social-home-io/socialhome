@@ -9,6 +9,7 @@ check them in production.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -53,9 +54,10 @@ from socialhome.services.gfs_member_publish_service import (
     parse_item_plaintext,
 )
 from socialhome.services.gfs_publish_retry import GfsPublish
-from socialhome.writer_cert import sign_writer_cert
+from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 SPACE_ID = "sp-pub"
+AUTHOR = "u-me"
 GFS_ID = "gfs-node-a"
 SPACE_SEED = os.urandom(32)
 SPACE_PK = ed25519_public_key(SPACE_SEED)
@@ -93,17 +95,19 @@ class _Certs:
     def __init__(self, holder: _Household, *, scope: str = "write") -> None:
         self.holder = holder
         self.scope: str | None = scope
+        self.users: list[str] = [AUTHOR]
 
     async def own_cert(self, space_id, epoch) -> WriterCert | None:
         if self.scope is None:
             return None
-        return sign_writer_cert(
+        cert = sign_writer_cert(
             space_seed=SPACE_SEED,
             space_id=space_id,
             epoch=epoch,
             instance_pk=self.holder.pk,
             scope=self.scope,
         )
+        return bind_writer_users(cert, space_seed=SPACE_SEED, user_ids=self.users)
 
     async def current_own_cert_wire(self, space_id):
         cert = await self.own_cert(space_id, 3)
@@ -306,7 +310,7 @@ def test_item_plaintext_round_trips_and_refuses_the_rest():
 
 
 async def test_plan_targets_a_capable_server_listing_the_space(world):
-    assert [c.id for c in await world["svc"].plan_post(SPACE_ID)] == ["conn-1"]
+    assert [c.id for c in await world["svc"].plan_post(SPACE_ID, AUTHOR)] == ["conn-1"]
 
 
 @pytest.mark.parametrize(
@@ -327,20 +331,20 @@ async def test_plan_is_empty_when_the_household_must_not_publish(world, setup):
         svc._writer_certs.scope = "comment"
     elif setup == "incapable":
         world["gfs"].capable = False
-    assert await svc.plan_post(SPACE_ID) == []
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
 
 
 async def test_a_server_not_listing_the_space_is_not_a_target(world):
     spaces = world["spaces"]
     spaces.spaces["sp-unlisted"] = _space(sid="sp-unlisted")
-    assert await world["svc"].plan_post("sp-unlisted") == []
+    assert await world["svc"].plan_post("sp-unlisted", AUTHOR) == []
 
 
 async def test_a_server_we_published_to_counts_as_listing_without_a_probe(world):
     svc = world["svc"]
     svc._conn_repo.own = ["conn-1"]
     world["spaces"].spaces["sp-unlisted"] = _space(sid="sp-unlisted")
-    assert [c.id for c in await svc.plan_post("sp-unlisted")] == ["conn-1"]
+    assert [c.id for c in await svc.plan_post("sp-unlisted", AUTHOR)] == ["conn-1"]
 
 
 async def test_the_listing_answer_is_cached(world, monkeypatch):
@@ -365,9 +369,11 @@ async def test_the_listing_answer_is_cached(world, monkeypatch):
 @pytest.mark.security
 async def test_a_published_post_is_accepted_and_carries_only_ciphertext(world):
     svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID)
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
     inner = _inner(writer_cert={"stale": True}, **{GFS_PUBLISHED_FIELD: [GFS_ID]})
-    assert await svc.publish_post(SPACE_ID, inner, targets) == 1
+    assert [c.id for c in await svc.publish_post(SPACE_ID, inner, targets)] == [
+        "conn-1"
+    ]
     rows = await _queued(world)
     assert len(rows) == 1
     frame = rows[0].sealed
@@ -433,17 +439,17 @@ async def test_without_the_capability_nothing_identified_is_sent(world, monkeypa
         world["tc"].session, "post", lambda *a, **kw: posted.append(a) or None
     )
     svc = world["svc"]
-    assert await svc.plan_post(SPACE_ID) == []
-    assert await svc.publish_post(SPACE_ID, _inner(), []) == 0
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
+    assert await svc.publish_post(SPACE_ID, _inner(), []) == []
     assert await svc.announce_epoch(SPACE_ID) == 0
     assert posted == []
 
 
 async def test_no_cert_for_the_sealing_epoch_publishes_nothing(world):
     svc = world["svc"]
-    targets = await svc.plan_post(SPACE_ID)
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
     svc._writer_certs.scope = None
-    assert await svc.publish_post(SPACE_ID, _inner(), targets) == 0
+    assert await svc.publish_post(SPACE_ID, _inner(), targets) == []
     assert await _queued(world) == []
 
 
@@ -549,8 +555,8 @@ async def test_a_failing_subscribe_is_fail_soft(world):
 
 async def test_planning_a_post_subscribes_once(world):
     svc = world["svc"]
-    await svc.plan_post(SPACE_ID)
-    await svc.plan_post(SPACE_ID)
+    await svc.plan_post(SPACE_ID, AUTHOR)
+    await svc.plan_post(SPACE_ID, AUTHOR)
     assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
 
 
@@ -583,3 +589,78 @@ async def test_a_failing_join_subscribe_is_logged_not_raised(world, monkeypatch)
     bus = EventBus()
     world["svc"].wire(bus)
     await bus.publish(SpaceMemberJoined(space_id=SPACE_ID, user_id="u1"))
+
+
+# ── v2: author binding, accepted-only targets, directory listing ─────────
+
+
+async def test_an_author_outside_our_cert_binding_takes_the_host_path(world):
+    """A plain member of a moderated / admin-only space (or any user the
+    cert does not bind) publishes nothing itself — its post goes through
+    the host (queue / refusal)."""
+    svc = world["svc"]
+    assert await svc.plan_post(SPACE_ID, "u-other") == []
+
+
+async def test_a_v1_cert_without_a_binding_takes_the_host_path(world, monkeypatch):
+    svc = world["svc"]
+
+    async def _v1(space_id):
+        cert = sign_writer_cert(
+            space_seed=SPACE_SEED,
+            space_id=space_id,
+            epoch=3,
+            instance_pk=world["me"].pk,
+            scope="write",
+        )
+        return cert.to_wire()
+
+    monkeypatch.setattr(svc._writer_certs, "current_own_cert_wire", _v1)
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
+
+
+async def test_only_servers_that_accepted_are_returned(world):
+    svc = world["svc"]
+    down = replace(world["conn"], id="conn-down", inbox_url="http://127.0.0.1:9")
+    accepted = await svc.publish_post(SPACE_ID, _inner(), [world["conn"], down])
+    assert [c.id for c in accepted] == ["conn-1"]
+    assert svc._retry.pending("conn-down")
+
+
+async def test_a_slow_first_attempt_is_bounded_and_retried(world, monkeypatch):
+    svc = world["svc"]
+
+    async def _slow(self, conn, item):
+        await asyncio.sleep(5)
+        return True
+
+    monkeypatch.setattr(GfsMemberPublishService, "_first_attempt", _slow)
+    started = time.monotonic()
+    accepted = await svc.publish_post(
+        SPACE_ID, _inner(), [world["conn"]], first_attempt_timeout_s=0.1
+    )
+    assert accepted == []
+    assert time.monotonic() - started < 2
+    assert svc._retry.pending("conn-1")
+
+
+async def test_listing_reads_the_whole_directory_never_a_space_probe(
+    world, monkeypatch
+):
+    svc = world["svc"]
+    seen: list[str] = []
+    real_get = world["tc"].session.get
+
+    def _spy(url, *a, **kw):
+        seen.append(str(url))
+        return real_get(url, *a, **kw)
+
+    monkeypatch.setattr(world["tc"].session, "get", _spy)
+    assert await svc._listed(world["conn"], SPACE_ID)
+    assert not await svc._listed(world["conn"], "sp-unlisted")
+    assert seen == [f"{world['conn'].inbox_url}/gfs/spaces"]
+
+
+async def test_listing_without_a_publish_session_lists_nothing(world, monkeypatch):
+    monkeypatch.setattr(world["gfs"], "publish_client", lambda: None)
+    assert not await world["svc"]._listed(world["conn"], SPACE_ID)

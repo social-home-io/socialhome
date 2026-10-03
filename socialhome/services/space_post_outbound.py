@@ -41,7 +41,7 @@ from ..domain.federation import FederationEventType, GfsConnection
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
-from .gfs_member_publish_service import GFS_PUBLISHED_FIELD
+from .gfs_member_publish_service import GFS_PUBLISHED_FIELD, ITEM_TYPE_POST
 from .moderation_release import current_release, with_release
 from .space_public_author import build_signed_author_inner
 
@@ -144,6 +144,29 @@ class SpacePostOutbound:
         self._own_instance_id = own_instance_id
         self._own_instance_pk = own_instance_public_key
         self._own_identity_seed = own_identity_seed
+
+    async def _publish_to_gfs(self, space_id: str, post) -> list[GfsConnection]:
+        """Publish our own post over the GFS (v_49 trusted mode); the
+        servers that accepted it, or ``[]`` (no target → the host path)."""
+        assert self._member_gfs is not None
+        targets = await self._member_gfs.plan_post(space_id, post.author)
+        if not targets:
+            return []
+        author = await self._users.get_by_user_id(post.author)
+        if author is None:
+            return []
+        inner = build_signed_author_inner(
+            post=post,
+            space_id=space_id,
+            author_username=author.username,
+            author_pk=self._own_instance_pk,
+            author_identity_seed=self._own_identity_seed,
+            origin_instance_id=self._own_instance_id,
+            author_identity_anchor=author.identity_anchor,
+            item_type=ITEM_TYPE_POST,
+            item_target=post.id,
+        )
+        return await self._member_gfs.publish_post(space_id, inner, targets)
 
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
         """Fan ``SPACE_POST_CREATED`` to every member household.
@@ -283,21 +306,25 @@ class SpacePostOutbound:
                         cert = None
                     if cert is not None:
                         payload["public_relay"]["writer_cert"] = cert
-        # v_49 — trusted member publish: name the connection servers we are
-        # about to publish this post to ourselves, so a seed holder relaying
-        # it skips them (no duplicate), then publish after the broadcast.
-        member_targets: list[GfsConnection] = []
+        # v_49 — trusted member publish, BEFORE the broadcast: publish the post
+        # to each capable server ourselves (each first attempt bounded), then
+        # name in the relay hint only the servers that ACCEPTED it, so a seed
+        # holder relaying the post skips exactly those — never one where our
+        # publish failed. The GFS copy carries its own inner, with the real
+        # item type and target bound inside the author signature.
         if self._member_gfs is not None and "public_relay" in payload:
             try:
-                member_targets = await self._member_gfs.plan_post(event.space_id)
+                accepted = await self._publish_to_gfs(event.space_id, post)
             except Exception:
                 log.exception(
-                    "member GFS publish: planning failed for space=%s",
+                    "member GFS publish failed for space=%s post=%s",
                     event.space_id,
+                    post.id,
                 )
-            if member_targets:
+                accepted = []
+            if accepted:
                 payload["public_relay"][GFS_PUBLISHED_FIELD] = sorted(
-                    c.gfs_instance_id for c in member_targets
+                    c.gfs_instance_id for c in accepted
                 )
         with_release(payload)
         try:
@@ -312,17 +339,6 @@ class SpacePostOutbound:
                 event.space_id,
                 post.id,
             )
-        if member_targets and self._member_gfs is not None:
-            try:
-                await self._member_gfs.publish_post(
-                    event.space_id, payload["public_relay"], member_targets
-                )
-            except Exception:
-                log.exception(
-                    "member GFS publish failed for space=%s post=%s",
-                    event.space_id,
-                    post.id,
-                )
         # Hand off the bytes-federation to SpaceMediaSyncService.
         # SPACE_POST_CREATED carries only the URL strings; without
         # the outbox-driven SPACE_MEDIA_BLOB stream the receiver's

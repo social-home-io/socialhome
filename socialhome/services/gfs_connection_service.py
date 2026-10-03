@@ -54,6 +54,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
 import aiohttp
@@ -191,6 +192,7 @@ class GfsConnectionService:
         "_rotation_warned",
         "_publish_retry",
         "_publish_client",
+        "_on_repinned",
     )
 
     def __init__(
@@ -266,6 +268,13 @@ class GfsConnectionService:
         # Failed ``POST /gfs/publish`` calls wait here for a retry —
         # identity-free bodies only, in memory, bounded (see the module).
         self._publish_retry = GfsPublishRetryQueue(self._retry_publish)
+        #: v_49 — called after a publish that carried the owner's authority
+        #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
+        self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
+
+    def attach_on_repinned(self, hook: Callable[[str, str], Awaitable[object]]) -> None:
+        """Wire the v_49 epoch re-announce run after a re-pinning publish."""
+        self._on_repinned = hook
 
     async def start(self) -> None:
         """Start the GFS publish retry loop (app ``on_startup``)."""
@@ -828,7 +837,22 @@ class GfsConnectionService:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         status = data.get("status") or "active"
-        return await self._repo.publish_space(space_id, gfs_id, status=status)
+        publication = await self._repo.publish_space(space_id, gfs_id, status=status)
+        if "authority_cert" in body and self._on_repinned is not None:
+            # v_49: a publish carrying the owner's cert re-pins the space key
+            # at the GFS, which clears its epoch state — re-announce the
+            # current epoch right away, whichever path (rotation, a later
+            # retry, the reconnect heal) made the re-pin land.
+            try:
+                await self._on_repinned(space_id, gfs_id)
+            except Exception:
+                log.exception(
+                    "publish_space: epoch re-announce after the re-pin failed "
+                    "for space %s on gfs %s",
+                    space_id,
+                    gfs_id,
+                )
+        return publication
 
     def _warn_no_authority_rotation(self, conn: GfsConnection) -> None:
         """WARN once per connection: this GFS cannot re-pin a rotated key."""

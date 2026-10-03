@@ -200,6 +200,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # host when a household leaves. Both act on state the host already
         # holds; no actor to authorize, no route reaches them.
         "writer_scope",
+        "writer_entitlement",
         "rotate_if_writer_scope_weakened",
         # v_49 — a member household's SPACE_INSTANCE_LEFT on the host. The
         # authorization is the §24.11-authenticated sender: only ITS seats

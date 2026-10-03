@@ -1070,15 +1070,25 @@ class _Conn:
 
 
 class _MemberGfs:
-    def __init__(self, targets=None, *, plan_raises=False, publish_raises=False):
+    def __init__(
+        self,
+        targets=None,
+        *,
+        accepted=None,
+        plan_raises=False,
+        publish_raises=False,
+    ):
         self.targets = targets or []
+        self.accepted = self.targets if accepted is None else accepted
         self.plan_raises = plan_raises
         self.publish_raises = publish_raises
         self.order: list[str] = []
         self.published: list[tuple] = []
+        self.planned_for: list[str] = []
 
-    async def plan_post(self, space_id):
+    async def plan_post(self, space_id, author_user_id):
         self.order.append("plan")
+        self.planned_for.append(author_user_id)
         if self.plan_raises:
             raise RuntimeError("boom")
         return self.targets
@@ -1088,7 +1098,7 @@ class _MemberGfs:
         if self.publish_raises:
             raise RuntimeError("boom")
         self.published.append((space_id, dict(inner), targets))
-        return len(targets)
+        return self.accepted
 
 
 def _member_setup(member_gfs):
@@ -1119,18 +1129,35 @@ def _member_setup(member_gfs):
     return bus, federation, post
 
 
-async def test_a_member_names_its_gfs_targets_then_publishes_after_the_broadcast():
-    member = _MemberGfs([_Conn("gfs-b"), _Conn("gfs-a")])
+async def test_a_member_publishes_first_then_names_only_accepting_servers():
+    member = _MemberGfs(
+        [_Conn("gfs-b"), _Conn("gfs-a"), _Conn("gfs-c")],
+        accepted=[_Conn("gfs-b"), _Conn("gfs-a")],
+    )
     bus, federation, post = _member_setup(member)
     await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
     relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
-    # The host-dedupe hint: which servers the author publishes to itself.
+    # The host-dedupe hint names only servers that ACCEPTED the post (gfs-c
+    # failed: the host must still relay there).
     assert relay["gfs_published"] == ["gfs-a", "gfs-b"]
-    # It stays OUTSIDE the author signature.
     assert verify_signed_author_inner(relay)
-    assert member.order == ["plan", "broadcast", "publish"]
+    assert member.order == ["plan", "publish", "broadcast"]
+    assert member.planned_for == [post.author]
     space_id, inner, targets = member.published[0]
-    assert (space_id, inner["post_id"], len(targets)) == ("sp-1", "post-m", 2)
+    assert (space_id, inner["post_id"], len(targets)) == ("sp-1", "post-m", 3)
+    # The GFS copy binds the real item type and its target in the signature;
+    # the member-broadcast hint does not.
+    assert (inner["item_type"], inner["item_target"]) == ("post", "post-m")
+    assert verify_signed_author_inner(inner)
+    assert "item_type" not in relay
+
+
+async def test_nothing_accepted_means_no_hint():
+    member = _MemberGfs([_Conn("gfs-a")], accepted=[])
+    bus, federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert "gfs_published" not in relay
 
 
 async def test_no_target_means_no_hint_and_no_publish():

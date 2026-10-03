@@ -42,6 +42,11 @@ _GRANTS: dict[str, frozenset[str]] = {
 #: Largest epoch a cert may carry (signed 64-bit SQLite INTEGER).
 MAX_WRITER_CERT_EPOCH: int = 2**63 - 1
 
+#: Bounds of the user binding (v2): at most this many users per household,
+#: each id at most this long.
+MAX_WRITER_USERS: int = 64
+MAX_WRITER_USER_ID_CHARS: int = 128
+
 
 def scope_permits(held: str, required: str) -> bool:
     """True iff a cert of scope ``held`` authorizes a ``required`` action."""
@@ -61,6 +66,16 @@ def strongest_scope(scopes: Iterable[str]) -> str | None:
     return None
 
 
+@dataclass(slots=True, frozen=True)
+class WriterEntitlement:
+    """What one household may do in a space, as its issuer derives it: the
+    strongest ``scope`` and the users holding that right (the v2 user
+    binding). A cert is re-issued at a new epoch whenever either shrinks."""
+
+    scope: str | None
+    user_ids: frozenset[str] = frozenset()
+
+
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -76,6 +91,14 @@ class WriterCert:
     scope: str
     issued_at: int
     cert_sig: str
+    #: v2 user binding — the household's users holding ``scope``, and the
+    #: space authority's SECOND signature over them (``users_sig``, suite
+    #: ``users_sig_suite``). A separate signature, so a v1 verifier (which
+    #: ignores these fields) still verifies ``cert_sig`` unchanged. Empty on
+    #: a v1 cert.
+    writer_user_ids: tuple[str, ...] = ()
+    users_sig: str = ""
+    users_sig_suite: str = ""
 
     def signing_body(self) -> dict:
         """Every signed field — the cert minus ``cert_sig``. The suite tag is
@@ -89,8 +112,26 @@ class WriterCert:
             "issued_at": self.issued_at,
         }
 
+    def users_signing_body(self) -> dict:
+        """What the v2 user-binding signature covers: the cert's own
+        signature (so it binds exactly this cert), its routing fields, the
+        sorted user ids and the binding's suite."""
+        return {
+            "cert_sig": self.cert_sig,
+            "space_id": self.space_id,
+            "epoch": self.epoch,
+            "instance_pk": self.instance_pk,
+            "writer_user_ids": sorted(self.writer_user_ids),
+            "users_sig_suite": self.users_sig_suite,
+        }
+
     def to_wire(self) -> dict:
-        return {**self.signing_body(), "cert_sig": self.cert_sig}
+        wire = {**self.signing_body(), "cert_sig": self.cert_sig}
+        if self.users_sig:
+            wire["writer_user_ids"] = sorted(self.writer_user_ids)
+            wire["users_sig"] = self.users_sig
+            wire["users_sig_suite"] = self.users_sig_suite
+        return wire
 
     @classmethod
     def from_wire(cls, raw: object) -> "WriterCert":
@@ -121,6 +162,24 @@ class WriterCert:
             raise ValueError("writer cert: bad issued_at")
         if not isinstance(sig, str) or not sig:
             raise ValueError("writer cert: bad cert_sig")
+        users: tuple[str, ...] = ()
+        users_sig = raw.get("users_sig", "")
+        users_suite = raw.get("users_sig_suite", "")
+        if users_sig:
+            raw_users = raw.get("writer_user_ids")
+            if (
+                not isinstance(raw_users, list)
+                or len(raw_users) > MAX_WRITER_USERS
+                or not all(
+                    isinstance(u, str) and 0 < len(u) <= MAX_WRITER_USER_ID_CHARS
+                    for u in raw_users
+                )
+                or not isinstance(users_sig, str)
+                or not isinstance(users_suite, str)
+                or not users_suite
+            ):
+                raise ValueError("writer cert: bad user binding")
+            users = tuple(sorted(set(raw_users)))
         return cls(
             cert_suite=suite,
             space_id=space_id,
@@ -129,4 +188,7 @@ class WriterCert:
             scope=str(scope),
             issued_at=int(issued_at),  # type: ignore[arg-type]
             cert_sig=sig,
+            writer_user_ids=users,
+            users_sig=str(users_sig) if users else "",
+            users_sig_suite=str(users_suite) if users else "",
         )

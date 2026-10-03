@@ -74,7 +74,10 @@ from ..domain.gfs_member_publish import (
 )
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
+from ..crypto import derive_instance_id
+from ..domain.space import SpaceRole
 from ..domain.writer_cert import WRITER_SCOPE_WRITE
+from ..writer_cert import verify_writer_users
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
@@ -89,6 +92,7 @@ from .space_public_author import (
 from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
+    from ..federation.space_authorship import SpaceAuthorship
     from .space_authority_pin import AuthorityPinRefresher
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -110,6 +114,7 @@ class SpacePublicInbound:
         "_mentions",
         "_pin_refresher",
         "_writer_certs",
+        "_authorship",
     )
 
     def __init__(
@@ -134,6 +139,13 @@ class SpacePublicInbound:
         #: today) skip its epoch-freshness gate; member-authorized items
         #: (PR 2) will run it.
         self._writer_certs: SpaceWriterCertService | None = None
+        #: v_49 — a member household's own view of the access levels and the
+        #: roster, run on member-published items as defence in depth.
+        self._authorship: "SpaceAuthorship | None" = None
+
+    def attach_authorship(self, authorship: "SpaceAuthorship") -> None:
+        """Wire the access-level / seat check for ``space_item``."""
+        self._authorship = authorship
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert service."""
@@ -267,6 +279,13 @@ class SpacePublicInbound:
                 post_id,
             )
             return
+        if not _origin_is_author_household(inner, origin_instance_id):
+            log.warning(
+                "space_public.inbound: post %s names an origin that is not the "
+                "author's household — dropped",
+                post_id,
+            )
+            return
         # Cross-space injection guard: the inner's signed ``space_id`` MUST
         # equal the outer envelope's space. A validly-signed inner authored for
         # space X must never be persisted under space Y (the relay decrypts +
@@ -381,7 +400,7 @@ class SpacePublicInbound:
                 item.space_id,
             )
             return
-        _item_type, inner = parsed
+        item_type, inner = parsed
         post_id = str(inner.get("post_id") or "")
         author_user_id = str(inner.get("author_user_id") or "")
         origin_instance_id = str(inner.get("origin_instance_id") or "")
@@ -399,6 +418,23 @@ class SpacePublicInbound:
         if str(inner.get("space_id") or "") != item.space_id:
             log.warning(
                 "space_public.inbound: space_item %s names another space — dropped",
+                post_id,
+            )
+            return
+        # The real type and its target are bound inside the author signature
+        # (verified above): nobody holding the content key can re-wrap a
+        # signed post as another kind of item.
+        if inner.get("item_type") != item_type or inner.get("item_target") != post_id:
+            log.warning(
+                "space_public.inbound: space_item %s has no author-bound type — "
+                "dropped",
+                post_id,
+            )
+            return
+        if not _origin_is_author_household(inner, origin_instance_id):
+            log.warning(
+                "space_public.inbound: space_item %s names an origin that is not "
+                "the author's household — dropped",
                 post_id,
             )
             return
@@ -428,11 +464,53 @@ class SpacePublicInbound:
                 item.space_id,
             )
             return
+        # v2 user binding: the cert names the household's users that may post
+        # — a member-published item requires it, and its author must be one.
+        try:
+            verify_writer_users(
+                item.writer_cert,
+                space_pubkey=bytes.fromhex(space.identity_public_key),
+                author_user_id=author_user_id,
+            )
+        except ValueError as exc:
+            log.warning(
+                "space_public.inbound: space_item %s author not bound by the "
+                "writer cert (%s) — dropped",
+                post_id,
+                exc,
+            )
+            return
+        # Defence in depth on a member household, which holds the roster and
+        # the access levels: the author's own seat must let them post here.
+        if (
+            self._authorship is not None
+            and await self._holds_writer_seat(item.space_id)
+            and not await self._authorship.item_access_admits(
+                origin_instance_id=origin_instance_id,
+                space_id=item.space_id,
+                feature="posts",
+                author_user_id=author_user_id,
+            )
+        ):
+            log.warning(
+                "space_public.inbound: space_item %s refused by the posts access "
+                "level / the author's seat here — dropped",
+                post_id,
+            )
+            return
         await self._persist(
             item.space_id, post_id, author_user_id, origin_instance_id, inner
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────
+
+    async def _holds_writer_seat(self, space_id: str) -> bool:
+        """We are a member household here (a local non-follower seat), so we
+        hold the roster and the access levels."""
+        return any(
+            str(m.role) != SpaceRole.SUBSCRIBER.value
+            for m in await self._spaces.list_members(space_id)
+        )
 
     async def _writer_cert_ok(
         self, space, inner: dict, *, epoch: int, pinned_pk_hex: str
@@ -516,3 +594,16 @@ class SpacePublicInbound:
             created_at=parse_iso8601_lenient(inner.get("created_at")),
             hidden_from_feed=bool(inner.get("hidden_from_feed", False)),
         )
+
+
+def _origin_is_author_household(inner: dict, origin_instance_id: str) -> bool:
+    """The inner's ``origin_instance_id`` must be the household whose key
+    signed it: an instance id IS the fingerprint of the household identity
+    key (§4.1.2), so a signed inner can't be credited to another household
+    (which would also dodge the self-echo guard)."""
+    try:
+        return derive_instance_id(bytes.fromhex(str(inner.get("author_pk") or ""))) == (
+            origin_instance_id
+        )
+    except ValueError:
+        return False

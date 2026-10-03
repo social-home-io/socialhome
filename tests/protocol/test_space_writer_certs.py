@@ -77,7 +77,10 @@ class _Seats:
     async def list_for_instance(
         self, space_id, instance_id, *, include_tombstoned=True
     ):
-        return [SimpleNamespace(role=r) for r in self.seats.get(instance_id, [])]
+        return [
+            SimpleNamespace(role=r, user_id=f"{instance_id}-u{i}")
+            for i, r in enumerate(self.seats.get(instance_id, []))
+        ]
 
 
 class _Fed:
@@ -185,7 +188,9 @@ async def _envelope(
         "type": "text",
         "content": "hello",
         "created_at": datetime(2026, 10, 3, tzinfo=timezone.utc).isoformat(),
-        "origin_instance_id": "author.home",
+        # The author's household: its id is the fingerprint of the key that
+        # signs the inner (the relay path requires exactly that).
+        "origin_instance_id": derive_instance_id(env.author_kp.public_key),
     }
     inner["author_sig"] = b64url_encode(
         sign_ed25519(env.author_kp.private_key, author_signing_bytes(inner))

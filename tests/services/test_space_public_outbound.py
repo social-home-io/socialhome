@@ -669,7 +669,10 @@ class _Seats:
     async def list_for_instance(
         self, space_id, instance_id, *, include_tombstoned=True
     ):
-        return [SimpleNamespace(role=r) for r in self.seats.get(instance_id, [])]
+        return [
+            SimpleNamespace(role=r, user_id=f"{instance_id}-u{i}")
+            for i, r in enumerate(self.seats.get(instance_id, []))
+        ]
 
 
 class _PeerKeys:

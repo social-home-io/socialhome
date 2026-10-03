@@ -185,6 +185,7 @@ from .space_member_guard import SpaceMemberGuardMixin
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
 from .space_writer_cert_service import scope_weakened
+from ..domain.writer_cert import WriterEntitlement
 
 
 log = logging.getLogger(__name__)
@@ -2354,6 +2355,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             await self._writer_certs_after_comment_toggle(
                 space_id, enabled=comment_just_enabled
             )
+        if (
+            features is not None
+            and features.posts_access != space.features.posts_access
+        ):
+            await self._writer_certs_after_posts_access_change(space, updated)
         # Delegated-admin authority just flipped OFF on the space we host:
         # every seed ever shared is now unauthorized. Rotate the authority
         # key and re-share it with nobody (v_44).
@@ -2363,6 +2369,45 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         ):
             await self._bus.publish(SpaceAdminAuthorityRevoked(space_id=space_id))
         return updated
+
+    async def _writer_certs_after_posts_access_change(
+        self, before: Space, after: Space
+    ) -> None:
+        """v_49 — the ``posts`` access level changed, which decides who a
+        writer cert lets post (``write`` only for seats the level lets post
+        directly). Any household whose entitlement shrank (scope, or the
+        users it covers) → rotate once, so the old certs die with the epoch;
+        otherwise the households that gained deserve their new cert now — a
+        roster snapshot to each carries it."""
+        if self._writer_certs is None or self._remote_members is None:
+            return
+        instances = {
+            r.instance_id
+            for r in await self._remote_members.list_for_space(after.id)
+            if r.instance_id
+        }
+        if self._own_instance_id:
+            instances.add(self._own_instance_id)
+        gained: list[str] = []
+        for instance_id in sorted(instances):
+            was = await self._writer_certs.entitlement_for_instance(before, instance_id)
+            now = await self._writer_certs.entitlement_for_instance(after, instance_id)
+            if scope_weakened(was, now):
+                log.info(
+                    "space %s: posts access %s → %s narrows household %s's "
+                    "writers — rotating the content key",
+                    after.id,
+                    before.features.posts_access.value,
+                    after.features.posts_access.value,
+                    instance_id,
+                )
+                await self._rotate_and_distribute_space_key(after.id)
+                return
+            if now != was:
+                gained.append(instance_id)
+        for instance_id in gained:
+            if instance_id != self._own_instance_id:
+                await self.send_roster_snapshot(after.id, to_instance_id=instance_id)
 
     async def _writer_certs_after_comment_toggle(
         self, space_id: str, *, enabled: bool
@@ -2771,7 +2816,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 space_id,
             )
             return True
-        scope_before = await self.writer_scope(space, instance_id)
+        scope_before = await self.writer_entitlement(space, instance_id)
         for seat in ending:
             await self._remote_members.remove(space_id, instance_id, seat.user_id)
         remaining = await self._remote_members.list_for_instance(
@@ -2873,7 +2918,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         (actor authority, matrix, owner refusal, we host) already passed."""
         space_id = space.id
         own = self._own_instance_id or ""
-        scope_before = await self.writer_scope(space, own)
+        scope_before = await self.writer_entitlement(space, own)
         await self._spaces.set_role(space_id, user_id, role)
         evt = role_change_event_type(old_role, role)
         # A role change is a ROSTER mutation, not a config edit — it must NOT
@@ -2930,14 +2975,17 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         return shared is not None and shared == space.authority_key_epoch
 
     async def _writer_scope_weakened(
-        self, space_id: str, instance_id: str, scope_before: str | None
+        self,
+        space_id: str,
+        instance_id: str,
+        scope_before: "str | WriterEntitlement | None",
     ) -> bool:
         if self._writer_certs is None:
             return False
         space = await self._spaces.get(space_id)
         if space is None:
             return False
-        after = await self._writer_certs.scope_for_instance(space, instance_id)
+        after = await self._writer_certs.entitlement_for_instance(space, instance_id)
         return scope_weakened(scope_before, after)
 
     async def _publish_admin_revoked(
@@ -2971,11 +3019,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             return None
         return await self._writer_certs.scope_for_instance(space, instance_id)
 
+    async def writer_entitlement(
+        self, space: Space, instance_id: str
+    ) -> WriterEntitlement | None:
+        """Household ``instance_id``'s writer scope AND writer users (the v2
+        cert binding) — what :meth:`rotate_if_writer_scope_weakened` compares
+        before and after a change. ``None`` without a cert service."""
+        if self._writer_certs is None:
+            return None
+        return await self._writer_certs.entitlement_for_instance(space, instance_id)
+
     async def rotate_if_writer_scope_weakened(
         self,
         space_id: str,
         instance_id: str,
-        scope_before: str | None,
+        scope_before: "str | WriterEntitlement | None",
         *,
         authority_rotation_follows: bool = False,
     ) -> bool:
@@ -2992,7 +3050,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         space = await self._spaces.get(space_id)
         if space is None:
             return False
-        after = await self._writer_certs.scope_for_instance(space, instance_id)
+        after = await self._writer_certs.entitlement_for_instance(space, instance_id)
         if not scope_weakened(scope_before, after):
             return False
         if authority_rotation_follows:
@@ -3732,7 +3790,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         instance_id = target.instance_id
         user_id = target.user_id
         scope_before = (
-            await self._writer_certs.scope_for_instance(space, instance_id)
+            await self._writer_certs.entitlement_for_instance(space, instance_id)
             if self._writer_certs is not None
             else None
         )
@@ -3842,7 +3900,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
             and self._writer_certs is not None
             and (
-                await self._writer_certs.scope_for_instance(space, instance_id)
+                await self._writer_certs.entitlement_for_instance(space, instance_id)
                 != scope_before
             )
         ):
