@@ -3521,22 +3521,6 @@ async def test_member_publish_trusted_ignores_the_unsigned_flag(env):
     assert not await svc.member_publish_trusted_supported(conn)
 
 
-async def test_publish_space_event_skips_servers_the_author_published_to(env):
-    session = _RecordingSession()
-    svc, _kp = await _publish_event_svc(
-        env, session, space_id="sp-relay", gfs_ids=["g1", "g2"]
-    )
-    svc._anon_publish.update({"g1": True, "g2": True})
-    delivered = await svc.publish_space_event(
-        space_id="sp-relay",
-        event_type="space_post_public",
-        payload={"space_id": "sp-relay", "epoch": 0, "encrypted_payload": "ct"},
-        skip_gfs_instance_ids=frozenset({"inst-g1"}),
-    )
-    assert delivered == 1
-    assert [u for u, _ in session.posts] == ["https://g2.example/gfs/publish"]
-
-
 async def _repin_svc(env, monkeypatch, *, with_cert: bool):
     _db, repo = env
     await repo.save(_make_conn("rp-1", inbox_url="https://rp.example"))

@@ -244,6 +244,12 @@ carries its writer cert in plaintext. **What it concedes, exactly:**
 - **Subscribers learn nothing new from the frame.** The fan-out frame names
   no publisher id; it carries the writer cert (the author's household key,
   which every receiver needs anyway to verify the author signature inside).
+- **It learns every writer household's membership, even one that never
+  posts.** A household with a writer seat auto-subscribes to the fan-out of
+  each of its public/global spaces on every capable server (so other
+  members' items reach it live), and a subscribe is household-signed — so
+  the server learns which households are writers in which spaces. Strict
+  mode (PR 4) must not auto-subscribe with identified requests.
 - **It learns when the space content key rotates** — from the owner's
   (household-signed) and delegated admins' (authority-signed) epoch notices
   — as it already could from the `epoch` of authority-signed post relays.

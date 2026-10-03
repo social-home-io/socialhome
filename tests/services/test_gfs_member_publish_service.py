@@ -9,7 +9,6 @@ check them in production.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import time
@@ -48,7 +47,6 @@ from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.gfs_member_publish_service import (
-    GFS_PUBLISHED_FIELD,
     GfsMemberPublishService,
     build_item_plaintext,
     parse_item_plaintext,
@@ -370,7 +368,7 @@ async def test_the_listing_answer_is_cached(world, monkeypatch):
 async def test_a_published_post_is_accepted_and_carries_only_ciphertext(world):
     svc = world["svc"]
     targets = await svc.plan_post(SPACE_ID, AUTHOR)
-    inner = _inner(writer_cert={"stale": True}, **{GFS_PUBLISHED_FIELD: [GFS_ID]})
+    inner = _inner(writer_cert={"stale": True})
     assert [c.id for c in await svc.publish_post(SPACE_ID, inner, targets)] == [
         "conn-1"
     ]
@@ -388,7 +386,6 @@ async def test_a_published_post_is_accepted_and_carries_only_ciphertext(world):
     )
     assert got["writer_cert"]["writer_user_ids"] == [AUTHOR]
     assert "writer_user_ids" not in frame["writer_cert"]
-    assert GFS_PUBLISHED_FIELD not in got
     assert got["content"] == "hello"
 
 
@@ -632,21 +629,42 @@ async def test_only_servers_that_accepted_are_returned(world):
     assert svc._retry.pending("conn-down")
 
 
-async def test_a_slow_first_attempt_is_bounded_and_retried(world, monkeypatch):
+async def test_schedule_post_publishes_in_the_background(world):
+    svc = world["svc"]
+    assert svc.schedule_post(SPACE_ID, AUTHOR, _inner())
+    await svc.wait_idle()
+    assert len(await _queued(world)) == 1
+
+
+async def test_schedule_post_for_an_author_without_rights_publishes_nothing(world):
+    svc = world["svc"]
+    assert svc.schedule_post(SPACE_ID, "u-other", _inner())
+    await svc.wait_idle()
+    assert await _queued(world) == []
+
+
+async def test_schedule_post_refuses_while_stopping_or_saturated(world, monkeypatch):
+    svc = world["svc"]
+    await svc.stop()
+    assert not svc.schedule_post(SPACE_ID, AUTHOR, _inner())
+    await svc.start()
+    monkeypatch.setattr(
+        "socialhome.services.gfs_member_publish_service.MAX_PENDING_PUBLISHES", 0
+    )
+    assert not svc.schedule_post(SPACE_ID, AUTHOR, _inner())
+
+
+async def test_a_failing_background_publish_is_logged(world, monkeypatch, caplog):
     svc = world["svc"]
 
-    async def _slow(self, conn, item):
-        await asyncio.sleep(5)
-        return True
+    async def _boom(self, space_id, author_user_id):
+        raise RuntimeError("down")
 
-    monkeypatch.setattr(GfsMemberPublishService, "_first_attempt", _slow)
-    started = time.monotonic()
-    accepted = await svc.publish_post(
-        SPACE_ID, _inner(), [world["conn"]], first_attempt_timeout_s=0.1
-    )
-    assert accepted == []
-    assert time.monotonic() - started < 2
-    assert svc._retry.pending("conn-1")
+    monkeypatch.setattr(GfsMemberPublishService, "plan_post", _boom)
+    with caplog.at_level("ERROR"):
+        svc.schedule_post(SPACE_ID, AUTHOR, _inner())
+        await svc.wait_idle()
+    assert "background publish failed" in caplog.text
 
 
 async def test_listing_reads_the_whole_directory_never_a_space_probe(

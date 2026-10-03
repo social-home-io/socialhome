@@ -31,15 +31,13 @@ type never leaves the ciphertext (the outer type is always ``space_item``).
 PR 3 adds comment / reaction / edit / delete item types; their type must then
 be bound inside the author signature.
 
-**Host dedupe rule.** Before the member broadcast goes out, the author names
-the connection servers it is about to publish to (``gfs_published`` — their
-``gfs_instance_id``s, outside the author signature, in the encrypted
-``public_relay`` hint). A seed holder relaying that post skips exactly those
-servers (``publish_space_event(skip_gfs_instance_ids=…)``) and relays to the
-rest — so a v_49 author's post is not published twice, while a v_48 author
-(no field) is relayed as before. If the author's own publish to one of them
-later fails permanently, subscribers there catch the post up through space
-sync; a duplicate is harmless either way (receivers dedupe by post id).
+**No host dedupe.** The host keeps relaying the member's post to every
+GFS (``space_post_public``) exactly as before, because followers on an older
+build read only that copy; receivers that understand ``space_item`` get the
+post twice and drop the second copy by post id. The member publish itself
+runs in the background (:meth:`GfsMemberPublishService.schedule_post`) —
+post creation never waits on a connection server. Revisit once followers
+advertise ``space_item`` support.
 
 Retries ride a second :class:`GfsPublishRetryQueue` (#808 machinery): a
 transient failure (transport, 408, 429, 5xx, a busy GFS's 503) is retried
@@ -95,17 +93,13 @@ log = logging.getLogger(__name__)
 ITEM_TYPE_POST: str = "post"
 SUPPORTED_ITEM_TYPES: frozenset[str] = frozenset({ITEM_TYPE_POST})
 
-#: Field of the ``public_relay`` hint naming the connection servers the
-#: author published the post to itself (see "Host dedupe rule").
-GFS_PUBLISHED_FIELD: str = "gfs_published"
-
 #: How long a "space X is listed on GFS Y" answer is trusted (seconds).
 LISTING_TTL_S: float = 600.0
 LISTING_NEGATIVE_TTL_S: float = 60.0
 
-#: Bound on one first publish attempt, which runs before the member
-#: broadcast so the author names only servers that accepted the post.
-FIRST_ATTEMPT_TIMEOUT_S: float = 3.0
+#: Background publishes in flight at once; past it a new one is dropped
+#: (logged) — the host's copy still reaches every follower.
+MAX_PENDING_PUBLISHES: int = 64
 
 #: Queue-item event types of the member retry queue.
 _KIND_ITEM = SPACE_ITEM_EVENT_TYPE
@@ -161,6 +155,8 @@ class GfsMemberPublishService:
         "_retry",
         "_spaces",
         "_subscribed",
+        "_stopping",
+        "_tasks",
         "_writer_certs",
     )
 
@@ -187,6 +183,9 @@ class GfsMemberPublishService:
         self._retry = GfsPublishRetryQueue(self._retry_send)
         #: (conn id, space id) pairs this process already subscribed.
         self._subscribed: set[tuple[str, str]] = set()
+        #: Background publishes in flight (strong refs) and the stop flag.
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._stopping = False
 
     def wire(self, bus: "EventBus") -> None:
         """Subscribe a newly seated local writer to the GFS fan-out at once
@@ -203,9 +202,14 @@ class GfsMemberPublishService:
             )
 
     async def start(self) -> None:
+        self._stopping = False
         await self._retry.start()
 
     async def stop(self) -> None:
+        """Let in-flight background publishes finish (their failures land in
+        the retry queue, stopped right after), then stop the retry loop."""
+        self._stopping = True
+        await self.wait_idle()
         await self._retry.stop()
 
     # ── Eligibility + targets ─────────────────────────────────────────────
@@ -297,22 +301,55 @@ class GfsMemberPublishService:
 
     # ── Publishing an item ────────────────────────────────────────────────
 
+    def schedule_post(self, space_id: str, author_user_id: str, inner: dict) -> bool:
+        """Plan and publish ``author_user_id``'s post in the BACKGROUND, so
+        post creation never waits on a connection server. Returns whether a
+        task was started (``False`` when stopping or too many are pending —
+        the host's relay still carries the post)."""
+        if self._stopping or len(self._tasks) >= MAX_PENDING_PUBLISHES:
+            log.warning(
+                "gfs.member_publish: background publish for space %s skipped "
+                "(%s) — the host relays the post",
+                space_id,
+                "stopping" if self._stopping else "too many pending",
+            )
+            return False
+        task = asyncio.create_task(
+            self._plan_and_publish(space_id, author_user_id, inner),
+            name=f"gfs-member-publish-{space_id}",
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return True
+
+    async def _plan_and_publish(
+        self, space_id: str, author_user_id: str, inner: dict
+    ) -> None:
+        try:
+            targets = await self.plan_post(space_id, author_user_id)
+            if targets:
+                await self.publish_post(space_id, inner, targets)
+        except Exception:
+            log.exception(
+                "gfs.member_publish: background publish failed for %s", space_id
+            )
+
+    async def wait_idle(self) -> None:
+        """Wait for every background publish (tests, graceful stop)."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
     async def publish_post(
         self,
         space_id: str,
         inner: dict,
         targets: list[GfsConnection],
-        *,
-        first_attempt_timeout_s: float = FIRST_ATTEMPT_TIMEOUT_S,
     ) -> list[GfsConnection]:
         """Encrypt the author-signed post *inner* (built with its bound
         ``item_type`` / ``item_target``) with our writer cert for the epoch
-        it is sealed under and publish it to *targets*, concurrently and
-        each first attempt bounded by ``first_attempt_timeout_s``. Returns
-        the servers that ACCEPTED it on that first attempt — the only ones
-        the author may name in the host-dedupe hint. A transient failure or
-        a timeout goes to the retry queue (the host then relays there too;
-        a duplicate is harmless — receivers dedupe by post id)."""
+        it is sealed under and publish it to *targets*. Returns the servers
+        that accepted it on the first attempt; transient failures go to the
+        retry queue."""
         if not targets:
             return []
         sealed = await self._seal(space_id, inner)
@@ -327,31 +364,16 @@ class GfsMemberPublishService:
             "payload": ciphertext,
         }
         item = GfsPublish(space_id=space_id, event_type=_KIND_ITEM, payload=data)
-        results = await asyncio.gather(
-            *(
-                self._bounded_first_attempt(conn, item, first_attempt_timeout_s)
-                for conn in targets
-            )
-        )
-        return [conn for conn, ok in zip(targets, results, strict=True) if ok]
-
-    async def _bounded_first_attempt(
-        self, conn: GfsConnection, item: GfsPublish, timeout_s: float
-    ) -> bool:
-        try:
-            return await asyncio.wait_for(self._first_attempt(conn, item), timeout_s)
-        except TimeoutError:
-            self._retry.enqueue(conn.id, item)
-            return False
+        accepted = []
+        for conn in targets:
+            if await self._first_attempt(conn, item):
+                accepted.append(conn)
+        return accepted
 
     async def _seal(
         self, space_id: str, inner: dict
     ) -> tuple[int, WriterCert, str] | None:
-        body = {
-            k: v
-            for k, v in inner.items()
-            if k not in (WRITER_CERT_FIELD, GFS_PUBLISHED_FIELD)
-        }
+        body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
         for _attempt in range(2):
             epoch = await self._crypto.get_current_epoch(space_id)
             if epoch is None:

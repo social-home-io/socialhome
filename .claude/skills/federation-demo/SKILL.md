@@ -746,8 +746,9 @@ post. e publishes the post itself (``POST /gfs/member-publish``, signed by
 its household key, authorized by its writer cert), so follower d receives
 it decrypted while a is down; the GFS log shows the member-publish fan-out
 and never the post text. Then a restarts, catches e's post up over the
-member path and does NOT relay it to the GFS again (e named that server in
-its relay hint). d holds exactly one copy. Polls every 3 s.
+member path and relays it to the GFS as before (older followers read only
+the host's copy); d receives it twice and holds exactly ONE copy (receiver
+dedupe by post id). Polls every 3 s.
 
 ### ``gfs-cluster`` — a multi-process GFS on one shared DB
 

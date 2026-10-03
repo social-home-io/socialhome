@@ -3483,17 +3483,16 @@ def cmd_gfs_member_publish() -> None:
     1. Stop **a** — the host, the only seed holder. Before v_49 nothing e
        posted could reach a follower now: only a seed holder could put an
        item on the relay.
-    2. e posts. It names the GFS in the post's relay hint and publishes the
-       post ITSELF — ``POST /gfs/member-publish``, signed by e's household
-       key, authorized by e's writer cert.
+    2. e posts and publishes the post ITSELF — ``POST /gfs/member-publish``,
+       signed by e's household key, authorized by e's writer cert.
     3. d (a follower that is NOT a member) receives the post decrypted
        within the poll window. The GFS log shows the member-publish fan-out
        for the space, and no line carries the post text.
     4. Restart a. a receives e's post over the normal member path (the
-       relay envelope queue) and does NOT relay it to the GFS again: the GFS
-       logs no authority-signed ``space_post_public`` relay for the space in
-       the settle window (e named that GFS in its hint).
-    5. d still holds exactly one copy.
+       relay envelope queue) and relays it to the GFS as before — older
+       followers read only the host's copy.
+    5. d holds exactly ONE copy of e's post: it received it twice (e's own
+       publish, then the host's relay) and the receiver dedupes by post id.
 
     Polls every 3 s (the per-user 60/min bucket on ``/api/spaces/*``).
     """
@@ -3572,35 +3571,43 @@ def cmd_gfs_member_publish() -> None:
         )
     print(f"  the GFS fanned the member-published item out ({fanned[-1].strip()}) ✓")
 
-    # 4. The host comes back and does not publish the post a second time.
+    # 4. The host comes back and relays the post as before. Bookmark the GFS
+    #    log BEFORE the respawn: a relays the queued post as soon as it is up,
+    #    often before ``_wait_ready`` returns.
+    back_off = _gfs_log_size()
     new_pid = _spawn("a", a["port"])
     state["instances"]["a"]["pid"] = new_pid
     _save(state)
     _wait_ready(a["port"])
     print(f"  a respawned: pid={new_pid}")
-    back_off = _gfs_log_size()
     _await_space_post(state, "a", space_id, post_id)
     print("  a (host) caught e's post up over the member path ✓")
-    time.sleep(10.0)  # settle: a would relay right after receiving the post
-    relayed = [
-        line
-        for line in _gfs_log_lines_matching(
-            "GFS: relaying space_post_public", offset=back_off
-        )
-        if space_id in line
-    ]
-    if relayed:
+    # Settle: a relays the post to the GFS right after receiving it.
+    deadline = time.monotonic() + 30.0
+    relayed: list[str] = []
+    while time.monotonic() < deadline and not relayed:
+        time.sleep(3.0)
+        relayed = [
+            line
+            for line in _gfs_log_lines_matching(
+                "GFS: relaying space_post_public", offset=back_off
+            )
+            if space_id in line
+        ]
+    if not relayed:
         raise SystemExit(
-            "gfs-member-publish: a relayed a space_post_public for the space "
-            f"after restarting ({len(relayed)} line(s)) — e already published "
-            "its post there; the host dedupe hint was not honoured.",
+            "gfs-member-publish: a never relayed e's post to the GFS after "
+            "restarting — older followers, which read only the host's copy, "
+            "would miss it.",
         )
-    print("  a did not re-publish e's post to the GFS (no duplicate) ✓")
+    print("  a relayed e's post to the GFS as before (older followers) ✓")
+    time.sleep(3.0)  # let d process the host's copy
 
-    # 5. d holds exactly one copy.
+    # 5. d received it twice and holds exactly one copy.
     rows = _rows("d", "SELECT id FROM space_posts WHERE id = ?", (post_id,))
     if len(rows) != 1:
         raise SystemExit(f"gfs-member-publish: d holds {len(rows)} copies of the post")
+    print("  d holds exactly one copy (receiver dedupe by post id) ✓")
     state["gfs_member_publish_post_id"] = post_id
     _save(state)
     print("gfs-member-publish: ok (member posts reach followers without the host)")

@@ -960,17 +960,14 @@ POST /gfs/member-publish
   `gfs_instance_id` = the id pinned from that server's `/gfs/info`);
   transient failures (transport, 408, 429, 5xx incl. a busy GFS's 503) are
   retried through a `GfsPublishRetryQueue`.
-- **Host dedupe rule.** The author publishes FIRST — every first attempt
-  concurrent and bounded (3 s) — and only then sends the member broadcast,
-  naming in the encrypted relay hint (`public_relay.gfs_published`, outside
-  the author signature) only the `gfs_instance_id`s that ACCEPTED the post.
-  A seed holder relaying that post skips exactly those servers and relays
-  to the rest, so a server where the author's publish failed or timed out
-  still gets the host's copy (the author's retry may add a duplicate there,
-  which receivers drop by post id); the field never travels on. A v_48
-  author sends no field and is relayed as before. The bounded wait is the
-  price of naming only accepting servers; post creation waits at most that
-  long.
+- **The host relays as before; receivers dedupe.** The member publish runs
+  in the background after the member broadcast (post creation never waits
+  on a connection server). The host keeps relaying the post to every GFS as
+  `space_post_public`, because followers on an older build ignore
+  `space_item` and read only that copy. A follower that reads both gets the
+  post twice and drops the second by post id — one duplicate frame per
+  post. This can be revisited (the host skipping servers the author
+  published to) once followers advertise `space_item` support.
 - **Auto-subscribe.** A household with a local writer seat (and no seed)
   subscribes to the fan-out of the space on every capable server listing it
   — when the seat is created (`SpaceMemberJoined`), when it first
@@ -981,11 +978,11 @@ POST /gfs/member-publish
   our own echo; verify the author signature, self-cert and owner-bound post
   id; require the author-bound `item_type` / `item_target` to match; require
   `origin_instance_id == derive_instance_id(author_pk)` (also on the host
-  relay path); require the inner cert to equal the frame's, and run
+  relay path); require the inner cert's v1 fields to equal the frame cert, and run
   `SpaceWriterCertService.check_item` — signature against the pinned space
   key, this space, the frame's epoch, the inner's `author_pk`, the scope the
   REAL type needs (`write` for a post) and epoch freshness; require the v2
-  user binding to name the author; on a MEMBER household (it holds the
+  user binding (on the inner copy) to name the author; on a MEMBER household (it holds the
   roster and the access levels) also require the author's own seat to let
   them post (`SpaceAuthorship.item_access_admits`); then dedupe by post id
   against the federated / host-relayed copy.

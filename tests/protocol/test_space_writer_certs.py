@@ -494,10 +494,7 @@ class _CaptureGfs:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def publish_space_event(
-        self, *, space_id, event_type, payload, skip_gfs_instance_ids=frozenset()
-    ) -> int:
-        self.skipped = skip_gfs_instance_ids
+    async def publish_space_event(self, *, space_id, event_type, payload) -> int:
         self.calls.append(payload)
         return 1
 

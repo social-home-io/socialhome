@@ -37,15 +37,16 @@ from ..domain.events import (
     PostEdited,
     SpacePostCreated,
 )
-from ..domain.federation import FederationEventType, GfsConnection
+from ..domain.federation import FederationEventType
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
-from .gfs_member_publish_service import GFS_PUBLISHED_FIELD, ITEM_TYPE_POST
+from .gfs_member_publish_service import ITEM_TYPE_POST
 from .moderation_release import current_release, with_release
 from .space_public_author import build_signed_author_inner
 
 if TYPE_CHECKING:
+    from ..domain.post import Post
     from ..federation.federation_service import FederationService
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
@@ -145,28 +146,32 @@ class SpacePostOutbound:
         self._own_instance_pk = own_instance_public_key
         self._own_identity_seed = own_identity_seed
 
-    async def _publish_to_gfs(self, space_id: str, post) -> list[GfsConnection]:
-        """Publish our own post over the GFS (v_49 trusted mode); the
-        servers that accepted it, or ``[]`` (no target → the host path)."""
+    async def _schedule_gfs_publish(self, space_id: str, post: Post) -> None:
+        """Build the GFS inner of our own post and hand it to the member
+        publisher's background queue (v_49 trusted mode). Never raises."""
         assert self._member_gfs is not None
-        targets = await self._member_gfs.plan_post(space_id, post.author)
-        if not targets:
-            return []
-        author = await self._users.get_by_user_id(post.author)
-        if author is None:
-            return []
-        inner = build_signed_author_inner(
-            post=post,
-            space_id=space_id,
-            author_username=author.username,
-            author_pk=self._own_instance_pk,
-            author_identity_seed=self._own_identity_seed,
-            origin_instance_id=self._own_instance_id,
-            author_identity_anchor=author.identity_anchor,
-            item_type=ITEM_TYPE_POST,
-            item_target=post.id,
-        )
-        return await self._member_gfs.publish_post(space_id, inner, targets)
+        try:
+            author = await self._users.get_by_user_id(post.author)
+            if author is None:
+                return
+            inner = build_signed_author_inner(
+                post=post,
+                space_id=space_id,
+                author_username=author.username,
+                author_pk=self._own_instance_pk,
+                author_identity_seed=self._own_identity_seed,
+                origin_instance_id=self._own_instance_id,
+                author_identity_anchor=author.identity_anchor,
+                item_type=ITEM_TYPE_POST,
+                item_target=post.id,
+            )
+            self._member_gfs.schedule_post(space_id, post.author, inner)
+        except Exception:
+            log.exception(
+                "member GFS publish could not be scheduled for space=%s post=%s",
+                space_id,
+                post.id,
+            )
 
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
         """Fan ``SPACE_POST_CREATED`` to every member household.
@@ -306,26 +311,6 @@ class SpacePostOutbound:
                         cert = None
                     if cert is not None:
                         payload["public_relay"]["writer_cert"] = cert
-        # v_49 — trusted member publish, BEFORE the broadcast: publish the post
-        # to each capable server ourselves (each first attempt bounded), then
-        # name in the relay hint only the servers that ACCEPTED it, so a seed
-        # holder relaying the post skips exactly those — never one where our
-        # publish failed. The GFS copy carries its own inner, with the real
-        # item type and target bound inside the author signature.
-        if self._member_gfs is not None and "public_relay" in payload:
-            try:
-                accepted = await self._publish_to_gfs(event.space_id, post)
-            except Exception:
-                log.exception(
-                    "member GFS publish failed for space=%s post=%s",
-                    event.space_id,
-                    post.id,
-                )
-                accepted = []
-            if accepted:
-                payload["public_relay"][GFS_PUBLISHED_FIELD] = sorted(
-                    c.gfs_instance_id for c in accepted
-                )
         with_release(payload)
         try:
             await self._federation.broadcast_to_space_members(
@@ -339,6 +324,15 @@ class SpacePostOutbound:
                 event.space_id,
                 post.id,
             )
+        # v_49 — trusted member publish: hand our own post to the member
+        # publisher, which publishes it to each capable connection server in
+        # the BACKGROUND (post creation never waits on a GFS). The host keeps
+        # relaying the post as before — older followers only read the host's
+        # copy — and receivers dedupe the two by post id. The GFS copy
+        # carries its own inner, with the real item type and target bound
+        # inside the author signature.
+        if self._member_gfs is not None and "public_relay" in payload:
+            await self._schedule_gfs_publish(event.space_id, post)
         # Hand off the bytes-federation to SpaceMediaSyncService.
         # SPACE_POST_CREATED carries only the URL strings; without
         # the outbox-driven SPACE_MEDIA_BLOB stream the receiver's

@@ -1435,13 +1435,8 @@ class GfsConnectionService:
         space_id: str,
         event_type: str,
         payload: dict,
-        skip_gfs_instance_ids: frozenset[str] = frozenset(),
     ) -> int:
         """Relay a single space-content event to a space's GFS subscribers.
-
-        ``skip_gfs_instance_ids`` names connection servers that already carry
-        this item because its author published it there itself (v_49); they
-        are left out.
 
         POSTs to ``POST /gfs/publish`` on every GFS the space is published to.
         The ``payload`` is the caller-built wire envelope — for the Phase-5a2
@@ -1497,11 +1492,6 @@ class GfsConnectionService:
         delivered = 0
         for conn in conns:
             if conn.status != "active":
-                continue
-            if conn.gfs_instance_id in skip_gfs_instance_ids:
-                # v_49: the author household published this item to that GFS
-                # itself (trusted member publish) — relaying it again would
-                # only hand every subscriber a duplicate.
                 continue
             if self._publish_retry.pending(conn.id):
                 # Earlier publishes to this GFS are waiting for a retry:
