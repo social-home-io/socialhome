@@ -18,6 +18,7 @@ from PIL import Image
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
     SpaceModerationQueued,
     SpacePostCreated,
@@ -47,6 +48,7 @@ from socialhome.domain.space import (
     Space,
     SpaceFeatureAccess,
     SpaceFeatures,
+    SpaceMember,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
@@ -9247,3 +9249,161 @@ async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
     ]
     assert [k["to_instance_id"] for k in sent] == ["peer-a"]
     assert _cert_of(sent[0]["payload"]).scope == "comment"
+
+
+# ─── v_49: a member household's leave reaches the host ────────────────────
+
+
+async def _stub_space_with_member(stack, *, host_version: int = 49):
+    """A space hosted on ``host-h``, with a local plain member ``leaver``."""
+    owner = await stack.provision_user("stubowner")
+    space = await stack.space_svc.create_space(owner_username="stubowner", name="S")
+    leaver = await stack.provision_user("leaver")
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=space.id, user_id=leaver.user_id, role="member", joined_at="t"
+        )
+    )
+    await stack.db.enqueue(
+        "UPDATE spaces SET owner_instance_id='host-h' WHERE id=?", (space.id,)
+    )
+    await stack.db.enqueue(
+        "UPDATE spaces SET identity_private_key=NULL WHERE id=?", (space.id,)
+    )
+    fed, fed_repo = _invite_fed()
+
+    async def _supports(_iid, *, min_version):
+        return host_version >= min_version
+
+    fed.peer_supports = _supports
+    stack.space_svc.attach_federation(
+        federation_service=fed,
+        federation_repo=fed_repo,
+        remote_member_repo=await _wire_remote_members(stack),
+    )
+    return space, leaver, fed, owner
+
+
+def _leaves(fed):
+    return [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_INSTANCE_LEFT
+    ]
+
+
+async def test_self_leave_on_a_stub_tells_the_host(stack):
+    space, leaver, fed, _owner = await _stub_space_with_member(stack)
+    await stack.space_svc.remove_member(
+        space.id, actor_username="leaver", user_id=leaver.user_id
+    )
+    sent = _leaves(fed)
+    assert len(sent) == 1
+    assert sent[0]["to_instance_id"] == "host-h"
+    assert sent[0]["payload"] == {"space_id": space.id, "user_id": leaver.user_id}
+    assert sent[0]["space_id"] == space.id
+
+
+async def test_self_leave_does_not_notify_a_host_below_v49(stack):
+    space, leaver, fed, _owner = await _stub_space_with_member(stack, host_version=48)
+    await stack.space_svc.remove_member(
+        space.id, actor_username="leaver", user_id=leaver.user_id
+    )
+    assert _leaves(fed) == []
+
+
+async def test_host_applies_a_leave_tombstone_drop_instance_then_rotate(
+    stack, monkeypatch
+):
+    """The household's last seat goes: tombstone, ``space_instances`` row
+    removed BEFORE the rotation (so the new key never reaches the leaver),
+    one rotation, and no cert for the leaver any more."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    seen_at_rotation: list[list[str]] = []
+
+    async def _spy(_self, space_id):
+        seen_at_rotation.append(await stack.space_repo.list_member_instances(space_id))
+
+    monkeypatch.setattr(type(stack.space_svc), "_rotate_and_distribute_space_key", _spy)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await remote.get(space.id, "peer-a", "u-a") is None
+    assert "peer-a" not in await stack.space_repo.list_member_instances(space.id)
+    assert len(seen_at_rotation) == 1
+    assert "peer-a" not in seen_at_rotation[0]
+    certs = stack.space_svc._writer_certs
+    assert await certs.issue_for_instance(space.id, "peer-a") is None
+    # The LEFT gossip went out for the seat.
+    assert any(
+        c.args[1] is FederationEventType.SPACE_MEMBER_LEFT
+        for c in fed.broadcast_to_space_members.await_args_list
+    )
+
+
+async def test_a_forged_leave_for_another_households_seat_changes_nothing(
+    stack, monkeypatch
+):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    # peer-b (the authenticated sender) names peer-a's user.
+    # Handled (we host) — but nothing of peer-a's moves.
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-b", "u-a")
+    assert await remote.get(space.id, "peer-a", "u-a") is not None
+    assert "peer-a" in await stack.space_repo.list_member_instances(space.id)
+    assert rekeys == []
+
+
+async def test_a_leave_with_another_seat_left_keeps_the_household(stack, monkeypatch):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await _seat(remote, space.id, "peer-a", "u-a2")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert "peer-a" in await stack.space_repo.list_member_instances(space.id)
+    assert rekeys == []  # still a writer — no scope drop
+
+
+async def test_a_leave_ending_the_last_admin_seat_rotates_once(stack, monkeypatch):
+    """Delegation on: the v_44 authority rotation rotates the content key, so
+    the scope-drop rotation is skipped (one epoch, not two)."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?", (space.id,)
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="admin")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    revoked: list = []
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, revoked.append)
+    rekeys = await _rekeys(stack, monkeypatch)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert [e.instance_id for e in revoked] == ["peer-a"]
+    assert rekeys == []
+
+
+async def test_a_leave_for_a_space_we_do_not_host_is_not_ours(stack):
+    space, leaver, fed, _owner = await _stub_space_with_member(stack)
+    assert not await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u")
+
+
+async def test_admin_demotion_with_v44_rotation_skips_the_scope_rotation(
+    stack, monkeypatch
+):
+    """Minor: when an admin seat ends together with a scope drop and the v_44
+    rotation will rotate anyway, the scope rotation is skipped."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=1, allow_subscriber_comment=1"
+        " WHERE id=?",
+        (space.id,),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="admin")
+    rekeys = await _rekeys(stack, monkeypatch)
+    target = await remote.get(space.id, "peer-a", "u-a")
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="subscriber"
+    )
+    assert rekeys == []

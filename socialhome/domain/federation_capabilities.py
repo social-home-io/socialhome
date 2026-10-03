@@ -762,7 +762,9 @@ from __future__ import annotations
 #:   one whose cert fails. **Gated, degraded fallback**: certs go only to
 #:   v_49 households; an item with no cert from a pre-v_49 author keeps
 #:   today's host-authority-signed path (a v_49 author's hint without one
-#:   is refused).
+#:   is refused). A member household's self-leave now reaches the host as
+#:   ``SPACE_INSTANCE_LEFT {space_id, user_id}`` (gated on v_49 — an older
+#:   host would drop the whole household's row and end no seat).
 OURS: int = 49
 
 

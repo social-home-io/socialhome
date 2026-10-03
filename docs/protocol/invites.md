@@ -636,6 +636,12 @@ own `space_instances` rows rather than trusting the sender, so a household
 that shares two spaces and leaves one cannot tear down the seat the other
 still needs.
 
+A link-joined member that leaves (v_49) tells the host with
+`SPACE_INSTANCE_LEFT {space_id, user_id}` over the same connection-server
+relay as every other envelope; the host ends that household's seat, drops
+its `space_instances` row with its last seat, rotates the content key, and
+then revokes the §D2b seat. See [`spaces.md`](./spaces.md#member-leave-v_49).
+
 No `PairingConfirmed` is published either — that event kicks off the
 user-roster sync, the DM-history backfill and the public-space snapshot,
 none of which a space-scoped relationship is entitled to. An existing

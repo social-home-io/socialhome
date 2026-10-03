@@ -2687,7 +2687,118 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 action="removed",
                 actor_id=actor.user_id,
             )
+        if is_self and self._hosted_elsewhere(space):
+            # v_49 — tell the host. Without this a member household's leave
+            # never reached it: the roster gossip above needs the seed, so the
+            # host kept the seat, kept fanning content keys out to us and kept
+            # issuing us a write cert.
+            await self._notify_host_of_leave(space, user_id)
         await self._rotate_and_distribute_space_key(space_id)
+
+    async def _notify_host_of_leave(self, space: Space, user_id: str) -> None:
+        """Send the host ``SPACE_INSTANCE_LEFT`` for one of our users (v_49).
+
+        Authenticated by the envelope's signed ``from_instance``; the host
+        only ever ends seats of that household. A link-joined household's
+        send goes over the connection-server relay like any other envelope.
+        A host below v_49 is skipped: it would read the event as "the whole
+        household left" and drop its ``space_instances`` row while our other
+        users may still be seated, without ending any seat.
+        """
+        host = space.owner_instance_id
+        if self._federation is None or not host:
+            return
+        if not await self._federation.peer_supports(
+            host, min_version=FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH
+        ):
+            return
+        try:
+            await self._federation.send_with_mesh_fallback(
+                to_instance_id=host,
+                event_type=FederationEventType.SPACE_INSTANCE_LEFT,
+                payload={"space_id": space.id, "user_id": user_id},
+                space_id=space.id,
+            )
+        except Exception:
+            log.exception(
+                "leave: could not tell host %s that %s left %s",
+                host,
+                user_id,
+                space.id,
+            )
+
+    async def on_remote_member_left(
+        self, space_id: str, instance_id: str, user_id: str | None
+    ) -> bool:
+        """Host side of a member household's leave (v_49).
+
+        ``instance_id`` is the §24.11-authenticated sender; only ITS seats
+        end — ``user_id`` names one, ``None`` means all of them. The seats are
+        tombstoned; when the household's last seat goes, its
+        ``space_instances`` row is removed BEFORE the rotation so the new
+        key never reaches it; the roster change is gossiped; and the content
+        key rotates once (or the v_44 authority rotation does it, when an
+        admin seat ended under delegation). Returns ``False`` when we do not
+        host the space (the caller then keeps the old semantics).
+        """
+        if self._remote_members is None:
+            return False
+        space = await self._spaces.get(space_id)
+        if space is None or not self._own_instance_id:
+            return False
+        if space.owner_instance_id != self._own_instance_id:
+            return False
+        live = await self._remote_members.list_for_instance(
+            space_id, instance_id, include_tombstoned=False
+        )
+        ending = [r for r in live if user_id is None or r.user_id == user_id]
+        if not ending:
+            if not live:
+                await self._spaces.remove_space_instance(space_id, instance_id)
+            log.info(
+                "leave from %s for space %s names no live seat of that "
+                "household — nothing to end",
+                instance_id,
+                space_id,
+            )
+            return True
+        scope_before = await self.writer_scope(space, instance_id)
+        for seat in ending:
+            await self._remote_members.remove(space_id, instance_id, seat.user_id)
+        remaining = await self._remote_members.list_for_instance(
+            space_id, instance_id, include_tombstoned=False
+        )
+        if not remaining:
+            await self._spaces.remove_space_instance(space_id, instance_id)
+        for seat in ending:
+            await self._emit_member_roster_gossip(
+                space,
+                user_id=seat.user_id,
+                instance_id=instance_id,
+                display_name=seat.display_name,
+                user_pk=seat.user_pk,
+                role=seat.role,
+                tombstoned=True,
+            )
+        admin_ended = any(r.role == SpaceRole.ADMIN for r in ending) and not any(
+            r.role == SpaceRole.ADMIN for r in remaining
+        )
+        if admin_ended:
+            await self._bus.publish(
+                SpaceAdminAuthorityRevoked(space_id=space_id, instance_id=instance_id)
+            )
+        await self.rotate_if_writer_scope_weakened(
+            space_id,
+            instance_id,
+            scope_before,
+            authority_rotation_follows=admin_ended
+            and space.features.delegated_admin_authority,
+        )
+        # LAST, as on a kick: a link-joined household's §D2b seat loses its
+        # reason to exist once it shares no space with us any more.
+        if not remaining:
+            await self.revoke_space_session_if_orphaned(instance_id)
+        return True
 
     async def set_role(
         self,
@@ -2790,13 +2901,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         return await self._writer_certs.scope_for_instance(space, instance_id)
 
     async def rotate_if_writer_scope_weakened(
-        self, space_id: str, instance_id: str, scope_before: str | None
+        self,
+        space_id: str,
+        instance_id: str,
+        scope_before: str | None,
+        *,
+        authority_rotation_follows: bool = False,
     ) -> bool:
         """Rotate the content key when household ``instance_id`` now holds a
         weaker writer scope than ``scope_before`` (write → comment, any →
         none). A writer cert is valid for its whole epoch, so a reduction of
         rights only takes effect at the next epoch — this makes that epoch
-        start now. Promotions never rotate. Returns whether it rotated."""
+        start now. Promotions never rotate. ``authority_rotation_follows``:
+        an admin seat ended under delegation, so the v_44 authority rotation
+        rotates the content key itself — skip, one epoch rather than two.
+        Returns whether it rotated."""
         if self._writer_certs is None:
             return False
         space = await self._spaces.get(space_id)
@@ -2804,6 +2923,16 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             return False
         after = await self._writer_certs.scope_for_instance(space, instance_id)
         if not scope_weakened(scope_before, after):
+            return False
+        if authority_rotation_follows:
+            log.info(
+                "space %s: household %s writer scope %s → %s — the authority "
+                "rotation will rotate the content key",
+                space_id,
+                instance_id,
+                scope_before,
+                after,
+            )
             return False
         log.info(
             "space %s: household %s writer scope %s → %s — rotating the content key",
@@ -3622,9 +3751,27 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # gets a fresh one at its current scope. Stronger (a follower made a
         # member): re-deliver its cert at the new scope, in a roster snapshot
         # addressed to that household alone. No rotation for a promotion.
+        # An admin seat that ended under delegation triggers the v_44
+        # authority rotation, which rotates the content key itself — the
+        # scope rotation is skipped then (one epoch, not two).
+        admin_ended = (
+            target.role == SpaceRole.ADMIN
+            and role != SpaceRole.ADMIN
+            and space.features.delegated_admin_authority
+            and space.owner_instance_id == self._own_instance_id
+            and not any(
+                r.role == SpaceRole.ADMIN
+                for r in await self._remote_members.list_for_instance(
+                    space_id, instance_id, include_tombstoned=False
+                )
+            )
+        )
         if (
             not await self.rotate_if_writer_scope_weakened(
-                space_id, instance_id, scope_before
+                space_id,
+                instance_id,
+                scope_before,
+                authority_rotation_follows=admin_ended,
             )
             and self._writer_certs is not None
             and (

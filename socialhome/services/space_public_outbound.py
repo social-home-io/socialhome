@@ -445,7 +445,9 @@ class SpacePublicOutbound:
     async def _legacy_hint_ok(self, origin: str | None, relay: dict) -> bool:
         """A hint with NO cert: only from a pre-v_49 origin (a v_49 one
         always attaches it — its absence is a stripped cert), and only when
-        its ``author_pk`` is the origin household's pinned key."""
+        its ``author_pk`` is the origin household's key — the one we pin for
+        it, or for a mesh-only household (no row) the key its instance id
+        derives from, as the v_31 routed-origin check verified it."""
         assert self._writer_certs is not None
         if not origin:
             return False
@@ -456,11 +458,17 @@ class SpacePublicOutbound:
                 origin,
             )
             return False
-        pinned = await self._writer_certs.pinned_instance_pk(origin)
-        if pinned is None or pinned.hex() != str(relay.get("author_pk") or ""):
+        try:
+            claimed = bytes.fromhex(str(relay.get("author_pk") or ""))
+        except ValueError:
+            claimed = None
+        verified = await self._writer_certs.verified_instance_pk(
+            origin, claimed=claimed
+        )
+        if verified is None or verified != claimed:
             log.warning(
-                "space_public.outbound: public_relay author_pk is not the key "
-                "we pin for %s — not relaying",
+                "space_public.outbound: public_relay author_pk is not %s's "
+                "identity key — not relaying",
                 origin,
             )
             return False
@@ -496,8 +504,13 @@ class SpacePublicOutbound:
             if instance_id == self._own_instance_id:
                 cert = await self._writer_certs.own_cert(space_id, current)
             else:
+                hint: bytes | None
+                try:
+                    hint = bytes.fromhex(expect_pk) if expect_pk else None
+                except ValueError:
+                    hint = None
                 cert = await self._writer_certs.issue_for_instance(
-                    space_id, instance_id, epoch=current
+                    space_id, instance_id, epoch=current, instance_pk_hint=hint
                 )
             if cert is not None and expect_pk:
                 named = SpaceWriterCertService.cert_instance_pk(cert.to_wire())

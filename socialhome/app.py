@@ -1222,10 +1222,12 @@ def _wire_federation_stack(
     )
     app[K.auto_pair_coordinator_key] = auto_pair_coordinator
     app[K.auto_pair_inbox_key] = auto_pair_inbox
-    SpaceMembershipInboundHandlers(
+    space_membership_handlers = SpaceMembershipInboundHandlers(
         bus=bus,
         space_repo=space_repo,
-    ).attach_to(federation_service)
+    )
+    space_membership_handlers.attach_to(federation_service)
+    app[K.space_membership_handlers_key] = space_membership_handlers
     SpaceInviteInboundHandlers(
         bus=bus,
         space_repo=space_repo,
@@ -3133,6 +3135,8 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.private_invite_handler_key].attach_space_service(
             real_space_service,
         )
+        # v_49 — a member household's SPACE_INSTANCE_LEFT ends its seats here.
+        app[K.space_membership_handlers_key].attach_space_service(real_space_service)
         # v_44 — rotate the space authority key when an admin household is
         # revoked (owner side), and apply the owner's rotation bundle
         # (member side).

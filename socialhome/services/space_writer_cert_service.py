@@ -39,7 +39,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..crypto import b64url_decode, ed25519_public_key
+from ..crypto import b64url_decode, derive_instance_id, ed25519_public_key
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import SpaceRole
 from ..domain.writer_cert import (
@@ -175,12 +175,31 @@ class SpaceWriterCertService:
                 scopes.append(WRITER_SCOPE_COMMENT)
         return strongest_scope(scopes)
 
-    async def _instance_pk(self, instance_id: str) -> bytes | None:
+    async def verified_instance_pk(
+        self, instance_id: str, *, claimed: bytes | None = None
+    ) -> bytes | None:
+        """Household ``instance_id``'s identity key, or ``None``.
+
+        Ours for ourselves; else the key we pin for it (``remote_instances``,
+        the key §24.11 verifies its envelopes against); else — for a
+        mesh-only household we hold no row for — a ``claimed`` key that
+        derives to its instance id. An instance id IS the fingerprint of its
+        identity key (§4.1.2), which is how the v_31 routed-origin check
+        verified that household's envelope in the first place."""
         if instance_id == self._own_instance_id:
             return self._own_pk
-        if self._federation is None:
+        if self._federation is not None:
+            pinned = await self._federation.peer_identity_public_key(instance_id)
+            if pinned is not None:
+                return pinned
+        if claimed is None or len(claimed) != 32:
             return None
-        return await self._federation.peer_identity_public_key(instance_id)
+        try:
+            if derive_instance_id(claimed) == instance_id:
+                return claimed
+        except ValueError:
+            return None
+        return None
 
     async def peer_is_cert_aware(self, instance_id: str) -> bool:
         """True when ``instance_id`` advertises v_49 — its items must carry a
@@ -192,10 +211,6 @@ class SpaceWriterCertService:
             min_version=FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH,
         )
 
-    async def pinned_instance_pk(self, instance_id: str) -> bytes | None:
-        """The identity key we pin for ``instance_id`` (ours for ourselves)."""
-        return await self._instance_pk(instance_id)
-
     # ── Issuing ──────────────────────────────────────────────────────────
 
     async def issue_for_instance(
@@ -204,9 +219,11 @@ class SpaceWriterCertService:
         instance_id: str,
         *,
         epoch: int | None = None,
+        instance_pk_hint: bytes | None = None,
     ) -> WriterCert | None:
         """Sign a cert for household ``instance_id`` at ``epoch`` (default:
-        our current content epoch). ``None`` when we are not a seed holder,
+        our current content epoch). ``instance_pk_hint`` is the key a
+        mesh-only household's item names (see :meth:`verified_instance_pk`). ``None`` when we are not a seed holder,
         our seed no longer matches the pin, there is no epoch, the household
         holds no entitled seat, or its identity key is unknown to us."""
         space = await self._spaces.get(space_id)
@@ -226,7 +243,7 @@ class SpaceWriterCertService:
         scope = await self.scope_for_instance(space, instance_id)
         if scope is None:
             return None
-        pk = await self._instance_pk(instance_id)
+        pk = await self.verified_instance_pk(instance_id, claimed=instance_pk_hint)
         if pk is None or len(pk) != 32:
             return None
         return sign_writer_cert(

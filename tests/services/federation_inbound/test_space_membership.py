@@ -824,3 +824,48 @@ async def test_member_unbanned_for_an_unknown_space_is_refused(repo, handlers):
         )
     )
     assert repo.unbans == []
+
+
+# ─── v_49: a member household's leave, on the host ───────────────────────
+
+
+class _LeaveService:
+    def __init__(self, hosts: bool):
+        self.hosts = hosts
+        self.calls: list[tuple] = []
+
+    async def on_remote_member_left(self, space_id, instance_id, user_id):
+        self.calls.append((space_id, instance_id, user_id))
+        return self.hosts
+
+
+async def test_instance_left_on_the_host_hands_the_leave_to_the_service(repo, handlers):
+    svc = _LeaveService(hosts=True)
+    handlers.attach_space_service(svc)
+    await handlers._on_instance_left(
+        _event(
+            FederationEventType.SPACE_INSTANCE_LEFT,
+            {"user_id": "u-1"},
+            space_id="sp-1",
+            from_instance="peer-a",
+        )
+    )
+    # The authenticated sender, never a household named in the payload.
+    assert svc.calls == [("sp-1", "peer-a", "u-1")]
+    # The service decides about space_instances (last seat only).
+    assert repo.instance_removes == []
+
+
+async def test_instance_left_elsewhere_keeps_the_old_semantics(repo, handlers):
+    svc = _LeaveService(hosts=False)
+    handlers.attach_space_service(svc)
+    await handlers._on_instance_left(
+        _event(
+            FederationEventType.SPACE_INSTANCE_LEFT,
+            {"instance_id": "someone-else"},
+            space_id="sp-1",
+            from_instance="peer-a",
+        )
+    )
+    assert svc.calls == [("sp-1", "peer-a", None)]
+    assert repo.instance_removes == [("sp-1", "peer-a")]

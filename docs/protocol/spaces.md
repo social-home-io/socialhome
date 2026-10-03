@@ -1035,21 +1035,31 @@ cert only while the author household still holds a seat that permits a post
 author and keeps today's behaviour — authorized by the host's authority
 signature — but the host relays such a hint only from an origin below v_49
 whose pinned identity key is the inner's `author_pk` (a v_49 author always
-attaches its cert; a hint without one is a stripped cert). That no-cert
+attaches its cert; a hint without one is a stripped cert). For a mesh-only
+origin we hold no `remote_instances` row for, the household key is the
+`author_pk` that derives to its instance id — the same self-authentication
+the v_31 routed-origin check verified its envelope with — so mesh members
+keep the relay and can be re-stamped. That no-cert
 branch is the migration tripwire: once every member household ships v_49 it
 can become a refusal.
 
 **Epoch freshness.** A cert is valid for its whole epoch, so receivers bound
-the epoch too: a cert-authorized item is accepted only at the newest content
-epoch the receiver holds, or at the previous one for
+the epoch too: a **member-authorized** (cert-only) item is accepted only at
+the newest content epoch the receiver holds, or at the previous one for
 `WRITER_CERT_EPOCH_GRACE_S` (10 min) after the newest key arrived there
-(`space_keys.created_at`). The grace lets a post sealed just before a
-rotation land; it needs no seed holder online (an expiry on the cert would).
+(`space_keys.created_at`) — `SpaceWriterCertService.check_item`. The grace
+lets a post sealed just before a rotation land; it needs no seed holder
+online (an expiry on the cert would). A **host-signed** item — every
+GFS-relayed item today, which the host re-stamped at its own current epoch —
+skips the gate: the authority signature is the authorizer, and a stale epoch
+there is late delivery, not revocation. A catch-up or backfill path must not
+run the gate either.
 
 **Revocation = rotation.** Any change that weakens a household's rights
 rotates the content key, so its old cert dies with the epoch: a role change
 from write to comment or none (remote or local), a household leaving the
-space, `allow_subscriber_comment` turned off while a follower seat exists,
+space (`SPACE_INSTANCE_LEFT`, see "Member leave (v_49)"),
+`allow_subscriber_comment` turned off while a follower seat exists,
 and — as before — every kick and ban. Promotions do not rotate; the new
 cert is delivered in a roster snapshot, and turning follower comments on
 sends each follower household its `comment` cert at once.
@@ -2203,9 +2213,51 @@ sequenceDiagram
 ```
 
 Owner cannot be kicked through this path — same invariant as
-`remove_member`. Self-leaves on a remote space still run the local
-path (the user is dropping their own stub membership; the host
-learns via the existing `SPACE_MEMBER_LEFT` outbound).
+`remove_member`. Self-leaves on a remote space run the local path (the
+user drops their own stub membership) and then tell the host — see
+"Member leave (v_49)" below.
+
+### Member leave (v_49)
+
+Before v_49 a member household's leave never reached the host: the local
+path only emitted roster gossip, which needs the space seed. The host kept
+the seat and the `space_instances` row, kept sending content keys, and kept
+issuing the household a write cert. Now `SpaceService.remove_member` on a
+member household (self-leave, space hosted elsewhere) sends the host
+`SPACE_INSTANCE_LEFT {space_id, user_id}` — an existing event type, inside
+the encrypted payload, authenticated by the envelope's signed
+`from_instance`. A link-joined household sends it over the
+connection-server relay (`/gfs/envelope`) like any other envelope.
+
+The host (`SpaceService.on_remote_member_left`, dispatched by
+`SpaceMembershipInboundHandlers._on_instance_left`) only ever ends seats
+of the authenticated sender — a leave naming another household's user
+changes nothing. It tombstones the seat(s); when the household's last seat
+goes it removes the `space_instances` row **before** rotating, so the new
+key never reaches the household that left; it gossips the roster change
+(`SPACE_MEMBER_LEFT`); and it rotates the content key once — or, when an
+admin seat ended under `delegated_admin_authority`, leaves that to the v_44
+authority rotation (one epoch, not two). A link-joined household's §D2b
+seat is then revoked like on a kick. Off the host the event keeps its old
+meaning (stop fanning out to that household).
+
+Gated on `peer_supports(host, MIN_FOR_MEMBER_GFS_PUBLISH)` (v_49): a host
+below v_49 would read the event as "the whole household left" and drop the
+row while other users of that household may still be seated, ending no
+seat — so an older host is sent nothing, as before.
+
+```mermaid
+sequenceDiagram
+    participant M as Member household
+    participant H as Host
+    participant O as Other members
+    M->>M: remove_member(self) — drop local membership
+    M->>H: SPACE_INSTANCE_LEFT {space_id, user_id} (signed from_instance)
+    H->>H: tombstone M's seat; last seat → remove space_instances(M)
+    H->>O: SPACE_MEMBER_LEFT (authority-signed gossip)
+    H->>O: SPACE_KEY_EXCHANGE_REKEY (epoch N+1, each with its own writer_cert)
+    Note over M: gets neither the new key nor a cert
+```
 
 ### Cross-household admin actions (v_15+)
 

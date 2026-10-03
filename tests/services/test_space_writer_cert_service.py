@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from socialhome.crypto import b64url_encode, ed25519_public_key
+from socialhome.crypto import b64url_encode, derive_instance_id, ed25519_public_key
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.space import (
     JoinMode,
@@ -519,8 +519,8 @@ async def test_peer_helpers():
     svc, _ = _svc()
     assert await svc.peer_is_cert_aware("peer")
     assert not await svc.peer_is_cert_aware("old")
-    assert await svc.pinned_instance_pk("peer") == PEER_PK
-    assert await svc.pinned_instance_pk("own") == OWN_PK
+    assert await svc.verified_instance_pk("peer") == PEER_PK
+    assert await svc.verified_instance_pk("own") == OWN_PK
     bare = SpaceWriterCertService(
         space_repo=_Spaces(_space(), SEED, ()),
         remote_member_repo=_Remote([]),
@@ -529,3 +529,27 @@ async def test_peer_helpers():
         own_identity_pk=OWN_PK,
     )
     assert not await bare.peer_is_cert_aware("peer")
+
+
+# ── Round 3: mesh-only households (no remote_instances row) ──────────────
+
+
+async def test_a_mesh_only_household_key_is_bound_by_its_instance_id():
+    """An instance id IS the fingerprint of its identity key (§4.1.2), the
+    binding the v_31 routed-origin check verifies a mesh origin by. A
+    claimed key that derives to the id is that household's key."""
+    mesh_pk = ed25519_public_key(os.urandom(32))
+    mesh_id = derive_instance_id(mesh_pk)
+    svc, _ = _svc(remote_rows=[_remote(mesh_id, "member")])
+    assert await svc.verified_instance_pk(mesh_id) is None
+    assert await svc.verified_instance_pk(mesh_id, claimed=mesh_pk) == mesh_pk
+    other = ed25519_public_key(os.urandom(32))
+    assert await svc.verified_instance_pk(mesh_id, claimed=other) is None
+    assert await svc.verified_instance_pk(mesh_id, claimed=b"short") is None
+    # A pinned key always wins over a claim.
+    assert await svc.verified_instance_pk("peer", claimed=other) == PEER_PK
+    cert = await svc.issue_for_instance("sp-1", mesh_id, instance_pk_hint=mesh_pk)
+    assert cert is not None
+    _check(cert, mesh_pk, WRITER_SCOPE_WRITE)
+    # Without a verifiable key: nothing.
+    assert await svc.issue_for_instance("sp-1", mesh_id) is None

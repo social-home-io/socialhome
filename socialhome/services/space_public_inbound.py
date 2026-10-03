@@ -30,10 +30,11 @@ trusted by the receiver:
 4b. **Writer cert (v_49)** — when the inner carries the author household's
    ``writer_cert``, it must verify against the pinned space key, name this
    space and the envelope's epoch, name the inner's ``author_pk`` and grant
-   ``write``, and the epoch must still be open here — the newest content
-   epoch we hold, or the previous one for ``WRITER_CERT_EPOCH_GRACE_S``
-   after the newest key arrived; otherwise the item is dropped (WARNING). An
-   inner with NO cert
+   ``write``; otherwise the item is dropped (WARNING). No epoch freshness
+   gate here: the frame's authority signature is the authorizer and the host
+   re-stamped the cert at its own current epoch, so an old epoch is late
+   delivery (freshness applies to member-authorized items, PR 2). An inner
+   with NO cert
    is a pre-v_49 author and keeps today's behaviour (authorized by the
    relaying seed holder's authority signature) — the migration tripwire.
 5. **Dedupe** — the GFS relay is at-least-once and keeps no replay cache
@@ -123,12 +124,13 @@ class SpacePublicInbound:
         #: household's view of the space's members. ``None`` → no mentions.
         self._mentions = mention_resolver
         self._pin_refresher: "AuthorityPinRefresher | None" = None
-        #: v_49 — adds epoch freshness to the writer-cert check. Without it
-        #: a cert is still verified, just not against the epoch window.
+        #: v_49 — the writer-cert service. Host-signed frames (all of them
+        #: today) skip its epoch-freshness gate; member-authorized items
+        #: (PR 2) will run it.
         self._writer_certs: SpaceWriterCertService | None = None
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
-        """Wire the v_49 writer-cert service (epoch freshness)."""
+        """Wire the v_49 writer-cert service."""
         self._writer_certs = writer_certs
 
     def attach_pin_refresher(self, refresher: "AuthorityPinRefresher") -> None:
@@ -317,15 +319,13 @@ class SpacePublicInbound:
             author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
         except ValueError:
             return False
-        if self._writer_certs is not None:
-            return await self._writer_certs.check_item(
-                space,
-                inner.get(WRITER_CERT_FIELD),
-                epoch=epoch,
-                author_pk=author_pk,
-                required_scope=WRITER_SCOPE_WRITE,
-                space_pubkey_hex=pinned_pk_hex,
-            )
+        # Every frame on this path is authority-signed by a seed holder, which
+        # re-stamped the cert at ITS current epoch: the authority signature is
+        # the authorizer here, and an old epoch means late delivery, not
+        # revocation — so NO freshness gate. Freshness
+        # (``SpaceWriterCertService.check_item``) is for member-authorized,
+        # cert-only items (PR 2). Any future catch-up / backfill path must not
+        # run the freshness gate either: replayed history is old by design.
         return SpaceWriterCertService.check_item_cert(
             space,
             inner.get(WRITER_CERT_FIELD),

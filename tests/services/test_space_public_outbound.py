@@ -891,4 +891,4 @@ async def test_legacy_hint_naming_another_key_is_not_relayed(env, caplog):
         )
     )
     assert env["gfs"].calls == []
-    assert "not the key" in caplog.text
+    assert "identity key" in caplog.text

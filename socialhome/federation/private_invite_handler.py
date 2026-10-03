@@ -795,29 +795,12 @@ class PrivateSpaceInviteHandler:
         if not space_id or not user_id:
             return
         prior = await self._remote_members.get(space_id, event.from_instance, user_id)
-        hosted = await self._space_repo.get(space_id)
-        we_host = (
-            hosted is not None
-            and bool(self._own_instance_id)
-            and hosted.owner_instance_id == self._own_instance_id
-        )
-        # v_49 — what the leaving household could write before it left.
-        scope_before = (
-            await self._space_service.writer_scope(hosted, event.from_instance)
-            if we_host and prior is not None and self._space_service is not None
-            else None
-        )
         await self._remote_members.remove(
             space_id,
             event.from_instance,
             user_id,
         )
-        if scope_before is not None and self._space_service is not None:
-            # Its writer cert is valid for the whole epoch: if this was the
-            # household's last writing seat, start a new epoch now.
-            await self._space_service.rotate_if_writer_scope_weakened(
-                space_id, event.from_instance, scope_before
-            )
+        hosted = await self._space_repo.get(space_id)
         if (
             prior is not None
             and prior.role == SpaceRole.ADMIN

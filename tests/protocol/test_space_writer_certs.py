@@ -35,6 +35,7 @@ from socialhome.authority_sig import (
 )
 from socialhome.crypto import (
     b64url_encode,
+    derive_instance_id,
     derive_user_id,
     generate_identity_keypair,
     generate_space_keypair,
@@ -386,35 +387,54 @@ async def test_no_cert_and_no_authority_signature_never_lands(env):
     assert not await _landed(env)
 
 
-async def test_previous_epoch_cert_lands_within_the_grace(env):
-    """An item sealed just before a rotation still lands while the new key
-    is younger than WRITER_CERT_EPOCH_GRACE_S."""
+async def test_host_signed_item_at_an_old_epoch_still_lands(env):
+    """A host-signed item (the host re-stamped it at ITS current epoch) that
+    arrives after later rotations is late delivery, not revocation: the
+    authority signature is the authorizer, so no freshness gate."""
     envelope = await _envelope(env, await _cert(env))
+    await env.crypto.rotate_epoch(SPACE)
     await env.crypto.rotate_epoch(SPACE)
     await _deliver(env, envelope)
     assert await _landed(env)
 
 
-async def test_previous_epoch_cert_is_dropped_after_the_grace(env):
-    """R5: an old-epoch cert does not verify forever — once the new key is
-    older than the grace, the previous epoch is closed."""
-    envelope = await _envelope(env, await _cert(env))
+async def _cert_item_ok(env, cert: dict, epoch: int) -> bool:
+    """The member-authorized (cert-only) check PR 2 relies on."""
+    return await env.inbound._writer_certs.check_item(
+        await env.spaces.get(SPACE),
+        cert,
+        epoch=epoch,
+        author_pk=env.author_kp.public_key,
+        required_scope="write",
+    )
+
+
+async def test_cert_only_item_previous_epoch_open_within_the_grace(env):
+    e0 = await env.crypto.get_current_epoch(SPACE)
+    cert = await _cert(env)
+    await env.crypto.rotate_epoch(SPACE)
+    assert await _cert_item_ok(env, cert, e0)
+
+
+async def test_cert_only_item_previous_epoch_closed_after_the_grace(env):
+    """R5: an old-epoch cert does not authorize a member item forever."""
+    e0 = await env.crypto.get_current_epoch(SPACE)
+    cert = await _cert(env)
     new_epoch = await env.crypto.rotate_epoch(SPACE)
     old = datetime.now(timezone.utc) - timedelta(seconds=WRITER_CERT_EPOCH_GRACE_S + 60)
     await env.db.enqueue(
         "UPDATE space_keys SET created_at=? WHERE space_id=? AND epoch=?",
         (old.isoformat(), SPACE, new_epoch),
     )
-    await _deliver(env, envelope)
-    assert not await _landed(env)
+    assert not await _cert_item_ok(env, cert, e0)
 
 
-async def test_two_epochs_back_is_always_dropped(env):
-    envelope = await _envelope(env, await _cert(env))
+async def test_cert_only_item_two_epochs_back_is_closed(env):
+    e0 = await env.crypto.get_current_epoch(SPACE)
+    cert = await _cert(env)
     await env.crypto.rotate_epoch(SPACE)
     await env.crypto.rotate_epoch(SPACE)
-    await _deliver(env, envelope)
-    assert not await _landed(env)
+    assert not await _cert_item_ok(env, cert, e0)
 
 
 async def test_a_weaker_older_cert_never_replaces_ours(env):
@@ -585,3 +605,48 @@ async def test_legacy_hint_must_name_the_origins_key(env, host):
 async def test_legacy_hint_from_a_pre_v49_origin_still_relays(env, host):
     host.certs({}, {"author.home": env.author_kp.public_key}, {"author.home": 48})
     assert await _host_relays(env, host, _relay_hint(env, cert=None))
+
+
+# ── Round 3: mesh-only origins (R7) ──────────────────────────────────────
+
+
+async def _mesh_relays(env, host, inner, origin: str) -> bool:
+    await host.out._on_space_post_created(
+        SpacePostCreated(
+            post=Post(
+                id="p-h",
+                author=inner["author_user_id"],
+                type=PostType.TEXT,
+                content="hi",
+                created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+            ),
+            space_id=SPACE,
+            origin_instance_id=origin,
+            public_relay=inner,
+        )
+    )
+    return bool(host.gfs.calls)
+
+
+async def test_mesh_only_origin_legacy_hint_still_relays(env, host):
+    """R7: a mesh-only member (no remote_instances row, unknown version, no
+    pinned key) relays on the host's authority as on main — its author key
+    bound by ``derive_instance_id(author_pk) == origin``, the self-
+    authentication the v_31 routed-origin check verified it with."""
+    origin = derive_instance_id(env.author_kp.public_key)
+    host.certs({origin: ["member"]}, {}, {})
+    assert await _mesh_relays(env, host, _relay_hint(env, cert=None), origin)
+
+
+async def test_mesh_only_origin_with_a_cert_is_restamped(env, host):
+    origin = derive_instance_id(env.author_kp.public_key)
+    host.certs({origin: ["member"]}, {}, {})
+    assert await _mesh_relays(
+        env, host, _relay_hint(env, cert=await _cert(env)), origin
+    )
+
+
+async def test_mesh_only_origin_with_someone_elses_key_is_refused(env, host):
+    origin = derive_instance_id(generate_identity_keypair().public_key)
+    host.certs({origin: ["member"]}, {}, {})
+    assert not await _mesh_relays(env, host, _relay_hint(env, cert=None), origin)
