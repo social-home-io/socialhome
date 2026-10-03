@@ -329,6 +329,7 @@ class SpaceSyncReceiver:
                 SpaceSyncComplete(
                     space_id=space_id,
                     from_instance=from_instance,
+                    sync_id=sync_id,
                 )
             )
             return

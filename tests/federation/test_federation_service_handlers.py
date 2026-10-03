@@ -240,10 +240,65 @@ async def test_handle_space_sync_complete_no_manager(svc):
 async def test_handle_space_sync_complete_delegates(svc):
     svc._sync_manager = MagicMock()
     svc._sync_manager.close_session = MagicMock()
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(requester_instance_id="peer-a")
+    )
     await svc._handle_space_sync_complete(
-        _event("SPACE_SYNC_COMPLETE", {"sync_id": "s1"}),
+        _event("SPACE_SYNC_COMPLETE", {"sync_id": "s1"}, from_instance="peer-a"),
     )
     svc._sync_manager.close_session.assert_called_once_with("s1")
+
+
+async def test_handle_space_sync_complete_only_from_the_requester(svc):
+    """Only the household the stream went to may end a session."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.close_session = MagicMock()
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(requester_instance_id="peer-a")
+    )
+    await svc._handle_space_sync_complete(
+        _event("SPACE_SYNC_COMPLETE", {"sync_id": "s1"}, from_instance="peer-b"),
+    )
+    svc._sync_manager.close_session.assert_not_called()
+
+
+async def test_a_landed_stream_frees_both_sessions(svc):
+    """The provider used to keep every finished stream's session until the
+    30-minute stale reaper — three per household — so a household that
+    restarted could not be served again (the federation demo's missed page
+    delete). The requester now closes its own session and tells the
+    provider (SPACE_SYNC_COMPLETE), which frees its slot."""
+    from socialhome.domain.events import SpaceSyncComplete
+
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.close_session = MagicMock()
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ) as send:
+        await svc._on_space_sync_landed(
+            SpaceSyncComplete(space_id="sp", from_instance="host", sync_id="s9")
+        )
+        await asyncio.sleep(0)  # the close runs once this delivery returned
+    svc._sync_manager.close_session.assert_called_once_with("s9")
+    send.assert_awaited_once_with(
+        to_instance_id="host",
+        event_type=FederationEventType.SPACE_SYNC_COMPLETE,
+        payload={"sync_id": "s9", "space_id": "sp"},
+        space_id="sp",
+    )
+
+
+async def test_a_landed_stream_without_a_sync_id_sends_nothing(svc):
+    from socialhome.domain.events import SpaceSyncComplete
+
+    svc._sync_manager = MagicMock()
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ) as send:
+        await svc._on_space_sync_landed(
+            SpaceSyncComplete(space_id="sp", from_instance="host")
+        )
+    send.assert_not_awaited()
 
 
 # ─── _handle_space_sync_begin ──────────────────────────────────────
@@ -1664,3 +1719,69 @@ async def test_handle_space_sync_chunk_refuses_an_unpinned_session(svc):
         ),
     )
     svc._space_sync_receiver.on_chunk.assert_not_awaited()
+
+
+# ─── A provider at capacity defers our sync (restart catch-up) ────────
+
+
+@pytest.mark.parametrize("reason", ["too_many_sessions", "node_capacity"])
+async def test_handle_direct_failed_at_capacity_defers_our_request(svc, reason):
+    """A provider caps concurrent syncs per household (S-6). A household
+    that restarts and asks one host for more spaces than the cap used to
+    lose the rest until the 30-minute tick: the refusal named a sync_id
+    with no session here, so nothing retried it. Now the scheduler is told
+    to ask again."""
+    from socialhome.domain.events import SpaceSyncDeferred
+    from socialhome.federation.sync_manager import PendingSyncRequest
+
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=None)
+    svc._sync_manager.pending_sync_request = MagicMock(
+        return_value=PendingSyncRequest(
+            sync_id="s1", space_id="sp", provider_instance_id="host", created_at=0
+        )
+    )
+    svc._sync_manager.forget_sync_request = MagicMock()
+    svc._sync_manager.trigger_relay_sync = AsyncMock()
+    await svc._handle_space_sync_direct_failed(
+        _event(
+            "SPACE_SYNC_DIRECT_FAILED",
+            {"sync_id": "s1", "reason": reason},
+            from_instance="host",
+        ),
+    )
+    svc._bus.publish.assert_awaited_once()
+    published = svc._bus.publish.await_args.args[0]
+    assert isinstance(published, SpaceSyncDeferred)
+    assert (published.space_id, published.provider_instance_id) == ("sp", "host")
+    svc._sync_manager.forget_sync_request.assert_called_once_with("s1")
+    svc._sync_manager.trigger_relay_sync.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("reason", "sender"),
+    [("rate_limited", "host"), ("too_many_sessions", "someone-else")],
+)
+async def test_handle_direct_failed_defers_only_a_capacity_answer_from_our_provider(
+    svc, reason, sender
+):
+    from socialhome.federation.sync_manager import PendingSyncRequest
+
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=None)
+    svc._sync_manager.pending_sync_request = MagicMock(
+        return_value=PendingSyncRequest(
+            sync_id="s1", space_id="sp", provider_instance_id="host", created_at=0
+        )
+    )
+    svc._sync_manager.trigger_relay_sync = AsyncMock(
+        return_value=SimpleNamespace(next_event=None, next_payload=None),
+    )
+    await svc._handle_space_sync_direct_failed(
+        _event(
+            "SPACE_SYNC_DIRECT_FAILED",
+            {"sync_id": "s1", "reason": reason},
+            from_instance=sender,
+        ),
+    )
+    svc._bus.publish.assert_not_awaited()

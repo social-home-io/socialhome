@@ -12,6 +12,7 @@ from socialhome.domain.events import (
     PairingConfirmed,
     SpaceAuthorityEchoDue,
     SpaceSyncComplete,
+    SpaceSyncDeferred,
 )
 from socialhome.domain.federation import FederationEventType, PairingStatus
 from socialhome.domain.space import (
@@ -745,3 +746,72 @@ async def test_no_echo_builder_means_no_echo(bus, queue, sync_manager):
     )
     await sched._tick_mesh_catchup()
     assert fed.mesh_extras == [None]
+
+
+# ─── A provider at capacity: ask again (restart catch-up) ────────────
+
+
+def _plain_sched(bus, queue, sync_manager, fed):
+    return SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([]),
+        space_repo=_FakeSpaceRepo(spaces_by_type={}, members_by_space={}),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+
+
+async def test_a_deferred_sync_is_asked_again(bus, queue, sync_manager, monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 0.01)
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _plain_sched(bus, queue, sync_manager, fed)
+    sched.wire()
+    await queue.start()
+    try:
+        await bus.publish(SpaceSyncDeferred(space_id="sp", provider_instance_id="host"))
+        for _ in range(100):
+            if fed.sent:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await sched.stop()
+        await queue.stop()
+    (begin,) = fed.sent
+    assert begin["type"] is FederationEventType.SPACE_SYNC_BEGIN
+    assert (begin["to"], begin["payload"]["space_id"]) == ("host", "sp")
+
+
+async def test_deferred_retries_are_capped_and_reset_on_completion(
+    bus, queue, sync_manager, monkeypatch
+):
+    monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 0.0)
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _plain_sched(bus, queue, sync_manager, fed)
+    sched.wire()
+    await queue.start()
+    try:
+        for _ in range(scheduler_mod.MAX_DEFERRED_SYNC_RETRIES + 3):
+            await bus.publish(
+                SpaceSyncDeferred(space_id="sp", provider_instance_id="host")
+            )
+            await asyncio.sleep(0.02)
+        assert len(fed.sent) == scheduler_mod.MAX_DEFERRED_SYNC_RETRIES
+        await bus.publish(SpaceSyncComplete(space_id="sp", from_instance="host"))
+        await bus.publish(SpaceSyncDeferred(space_id="sp", provider_instance_id="host"))
+        await asyncio.sleep(0.05)
+        assert len(fed.sent) == scheduler_mod.MAX_DEFERRED_SYNC_RETRIES + 1
+    finally:
+        await sched.stop()
+        await queue.stop()
+
+
+async def test_a_deferred_sync_waits_on_stop(bus, queue, sync_manager, monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 60.0)
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _plain_sched(bus, queue, sync_manager, fed)
+    sched.wire()
+    await bus.publish(SpaceSyncDeferred(space_id="sp", provider_instance_id="host"))
+    await asyncio.wait_for(sched.stop(), timeout=2.0)
+    assert fed.sent == []

@@ -1,6 +1,6 @@
 """Sync initiation scheduler (§25.6).
 
-Four triggers:
+Triggers:
 
 1. **Event-driven** — on :class:`PairingConfirmed` enqueue a P4 initial
    sync for every space we know the peer is a member of.
@@ -15,7 +15,13 @@ Four triggers:
    ``sync_id`` and the host's route cache both live in RAM. Startup and
    every periodic tick re-issue ``SPACE_SYNC_BEGIN`` for any such space
    that has not yet been seen to complete (#648).
-5. **Authority epoch echo** (v_46) — a BEGIN to a space's owner carries
+5. **Deferred** — a provider caps concurrent syncs per household (S-6),
+   so a household that restarts and asks one host for more spaces than
+   the cap gets ``too_many_sessions`` for the rest. The requester's
+   federation service turns that into :class:`SpaceSyncDeferred` and the
+   scheduler asks again after :data:`DEFERRED_SYNC_RETRY_S` (growing,
+   at most :data:`MAX_DEFERRED_SYNC_RETRIES` until that space completes).
+6. **Authority epoch echo** (v_46) — a BEGIN to a space's owner carries
    the ``authority_epoch_echo`` the attached builder returns
    (:meth:`attach_authority_echo`), and :class:`SpaceAuthorityEchoDue`
    sends one to the owner right away.
@@ -36,6 +42,7 @@ from ....domain.events import (
     PairingConfirmed,
     SpaceAuthorityEchoDue,
     SpaceSyncComplete,
+    SpaceSyncDeferred,
 )
 from ....domain.federation import FederationEventType, PairingStatus
 from ....domain.space import Space, SpaceType
@@ -78,6 +85,18 @@ STARTUP_MESH_CATCHUP_DELAY_SECONDS: float = 45.0
 #: host and so never touched its budget (#648).
 MAX_MESH_CATCHUP_ATTEMPTS: int = 3
 
+#: First delay before asking a provider again for a sync it deferred for
+#: lack of a slot; the n-th retry waits n times this. Long enough for the
+#: provider's concurrent syncs to us to finish (an initial stream takes
+#: seconds), short enough that a restarted household catches up in a minute
+#: or two rather than at the next 30-minute tick.
+DEFERRED_SYNC_RETRY_S: float = 20.0
+
+#: Retries of one deferred (space, provider) sync before the periodic tick
+#: is left to pick it up. Reset when that sync completes. A capacity
+#: refusal spends none of the provider's 5 / h budget.
+MAX_DEFERRED_SYNC_RETRIES: int = 6
+
 #: Delays between startup sweep passes, in seconds. A household that has just
 #: rebooted cannot route anywhere yet: the confirmed-peer transports are still
 #: coming up, so ``discover_route`` returns None and the BEGIN fails with
@@ -107,6 +126,8 @@ class SpaceSyncScheduler:
         "_mesh_catchup_attempts",
         "_roster_refresh",
         "_authority_echo",
+        "_deferred_attempts",
+        "_deferred_tasks",
     )
 
     def __init__(
@@ -144,6 +165,10 @@ class SpaceSyncScheduler:
         self._roster_refresh: Callable[[], Awaitable[object]] | None = None
         #: v_46 authority epoch echo builder (see :meth:`attach_authority_echo`).
         self._authority_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
+        #: ``(space_id, provider)`` → deferred retries since it last completed.
+        self._deferred_attempts: dict[tuple[str, str], int] = {}
+        #: Pending deferred-retry waits (they end on ``_stop``).
+        self._deferred_tasks: set[asyncio.Task] = set()
 
     def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
         """Run ``refresh`` on every periodic tick — the host re-sending each
@@ -166,6 +191,7 @@ class SpaceSyncScheduler:
         self._bus.subscribe(PairingConfirmed, self._on_pairing_confirmed)
         self._bus.subscribe(SpaceSyncComplete, self._on_space_sync_complete)
         self._bus.subscribe(SpaceAuthorityEchoDue, self._on_authority_echo_due)
+        self._bus.subscribe(SpaceSyncDeferred, self._on_sync_deferred)
 
     async def _echo_for(self, space_id: str, to_instance_id: str) -> dict | None:
         if self._authority_echo is None:
@@ -205,6 +231,42 @@ class SpaceSyncScheduler:
         recovers a requester that restarted mid-stream.
         """
         self._mesh_catchup_done.add((event.space_id, event.from_instance))
+        self._deferred_attempts.pop((event.space_id, event.from_instance), None)
+
+    async def _on_sync_deferred(self, event: SpaceSyncDeferred) -> None:
+        """A provider had no free slot for our BEGIN: ask again shortly —
+        the sync was never served (trigger 5)."""
+        key = (event.space_id, event.provider_instance_id)
+        attempts = self._deferred_attempts.get(key, 0)
+        if attempts >= MAX_DEFERRED_SYNC_RETRIES:
+            log.warning(
+                "space sync %s from %s deferred %d times — left to the periodic tick",
+                event.space_id,
+                event.provider_instance_id,
+                attempts,
+            )
+            return
+        self._deferred_attempts[key] = attempts + 1
+        task = asyncio.create_task(
+            self._retry_deferred(
+                event.space_id,
+                event.provider_instance_id,
+                DEFERRED_SYNC_RETRY_S * (attempts + 1),
+            ),
+            name=f"SpaceSyncScheduler-deferred-{event.space_id}",
+        )
+        self._deferred_tasks.add(task)
+        task.add_done_callback(self._deferred_tasks.discard)
+
+    async def _retry_deferred(self, space_id: str, provider: str, delay: float) -> None:
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=delay)
+            return  # stopped while waiting
+        except asyncio.TimeoutError:
+            pass
+        await self.enqueue_sync_for_space(
+            space_id=space_id, peer_instance_id=provider, priority=P6_PRODUCTIVITY
+        )
 
     async def start(self) -> None:
         """Begin the periodic tick. Idempotent."""
@@ -220,6 +282,9 @@ class SpaceSyncScheduler:
 
     async def stop(self) -> None:
         self._stop.set()
+        if self._deferred_tasks:
+            # Each wait ends on ``_stop``; nothing is mid-write.
+            await asyncio.gather(*self._deferred_tasks, return_exceptions=True)
         if self._startup_task is not None:
             # Waits on ``self._stop`` internally, so setting the event above
             # is enough for it to return on its own.

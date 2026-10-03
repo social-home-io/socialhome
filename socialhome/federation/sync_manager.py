@@ -224,6 +224,11 @@ class SyncSessionManager:
         self._prune_requests()
         return self._requests.get(sync_id)
 
+    def forget_sync_request(self, sync_id: str) -> None:
+        """Drop a request the provider refused — an OFFER for it is no
+        longer an answer to anything."""
+        self._requests.pop(sync_id, None)
+
     def _prune_requests(self) -> None:
         cutoff = time.time() - PENDING_REQUEST_TTL_SECONDS
         stale = [k for k, v in self._requests.items() if v.created_at < cutoff]
@@ -378,14 +383,11 @@ class SyncSessionManager:
         if sync_id in self._sessions:
             return SyncDecision(accepted=False, reason="duplicate_sync_id")
 
-        if not self.check_sync_begin_rate(requester_instance_id, space_id):
-            return SyncDecision(
-                accepted=False,
-                reason="rate_limited",
-                next_event=FederationEventType.SPACE_SYNC_DIRECT_FAILED,
-                next_payload={"sync_id": sync_id, "reason": "rate_limited"},
-            )
-
+        # Capacity before the hourly budget: a BEGIN refused for lack of a
+        # slot was never served, so it must not spend one of the
+        # requester's 5 / h for that space — a household that restarts and
+        # asks for more spaces than the cap at once retries the rest
+        # (``SpaceSyncDeferred``) and would otherwise lock itself out.
         if (
             self.active_sessions_for_instance(requester_instance_id)
             >= MAX_ACTIVE_SESSIONS_PER_INSTANCE
@@ -403,6 +405,14 @@ class SyncSessionManager:
                 reason="node_capacity",
                 next_event=FederationEventType.SPACE_SYNC_DIRECT_FAILED,
                 next_payload={"sync_id": sync_id, "reason": "node_capacity"},
+            )
+
+        if not self.check_sync_begin_rate(requester_instance_id, space_id):
+            return SyncDecision(
+                accepted=False,
+                reason="rate_limited",
+                next_event=FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+                next_payload={"sync_id": sync_id, "reason": "rate_limited"},
             )
 
         # Optional space-membership check (S-1).

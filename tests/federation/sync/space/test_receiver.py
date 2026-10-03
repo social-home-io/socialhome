@@ -254,6 +254,9 @@ async def test_on_chunk_sentinel_publishes_completion(bus, receiver, peer_setup)
     assert len(captured) == 1
     assert captured[0].space_id == "sp-1"
     assert captured[0].from_instance == "peer-a"
+    # The sync id rides along, so the requester can tell the provider the
+    # stream landed and both sides free the session.
+    assert captured[0].sync_id == "sync-1"
 
 
 async def test_on_chunk_rejects_unknown_peer(receiver, peer_setup):

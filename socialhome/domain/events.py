@@ -1173,10 +1173,23 @@ class PairingIntroRelayReceived(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class SpaceSyncComplete(DomainEvent):
-    """A direct-peer sync session finished streaming (§25.6)."""
+    """A direct-peer sync session finished streaming (§25.6). ``sync_id``
+    names the session, so both sides can free it."""
 
     space_id: str
     from_instance: str
+    sync_id: str = ""
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceSyncDeferred(DomainEvent):
+    """A provider refused a ``SPACE_SYNC_BEGIN`` we sent for lack of
+    capacity (``too_many_sessions`` / ``node_capacity``, §25.6 S-6 / S-8):
+    the sync was never served and must be asked for again."""
+
+    space_id: str
+    provider_instance_id: str
     occurred_at: datetime = field(default_factory=_now)
 
 
