@@ -292,7 +292,6 @@ class FederationService:
         "_inbound_pipeline",
         "_rtc_inbound_pipeline",
         "_event_registry",
-        "_gfs_connection_service",
         "_user_repo",
         "_space_repo",
         "_space_remote_member_repo",
@@ -353,7 +352,6 @@ class FederationService:
         self._online_status_service = None
         self._space_sync_service = None
         self._space_sync_receiver = None
-        self._gfs_connection_service = None
         # Set via :meth:`attach_user_repo` after construction. Enables
         # the receiver-side deprovisioned-author filter (§24.11 step 11).
         # When unset, the filter step is omitted from the pipeline — a
@@ -836,16 +834,6 @@ class FederationService:
         # A learned route drains that member's deferred queue at once
         # instead of after its backoff.
         route_service.add_route_learned_listener(self.on_route_learned)
-
-    def attach_gfs_connection_service(self, gfs_connection_service) -> None:
-        """Attach :class:`GfsConnectionService` so spec §24.10.7 works.
-
-        The provider asks the GFS for a least-loaded ``signaling_node``
-        URL before generating ``SPACE_SYNC_OFFER``, and releases the
-        slot when the direct path opens or fails. Without this attach,
-        offers ship without ``signaling_node`` (single-node behaviour).
-        """
-        self._gfs_connection_service = gfs_connection_service
 
     def attach_call_signaling(self, call_signaling) -> None:
         """Attach a :class:`CallSignalingService` after construction."""
@@ -3166,28 +3154,14 @@ class FederationService:
             record = self._sync_manager.get_session(sync_id)
             if record is not None and record.rtc is not None:
                 sdp_offer = await record.rtc.create_offer()
-                # Spec §24.10.7 — ask the paired GFS for a signaling
-                # node so ICE candidates spread across cluster peers.
-                # ``None`` = single-node GFS or no GFS paired; field is
-                # then omitted from the offer per the spec.
-                signaling_node: str | None = None
-                if self._gfs_connection_service is not None:
-                    signaling_node = (
-                        await self._gfs_connection_service.request_signaling_node(
-                            sync_id,
-                            from_instance=self._own_instance_id,
-                            signing_key=self._own_identity_seed,
-                        )
-                    )
-                    if signaling_node:
-                        record.signaling_node = signaling_node
+                # The OFFER, ANSWER and every ICE candidate ride the signed
+                # household-to-household path — the GFS is never asked for
+                # a signaling node, so it learns nothing about this sync.
                 offer_payload: dict = {
                     "sync_id": sync_id,
                     "sdp_offer": sdp_offer,
                     "ice_servers": self._ice_servers,
                 }
-                if signaling_node:
-                    offer_payload["signaling_node"] = signaling_node
                 await self.send_event(
                     to_instance_id=event.from_instance,
                     event_type=FederationEventType.SPACE_SYNC_OFFER,
@@ -3305,7 +3279,7 @@ class FederationService:
                 record.sync_id,
             )
             # The provider must hear this to release its half of the
-            # session (RTC handle + GFS signaling node). A mesh-only
+            # session (its RTC handle). A mesh-only
             # provider is not a CONFIRMED peer, so route through the mesh
             # fallback — it short-circuits to ``send_event`` for a paired
             # peer, so the direct path is unchanged.
@@ -3442,7 +3416,6 @@ class FederationService:
         # requester recorded at begin_session time.
         if session.requester_instance_id != event.from_instance:
             return
-        await self._release_signaling_node(session)
         asyncio.create_task(
             self._space_sync_service.stream_initial(session),
             name=f"space-sync-initial-{sync_id}",
@@ -3459,7 +3432,7 @@ class FederationService:
         ``prefer_direct=False``. If the local instance is the
         **provider** (Part A path: requester's 15 s ICE watcher
         observed the timeout and emitted DIRECT_FAILED so we'd
-        release our session + signaling node), we MUST NOT re-issue
+        release our session), we MUST NOT re-issue
         the BEGIN — the requester drives the retry from their side
         and a bounced BEGIN here would land back at the requester
         as a federation event they don't expect.
@@ -3471,7 +3444,6 @@ class FederationService:
             return
         session = self._sync_manager.get_session(sync_id)
         if session is not None:
-            await self._release_signaling_node(session)
             if session.provider_instance_id == self._own_instance_id:
                 # Provider-side cleanup only — close the session, drop
                 # the RTC handle. The requester will mint a fresh BEGIN
@@ -3541,27 +3513,6 @@ class FederationService:
                 "sync %s: failed to send relay-fallback BEGIN",
                 sync_id,
             )
-
-    async def _release_signaling_node(self, session) -> None:
-        """Release the GFS-side counter for a sync session (spec §24.10.7).
-
-        Idempotent: clears ``session.signaling_node`` after release so a
-        subsequent ``DIRECT_FAILED`` after a ``DIRECT_READY`` does not
-        decrement twice on this end (the GFS endpoint floors at 0
-        anyway).
-        """
-        if self._gfs_connection_service is None:
-            return
-        node = session.signaling_node
-        if not node:
-            return
-        session.signaling_node = None
-        await self._gfs_connection_service.release_signaling_node(
-            session.sync_id,
-            node,
-            from_instance=self._own_instance_id,
-            signing_key=self._own_identity_seed,
-        )
 
     async def _handle_space_sync_chunk(self, event) -> None:
         """Inbound ``SPACE_SYNC_CHUNK`` — HTTPS-fallback chunk delivery.

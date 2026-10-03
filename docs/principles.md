@@ -142,7 +142,8 @@ There is **no identified fallback on the relay**: a household never sends
 publish rides a separate cookie-less HTTP session so no load-balancer cookie
 from its authenticated GFS calls links the two. (Those other calls are
 identified by design and still are: pairing, the GFS WebSocket, appeals,
-signaling-node requests, signed subscribe/unsubscribe.) It relays only to a GFS
+signed subscribe/unsubscribe. A space sync makes no GFS call at all — the
+per-sync signaling-node request is gone.) It relays only to a GFS
 whose `GET /gfs/info` capability block proves `anonymous_publish` under the
 GFS identity key the household pinned at pair time (the answer **ratchets** —
 a capability cannot be un-advertised mid-life — and a public GFS URL must be

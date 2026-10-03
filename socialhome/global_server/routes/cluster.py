@@ -184,6 +184,12 @@ def _check_signaling_rate(instance_id: str) -> None:
 class ClusterSignalingBeginView(GfsBaseView):
     """``POST /cluster/signaling-session`` — pick a signaling node.
 
+    **Legacy — older households only.** Current households never call
+    this: the identified body told the GFS which household began a direct
+    space sync and when, and the returned URL was never used (ICE rides
+    the household-to-household path). It stays so an older household's
+    sync keeps working; see ``tests/protocol/test_gfs_no_sync_signaling.py``.
+
     Body: ``{from_instance, sync_id, signature}``. Returns
     ``{signaling_node, session_id}`` where ``signaling_node`` is the URL
     chosen by :meth:`ClusterService.pick_signaling_node`. Single-node
@@ -236,6 +242,8 @@ class ClusterSignalingBeginView(GfsBaseView):
 
 class ClusterSignalingEndView(GfsBaseView):
     """``POST /cluster/signaling-session/release`` — decrement load.
+
+    **Legacy — older households only** (see :class:`ClusterSignalingBeginView`).
 
     Body: ``{from_instance, sync_id, signaling_node, signature}``.
     Idempotent: duplicate releases (e.g. both ``DIRECT_READY`` and

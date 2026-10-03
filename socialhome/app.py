@@ -3296,10 +3296,6 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo=federation_repo,
             user_repo=user_repo,
         )
-        # Spec §24.10.7 — provider asks the paired GFS for a least-loaded
-        # signaling node before generating SPACE_SYNC_OFFER, releases on
-        # DIRECT_READY / DIRECT_FAILED.
-        federation_service.attach_gfs_connection_service(gfs_connection_service)
         await federation_service.warm_replay_cache()
 
         # Federation transport facade (§24.12.5): WebRTC DataChannel
