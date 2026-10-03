@@ -942,7 +942,9 @@ POST /gfs/member-publish
 - **Who publishes.** A household NOT holding the space seed (seed holders
   keep relaying with the authority signature) whose cert for the current
   epoch lets THIS author post — `write` scope and a v2 user binding naming
-  them (so a plain member of a `MODERATED` or `ADMIN_ONLY` space never
+  them — the binding itself rides only inside the ciphertext; the plaintext
+  `writer_cert` the server sees is the v1 fields alone, and the server
+  refuses any other key — (so a plain member of a `MODERATED` or `ADMIN_ONLY` space never
   member-publishes: its post goes to the host, into the queue or refused) —
   in a PUBLIC/GLOBAL space with `allow_subscribers`, to every active
   connection server that lists the space AND proves

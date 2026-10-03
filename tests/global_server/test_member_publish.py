@@ -60,7 +60,7 @@ from socialhome.global_server.member_publish import (
 )
 from socialhome.domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from socialhome.global_server.server import create_gfs_app
-from socialhome.writer_cert import sign_writer_cert
+from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 SPACE_ID = "sp-public"
 OTHER_SPACE = "sp-other"
@@ -1116,3 +1116,18 @@ async def test_stop_warns_with_the_count_it_could_not_drain(gfs, monkeypatch, ca
         await stopping
     assert "not fanned out before shutdown" in caplog.text
     await svc.start()
+
+
+@pytest.mark.security
+async def test_a_writer_cert_carrying_a_user_binding_is_a_400(gfs):
+    """The v2 binding names the household's users: it must never reach the
+    connection server, so a request carrying it is refused outright (and
+    nothing of it can reach a fan-out frame or the queue)."""
+    bound = bind_writer_users(
+        _cert(gfs.publisher), space_seed=SPACE_SEED, user_ids=["u-1", "u-2"]
+    )
+    body = _body(gfs.publisher)
+    body["writer_cert"] = bound.to_wire()
+    resp = await gfs.post("/gfs/member-publish", json=body)
+    assert resp.status == 400
+    assert await _queued(gfs, gfs.subscriber) == []

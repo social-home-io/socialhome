@@ -319,7 +319,13 @@ class GfsMemberPublishService:
         if sealed is None:
             return []
         epoch, cert, ciphertext = sealed
-        data = {"epoch": epoch, "writer_cert": cert.to_wire(), "payload": ciphertext}
+        # Only the v1 cert fields travel in plaintext; the user binding stays
+        # inside the encrypted inner (it names this household's users).
+        data = {
+            "epoch": epoch,
+            "writer_cert": cert.v1().to_wire(),
+            "payload": ciphertext,
+        }
         item = GfsPublish(space_id=space_id, event_type=_KIND_ITEM, payload=data)
         results = await asyncio.gather(
             *(

@@ -112,6 +112,20 @@ class WriterCert:
             "issued_at": self.issued_at,
         }
 
+    def v1(self) -> "WriterCert":
+        """This cert WITHOUT the user binding — the v1 fields only, which is
+        all that ever travels in plaintext (to a connection server, in a
+        fan-out frame): the binding names the household's users."""
+        return WriterCert(
+            cert_suite=self.cert_suite,
+            space_id=self.space_id,
+            epoch=self.epoch,
+            instance_pk=self.instance_pk,
+            scope=self.scope,
+            issued_at=self.issued_at,
+            cert_sig=self.cert_sig,
+        )
+
     def users_signing_body(self) -> dict:
         """What the v2 user-binding signature covers: the cert's own
         signature (so it binds exactly this cert), its routing fields, the

@@ -995,7 +995,11 @@ ending while the household keeps others, a demotion, or a `posts` access
 change that stops a role posting directly (`SpaceService
 .rotate_if_writer_scope_weakened` compares scope AND users; `update_config`
 rotates when `posts_access` narrows anyone, and re-delivers certs in roster
-snapshots when it widens).
+snapshots when it widens). A user seated in a household that already holds
+a seat gets the household a roster snapshot carrying its re-issued cert at
+once, so the new user can publish without waiting for a rotation. The
+binding is kept out of every plaintext copy of the cert: what reaches a
+connection server is the v1 fields only.
 
 **When.** On seating (the invite-link redeem ACK, and the roster snapshot a
 paired joiner receives), on a role change that alters the household's write /

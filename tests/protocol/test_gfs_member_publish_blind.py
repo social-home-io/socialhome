@@ -29,8 +29,10 @@ from socialhome.crypto import (
     ed25519_public_key,
     sign_ed25519,
 )
+from socialhome.domain.federation import GfsConnection
 from socialhome.domain.gfs_member_publish import (
     MEMBER_PUBLISH_FRAME_KEYS,
+    PLAINTEXT_CERT_KEYS,
     MEMBER_PUBLISH_REQUEST_KEYS,
     SPACE_ITEM_EVENT_TYPE,
     MemberPublishRequest,
@@ -43,7 +45,8 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
-from socialhome.writer_cert import sign_writer_cert
+from socialhome.services.gfs_member_publish_service import GfsMemberPublishService
+from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 pytestmark = pytest.mark.security
 
@@ -184,3 +187,96 @@ async def test_the_wire_shape_has_no_room_for_a_plaintext_side_channel(gfs, smug
         )
         == []
     )
+
+
+async def test_the_user_binding_never_reaches_the_gfs(gfs, caplog):
+    """U1: the household's real publish path (the v2 cert with its user
+    binding) hands the connection server the v1 cert fields only — in the
+    request, the fan-out frame and the queued row."""
+    publisher = gfs.publisher
+    cert = bind_writer_users(
+        sign_writer_cert(
+            space_seed=SPACE_SEED,
+            space_id=SPACE_ID,
+            epoch=1,
+            instance_pk=publisher.pk,
+            scope="write",
+        ),
+        space_seed=SPACE_SEED,
+        user_ids=["alice-user-id", "bob-user-id"],
+    )
+    svc = GfsMemberPublishService(
+        gfs=_HouseholdGfs(gfs.session),  # type: ignore[arg-type]
+        conn_repo=None,  # type: ignore[arg-type]
+        space_repo=None,  # type: ignore[arg-type]
+        space_crypto=_OneKey(),  # type: ignore[arg-type]
+        writer_certs=_FixedCert(cert),  # type: ignore[arg-type]
+        own_instance_id=publisher.instance_id,
+        own_identity_seed=publisher.seed,
+    )
+    sent: list[dict] = []
+    real_post = gfs.session.post
+
+    def _spy(url, *a, json=None, **kw):
+        sent.append(json)
+        return real_post(url, *a, json=json, **kw)
+
+    gfs.session.post = _spy  # type: ignore[method-assign]
+    conn = GfsConnection(
+        id="c",
+        gfs_instance_id="gfs-node-a",
+        display_name="g",
+        public_key="00" * 32,
+        inbox_url=str(gfs.make_url("")).rstrip("/"),
+        status="active",
+        paired_at="",
+    )
+    with caplog.at_level(logging.DEBUG):
+        accepted = await svc.publish_post(
+            SPACE_ID, {"post_id": "p", "space_id": SPACE_ID}, [conn]
+        )
+        await gfs.app_[gfs_member_publish_key].wait_idle()
+    assert [c.id for c in accepted] == ["c"]
+    queued = await gfs.app_[gfs_envelope_queue_repo_key].list_for(
+        gfs.subscriber.instance_id, now=0
+    )
+    for where, blob in (
+        ("the request", json.dumps(sent)),
+        ("the fan-out frame / queued row", json.dumps([q.sealed for q in queued])),
+        ("the GFS logs", caplog.text),
+    ):
+        for leak in ("alice-user-id", "bob-user-id", "writer_user_ids", "users_sig"):
+            assert leak not in blob, f"{where} carries {leak!r}"
+    assert set(queued[0].sealed["writer_cert"]) == PLAINTEXT_CERT_KEYS
+
+
+class _HouseholdGfs:
+    def __init__(self, session) -> None:
+        self.session = session
+
+    def client(self):
+        return self.session
+
+    def publish_client(self):
+        return self.session
+
+
+class _OneKey:
+    key = AESGCM.generate_key(bit_length=256)
+
+    async def get_current_epoch(self, space_id):
+        return 1
+
+    async def encrypt(self, space_id, plaintext: bytes):
+        nonce = os.urandom(12)
+        return 1, b64url_encode(
+            nonce + AESGCM(self.key).encrypt(nonce, plaintext, None)
+        )
+
+
+class _FixedCert:
+    def __init__(self, cert) -> None:
+        self.cert = cert
+
+    async def own_cert(self, space_id, epoch):
+        return self.cert

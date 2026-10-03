@@ -642,3 +642,14 @@ def test_scope_weakened_counts_a_shrinking_user_set():
     assert scope_weakened(
         two, WriterEntitlement(WRITER_SCOPE_WRITE, frozenset({"a", "c"}))
     )
+
+
+async def test_a_truncated_binding_warns_once_per_space_and_household(caplog):
+    rows = [_remote("peer", SpaceRole.MEMBER.value, f"u{i:03d}") for i in range(70)]
+    svc, _ = _svc(remote_rows=rows)
+    with caplog.at_level("WARNING"):
+        first = await svc.issue_for_instance("sp-1", "peer")
+        await svc.issue_for_instance("sp-1", "peer")
+    assert len(first.writer_user_ids) == 64
+    warnings = [r for r in caplog.records if "binding only the first" in r.message]
+    assert len(warnings) == 1

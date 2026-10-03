@@ -13,12 +13,13 @@ from socialhome.domain.gfs_member_publish import (
     MEMBER_PUBLISH_FRAME_KEYS,
     MEMBER_PUBLISH_MAX_PAYLOAD_CHARS,
     MEMBER_PUBLISH_REQUEST_KEYS,
+    PLAINTEXT_CERT_KEYS,
     SPACE_ITEM_EVENT_TYPE,
     InvalidMemberPublish,
     MemberPublishRequest,
     SpaceItemFrame,
 )
-from socialhome.writer_cert import sign_writer_cert
+from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 SPACE_SEED = os.urandom(32)
 AUTHOR_PK = ed25519_public_key(os.urandom(32))
@@ -195,3 +196,52 @@ def test_the_signed_bytes_name_the_audience_gfs():
     assert req.signing_payload()["gfs_instance_id"] == "gfs-node-a"
     other = MemberPublishRequest.from_wire(_wire(gfs_instance_id="gfs-node-b"))
     assert other.signing_bytes() != req.signing_bytes()
+
+
+# ─── The v2 user binding never travels in plaintext ─────────────────────
+
+
+def _bound_cert():
+    return bind_writer_users(_cert(), space_seed=SPACE_SEED, user_ids=["alice", "bob"])
+
+
+@pytest.mark.security
+def test_serialised_requests_and_frames_carry_only_the_v1_cert():
+    """U1: a request built from a bound cert must not hand the connection
+    server the household's writer user ids — not in the request, not in the
+    fan-out frame, not in the signed bytes."""
+    req = MemberPublishRequest(
+        instance_id="i",
+        gfs_instance_id="g",
+        ts="t",
+        signature="s",
+        target="sp-1",
+        epoch=3,
+        writer_cert=_bound_cert(),
+        payload="ct",
+    )
+    for wire in (
+        req.to_wire()["writer_cert"],
+        req.fan_out_frame()["writer_cert"],
+        req.signing_payload()["writer_cert"],
+    ):
+        assert set(wire) == PLAINTEXT_CERT_KEYS
+    blob = (
+        json.dumps([req.to_wire(), req.fan_out_frame()]) + req.signing_bytes().decode()
+    )
+    for leak in ("alice", "bob", "writer_user_ids", "users_sig"):
+        assert leak not in blob
+
+
+@pytest.mark.security
+def test_a_request_carrying_the_binding_is_refused():
+    with pytest.raises(InvalidMemberPublish):
+        MemberPublishRequest.from_wire(_wire(writer_cert=_bound_cert().to_wire()))
+
+
+def test_a_frame_carrying_the_binding_is_refused():
+    req = MemberPublishRequest.from_wire(_wire())
+    with pytest.raises(InvalidMemberPublish):
+        SpaceItemFrame.from_wire(
+            {**req.fan_out_frame(), "writer_cert": _bound_cert().to_wire()}
+        )

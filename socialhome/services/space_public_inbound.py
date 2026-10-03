@@ -76,7 +76,7 @@ from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
 from ..crypto import derive_instance_id
 from ..domain.space import SpaceRole
-from ..domain.writer_cert import WRITER_SCOPE_WRITE
+from ..domain.writer_cert import WRITER_SCOPE_WRITE, WriterCert
 from ..writer_cert import verify_writer_users
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
@@ -439,7 +439,13 @@ class SpacePublicInbound:
             )
             return
         raw_cert = inner.get(WRITER_CERT_FIELD)
-        if raw_cert != item.writer_cert.to_wire():
+        try:
+            inner_cert = WriterCert.from_wire(raw_cert)
+        except ValueError:
+            inner_cert = None
+        # The frame carries only the v1 fields (the binding never leaves the
+        # ciphertext): they must be exactly the inner cert's.
+        if inner_cert is None or inner_cert.v1() != item.writer_cert:
             log.warning(
                 "space_public.inbound: space_item %s cert differs from the frame's "
                 "— dropped",
@@ -468,7 +474,7 @@ class SpacePublicInbound:
         # — a member-published item requires it, and its author must be one.
         try:
             verify_writer_users(
-                item.writer_cert,
+                inner_cert,
                 space_pubkey=bytes.fromhex(space.identity_public_key),
                 author_user_id=author_user_id,
             )

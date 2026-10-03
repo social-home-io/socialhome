@@ -488,7 +488,15 @@ on purpose: the v1 signing bytes (`space-writer-cert:v1:` over the six v1
 fields) are unchanged, so a v1 verifier — which ignores the extra fields —
 still accepts a bound cert. `verify_writer_users` requires the binding and
 the author's user id in it; a member-published `space_item` must carry it,
-the host-relay path does not.
+the host-relay path does not. **The binding never travels in plaintext**:
+it names the household's users, so it rides only inside the encrypted inner.
+The `writer_cert` a connection server sees (request, fan-out frame, queue)
+is the v1 fields alone — the codec serializes nothing else, and the GFS
+refuses a request whose cert carries any other key; the receiver checks
+that the frame's v1 cert equals the inner cert's v1 fields and verifies the
+binding on the inner copy. A household with more than 64 writer users gets
+the first 64 bound (logged once per space and household); the rest post
+through the host.
 
 **Author-bound item type (v_49 `space_item`)** — an inner built for a
 member publish signs two extra fields with the author signature,

@@ -18,6 +18,7 @@ from PIL import Image
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    SpaceRemoteSeatLive,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
     SpaceModerationQueued,
@@ -9624,3 +9625,42 @@ async def test_opening_posts_does_not_rotate_but_re_issues(stack, monkeypatch):
     )
     assert rekeys == []
     assert snapshots == ["peer-a"]
+
+
+async def test_a_new_seat_in_a_seated_household_re_issues_its_cert(stack, monkeypatch):
+    """v2: the household's cert binding does not name a newly seated user
+    yet — the host sends it a roster snapshot (with the re-issued cert)."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    snapshots: list[str] = []
+
+    async def _snapshot(self, space_id, *, to_instance_id):
+        snapshots.append(to_instance_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "send_roster_snapshot", _snapshot)
+    await stack.bus.publish(
+        SpaceRemoteSeatLive(space_id=space.id, instance_id="peer-a", user_id="u-a")
+    )
+    assert snapshots == []  # its first seat: the cert came with the seat
+    await _seat(remote, space.id, "peer-a", "u-b")
+    await stack.bus.publish(
+        SpaceRemoteSeatLive(space_id=space.id, instance_id="peer-a", user_id="u-b")
+    )
+    assert snapshots == ["peer-a"]
+
+
+async def test_a_new_seat_in_a_space_we_do_not_host_re_issues_nothing(
+    stack, monkeypatch
+):
+    space, leaver, fed, _owner = await _stub_space_with_member(stack)
+    await _cert_space(stack)
+    snapshots: list[str] = []
+
+    async def _snapshot(self, space_id, *, to_instance_id):
+        snapshots.append(to_instance_id)
+
+    monkeypatch.setattr(type(stack.space_svc), "send_roster_snapshot", _snapshot)
+    await stack.bus.publish(
+        SpaceRemoteSeatLive(space_id=space.id, instance_id="peer-a", user_id="u")
+    )
+    assert snapshots == []

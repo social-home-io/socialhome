@@ -73,6 +73,7 @@ from ..domain.child_protection import (
     ProtectedCapability,
 )
 from ..domain.events import (
+    SpaceRemoteSeatLive,
     CommentAdded,
     PeerProtoVersionRaised,
     CommentDeleted,
@@ -498,6 +499,34 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """Wire the v_49 writer-cert service: the roster snapshot and the
         forward-secrecy rekey then carry each household its own cert."""
         self._writer_certs = writer_certs
+        self._bus.subscribe(SpaceRemoteSeatLive, self._reissue_cert_on_new_seat)
+
+    async def _reissue_cert_on_new_seat(self, event: SpaceRemoteSeatLive) -> None:
+        """v_49 v2 — a user just took a seat in a household that already
+        holds one in a space we host: its cert's user binding does not name
+        them yet, so send the household a roster snapshot carrying its
+        re-issued cert at once (otherwise the new user could not publish
+        over the connection server until the next rotation). A household's
+        FIRST seat gets its cert with the seat itself (redeem ACK / snapshot)."""
+        if self._writer_certs is None or self._remote_members is None:
+            return
+        try:
+            space = await self._spaces.get(event.space_id)
+            if space is None or space.owner_instance_id != self._own_instance_id:
+                return
+            seats = await self._remote_members.list_for_instance(
+                event.space_id, event.instance_id, include_tombstoned=False
+            )
+            if len(seats) > 1:
+                await self.send_roster_snapshot(
+                    event.space_id, to_instance_id=event.instance_id
+                )
+        except Exception:
+            log.exception(
+                "space %s: re-issuing %s's writer cert after a new seat failed",
+                event.space_id,
+                event.instance_id,
+            )
 
     def attach_federation(
         self,

@@ -381,8 +381,13 @@ async def test_a_published_post_is_accepted_and_carries_only_ciphertext(world):
     assert "hello" not in json.dumps(frame)
     item_type, got = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
     assert item_type == "post"
-    # Our own fresh cert rides inside, the routing hint does not.
-    assert got["writer_cert"] == frame["writer_cert"]
+    # Our own fresh cert rides inside — with its user binding, which never
+    # appears in plaintext (the frame carries the v1 fields only).
+    assert (
+        WriterCert.from_wire(got["writer_cert"]).v1().to_wire() == frame["writer_cert"]
+    )
+    assert got["writer_cert"]["writer_user_ids"] == [AUTHOR]
+    assert "writer_user_ids" not in frame["writer_cert"]
     assert GFS_PUBLISHED_FIELD not in got
     assert got["content"] == "hello"
 

@@ -80,6 +80,23 @@ MAX_WIRE_ID_CHARS: int = 128
 #: Upper bound on ``ts`` / ``signature`` strings.
 _MAX_SHORT_FIELD_CHARS: int = 256
 
+#: Exact key set of the plaintext ``writer_cert`` — the v1 fields ONLY. The
+#: v2 user binding (``writer_user_ids`` / ``users_sig`` / ``users_sig_suite``)
+#: names the household's users, so it rides only inside the encrypted inner;
+#: a request carrying it is refused, and nothing this module serializes ever
+#: includes it.
+PLAINTEXT_CERT_KEYS: frozenset[str] = frozenset(
+    {
+        "cert_suite",
+        "space_id",
+        "epoch",
+        "instance_pk",
+        "scope",
+        "issued_at",
+        "cert_sig",
+    }
+)
+
 #: Exact request key set.
 MEMBER_PUBLISH_REQUEST_KEYS: frozenset[str] = frozenset(
     {
@@ -150,8 +167,11 @@ def _payload(raw: dict) -> str:
 
 
 def _cert(raw: dict) -> WriterCert:
+    wire = raw.get("writer_cert")
+    if not isinstance(wire, dict) or set(wire) != PLAINTEXT_CERT_KEYS:
+        raise InvalidMemberPublish("invalid field: writer_cert")
     try:
-        return WriterCert.from_wire(raw.get("writer_cert"))
+        return WriterCert.from_wire(wire)
     except ValueError as exc:
         raise InvalidMemberPublish("invalid field: writer_cert") from exc
 
@@ -189,7 +209,7 @@ class MemberPublishRequest:
             "target": self.target,
             "event_type": SPACE_ITEM_EVENT_TYPE,
             "epoch": self.epoch,
-            "writer_cert": self.writer_cert.to_wire(),
+            "writer_cert": self.writer_cert.v1().to_wire(),
             "payload": self.payload,
         }
 
@@ -212,7 +232,7 @@ class MemberPublishRequest:
             "space_id": self.target,
             "event_type": SPACE_ITEM_EVENT_TYPE,
             "epoch": self.epoch,
-            "writer_cert": self.writer_cert.to_wire(),
+            "writer_cert": self.writer_cert.v1().to_wire(),
             "payload": self.payload,
         }
 
@@ -251,7 +271,7 @@ class SpaceItemFrame:
             "space_id": self.space_id,
             "event_type": SPACE_ITEM_EVENT_TYPE,
             "epoch": self.epoch,
-            "writer_cert": self.writer_cert.to_wire(),
+            "writer_cert": self.writer_cert.v1().to_wire(),
             "payload": self.payload,
         }
 

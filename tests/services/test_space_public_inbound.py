@@ -837,6 +837,14 @@ def _signed_inner(
     return inner
 
 
+def _v1(cert: dict) -> dict:
+    return {
+        k: v
+        for k, v in cert.items()
+        if k not in ("writer_user_ids", "users_sig", "users_sig_suite")
+    }
+
+
 async def _item_frame(
     env,
     *,
@@ -861,7 +869,8 @@ async def _item_frame(
         "space_id": "sp-1",
         "event_type": "space_item",
         "epoch": sealed_epoch if epoch is None else epoch,
-        "writer_cert": frame_cert if frame_cert is not None else cert,
+        # The frame carries only the v1 fields — never the user binding.
+        "writer_cert": frame_cert if frame_cert is not None else _v1(cert),
         "payload": ct,
     }
 
@@ -922,7 +931,7 @@ async def test_a_stale_epoch_is_dropped_by_the_freshness_gate(item_env, caplog):
         "space_id": "sp-1",
         "event_type": "space_item",
         "epoch": old_epoch,
-        "writer_cert": old_cert,
+        "writer_cert": _v1(old_cert),
         "payload": ct,
     }
     with caplog.at_level(logging.WARNING):

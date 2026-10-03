@@ -157,6 +157,7 @@ class SpaceWriterCertService:
         "_federation",
         "_own_instance_id",
         "_own_pk",
+        "_truncation_warned",
     )
 
     def __init__(
@@ -174,6 +175,9 @@ class SpaceWriterCertService:
         self._federation: "FederationService | None" = None
         self._own_instance_id = own_instance_id
         self._own_pk = own_identity_pk
+        #: (space id, instance id) pairs already warned about a binding
+        #: truncated to MAX_WRITER_USERS — once each per process.
+        self._truncation_warned: set[tuple[str, str]] = set()
 
     def attach_federation(self, federation_service: "FederationService") -> None:
         """Wire the federation service (peer versions + pinned peer keys)."""
@@ -308,10 +312,22 @@ class SpaceWriterCertService:
         )
         # v2: bind the household's users holding that scope (a second
         # signature — v1 verifiers still accept the cert unchanged).
+        users = sorted(entitlement.user_ids)
+        if len(users) > MAX_WRITER_USERS and (
+            (space_id, instance_id) not in self._truncation_warned
+        ):
+            self._truncation_warned.add((space_id, instance_id))
+            log.warning(
+                "writer cert for household %s in space %s: %d writer users, "
+                "binding only the first %d — the rest cannot publish over the "
+                "connection server (their posts take the host path)",
+                instance_id,
+                space_id,
+                len(users),
+                MAX_WRITER_USERS,
+            )
         return bind_writer_users(
-            cert,
-            space_seed=seed,
-            user_ids=sorted(entitlement.user_ids)[:MAX_WRITER_USERS],
+            cert, space_seed=seed, user_ids=users[:MAX_WRITER_USERS]
         )
 
     async def cert_for_peer(
