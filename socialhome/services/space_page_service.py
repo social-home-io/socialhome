@@ -457,7 +457,13 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                 payload={"entity": "page", "target_id": page.id},
                 snapshot=_page_dict(page),
             )
-        await self._pages.delete(page.id, space_id=space_id)
+        # Tombstoned, not removed (migration 0073): sync / resume tell a
+        # household that missed it, and a stale copy cannot come back.
+        deleter = approved_by or actor_user_id
+        if self._conflicts is not None:
+            await self._conflicts.delete_page(space_id, page.id, deleted_by=deleter)
+        else:
+            await self._pages.delete(page.id, space_id=space_id, deleted_by=deleter)
         # ``space_id`` is what routes the delete to the space's member
         # households (``PageFederationOutbound`` drops a scope-less one).
         await self._emit(

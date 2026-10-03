@@ -74,7 +74,7 @@ class _CrossSpaceWrite(Exception):
 
 # Domain dataclasses live in ``socialhome/domain/page.py``. They are
 # re-exported here so existing repo-level imports keep working.
-from ..domain.page import Page, PageVersion  # noqa: F401,E402
+from ..domain.page import Page, PageTombstone, PageVersion  # noqa: F401,E402
 
 
 @runtime_checkable
@@ -95,7 +95,22 @@ class AbstractPageRepo(Protocol):
         *,
         limit: int = 500,
     ) -> builtins.list[Page]: ...
-    async def delete(self, page_id: str, *, space_id: str | None) -> bool: ...
+    async def delete(
+        self, page_id: str, *, space_id: str | None, deleted_by: str = ""
+    ) -> bool: ...
+    async def tombstone(
+        self,
+        page_id: str,
+        *,
+        space_id: str,
+        created_by: str,
+        deleted_by: str = "",
+    ) -> bool: ...
+    async def is_page_deleted(self, page_id: str, *, space_id: str) -> bool: ...
+    async def list_page_tombstones(
+        self, space_id: str, *, since: str | None = None, limit: int = 500
+    ) -> builtins.list[PageTombstone]: ...
+    async def raise_seq(self, page_id: str, *, space_id: str, seq: int) -> bool: ...
 
     async def acquire_lock(
         self,
@@ -257,7 +272,7 @@ class SqlitePageRepo:
         if row is not None:
             return _row_to_page(row_to_dict(row))
         row = await self._db.fetchone(
-            "SELECT * FROM space_pages WHERE id=?",
+            "SELECT * FROM space_pages WHERE id=? AND deleted_at IS NULL",
             (page_id,),
         )
         return _row_to_page(row_to_dict(row))
@@ -270,7 +285,8 @@ class SqlitePageRepo:
         the two tables share an id. Space-scoped callers use this.
         """
         row = await self._db.fetchone(
-            "SELECT * FROM space_pages WHERE id=? AND space_id=?",
+            "SELECT * FROM space_pages"
+            " WHERE id=? AND space_id=? AND deleted_at IS NULL",
             (page_id, space_id),
         )
         return _row_to_page(row_to_dict(row))
@@ -299,7 +315,8 @@ class SqlitePageRepo:
             )
         else:
             rows = await self._db.fetchall(
-                "SELECT * FROM space_pages WHERE space_id=? ORDER BY updated_at DESC",
+                "SELECT * FROM space_pages WHERE space_id=? AND deleted_at IS NULL"
+                " ORDER BY updated_at DESC",
                 (space_id,),
             )
         return [p for p in (_row_to_page(d) for d in rows_to_dicts(rows)) if p]
@@ -328,13 +345,15 @@ class SqlitePageRepo:
         """
         rows = await self._db.fetchall(
             "SELECT * FROM space_pages "
-            "WHERE space_id=? AND updated_at > ? "
+            "WHERE space_id=? AND deleted_at IS NULL AND updated_at > ? "
             "ORDER BY updated_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )
         return [p for p in (_row_to_page(d) for d in rows_to_dicts(rows)) if p]
 
-    async def delete(self, page_id: str, *, space_id: str | None) -> bool:
+    async def delete(
+        self, page_id: str, *, space_id: str | None, deleted_by: str = ""
+    ) -> bool:
         """Delete a page from the table its scope selects.
 
         The two tables are never both touched (§24.11): a
@@ -342,6 +361,14 @@ class SqlitePageRepo:
         ``space_pages`` — naming a household page id leaves the
         household's personal page alone. ``space_id=None`` is the
         household path and likewise cannot reach a space page.
+
+        A space page is **tombstoned**, not removed (migration 0073): the
+        row keeps its id, creator and ``seq`` with ``deleted_at`` set and
+        ``deleted_by`` naming who authorised the delete (empty when nobody
+        can be named), so sync and resume can tell a household that missed
+        it, and no stale copy can bring it back. Its title / content /
+        cover are blanked, any draft dropped; the migration-0073 trigger
+        drops its snapshots and history in this space.
         """
         if space_id is None:
             n = await self._db.enqueue_rowcount(
@@ -357,14 +384,87 @@ class SqlitePageRepo:
             )
             return n > 0
         n = await self._db.enqueue_rowcount(
-            "DELETE FROM space_pages WHERE id=? AND space_id=?",
+            "UPDATE space_pages SET deleted_at=datetime('now'),"
+            " deleted_by=NULLIF(?, ''), title='', content='',"
+            " cover_image_url=NULL, pending_base_seq=NULL,"
+            " locked_by=NULL, locked_at=NULL, lock_expires_at=NULL"
+            " WHERE id=? AND space_id=? AND deleted_at IS NULL",
+            (deleted_by, page_id, space_id),
+        )
+        return n > 0
+
+    async def tombstone(
+        self,
+        page_id: str,
+        *,
+        space_id: str,
+        created_by: str,
+        deleted_by: str = "",
+    ) -> bool:
+        """Record a delete of a space page never held here: a content-free
+        stub row, so a stale copy streamed or replayed later can't create
+        it.
+
+        Insert-only — an id already held (live or tombstoned, in any space)
+        is never touched. ``False`` says nothing was written. The caller
+        must have proven the id is this space's (owner-bound to
+        ``created_by`` in ``space_id``): page ids are global, so a stub for
+        another space's id would block that space's real page here.
+        """
+        n = await self._db.enqueue_rowcount(
+            "INSERT INTO space_pages(id, space_id, title, content, created_by,"
+            " deleted_at, deleted_by)"
+            " VALUES(?, ?, '', '', ?, datetime('now'), NULLIF(?, ''))"
+            " ON CONFLICT(id) DO NOTHING",
+            (page_id, space_id, created_by, deleted_by),
+        )
+        return n > 0
+
+    async def is_page_deleted(self, page_id: str, *, space_id: str) -> bool:
+        """Whether ``page_id`` is a tombstone of ``space_id`` here."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM space_pages"
+            " WHERE id=? AND space_id=? AND deleted_at IS NOT NULL",
             (page_id, space_id),
         )
-        if n:
-            await self._db.enqueue(
-                "DELETE FROM space_page_snapshots WHERE page_id=? AND space_id=?",
-                (page_id, space_id),
+        return row is not None
+
+    async def list_page_tombstones(
+        self, space_id: str, *, since: str | None = None, limit: int = 500
+    ) -> builtins.list[PageTombstone]:
+        """The space's deleted pages, newest delete first (so a ``limit``
+        keeps the deletes a peer is likeliest to have missed) — all of
+        them, or those deleted at or after ``since`` (``deleted_at`` is
+        naive UTC, ``since`` ISO 8601, so both go through ``datetime()``;
+        second precision, hence ``>=``)."""
+        sql = (
+            "SELECT id, created_by, deleted_at, deleted_by FROM space_pages"
+            " WHERE space_id=? AND deleted_at IS NOT NULL"
+        )
+        params: tuple = (space_id,)
+        if since is not None:
+            sql += " AND datetime(deleted_at) >= datetime(?)"
+            params += (since,)
+        sql += " ORDER BY deleted_at DESC, id LIMIT ?"
+        rows = await self._db.fetchall(sql, (*params, int(limit)))
+        return [
+            PageTombstone(
+                id=d["id"],
+                deleted_at=d["deleted_at"],
+                created_by=d["created_by"] or "",
+                deleted_by=d["deleted_by"] or "",
             )
+            for d in rows_to_dicts(rows)
+        ]
+
+    async def raise_seq(self, page_id: str, *, space_id: str, seq: int) -> bool:
+        """Raise a live space page's ``seq`` to ``seq`` — never lower it,
+        never touch its content. ``True`` when it moved."""
+        n = await self._db.enqueue_rowcount(
+            "UPDATE space_pages SET seq=?"
+            " WHERE id=? AND space_id=? AND deleted_at IS NULL AND seq < ?",
+            (int(seq), page_id, space_id, int(seq)),
+        )
         return n > 0
 
     # ── Locks ──────────────────────────────────────────────────────────
@@ -931,13 +1031,14 @@ class SqlitePageRepo:
         if space_id is None:
             rows = await self._db.fetchall(
                 "SELECT space_id, id FROM space_pages"
-                " WHERE pending_base_seq IS NOT NULL ORDER BY updated_at",
+                " WHERE pending_base_seq IS NOT NULL AND deleted_at IS NULL"
+                " ORDER BY updated_at",
             )
         else:
             rows = await self._db.fetchall(
                 "SELECT space_id, id FROM space_pages"
                 " WHERE space_id=? AND pending_base_seq IS NOT NULL"
-                " ORDER BY updated_at",
+                " AND deleted_at IS NULL ORDER BY updated_at",
                 (space_id,),
             )
         return [(str(r["space_id"]), str(r["id"])) for r in rows]
@@ -1007,7 +1108,8 @@ def decode_side_body(body: str, *, fallback_title: str) -> _StoredVersion:
 
 
 #: Upsert of a space page — ``space_id`` decides which rows it may update
-#: (an id of another space is refused by the WHERE).
+#: (an id of another space is refused by the WHERE, and so is a tombstone:
+#: a deleted page never comes back, migration 0073).
 _SPACE_PAGE_UPSERT = """
 INSERT INTO space_pages(
     id, space_id, title, content, cover_image_url, created_by,
@@ -1032,6 +1134,7 @@ ON CONFLICT(id) DO UPDATE SET
     seq=excluded.seq,
     pending_base_seq=excluded.pending_base_seq
 WHERE space_pages.space_id = excluded.space_id
+  AND space_pages.deleted_at IS NULL
 """
 
 

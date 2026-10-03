@@ -1328,6 +1328,158 @@ class PageConflictService(BusPublisherMixin):
             )
         )
 
+    async def raise_floor(self, space_id: str, page_id: str, seq: int) -> bool:
+        """The host learns a member household mirrors ``page_id`` at
+        ``seq`` (its §25.6 sync record — never its content). A ``seq`` ahead
+        of ours means we were restored from a backup (or took over from
+        another host): raise our floor to it, so our next commit lands
+        above every version members hold and they take it. Only ever
+        raised, by at most :data:`MAX_FLOOR_STEP` per signal and never to
+        :data:`MAX_SEQ`; a live page held here only. ``True`` when it
+        moved. The caller has checked that this household hosts the space.
+        """
+        if seq <= 0 or seq > MAX_SEQ:
+            return False
+        async with self.lock_for(space_id, page_id):
+            page = await self._pages.get_space_page(page_id, space_id=space_id)
+            if page is None or seq <= page.seq:
+                return False
+            if seq - page.seq > MAX_FLOOR_STEP:
+                log.warning(
+                    "page %s in space %s: a member reports seq %s, %s past ours "
+                    "— beyond the floor step; not raised",
+                    page_id,
+                    space_id,
+                    seq,
+                    seq - page.seq,
+                )
+                return False
+            floor = min(seq, MAX_SEQ - 1)
+            raised = await self._pages.raise_seq(page_id, space_id=space_id, seq=floor)
+        if raised:
+            log.warning(
+                "page %s in space %s: a member mirrors seq %s, ahead of ours "
+                "(%s) — restored host; floor raised",
+                page_id,
+                space_id,
+                floor,
+                page.seq,
+            )
+        return raised
+
+    async def delete_page(
+        self, space_id: str, page_id: str, *, deleted_by: str = ""
+    ) -> bool:
+        """Tombstone a space page (migration 0073) under its lock, so no
+        sequencing or mirroring step interleaves with the delete. ``False``
+        when no live page of ``space_id`` was there."""
+        async with self.lock_for(space_id, page_id):
+            return await self._pages.delete(
+                page_id, space_id=space_id, deleted_by=deleted_by
+            )
+
+    async def adopt_draft(self, space_id: str, page_id: str) -> bool:
+        """This household hosts the space now, yet still holds a draft of
+        its own made under the previous host: commit it as host and clear
+        ``pending_base_seq``. The draft is sequenced like a proposal on the
+        base it was made from, against the newest version mirrored since
+        (``seq`` stays above every version we saw), so it fast-forwards,
+        merges, or is kept as a side — never lost. ``True`` when a draft
+        was adopted."""
+        async with self.lock_for(space_id, page_id):
+            page = await self._pages.get_space_page(page_id, space_id=space_id)
+            if page is None or page.pending_base_seq is None:
+                return False
+            base = await self._pages.get_draft_base(page_id, space_id=space_id)
+            proposal = Proposal(
+                title=page.title,
+                content=page.content,
+                cover_image_url=page.cover_image_url,
+                actor_user_id=page.last_editor_user_id or page.created_by,
+            )
+            await self._pages.clear_draft_base(page_id, space_id=space_id)
+            if page.pending_base_seq == 0 or base is None or not base.title:
+                # Our own create, never sequenced: its first version.
+                first = replace(
+                    page, seq=min(page.seq + 1, MAX_SEQ), pending_base_seq=None
+                )
+                await self._pages.save(first, space_id=space_id)
+                stored = await self._pages.get_space_page(page_id, space_id=space_id)
+                result = SequenceResult(
+                    SequenceOutcome.APPLIED, None, stored or first, created=True
+                )
+            else:
+                current = await self._canonical_under_draft(space_id, page, base)
+                # The draft's base is an ancestor of the current version:
+                # keep it in history, where the merge looks bases up.
+                await self._remember(
+                    page,
+                    title=base.title,
+                    content=base.content,
+                    cover_image_url=base.cover_image_url,
+                    edited_by=base.by,
+                    space_id=space_id,
+                )
+                proposal = replace(
+                    proposal,
+                    base_seq=page.pending_base_seq,
+                    base_hash=version_hash(
+                        base.title, base.content, base.cover_image_url
+                    ),
+                    resolves=base.resolves,
+                )
+                result = await self._sequence_edit(space_id, current, proposal)
+                if result.outcome not in (
+                    SequenceOutcome.APPLIED,
+                    SequenceOutcome.SIDE,
+                ):
+                    # Nothing to commit (the draft was the current version
+                    # already): just drop the draft.
+                    await self._pages.save(current, space_id=space_id)
+        log.info(
+            "page %s in space %s: this household hosts the space now — our "
+            "draft is sequenced here (%s)",
+            page_id,
+            space_id,
+            result.outcome,
+        )
+        await self._publish_result(
+            result,
+            space_id=space_id,
+            page_id=page_id,
+            proposal=proposal,
+            proposer_instance="",
+        )
+        return True
+
+    async def _canonical_under_draft(
+        self, space_id: str, page: Page, base: DraftBase
+    ) -> Page:
+        """The canonical version a draft row sits on: the draft's base, or —
+        when a newer host version was mirrored under the draft — that
+        version (the newest history row: a member writes history only when
+        it mirrors a host version)."""
+        title, content, cover = base.title, base.content, base.cover_image_url
+        editor = base.by
+        if page.seq > base.seq:
+            versions = await self._pages.list_versions(page.id, space_id=space_id)
+            newest = max(versions, key=lambda v: v.version, default=None)
+            if newest is not None:
+                title, content, cover = (
+                    newest.title,
+                    newest.content,
+                    newest.cover_image_url,
+                )
+                editor = newest.edited_by
+        return replace(
+            page,
+            title=title,
+            content=content,
+            cover_image_url=cover,
+            last_editor_user_id=editor or page.last_editor_user_id,
+            pending_base_seq=None,
+        )
+
     async def host_create(self, page: Page, *, actor_user_id: str) -> Page:
         """A page created here, on its host: sequenced as ``seq`` 1."""
         async with self.lock_for(page.space_id or "", page.id):

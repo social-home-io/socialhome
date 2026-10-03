@@ -57,6 +57,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    SPACE_PAGE_KIND,
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
@@ -116,6 +117,11 @@ _LIST_ELSEWHERE = mint_owner_bound_id(
 _TASK_SYNC = mint_owner_bound_id(SPACE_TASK_KIND, space_id=SP, owner_user_id="u-a")
 _TASK_ELSEWHERE = mint_owner_bound_id(
     SPACE_TASK_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
+)
+#: The page twins (migration 0073).
+_PAGE_SYNC = mint_owner_bound_id(SPACE_PAGE_KIND, space_id=SP, owner_user_id="u-a")
+_PAGE_ELSEWHERE = mint_owner_bound_id(
+    SPACE_PAGE_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
 )
 _TT_FOR_U_A = mint_owner_bound_id(
     SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-a"
@@ -1826,6 +1832,34 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         [{"id": "pg-sync", "title": "x", "created_by": "u-a"}],
         (AUTHOR, HOST),
         (OTHER,),
+    ),
+    (
+        "pages_deleted",
+        "delete u-a's page (a delete the provider heard, we missed)",
+        [{"id": "page-a", "space_id": SP}],
+        (HOST, AUTHOR, OTHER),
+        (STRANGER,),
+    ),
+    (
+        "pages_deleted",
+        "tombstone a page id not held here",
+        [{"id": _PAGE_SYNC, "space_id": SP, "created_by": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "pages_deleted",
+        "stub a page id bound to another space (a cross-space squat)",
+        [{"id": _PAGE_ELSEWHERE, "space_id": SP, "created_by": "u-a"}],
+        (),
+        (HOST, AUTHOR, OTHER),
+    ),
+    (
+        "pages_deleted",
+        "stub a legacy (unbound) page id never held here",
+        [{"id": "pg-legacy-tomb", "space_id": SP, "created_by": "u-a"}],
+        (),
+        (HOST, AUTHOR),
     ),
     (
         "stickies",

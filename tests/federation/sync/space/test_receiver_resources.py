@@ -164,6 +164,9 @@ class _PageRepoStub:
     async def get_space_page(self, page_id, *, space_id):
         return self.held.get((page_id, space_id))
 
+    async def is_page_deleted(self, page_id, *, space_id):
+        return False
+
 
 class _StickyRepoStub:
     def __init__(self, collector):

@@ -62,6 +62,11 @@ RESOURCE_ORDER: tuple[str, ...] = (
     "tasks_deleted",
     "tasks",
     "tasks_archived",
+    # Page tombstones (migration 0073) before the live pages: a household
+    # that missed a page delete drops its copy, and a host stub keeps a
+    # stale copy streamed later out. An older receiver drops the unknown
+    # resource.
+    "pages_deleted",
     "pages",
     "stickies",
     "calendar",
@@ -96,7 +101,9 @@ ROSTER_RESOURCES: frozenset[str] = frozenset({"bans", "members", "member_picture
 #: Content resources that only ever REMOVE rows. Like the live
 #: ``ARCHIVED_ALLOWED_REMOVAL_TYPES``, they still land in a space that is
 #: archived here — a delete must not outlive itself on the snapshot.
-REMOVAL_RESOURCES: frozenset[str] = frozenset({"task_lists_deleted", "tasks_deleted"})
+REMOVAL_RESOURCES: frozenset[str] = frozenset(
+    {"task_lists_deleted", "tasks_deleted", "pages_deleted"}
+)
 
 
 #: Sentinel resource sent over the channel after all real chunks.

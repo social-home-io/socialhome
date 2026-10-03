@@ -446,8 +446,15 @@ That single command runs the full sequence:
    conflict forms in whichever order **b** sees them. The step polls every
    3 s and backs off on 429 (every ``/api/spaces/…`` request of a user
    shares one 60 / min bucket). **a** resolves with ``resolution: "side"`` + ``sides`` and all
-   three converge on one ``seq`` with no conflict. The ``verify`` step's
-   ``proto_version >= OURS`` check covers the v_48 round-trip.
+   three converge on one ``seq`` with no conflict. Finally a **missed
+   delete** (migration 0073 tombstones): **a** creates a second page, **c**
+   is killed, **b** deletes the page and the delete queued for **c** is
+   dropped from the outboxes (a lost envelope). **c** restarts still holding
+   the page; its start-up §25.6 sync pulls **b**'s ``pages_deleted`` stream
+   and **c** tombstones it (blank row). **b** then runs "Sync now", pulling
+   **c**'s chunk, and **a**, **b** and **c** never list the page again. The
+   ``verify`` step's ``proto_version >= OURS`` check covers the v_48
+   round-trip.
 
 9d. ``admin-revoke-rotation`` (v_44 space authority key rotation) — **a**
    creates a private space with ``delegated_admin_authority`` on, invites

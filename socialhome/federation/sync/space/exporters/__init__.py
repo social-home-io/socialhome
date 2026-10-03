@@ -18,6 +18,7 @@ from .gallery import GalleryExporter
 from .member_pictures import MemberPicturesExporter
 from .members import MembersExporter
 from .pages import PagesExporter
+from .pages_deleted import PagesDeletedExporter
 from .polls import PollsExporter
 from .posts import PostsExporter
 from .schedules import SchedulesExporter
@@ -38,6 +39,7 @@ __all__ = [
     "GalleryExporter",
     "MemberPicturesExporter",
     "MembersExporter",
+    "PagesDeletedExporter",
     "PagesExporter",
     "PollsExporter",
     "PostsExporter",

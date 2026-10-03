@@ -34,7 +34,8 @@ as before (see [Mixed fleets](#mixed-fleets)).
 `SPACE_PAGE_CREATED`, `SPACE_PAGE_UPDATED`, `SPACE_PAGE_DELETED`. Every
 field below except the routing fields (`space_id`) rides inside the
 encrypted payload (§25.8.21). Deletes are not sequenced: any writer
-broadcasts `SPACE_PAGE_DELETED` to the member households, as before.
+broadcasts `SPACE_PAGE_DELETED` to the member households, as before, and
+every household keeps a **tombstone** (see [Tombstones](#tombstones)).
 
 ### Proposal — member → host only
 
@@ -84,7 +85,7 @@ above. It carries the current state and `seq`, plus `sequenced` with
 | `reason` | When |
 |---|---|
 | `access` | the gates refused it: the named `actor_user_id` is not seated on the sending household (checked at **every** access level, so no household ever edits as — or evicts the side of — another household's user), the owner-bound id, or the space's `pages` access level. Not sent when the write is *held* for an actor whose seat has not reached the host yet (it is replayed when it does) |
-| `gone` | the page no longer exists on the host (`base_seq ≥ 1`); the payload carries no state, `seq: 0` |
+| `gone` | the page no longer exists on the host: never held (`base_seq ≥ 1`), or **deleted** there (a tombstone, whatever `base_seq` — a create included); the payload carries no state, `seq: 0` |
 | `rate_limited` | more than 120 proposals / minute from that household for that space; carries **no page state** (the member keeps its draft for the next tick) |
 | `bad_base` | the proposal is malformed (bad `base_seq` / `base_hash` / `resolves`, a missing or over-long title). The member keeps its draft (retried on the tick) — never discarded |
 | `archived` | the space is archived on the host: the post-decrypt archived gate refuses the write and tells the page handler (`FederationService.add_archived_write_listener`). Only a sender holding a **live writer seat** hears back — anyone else gets silence, so the refusal is no oracle — and the answer carries **no page state**; the member restores its own draft base |
@@ -115,8 +116,9 @@ runs these steps in order:
    `SPACE_PAGE_CREATED` without `base_seq`. A live `SPACE_PAGE_UPDATED` without `base_seq` is a
    pre-v_48 (or not-yet-upgraded) sender's update, based on the current
    version.
-2. **Gates.** Malformed → `bad_base`. A page this household no longer
-   holds, proposed with `base_seq ≥ 1` → `gone`. Then the owner-bound id
+2. **Gates.** Malformed → `bad_base`. A page this household does not
+   hold, proposed with `base_seq ≥ 1` → `gone`; a page it holds as a
+   tombstone → `gone`, at any `base_seq`. Then the owner-bound id
    (creates; a create must be its creator's own write), the actor's seat
    on the sender (`acts_for`, every access level — held, not refused,
    while the roster gossip catches up; a demoted, read-only author still
@@ -138,9 +140,8 @@ runs these steps in order:
      proposal above it (`base_seq + 1`) — fast-forward only when its
      `base_hash` is the host's current copy, else merged against a known
      base or kept as a side, a duplicate still committed — so every member
-     takes the result. Until a member proposes, the restored host's own
-     edits sit below the members' seq and are not mirrored (they reach
-     members with the next proposal's commit).
+     takes the result. The host also learns the members' `seq` without a
+     proposal, from their sync chunks (see [Restored host](#restored-host)).
    - **Base check.** A proposal that is
      the current body (a resolution keeping it) changes no body. One
      equal to an open side makes that side current. With
@@ -248,6 +249,14 @@ no pending draft is dropped, so a settle never strands the page.
   by its hash and simply acknowledges it.
 - **The host's own edits** are sequenced at once (`commit_local`, a
   fast-forward over the current version).
+- **A draft goes to the household hosting the space now.** The forwarder
+  remembers which host each outstanding proposal went to. If the space's
+  `owner_instance_id` differs at the next kick or flush, it drops the
+  outstanding entry and sends the draft to the new host. An answer from
+  the former host moves nothing, because a member mirrors only the current
+  owner's versions. If this household is the host itself, it commits its
+  own pending draft as host (`adopt_draft`, see
+  [Host change](#host-change)).
 
 ## Resolution
 
@@ -262,7 +271,8 @@ household converges.
 
 ## Sync and resume
 
-- **§25.6 sync**: `pages` records carry `seq`, `version_hash` and
+- **§25.6 sync**: `pages_deleted` records (the tombstones) ship before
+  `pages`; see [Tombstones](#tombstones). `pages` records carry `seq`, `version_hash` and
   `conflict`. An unacknowledged draft never leaves a household: the page
   is exported as the canonical version the draft was made from (or not at
   all, for a create the host has not sequenced). A record from the
@@ -273,8 +283,11 @@ household converges.
   record at all**: a member's new page reaches it as a create proposal,
   never as an unsequenced row it would hold but never broadcast. Under a
   pre-v_48 host, records without `seq` are taken as before.
-- **Resume** (`SPACE_SYNC_RESUME`): a member replays **no page to the
-  v_48 host** (its own drafts reach it as proposals). To anyone else each
+- **Resume** (`SPACE_SYNC_RESUME`): every household first replays the
+  pages deleted since `since` as `SPACE_PAGE_DELETED` (with the deleter
+  as `actor_user_id` and `created_by`), to the host as well. A member
+  then replays **no page to the v_48 host** (its own drafts reach it as
+  proposals). To anyone else each
   page replays as `SPACE_PAGE_CREATED` with `seq`, `version_hash`,
   `last_editor_user_id` and `conflict` (to a v_48 peer), drafts as their
   canonical base. Only the host's replay updates a held page.
@@ -321,22 +334,143 @@ forced. See [`moderation.md`](./moderation.md).
   one for a proposal, never lets one create a page. A last-write-wins
   create from a household with a stale view of its host carries
   `base_seq: 0`, so the host sequences it as the create it is.
-- **Ownership transfer while drafts are pending** *(known limitation)*:
-  a member's draft is proposed to whichever household hosts the space
-  when the forwarder sends it. If the space's host changes while drafts
-  are pending, the new host does not hold the old host's history or
-  sides, so a draft based on the old host's `seq` arrives with an unknown
-  base and becomes a conflict side there (nothing is lost; a user
-  resolves it), and an outstanding proposal to the old host is only
-  re-sent on the next flush.
-- **Delete while pending or conflicted**: `SPACE_PAGE_DELETED` removes
-  the page, its open sides and the draft base. A later proposal for it is
-  answered `gone`, the member keeps the words, and the SPA offers "Save
-  as new page".
+- **Delete while pending or conflicted**: `SPACE_PAGE_DELETED` tombstones
+  the page and drops its open sides, draft base and history. A later
+  proposal for it is answered `gone`, the member keeps the words, and the
+  SPA offers "Save as new page".
 - **Same-household concurrency**: `base_updated_at` still answers
   409 `stale_update` between two tabs of one household.
 - **Restart**: the forwarder's outstanding proposal lives in memory. After
   a restart the draft is resent and the host deduplicates it by hash.
+
+## Tombstones
+
+A space page delete keeps the row as a **tombstone** (migration 0073:
+`space_pages.deleted_at` / `deleted_by`) instead of removing it. Before
+this, a household that missed `SPACE_PAGE_DELETED` (offline past the
+outbox, or the envelope lost) kept the page. Its §25.6 `pages` stream or
+its resume replay then brought the page back on households that had never
+held it, since a member takes a new page from any member household.
+
+- **No content.** The delete blanks the title, content and cover and drops
+  any draft. A trigger drops the page's conflict sides, draft base,
+  resolved snapshots and edit history in that space. The row keeps only
+  the id, the creator, `seq` and who deleted it.
+- **Nothing brings it back.** Every live read skips tombstones, and the
+  page upsert refuses a tombstoned id. So none of these can recreate the
+  page, whatever `seq` it carries: a host version, another member's create,
+  a sync record, a resume replay, or a late proposal (answered `gone`).
+  The delete is never undone by an edit. This holds on the host too: the
+  host is the pages' authority, and a page it deleted is gone at every
+  `seq`.
+- **`pages_deleted`** (§25.6 resource, in `REMOVAL_RESOURCES`, ships before
+  `pages`): `{id, page_id, space_id, created_by, actor_user_id}`, newest
+  delete first, at most 500. On the receiver:
+  - a page held live in this space is tombstoned, with `actor_user_id` as
+    the deleter;
+  - from the **host**, an id never held gets an insert-only **stub**
+    tombstone, so a stale copy streamed later cannot create it. This
+    happens only for an id owner-bound to its `created_by` in **this**
+    space (page ids are global, so a stub for another space's id would
+    block that page here). A legacy (unbound) id gets no stub;
+  - from a **member** household, a record is admitted under the live
+    delete rule: the page is held live in this space, the provider is a
+    writer household, `actor_user_id` is seated on it, and the space's
+    `pages` level admits the delete for that user. A member never stubs an
+    unseen id.
+
+  An older receiver drops the unknown resource. Like the other removals,
+  it lands even in a space archived here.
+- **Resume** replays each delete since `since` as `SPACE_PAGE_DELETED`
+  with the same payload. A live or replayed delete from the host of an
+  owner-bound id never held leaves a stub, as above.
+- **A delete the host missed** (a member deleted, the envelope to the host
+  was lost): the host keeps the page and may broadcast newer versions.
+  Every household that deleted it ignores those versions. The member's
+  `pages_deleted` stream then reaches the host under the live delete rule,
+  and the host's own stream tells the rest.
+- Tombstones are never pruned.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Member A (offline)
+    participant H as Host H
+    participant B as Member B
+    H->>H: DELETE page → tombstone (content, sides, history dropped)
+    H->>B: SPACE_PAGE_DELETED (actor_user_id)
+    Note over A: misses the delete, still holds the page
+    A->>B: §25.6 pages chunk (stale copy)
+    B->>B: tombstone wins — skipped
+    A->>H: proposal (base_seq 4)
+    H->>A: refused / gone (no state)
+    H->>A: §25.6 pages_deleted {id, created_by, actor_user_id}
+    A->>A: tombstone — the page is gone here too
+```
+
+No protocol version gate: a v_48 peer drops `pages_deleted` as unknown
+and keeps behaving as before, and a replayed delete is an ordinary
+`SPACE_PAGE_DELETED` (its extra `created_by` is ignored).
+
+## Host change
+
+The host is the space's `owner_instance_id`. In this codebase that column
+never changes. `save` never rewrites the owner columns,
+`transfer_ownership` moves the owner role only between the host
+household's own users, and an owner seat on another household is refused
+(v_8). The following rules make a host change safe if it ever does
+happen:
+
+- **A member with a pending draft** proposes it to the new host. The
+  forwarder re-targets an outstanding proposal whose host differs (see
+  [Drafts and the forwarder](#drafts-and-the-forwarder)). The member's
+  `seq` is the old host's latest version it mirrored, so the new host
+  fast-forwards it, merges it, or keeps it as a side, as for any
+  proposal. A late answer from the old host is ignored, because only the
+  current owner's versions are mirrored.
+- **A household that becomes host** commits each of its own pending
+  drafts as host (`PageConflictService.adopt_draft`) at the next kick or
+  flush (on startup, on reachability, or the 30-minute tick). The draft
+  is sequenced as a proposal on its base. That base is written to history
+  so the merge finds it. The proposal runs against the newest version
+  mirrored under the draft, which is the newest history row, or the base
+  itself. The draft is cleared (`pending_base_seq` NULL), and the result
+  is broadcast. A create never sequenced becomes its first version.
+- **`seq` never regresses.** The new host starts from its own mirrored
+  `seq`, which is the highest version of the old host it saw. A version
+  the old host broadcast that the new host missed reaches it as a seq
+  hint from the members' sync chunks (see
+  [Restored host](#restored-host)). A proposal based on it raises the
+  floor as for a restored host. Until then, such a version may sit at the
+  same `seq` on the members that got it. The new host's next commit is
+  above it, and every member takes that commit.
+
+## Restored host
+
+A host restored from a backup holds a lower `seq` than its members. A
+member proposal raises its floor (see [Host rules](#host-rules)). So do
+the members' **sync chunks**. On the host, the receiver reads `seq` from
+a member household's `pages` records **before** the admission drops them
+(the host takes no page record). For each live page it holds, it calls
+`PageConflictService.raise_floor`:
+
+- the floor only ever rises, by at most `MAX_FLOOR_STEP` (`2**20`) per
+  signal, and never to `MAX_SEQ`;
+- only the number is read, never the content;
+- only from a household seated in the space;
+- never for a page the host does not hold, or holds as a tombstone.
+
+The host's scheduler asks every member for a sync at startup and every 30
+minutes. So shortly after a restore, the host's next own edit lands above
+every member's `seq`, and the members take it. Their newer bodies stay in
+their own history, and nothing is overwritten until the host commits
+again.
+
+Design choice: the hint rides on the `seq` that v_48 `pages` records
+already carry. It needs no new event, no new field and no protocol bump,
+and it works with every v_48 member. The alternative was having members
+re-announce their `seq` when they see a lower host version. That needs a
+new message, and a restored host that never edits would never trigger it.
 
 ## Flow — proposal, merge, canonical version
 
@@ -410,12 +544,14 @@ Legacy (uuid4) ids keep the first-come rule. See
   broadcast plus the legacy payload. Proposals are never broadcast.
 - `socialhome/services/federation_inbound/space_content.py`: host
   proposal / member mirror routing.
-- `socialhome/federation/sync/space/{exporters/pages.py,receiver.py,resume.py}`:
-  sync records and resume by `seq`.
+- `socialhome/federation/sync/space/{exporters/pages.py,exporters/pages_deleted.py,receiver.py,resume.py}`:
+  sync records and resume by `seq`, tombstones, the host's seq hints.
 - `socialhome/repositories/page_repo.py`: `seq` / `pending_base_seq`,
   history, conflict sides and the draft base (`space_page_snapshots`).
-- `socialhome/migrations/0072_space_page_seq.sql`.
-- Tests: `tests/protocol/test_space_page_host_sequencing.py`.
+- `socialhome/migrations/0072_space_page_seq.sql`,
+  `socialhome/migrations/0073_space_page_tombstones.sql`.
+- Tests: `tests/protocol/test_space_page_host_sequencing.py`,
+  `tests/protocol/test_page_tombstones.py`.
 
 ## Spec references
 

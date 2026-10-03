@@ -29,9 +29,16 @@ class _Conflicts:
         self.drafts: dict[str, Proposal] = {}
         self.rebased: list[tuple[str, int]] = []
         self.marked: list[tuple[str, str]] = []
+        self.adopted: list[str] = []
+        self.host = HOST
 
     async def mode(self, space_id):
-        return self.mode_, HOST
+        return self.mode_, self.host
+
+    async def adopt_draft(self, space_id, page_id):
+        self.adopted.append(page_id)
+        self.drafts.pop(page_id, None)
+        return True
 
     async def proposal_for(self, space_id, page_id):
         return self.drafts.get(page_id)
@@ -254,3 +261,27 @@ async def test_a_settled_draft_frees_the_page(env):
     assert env.fwd.outstanding() == {}
     env.conflicts.drafts["pg"] = _draft("later")
     assert await env.fwd.kick(SID, "pg")
+
+
+async def test_a_household_that_hosts_now_adopts_its_draft(env):
+    env.conflicts.drafts["pg"] = _draft("one")
+    assert await env.fwd.kick(SID, "pg")
+    env.conflicts.mode_ = PageMode.HOST
+    env.conflicts.drafts["pg"] = _draft("two")
+    assert not await env.fwd.kick(SID, "pg")
+    assert env.conflicts.adopted == ["pg"]
+    assert env.fwd.outstanding() == {}
+    assert len(env.fed.sent) == 1
+
+
+async def test_an_outstanding_proposal_follows_a_host_change(env):
+    env.conflicts.drafts["pg"] = _draft("one")
+    assert await env.fwd.kick(SID, "pg")
+    # Same host: stop and wait.
+    assert not await env.fwd.kick(SID, "pg")
+    env.conflicts.host = "new-host"
+    assert await env.fwd.kick(SID, "pg")
+    assert [to for to, _et, _p in env.fed.sent] == [HOST, "new-host"]
+    # Stop and wait again, now on the new host.
+    assert not await env.fwd.kick(SID, "pg")
+    assert len(env.fed.sent) == 2

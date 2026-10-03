@@ -809,6 +809,14 @@ class SpaceContentInboundHandlers:
         if mode is PageMode.HOST:
             await self._on_page_proposal(event, space_id, page_id, existing)
             return
+        if existing is None and await self._page_repo.is_page_deleted(
+            page_id, space_id=space_id
+        ):
+            # Deleted here (migration 0073): a household that missed the
+            # delete, or its replay, never brings the page back — not even
+            # the host's version (its delete reaches the host by sync).
+            log_not_applied(event, what="page", row_id=page_id, reason="deleted here")
+            return
         if (
             mode is PageMode.LEGACY
             and host
@@ -957,7 +965,13 @@ class SpaceContentInboundHandlers:
                 reason="bad_base",
             )
             return
-        if existing is None and (proposal.base_seq or 0) > 0:
+        if existing is None and (
+            (proposal.base_seq or 0) > 0
+            or await self._page_repo.is_page_deleted(page_id, space_id=space_id)
+        ):
+            # Gone: never held, or deleted here (a tombstone is never
+            # brought back, whatever ``base_seq`` it claims). The member
+            # keeps its words and the SPA offers "Save as new page".
             await engine.refuse(
                 space_id=space_id,
                 page_id=page_id,
@@ -1090,9 +1104,7 @@ class SpaceContentInboundHandlers:
             return
         existing = await self._page_repo.get(page_id)
         if existing is None:
-            log_not_applied(
-                event, what="page", row_id=page_id, reason="no such page here"
-            )
+            await self._page_delete_of_unseen(event, space_id, page_id)
             return
         if existing.space_id != space_id:
             log_cross_space_refusal(
@@ -1109,10 +1121,60 @@ class SpaceContentInboundHandlers:
             row_owner=existing.created_by,
         ):
             return
-        if not await self._page_repo.delete(page_id, space_id=space_id):
+        # Tombstoned, not removed (migration 0073): sync / resume tell a
+        # household that missed it, and a stale copy cannot come back.
+        deleter = _deleter(event)
+        deleted = (
+            await self._page_conflicts.delete_page(
+                space_id, page_id, deleted_by=deleter
+            )
+            if self._page_conflicts is not None
+            else await self._page_repo.delete(
+                page_id, space_id=space_id, deleted_by=deleter
+            )
+        )
+        if not deleted:
             log_cross_space_refusal(
                 event, space_id=space_id, what="page", row_id=page_id
             )
+
+    async def _page_delete_of_unseen(
+        self, event: "FederationEvent", space_id: str, page_id: str
+    ) -> None:
+        """A delete of a page not held live here. From the space's **host**
+        (live, or its resume replay) a page we never held gets a stub
+        tombstone, so a stale copy another household streams or replays
+        later cannot create it — but only for an id owner-bound to its
+        ``created_by`` in THIS space (page ids are global)."""
+        if await self._page_repo.is_page_deleted(page_id, space_id=space_id):
+            log_not_applied(
+                event, what="page", row_id=page_id, reason="deleted here already"
+            )
+            return
+        host = (
+            (await self._page_conflicts.mode(space_id))[1]
+            if self._page_conflicts is not None
+            else ""
+        )
+        created_by = str(event.payload.get("created_by") or "")
+        if (
+            not host
+            or host != event.from_instance
+            or check_owner_bound_id(
+                SPACE_PAGE_KIND, page_id, space_id=space_id, owner_user_id=created_by
+            )
+            is not OwnerBinding.VALID
+        ):
+            log_not_applied(
+                event, what="page", row_id=page_id, reason="no such page here"
+            )
+            return
+        await self._page_repo.tombstone(
+            page_id,
+            space_id=space_id,
+            created_by=created_by,
+            deleted_by=_deleter(event),
+        )
 
     # ─── Stickies ────────────────────────────────────────────────────────
 
@@ -3058,7 +3120,7 @@ def _assignee_owner(existing: Task, incoming: Task, actor: str | None) -> str:
 
 
 def _deleter(event: "FederationEvent") -> str:
-    """Who authorised a delete, for a list or task tombstone's
+    """Who authorised a delete, for a list, task or page tombstone's
     ``deleted_by``: the approver of a reviewed (v_43) delete, else the
     payload's actor (v_42), else nobody. A replay of the tombstone names this user, so it passes
     the space's level wherever the live delete did."""

@@ -11032,6 +11032,13 @@ def cmd_page_concurrent_edit() -> None:
     3. **Resolution.** a resolves with ``resolution: "side"`` + ``sides``;
        it is a proposal like any edit, the host retires every side and
        broadcasts: a, b and c converge on one ``seq``, no conflict left.
+    4. **A missed delete (migration 0073 tombstones).** a creates a second
+       page; c goes offline; b deletes it and the delete addressed to c is
+       LOST (its outbox rows dropped, as if the envelope never made it).
+       c comes back still holding the page. c's start-up §25.6 sync pulls
+       the host's ``pages_deleted`` stream, so c tombstones it; b then
+       pulls c's chunk ("Sync now") and a and b never see the page again —
+       no household resurrects it.
 
     The space is this step's own, so no earlier assertion changes.
     """
@@ -11299,6 +11306,85 @@ def cmd_page_concurrent_edit() -> None:
         timeout=90.0,
     )
     print(f"  resolution: a/b/c on seq {_get('b')['seq']}, no conflict left ✓")
+
+    # 4. A delete c misses cannot come back, and c heals by sync.
+    st, old = _http("a", "POST", pages, {"title": "Old notes", "content": "Bye."})
+    if st != 201:
+        raise SystemExit(f"page-concurrent-edit: second page answered {st} {old!r}")
+    old_id = old["id"]
+
+    def _listed(label: str, pid: str) -> bool:
+        st, body = _http(label, "GET", pages)
+        if st != 200:
+            raise SystemExit(f"page-concurrent-edit: listing on {label} answered {st} {body!r}")
+        hit = next((p for p in body if p.get("id") == pid), None)
+        return bool(hit) and hit.get("seq", 0) >= 1 and not hit.get("pending")
+
+    def _tombstoned(label: str, pid: str) -> bool:
+        return bool(
+            _rows(
+                label,
+                "SELECT 1 FROM space_pages WHERE id=? AND deleted_at IS NOT NULL"
+                " AND content='' AND title=''",
+                (pid,),
+            )
+        )
+
+    _poll(
+        "every household to hold the second page",
+        lambda: all(_listed(k, old_id) for k in houses),
+        timeout=90.0,
+    )
+    _kill_household("c", c)
+    t0 = _rows("b", "SELECT datetime('now', '-2 seconds')")[0][0]
+    st, body = _http("b", "DELETE", f"{pages}/{old_id}")
+    if st != 200:
+        raise SystemExit(f"page-concurrent-edit: delete answered {st} {body!r}")
+    _poll(
+        "a and b to tombstone the deleted page",
+        lambda: all(_tombstoned(k, old_id) for k in ("a", "b")),
+        timeout=60.0,
+    )
+    # Lose the delete addressed to c: whatever a or b queued for c since
+    # (the direct envelope or a mesh-routed copy) is dropped.
+    lost = 0
+    for label in ("a", "b"):
+        con = sqlite3.connect(_instance_dir(label) / "socialhome.db", timeout=10)
+        try:
+            cur = con.execute(
+                "DELETE FROM federation_outbox WHERE instance_id=? AND status='pending'"
+                " AND event_type IN ('space_page_deleted', 'space_routed')"
+                " AND created_at >= ?",
+                (c["instance_id"], t0),
+            )
+            lost += cur.rowcount
+            con.commit()
+        finally:
+            con.close()
+    if not _rows("c", "SELECT 1 FROM space_pages WHERE id=? AND deleted_at IS NULL", (old_id,)):
+        raise SystemExit("page-concurrent-edit: offline c no longer holds the page?")
+    print(f"  c offline missed b's delete ({lost} queued envelope(s) dropped)")
+    new_pid = _spawn("c", c["port"])
+    state["instances"]["c"]["pid"] = new_pid
+    _save(state)
+    _wait_ready(c["port"])
+    print(f"  c respawned: pid={new_pid}")
+    _poll(
+        "c to tombstone the page from the host's pages_deleted stream",
+        lambda: _tombstoned("c", old_id),
+        timeout=240.0,
+    )
+    print("  c caught up by sync: the page is a blank tombstone on c ✓")
+    st, body = _http("b", "POST", f"/api/spaces/{space_id}/sync")
+    if st != 202:
+        raise SystemExit(f"page-concurrent-edit: sync now on b answered {st} {body!r}")
+    time.sleep(10.0)
+    for label in houses:
+        if _listed(label, old_id) or not _tombstoned(label, old_id):
+            raise SystemExit(
+                f"page-concurrent-edit: the deleted page came back on {label}"
+            )
+    print("  no household resurrected the deleted page ✓")
     state["page_concurrent_edit_space_id"] = space_id
     _save(state)
     print("page-concurrent-edit: ok")
@@ -11440,7 +11526,9 @@ def main() -> None:
         # hosted by b, a and c propose concurrent edits while b appends — all
         # three end on one seq and body; same-paragraph edits leave the
         # identical conflict everywhere (edits still allowed); a resolves by
-        # side and everyone converges.
+        # side and everyone converges. Then c misses a page delete while
+        # offline and heals from the host's tombstones without bringing
+        # the page back anywhere (migration 0073).
         cmd_page_concurrent_edit()
         # ``admin-revoke-rotation`` (v_44): a demotes delegated admin b; a
         # rotates the space authority key, c and b re-pin from the owner's
