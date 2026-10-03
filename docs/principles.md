@@ -137,8 +137,12 @@ space-authority signature sealed inside the opaque payload; the fan-out
 frame to subscribers is identity-free too. The relaying household's
 identity is not **required, stored, logged or forwarded**.
 
-There is **no identified fallback**: a household never sends
-`from_instance` or a household signature to a GFS. It relays only to a GFS
+There is **no identified fallback on the relay**: a household never sends
+`from_instance` or a household signature on `POST /gfs/publish`, and the
+publish rides a separate cookie-less HTTP session so no load-balancer cookie
+from its authenticated GFS calls links the two. (Those other calls are
+identified by design and still are: pairing, the GFS WebSocket, appeals,
+signaling-node requests, signed subscribe/unsubscribe.) It relays only to a GFS
 whose `GET /gfs/info` capability block proves `anonymous_publish` under the
 GFS identity key the household pinned at pair time (the answer **ratchets** —
 a capability cannot be un-advertised mid-life — and a public GFS URL must be

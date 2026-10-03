@@ -6,11 +6,13 @@ import logging
 import tempfile
 from pathlib import Path
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome._version import __version__
+from socialhome.app_keys import gfs_connection_service_key, http_session_key
 from socialhome.app import (
     MAP_TILE_USER_AGENT,
     _build_link_previews,
@@ -420,3 +422,25 @@ def test_build_link_previews_wires_the_guarded_fetcher(tmp_path):
     assert isinstance(svc._fetcher, OutboundFetcher)
     assert svc._preferences is prefs
     assert svc._media_dir == tmp_path / "media"
+
+
+async def test_gfs_publishes_ride_a_cookie_less_session(tmp_dir):
+    """``/gfs/publish`` and its retries use their own session with no cookie
+    jar, so a sticky load-balancer cookie set on the household's
+    authenticated GFS calls can never link an anonymous publish back to it."""
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)) as tc:
+        await tc.get("/healthz")
+        publish = app[gfs_connection_service_key].publish_client()
+        assert publish is not None
+        assert publish is not app[http_session_key]
+        assert isinstance(publish.cookie_jar, aiohttp.DummyCookieJar)
+        assert publish.closed is False
+    assert publish.closed is True

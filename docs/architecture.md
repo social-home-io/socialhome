@@ -434,9 +434,13 @@ right after its broadcast, and a re-read would lose the very event that tells
 the member. A re-send that fails for a reason waiting cannot fix
 (`not_confirmed`) or raises costs only that item. Concurrent broadcasts that
 miss together join the same queue — one queue and one drain task per target,
-ever. Bounds: 64 queued sends per target and 256 deferred targets — past
-either, the broadcast reports `mesh_retry_queue_full` as a terminal miss,
-logged once per target. `FederationService.stop()` cancels pending queues and
+ever. Bounds: 64 queued sends per target, 256 deferred targets and a 16 MiB
+byte budget across all queues (serialized payload size); a single payload
+over 256 KiB is never deferred (WARNING). Past any of them the broadcast
+reports `mesh_retry_queue_full` as a terminal miss, logged once per target.
+A wake raised by the drain's OWN re-send (its re-discovery caches a route and
+fires `on_route_learned` for the same target) is ignored — the wake event is
+cleared after each pass — so the backoff is never skipped by itself. `FederationService.stop()` cancels pending queues and
 refuses new ones; app cleanup runs it before the routed handler and the
 transport stop. What the budget does not bridge is healed by §25.6 sync.
 
@@ -465,7 +469,14 @@ publish has neither — so carrying it there, or in a new table, would be a
 migration for a payload that is already authority-signed public ciphertext,
 deduped by post id on the subscriber side, and only worth retrying for
 minutes. A restart loses the queue (logged), which costs no more than before
-the queue existed. Bounded at 256 pending publishes; the loop follows the
+the queue existed. Bounded at 256 pending publishes, at most 64 per
+connection so one dead GFS cannot crowd out the others. A GFS already known
+to lack the capability stays "unsupported" even if a later `/gfs/info`
+refresh fails; only a connection with no answer at all is "unknown". The
+publish and its retries ride a **separate cookie-less `aiohttp` session**
+(`DummyCookieJar`), so a sticky load-balancer cookie from the household's
+authenticated GFS calls can never be replayed on an anonymous publish. The
+loop follows the
 `_stop: asyncio.Event` scheduler pattern and is started / stopped with the
 app.
 

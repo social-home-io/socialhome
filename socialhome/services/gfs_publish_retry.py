@@ -63,6 +63,10 @@ GFS_PUBLISH_MAX_RETRY_AFTER_S: float = 900.0
 #: publish is lost as before (logged once until the queue drains).
 GFS_PUBLISH_RETRY_MAX_PENDING: int = 256
 
+#: Ceiling on queued publishes for ONE connection, inside the global one, so
+#: a single dead GFS cannot crowd every other connection out of the queue.
+GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN: int = 64
+
 
 @dataclass(slots=True, frozen=True)
 class GfsPublish:
@@ -154,7 +158,15 @@ PublishSender = Callable[[str, GfsPublish], Awaitable[PublishOutcome]]
 class GfsPublishRetryQueue:
     """Per-connection FIFO of failed GFS publishes, retried with backoff."""
 
-    __slots__ = ("_send", "_queues", "_task", "_stop", "_wake", "_full_logged")
+    __slots__ = (
+        "_send",
+        "_queues",
+        "_task",
+        "_stop",
+        "_wake",
+        "_full_logged",
+        "_conn_full_logged",
+    )
 
     def __init__(self, send: PublishSender) -> None:
         self._send = send
@@ -163,6 +175,7 @@ class GfsPublishRetryQueue:
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._full_logged = False
+        self._conn_full_logged: set[str] = set()
 
     def pending(self, conn_id: str) -> bool:
         """Whether ``conn_id`` has publishes waiting (new ones queue behind)."""
@@ -192,6 +205,19 @@ class GfsPublishRetryQueue:
                     "GFS publish retry queue is full (%d) — further failed"
                     " publishes are lost until it drains",
                     GFS_PUBLISH_RETRY_MAX_PENDING,
+                )
+            return False
+        existing = self._queues.get(conn_id)
+        if existing is not None and len(existing.items) >= (
+            GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN
+        ):
+            if conn_id not in self._conn_full_logged:
+                self._conn_full_logged.add(conn_id)
+                log.warning(
+                    "GFS publish retry queue for %s is full (%d) — further"
+                    " failed publishes to it are lost until it drains",
+                    conn_id,
+                    GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN,
                 )
             return False
         queued = GfsPublish(
@@ -236,6 +262,7 @@ class GfsPublishRetryQueue:
             )
         self._queues.clear()
         self._full_logged = False
+        self._conn_full_logged.clear()
 
     @staticmethod
     def _due(retries_done: int, retry_after_s: float | None) -> float:
@@ -313,5 +340,6 @@ class GfsPublishRetryQueue:
             return
         if not conn.items and self._queues.get(conn_id) is conn:
             del self._queues[conn_id]
+            self._conn_full_logged.discard(conn_id)
             if not self._queues:
                 self._full_logged = False

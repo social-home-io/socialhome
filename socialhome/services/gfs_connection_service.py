@@ -189,6 +189,7 @@ class GfsConnectionService:
         "_authority_rotation",
         "_rotation_warned",
         "_publish_retry",
+        "_publish_client",
     )
 
     def __init__(
@@ -196,9 +197,17 @@ class GfsConnectionService:
         repo: AbstractGfsConnectionRepo,
         *,
         http_client: aiohttp.ClientSession | None = None,
+        publish_client: aiohttp.ClientSession | None = None,
     ) -> None:
         self._repo = repo
         self._http_client = http_client
+        # The session ``POST /gfs/publish`` (and its retries) rides — a
+        # SEPARATE, cookie-less one (``aiohttp.DummyCookieJar``), so a sticky
+        # load-balancer cookie the GFS set on this household's authenticated
+        # calls (pairing, WS, signed queries) can never be replayed on an
+        # anonymous publish and link it back. No fallback to the shared
+        # session: without it, nothing is published.
+        self._publish_client = publish_client
         # Attached lazily after construction (the space repo + identity
         # aren't available at the same wiring step as the GFS-connection
         # repo). When unset, ``publish_space`` falls back to a metadata-
@@ -295,6 +304,15 @@ class GfsConnectionService:
         """
         if self._http_client is None:
             self._http_client = session
+
+    def attach_publish_session(self, session: aiohttp.ClientSession) -> None:
+        """Provide the cookie-less publish session (``app._on_startup``)."""
+        if self._publish_client is None:
+            self._publish_client = session
+
+    def publish_client(self) -> aiohttp.ClientSession | None:
+        """The cookie-less session ``/gfs/publish`` rides (app cleanup closes it)."""
+        return self._publish_client
 
     def client(self) -> aiohttp.ClientSession:
         """The shared session, for the sibling services that relay through a
@@ -1409,10 +1427,14 @@ class GfsConnectionService:
         cannot overtake. Returns the number of GFS instances the event was
         accepted by on this first attempt.
         """
-        if self._http_client is None or not self._own_signing_key:
-            # No publish context (``attach_publish_context``) — a household
-            # with no identity wired has nothing to relay. Nothing is signed
-            # with it here.
+        if (
+            self._http_client is None
+            or self._publish_client is None
+            or not self._own_signing_key
+        ):
+            # No publish context (``attach_publish_context`` / the cookie-less
+            # publish session) — nothing to relay with. Nothing is signed
+            # with the identity here.
             log.warning(
                 "publish_space_event: publish context not wired — dropping"
                 " relay for space %s",
@@ -1458,7 +1480,10 @@ class GfsConnectionService:
         """
         if await self._anonymous_publish_supported(conn):
             return "anonymous"
-        if conn.id in self._info_failed_at:
+        # "unknown" only while there is no answer at all: a GFS already seen
+        # without the proof stays "unsupported" even if a later refresh
+        # blipped, or its publishes would wait in the queue forever.
+        if self._anon_publish.get(conn.id) is None and conn.id in self._info_failed_at:
             return "unknown"
         return "unsupported"
 
@@ -1466,10 +1491,10 @@ class GfsConnectionService:
         self, conn: GfsConnection, body: dict, *, space_id: str
     ) -> PublishOutcome:
         """One ``POST /gfs/publish`` of ``body`` to ``conn``, classified."""
-        assert self._http_client is not None
+        assert self._publish_client is not None
         url = f"{conn.inbox_url}/gfs/publish"
         try:
-            async with self._http_client.post(
+            async with self._publish_client.post(
                 url,
                 allow_redirects=False,
                 json=body,
@@ -1523,7 +1548,7 @@ class GfsConnectionService:
         ``/gfs/info`` is unreachable the item waits; a GFS that answers
         without the proof has it dropped.
         """
-        if self._http_client is None:
+        if self._http_client is None or self._publish_client is None:
             return PublishOutcome.permanent()
         conn = next(
             (

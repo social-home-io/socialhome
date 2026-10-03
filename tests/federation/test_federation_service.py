@@ -9,6 +9,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -4629,3 +4630,152 @@ async def test_a_member_coming_back_online_drains_its_deferred_queue(monkeypatch
     await _drain_deferred(svc)
 
     assert [s[1] for s in routed.sent] == ["space_post_created"]
+
+
+# ─── Review regressions: self-wake, byte budget ──────────────────────────
+
+
+class _FloodingRouteService:
+    """Every fresh discovery floods, caches a route and fires the
+    route-learned listeners — what ``RouteDiscoveryService._cache_route``
+    does. ``invalidate`` drops the cache, as after a failed routed send."""
+
+    def __init__(self) -> None:
+        self.listeners: list = []
+        self.cached = False
+        self.floods = 0
+
+    def add_route_learned_listener(self, listener) -> None:
+        self.listeners.append(listener)
+
+    def cooldown_remaining(self, target: str) -> float:
+        return 0.0
+
+    async def discover_route(self, target: str):
+        if not self.cached:
+            self.floods += 1
+            self.cached = True
+            for listener in self.listeners:
+                listener(target)
+        return ["self", "relay", target], "eph"
+
+    async def invalidate(self, target: str) -> None:
+        self.cached = False
+
+    def cached_target_identity_pk(self, target: str) -> str:
+        return "aa" * 32
+
+
+class _AlwaysFailingRoutedHandler:
+    async def send_routed(self, **_kw) -> None:
+        raise RuntimeError("relay gone")
+
+
+@pytest.mark.asyncio
+async def test_a_drain_does_not_wake_itself_and_burn_its_backoff(monkeypatch):
+    """A ``routed_send_failed`` re-send re-discovers, and the route it caches
+    fires ``on_route_learned`` for the very target being drained. That wake
+    must not cut the drain's own next wait short — the budget takes the full
+    backoff, with one discovery round per re-send, not a flood per tick."""
+    backoff = (0.0, 0.15, 0.15, 0.15)
+    monkeypatch.setattr(federation_service_mod, "MESH_DEFERRED_SEND_MARGIN_S", 0.0)
+    monkeypatch.setattr(
+        federation_service_mod, "MESH_DEFERRED_RETRY_BACKOFF_S", backoff
+    )
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo)
+    fed_repo.add_space_member("s", "peer")
+    route = _FloodingRouteService()
+    svc._route_service = route
+    svc._routed_handler = _AlwaysFailingRoutedHandler()
+    route.add_route_learned_listener(svc.on_route_learned)
+
+    started = time.monotonic()
+    result = await svc.broadcast_to_space_members(
+        "s",
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "s", "post_id": "p"},
+    )
+    assert result.results[0].error == DELIVERY_ERROR_MESH_DEFERRED
+    for _ in range(300):
+        if not svc._deferred_mesh_tasks:
+            break
+        await asyncio.sleep(0.01)
+    elapsed = time.monotonic() - started
+    await svc.stop()
+
+    assert not svc._deferred_mesh_tasks
+    assert elapsed >= sum(backoff)
+    # The first send floods twice (cold cache, then the forced re-discovery
+    # after its failure); every re-send reuses that cache and floods once.
+    assert route.floods == 2 + len(backoff)
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_payload_is_not_deferred(caplog, monkeypatch, no_margin):
+    monkeypatch.setattr(federation_service_mod, "MAX_DEFERRED_MESH_PAYLOAD_BYTES", 64)
+    svc, space_id, patcher, _calls = _broadcast_svc_with_scripted_results(
+        {"mesh-only-peer": [_no_route()]}
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        result = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "blob": "x" * 200},
+        )
+        await svc.stop()
+    assert [r.error for r in result.terminal_failures] == [
+        DELIVERY_ERROR_MESH_DEFER_FULL
+    ]
+    assert svc._deferred_mesh_bytes == 0
+    assert "too large to defer" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_byte_budget_is_a_terminal_miss(caplog, monkeypatch):
+    """Past the total byte budget nothing more is queued (WARNING, once per
+    target); draining or stopping returns the bytes."""
+    monkeypatch.setattr(federation_service_mod, "MAX_DEFERRED_MESH_BYTES", 150)
+    svc, space_id, patcher, _calls = _broadcast_svc_with_scripted_results(
+        {"mesh-only-peer": [_cooldown(after=30.0)]}
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        results = [
+            await svc.broadcast_to_space_members(
+                space_id=space_id,
+                event_type=FederationEventType.SPACE_POST_CREATED,
+                payload={"space_id": space_id, "post_id": f"p{i}", "pad": "y" * 40},
+            )
+            for i in range(3)
+        ]
+        assert 0 < svc._deferred_mesh_bytes <= 150
+        await svc.stop()
+    assert results[0].terminal_failures == ()
+    assert [r.error for r in results[-1].terminal_failures] == [
+        DELIVERY_ERROR_MESH_DEFER_FULL
+    ]
+    assert "byte budget" in caplog.text
+    assert svc._deferred_mesh_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_delivered_and_given_up_items_return_their_bytes(no_margin):
+    budget = len(federation_service_mod.MESH_DEFERRED_RETRY_BACKOFF_S)
+    svc, space_id, patcher, _calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [_no_route()] * (1 + budget),
+            "other-peer": [
+                _no_route("other-peer"),
+                DeliveryResult(instance_id="other-peer", ok=True),
+            ],
+        }
+    )
+    with patcher:
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+        assert svc._deferred_mesh_bytes > 0
+        await _drain_deferred(svc)
+    assert svc._deferred_mesh_bytes == 0

@@ -23,6 +23,7 @@ import logging
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -178,6 +179,18 @@ MAX_DEFERRED_MESH_TARGETS: int = 256
 #: without bound.
 MAX_DEFERRED_MESH_SENDS_PER_TARGET: int = 64
 
+#: Byte budget across every deferred mesh queue (serialized payload size).
+#: The item caps above bound COUNT; this bounds MEMORY, so a busy space of
+#: large payloads (covers, media metadata) plus dead routes cannot pin tens
+#: of megabytes. Past it a broadcast is a terminal miss, logged once per
+#: target at WARNING.
+MAX_DEFERRED_MESH_BYTES: int = 16 * 1024 * 1024
+
+#: A single payload larger than this is never deferred (WARNING): bulky
+#: content has its own recovery (§25.6 sync, media re-fetch) and one such
+#: item should not eat the shared budget.
+MAX_DEFERRED_MESH_PAYLOAD_BYTES: int = 256 * 1024
+
 #: Broadcast events whose own effect takes the recipient out of
 #: ``space_instances`` right after the broadcast: ``dissolve_space`` purges
 #: every row once its ``SPACE_DISSOLVED`` fan-out returns, and a leave whose
@@ -200,6 +213,11 @@ DEFERRED_SEND_SNAPSHOT_EVENTS: frozenset[FederationEventType] = frozenset(
 )
 
 
+def _deferred_payload_size(payload: dict) -> int:
+    """Serialized size of a broadcast payload, for the deferral byte budget."""
+    return len(_orjson.dumps(payload, default=str))
+
+
 @dataclass(slots=True, frozen=True)
 class _DeferredMeshSend:
     """One broadcast waiting in a mesh target's deferred FIFO. Process-local
@@ -211,6 +229,8 @@ class _DeferredMeshSend:
     payload: dict
     #: Deliver without re-reading membership (:data:`DEFERRED_SEND_SNAPSHOT_EVENTS`).
     snapshot: bool
+    #: Serialized payload size, charged to :data:`MAX_DEFERRED_MESH_BYTES`.
+    size: int
 
 
 class FederationService:
@@ -285,6 +305,7 @@ class FederationService:
         "_deferred_mesh_queues",
         "_deferred_mesh_tasks",
         "_deferred_mesh_wake",
+        "_deferred_mesh_bytes",
         "_deferred_mesh_cap_logged",
         "_stopping",
         "_archived_write_listeners",
@@ -381,6 +402,8 @@ class FederationService:
         #: Per pending target: set to cut its drain task's wait short when a
         #: route to it is learned (:meth:`on_route_learned`).
         self._deferred_mesh_wake: dict[str, asyncio.Event] = {}
+        #: Bytes held by every deferred queue (:data:`MAX_DEFERRED_MESH_BYTES`).
+        self._deferred_mesh_bytes = 0
         #: Targets whose cap overflow was already logged (reset on drain).
         self._deferred_mesh_cap_logged: set[str] = set()
         #: Set by :meth:`stop`; no new deferred work is armed after it.
@@ -2229,6 +2252,12 @@ class FederationService:
         if len(self._deferred_mesh_queues) >= MAX_DEFERRED_MESH_TARGETS:
             self._log_deferred_cap(target, "the deferred-target ceiling is full")
             return result
+        if self._deferral_refused(
+            target, space_id, event_type, _deferred_payload_size(payload)
+        ):
+            return DeliveryResult(
+                instance_id=target, ok=False, error=DELIVERY_ERROR_MESH_DEFER_FULL
+            )
         delay_s = self._mesh_retry_delay_s(result, retries_done=0)
         queue: deque[_DeferredMeshSend] = deque()
         wake = asyncio.Event()
@@ -2263,23 +2292,63 @@ class FederationService:
     ) -> DeliveryResult:
         """Append a broadcast to ``target``'s pending FIFO (which must exist)."""
         queue = self._deferred_mesh_queues[target]
-        if self._stopping or len(queue) >= MAX_DEFERRED_MESH_SENDS_PER_TARGET:
-            if not self._stopping:
-                self._log_deferred_cap(target, "its deferred queue is full")
-            return DeliveryResult(
-                instance_id=target, ok=False, error=DELIVERY_ERROR_MESH_DEFER_FULL
-            )
+        refused = DeliveryResult(
+            instance_id=target, ok=False, error=DELIVERY_ERROR_MESH_DEFER_FULL
+        )
+        if self._stopping:
+            return refused
+        if len(queue) >= MAX_DEFERRED_MESH_SENDS_PER_TARGET:
+            self._log_deferred_cap(target, "its deferred queue is full")
+            return refused
+        size = _deferred_payload_size(payload)
+        if self._deferral_refused(target, space_id, event_type, size):
+            return refused
         queue.append(
             _DeferredMeshSend(
                 space_id=space_id,
                 event_type=event_type,
                 payload=copy.deepcopy(payload),
                 snapshot=event_type in DEFERRED_SEND_SNAPSHOT_EVENTS,
+                size=size,
             )
         )
+        self._deferred_mesh_bytes += size
         return DeliveryResult(
             instance_id=target, ok=False, error=DELIVERY_ERROR_MESH_DEFERRED
         )
+
+    def _deferral_refused(
+        self,
+        target: str,
+        space_id: str,
+        event_type: FederationEventType,
+        size: int,
+    ) -> bool:
+        """``True`` (and a WARNING) when a ``size``-byte payload cannot be
+        deferred: larger than :data:`MAX_DEFERRED_MESH_PAYLOAD_BYTES`, or past
+        the shared :data:`MAX_DEFERRED_MESH_BYTES` budget."""
+        if size > MAX_DEFERRED_MESH_PAYLOAD_BYTES:
+            log.warning(
+                "broadcast_to_space_members: space=%s event=%s — payload of %d"
+                " bytes to %s is too large to defer (cap %d); not retried",
+                space_id,
+                event_type.value,
+                size,
+                target,
+                MAX_DEFERRED_MESH_PAYLOAD_BYTES,
+            )
+            return True
+        if self._deferred_mesh_bytes + size > MAX_DEFERRED_MESH_BYTES:
+            self._log_deferred_cap(
+                target,
+                f"the deferred byte budget ({MAX_DEFERRED_MESH_BYTES} bytes) is full",
+            )
+            return True
+        return False
+
+    def _release_deferred(self, items: Iterable[_DeferredMeshSend]) -> None:
+        for item in items:
+            self._deferred_mesh_bytes = max(0, self._deferred_mesh_bytes - item.size)
 
     def _log_deferred_cap(self, target: str, why: str) -> None:
         if target in self._deferred_mesh_cap_logged:
@@ -2359,14 +2428,19 @@ class FederationService:
                     await asyncio.wait_for(wake.wait(), timeout=delay_s)
                 except TimeoutError:
                     pass
-                wake.clear()
                 miss: DeliveryResult | None = None
                 while queue:
                     miss = await self._deferred_send_one(target, queue[0])
                     if miss is not None:
                         break
-                    queue.popleft()
+                    self._release_deferred((queue.popleft(),))
                     retries_done = 0  # progress: a fresh budget for the rest
+                # Cleared AFTER the pass, not before: the pass's own sends
+                # re-discover the route, and a route they cache fires
+                # ``on_route_learned`` for this very target. Honouring that
+                # wake would skip the backoff and turn the budget into a
+                # flood per tick. A wake that arrives while we wait is kept.
+                wake.clear()
                 if not queue:
                     return
                 assert miss is not None
@@ -2382,6 +2456,7 @@ class FederationService:
                         miss.error,
                         ", ".join(f"{q.event_type.value}@{q.space_id}" for q in queue),
                     )
+                    self._release_deferred(queue)
                     queue.clear()
                     return
                 delay_s = self._mesh_retry_delay_s(miss, retries_done=retries_done)
@@ -2400,6 +2475,7 @@ class FederationService:
             # broadcast cannot slip an item into a queue we are discarding.
             # Only the task that owns the slot clears it — never a stale one.
             if self._deferred_mesh_tasks.get(target) is asyncio.current_task():
+                self._release_deferred(queue)
                 self._deferred_mesh_queues.pop(target, None)
                 self._deferred_mesh_tasks.pop(target, None)
                 self._deferred_mesh_wake.pop(target, None)
@@ -2494,6 +2570,7 @@ class FederationService:
         self._deferred_mesh_queues.clear()
         self._deferred_mesh_tasks.clear()
         self._deferred_mesh_wake.clear()
+        self._deferred_mesh_bytes = 0
         self._deferred_mesh_cap_logged.clear()
 
     # ─── Inbound ──────────────────────────────────────────────────────────

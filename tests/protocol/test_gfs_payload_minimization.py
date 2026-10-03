@@ -433,7 +433,7 @@ async def _publish_anonymously(tmp_dir, payload: dict, event_type: str) -> dict:
         )
         await repo.publish_space(SPACE_ID, "gfs-1")
         session = _RecordingSession()
-        svc = GfsConnectionService(repo, http_client=session)
+        svc = GfsConnectionService(repo, http_client=session, publish_client=session)
         svc.attach_publish_context(
             space_repo=None,
             own_instance_id=PUBLISHER_INSTANCE,
@@ -534,7 +534,7 @@ async def test_no_publish_body_ever_carries_identity(
         )
         await repo.publish_space(SPACE_ID, "gfs-1")
         session = _CapabilitySession(state)
-        svc = GfsConnectionService(repo, http_client=session)
+        svc = GfsConnectionService(repo, http_client=session, publish_client=session)
         svc.attach_publish_context(
             space_repo=None,
             own_instance_id=PUBLISHER_INSTANCE,

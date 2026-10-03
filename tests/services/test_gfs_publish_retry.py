@@ -257,3 +257,17 @@ async def test_start_is_idempotent_and_restartable(fast):
     finally:
         await queue.stop()
     assert len(send.calls) == 1
+
+
+async def test_one_gfs_cannot_crowd_out_the_others(monkeypatch, caplog):
+    """A per-connection cap inside the global one: a dead GFS fills its own
+    share, and another GFS can still queue."""
+    monkeypatch.setattr(mod, "GFS_PUBLISH_RETRY_MAX_PENDING", 10)
+    monkeypatch.setattr(mod, "GFS_PUBLISH_RETRY_MAX_PENDING_PER_CONN", 2)
+    queue = GfsPublishRetryQueue(_ScriptedSend([]))
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        assert queue.enqueue("dead", _item(1))
+        assert queue.enqueue("dead", _item(2))
+        assert not queue.enqueue("dead", _item(3))
+        assert queue.enqueue("alive", _item(4))
+    assert "retry queue for dead is full" in caplog.text

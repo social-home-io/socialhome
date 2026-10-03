@@ -2729,6 +2729,15 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         app[K.http_session_key] = http_session
         gfs_connection_service.attach_session(http_session)
+        # ``POST /gfs/publish`` rides its own cookie-less session, so no
+        # cookie from the household's authenticated GFS calls can link an
+        # anonymous publish back to it. Closed in _on_cleanup.
+        gfs_connection_service.attach_publish_session(
+            aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30),
+                cookie_jar=aiohttp.DummyCookieJar(),
+            )
+        )
         gfs_space_mirror.attach_session(http_session)
         public_space_discovery.attach_session(http_session)
         map_tile_service.attach_session(http_session)
@@ -3844,8 +3853,11 @@ def create_app(config: Config | None = None) -> web.Application:
             await stale_call_scheduler.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
-        # Before the shared aiohttp client closes: a retry rides it.
+        # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()
+        gfs_publish_session = gfs_connection_service.publish_client()
+        if gfs_publish_session is not None:
+            await gfs_publish_session.close()
         # Wind down any in-flight public-viewer sessions before
         # closing the shared aiohttp client below.
         await highlight_signaling_handler.stop()

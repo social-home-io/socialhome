@@ -610,8 +610,10 @@ space is still published there and that the GFS has proved
 `anonymous_publish`; a GFS that does not support it gets no retry at all
 (it never got the first attempt either). A retry whose first attempt did land
 is a no-op on the GFS (the 5-minute replay dedupe) and on subscribers (the
-`post_id` dedupe). The queue is in memory and bounded
-(`services/gfs_publish_retry.py`); see
+`post_id` dedupe). The publish and its retries ride a separate cookie-less HTTP session
+(`aiohttp.DummyCookieJar`), so a sticky load-balancer cookie from the
+household's authenticated GFS calls cannot link them. The queue is in
+memory and bounded (`services/gfs_publish_retry.py`); see
 [`architecture.md`](../architecture.md#outbox-and-retries).
 
 The HTTPS-inbox fallback for relayed `space_post_public` events is a

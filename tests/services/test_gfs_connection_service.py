@@ -205,7 +205,7 @@ async def _publishable_svc(env, session, gfs_id: str, *, space_id: str):
         )
     )
     kp = generate_identity_keypair()
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=space_repo,
         own_instance_id="alpha.home",
@@ -223,7 +223,7 @@ def _signing_svc(repo, session) -> tuple[GfsConnectionService, bytes]:
     public key so a test can verify the signature it produced.
     """
     kp = generate_identity_keypair()
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -267,7 +267,7 @@ async def test_refresh_connection_metadata_updates_changed_name(env):
     _, repo = env
     await repo.save(_make_conn("gfs-1", status="active", inbox_url="https://gfs.test"))
     session = _StubSession(status=200, body={"server_name": "New Name"})
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     await svc.refresh_connection_metadata("gfs-1")
     got = await repo.get("gfs-1")
     assert got is not None
@@ -282,7 +282,7 @@ async def test_refresh_connection_metadata_noop_when_unchanged(env):
     await repo.save(_make_conn("gfs-1", status="active", inbox_url="https://gfs.test"))
     # The fake GFS returns the SAME name the row already holds.
     session = _StubSession(status=200, body={"server_name": "GFS gfs-1"})
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     await svc.refresh_connection_metadata("gfs-1")
     got = await repo.get("gfs-1")
     assert got is not None
@@ -309,7 +309,7 @@ async def test_refresh_connection_metadata_swallows_transport_error(env):
 async def test_refresh_connection_metadata_noop_for_unknown_gfs(env):
     _, repo = env
     session = _StubSession(status=200, body={"server_name": "Whatever"})
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     # No connection row → returns without touching the network.
     await svc.refresh_connection_metadata("nope")
     assert session.calls == []
@@ -319,7 +319,7 @@ async def test_refresh_connection_metadata_ignores_missing_server_name(env):
     _, repo = env
     await repo.save(_make_conn("gfs-1", status="active", inbox_url="https://gfs.test"))
     session = _StubSession(status=200, body={})
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     await svc.refresh_connection_metadata("gfs-1")
     got = await repo.get("gfs-1")
     assert got is not None
@@ -333,7 +333,7 @@ async def test_report_fraud_signs_and_posts(env):
     _, repo = env
     await repo.save(_make_conn("gfs-1", status="active", inbox_url="https://gfs.test"))
     session = _StubSession(status=200, body={"status": "recorded"})
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     ok = await svc.report_fraud(
         "gfs-1",
         target_type="space",
@@ -356,7 +356,7 @@ async def test_report_fraud_returns_false_on_http_error(env):
         status=500,
         body={},
     )
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     ok = await svc.report_fraud(
         "gfs-2",
         target_type="instance",
@@ -373,7 +373,7 @@ async def test_report_fraud_returns_false_on_http_error(env):
 async def test_report_fraud_returns_false_for_unknown_gfs(env):
     _, repo = env
     session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     ok = await svc.report_fraud(
         "nope",
         target_type="space",
@@ -679,7 +679,7 @@ async def test_pair_success(env):
             "POST": (200, {"status": "registered", "instance_id": "alpha.home"}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     conn = await svc.pair(
         {"gfs_url": "https://gfs.example.com", "token": "tok-123"},
         **_OWN_PAIR_KW,
@@ -717,7 +717,7 @@ async def test_pair_ships_keywrap_pubkey_and_kem_suite(env):
             "POST": (200, {"status": "registered"}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     await svc.pair(
         {"gfs_url": "https://gfs.example.com", "token": "tok"},
         **_OWN_PAIR_KW,
@@ -748,7 +748,7 @@ async def test_pair_omits_keywrap_when_unavailable(env):
             "POST": (200, {"status": "registered"}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     await svc.pair(
         {"gfs_url": "https://gfs", "token": "tok"},
         **_OWN_PAIR_KW,
@@ -778,7 +778,7 @@ async def test_pair_pending_status(env):
             "POST": (200, {"status": "pending"}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     conn = await svc.pair(
         {"gfs_url": "https://gfs", "token": "tok"},
         **_OWN_PAIR_KW,
@@ -824,7 +824,7 @@ async def test_pair_rejects_a_public_gfs_url_without_tls(env, gfs_url):
     before a single byte is sent — rather than pinning a downgradeable peer."""
     _, repo = env
     session = _StubSession(method_responses={"GET": (200, {})})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError, match="https"):
         await svc.pair({"gfs_url": gfs_url, "token": "tok"}, **_OWN_PAIR_KW)
     # Nothing left the household — the URL never reached the network.
@@ -859,7 +859,7 @@ async def test_pair_allows_plain_http_on_loopback_or_a_private_network(env, gfs_
             "POST": (200, {"status": "registered"}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     conn = await svc.pair({"gfs_url": gfs_url, "token": "tok"}, **_OWN_PAIR_KW)
     assert conn.gfs_instance_id == "lan-gfs"
 
@@ -879,7 +879,7 @@ async def test_pair_rejects_a_malformed_gfs_url(env, gfs_url):
     credentials in the URL, a host is required, no control characters."""
     _, repo = env
     session = _StubSession(method_responses={"GET": (200, {})})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError):
         await svc.pair({"gfs_url": gfs_url, "token": "tok"}, **_OWN_PAIR_KW)
     assert session.calls == []
@@ -892,7 +892,7 @@ async def test_pair_rejects_a_public_plain_http_own_inbox_url(env):
     surface from the other side."""
     _, repo = env
     session = _StubSession(method_responses={"GET": (200, {})})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError, match="https"):
         await svc.pair(
             {"gfs_url": "https://gfs.example.com", "token": "tok"},
@@ -909,7 +909,7 @@ async def test_pair_gfs_info_unreachable(env):
     session = _StubSession(
         method_responses={"GET": (404, {})},
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError, match="HTTP 404"):
         await svc.pair(
             {"gfs_url": "https://gfs.example.com", "token": "tok"},
@@ -933,7 +933,7 @@ async def test_pair_register_rejects(env):
             "POST": (401, {}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError, match="HTTP 401"):
         await svc.pair(
             {"gfs_url": "https://gfs.example.com", "token": "stale-tok"},
@@ -951,7 +951,7 @@ async def test_pair_no_public_key_in_info(env):
             "GET": (200, {"gfs_instance_id": "remote", "public_key": ""}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError, match="gfs_instance_id and public_key"):
         await svc.pair(
             {"gfs_url": "https://gfs.example.com", "token": "tok"},
@@ -1035,7 +1035,7 @@ async def test_request_signaling_node_returns_url(env):
         status=200,
         body={"signaling_node": "https://b.gfs.test", "session_id": "s1"},
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     result = await svc.request_signaling_node(
         "s1",
         from_instance="caller.home",
@@ -1053,7 +1053,7 @@ async def test_request_signaling_node_503_returns_none(env):
     await repo.save(_make_conn("gfs-1"))
     kp = generate_identity_keypair()
     session = _StubSession(status=503, body={"reason": "node_capacity"})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     result = await svc.request_signaling_node(
         "s1",
         from_instance="caller.home",
@@ -1068,7 +1068,7 @@ async def test_request_signaling_node_null_returns_none(env):
     await repo.save(_make_conn("gfs-1"))
     kp = generate_identity_keypair()
     session = _StubSession(status=200, body={"signaling_node": None})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     result = await svc.request_signaling_node(
         "s1",
         from_instance="caller.home",
@@ -1095,7 +1095,7 @@ async def test_release_signaling_node_posts(env):
     await repo.save(_make_conn("gfs-1"))
     kp = generate_identity_keypair()
     session = _StubSession(status=200, body={"status": "released"})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     await svc.release_signaling_node(
         "s1",
         "https://b.gfs.test",
@@ -1112,7 +1112,7 @@ async def test_release_signaling_node_no_url_is_noop(env):
     await repo.save(_make_conn("gfs-1"))
     kp = generate_identity_keypair()
     session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     await svc.release_signaling_node(
         "s1",
         "",
@@ -1132,7 +1132,7 @@ async def test_publish_body_raises_when_context_unset(env):
     _, repo = env
     await repo.save(_make_conn("gfs-1", inbox_url="https://gfs.example"))
     session = _StubSession(method_responses={"POST": (200, {"status": "pending"})})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     # No attach_publish_context call → no signing key → must refuse.
     with pytest.raises(GfsConnectionError):
         await svc.publish_space("sp-bare", "gfs-1")
@@ -1173,7 +1173,7 @@ async def test_publish_body_carries_metadata_and_signature(env):
     session = _StubSession(
         method_responses={"POST": (200, {"status": "registered"})},
     )
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=space_repo,
         own_instance_id="alpha.home",
@@ -1231,7 +1231,7 @@ async def test_publish_body_carries_allow_subscribers(env):
     )
     kp = generate_identity_keypair()
     session = _StubSession(method_responses={"POST": (200, {"status": "active"})})
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=space_repo,
         own_instance_id="alpha.home",
@@ -1276,7 +1276,7 @@ async def test_publish_body_carries_invite_only_join_mode(env):
     )
     kp = generate_identity_keypair()
     session = _StubSession(method_responses={"POST": (200, {"status": "active"})})
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=space_repo,
         own_instance_id="alpha.home",
@@ -1320,7 +1320,7 @@ async def test_publish_body_carries_fresh_signed_ts(env):
     )
     kp = generate_identity_keypair()
     session = _StubSession(method_responses={"POST": (200, {"status": "active"})})
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=space_repo,
         own_instance_id="alpha.home",
@@ -1385,7 +1385,7 @@ async def test_publish_body_carries_brand_colors_and_image_data_uris(env):
 
     kp = generate_identity_keypair()
     session = _StubSession(method_responses={"POST": (200, {"status": "ok"})})
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=space_repo,
         own_instance_id="alpha.home",
@@ -1415,7 +1415,7 @@ async def test_update_display_name_signs_and_posts_to_each_gfs(env):
     await repo.save(_make_conn("g2", inbox_url="https://b.example"))
     kp = generate_identity_keypair()
     session = _StubSession(status=200, body={"status": "ok"})
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1451,7 +1451,7 @@ async def test_update_display_name_skips_404_old_gfs(env):
     await repo.save(_make_conn("g1", inbox_url="https://old.example"))
     kp = generate_identity_keypair()
     session = _StubSession(status=404)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1483,7 +1483,7 @@ async def test_update_display_name_skips_transport_errors(env):
             return _StubResp(200, {"status": "ok"})
 
     session = _MixedSession()
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1500,7 +1500,7 @@ async def test_update_display_name_no_context_returns_zero(env):
     _, repo = env
     await repo.save(_make_conn("g1", inbox_url="https://a.example"))
     session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     n = await svc.update_display_name_to_all("New Name")
     assert n == 0
     assert session.calls == []
@@ -1520,7 +1520,7 @@ async def test_push_display_name_signs_and_posts_to_one_gfs(env):
     await repo.save(_make_conn("g2", inbox_url="https://b.example"))
     kp = generate_identity_keypair()
     session = _StubSession(status=200, body={"status": "ok"})
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1556,7 +1556,7 @@ async def test_push_display_name_returns_false_on_http_error(env):
     await repo.save(_make_conn("g1", inbox_url="https://old.example"))
     kp = generate_identity_keypair()
     session = _StubSession(status=404)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1582,7 +1582,7 @@ async def test_push_display_name_returns_false_on_transport_error(env):
             raise aiohttp.ClientError("boom")
 
     session = _ErrSession()
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1598,7 +1598,7 @@ async def test_push_display_name_returns_false_for_unknown_gfs(env):
     _, repo = env
     kp = generate_identity_keypair()
     session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1615,7 +1615,7 @@ async def test_push_display_name_no_context_returns_false(env):
     _, repo = env
     await repo.save(_make_conn("g1", inbox_url="https://a.example"))
     session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
     ok = await svc.push_display_name("g1", "New Name")
     assert ok is False
     assert session.calls == []
@@ -1632,7 +1632,7 @@ async def test_publish_body_raises_when_space_missing(env):
     await conn_repo.save(_make_conn("gfs-3", inbox_url="https://gfs.example"))
     kp = generate_identity_keypair()
     session = _StubSession(method_responses={"POST": (200, {"status": "pending"})})
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=SqliteSpaceRepo(db),
         own_instance_id="alpha.home",
@@ -1653,7 +1653,7 @@ async def test_subscribe_to_gfs_space_signs_body(env):
     await repo.save(_make_conn("gfs-sub", inbox_url="https://gfs.example"))
     kp = generate_identity_keypair()
     session = _StubSession(method_responses={"POST": (200, {"status": "subscribed"})})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1724,7 +1724,7 @@ async def test_unpublish_space_raises_without_signing_key(env):
     await repo.save(_make_conn("gfs-un2", inbox_url="https://gfs.example"))
     await repo.publish_space("sp-un2", "gfs-un2")
     session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError):
         await svc.unpublish_space("sp-un2", "gfs-un2")
     assert session.calls == []
@@ -1736,7 +1736,7 @@ async def test_subscribe_to_gfs_space_raises_without_signing_key(env):
     _, repo = env
     await repo.save(_make_conn("gfs-sub2", inbox_url="https://gfs.example"))
     session = _StubSession(method_responses={"POST": (200, {"status": "subscribed"})})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError):
         await svc.subscribe_to_gfs_space("sp-join", "gfs-sub2")
     assert session.calls == []
@@ -1785,7 +1785,7 @@ async def _publish_event_svc(env, session, *, space_id: str, gfs_ids: list[str])
         )
         await conn_repo.publish_space(space_id, gid)
     kp = generate_identity_keypair()
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -1827,7 +1827,7 @@ async def test_publish_space_event_returns_zero_without_signing_key(env):
     await repo.save(_make_conn("g-x", inbox_url="https://gx.example"))
     await repo.publish_space("sp-x", "g-x")
     session = _RecordingSession()
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     delivered = await svc.publish_space_event(
         space_id="sp-x",
         event_type="space_post_public",
@@ -1916,7 +1916,7 @@ async def test_unsubscribe_from_gfs_space_without_signing_key_raises(env):
     _, repo = env
     await repo.save(_make_conn("gfs-unsub", inbox_url="https://gfs.example"))
     session = _StubSession(status=200)
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     with pytest.raises(GfsConnectionError):
         await svc.unsubscribe_from_gfs_space("sp-x", "gfs-unsub")
     assert session.calls == []
@@ -2266,7 +2266,9 @@ async def test_the_ratchet_does_not_survive_a_restart(env):
 
     _db, conn_repo = env
     session.info = _stripped_info()
-    restarted = GfsConnectionService(conn_repo, http_client=session)
+    restarted = GfsConnectionService(
+        conn_repo, http_client=session, publish_client=session
+    )
     restarted.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -2405,7 +2407,7 @@ async def test_pair_seeds_the_capability_only_from_a_verified_block(env):
             "POST": (200, {"status": "registered"}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -2445,7 +2447,7 @@ async def test_pair_does_not_seed_the_capability_from_an_unsigned_flag(env):
             "POST": (200, {"status": "registered"}),
         },
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -2511,7 +2513,7 @@ async def _heal_svc(env, session, *, gfs_id: str, spaces: list[str], space_repo)
     for sid in spaces:
         await conn_repo.publish_space(sid, gfs_id)
     kp = generate_identity_keypair()
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=space_repo,
         own_instance_id="alpha.home",
@@ -2588,7 +2590,7 @@ async def test_heal_space_pins_noops_for_unknown_or_inactive_gfs(env):
     await conn_repo.save(_make_conn("g-sus", status="suspended"))
     repo = _FakeSpaceRepo({"sp-a": _fake_space("sp-a")}, {"sp-a": b"\x01" * 32})
     kp = generate_identity_keypair()
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=repo,
         own_instance_id="alpha.home",
@@ -2605,7 +2607,7 @@ async def test_heal_space_pins_noops_without_publish_context(env):
     _db, conn_repo = env
     await conn_repo.save(_make_conn("g1"))
     await conn_repo.publish_space("sp-a", "g1")
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     assert await svc.heal_space_pins("g1") == 0
     assert session.posts == []
 
@@ -2726,7 +2728,9 @@ async def e2e_sender(tmp_dir, real_gfs, inbox_sink):
         join_mode=JoinMode.OPEN,
     )
     async with aiohttp.ClientSession() as session:
-        svc = GfsConnectionService(conn_repo, http_client=session)
+        svc = GfsConnectionService(
+            conn_repo, http_client=session, publish_client=session
+        )
         svc.attach_publish_context(
             space_repo=_SeedSpaceRepo(space, space_kp.private_key),
             own_instance_id=_E2E_OWN_INSTANCE,
@@ -2818,7 +2822,9 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
     try:
         conn_repo = SqliteGfsConnectionRepo(db)
         async with aiohttp.ClientSession() as session:
-            svc = GfsConnectionService(conn_repo, http_client=session)
+            svc = GfsConnectionService(
+                conn_repo, http_client=session, publish_client=session
+            )
             conn = await svc.pair(
                 {"gfs_url": gfs_base, "token": token},
                 own_instance_id=_E2E_OWN_INSTANCE,
@@ -2851,7 +2857,7 @@ async def test_envelope_relay_supported_reads_the_signed_block(env):
             capabilities={"anonymous_publish": True, "envelope_relay": True},
         ),
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     assert await svc.envelope_relay_supported(conn) is True
     # Cached after the first probe — a redeem must not re-fetch /gfs/info.
     assert await svc.envelope_relay_supported(conn) is True
@@ -2868,7 +2874,7 @@ async def test_envelope_relay_absent_from_the_block_is_false(env):
             capabilities={"anonymous_publish": True},
         ),
     )
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     assert await svc.envelope_relay_supported(conn) is False
 
 
@@ -2878,7 +2884,7 @@ async def test_envelope_relay_from_a_stripped_block_is_false(env):
     conn = _make_conn("er-3", public_key=_GFS_KP.public_key.hex())
     await repo.save(conn)
     session = _AnonSession(info={"server_name": "x", "envelope_relay": True})
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     assert await svc.envelope_relay_supported(conn) is False
 
 
@@ -2889,7 +2895,7 @@ async def test_envelope_relay_unreachable_gfs_is_false_and_suppressed(env):
     conn = _make_conn("er-4", public_key=_GFS_KP.public_key.hex())
     await repo.save(conn)
     session = _AnonSession(raise_on_get=True)
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     assert await svc.envelope_relay_supported(conn) is False
     assert await svc.envelope_relay_supported(conn) is False
     assert len(session.gets) == 1
@@ -2932,7 +2938,7 @@ async def _invite_svc(repo, session, gfs_id: str):
     conn = _make_conn(gfs_id, public_key=_GFS_KP.public_key.hex())
     await repo.save(conn)
     kp = generate_identity_keypair()
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=None,
         own_instance_id="alpha.home",
@@ -3173,7 +3179,7 @@ async def test_client_exposes_the_shared_session(env):
     a second connection pool."""
     _db, repo = env
     session = _AnonSession()
-    svc = GfsConnectionService(repo, http_client=session)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     assert svc.client() is session
 
 
@@ -3209,7 +3215,7 @@ async def _rotated_publish_svc(env, session):
     await space_repo.rotate_authority_key(
         "sp-rot", public_key_hex=k2.public_key.hex(), seed=k2.private_key, key_epoch=1
     )
-    svc = GfsConnectionService(conn_repo, http_client=session)
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
     svc.attach_publish_context(
         space_repo=space_repo,
         own_instance_id=owner_id,
@@ -3541,3 +3547,47 @@ def test_publish_space_event_takes_no_household_identity():
     """Structural: the relay API has no ``from_instance`` to leak."""
     params = inspect.signature(GfsConnectionService.publish_space_event).parameters
     assert "from_instance" not in params
+
+
+async def test_a_stale_probe_failure_does_not_make_a_known_old_gfs_unknown(env):
+    """A GFS already known to lack ``anonymous_publish`` whose later refresh
+    failed once is still "unsupported" — not "unknown", which would park its
+    publishes in the retry queue forever."""
+    session = _ScriptedPublishSession([], info=_stripped_info())
+    svc, _ = await _publish_event_svc(env, session, space_id="s1", gfs_ids=["g1"])
+    (conn,) = await env[1].list_gfs_for_space("s1")
+    await svc._fetch_gfs_info(conn)
+    assert svc._anon_publish[conn.id] is False
+    session.info_down = True
+    await svc._fetch_gfs_info(conn)  # a blip on a reconnect-time refresh
+    session.info_down = False
+    assert await svc._publish_capability(conn) == "unsupported"
+    await svc.publish_space_event(
+        space_id="s1", event_type="space_post_public", payload={"x": 1}
+    )
+    assert not svc._publish_retry.pending(conn.id)
+    assert session.posts == []
+
+
+async def test_publishes_ride_only_the_publish_session(env):
+    """The relay POST goes out on the cookie-less publish session, never on
+    the shared one the household's authenticated GFS calls use — and with no
+    publish session wired nothing is sent (no fallback)."""
+    shared = _RecordingSession()
+    publish = _RecordingSession()
+    _db, repo = env
+    await repo.save(_make_conn("g1", inbox_url="https://g1.example"))
+    await repo.publish_space("sp-s", "g1")
+    for client in (publish, None):
+        svc = GfsConnectionService(repo, http_client=shared, publish_client=client)
+        svc.attach_publish_context(
+            space_repo=None,
+            own_instance_id="alpha.home",
+            own_signing_key=generate_identity_keypair().private_key,
+        )
+        svc._anon_publish["g1"] = True
+        await svc.publish_space_event(
+            space_id="sp-s", event_type="space_post_public", payload={"x": 1}
+        )
+    assert len(publish.posts) == 1
+    assert shared.posts == []
