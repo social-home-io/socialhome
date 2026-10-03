@@ -3057,6 +3057,17 @@ class FederationService:
         event; no capability gate."""
         if self._sync_manager is None or not event.sync_id:
             return
+        session = self._sync_manager.get_session(event.sync_id)
+        if session is not None and session.provider_instance_id != event.from_instance:
+            # Only the session's own provider may end it: a peer that learned
+            # a sync id we hold with another provider must not cut it short.
+            log.warning(
+                "space sync: sentinel for %s from %s, not its provider %s — ignored",
+                event.sync_id,
+                event.from_instance,
+                session.provider_instance_id,
+            )
+            return
         try:
             await self.send_with_mesh_fallback(
                 to_instance_id=event.from_instance,
@@ -3072,8 +3083,10 @@ class FederationService:
                 exc,
             )
         # In DataChannel mode this runs inside the session's own chunk-drain
-        # task, which ``close_session`` cancels: close once the current
-        # delivery (and the other handlers of this event) has returned.
+        # task, which ``close_session`` cancels: defer the close to the next
+        # loop iteration so this delivery returns first. The cancel lands at
+        # the drain's next await — fine while later subscribers of this event
+        # don't await I/O (today only the scheduler's synchronous handler).
         asyncio.get_running_loop().call_soon(
             self._sync_manager.close_session, event.sync_id
         )

@@ -15,9 +15,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from socialhome.domain.events import PairingIntroRelayReceived
+from socialhome.domain.events import (
+    PairingIntroRelayReceived,
+    SpaceSyncComplete,
+    SpaceSyncDeferred,
+)
 from socialhome.domain.federation import FederationEventType, PairingStatus
 from socialhome.federation.federation_service import FederationService
+from socialhome.federation.sync_manager import PendingSyncRequest
 
 
 def _event(
@@ -268,10 +273,11 @@ async def test_a_landed_stream_frees_both_sessions(svc):
     restarted could not be served again (the federation demo's missed page
     delete). The requester now closes its own session and tells the
     provider (SPACE_SYNC_COMPLETE), which frees its slot."""
-    from socialhome.domain.events import SpaceSyncComplete
-
     svc._sync_manager = MagicMock()
     svc._sync_manager.close_session = MagicMock()
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(provider_instance_id="host")
+    )
     with patch.object(
         FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
     ) as send:
@@ -288,9 +294,27 @@ async def test_a_landed_stream_frees_both_sessions(svc):
     )
 
 
-async def test_a_landed_stream_without_a_sync_id_sends_nothing(svc):
-    from socialhome.domain.events import SpaceSyncComplete
+async def test_a_sentinel_from_another_household_closes_nothing(svc):
+    """The sentinel names a sync id; only that session's provider may end
+    it. A paired peer that learned our sync id with another provider must
+    not cut that stream short by signing a sentinel naming it."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.close_session = MagicMock()
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(provider_instance_id="host")
+    )
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ) as send:
+        await svc._on_space_sync_landed(
+            SpaceSyncComplete(space_id="sp", from_instance="intruder", sync_id="s9")
+        )
+        await asyncio.sleep(0)
+    svc._sync_manager.close_session.assert_not_called()
+    send.assert_not_awaited()
 
+
+async def test_a_landed_stream_without_a_sync_id_sends_nothing(svc):
     svc._sync_manager = MagicMock()
     with patch.object(
         FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
@@ -1731,9 +1755,6 @@ async def test_handle_direct_failed_at_capacity_defers_our_request(svc, reason):
     lose the rest until the 30-minute tick: the refusal named a sync_id
     with no session here, so nothing retried it. Now the scheduler is told
     to ask again."""
-    from socialhome.domain.events import SpaceSyncDeferred
-    from socialhome.federation.sync_manager import PendingSyncRequest
-
     svc._sync_manager = MagicMock()
     svc._sync_manager.get_session = MagicMock(return_value=None)
     svc._sync_manager.pending_sync_request = MagicMock(
@@ -1765,8 +1786,6 @@ async def test_handle_direct_failed_at_capacity_defers_our_request(svc, reason):
 async def test_handle_direct_failed_defers_only_a_capacity_answer_from_our_provider(
     svc, reason, sender
 ):
-    from socialhome.federation.sync_manager import PendingSyncRequest
-
     svc._sync_manager = MagicMock()
     svc._sync_manager.get_session = MagicMock(return_value=None)
     svc._sync_manager.pending_sync_request = MagicMock(
