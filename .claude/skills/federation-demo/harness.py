@@ -6187,6 +6187,14 @@ _LOG_BENIGN: tuple[str, ...] = (
     # HTTPS-inbox delivery (message body never lands), THAT is the
     # real regression — start with the perfect-negotiation logic
     # in ``socialhome/federation/transport.py``.
+    # SCTP stream reset failing while a peer's association is already
+    # gone: steps that kill a household to simulate it going offline
+    # (e.g. ``gfs-member-publish`` stopping host a before ``verify``)
+    # leave its peers' DataChannels to be torn down against a dead
+    # association, and libdatachannel logs the failed reset. Delivery
+    # is unaffected (the step's own content checks prove it). Narrow
+    # to this exact native message so other SCTP errors still surface.
+    "SctpTransport::sendReset",
     "DTLS handshake failed",
     "DTLS recv: Handshake timeout",
     # Same envelope of RTC-init noise on the Python side: an ICE
