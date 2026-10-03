@@ -152,6 +152,30 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
   `_handle_space_sync_direct_failed`); the provider only owns the retry when
   it was the one that sent DIRECT_FAILED (e.g. rate-limited).
 
+**Freeing the session.** When the end-of-stream sentinel lands, the
+requester sends `SPACE_SYNC_COMPLETE {sync_id, space_id}` to the provider
+(`send_with_mesh_fallback`) and closes its own session. The provider then
+frees its slot, but only when the sender is the household the stream went
+to. Before this, nothing sent that event. The provider held every finished
+stream's session until the 30-minute stale reaper, so after three syncs a
+household could not be served by that provider for half an hour. Older
+providers already close on `SPACE_SYNC_COMPLETE`, so there is no
+capability gate.
+
+**A provider with no free slot.** The provider admits at most 3
+concurrent syncs per household (S-6) and caps its signalling sessions
+overall (S-8). A BEGIN refused for lack of a slot is answered
+`SPACE_SYNC_DIRECT_FAILED {reason: "too_many_sessions" | "node_capacity"}`.
+That refusal spends **none** of the requester's 5 / h budget for the space:
+the provider checks capacity before it charges the hourly bucket. No
+session was made, so nothing is relayed. The requester forgets the
+request and publishes `SpaceSyncDeferred`. `SpaceSyncScheduler` then asks
+again after 20 s, 40 s, 60 s and so on, up to 6 times, until that
+(space, provider) sync completes. Before this, a household that restarted
+and asked one host for more than 3 spaces at once lost the rest until the
+30-minute tick. A `rate_limited` refusal is not retried; the periodic tick
+covers it.
+
 **Direct-only vs mesh-capable legs.** `SPACE_SYNC_OFFER`, `SPACE_SYNC_ANSWER`,
 `SPACE_SYNC_ICE` and `SPACE_SYNC_DIRECT_READY` only make sense on the direct
 path — ICE cannot traverse a relay, so the provider never offers a mesh-only

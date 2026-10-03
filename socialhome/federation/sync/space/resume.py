@@ -25,7 +25,11 @@ Resource types replayed today:
   ``since`` (their tombstones, migration 0071), with the deleter as
   ``actor_user_id``, sent after the lists and before the live tasks.
 * ``SPACE_TASK_CREATED``         — live task rows (tombstones excluded).
-* ``SPACE_PAGE_CREATED``         — wiki-style pages.
+* ``SPACE_PAGE_DELETED``         — the space's pages deleted since
+  ``since`` (their tombstones, migration 0073), with the deleter as
+  ``actor_user_id``, sent before the live pages — to the host too.
+* ``SPACE_PAGE_CREATED``         — live wiki-style pages (tombstones
+  excluded).
 * ``SPACE_STICKY_CREATED``       — corkboard notes.
 * ``SPACE_CALENDAR_EVENT_CREATED`` — calendar events (RRULEs included).
 * ``SPACE_GALLERY_ITEM_CREATED`` — gallery items, joined via
@@ -50,6 +54,7 @@ from typing import TYPE_CHECKING
 from ....domain.federation import FederationEventType
 from ....domain.federation_capabilities import FederationCapability
 from ....domain.link_preview import link_preview_to_dict
+from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
 from ....services.page_conflict_service import side_to_wire
 from ....domain.task import (
@@ -235,6 +240,7 @@ class SpaceSyncResumeProvider:
         sent += await self._replay_task_lists(space_id, since, to=instance_id)
         sent += await self._replay_task_deletes(space_id, since, to=instance_id)
         sent += await self._replay_tasks(space_id, since, to=instance_id)
+        sent += await self._replay_page_deletes(space_id, since, to=instance_id)
         sent += await self._replay_pages(space_id, since, to=instance_id)
         sent += await self._replay_stickies(space_id, since, to=instance_id)
         sent += await self._replay_calendar(space_id, since, to=instance_id)
@@ -388,6 +394,28 @@ class SpaceSyncResumeProvider:
             tasks,
             FederationEventType.SPACE_TASK_CREATED,
             lambda task: task_to_wire_dict(task, space_id),
+            space_id=space_id,
+            to=to,
+        )
+
+    async def _replay_page_deletes(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        to: str,
+    ) -> int:
+        if self._page_repo is None:
+            return 0
+        tombstones = await self._page_repo.list_page_tombstones(
+            space_id,
+            since=since,
+            limit=MAX_PER_RESOURCE,
+        )
+        return await self._send_each(
+            tombstones,
+            FederationEventType.SPACE_PAGE_DELETED,
+            lambda tombstone: page_tombstone_to_wire_dict(tombstone, space_id),
             space_id=space_id,
             to=to,
         )

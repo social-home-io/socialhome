@@ -52,6 +52,8 @@ from ..domain.events import (
     PeerHomeChanged,
     SpaceConfigChanged,
     SpaceRemoteSeatLive,
+    SpaceSyncComplete,
+    SpaceSyncDeferred,
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.media_validator import validate_inbound_media_meta
@@ -126,6 +128,10 @@ def _loads(s: str | bytes) -> dict:
 
 
 log = logging.getLogger(__name__)
+
+#: ``SPACE_SYNC_DIRECT_FAILED`` reasons that mean "no free slot now": the
+#: BEGIN was never served, so the requester asks again (``SpaceSyncDeferred``).
+_CAPACITY_REFUSALS = frozenset({"too_many_sessions", "node_capacity"})
 
 #: Maximum allowed clock skew for inbound envelopes (§24.11 §5).
 _TIMESTAMP_SKEW_SECONDS = 300
@@ -447,6 +453,8 @@ class FederationService:
         )
         # A member coming back online drains its deferred mesh queue now.
         self._bus.subscribe(ConnectionReachable, self._on_connection_reachable)
+        # A sync stream we requested landed: free both sides' session.
+        self._bus.subscribe(SpaceSyncComplete, self._on_space_sync_landed)
 
     def _build_inbound_pipeline(self):
         """Lazily construct the §24.11 validation middleware chain.
@@ -3026,10 +3034,62 @@ class FederationService:
             self._sync_manager.close_session(sync_id)
 
     async def _handle_space_sync_complete(self, event: FederationEvent) -> None:
-        if self._sync_manager is not None:
-            self._sync_manager.close_session(
-                event.payload.get("sync_id", ""),
+        """The requester got our whole stream (its sentinel landed): free
+        the session — only for the household the stream went to."""
+        if self._sync_manager is None:
+            return
+        sync_id = str(event.payload.get("sync_id") or "")
+        session = self._sync_manager.get_session(sync_id)
+        if session is None or session.requester_instance_id != event.from_instance:
+            return
+        self._sync_manager.close_session(sync_id)
+
+    async def _on_space_sync_landed(self, event: SpaceSyncComplete) -> None:
+        """The end-of-stream sentinel of a sync we requested landed.
+
+        Free our own session and tell the provider
+        (``SPACE_SYNC_COMPLETE``), which frees its slot. Without this a
+        provider held every finished stream's session until the 30-minute
+        stale reaper — and it serves at most
+        ``MAX_ACTIVE_SESSIONS_PER_INSTANCE`` per household, so a household
+        that restarted (or joined several spaces) could not be served
+        again for half an hour. Older providers already close on this
+        event; no capability gate."""
+        if self._sync_manager is None or not event.sync_id:
+            return
+        session = self._sync_manager.get_session(event.sync_id)
+        if session is not None and session.provider_instance_id != event.from_instance:
+            # Only the session's own provider may end it: a peer that learned
+            # a sync id we hold with another provider must not cut it short.
+            log.warning(
+                "space sync: sentinel for %s from %s, not its provider %s — ignored",
+                event.sync_id,
+                event.from_instance,
+                session.provider_instance_id,
             )
+            return
+        try:
+            await self.send_with_mesh_fallback(
+                to_instance_id=event.from_instance,
+                event_type=FederationEventType.SPACE_SYNC_COMPLETE,
+                payload={"sync_id": event.sync_id, "space_id": event.space_id},
+                space_id=event.space_id,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "SPACE_SYNC_COMPLETE to %s for %s failed: %s",
+                event.from_instance,
+                event.space_id,
+                exc,
+            )
+        # In DataChannel mode this runs inside the session's own chunk-drain
+        # task, which ``close_session`` cancels: defer the close to the next
+        # loop iteration so this delivery returns first. The cancel lands at
+        # the drain's next await — fine while later subscribers of this event
+        # don't await I/O (today only the scheduler's synchronous handler).
+        asyncio.get_running_loop().call_soon(
+            self._sync_manager.close_session, event.sync_id
+        )
 
     async def _handle_space_sync_begin(self, event) -> None:
         """Provider receives SPACE_SYNC_BEGIN — admit + create session.
@@ -3449,6 +3509,31 @@ class FederationService:
                 # the RTC handle. The requester will mint a fresh BEGIN
                 # against us with ``prefer_direct=False``.
                 self._sync_manager.close_session(sync_id)
+                return
+        elif event.payload.get("reason") in _CAPACITY_REFUSALS:
+            # The provider had no free slot for a BEGIN we sent (S-6 / S-8:
+            # it caps concurrent syncs per household). No session was ever
+            # made, so there is nothing to relay — the sync is simply owed.
+            # A household that restarts and asks one host for more spaces
+            # than the cap used to lose the rest until the 30-minute tick.
+            request = self._sync_manager.pending_sync_request(sync_id)
+            if (
+                request is not None
+                and request.provider_instance_id == event.from_instance
+            ):
+                self._sync_manager.forget_sync_request(sync_id)
+                log.info(
+                    "space sync %s from %s deferred (%s) — asking again",
+                    request.space_id,
+                    event.from_instance,
+                    event.payload.get("reason"),
+                )
+                await self._bus.publish(
+                    SpaceSyncDeferred(
+                        space_id=request.space_id,
+                        provider_instance_id=event.from_instance,
+                    )
+                )
                 return
         decision = await self._sync_manager.trigger_relay_sync(sync_id)
         if decision.next_event is not None:

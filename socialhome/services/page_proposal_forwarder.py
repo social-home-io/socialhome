@@ -172,6 +172,17 @@ class PageProposalForwarder:
         if key in self._outstanding:
             return False
         mode, host = await self._conflicts.mode(space_id)
+        if mode is PageMode.HOST:
+            # A draft is made only under another household's v_48 host, and
+            # a space's host never changes (``owner_instance_id`` is fixed),
+            # so this is a corrupt row — say so, never propose to ourselves.
+            log.warning(
+                "page %s in space %s: a pending draft on the space's host — "
+                "not proposed",
+                page_id,
+                space_id,
+            )
+            return False
         if mode is not PageMode.MEMBER or not host:
             return False
         instance = await self._federation_repo.get_instance(host)

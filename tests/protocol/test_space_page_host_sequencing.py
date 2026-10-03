@@ -306,8 +306,11 @@ async def _page(house: House, pid: str) -> dict:
 
 
 async def _content(house: House, pid: str) -> str | None:
+    """The live content (``None``: not held, or a tombstone)."""
     row = await house.db.fetchone(
-        "SELECT content FROM space_pages WHERE id=? AND space_id=?", (pid, SID)
+        "SELECT content FROM space_pages"
+        " WHERE id=? AND space_id=? AND deleted_at IS NULL",
+        (pid, SID),
     )
     return None if row is None else row["content"]
 

@@ -675,3 +675,136 @@ async def test_commit_version_is_atomic_and_scoped(scoped):
         await repo.get_space_page("pg-b", space_id="space-b")
     ).content == "body-pg-b"
     assert await repo.list_versions("pg-b", space_id="space-a") == []
+
+
+# ─── Tombstones (migration 0073) ─────────────────────────────────────────
+
+
+async def test_a_space_delete_keeps_a_blank_tombstone(scoped):
+    """A space page delete keeps the row as a content-free tombstone that
+    every live read skips; its history and snapshots are gone."""
+    repo = scoped.page_repo
+    await repo.save_version(_version("pg-a", "space-a", 1))
+    await repo.insert_snapshot(
+        page_id="pg-a",
+        space_id="space-a",
+        body="side",
+        author_user_id="u",
+        side="theirs",
+        conflict=True,
+    )
+    assert await repo.delete("pg-a", space_id="space-a", deleted_by="u-del") is True
+    assert await repo.get("pg-a") is None
+    assert await repo.get_space_page("pg-a", space_id="space-a") is None
+    assert await repo.list(space_id="space-a") == []
+    assert await repo.list_since("space-a", "1970-01-01T00:00:00+00:00") == []
+    assert await repo.is_page_deleted("pg-a", space_id="space-a") is True
+    assert await repo.is_page_deleted("pg-a", space_id="space-b") is False
+    row = await _page_row(scoped, "space_pages", "pg-a")
+    assert (row["title"], row["content"], row["deleted_by"]) == ("", "", "u-del")
+    assert row["deleted_at"] is not None
+    assert await repo.list_versions("pg-a", space_id="space-a") == []
+    assert await repo.list_conflict_sides("pg-a", space_id="space-a") == []
+    # A second delete is a no-op.
+    assert await repo.delete("pg-a", space_id="space-a") is False
+
+
+async def test_a_tombstone_is_never_brought_back_by_an_upsert(scoped):
+    from dataclasses import replace
+
+    repo = scoped.page_repo
+    page = await repo.get_space_page("pg-a", space_id="space-a")
+    await repo.delete("pg-a", space_id="space-a")
+    assert await repo.save(replace(page, seq=9), space_id="space-a") is False
+    assert not await repo.commit_version(
+        replace(page, seq=9),
+        space_id="space-a",
+        history=[_version("pg-a", "space-a", 0)],
+        sides=[],
+    )
+    assert await repo.get_space_page("pg-a", space_id="space-a") is None
+    assert await repo.list_versions("pg-a", space_id="space-a") == []
+
+
+async def test_a_pending_draft_tombstoned_is_no_longer_pending(scoped):
+    from dataclasses import replace
+
+    repo = scoped.page_repo
+    page = await repo.get_space_page("pg-a", space_id="space-a")
+    await repo.save(replace(page, pending_base_seq=0), space_id="space-a")
+    assert await repo.list_pending_drafts() == [("space-a", "pg-a")]
+    await repo.delete("pg-a", space_id="space-a")
+    assert await repo.list_pending_drafts() == []
+
+
+async def test_a_stub_tombstone_is_insert_only(scoped):
+    repo = scoped.page_repo
+    assert await repo.tombstone(
+        "pg-new", space_id="space-a", created_by="u-c", deleted_by="u-d"
+    )
+    assert await repo.is_page_deleted("pg-new", space_id="space-a")
+    assert await repo.get_space_page("pg-new", space_id="space-a") is None
+    # A held id (live or tombstoned, any space) is never touched.
+    assert not await repo.tombstone("pg-b", space_id="space-a", created_by="u-c")
+    assert (await repo.get_space_page("pg-b", space_id="space-b")) is not None
+    assert not await repo.tombstone("pg-new", space_id="space-a", created_by="x")
+
+
+async def test_page_tombstones_list_newest_first_and_since(scoped):
+    repo = scoped.page_repo
+    await repo.delete("pg-a", space_id="space-a", deleted_by="u-d")
+    await scoped.db.enqueue(
+        "UPDATE space_pages SET deleted_at='2020-01-01 00:00:00' WHERE id='pg-a'"
+    )
+    await repo.tombstone("pg-x", space_id="space-a", created_by="u-c")
+    got = await repo.list_page_tombstones("space-a")
+    assert [(t.id, t.created_by, t.deleted_by) for t in got] == [
+        ("pg-x", "u-c", ""),
+        ("pg-a", "uid-owner", "u-d"),
+    ]
+    since = await repo.list_page_tombstones(
+        "space-a", since="2021-01-01T00:00:00+00:00"
+    )
+    assert [t.id for t in since] == ["pg-x"]
+    assert [t.id for t in await repo.list_page_tombstones("space-a", limit=1)] == [
+        "pg-x"
+    ]
+    assert await repo.list_page_tombstones("space-b") == []
+
+
+async def test_raise_seq_only_raises_a_live_pages_seq(scoped):
+    repo = scoped.page_repo
+    assert await repo.raise_seq("pg-a", space_id="space-a", seq=7) is True
+    assert (await repo.get_space_page("pg-a", space_id="space-a")).seq == 7
+    assert await repo.raise_seq("pg-a", space_id="space-a", seq=5) is False
+    assert (await repo.get_space_page("pg-a", space_id="space-a")).seq == 7
+    assert await repo.raise_seq("pg-a", space_id="space-b", seq=9) is False
+    await repo.delete("pg-a", space_id="space-a")
+    assert await repo.raise_seq("pg-a", space_id="space-a", seq=9) is False
+
+
+async def test_an_unconfirmed_tombstone_revives_for_the_hosts_seq(scoped):
+    from dataclasses import replace
+
+    repo = scoped.page_repo
+    page = await repo.get_space_page("pg-a", space_id="space-a")
+    await repo.save(replace(page, seq=3), space_id="space-a")
+    await repo.delete("pg-a", space_id="space-a", confirmed=False)
+    assert not await repo.revive("pg-a", space_id="space-a", seq=2)  # older
+    assert await repo.revive("pg-a", space_id="space-a", seq=3)
+    back = await repo.get_space_page("pg-a", space_id="space-a")
+    assert (back.seq, back.title, back.created_by) == (0, "", "uid-owner")
+    assert not await repo.is_page_deleted("pg-a", space_id="space-a")
+
+
+async def test_a_confirmed_tombstone_never_revives(scoped):
+    repo = scoped.page_repo
+    await repo.delete("pg-a", space_id="space-a", confirmed=False)
+    assert await repo.confirm_delete("pg-a", space_id="space-a")
+    assert not await repo.confirm_delete("pg-a", space_id="space-a")
+    assert not await repo.revive("pg-a", space_id="space-a", seq=99)
+    # Host-made deletes and stubs are confirmed from the start.
+    await repo.delete("pg-b", space_id="space-b")
+    assert not await repo.revive("pg-b", space_id="space-b", seq=99)
+    await repo.tombstone("pg-s", space_id="space-a", created_by="u")
+    assert not await repo.revive("pg-s", space_id="space-a", seq=99)

@@ -45,7 +45,7 @@ from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import ContentAction, SpaceMember, SpaceZone
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
-from ....domain.events import TaskDeleted, TaskListDeleted, TimetableSaved
+from ....domain.events import PageDeleted, TaskDeleted, TaskListDeleted, TimetableSaved
 from ....domain.timetable import (
     Timetable,
     from_wire_dict,
@@ -329,6 +329,7 @@ class SpaceSyncReceiver:
                 SpaceSyncComplete(
                     space_id=space_id,
                     from_instance=from_instance,
+                    sync_id=sync_id,
                 )
             )
             return
@@ -420,6 +421,10 @@ class SpaceSyncReceiver:
                 provider,
                 space_id,
             )
+        if resource == "pages":
+            # Read before the admission drops a member's records for held
+            # pages: the host's seq floor learns from them (never content).
+            await self._page_seq_hints(shaped, space_id, provider=provider)
         records = await self._admit(resource, space_id, shaped, provider=provider)
         # v_36: whoever streams it — the host included — a record may not
         # claim an owner-bound id for anybody but the user it commits to.
@@ -577,10 +582,22 @@ class SpaceSyncReceiver:
                     task, space_id=space_id
                 ):
                     _log_sync_refusal("task", task.id, space_id)
+        elif resource == "pages_deleted":
+            await self._persist_page_tombstones(records, space_id, provider=provider)
         elif resource == "pages":
             for r in records:
                 page = _page_from_record(r, space_id)
                 if page is None:
+                    continue
+                if await self._page_repo.is_page_deleted(
+                    page.id, space_id=space_id
+                ) and not await self._is_host_version(space_id, provider, r):
+                    # Deleted here — a provider that missed the delete still
+                    # streams it; the tombstone wins (its id is never
+                    # reused), and its own tombstone stream will tell it.
+                    # Only the host's version may revive a tombstone, and
+                    # only one the host never confirmed (the engine's call).
+                    log.debug("sync: page %s was deleted here — skipped", page.id)
                     continue
                 if await self._apply_page_version(page, r, space_id, provider):
                     continue
@@ -935,6 +952,166 @@ class SpaceSyncReceiver:
                 space_id,
             )
 
+    async def _persist_page_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed page deletes (``pages_deleted``).
+
+        A page held live here in this space is tombstoned (``deleted_by``
+        from the record's ``actor_user_id``) exactly as a live
+        ``SPACE_PAGE_DELETED`` does — confirmed (final) when the host
+        streams it, or when we are the host (which then re-broadcasts the
+        delete); unconfirmed from another member. The host's record also
+        confirms a tombstone of our own. A member household's records were
+        admitted only for pages held live here (:meth:`_authored_record`).
+
+        From the **host**, an id we never held gets a stub tombstone, so a
+        stale copy another household streams or replays later cannot
+        create it — but only when the id is owner-bound to its
+        ``created_by`` in THIS space (page ids are global: a stub for
+        another space's id would block that space's real page here).
+        Refusals are summarised once per chunk.
+        """
+        space = await self._space_repo.get(space_id)
+        from_host = space is not None and space.owner_instance_id == provider
+        is_host = (
+            space is not None
+            and self._page_conflicts is not None
+            and space.owner_instance_id == self._page_conflicts.own_instance_id
+        )
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            page_id = str(r.get("id") or r.get("page_id") or "")
+            if not page_id:
+                continue
+            deleted_by = str(r.get("actor_user_id") or "")
+            held = await self._page_repo.get(page_id)
+            if held is not None:
+                if held.space_id != space_id:
+                    cross_space.append(page_id)
+                elif self._page_conflicts is not None:
+                    deleted = await self._page_conflicts.delete_page(
+                        space_id, page_id, deleted_by=deleted_by, from_instance=provider
+                    )
+                    if deleted and space is not None and is_host:
+                        # The host accepted a member's delete it had missed:
+                        # it decides, so it tells every member household.
+                        await self._bus.publish(
+                            PageDeleted(
+                                page_id=page_id,
+                                space_id=space_id,
+                                actor_user_id=deleted_by,
+                            )
+                        )
+                else:
+                    await self._page_repo.delete(
+                        page_id,
+                        space_id=space_id,
+                        deleted_by=deleted_by,
+                        confirmed=from_host,
+                    )
+                continue
+            if await self._page_repo.is_page_deleted(page_id, space_id=space_id):
+                if from_host:
+                    # The host stands behind our own (unconfirmed) delete.
+                    await self._page_repo.confirm_delete(page_id, space_id=space_id)
+                continue
+            if not from_host:
+                continue
+            created_by = str(r.get("created_by") or "")
+            if (
+                check_owner_bound_id(
+                    SPACE_PAGE_KIND,
+                    page_id,
+                    space_id=space_id,
+                    owner_user_id=created_by,
+                )
+                is not OwnerBinding.VALID
+            ):
+                unbound += 1
+                continue
+            await self._page_repo.tombstone(
+                page_id, space_id=space_id, created_by=created_by, deleted_by=deleted_by
+            )
+        if cross_space:
+            log.warning(
+                "space sync: %d page tombstone(s) from %s for %s name a page "
+                "held in another space — refused: %s",
+                len(cross_space),
+                provider,
+                space_id,
+                ", ".join(cross_space[:5]),
+            )
+        if unbound:
+            log.info(
+                "space sync: %d page tombstone(s) from %s for %s name a page "
+                "never held here whose id is not bound to this space — no "
+                "stub recorded",
+                unbound,
+                provider,
+                space_id,
+            )
+
+    async def _page_seq_hints(
+        self, records: list[dict[str, Any]], space_id: str, *, provider: str
+    ) -> None:
+        """On the **host**: a member household's ``pages`` records carry
+        the ``seq`` it mirrors. A host restored from a backup raises its seq
+        floor to it, so its next own edit lands above every version members
+        hold — they take it. Only the number is read (the highest per page
+        in the chunk), only for live pages held here, and only from a
+        **writer** household seated in the space; the content is never
+        taken this way (and the admission drops the records right after).
+        :meth:`PageConflictService.raise_floor` bounds each raise and rate
+        limits them per provider, page and day."""
+        engine = self._page_conflicts
+        if engine is None or not records or self._authorship is None:
+            return
+        mode, host = await engine.mode(space_id)
+        if mode is not PageMode.HOST or not provider or provider == host:
+            return
+        highest: dict[str, int] = {}
+        for r in records:
+            page_id = str(r.get("id") or r.get("page_id") or "")
+            seq = r.get("seq")
+            if (
+                not page_id
+                or not isinstance(seq, int)
+                or isinstance(seq, bool)
+                or seq <= 0
+            ):
+                continue
+            highest[page_id] = max(seq, highest.get(page_id, 0))
+        if not highest:
+            return
+        event = FederationEvent(
+            msg_id=f"sync:{space_id}:pages",
+            event_type=FederationEventType.SPACE_SYNC_CHUNK,
+            from_instance=provider,
+            to_instance="",
+            timestamp="",
+            payload={},
+            space_id=space_id,
+        )
+        if not await self._authorship.writes_here(event, space_id):
+            return
+        for page_id, seq in highest.items():
+            await engine.raise_floor(space_id, page_id, seq, provider=provider)
+
+    async def _is_host_version(
+        self, space_id: str, provider: str, r: dict[str, Any]
+    ) -> bool:
+        """Is ``r`` a host version (``seq``) streamed by the space's host?"""
+        if "seq" not in r or not provider:
+            return False
+        space = await self._space_repo.get(space_id)
+        return space is not None and space.owner_instance_id == provider
+
     async def _apply_page_version(
         self, page: Page, r: dict[str, Any], space_id: str, provider: str
     ) -> bool:
@@ -1199,9 +1376,37 @@ class SpaceSyncReceiver:
                 return await auth.may_author(
                     event, space_id, str(r.get("created_by") or "")
                 )
+            case "pages_deleted":
+                # The live SPACE_PAGE_DELETED rule: a writer household
+                # removes a page held live here IN THIS SPACE, if the
+                # space's ``pages`` level admits the delete for the user who
+                # made it (``actor_user_id``), who must be seated on the
+                # provider. Refusals are counted in :meth:`_admit`.
+                rid = rid or str(r.get("page_id") or "")
+                held_page = await self._page_repo.get(rid) if rid else None
+                if held_page is None or held_page.space_id != space_id:
+                    return False
+                if not await auth.writes_here(event, space_id):
+                    return False
+                actor = str(r.get("actor_user_id") or "") or None
+                if actor is not None and not await auth.acts_for(
+                    event, space_id, actor, any_role=True
+                ):
+                    return False
+                return await auth.access_admits(
+                    event,
+                    space_id,
+                    "pages",
+                    ContentAction.DELETE,
+                    actor=actor,
+                    row_owner=held_page.created_by,
+                    quiet=True,
+                )
             case "pages":
                 if not rid or await self._page_repo.get(rid) is not None:
                     return False
+                if await self._page_repo.is_page_deleted(rid, space_id=space_id):
+                    return False  # deleted here; the tombstone wins
                 creator = str(r.get("created_by") or "")
                 if creator:
                     return await auth.may_author(event, space_id, creator)

@@ -254,3 +254,12 @@ async def test_a_settled_draft_frees_the_page(env):
     assert env.fwd.outstanding() == {}
     env.conflicts.drafts["pg"] = _draft("later")
     assert await env.fwd.kick(SID, "pg")
+
+
+async def test_a_draft_on_the_host_is_only_warned_about(env, caplog):
+    env.conflicts.drafts["pg"] = _draft("one")
+    env.conflicts.mode_ = PageMode.HOST
+    with caplog.at_level("WARNING"):
+        assert not await env.fwd.kick(SID, "pg")
+    assert "pending draft on the space's host" in caplog.text
+    assert env.fed.sent == []

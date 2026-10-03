@@ -726,3 +726,36 @@ async def test_apply_offer_records_the_provider_on_a_fresh_session():
             space_id="sp",
         )
     assert mgr.get_session("s1").provider_instance_id == "host"
+
+
+async def test_a_capacity_refusal_does_not_spend_the_hourly_budget():
+    """A BEGIN refused for ``too_many_sessions`` was never served: it must
+    not eat the requester's 5 / h for that space, or a household that
+    asks for more spaces than the cap at once (a restart) would be locked
+    out of the very retry that catches it up."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    for i in range(MAX_ACTIVE_SESSIONS_PER_INSTANCE):
+        assert (
+            await mgr.begin_session(
+                sync_id=f"s{i}",
+                space_id=f"sp-{i}",
+                requester_instance_id="alice",
+                provider_instance_id="me",
+            )
+        ).accepted
+    for j in range(SYNC_BEGIN_RATE_LIMIT_PER_HOUR + 1):
+        refused = await mgr.begin_session(
+            sync_id=f"x{j}",
+            space_id="sp-late",
+            requester_instance_id="alice",
+            provider_instance_id="me",
+        )
+        assert refused.reason == "too_many_sessions"
+    mgr.close_session("s0")
+    late = await mgr.begin_session(
+        sync_id="late",
+        space_id="sp-late",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+    )
+    assert late.accepted, late.reason

@@ -172,6 +172,8 @@ class _FakePageRepo:
         self.saved = []
         self.deleted = []
         self.rows = _ScopedRows()
+        self.tombstones: dict[tuple[str, str], str] = {}
+        self.confirmed: set[tuple[str, str]] = set()
 
     async def get(self, page_id):
         return self.rows.row(page_id)
@@ -182,10 +184,31 @@ class _FakePageRepo:
         self.saved.append(page)
         return True
 
-    async def delete(self, page_id, *, space_id):
+    async def delete(self, page_id, *, space_id, deleted_by="", confirmed=True):
         if not self.rows.drop(page_id, space_id):
             return False
         self.deleted.append(page_id)
+        self.tombstones[(page_id, space_id)] = deleted_by
+        if confirmed:
+            self.confirmed.add((page_id, space_id))
+        return True
+
+    async def confirm_delete(self, page_id, *, space_id):
+        key = (page_id, space_id)
+        if key not in self.tombstones or key in self.confirmed:
+            return False
+        self.confirmed.add(key)
+        return True
+
+    async def is_page_deleted(self, page_id, *, space_id):
+        return (page_id, space_id) in self.tombstones
+
+    async def tombstone(self, page_id, *, space_id, created_by, deleted_by=""):
+        if self.rows.row(page_id) is not None or any(
+            pid == page_id for pid, _sid in self.tombstones
+        ):
+            return False
+        self.tombstones[(page_id, space_id)] = deleted_by
         return True
 
 
@@ -949,6 +972,8 @@ class _FakeConflicts:
         self.mirrored: list[dict] = []
         self.refused: list[dict] = []
         self.legacy: list[tuple] = []
+        self.page_repo = None
+        self.page_repo_deletes: list[tuple[str, str]] = []
 
     async def mode(self, space_id):
         return self.mode_, self.host
@@ -964,6 +989,15 @@ class _FakeConflicts:
 
     async def legacy_apply(self, page, incoming, *, space_id):
         self.legacy.append((page.id, incoming.content))
+
+    async def delete_page(self, space_id, page_id, *, deleted_by="", from_instance=""):
+        self.page_repo_deletes.append((page_id, deleted_by))
+        return await self.page_repo.delete(
+            page_id,
+            space_id=space_id,
+            deleted_by=deleted_by,
+            confirmed=from_instance == self.host,
+        )
 
 
 def _page_handlers(bus, repos, conflicts, *, auth=None):
@@ -1246,6 +1280,134 @@ async def test_under_a_legacy_host_a_held_page_is_last_write_wins(bus, repos):
         )
     )
     assert engine.legacy == [("p-1", "lww")]
+
+
+async def test_the_host_answers_gone_for_a_page_deleted_here(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    repos["page"].tombstones[("p-9", "sp-1")] = "u-del"
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_CREATED,
+            {
+                "id": "p-9",
+                "title": "T",
+                "content": "x",
+                "base_seq": 0,
+                "created_by": "u-1",
+                "actor_user_id": "u-1",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == []
+    assert [r["reason"] for r in engine.refused] == ["gone"]
+
+
+async def test_a_member_never_takes_a_page_deleted_here(bus, repos):
+    engine = _FakeConflicts("member", host="host-iid")
+    h = _page_handlers(bus, repos, engine)
+    repos["page"].tombstones[("p-9", "sp-1")] = ""
+    for sender in ("host-iid", "peer-a"):
+        await h._on_page_saved(
+            _event(
+                FederationEventType.SPACE_PAGE_CREATED,
+                {"id": "p-9", "title": "T", "content": "x", "created_by": "u-1"},
+                from_instance=sender,
+                space_id="sp-1",
+            )
+        )
+    assert engine.mirrored == [] and repos["page"].saved == []
+
+
+async def test_a_page_delete_tombstones_under_the_engine_with_the_deleter(bus, repos):
+    engine = _FakeConflicts("member", host="host-iid")
+    engine.page_repo = repos["page"]
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_deleted(
+        _event(
+            FederationEventType.SPACE_PAGE_DELETED,
+            {"id": "p-1", "actor_user_id": "u-del"},
+            space_id="sp-1",
+        )
+    )
+    assert engine.page_repo_deletes == [("p-1", "u-del")]
+    assert repos["page"].tombstones == {("p-1", "sp-1"): "u-del"}
+
+
+async def test_a_hosts_delete_of_an_unseen_bound_page_leaves_a_stub(bus, repos):
+    from socialhome.federation.owner_bound_id import (
+        SPACE_PAGE_KIND,
+        mint_owner_bound_id,
+    )
+
+    engine = _FakeConflicts("member", host="host-iid")
+    h = _page_handlers(bus, repos, engine)
+    bound = mint_owner_bound_id(SPACE_PAGE_KIND, space_id="sp-1", owner_user_id="u-1")
+    payload = {"id": bound, "created_by": "u-1", "actor_user_id": "u-del"}
+    # A member's delete of an unseen page, or an unbound id: no stub.
+    await h._on_page_deleted(
+        _event(FederationEventType.SPACE_PAGE_DELETED, payload, space_id="sp-1")
+    )
+    await h._on_page_deleted(
+        _event(
+            FederationEventType.SPACE_PAGE_DELETED,
+            {**payload, "id": "legacy"},
+            from_instance="host-iid",
+            space_id="sp-1",
+        )
+    )
+    assert repos["page"].tombstones == {}
+    for _ in range(2):  # the second is a no-op
+        await h._on_page_deleted(
+            _event(
+                FederationEventType.SPACE_PAGE_DELETED,
+                payload,
+                from_instance="host-iid",
+                space_id="sp-1",
+            )
+        )
+    assert repos["page"].tombstones == {(bound, "sp-1"): "u-del"}
+
+
+async def test_the_host_rebroadcasts_a_member_delete_it_accepts(bus, repos):
+    from socialhome.domain.events import PageDeleted
+
+    seen: list = []
+
+    async def _on(e):
+        seen.append(e)
+
+    bus.subscribe(PageDeleted, _on)
+    engine = _FakeConflicts("host", host="self")
+    engine.page_repo = repos["page"]
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    await h._on_page_deleted(
+        _event(
+            FederationEventType.SPACE_PAGE_DELETED,
+            {"id": "p-1", "actor_user_id": "u-del"},
+            space_id="sp-1",
+        )
+    )
+    assert [(e.page_id, e.actor_user_id) for e in seen] == [("p-1", "u-del")]
+
+
+async def test_a_members_delete_from_the_host_skips_the_gates_and_is_final(bus, repos):
+    engine = _FakeConflicts("member", host="host-iid")
+    engine.page_repo = repos["page"]
+    h = _page_handlers(bus, repos, engine, auth=_AllowAuthorship(access=False))
+    _held(repos)
+    await h._on_page_deleted(
+        _event(
+            FederationEventType.SPACE_PAGE_DELETED,
+            {"id": "p-1", "actor_user_id": "u-elsewhere"},
+            from_instance="host-iid",
+            space_id="sp-1",
+        )
+    )
+    assert repos["page"].confirmed == {("p-1", "sp-1")}
 
 
 async def test_page_deleted(repos, handlers):

@@ -13,7 +13,7 @@ import pytest
 from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
-from socialhome.domain.page import Page
+from socialhome.domain.page import Page, PageTombstone
 from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import (
@@ -113,12 +113,14 @@ class _FakeListSinceRepo:
         lists: list | None = None,
         tombstones: list | None = None,
         task_tombstones: list | None = None,
+        page_tombstones: list | None = None,
     ) -> None:
         self._rows = rows
         self._method = method
         self._lists = lists or []
         self._tombstones = tombstones or []
         self._task_tombstones = task_tombstones or []
+        self._page_tombstones = page_tombstones or []
 
     def __getattr__(self, name):  # type: ignore[no-redef]
         if name == "list_list_tombstones":
@@ -133,6 +135,12 @@ class _FakeListSinceRepo:
                 return self._task_tombstones[:limit]
 
             return _task_tombstones
+        if name == "list_page_tombstones":
+
+            async def _page_tombstones(space_id, *, since=None, limit=500):
+                return self._page_tombstones[:limit]
+
+            return _page_tombstones
         if name == "list_lists_since":
 
             async def _lists(space_id, since, *, limit=500):
@@ -613,6 +621,45 @@ async def test_handle_request_replays_task_deletes_after_lists_before_tasks():
         "id": "t-gone",
         "space_id": "sp-1",
         "list_id": "l-1",
+        "created_by": "u-1",
+        "actor_user_id": "u-adm",
+    }
+
+
+async def test_handle_request_replays_page_deletes_before_the_pages():
+    """Migration 0073: a page deleted since ``since`` goes out as
+    SPACE_PAGE_DELETED before the live pages, naming the deleter as
+    ``actor_user_id`` and binding the id with ``created_by``."""
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    fed = _FakeFederation()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(),
+        page_repo=_FakeListSinceRepo(
+            [_page(0, (base + timedelta(minutes=1)).isoformat())],
+            page_tombstones=[
+                PageTombstone(
+                    id="pg-gone",
+                    deleted_at="2026-04-02 00:00:00",
+                    created_by="u-1",
+                    deleted_by="u-adm",
+                )
+            ],
+        ),
+    )
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert sent == 2
+    assert [s["type"] for s in fed.sent] == [
+        FederationEventType.SPACE_PAGE_DELETED,
+        FederationEventType.SPACE_PAGE_CREATED,
+    ]
+    assert fed.sent[0]["payload"] == {
+        "id": "pg-gone",
+        "page_id": "pg-gone",
+        "space_id": "sp-1",
         "created_by": "u-1",
         "actor_user_id": "u-adm",
     }
