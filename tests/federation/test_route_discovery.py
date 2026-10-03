@@ -1841,3 +1841,31 @@ async def test_late_route_found_pins_the_identity_pk_too():
         origin.cached_target_identity_pk(target_id)
         == nodes["b"].fed.own_identity_pk.hex()
     )
+
+
+async def test_a_discovered_route_notifies_route_learned_listeners():
+    """A route that lands in the cache tells every listener which target is
+    reachable now — the federation service uses it to drain a deferred
+    queue at once. A listener that raises does not stop the others."""
+    nodes = _build_mesh({"a": ["b"], "b": ["a"]})
+    b_id = nodes["b"].instance_id
+    heard: list[str] = []
+
+    def _boom(target: str) -> None:
+        raise RuntimeError("listener bug")
+
+    nodes["a"].service.add_route_learned_listener(_boom)
+    nodes["a"].service.add_route_learned_listener(heard.append)
+    assert await nodes["a"].service.discover_route(b_id) is not None
+    assert heard == [b_id]
+    # A cache hit is not a new route: no second notification.
+    assert await nodes["a"].service.discover_route(b_id) is not None
+    assert heard == [b_id]
+
+
+async def test_a_failed_discovery_notifies_no_listener():
+    nodes = _build_mesh({"a": []})
+    heard: list[str] = []
+    nodes["a"].service.add_route_learned_listener(heard.append)
+    assert await nodes["a"].service.discover_route("nobody") is None
+    assert heard == []

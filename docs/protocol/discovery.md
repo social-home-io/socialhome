@@ -589,11 +589,30 @@ sequenceDiagram
     SH->>SH: verify author_sig + self-cert + space_id binding
     SH->>SH: encrypt inner under space content key + authority-sign envelope
     SH->>G: POST /gfs/publish {space_id, event_type, payload}<br/>(no from_instance; authority-signed ciphertext)
+    opt transient failure (network, timeout, 408, 429, 5xx)
+        SH->>SH: queue {space_id, event_type, payload}<br/>(in memory, FIFO per GFS)
+        SH->>G: POST /gfs/publish — byte-identical body<br/>after backoff or the 429's Retry-After
+    end
     G->>G: verify authority sig vs pinned pubkey<br/>(the ONLY authenticator)
     G->>SUB: {type:"relay", space_id, event_type, payload}<br/>(to every subscriber)
     SUB->>SUB: re-verify authority sig + decrypt + self-cert + author_sig
     SUB->>SUB: dedupe by post_id, persist
 ```
+
+**A failed publish is retried, identity-free.** A transient failure of
+`POST /gfs/publish` (transport error, timeout, 408, 429, 5xx) is queued per
+GFS connection and re-POSTed with backoff (5 s, 30 s, 2 min, 10 min),
+honouring a 429's `Retry-After`; any other 4xx is permanent and not retried.
+The queue holds exactly `{space_id, event_type, payload}` — a retry is the
+byte-identical identity-free body and can never add `from_instance` or a
+household signature. Before each retry the household re-checks that the
+space is still published there and that the GFS has proved
+`anonymous_publish`; a GFS that does not support it gets no retry at all
+rather than the legacy identified body. A retry whose first attempt did land
+is a no-op on the GFS (the 5-minute replay dedupe) and on subscribers (the
+`post_id` dedupe). The queue is in memory and bounded
+(`services/gfs_publish_retry.py`); see
+[`architecture.md`](../architecture.md#outbox-and-retries).
 
 The HTTPS-inbox fallback for relayed `space_post_public` events is a
 follow-up; today the consumer is wired on the WebSocket path (mirroring

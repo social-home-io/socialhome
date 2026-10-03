@@ -145,6 +145,7 @@ KEY_HANDOFF_CLEARTEXT_KEYS: frozenset[str] = frozenset(
 class _RecordingResp:
     def __init__(self) -> None:
         self.status = 200
+        self.headers: dict[str, str] = {}
 
     async def __aenter__(self):
         return self

@@ -3568,6 +3568,10 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         await replay_cache_scheduler.start()
 
+        # Failed GFS publishes (``POST /gfs/publish``) wait in an in-memory,
+        # bounded retry queue owned by the connection service.
+        await gfs_connection_service.start()
+
         # v_48: page drafts waiting for their host — flushed now, then on a
         # tick and whenever a host answers again.
         page_forwarder = app.get(K.page_proposal_forwarder_key)
@@ -3840,6 +3844,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await stale_call_scheduler.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
+        # Before the shared aiohttp client closes: a retry rides it.
+        await gfs_connection_service.stop()
         # Wind down any in-flight public-viewer sessions before
         # closing the shared aiohttp client below.
         await highlight_signaling_handler.stop()

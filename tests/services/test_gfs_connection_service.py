@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -61,10 +62,11 @@ class _Content:
 
 
 class _StubResp:
-    __slots__ = ("status", "_body", "_text", "content", "content_length")
+    __slots__ = ("status", "_body", "_text", "content", "content_length", "headers")
 
     def __init__(self, status: int, body: dict | None = None, text: str = ""):
         self.status = status
+        self.headers: dict[str, str] = {}
         self._body = body or {}
         self._text = text
         self.content = _Content(text.encode())
@@ -3321,3 +3323,214 @@ async def test_republish_space_targets_only_the_gfs_it_is_published_to(env):
     assert [u for u, _b in session.posts] == [
         "https://gfs.example.com/gfs/spaces/sp-rot/publish"
     ]
+
+
+# ─── publish_space_event retries (transient → retried, never identified) ──
+
+
+class _ScriptedPublishSession:
+    """aiohttp-session stub whose ``POST /gfs/publish`` answers from a
+    script: an ``int`` status (with optional ``Retry-After``), or an
+    exception to raise. ``GET /gfs/info`` returns ``info`` (or raises while
+    ``info_down``). Every POST body is recorded as sent."""
+
+    def __init__(self, script: list, *, info: dict | None, info_down=False) -> None:
+        self.script = list(script)
+        self.info = info
+        self.info_down = info_down
+        self.posts: list[tuple[str, dict]] = []
+        self.gets: list[str] = []
+
+    def get(self, url, **_kw):
+        self.gets.append(url)
+        if self.info_down:
+            raise aiohttp.ClientError("info down")
+        return _StubResp(200, self.info or {})
+
+    def post(self, url, *, json=None, **_kw):
+        self.posts.append((url, json))
+        nxt = self.script.pop(0) if self.script else 200
+        if isinstance(nxt, Exception):
+            raise nxt
+        status, retry_after = nxt if isinstance(nxt, tuple) else (nxt, None)
+        return _HeaderResp(status, retry_after)
+
+
+class _HeaderResp(_StubResp):
+    __slots__ = ()
+
+    def __init__(self, status: int, retry_after: str | None) -> None:
+        super().__init__(status, {"status": "published"})
+        self.headers = {"Retry-After": retry_after} if retry_after else {}
+
+
+@pytest.fixture
+def fast_gfs_retry(monkeypatch):
+    from socialhome.services import gfs_publish_retry
+
+    monkeypatch.setattr(
+        gfs_publish_retry, "GFS_PUBLISH_RETRY_BACKOFF_S", (0.0, 0.0, 0.0, 0.0)
+    )
+
+
+async def _publish_and_settle(svc, *, space_id: str, payload: dict) -> int:
+    await svc.start()
+    try:
+        delivered = await svc.publish_space_event(
+            space_id=space_id,
+            event_type="space_post_public",
+            payload=payload,
+            from_instance="alpha.home",
+        )
+        for _ in range(200):
+            if not svc._publish_retry._queues:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await svc.stop()
+    return delivered
+
+
+@pytest.mark.parametrize(
+    "first_failure",
+    [aiohttp.ClientError("connection refused"), asyncio.TimeoutError(), 503, 408],
+)
+async def test_a_transient_gfs_publish_failure_is_retried_identically(
+    env, fast_gfs_retry, first_failure
+):
+    """A network error, timeout, 5xx or 408 is not the end of the event: it
+    is re-POSTed, and the retry body is byte-for-byte the first one —
+    exactly ``{space_id, event_type, payload}``."""
+    session = _ScriptedPublishSession([first_failure, 200], info=_signed_info())
+    svc, _ = await _publish_event_svc(env, session, space_id="sp-r", gfs_ids=["g1"])
+    envelope = {"space_id": "sp-r", "epoch": 0, "encrypted_payload": "ct"}
+
+    await _publish_and_settle(svc, space_id="sp-r", payload=envelope)
+
+    assert len(session.posts) == 2
+    (url1, body1), (url2, body2) = session.posts
+    assert url1 == url2 == "https://g1.example/gfs/publish"
+    assert json.dumps(body1, sort_keys=True) == json.dumps(body2, sort_keys=True)
+    assert set(body2) == {"space_id", "event_type", "payload"}
+    assert body2["payload"] == envelope
+
+
+@pytest.mark.parametrize("status", [400, 403, 404, 413, 422])
+async def test_a_permanent_gfs_publish_failure_is_not_retried(
+    env, fast_gfs_retry, status
+):
+    session = _ScriptedPublishSession([status], info=_signed_info())
+    svc, _ = await _publish_event_svc(env, session, space_id="sp-p", gfs_ids=["g1"])
+
+    await _publish_and_settle(svc, space_id="sp-p", payload={"space_id": "sp-p"})
+
+    assert len(session.posts) == 1
+
+
+async def test_a_429_gfs_publish_waits_its_retry_after(env, fast_gfs_retry):
+    """The GFS's per-IP limiter answers 429 + ``Retry-After``: the retry is
+    scheduled no earlier than that, not on the (zeroed) backoff."""
+    session = _ScriptedPublishSession([(429, "60")], info=_signed_info())
+    svc, _ = await _publish_event_svc(env, session, space_id="sp-t", gfs_ids=["g1"])
+    before = time.monotonic()
+    delivered = await svc.publish_space_event(
+        space_id="sp-t",
+        event_type="space_post_public",
+        payload={"space_id": "sp-t"},
+        from_instance="alpha.home",
+    )
+    assert delivered == 0
+    due_in = svc._publish_retry._queues["g1"].due_at - before
+    assert 60.0 <= due_in < 61.0
+    await svc.stop()
+
+
+async def test_a_retry_never_falls_back_to_the_identified_body(env, fast_gfs_retry):
+    """Cold capability cache + GFS down: the first attempt is the legacy
+    body (unknown → legacy), and it fails. Once the GFS is back and proves
+    ``anonymous_publish``, the RETRY is the identity-free body — the retry
+    itself never carries ``from_instance`` or a household signature."""
+    session = _ScriptedPublishSession(
+        [aiohttp.ClientError("down"), 200], info=_signed_info(), info_down=True
+    )
+    svc, _ = await _publish_event_svc(env, session, space_id="sp-c", gfs_ids=["g1"])
+    await svc.publish_space_event(
+        space_id="sp-c",
+        event_type="space_post_public",
+        payload={"space_id": "sp-c"},
+        from_instance="alpha.home",
+    )
+    assert "from_instance" in session.posts[0][1]  # the pre-existing fallback
+    session.info_down = False
+    svc._info_failed_at.clear()
+    await svc.start()
+    try:
+        for _ in range(200):
+            if not svc._publish_retry._queues:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await svc.stop()
+    assert len(session.posts) == 2
+    retry_body = session.posts[1][1]
+    assert set(retry_body) == {"space_id", "event_type", "payload"}
+    assert "alpha.home" not in json.dumps(retry_body)
+
+
+async def test_a_retry_to_a_gfs_without_anonymous_publish_is_dropped(
+    env, fast_gfs_retry, caplog
+):
+    """A reachable GFS that does not support the identity-free body never
+    gets a retry: re-sending would mean the identified body again."""
+    session = _ScriptedPublishSession([503], info={"server_name": "Old GFS"})
+    svc, _ = await _publish_event_svc(env, session, space_id="sp-o", gfs_ids=["g1"])
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        await _publish_and_settle(svc, space_id="sp-o", payload={"space_id": "sp-o"})
+    assert len(session.posts) == 1
+    assert "not retrying" in caplog.text
+
+
+async def test_a_later_publish_queues_behind_a_pending_retry(env, fast_gfs_retry):
+    """Per GFS, events keep their order: while a retry is pending, a new
+    publish to that GFS waits behind it instead of overtaking it."""
+    session = _ScriptedPublishSession([503, 200, 200], info=_signed_info())
+    svc, _ = await _publish_event_svc(env, session, space_id="sp-o", gfs_ids=["g1"])
+    for n in (1, 2):
+        await svc.publish_space_event(
+            space_id="sp-o",
+            event_type="space_post_public",
+            payload={"space_id": "sp-o", "n": n},
+            from_instance="alpha.home",
+        )
+    assert len(session.posts) == 1  # the second one did not overtake
+    await svc.start()
+    try:
+        for _ in range(200):
+            if not svc._publish_retry._queues:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await svc.stop()
+    assert [b["payload"]["n"] for _u, b in session.posts] == [1, 1, 2]
+
+
+async def test_a_retry_skips_a_space_unpublished_meanwhile(env, fast_gfs_retry):
+    session = _ScriptedPublishSession([503, 200], info=_signed_info())
+    svc, _ = await _publish_event_svc(env, session, space_id="sp-u", gfs_ids=["g1"])
+    await svc.publish_space_event(
+        space_id="sp-u",
+        event_type="space_post_public",
+        payload={"space_id": "sp-u"},
+        from_instance="alpha.home",
+    )
+    _db, repo = env
+    await repo.unpublish_space("sp-u", "g1")
+    await svc.start()
+    try:
+        for _ in range(200):
+            if not svc._publish_retry._queues:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await svc.stop()
+    assert len(session.posts) == 1

@@ -2385,7 +2385,8 @@ async def test_media_frame_idempotency_short_circuits_before_assembly():
     r1 = await p.svc_b.handle_inbound_media_frame(p.a_id, h1, pl1)
     r2 = await p.svc_b.handle_inbound_media_frame(p.a_id, h2, pl2)
     assert r1 == {"status": "ok"}
-    assert r2.get("deduped") is True
+    # Same generic answer as a dispatched frame — the dedupe is not echoed.
+    assert r2 == {"status": "ok"}
     assert len(p.received) == 1  # only the first dispatched
 
 
@@ -3288,9 +3289,9 @@ async def test_broadcast_to_space_members_without_a_legacy_payload_sends_one_sha
     assert sent == {old.id: {"role": "admin"}}
 
 
-async def test_broadcast_to_space_members_warns_about_failed_targets(caplog):
-    """The mesh fan-out has no outbox, so a failed target is a permanent,
-    invisible loss. The minimum bar is a diagnosable WARNING naming the
+async def test_broadcast_to_space_members_warns_about_failed_targets(caplog, no_margin):
+    """The mesh fan-out has no outbox: a ``no_route`` member is retried, and
+    once the retries are spent the loss is a diagnosable WARNING naming the
     space, the event type, the instance and the reason."""
     km = _make_kek_manager()
     fed_repo = InMemoryFederationRepo()
@@ -3309,8 +3310,11 @@ async def test_broadcast_to_space_members_warns_about_failed_targets(caplog):
             event_type=FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
             payload={"space_id": space_id, "role": "admin"},
         )
+        await _drain_deferred(svc)
 
     assert result.failed == 1
+    assert "giving up" in caplog.text
+    assert "space_member_role_changed" in caplog.text
     assert "mesh-only-peer" in caplog.text
     assert space_id in caplog.text
     assert "no_route" in caplog.text
@@ -3401,12 +3405,13 @@ async def test_broadcast_to_space_members_queued_failure_logs_no_warning(caplog)
 
 @pytest.mark.asyncio
 async def test_broadcast_to_space_members_mesh_failure_still_warns(caplog):
-    """The mesh path has no outbox: ``no_route`` is a single-attempt,
-    permanent loss and MUST stay diagnosable."""
+    """The mesh path has no outbox: a mesh miss that is not worth retrying
+    (``not_confirmed`` — no mesh wired at all) is a permanent loss and MUST
+    stay diagnosable."""
     svc, space_id, patcher = _broadcast_svc_with_per_peer_results(
         {
             "mesh-only-peer": DeliveryResult(
-                instance_id="mesh-only-peer", ok=False, error="no_route"
+                instance_id="mesh-only-peer", ok=False, error="not_confirmed"
             ),
         }
     )
@@ -3421,13 +3426,13 @@ async def test_broadcast_to_space_members_mesh_failure_still_warns(caplog):
     assert result.failed == 1
     assert len(result.terminal_failures) == 1
     assert "broadcast_to_space_members" in caplog.text
-    assert "mesh-only-peer=no_route" in caplog.text
+    assert "mesh-only-peer=not_confirmed" in caplog.text
     assert space_id in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_broadcast_to_space_members_mixed_names_only_terminal_peer(caplog):
-    """One outbox-queued direct peer + one mesh ``no_route`` peer: the
+    """One outbox-queued direct peer + one terminal mesh peer: the
     WARNING names ONLY the mesh peer, and counts 1 (not 2) as unreached."""
     svc, space_id, patcher = _broadcast_svc_with_per_peer_results(
         {
@@ -3435,7 +3440,7 @@ async def test_broadcast_to_space_members_mixed_names_only_terminal_peer(caplog)
                 instance_id="direct-peer", ok=False, error=DELIVERY_ERROR_QUEUED
             ),
             "mesh-only-peer": DeliveryResult(
-                instance_id="mesh-only-peer", ok=False, error="no_route"
+                instance_id="mesh-only-peer", ok=False, error="not_confirmed"
             ),
             "happy-peer": DeliveryResult(instance_id="happy-peer", ok=True),
         }
@@ -3452,7 +3457,7 @@ async def test_broadcast_to_space_members_mixed_names_only_terminal_peer(caplog)
     assert result.succeeded == 1
     assert result.failed == 2
     assert [r.instance_id for r in result.terminal_failures] == ["mesh-only-peer"]
-    assert "mesh-only-peer=no_route" in caplog.text
+    assert "mesh-only-peer=not_confirmed" in caplog.text
     assert "direct-peer" not in caplog.text
     assert "did not reach 1/3" in caplog.text
 
@@ -3509,6 +3514,13 @@ async def _drain_deferred(svc: FederationService) -> None:
 @pytest.fixture
 def no_margin(monkeypatch):
     monkeypatch.setattr(federation_service_mod, "MESH_DEFERRED_SEND_MARGIN_S", 0.0)
+    monkeypatch.setattr(
+        federation_service_mod, "MESH_DEFERRED_RETRY_BACKOFF_S", (0.0, 0.0, 0.0, 0.0)
+    )
+
+
+def _no_route(iid: str = "mesh-only-peer") -> DeliveryResult:
+    return DeliveryResult(instance_id=iid, ok=False, error="no_route")
 
 
 class _CooldownRouteService:
@@ -3635,19 +3647,19 @@ async def test_concurrent_broadcasts_into_one_cooldown_lose_nothing(no_margin):
 
 
 @pytest.mark.asyncio
-async def test_a_deferred_mesh_send_that_fails_again_warns(caplog, no_margin):
-    """One attempt, not a loop: a second miss is a loss and says so."""
+async def test_a_deferred_mesh_send_that_misses_again_is_retried(no_margin):
+    """A re-send that still finds no route is not the end: the target's
+    queue backs off and tries again."""
     svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
         {
             "mesh-only-peer": [
                 _cooldown(),
-                DeliveryResult(
-                    instance_id="mesh-only-peer", ok=False, error="no_route"
-                ),
+                _no_route(),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
             ],
         }
     )
-    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+    with patcher:
         await svc.broadcast_to_space_members(
             space_id=space_id,
             event_type=FederationEventType.SPACE_POST_CREATED,
@@ -3655,10 +3667,7 @@ async def test_a_deferred_mesh_send_that_fails_again_warns(caplog, no_margin):
         )
         await _drain_deferred(svc)
 
-    assert [c[0] for c in calls] == ["mesh-only-peer", "mesh-only-peer"]
-    assert "mesh-only-peer" in caplog.text
-    assert "no_route" in caplog.text
-    assert space_id in caplog.text
+    assert [c[0] for c in calls] == ["mesh-only-peer"] * 3
 
 
 @pytest.mark.asyncio
@@ -3868,18 +3877,12 @@ async def test_a_deferred_snapshot_event_skips_a_household_banned_meanwhile(
 
 
 @pytest.mark.asyncio
-async def test_dropping_the_rest_of_a_queue_names_what_was_lost(caplog, no_margin):
-    """After a re-send misses, the rest of the target's queue is dropped; the
-    WARNING names each lost event and its space, not just a count."""
+async def test_giving_up_on_a_queue_names_what_was_lost(caplog, no_margin):
+    """Once the retry budget is spent the target's whole queue is dropped;
+    the WARNING names each lost event and its space, not just a count."""
+    budget = len(federation_service_mod.MESH_DEFERRED_RETRY_BACKOFF_S)
     svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
-        {
-            "mesh-only-peer": [
-                _cooldown(after=0.05),
-                DeliveryResult(
-                    instance_id="mesh-only-peer", ok=False, error="no_route"
-                ),
-            ],
-        }
+        {"mesh-only-peer": [_cooldown(after=0.05)] + [_no_route()] * budget}
     )
     with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
         for event_type in (
@@ -3894,8 +3897,10 @@ async def test_dropping_the_rest_of_a_queue_names_what_was_lost(caplog, no_margi
             )
         await _drain_deferred(svc)
 
-    assert len(calls) == 2  # the first send, then one re-send that missed
-    assert "dropping 2 more deferred send(s) to mesh-only-peer" in caplog.text
+    # The first send, then ``budget`` re-sends of the head item, all missed.
+    assert len(calls) == 1 + budget
+    assert "giving up on 3 deferred send(s) to mesh-only-peer" in caplog.text
+    assert f"space_post_created@{space_id}" in caplog.text
     assert f"space_post_updated@{space_id}" in caplog.text
     assert f"space_comment_created@{space_id}" in caplog.text
 
@@ -4372,3 +4377,230 @@ async def test_a_frame_too_big_for_the_relay_is_not_queued_for_retry():
     assert result.error == DELIVERY_ERROR_RELAY_TOO_LARGE
     assert outbox_repo.enqueued == []
     assert fed_repo.unreachable_calls == []
+
+
+# ─── no_route mesh sends are retried (same deferred FIFO as the cooldown) ──
+
+
+class _NoRouteUntilLearnedRouteService:
+    """Route discovery that finds nothing until ``learn()`` — then the route
+    is cached and every look hits it. No cooldown, so only the deferral's
+    own timing decides when a re-send happens."""
+
+    def __init__(self) -> None:
+        self.known = False
+        self.discoveries = 0
+
+    def cooldown_remaining(self, target: str) -> float:
+        return 0.0
+
+    async def discover_route(self, target: str):
+        self.discoveries += 1
+        if not self.known:
+            return None
+        return ["self", "relay", target], "eph-pk"
+
+    def cached_target_identity_pk(self, target: str) -> str:
+        return "aa" * 32
+
+    async def invalidate(self, target: str) -> None:  # pragma: no cover
+        return None
+
+
+def _mesh_svc_with_route(route) -> tuple[FederationService, Any, Any]:
+    fed_repo = InMemoryFederationRepo()
+    svc, _ = _make_service(federation_repo=fed_repo)
+    fed_repo.add_space_member("space-1", "mesh-only-peer")
+    routed = _RecordingRoutedHandler()
+    svc._route_service = route
+    svc._routed_handler = routed
+    return svc, fed_repo, routed
+
+
+@pytest.mark.asyncio
+async def test_a_no_route_post_reaches_the_member_once_a_route_is_learned(
+    monkeypatch,
+):
+    """End to end through the real ``send_with_mesh_fallback``: discovery
+    finds no route, so the post is queued instead of lost. When a route to
+    that member is learned, the queue drains at once — it does not sit out
+    its (long) backoff."""
+    monkeypatch.setattr(federation_service_mod, "MESH_DEFERRED_SEND_MARGIN_S", 600.0)
+    route = _NoRouteUntilLearnedRouteService()
+    svc, _repo, routed = _mesh_svc_with_route(route)
+
+    result = await svc.broadcast_to_space_members(
+        "space-1",
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "space-1", "post_id": "p1"},
+    )
+    (only,) = result.results
+    assert only.error == DELIVERY_ERROR_MESH_DEFERRED
+    assert result.terminal_failures == ()
+    assert routed.sent == []
+
+    route.known = True
+    svc.on_route_learned("someone-else")  # another target: no effect
+    await asyncio.sleep(0.02)
+    assert routed.sent == []
+    svc.on_route_learned("mesh-only-peer")
+    await _drain_deferred(svc)
+
+    assert routed.sent == [
+        (
+            ["self", "relay", "mesh-only-peer"],
+            "space_post_created",
+            {"space_id": "space-1", "post_id": "p1"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_no_route_post_is_delivered_on_a_timed_retry(no_margin):
+    """No route event at all: the backoff alone re-discovers, and the
+    second look finds the route."""
+    route = _NoRouteUntilLearnedRouteService()
+    svc, _repo, routed = _mesh_svc_with_route(route)
+    discoveries_seen: list[int] = []
+
+    original = route.discover_route
+
+    async def _learn_on_second_look(target: str):
+        discoveries_seen.append(route.discoveries)
+        if route.discoveries >= 1:
+            route.known = True
+        return await original(target)
+
+    route.discover_route = _learn_on_second_look  # type: ignore[method-assign]
+    await svc.broadcast_to_space_members(
+        "space-1",
+        FederationEventType.SPACE_POST_CREATED,
+        {"space_id": "space-1", "post_id": "p1"},
+    )
+    await _drain_deferred(svc)
+
+    assert route.discoveries == 2
+    assert [s[1] for s in routed.sent] == ["space_post_created"]
+
+
+@pytest.mark.asyncio
+async def test_a_no_route_queue_gives_up_after_its_budget(caplog, no_margin):
+    """A member that stays unreachable is not retried forever: after the
+    budget, one WARNING names the event types and spaces given up on."""
+    budget = len(federation_service_mod.MESH_DEFERRED_RETRY_BACKOFF_S)
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {"mesh-only-peer": [_no_route()] * (1 + budget)}
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        first = await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_TASK_CREATED,
+            payload={"space_id": space_id, "task_id": "t1"},
+        )
+        await _drain_deferred(svc)
+
+    assert first.results[0].error == DELIVERY_ERROR_MESH_DEFERRED
+    assert len(calls) == 1 + budget
+    assert svc._deferred_mesh_queues == {}
+    assert "giving up on 2 deferred send(s) to mesh-only-peer" in caplog.text
+    assert f"space_post_created@{space_id}" in caplog.text
+    assert f"space_task_created@{space_id}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_no_route_and_cooldown_deferrals_share_one_ordered_queue(no_margin):
+    """A broadcast in route cooldown, then one that would find no route, go
+    to the same member: both wait in ONE FIFO, and a no_route miss on the
+    head keeps the head first — A is delivered before B, never overtaken."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _cooldown(after=0.02),
+                _no_route(),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+            ],
+        }
+    )
+    with patcher:
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "A"},
+        )
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_UPDATED,
+            payload={"space_id": space_id, "post_id": "B"},
+        )
+        assert len(svc._deferred_mesh_tasks) == 1
+        await _drain_deferred(svc)
+
+    assert [c[2]["post_id"] for c in calls] == ["A", "A", "A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_a_no_route_retry_skips_a_household_removed_meanwhile(
+    caplog, no_margin, monkeypatch
+):
+    """Members only: a household removed from the space while its no_route
+    retry waits gets nothing — membership is re-read before every re-send."""
+    monkeypatch.setattr(
+        federation_service_mod, "MESH_DEFERRED_RETRY_BACKOFF_S", (0.05, 0.0, 0.0)
+    )
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {"mesh-only-peer": [_no_route()]}
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        await svc.broadcast_to_space_members(
+            space_id=space_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={"space_id": space_id, "post_id": "p1"},
+        )
+        svc._federation_repo._space_members.discard((space_id, "mesh-only-peer"))
+        await _drain_deferred(svc)
+
+    assert len(calls) == 1
+    assert "no longer a member" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_mesh_miss_on_a_re_send_costs_only_that_item(
+    caplog, no_margin
+):
+    """A re-send that fails for a reason a retry cannot fix (no mesh wired
+    any more) loses that item with a WARNING; the queue moves on."""
+    svc, space_id, patcher, calls = _broadcast_svc_with_scripted_results(
+        {
+            "mesh-only-peer": [
+                _no_route(),
+                DeliveryResult(
+                    instance_id="mesh-only-peer", ok=False, error="not_confirmed"
+                ),
+                DeliveryResult(instance_id="mesh-only-peer", ok=True),
+            ],
+        }
+    )
+    with patcher, caplog.at_level(logging.WARNING, logger="socialhome"):
+        for post in ("A", "B"):
+            await svc.broadcast_to_space_members(
+                space_id=space_id,
+                event_type=FederationEventType.SPACE_POST_CREATED,
+                payload={"space_id": space_id, "post_id": post},
+            )
+        await _drain_deferred(svc)
+
+    assert [c[2]["post_id"] for c in calls] == ["A", "A", "B"]
+    assert "not_confirmed" in caplog.text
+
+
+def test_attach_mesh_subscribes_to_learned_routes():
+    svc, _ = _make_service()
+    route = MagicMock()
+    svc.attach_mesh(route_service=route, routed_handler=MagicMock())
+    route.add_route_learned_listener.assert_called_once_with(svc.on_route_learned)

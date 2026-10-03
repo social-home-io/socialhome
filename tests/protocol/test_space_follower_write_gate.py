@@ -59,7 +59,7 @@ pytestmark = pytest.mark.security
 SPACE_ID = "sp-follower"
 FOLLOWER = "follower-household"
 MEMBER = "member-household"
-REFUSED = {"status": "ok", "dropped": "subscriber-write"}
+REFUSED = "subscriber-write"
 
 
 @pytest.fixture
@@ -111,7 +111,10 @@ async def _run(step, event):
     ctx = InboundContext()
     ctx.event = event
     await step(ctx)
-    return ctx.early_response
+    # The wire answer is the generic ``ok`` for every drop; the reason is
+    # server-side only.
+    assert ctx.early_response in (None, {"status": "ok"})
+    return ctx.drop_reason
 
 
 async def _seat(members, instance_id, user_id, role):

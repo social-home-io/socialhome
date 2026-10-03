@@ -70,6 +70,17 @@ Each step is an independently-testable async callable composed via
 steps are appended to the chain — `handle_inbound_envelope` is not
 edited. The same chain runs for RTC-delivered envelopes.
 
+**A gate that drops a valid envelope answers like a dispatch.** The
+post-signature gates (idempotent duplicate, space ban, deprovisioned author,
+archived space, reader / non-member write, write held for a seat) all
+short-circuit through `inbound_validator.drop()`, which answers the one
+body `{"status": "ok"}` — the same a dispatched envelope gets. A distinct
+reason (or a `403` for a ban) would let any signed sender, member or not,
+learn whether a space exists, is hosted here, is archived or has banned it.
+The reason is kept server-side (`InboundContext.drop_reason` and the gate's
+log line). Over the DataChannel and the GFS relay the answer is not sent
+back at all.
+
 The signature step **also binds `from_instance` to the verified signing
 identity**: an envelope whose `from_instance` claim does not match the
 instance whose public key passed verification is rejected with

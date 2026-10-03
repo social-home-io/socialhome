@@ -20,13 +20,17 @@ Steps (in order):
 6. **Decrypt payload** — AES-256-GCM using ``key_remote_to_self``.
 7. **Parse inner** — decrypted bytes → ``FederationEvent``.
 8. **Idempotency** — optional ``idempotency_key`` de-dup.
-9. **Ban check** — space-scoped events from banned instances → reject.
+9. **Ban check** — space-scoped events from banned instances → drop.
 10. **Persist replay** — insert ``msg_id`` into the replay table.
 
 The middleware shape matches :class:`InboundStep`: a coroutine that
-takes :class:`InboundContext` and returns either ``None`` (pass) or a
-``dict`` to short-circuit with an early response. Raising ``ValueError``
-means "reject the envelope".
+takes :class:`InboundContext` and returns ``None``; a step that is done
+with the envelope calls :func:`drop`, which short-circuits the chain with
+:data:`ACCEPTED_RESPONSE` — the same body a dispatched envelope gets, so a
+drop never tells the sender why (no space-existence / archive / ban
+oracle). Raising ``ValueError`` means "reject the envelope" and is reserved
+for transport-level failures (bad JSON, unknown inbox, skew, signature,
+replay, decrypt) that reveal nothing about a space.
 
 Benefits of the decomposition:
 
@@ -138,8 +142,13 @@ class InboundContext:
     event: FederationEvent | None = None
 
     #: Short-circuit response (set by idempotency or other steps that
-    #: want to return early without dispatching).
+    #: want to return early without dispatching). Always set through
+    #: :func:`drop`, so it is always :data:`ACCEPTED_RESPONSE`.
     early_response: dict | None = None
+
+    #: Why a step dropped the event (see :func:`drop`). Server-side only —
+    #: it is logged and read by tests, never put on the wire.
+    drop_reason: str | None = None
 
     #: Which transport delivered these bytes. Empty for a live wire (RTC
     #: DataChannel, HTTPS inbox); :data:`TRANSPORT_GFS_RELAY` when the
@@ -150,6 +159,35 @@ class InboundContext:
 
 #: Middleware shape: async callable that takes context + raises or returns.
 InboundStep = Callable[[InboundContext], Awaitable[None]]
+
+
+#: Server-side drop reasons (:attr:`InboundContext.drop_reason`).
+DROP_DEDUPED = "deduped"
+DROP_BANNED = "banned-from-space"
+DROP_DEPROVISIONED_AUTHOR = "deprovisioned-author"
+DROP_SUBSCRIBER_WRITE = "subscriber-write"
+DROP_HELD_AWAITING_SEAT = "awaiting-seat"
+DROP_ARCHIVED_SPACE = "archived-space"
+
+#: The one body every accepted envelope gets — dispatched OR dropped by a
+#: gate. A distinct body per drop reason (``archived-space``,
+#: ``subscriber-write``, ``awaiting-seat``, ``deduped``…) and a ``403`` for a
+#: ban were an oracle: any signed sender, member or not, could learn that a
+#: space exists, is hosted here, is archived, or has banned it, just by
+#: reading the answer. Every drop is ``ok`` because the sender is done with
+#: the envelope either way (its outbox must stop redelivering). The reason
+#: stays server-side in :attr:`InboundContext.drop_reason` and the step's
+#: log line.
+ACCEPTED_RESPONSE: dict = {"status": "ok"}
+
+
+def drop(ctx: InboundContext, reason: str) -> None:
+    """Short-circuit ``ctx``: stop the chain, answer :data:`ACCEPTED_RESPONSE`.
+
+    ``reason`` is recorded on the context for logging and tests only.
+    """
+    ctx.drop_reason = reason
+    ctx.early_response = dict(ACCEPTED_RESPONSE)
 
 
 class _InboxInstance:
@@ -564,13 +602,17 @@ def make_idempotency_check(*, cache_holder) -> InboundStep:
                 ctx.event.event_type.value,
                 ik,
             )
-            ctx.early_response = {"status": "ok", "deduped": True}
+            drop(ctx, DROP_DEDUPED)
 
     return idempotency_check
 
 
 def make_ban_check(*, federation_repo) -> InboundStep:
-    """Step 9: reject space-scoped events from banned instances.
+    """Step 9: drop space-scoped events from banned instances.
+
+    The drop answers :data:`ACCEPTED_RESPONSE` like every other gate — a
+    distinct ``403`` told a sender holding a valid signature that the space
+    exists here and has banned it. The reason is logged at WARNING.
 
     Judges every space the event could be applied to: the routing
     ``space_id`` and — once decrypted — the payload copy, which content
@@ -597,9 +639,14 @@ def make_ban_check(*, federation_repo) -> InboundStep:
                 space_id,
                 from_instance,
             ):
-                raise ValueError(
-                    f"Instance {from_instance!r} is banned from space {space_id!r}"
+                log.warning(
+                    "inbound: dropped %s from %s — banned from space %s",
+                    ctx.envelope.get("event_type"),
+                    from_instance,
+                    space_id,
                 )
+                drop(ctx, DROP_BANNED)
+                return
 
     return ban_check
 
@@ -704,10 +751,7 @@ def make_check_deprovisioned_author(*, user_repo) -> InboundStep:
                 event.event_type.value,
                 author_user_id,
             )
-            ctx.early_response = {
-                "status": "ok",
-                "dropped": "deprovisioned-author",
-            }
+            drop(ctx, DROP_DEPROVISIONED_AUTHOR)
 
     return check_deprovisioned_author
 
@@ -722,19 +766,6 @@ def make_check_deprovisioned_author(*, user_repo) -> InboundStep:
 _WRITER_ROLES: frozenset[str] = frozenset(
     r.value for r in WRITER_ROLES if r is not SpaceRole.OWNER
 )
-
-#: Early-response body for a refused write. ``status: ok`` on purpose: the
-#: envelope was valid and we are done with it, so the sender's outbox must
-#: stop redelivering it rather than retry forever.
-_REFUSED_WRITE = {"status": "ok", "dropped": "subscriber-write"}
-
-#: Early-response body for a write held until its household's seat lands.
-_HELD_WRITE = {"status": "ok", "held": "awaiting-seat"}
-
-#: Early-response body for a write into a locally archived space. ``ok``
-#: for the same reason as :data:`_REFUSED_WRITE`: redelivering it cannot
-#: change the answer until the space is unarchived.
-_ARCHIVED_WRITE = {"status": "ok", "dropped": "archived-space"}
 
 
 def make_check_space_archived(
@@ -810,7 +841,7 @@ def make_check_space_archived(
             event.from_instance,
             reason,
         )
-        ctx.early_response = dict(_ARCHIVED_WRITE)
+        drop(ctx, DROP_ARCHIVED_SPACE)
         if on_refused is not None:
             try:
                 await on_refused(event, space)
@@ -933,7 +964,7 @@ def make_check_space_writer(
                 event.event_type.value,
                 event.from_instance,
             )
-            ctx.early_response = dict(_REFUSED_WRITE)
+            drop(ctx, DROP_SUBSCRIBER_WRITE)
             return
         try:
             seats = await remote_member_repo.list_for_instance(
@@ -967,7 +998,7 @@ def make_check_space_writer(
                     space_id,
                     event.from_instance,
                 )
-                ctx.early_response = dict(_HELD_WRITE)
+                drop(ctx, DROP_HELD_AWAITING_SEAT)
                 return
         if event.event_type is FederationEventType.SPACE_COMMENT_CREATED:
             if await _subscriber_comment_allowed(
@@ -986,7 +1017,7 @@ def make_check_space_writer(
             len(live),
             len(seats) - len(live),
         )
-        ctx.early_response = dict(_REFUSED_WRITE)
+        drop(ctx, DROP_SUBSCRIBER_WRITE)
 
     return check_space_writer
 
@@ -1064,7 +1095,7 @@ async def run_post_decrypt_gates(
 
     Returns ``True`` when the event may be dispatched, ``False`` when a
     gate refused it (``early_response`` set, or a step raised
-    ``ValueError`` the way the ban check does on a banned instance).
+    ``ValueError``).
     """
     for step in steps:
         try:

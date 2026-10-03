@@ -1173,6 +1173,19 @@ class PairingSession:
 #: milliseconds against a route that is seconds from warming up.
 DELIVERY_ERROR_ROUTE_COOLDOWN: str = "route_cooldown"
 
+#: :attr:`DeliveryResult.error` value meaning "we probed the mesh and the
+#: flood found no route to this target" (or the route it found was too
+#: short to use). Unlike :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` a probe did
+#: go out — but a mesh route can appear seconds later (a relay comes back,
+#: the target reconnects), so ``broadcast_to_space_members`` defers and
+#: retries it with backoff rather than writing the member off.
+DELIVERY_ERROR_NO_ROUTE: str = "no_route"
+
+#: :attr:`DeliveryResult.error` value meaning "a route was found but the
+#: routed send failed, twice — once on the cached path, once on a freshly
+#: probed one". Deferred and retried like :data:`DELIVERY_ERROR_NO_ROUTE`.
+DELIVERY_ERROR_ROUTED_SEND_FAILED: str = "routed_send_failed"
+
 #: :attr:`DeliveryResult.error` value meaning "the connection-server relay
 #: answered 429". Like :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` this is a
 #: *waitable* window, not a broken path: the relay is up, the envelope is
@@ -1201,19 +1214,21 @@ DELIVERY_ERROR_RELAY_TOO_LARGE: str = "relay_too_large"
 #: the direct peer is reachable again. The literal stays ``"delivery_failed"``
 #: for log consumers that already match it; the name carries the semantics.
 #: It and :data:`DELIVERY_ERROR_MESH_DEFERRED` are the ``ok=False`` reasons
-#: that are *not* terminal — the mesh path (``no_route`` /
-#: ``unknown_instance`` / ``not_confirmed`` / ``routed_send_failed`` /
-#: :data:`DELIVERY_ERROR_ROUTE_COOLDOWN`) has no outbox, so every other
-#: reason is a single-attempt, permanent loss.
+#: that are *not* terminal. The mesh path has no outbox: a broadcast's
+#: :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` / :data:`DELIVERY_ERROR_NO_ROUTE` /
+#: :data:`DELIVERY_ERROR_ROUTED_SEND_FAILED` miss is queued for a bounded
+#: retry (reported as :data:`DELIVERY_ERROR_MESH_DEFERRED`), and every other
+#: mesh reason (``not_confirmed`` …) is a permanent loss.
 DELIVERY_ERROR_QUEUED: str = "delivery_failed"
 
 
 #: :attr:`DeliveryResult.error` value meaning "queued in the mesh target's
 #: deferred FIFO" — NOT a loss yet. ``FederationService.broadcast_to_space_members``
-#: reports it for a mesh-only member in its negative route cooldown, and for
-#: every later broadcast to that member while its queue is pending (so order
-#: is kept). The queue drains once after the cooldown, one attempt per item,
-#: and logs a WARNING itself for anything that misses again.
+#: reports it for a mesh-only member it could not reach (route cooldown, no
+#: route, routed send failed), and for every later broadcast to that member
+#: while its queue is pending (so order is kept). The queue re-sends with a
+#: bounded backoff — immediately when a route to the member is learned — and
+#: logs one WARNING naming what it gave up on once the budget is spent.
 DELIVERY_ERROR_MESH_DEFERRED: str = "mesh_retry_scheduled"
 
 #: :attr:`DeliveryResult.error` value meaning "the mesh target's deferred

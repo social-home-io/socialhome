@@ -71,6 +71,12 @@ from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from .gfs_publish_retry import (
+    GfsPublish,
+    GfsPublishRetryQueue,
+    PublishOutcome,
+    classify_publish_status,
+)
 from .space_authority_pin import owner_authority_cert
 
 log = logging.getLogger(__name__)
@@ -184,6 +190,7 @@ class GfsConnectionService:
         "_invite_links",
         "_authority_rotation",
         "_rotation_warned",
+        "_publish_retry",
     )
 
     def __init__(
@@ -243,6 +250,17 @@ class GfsConnectionService:
         # relays — so a household publishing a cert there warns, once.
         self._authority_rotation: dict[str, bool] = {}
         self._rotation_warned: set[str] = set()
+        # Failed ``POST /gfs/publish`` calls wait here for a retry —
+        # identity-free bodies only, in memory, bounded (see the module).
+        self._publish_retry = GfsPublishRetryQueue(self._retry_publish)
+
+    async def start(self) -> None:
+        """Start the GFS publish retry loop (app ``on_startup``)."""
+        await self._publish_retry.start()
+
+    async def stop(self) -> None:
+        """Stop the GFS publish retry loop (app ``on_cleanup``)."""
+        await self._publish_retry.stop()
 
     def attach_publish_context(
         self,
@@ -1392,9 +1410,15 @@ class GfsConnectionService:
 
         Fail-closed: with no signing identity wired, nothing is sent (returns
         ``0`` — the legacy fallback would be unsignable, and a household with
-        no identity has nothing to relay). A per-GFS transport/HTTP failure is
-        logged and skipped so one unreachable server doesn't abort the
-        fan-out. Returns the number of GFS instances the event was accepted by.
+        no identity has nothing to relay). A per-GFS failure never aborts the
+        fan-out. A *transient* one (transport error, timeout, 408, 429, 5xx)
+        is queued for a backed-off retry, honouring a 429's ``Retry-After``
+        (:class:`~socialhome.services.gfs_publish_retry.GfsPublishRetryQueue`);
+        a retry is always the identity-free body, never the legacy one (see
+        :meth:`_retry_publish`). A *permanent* one (any other 4xx) is logged
+        and dropped. While a GFS has retries pending, a new publish to it
+        queues behind them so it cannot overtake. Returns the number of GFS
+        instances the event was accepted by on this first attempt.
         """
         if self._http_client is None or not self._own_signing_key:
             log.warning(
@@ -1413,8 +1437,16 @@ class GfsConnectionService:
         }
         legacy_body: dict | None = None
         delivered = 0
+        retry_item = GfsPublish(
+            space_id=space_id, event_type=event_type, payload=payload
+        )
         for conn in conns:
             if conn.status != "active":
+                continue
+            if self._publish_retry.pending(conn.id):
+                # Earlier publishes to this GFS are waiting for a retry:
+                # join them rather than overtake (subscribers see order).
+                self._queue_publish_retry(conn, retry_item, None)
                 continue
             if await self._anonymous_publish_supported(conn):
                 body = anonymous_body
@@ -1428,32 +1460,105 @@ class GfsConnectionService:
                         from_instance,
                     )
                 body = legacy_body
-            url = f"{conn.inbox_url}/gfs/publish"
-            try:
-                async with self._http_client.post(
-                    url,
-                    allow_redirects=False,
-                    json=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status < 300:
-                        delivered += 1
-                    else:
-                        log.warning(
-                            "publish_space_event: GFS %s rejected relay "
-                            "for space %s — HTTP %d",
-                            conn.id,
-                            space_id,
-                            resp.status,
-                        )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                log.warning(
-                    "publish_space_event: GFS %s relay failed for space %s: %s",
-                    conn.id,
-                    space_id,
-                    exc,
-                )
+            outcome = await self._post_publish(conn, body, space_id=space_id)
+            if outcome.kind == "delivered":
+                delivered += 1
+            elif outcome.kind == "transient":
+                self._queue_publish_retry(conn, retry_item, outcome.retry_after_s)
         return delivered
+
+    async def _post_publish(
+        self, conn: GfsConnection, body: dict, *, space_id: str
+    ) -> PublishOutcome:
+        """One ``POST /gfs/publish`` of ``body`` to ``conn``, classified."""
+        assert self._http_client is not None
+        url = f"{conn.inbox_url}/gfs/publish"
+        try:
+            async with self._http_client.post(
+                url,
+                allow_redirects=False,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                outcome = classify_publish_status(
+                    resp.status, resp.headers.get("Retry-After")
+                )
+                if outcome.kind != "delivered":
+                    log.warning(
+                        "publish_space_event: GFS %s rejected relay for space"
+                        " %s — HTTP %d (%s)",
+                        conn.id,
+                        space_id,
+                        resp.status,
+                        outcome.kind,
+                    )
+                return outcome
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning(
+                "publish_space_event: GFS %s relay failed for space %s: %s",
+                conn.id,
+                space_id,
+                exc or type(exc).__name__,
+            )
+            return PublishOutcome.transient()
+
+    def _queue_publish_retry(
+        self,
+        conn: GfsConnection,
+        item: GfsPublish,
+        retry_after_s: float | None,
+    ) -> None:
+        if not self._publish_retry.enqueue(conn.id, item, retry_after_s=retry_after_s):
+            log.warning(
+                "publish_space_event: %s@%s to GFS %s is lost — the retry"
+                " queue refused it",
+                item.event_type,
+                item.space_id,
+                conn.id,
+            )
+
+    async def _retry_publish(self, conn_id: str, item: GfsPublish) -> PublishOutcome:
+        """One retry of ``item`` to ``conn_id`` — the retry queue's sender.
+
+        Re-reads before every attempt: the space must still be published
+        to that connection and the connection active, or the item is
+        dropped (the owner withdrew it). The body is ALWAYS the
+        identity-free ``{space_id, event_type, payload}``: a GFS that has
+        not proved ``anonymous_publish`` under its signed capability block
+        is either still unreachable (``/gfs/info`` failing — retry later)
+        or does not support it, and then the item is dropped rather than
+        re-sent with ``from_instance`` and a household signature.
+        """
+        if self._http_client is None:
+            return PublishOutcome.permanent()
+        conn = next(
+            (
+                c
+                for c in await self._repo.list_gfs_for_space(item.space_id)
+                if c.id == conn_id
+            ),
+            None,
+        )
+        if conn is None or conn.status != "active":
+            log.info(
+                "publish retry: %s@%s is no longer published to GFS %s — dropping it",
+                item.event_type,
+                item.space_id,
+                conn_id,
+            )
+            return PublishOutcome.permanent()
+        if not await self._anonymous_publish_supported(conn):
+            if conn.id in self._info_failed_at:
+                return PublishOutcome.transient()
+            log.warning(
+                "publish retry: GFS %s does not support the identity-free"
+                " relay — not retrying %s@%s with the identified body",
+                conn.id,
+                item.event_type,
+                item.space_id,
+            )
+            return PublishOutcome.permanent()
+        return await self._post_publish(conn, item.body(), space_id=item.space_id)
 
     def _legacy_publish_body(
         self,

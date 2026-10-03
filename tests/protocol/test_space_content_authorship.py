@@ -1559,7 +1559,8 @@ async def test_a_write_from_a_household_not_yet_seated_is_held_at_the_gate(env):
     assert not await run_post_decrypt_gates(
         ctx, steps=fed.post_decrypt_gate_steps(include_ban_check=True)
     )
-    assert ctx.early_response == {"status": "ok", "held": "awaiting-seat"}
+    assert ctx.drop_reason == "awaiting-seat"
+    assert ctx.early_response == {"status": "ok"}
     await _seat_lands(app, db, "house-joiner", "u-j")
     assert await db.fetchone("SELECT 1 FROM space_posts WHERE id='p-joiner'", ())
 

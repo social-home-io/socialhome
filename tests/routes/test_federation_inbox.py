@@ -365,3 +365,100 @@ async def test_inbound_error_does_not_leak_exception_text(client, env):
     assert body_json == {"error": "gone"}
     assert "msg_id" not in str(body_json)
     assert "Replay" not in str(body_json)
+
+
+# ─── Early drops answer like an accepted envelope (no oracle) ───────────
+
+
+async def _save_space(client, sid: str, *, owner: str, archived: bool) -> None:
+    from socialhome.app_keys import space_repo_key
+    from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+
+    await client.server.app[space_repo_key].save(
+        Space(
+            id=sid,
+            name=sid,
+            owner_instance_id=owner,
+            owner_username="admin",
+            identity_public_key="aabb" * 16,
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+            archived=archived,
+        )
+    )
+
+
+async def _post_write(client, env, space_id: str, msg_id: str) -> tuple[int, bytes]:
+    """A signed, well-formed SPACE_POST_CREATED from a paired NON-member."""
+    raw = json.loads(
+        _build_envelope(
+            own_iid=env["own_iid"],
+            peer_kp=env["peer_kp"],
+            session_key=env["session_key"],
+            payload={
+                "space_id": space_id,
+                "id": f"post-{msg_id}",
+                "author": "mallory",
+                "type": "text",
+                "content": "probe",
+            },
+            msg_id=msg_id,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+        )
+    )
+    # Re-sign with the routing space_id set, as every real writer does.
+    raw.pop("signatures")
+    raw["space_id"] = space_id
+    sig = sign_ed25519(
+        env["peer_kp"].private_key,
+        json.dumps(raw, separators=(",", ":")).encode("utf-8"),
+    )
+    raw["signatures"] = {"ed25519": b64url_encode(sig)}
+    r = await client.post("/federation/inbox/wh-test", data=json.dumps(raw))
+    return r.status, await r.read()
+
+
+@pytest.mark.security
+async def test_a_dropped_write_is_indistinguishable_across_space_states(client, env):
+    """A signed sender that is NOT a member must not learn from the inbox
+    answer whether a space exists, is hosted here, is archived, or has
+    banned it. Archived / unknown / live-not-a-member / banned all answer
+    byte-for-byte what an accepted envelope gets — the reason stays in the
+    server log only."""
+    from socialhome.app_keys import federation_repo_key
+
+    await _save_space(client, "sp-archived", owner=env["own_iid"], archived=True)
+    await _save_space(client, "sp-live", owner=env["own_iid"], archived=False)
+    await _save_space(client, "sp-banned", owner=env["own_iid"], archived=False)
+    await client.server.app[federation_repo_key].ban_instance_from_space(
+        "sp-banned", env["peer"].id, reason="test"
+    )
+
+    accepted = await client.post(
+        "/federation/inbox/wh-test",
+        data=_build_envelope(
+            own_iid=env["own_iid"],
+            peer_kp=env["peer_kp"],
+            session_key=env["session_key"],
+            payload={"user_id": "alice", "state": "home"},
+            msg_id="baseline",
+        ),
+    )
+    baseline = (accepted.status, await accepted.read())
+
+    answers = {
+        label: await _post_write(client, env, sid, msg_id=label)
+        for label, sid in (
+            ("archived", "sp-archived"),
+            ("unknown", "sp-does-not-exist"),
+            ("live-not-member", "sp-live"),
+            ("banned", "sp-banned"),
+        )
+    }
+
+    assert baseline[0] == 200
+    assert json.loads(baseline[1]) == {"status": "ok"}
+    for label, answer in answers.items():
+        assert answer == baseline, label
