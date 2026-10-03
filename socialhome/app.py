@@ -72,6 +72,7 @@ from .infrastructure import (
     KeyManager,
     OutboxProcessor,
     ReconnectSyncQueue,
+    RetryAfter,
     WebSocketManager,
 )
 from .infrastructure.page_lock_scheduler import PageLockExpiryScheduler
@@ -392,7 +393,7 @@ async def _deliver_outbox_entry(
     entry,
     *,
     still_wanted=None,
-) -> DeliveryOutcome:
+) -> DeliveryOutcome | RetryAfter:
     """The :class:`OutboxProcessor` delivery callback.
 
     :func:`_redeliver_envelope` does the work; an ``UNPAIR`` that reached a
@@ -404,19 +405,53 @@ async def _deliver_outbox_entry(
     if still_wanted is not None and not await still_wanted(entry):
         return DeliveryOutcome.PERMANENT
     outcome = await _redeliver_envelope(federation_service, federation_repo, entry)
-    if (
-        entry.event_type is FederationEventType.UNPAIR
-        and outcome is not DeliveryOutcome.TRANSIENT
+    # Only a verdict ends the tombstone: SUCCESS, or PERMANENT. TRANSIENT
+    # and a throttled ``RetryAfter`` both mean "not delivered yet".
+    if entry.event_type is FederationEventType.UNPAIR and outcome in (
+        DeliveryOutcome.SUCCESS,
+        DeliveryOutcome.PERMANENT,
     ):
         await peer_unpair.finish_unpair(entry.instance_id)
     return outcome
+
+
+def _parse_retry_after_s(value: str | None) -> float | None:
+    """``Retry-After`` as delta-seconds, or ``None`` when absent/unusable.
+
+    Only the delta-seconds form is honoured — our own inbox sends it
+    (``routes/federation.py``). The HTTP-date form is ignored rather than
+    trusted against a peer's clock; the caller falls back to the backoff.
+    """
+    if not value:
+        return None
+    try:
+        seconds = int(value.strip())
+    except ValueError:
+        return None
+    return float(seconds) if seconds >= 0 else None
+
+
+def _throttled_outcome(entry, resp) -> DeliveryOutcome | RetryAfter:
+    """Outcome for an inbox that answered 429: always a retry, never a drop."""
+    retry_after_s = _parse_retry_after_s(resp.headers.get("Retry-After"))
+    log.info(
+        "outbox: %s rate-limited %s (HTTP 429) — retrying %s",
+        entry.instance_id,
+        entry.id,
+        "after its Retry-After of %ds" % retry_after_s
+        if retry_after_s is not None
+        else "on the backoff schedule",
+    )
+    if retry_after_s is None:
+        return DeliveryOutcome.TRANSIENT
+    return RetryAfter(seconds=retry_after_s)
 
 
 async def _redeliver_envelope(
     federation_service: FederationService,
     federation_repo,
     entry,
-) -> DeliveryOutcome:
+) -> DeliveryOutcome | RetryAfter:
     """Re-POST a previously-built envelope from an :class:`OutboxEntry`.
 
     The envelope JSON stored in ``payload_json`` is already signed and
@@ -431,7 +466,13 @@ async def _redeliver_envelope(
     Status code mapping:
 
     * 2xx → :attr:`DeliveryOutcome.SUCCESS`.
-    * 4xx → :attr:`DeliveryOutcome.PERMANENT` (drop). The federation
+    * 429 → :attr:`DeliveryOutcome.TRANSIENT`, or :class:`RetryAfter`
+      when the inbox sent a delta-seconds ``Retry-After``. A rate limit is
+      back-pressure ("later"), not a refusal ("never"): dropping it lost
+      unrelated envelopes (an UNPAIR, a replayed highlight) to one echo
+      storm. Bounded like any transient failure — :data:`MAX_ATTEMPTS`,
+      the 7-day TTL and the per-peer pending cap.
+    * other 4xx → :attr:`DeliveryOutcome.PERMANENT` (drop). The federation
       inbox returns 4xx for several distinct reasons — most are
       genuinely "the receiver has this state already" (success-
       equivalent) and the rest are "the receiver will never accept
@@ -570,6 +611,8 @@ async def _redeliver_envelope(
                 # online indicator never goes green even though every
                 # outbox tick is succeeding from the receiver's view.
                 await federation_repo.mark_reachable(entry.instance_id)
+                if resp.status == 429:
+                    return _throttled_outcome(entry, resp)
                 # 404 ``No instance found`` is *transient*: the peer just
                 # hasn't installed its RemoteInstance row for us yet,
                 # which happens in the relay-pair handshake window where
@@ -3829,10 +3872,14 @@ def create_app(config: Config | None = None) -> web.Application:
         # Cancel any deferred mesh retransmit parked in the routed-envelope
         # handler BEFORE the transport below closes — a task waking after
         # that would only fail its send against a torn-down channel.
+        # The deferred mesh re-sends of space broadcasts go first: they ride
+        # the routed handler, so stopping it underneath them would fail them.
+        fed_svc = app.get(K.federation_service_key)
+        if fed_svc is not None:
+            await fed_svc.stop()
         if routed_handler is not None:
             await routed_handler.stop()
         # Close all RTC DataChannels so the peers see a clean EOF.
-        fed_svc = app.get(K.federation_service_key)
         if fed_svc is not None and getattr(fed_svc, "_transport", None) is not None:
             await fed_svc._transport.close_all()
         await reconnect_queue.stop()

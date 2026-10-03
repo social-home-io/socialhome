@@ -29,6 +29,7 @@ from socialhome.infrastructure import (
     DeliveryOutcome,
     EventBus,
     KeyManager,
+    RetryAfter,
 )
 from socialhome.repositories import (
     SqliteFederationRepo,
@@ -913,9 +914,10 @@ async def test_redeliver_does_not_follow_a_redirect_to_another_host(env):
 
 
 class _StatusResp:
-    def __init__(self, status, body='{"error": "unknown_inbox"}'):
+    def __init__(self, status, body='{"error": "unknown_inbox"}', headers=None):
         self.status = status
         self.body = body
+        self.headers = headers or {}
 
     async def text(self):
         return self.body
@@ -928,14 +930,15 @@ class _StatusResp:
 
 
 class _CountingClient:
-    def __init__(self, status=204, body='{"error": "unknown_inbox"}'):
+    def __init__(self, status=204, body='{"error": "unknown_inbox"}', headers=None):
         self.status = status
         self.body = body
+        self.headers = headers
         self.posts: list[str] = []
 
     def post(self, url, **kw):
         self.posts.append(url)
-        return _StatusResp(self.status, self.body)
+        return _StatusResp(self.status, self.body, self.headers)
 
 
 async def _peer(fed_repo, kek, *, tombstone=True):
@@ -1098,3 +1101,74 @@ async def test_unpair_404_from_the_peers_social_home_still_ends_it(env):
     entry = _unpair_entry(svc, peer, attempts=PAIR_WINDOW_404_ATTEMPTS)
     outcome = await _redeliver_envelope(svc, fed_repo, entry)
     assert outcome is DeliveryOutcome.PERMANENT
+
+
+# ─── 429: back-pressure, never a drop ────────────────────────────────────
+
+
+def _entry_for(svc, peer, *, event_type=FederationEventType.SPACE_DISSOLVED):
+    return _OutboxEntry(
+        id="e-429-inbox",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id, msg_id="m-429"),
+        event_type=event_type,
+    )
+
+
+async def test_redeliver_429_from_the_inbox_is_transient_not_a_drop(env):
+    """The peer's inbox rate-limited us. That says "later", not "never":
+    dropping it turned one echo storm into the silent loss of unrelated
+    envelopes (an UNPAIR, a replayed highlight) in the flake RCA."""
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    svc._http_client = _CountingClient(429, body='{"error": "rate_limited"}')
+
+    outcome = await _redeliver_envelope(svc, fed_repo, _entry_for(svc, peer))
+
+    assert outcome is DeliveryOutcome.TRANSIENT
+
+
+async def test_redeliver_429_honours_the_inbox_retry_after(env):
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    svc._http_client = _CountingClient(
+        429, body='{"error": "rate_limited"}', headers={"Retry-After": "42"}
+    )
+
+    outcome = await _redeliver_envelope(svc, fed_repo, _entry_for(svc, peer))
+
+    assert outcome == RetryAfter(seconds=42.0)
+
+
+@pytest.mark.parametrize("value", ["soon", "-5", "Wed, 21 Oct 2015 07:28:00 GMT", ""])
+async def test_redeliver_429_with_an_unusable_retry_after_uses_the_backoff(env, value):
+    """Only delta-seconds is honoured; anything else falls back to the
+    ordinary backoff ladder rather than guessing."""
+    svc, fed_repo, kek = env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    svc._http_client = _CountingClient(
+        429, body='{"error": "rate_limited"}', headers={"Retry-After": value}
+    )
+
+    outcome = await _redeliver_envelope(svc, fed_repo, _entry_for(svc, peer))
+
+    assert outcome is DeliveryOutcome.TRANSIENT
+
+
+async def test_unpair_throttled_with_retry_after_keeps_the_tombstone(unpair_env):
+    """A Retry-After outcome is still transient: the UNPAIR has not been
+    delivered, so the tombstone must survive for the next attempt."""
+    svc, fed_repo, kek, unpair = unpair_env
+    peer = await _peer(fed_repo, kek, tombstone=False)
+    svc._http_client = _CountingClient(503)
+    assert await unpair.unpair(peer.id) is False
+    (entry,) = await svc._outbox_repo.list_due(10)
+
+    svc._http_client = _CountingClient(
+        429, body='{"error": "rate_limited"}', headers={"Retry-After": "30"}
+    )
+    outcome = await _deliver_outbox_entry(svc, fed_repo, unpair, entry)
+
+    assert outcome == RetryAfter(seconds=30.0)
+    tomb = await fed_repo.get_instance(peer.id, include_unpairing=True)
+    assert tomb is not None and tomb.status is PairingStatus.UNPAIRING

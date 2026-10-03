@@ -194,9 +194,18 @@ class FederationInboxView(BaseView):
                 limit=INBOX_RATE_LIMIT,
                 window_s=INBOX_RATE_WINDOW_S,
             ):
+                # ``Retry-After`` (delta-seconds) tells the sender's outbox
+                # when the window frees up, so it waits instead of hammering
+                # — a 429 is back-pressure the sender retries, never a drop.
                 return web.json_response(
                     {"error": _GENERIC_ERROR_BY_STATUS[429]},
                     status=429,
+                    headers={
+                        "Retry-After": str(
+                            limiter.retry_after_s(bucket, window_s=INBOX_RATE_WINDOW_S)
+                            or 1
+                        )
+                    },
                 )
 
         try:

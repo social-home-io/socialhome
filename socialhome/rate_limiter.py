@@ -11,6 +11,7 @@ no background cleanup task is required.
 from __future__ import annotations
 
 import fnmatch
+import math
 import time
 from collections.abc import Callable
 
@@ -72,6 +73,21 @@ class RateLimiter:
         times.append(now)
         self._windows[key] = times
         return True
+
+    def retry_after_s(self, key: str, *, window_s: int) -> int:
+        """Whole seconds until ``key``'s oldest request leaves the window.
+
+        That is the first moment a refused caller can be allowed again —
+        what an HTTP ``Retry-After`` should say. Rounded up and never below
+        ``1`` for a bucket that holds anything (``0`` for an empty one), so
+        a caller that honours it does not come back a fraction early. Pure
+        read: records nothing.
+        """
+        times = self._windows.get(key)
+        if not times:
+            return 0
+        remaining = times[0] + window_s - self._monotonic()
+        return max(1, math.ceil(remaining))
 
     def reset(self, bucket_or_key: str | None = None) -> None:
         """Reset a single bucket (or the whole limiter when ``None``)."""

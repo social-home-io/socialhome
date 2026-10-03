@@ -6,10 +6,12 @@ from .key_manager import KeyManager, KeyManagerError
 from .outbox_processor import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS,
+    MAX_RETRY_AFTER_S,
     PAIR_WINDOW_404_ATTEMPTS,
     NEVER_DROP,
     DeliveryOutcome,
     OutboxProcessor,
+    RetryAfter,
 )
 from .reconnect_queue import (
     P1_SECURITY,
@@ -33,9 +35,11 @@ __all__ = [
     "KeyManager",
     "KeyManagerError",
     "MAX_ATTEMPTS",
+    "MAX_RETRY_AFTER_S",
     "PAIR_WINDOW_404_ATTEMPTS",
     "NEVER_DROP",
     "OutboxProcessor",
+    "RetryAfter",
     "P1_SECURITY",
     "P2_STRUCTURAL",
     "P3_MEMBERSHIP",

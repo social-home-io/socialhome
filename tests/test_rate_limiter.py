@@ -126,3 +126,24 @@ async def test_each_limit_rule_counts_only_its_own_requests():
     assert await _hit(mw, "/api/calls/c1/ice") == 204
     # Unmatched paths keep their per-first-two-segments default bucket.
     assert await _hit(mw, "/api/feed/posts") == 204
+
+
+def test_retry_after_s_counts_down_to_the_oldest_stamp_leaving_the_window():
+    """``Retry-After`` for a full sliding-window bucket is the time until
+    its oldest request ages out — the first moment a new one is allowed."""
+    now = [100.0]
+    rl = RateLimiter(monotonic=lambda: now[0])
+    assert rl.is_allowed("k", limit=2, window_s=60)
+    now[0] = 110.0
+    assert rl.is_allowed("k", limit=2, window_s=60)
+    assert not rl.is_allowed("k", limit=2, window_s=60)
+    now[0] = 120.0
+    # Oldest stamp (100) leaves the 60 s window at 160 → 40 s from now.
+    assert rl.retry_after_s("k", window_s=60) == 40
+    now[0] = 159.5
+    assert rl.retry_after_s("k", window_s=60) == 1  # rounded up, never 0
+
+
+def test_retry_after_s_is_zero_for_an_empty_bucket():
+    rl = RateLimiter()
+    assert rl.retry_after_s("never-seen", window_s=60) == 0

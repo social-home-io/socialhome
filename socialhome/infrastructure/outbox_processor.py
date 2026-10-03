@@ -23,6 +23,7 @@ import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE
@@ -97,9 +98,10 @@ class DeliveryOutcome(enum.Enum):
       replay cache, timestamp too old, banned, malformed envelope).
       Retrying will never succeed; row is marked failed immediately
       regardless of attempt count or :data:`NEVER_DROP` membership.
-    * :attr:`TRANSIENT` — 5xx, timeout, DNS failure, connection reset.
-      Row is rescheduled with jittered backoff, respecting
-      :data:`NEVER_DROP` past :data:`MAX_ATTEMPTS`.
+    * :attr:`TRANSIENT` — 5xx, 429, timeout, DNS failure, connection
+      reset. Row is rescheduled with jittered backoff, respecting
+      :data:`NEVER_DROP` past :data:`MAX_ATTEMPTS`. A 429 that carries a
+      ``Retry-After`` comes back as a :class:`RetryAfter` instead.
     """
 
     SUCCESS = "success"
@@ -107,9 +109,32 @@ class DeliveryOutcome(enum.Enum):
     TRANSIENT = "transient"
 
 
+#: Ceiling on how long a :class:`RetryAfter` may push one retry out — the
+#: backoff ceiling. A peer's ``Retry-After`` is a hint about its own window;
+#: honouring an arbitrary value would let it park an entry indefinitely.
+MAX_RETRY_AFTER_S: float = float(BACKOFF_SECONDS[-1])
+
+
+@dataclass(slots=True, frozen=True)
+class RetryAfter:
+    """A :attr:`DeliveryOutcome.TRANSIENT` that names the earliest retry.
+
+    Returned when the receiver throttled us (HTTP 429) and said how long
+    its window has left (``Retry-After``). The processor treats it exactly
+    like TRANSIENT — it costs an attempt, respects :data:`MAX_ATTEMPTS` and
+    :data:`NEVER_DROP` — except that ``seconds`` is a floor on the next
+    delay (capped at :data:`MAX_RETRY_AFTER_S`, then jittered upward by up
+    to :data:`JITTER_RATIO`): never sooner than the peer asked, and spread so
+    a burst it throttled does not return on one tick.
+    """
+
+    seconds: float
+
+
 #: Delivery callback signature. Return one of the :class:`DeliveryOutcome`
-#: values; raising is treated the same as :attr:`DeliveryOutcome.TRANSIENT`.
-Deliver = Callable[[OutboxEntry], Awaitable[DeliveryOutcome]]
+#: values or a :class:`RetryAfter`; raising is treated the same as
+#: :attr:`DeliveryOutcome.TRANSIENT`.
+Deliver = Callable[[OutboxEntry], Awaitable["DeliveryOutcome | RetryAfter"]]
 
 #: Optional follow-up to the retention sweep. Runs after expired rows have
 #: been flipped to ``failed``, so it sees the outbox as the sweep left it
@@ -226,12 +251,14 @@ class OutboxProcessor:
         Errors raised by the deliver callback are caught and treated as
         :attr:`DeliveryOutcome.TRANSIENT`. Rows whose ``attempts`` would
         exceed :data:`MAX_ATTEMPTS` are marked failed rather than
-        rescheduled. 4xx outcomes are dropped immediately.
+        rescheduled. PERMANENT outcomes (4xx other than 429) are dropped
+        immediately; a :class:`RetryAfter` is TRANSIENT with a delay floor.
         """
         entries = await self._repo.list_due(limit)
         if not entries:
             return 0
         for entry in entries:
+            outcome: DeliveryOutcome | RetryAfter
             try:
                 outcome = await self._deliver(entry)
             except Exception as exc:
@@ -257,6 +284,12 @@ class OutboxProcessor:
                 await self._repo.mark_failed(entry.id)
                 continue
 
+            # TRANSIENT, or a RetryAfter (a 429 that named its window).
+            floor_s = (
+                self._retry_after_floor(outcome.seconds)
+                if isinstance(outcome, RetryAfter)
+                else 0.0
+            )
             new_attempts = entry.attempts + 1
             if new_attempts >= MAX_ATTEMPTS:
                 # §4.4.7: structural / security events keep retrying on
@@ -269,7 +302,7 @@ class OutboxProcessor:
                         entry.event_type,
                         entry.id,
                     )
-                    delay = self._delay_for(MAX_ATTEMPTS)
+                    delay = max(self._delay_for(MAX_ATTEMPTS), floor_s)
                     next_at = (
                         datetime.now(timezone.utc) + timedelta(seconds=delay)
                     ).isoformat()
@@ -286,7 +319,7 @@ class OutboxProcessor:
                 )
                 await self._repo.mark_failed(entry.id)
                 continue
-            delay = self._delay_for(new_attempts)
+            delay = max(self._delay_for(new_attempts), floor_s)
             next_at = (
                 datetime.now(timezone.utc) + timedelta(seconds=delay)
             ).isoformat()
@@ -340,6 +373,17 @@ class OutboxProcessor:
         return orphaned + expired + purged
 
     # ── Backoff math (pure) ────────────────────────────────────────────
+
+    def _retry_after_floor(self, seconds: float) -> float:
+        """The minimum next delay for a peer's ``Retry-After``.
+
+        Capped at :data:`MAX_RETRY_AFTER_S`, then jittered UP by up to
+        :data:`JITTER_RATIO` — never below what the peer asked, but spread so
+        every envelope it throttled in one burst does not come back on the
+        same tick and re-trip the same window.
+        """
+        base = min(max(seconds, 0.0), MAX_RETRY_AFTER_S)
+        return base * (1.0 + self._jitter() * JITTER_RATIO)
 
     def _delay_for(self, attempt: int) -> float:
         """Return a jittered delay in seconds for the given attempt count.

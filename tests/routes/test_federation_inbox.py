@@ -338,6 +338,10 @@ async def test_inbound_rate_limit_per_ip(client, env):
     assert r.status == 429
     body_json = await r.json()
     assert body_json["error"] == "rate_limited"
+    # The sender's outbox reads this to wait the window out instead of
+    # dropping the envelope (a 429 is back-pressure, not a refusal).
+    retry_after = int(r.headers["Retry-After"])
+    assert 1 <= retry_after <= INBOX_RATE_WINDOW_S
 
 
 async def test_inbound_error_does_not_leak_exception_text(client, env):
