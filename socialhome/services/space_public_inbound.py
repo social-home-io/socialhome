@@ -67,12 +67,18 @@ from ..authority_sig import (
     verify_authority_event,
 )
 from ..domain.events import SpacePostCreated
+from ..domain.gfs_member_publish import (
+    SPACE_ITEM_EVENT_TYPE,
+    InvalidMemberPublish,
+    SpaceItemFrame,
+)
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
 from ..domain.writer_cert import WRITER_SCOPE_WRITE
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
+from .gfs_member_publish_service import parse_item_plaintext
 from .inbound_media_store import local_media_ref, local_media_refs
 from .link_preview_service import wire_link_preview
 from .space_public_author import (
@@ -143,12 +149,16 @@ class SpacePublicInbound:
         self._own_instance_id = own_instance_id
 
     async def handle(self, frame: dict[str, Any], *, gfs_id: str | None = None) -> None:
-        """Dispatch one GFS relay frame. Non-``space_post_public`` frames
-        are ignored so this can sit on the generic relay channel.
+        """Dispatch one GFS relay frame: ``space_post_public`` (host relay)
+        or ``space_item`` (v_49 member publish). Other frames are ignored so
+        this can sit on the generic relay channel.
 
         The frame carries no household identity — an outer ``from_instance``
         from an older GFS is neither read nor logged.
         """
+        if frame.get("event_type") == SPACE_ITEM_EVENT_TYPE:
+            await self._on_space_item(frame)
+            return
         if frame.get("event_type") != AUTHORITY_EVENT_SPACE_POST_PUBLIC:
             return
         envelope = frame.get("payload")
@@ -282,7 +292,21 @@ class SpacePublicInbound:
                 post_id,
             )
             return
-        # Dedupe by post id — the GFS relay is at-least-once.
+        await self._persist(
+            space_id, post_id, author_user_id, origin_instance_id, inner
+        )
+
+    async def _persist(
+        self,
+        space_id: str,
+        post_id: str,
+        author_user_id: str,
+        origin_instance_id: str,
+        inner: dict,
+    ) -> None:
+        """Dedupe by post id, save, publish — shared by both relay paths."""
+        # Dedupe by post id — the GFS relay is at-least-once, and a
+        # member-published item usually also arrives over federation.
         if await self._posts.get(post_id) is not None:
             log.debug("space_public.inbound: duplicate post %s — dropped", post_id)
             return
@@ -308,6 +332,104 @@ class SpacePublicInbound:
                 ),
                 origin_instance_id=origin_instance_id,
             )
+        )
+
+    # ── Member-published items (v_49 trusted mode) ───────────────────────
+
+    async def _on_space_item(self, frame: dict[str, Any]) -> None:
+        """A ``space_item`` a member household published itself over the GFS.
+
+        No authority signature — the authorizer is the author household's
+        writer cert, checked HERE with epoch freshness and the scope the real
+        item type needs (the GFS can see neither): decrypt; read the real
+        type and the author-signed inner; drop our own echo; verify the
+        author signature + self-cert + owner-bound id; require the inner
+        cert (identical to the frame's), valid for this space, the frame's
+        epoch, the inner's ``author_pk`` and ``write``, at an epoch still
+        open here; then dedupe by post id against the host-relayed /
+        federated copy."""
+        try:
+            item = SpaceItemFrame.from_wire(frame)
+        except InvalidMemberPublish:
+            log.warning("space_public.inbound: malformed space_item frame — dropped")
+            return
+        space = await self._spaces.get(item.space_id)
+        if space is None or not space.identity_public_key:
+            log.info(
+                "space_public.inbound: space_item for unknown space %s — dropped",
+                item.space_id,
+            )
+            return
+        if archive_refusal(space, "") is not None:
+            return
+        if self._writer_certs is None:
+            return
+        try:
+            pt = await self._crypto.decrypt(item.space_id, item.epoch, item.payload)
+        except (RuntimeError, ValueError, InvalidTag) as exc:
+            log.info(
+                "space_public.inbound: cannot decrypt space_item for %s epoch %s: %s",
+                item.space_id,
+                item.epoch,
+                exc,
+            )
+            return
+        parsed = parse_item_plaintext(pt)
+        if parsed is None:
+            log.warning(
+                "space_public.inbound: unsupported space_item for space %s — dropped",
+                item.space_id,
+            )
+            return
+        _item_type, inner = parsed
+        post_id = str(inner.get("post_id") or "")
+        author_user_id = str(inner.get("author_user_id") or "")
+        origin_instance_id = str(inner.get("origin_instance_id") or "")
+        if origin_instance_id and origin_instance_id == self._own_instance_id:
+            log.debug("space_public.inbound: self-echo for item %s — dropped", post_id)
+            return
+        if not verify_signed_author_inner(inner):
+            log.warning(
+                "space_public.inbound: author verification failed for space_item "
+                "%s in space %s",
+                post_id,
+                item.space_id,
+            )
+            return
+        if str(inner.get("space_id") or "") != item.space_id:
+            log.warning(
+                "space_public.inbound: space_item %s names another space — dropped",
+                post_id,
+            )
+            return
+        raw_cert = inner.get(WRITER_CERT_FIELD)
+        if raw_cert != item.writer_cert.to_wire():
+            log.warning(
+                "space_public.inbound: space_item %s cert differs from the frame's "
+                "— dropped",
+                post_id,
+            )
+            return
+        try:
+            author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
+        except ValueError:
+            return
+        if not await self._writer_certs.check_item(
+            space,
+            raw_cert,
+            epoch=item.epoch,
+            author_pk=author_pk,
+            required_scope=WRITER_SCOPE_WRITE,
+        ):
+            log.warning(
+                "space_public.inbound: writer cert refused for space_item %s in "
+                "space %s — dropped",
+                post_id,
+                item.space_id,
+            )
+            return
+        await self._persist(
+            item.space_id, post_id, author_user_id, origin_instance_id, inner
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────

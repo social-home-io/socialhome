@@ -165,6 +165,7 @@ class SpaceAuthorityRotationService:
         "_space_service",
         "_gfs",
         "_subscriber_keys",
+        "_member_gfs",
         "_writer_certs",
         "_locks",
         "_echo_reacted",
@@ -194,6 +195,7 @@ class SpaceAuthorityRotationService:
         self._space_service: "SpaceService | None" = None
         self._gfs = None
         self._subscriber_keys = None
+        self._member_gfs = None
         #: v_49 — re-issues each household's writer cert under the NEW
         #: authority key (owner side) and stores ours (member side).
         self._writer_certs: "SpaceWriterCertService | None" = None
@@ -253,6 +255,12 @@ class SpaceAuthorityRotationService:
     def attach_subscriber_keys(self, subscriber_key_outbound) -> None:
         """Optional: re-seal the rotated content key to GFS subscribers."""
         self._subscriber_keys = subscriber_key_outbound
+
+    def attach_member_gfs(self, member_gfs) -> None:
+        """Optional (v_49): re-announce the current content epoch to each GFS
+        right after the re-pin (which clears the GFS epoch state), before the
+        subscriber re-seal."""
+        self._member_gfs = member_gfs
 
     def attach_restore_gate(self, pending: Callable[[], Awaitable[bool]]) -> None:
         """``pending()`` → a restore happened whose post-restore rotation has
@@ -743,6 +751,15 @@ class SpaceAuthorityRotationService:
             except Exception:
                 log.exception(
                     "authority rotation: GFS re-publish failed for %s", space.id
+                )
+        # v_49 — the re-pin cleared the GFS's epoch state: re-announce (the
+        # owner's household-signed form) before the re-seal.
+        if self._member_gfs is not None:
+            try:
+                await self._member_gfs.announce_epoch(space.id)
+            except Exception:
+                log.exception(
+                    "authority rotation: GFS epoch notice failed for %s", space.id
                 )
         if self._subscriber_keys is not None:
             try:

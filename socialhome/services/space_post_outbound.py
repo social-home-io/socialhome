@@ -37,10 +37,11 @@ from ..domain.events import (
     PostEdited,
     SpacePostCreated,
 )
-from ..domain.federation import FederationEventType
+from ..domain.federation import FederationEventType, GfsConnection
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..infrastructure.event_bus import EventBus
+from .gfs_member_publish_service import GFS_PUBLISHED_FIELD
 from .moderation_release import current_release, with_release
 from .space_public_author import build_signed_author_inner
 
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .gfs_member_publish_service import GfsMemberPublishService
     from .space_media_sync_service import SpaceMediaSyncService
     from .space_writer_cert_service import SpaceWriterCertService
 
@@ -68,6 +70,7 @@ class SpacePostOutbound:
         "_own_instance_pk",
         "_own_identity_seed",
         "_writer_certs",
+        "_member_gfs",
     )
 
     def __init__(
@@ -95,6 +98,9 @@ class SpacePostOutbound:
         #: v_49 — when wired, the relay hint carries this household's writer
         #: cert for the current epoch (a seed holder re-checks + re-stamps it).
         self._writer_certs: "SpaceWriterCertService | None" = None
+        #: v_49 — when wired, a non-seed-holding writer household publishes
+        #: its own public/global post to the GFS itself (trusted mode).
+        self._member_gfs: "GfsMemberPublishService | None" = None
         #: Optional — when wired, ``SPACE_POST_CREATED`` broadcasts
         #: are followed by per-peer outbox enqueues for every
         #: referenced media URL. The sync service's scheduler reads
@@ -120,6 +126,10 @@ class SpacePostOutbound:
     def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
         """Wire the v_49 writer-cert holder for the relay hint."""
         self._writer_certs = writer_certs
+
+    def attach_member_gfs(self, member_gfs: "GfsMemberPublishService") -> None:
+        """Wire the v_49 trusted-mode member publisher."""
+        self._member_gfs = member_gfs
 
     def attach_identity(
         self,
@@ -273,6 +283,22 @@ class SpacePostOutbound:
                         cert = None
                     if cert is not None:
                         payload["public_relay"]["writer_cert"] = cert
+        # v_49 — trusted member publish: name the connection servers we are
+        # about to publish this post to ourselves, so a seed holder relaying
+        # it skips them (no duplicate), then publish after the broadcast.
+        member_targets: list[GfsConnection] = []
+        if self._member_gfs is not None and "public_relay" in payload:
+            try:
+                member_targets = await self._member_gfs.plan_post(event.space_id)
+            except Exception:
+                log.exception(
+                    "member GFS publish: planning failed for space=%s",
+                    event.space_id,
+                )
+            if member_targets:
+                payload["public_relay"][GFS_PUBLISHED_FIELD] = sorted(
+                    c.gfs_instance_id for c in member_targets
+                )
         with_release(payload)
         try:
             await self._federation.broadcast_to_space_members(
@@ -286,6 +312,17 @@ class SpacePostOutbound:
                 event.space_id,
                 post.id,
             )
+        if member_targets and self._member_gfs is not None:
+            try:
+                await self._member_gfs.publish_post(
+                    event.space_id, payload["public_relay"], member_targets
+                )
+            except Exception:
+                log.exception(
+                    "member GFS publish failed for space=%s post=%s",
+                    event.space_id,
+                    post.id,
+                )
         # Hand off the bytes-federation to SpaceMediaSyncService.
         # SPACE_POST_CREATED carries only the URL strings; without
         # the outbox-driven SPACE_MEDIA_BLOB stream the receiver's

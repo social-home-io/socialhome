@@ -3471,6 +3471,141 @@ def cmd_gfs_invite_link_content() -> None:
     )
 
 
+def cmd_gfs_member_publish() -> None:
+    """v_49 trusted-mode member publish: a link-joined member posts while
+    the HOST is offline, and the space's followers still get it live.
+
+    Prereqs: ``gfs-space-subscribe`` (d follows a's global space over the
+    GFS) and ``gfs-invite-link`` (+ ``-content``) — e holds a link-joined
+    member seat in that space and is paired with nobody but the GFS.
+
+    Sequence:
+    1. Stop **a** — the host, the only seed holder. Before v_49 nothing e
+       posted could reach a follower now: only a seed holder could put an
+       item on the relay.
+    2. e posts. It names the GFS in the post's relay hint and publishes the
+       post ITSELF — ``POST /gfs/member-publish``, signed by e's household
+       key, authorized by e's writer cert.
+    3. d (a follower that is NOT a member) receives the post decrypted
+       within the poll window. The GFS log shows the member-publish fan-out
+       for the space, and no line carries the post text.
+    4. Restart a. a receives e's post over the normal member path (the
+       relay envelope queue) and does NOT relay it to the GFS again: the GFS
+       logs no authority-signed ``space_post_public`` relay for the space in
+       the settle window (e named that GFS in its hint).
+    5. d still holds exactly one copy.
+
+    Polls every 3 s (the per-user 60/min bucket on ``/api/spaces/*``).
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
+    space_id = (state.get("gfs") or {}).get("global_space_id")
+    if not space_id or not state.get("gfs_invite_space_id"):
+        raise SystemExit("run 'gfs-space-subscribe' and 'gfs-invite-link' first")
+    if state.get("gfs_invite_space_id") != space_id:
+        raise SystemExit(
+            "gfs-member-publish: the invite-link space is not the global space "
+            "d follows — run 'gfs-invite-link' against gfs.global_space_id"
+        )
+    a = state["instances"]["a"]
+    d = state["instances"]["d"]
+    e = state["instances"]["e"]
+    e_base = f"http://127.0.0.1:{e['port']}"
+
+    # 1. Host offline.
+    _kill_household("a", a)
+    gfs_off = _gfs_log_size()
+
+    # 2. The link-joined member posts.
+    content = f"Posted while the host is offline — {time.time_ns()}"
+    s, post = _request(
+        f"{e_base}/api/spaces/{space_id}/posts",
+        token=e["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post = _must("e posts with the host offline", s, post, ok=(201,))
+    post_id = post["id"]
+
+    # 3. The follower gets it live, over the GFS, from e itself.
+    deadline = time.monotonic() + 60.0
+    seen = None
+    while time.monotonic() < deadline and seen is None:
+        time.sleep(3.0)
+        st, body = _request(
+            f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/feed",
+            token=d["token"],
+        )
+        if st == 429:
+            time.sleep(10.0)
+            continue
+        if st != 200:
+            continue
+        feed = body if isinstance(body, list) else (body.get("posts") or [])
+        seen = next((p for p in feed if p.get("id") == post_id), None)
+    if seen is None:
+        raise SystemExit(
+            f"gfs-member-publish: d never saw e's post {post_id} within 60 s "
+            f"while a was down. Check {_instance_dir('e') / 'log.txt'} for "
+            "'gfs.member_publish' and the GFS log for the member-publish "
+            "route's DEBUG refusal reason.",
+        )
+    if seen.get("content") != content:
+        raise SystemExit(
+            f"gfs-member-publish: d decrypted {seen.get('content')!r}, "
+            f"expected {content!r}",
+        )
+    print("  d (follower) received e's post with the host offline ✓")
+    fanned = _gfs_log_lines_matching(
+        f"gfs.member_publish: space={space_id}", offset=gfs_off
+    )
+    if not fanned:
+        raise SystemExit(
+            "gfs-member-publish: the GFS logged no member-publish fan-out for "
+            "the space — the post reached d some other way."
+        )
+    leaked = _gfs_log_lines_matching(content, offset=gfs_off)
+    if leaked:
+        raise SystemExit(
+            f"gfs-member-publish: the GFS log carries the post text: {leaked[:1]!r}"
+        )
+    print(f"  the GFS fanned the member-published item out ({fanned[-1].strip()}) ✓")
+
+    # 4. The host comes back and does not publish the post a second time.
+    new_pid = _spawn("a", a["port"])
+    state["instances"]["a"]["pid"] = new_pid
+    _save(state)
+    _wait_ready(a["port"])
+    print(f"  a respawned: pid={new_pid}")
+    back_off = _gfs_log_size()
+    _await_space_post(state, "a", space_id, post_id)
+    print("  a (host) caught e's post up over the member path ✓")
+    time.sleep(10.0)  # settle: a would relay right after receiving the post
+    relayed = [
+        line
+        for line in _gfs_log_lines_matching(
+            "GFS: relaying space_post_public", offset=back_off
+        )
+        if space_id in line
+    ]
+    if relayed:
+        raise SystemExit(
+            "gfs-member-publish: a relayed a space_post_public for the space "
+            f"after restarting ({len(relayed)} line(s)) — e already published "
+            "its post there; the host dedupe hint was not honoured.",
+        )
+    print("  a did not re-publish e's post to the GFS (no duplicate) ✓")
+
+    # 5. d holds exactly one copy.
+    rows = _rows("d", "SELECT id FROM space_posts WHERE id = ?", (post_id,))
+    if len(rows) != 1:
+        raise SystemExit(f"gfs-member-publish: d holds {len(rows)} copies of the post")
+    state["gfs_member_publish_post_id"] = post_id
+    _save(state)
+    print("gfs-member-publish: ok (member posts reach followers without the host)")
+
+
 def cmd_gfs_down() -> None:
     """Stop the GFS started by :func:`cmd_gfs_up` (idempotent)."""
     state = _load()

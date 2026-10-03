@@ -3493,3 +3493,45 @@ async def test_publishes_ride_only_the_publish_session(env):
         )
     assert len(publish.posts) == 1
     assert shared.posts == []
+
+
+# ─── v_49: member publish capability + host dedupe skip ────────────────
+
+
+async def test_member_publish_trusted_needs_the_signed_flag(env):
+    _db, repo = env
+    conn = _make_conn("mp-1", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"anonymous_publish": True, "member_publish_trusted": True},
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert await svc.member_publish_trusted_supported(conn)
+
+
+async def test_member_publish_trusted_ignores_the_unsigned_flag(env):
+    _db, repo = env
+    conn = _make_conn("mp-2", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _InviteSession(info={"server_name": "x", "member_publish_trusted": True})
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert not await svc.member_publish_trusted_supported(conn)
+
+
+async def test_publish_space_event_skips_servers_the_author_published_to(env):
+    session = _RecordingSession()
+    svc, _kp = await _publish_event_svc(
+        env, session, space_id="sp-relay", gfs_ids=["g1", "g2"]
+    )
+    svc._anon_publish.update({"g1": True, "g2": True})
+    delivered = await svc.publish_space_event(
+        space_id="sp-relay",
+        event_type="space_post_public",
+        payload={"space_id": "sp-relay", "epoch": 0, "encrypted_payload": "ct"},
+        skip_gfs_instance_ids=frozenset({"inst-g1"}),
+    )
+    assert delivered == 1
+    assert [u for u, _ in session.posts] == ["https://g2.example/gfs/publish"]

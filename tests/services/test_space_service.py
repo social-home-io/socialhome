@@ -9499,3 +9499,63 @@ async def test_failing_authority_rotation_on_demotion_still_rotates(stack):
         await stack.space_repo.get(space.id), target=target, role="subscriber"
     )
     assert await _epoch(stack, space.id) == before + 1
+
+
+# ─── v_49: every rotation announces the new epoch to the GFS first ──────
+
+
+async def _removal_with_member_gfs(stack, member_gfs):
+    _anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    order: list[str] = []
+    space_crypto = AsyncMock()
+    space_crypto.rotate_epoch = AsyncMock(return_value=7)
+    space_crypto.export_current_key = AsyncMock(return_value=(7, bytes(range(32))))
+    federation = AsyncMock()
+
+    async def _broadcast(_space_id, event_type, *a, **kw):
+        if event_type == FederationEventType.SPACE_KEY_EXCHANGE_REKEY:
+            order.append("rekey")
+
+    federation.broadcast_to_space_members = AsyncMock(side_effect=_broadcast)
+    subscriber_keys = AsyncMock()
+
+    async def _reseal(space_id):
+        order.append("reseal")
+
+    subscriber_keys.reconcile_space_everywhere = AsyncMock(side_effect=_reseal)
+
+    async def _announce(space_id):
+        order.append("notice")
+        if isinstance(member_gfs, Exception):
+            raise member_gfs
+        return 1
+
+    gfs = AsyncMock()
+    gfs.announce_epoch = AsyncMock(side_effect=_announce)
+    stack.space_svc.attach_space_crypto_service(space_crypto)
+    stack.space_svc.attach_subscriber_key_outbound(subscriber_keys)
+    stack.space_svc.attach_member_gfs(gfs)
+    stack.space_svc._federation = federation
+    await stack.space_svc.remove_member(
+        space.id, actor_username="anna", user_id=bob.user_id
+    )
+    return space, bob, order, gfs
+
+
+async def test_a_rotation_sends_the_gfs_epoch_notice_before_rekey_and_reseal(stack):
+    space, _bob, order, gfs = await _removal_with_member_gfs(stack, None)
+    gfs.announce_epoch.assert_awaited_once_with(space.id)
+    assert order == ["notice", "rekey", "reseal"]
+
+
+async def test_a_failing_epoch_notice_never_breaks_the_rotation(stack):
+    space, bob, order, _gfs = await _removal_with_member_gfs(
+        stack, RuntimeError("gfs down")
+    )
+    assert order == ["notice", "rekey", "reseal"]
+    assert await stack.space_repo.get_member(space.id, bob.user_id) is None

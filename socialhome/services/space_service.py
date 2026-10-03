@@ -315,6 +315,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_space_crypto",
         "_gfs_mirror",
         "_subscriber_keys",
+        "_member_gfs",
         "_writer_certs",
         "_media_dir",
         "_media_refs",
@@ -356,6 +357,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._gfs = None
         self._gfs_mirror = None
         self._subscriber_keys = None
+        #: v_49 — announces each rotated epoch to the GFS (member publish).
+        self._member_gfs = None
         #: v_49 writer-cert issuer/holder (:class:`SpaceWriterCertService`).
         #: Optional — absent, no cert rides any channel (pre-v_49 behaviour).
         self._writer_certs: "SpaceWriterCertService | None" = None
@@ -474,6 +477,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         re-mints a lost seed of a rotated space by rotating (members get a
         cert for the new key) instead of silently forking the pin."""
         self._authority_rotation = rotation
+
+    def attach_member_gfs(self, member_gfs) -> None:
+        """Wire the v_49 GFS epoch notice: every rotation announces the new
+        content epoch to each capable GFS listing the space, BEFORE the
+        subscriber re-seal (so a removed writer stops being relayed)."""
+        self._member_gfs = member_gfs
 
     def attach_subscriber_key_outbound(self, subscriber_key_outbound) -> None:
         """Wire the Phase-5b subscriber content-key producer so a
@@ -4673,6 +4682,17 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 new_epoch,
                 epoch,
             )
+        # v_49 — the GFS epoch notice goes out FIRST (before the member rekey
+        # and the subscriber re-seal): until it lands, a writer this rotation
+        # removed is still relayed by the GFS. Never raises out of here.
+        if self._member_gfs is not None:
+            try:
+                await self._member_gfs.announce_epoch(space_id)
+            except Exception:
+                log.exception(
+                    "rotate_and_distribute_space_key: GFS epoch notice failed for %s",
+                    space_id,
+                )
         meta = {
             "epoch": epoch,
             "key_suite": KEY_SUITE_AESGCM_256,

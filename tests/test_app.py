@@ -377,6 +377,19 @@ async def test_gfs_relay_dispatches_a_key_handoff_frame_without_from_instance():
     assert posts.frames == []
 
 
+async def test_gfs_relay_dispatches_a_member_published_space_item():
+    """v_49: ``space_item`` frames go to the same public-content consumer."""
+    posts, keys = _RecordingConsumer(), _RecordingConsumer()
+    frame = _relay_frame("space_item")
+    await dispatch_gfs_relay_frame(
+        frame,
+        space_public_inbound=posts,
+        space_subscriber_key_inbound=keys,
+    )
+    assert posts.frames == [frame]
+    assert keys.frames == []
+
+
 async def test_gfs_relay_never_logs_an_outer_from_instance(caplog):
     """A legacy GFS may still ship ``from_instance``. It is a household
     identity the GFS is not supposed to know — it must reach no log line."""

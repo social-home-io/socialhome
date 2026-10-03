@@ -57,7 +57,10 @@ class _CaptureGfs:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def publish_space_event(self, *, space_id, event_type, payload) -> int:
+    async def publish_space_event(
+        self, *, space_id, event_type, payload, skip_gfs_instance_ids=frozenset()
+    ) -> int:
+        self.skipped = skip_gfs_instance_ids
         self.calls.append(
             {
                 "space_id": space_id,
@@ -892,3 +895,56 @@ async def test_legacy_hint_naming_another_key_is_not_relayed(env, caplog):
     )
     assert env["gfs"].calls == []
     assert "identity key" in caplog.text
+
+
+# ─── v_49: host dedupe with a self-publishing author ────────────────────
+
+
+async def test_a_self_published_post_skips_the_named_servers_and_drops_the_hint(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    _kp, author_user_id, relay = _remote_relay()
+    relay["gfs_published"] = ["gfs-a", 7, "gfs-b"]
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].skipped == frozenset({"gfs-a", "gfs-b"})
+    envelope = env["gfs"].calls[0]["payload"]
+    pt = await env["crypto"].decrypt(
+        "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
+    )
+    # The author's routing hint never travels on to subscribers.
+    assert "gfs_published" not in json.loads(pt)
+
+
+async def test_a_v48_author_without_the_hint_is_relayed_everywhere(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    _kp, author_user_id, relay = _remote_relay()
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].skipped == frozenset()
+
+
+async def test_a_malformed_hint_skips_nothing(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    _kp, author_user_id, relay = _remote_relay()
+    relay["gfs_published"] = "gfs-a"
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].skipped == frozenset()

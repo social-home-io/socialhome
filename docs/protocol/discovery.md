@@ -937,6 +937,50 @@ POST /gfs/member-publish
   hold at most 500 subscriptions. Subscribers dedupe by item id, as for
   host-relayed copies.
 
+**Household side** (`services/gfs_member_publish_service.py`):
+
+- **Who publishes.** A household holding a `write` writer cert for the
+  current epoch and NOT the space seed (seed holders keep relaying with the
+  authority signature), in a PUBLIC/GLOBAL space with `allow_subscribers`,
+  to every active connection server that lists the space (`GET
+  /gfs/spaces/{id}`, cached 10 min) AND proves `member_publish_trusted` in
+  its signed capability block. Without the capability nothing identified is
+  sent: the post takes today's path — the member broadcast, from which a
+  seed holder relays it.
+- **What it sends.** The ciphertext of `{"item_type": "post", "inner":
+  <the author-signed inner, as in the host relay hint, + our writer cert
+  for the sealing epoch>}`. Each attempt is signed afresh (`ts`,
+  `gfs_instance_id` = the id pinned from that server's `/gfs/info`);
+  transient failures (transport, 408, 429, 5xx incl. a busy GFS's 503) are
+  retried through a `GfsPublishRetryQueue`.
+- **Host dedupe rule.** Before the member broadcast goes out, the author
+  writes the `gfs_instance_id`s it is about to publish to into the encrypted
+  relay hint (`public_relay.gfs_published`, outside the author signature).
+  A seed holder relaying that post skips exactly those servers and relays
+  to the rest; the field never travels on. A v_48 author sends no field and
+  is relayed as before. If the author's own publish later fails
+  permanently, followers on that server catch the post up through space
+  sync; a duplicate would be harmless anyway (dedupe by post id).
+- **Auto-subscribe.** A household with a local writer seat (and no seed)
+  subscribes to the fan-out of the space on every capable server listing it
+  — when the seat is created (`SpaceMemberJoined`), when it first
+  publishes, and on every GFS (re)connect — so other members' items arrive
+  live.
+- **Receiving** a `space_item` (`SpacePublicInbound`): decrypt; read the
+  real type (only `post` in this release — anything else is dropped); drop
+  our own echo; verify the author signature, self-cert and owner-bound post
+  id; require the inner cert to equal the frame's, and run
+  `SpaceWriterCertService.check_item` — signature against the pinned space
+  key, this space, the frame's epoch, the inner's `author_pk`, the scope the
+  REAL type needs (`write` for a post) and epoch freshness; then dedupe by
+  post id against the federated / host-relayed copy.
+- **Epoch notices** (`announce_epoch`): sent before the subscriber
+  re-seal at every content-key rotation (`SpaceService
+  ._rotate_and_distribute_space_key` — kick, ban, leave, scope drop), right
+  after an authority re-pin (`SpaceAuthorityRotationService._refresh_gfs`),
+  and for every seed-held space on each GFS (re)connect. The owner sends the
+  household-signed form, a delegated admin the authority-signed one.
+
 **Operator notes (connection server).**
 
 - **Public servers: turn `auto_accept_clients` off** (`[policy]` in

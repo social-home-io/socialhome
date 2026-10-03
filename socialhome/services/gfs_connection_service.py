@@ -186,6 +186,7 @@ class GfsConnectionService:
         "_info_failed_at",
         "_envelope_relay",
         "_invite_links",
+        "_member_publish_trusted",
         "_authority_rotation",
         "_rotation_warned",
         "_publish_retry",
@@ -251,6 +252,11 @@ class GfsConnectionService:
         # Same discipline again, for the ``invite_links`` capability
         # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
         self._invite_links: dict[str, bool] = {}
+        # Same again for ``member_publish_trusted`` (v_49): whether the GFS
+        # carries the identified ``POST /gfs/member-publish`` and the
+        # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
+        # to a GFS that has not proved it under a valid signature.
+        self._member_publish_trusted: dict[str, bool] = {}
         # Same again for ``authority_rotation`` (v_44): whether the GFS
         # re-pins a space's authority key from an owner cert. A GFS without
         # it keeps the OLD key — and so keeps honouring a revoked admin's
@@ -671,6 +677,20 @@ class GfsConnectionService:
             conn,
             "invite_links",
             self._invite_links,
+        )
+
+    async def member_publish_trusted_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``member_publish_trusted`` on /gfs/info.
+
+        Gates every identified member publish and every epoch notice
+        (:mod:`socialhome.services.gfs_member_publish_service`): a household
+        sends its identity to a connection server only after that server's
+        signed capability block proved it agreed to the trusted-mode
+        contract."""
+        return await self._signed_capability_supported(
+            conn,
+            "member_publish_trusted",
+            self._member_publish_trusted,
         )
 
     async def _signed_capability_supported(
@@ -1391,8 +1411,13 @@ class GfsConnectionService:
         space_id: str,
         event_type: str,
         payload: dict,
+        skip_gfs_instance_ids: frozenset[str] = frozenset(),
     ) -> int:
         """Relay a single space-content event to a space's GFS subscribers.
+
+        ``skip_gfs_instance_ids`` names connection servers that already carry
+        this item because its author published it there itself (v_49); they
+        are left out.
 
         POSTs to ``POST /gfs/publish`` on every GFS the space is published to.
         The ``payload`` is the caller-built wire envelope — for the Phase-5a2
@@ -1448,6 +1473,11 @@ class GfsConnectionService:
         delivered = 0
         for conn in conns:
             if conn.status != "active":
+                continue
+            if conn.gfs_instance_id in skip_gfs_instance_ids:
+                # v_49: the author household published this item to that GFS
+                # itself (trusted member publish) — relaying it again would
+                # only hand every subscriber a duplicate.
                 continue
             if self._publish_retry.pending(conn.id):
                 # Earlier publishes to this GFS are waiting for a retry:

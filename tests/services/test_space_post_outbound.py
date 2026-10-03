@@ -1059,3 +1059,102 @@ async def test_relay_hint_carries_our_writer_cert_outside_the_author_sig():
 async def test_relay_hint_without_a_cert_has_no_field():
     assert "writer_cert" not in await _relay_hint_with(_FakeCerts(None))
     assert "writer_cert" not in await _relay_hint_with(None)
+
+
+# ─── v_49: trusted-mode member publish ─────────────────────────────────
+
+
+@dataclass
+class _Conn:
+    gfs_instance_id: str
+
+
+class _MemberGfs:
+    def __init__(self, targets=None, *, plan_raises=False, publish_raises=False):
+        self.targets = targets or []
+        self.plan_raises = plan_raises
+        self.publish_raises = publish_raises
+        self.order: list[str] = []
+        self.published: list[tuple] = []
+
+    async def plan_post(self, space_id):
+        self.order.append("plan")
+        if self.plan_raises:
+            raise RuntimeError("boom")
+        return self.targets
+
+    async def publish_post(self, space_id, inner, targets):
+        self.order.append("publish")
+        if self.publish_raises:
+            raise RuntimeError("boom")
+        self.published.append((space_id, dict(inner), targets))
+        return len(targets)
+
+
+def _member_setup(member_gfs):
+    bus = EventBus()
+    federation = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+
+    async def _broadcast(*a, **kw):
+        member_gfs.order.append("broadcast")
+
+    federation.broadcast_to_space_members = AsyncMock(side_effect=_broadcast)
+    outbound = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(space_type=SpaceType.PUBLIC)}),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    outbound.attach_member_gfs(member_gfs)
+    post = Post(
+        id="post-m",
+        author=uid,
+        type=PostType.TEXT,
+        content="member hello",
+        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+    return bus, federation, post
+
+
+async def test_a_member_names_its_gfs_targets_then_publishes_after_the_broadcast():
+    member = _MemberGfs([_Conn("gfs-b"), _Conn("gfs-a")])
+    bus, federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    # The host-dedupe hint: which servers the author publishes to itself.
+    assert relay["gfs_published"] == ["gfs-a", "gfs-b"]
+    # It stays OUTSIDE the author signature.
+    assert verify_signed_author_inner(relay)
+    assert member.order == ["plan", "broadcast", "publish"]
+    space_id, inner, targets = member.published[0]
+    assert (space_id, inner["post_id"], len(targets)) == ("sp-1", "post-m", 2)
+
+
+async def test_no_target_means_no_hint_and_no_publish():
+    member = _MemberGfs([])
+    bus, federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert "gfs_published" not in relay
+    assert member.published == []
+
+
+async def test_a_planning_failure_still_broadcasts():
+    member = _MemberGfs(plan_raises=True)
+    bus, federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    federation.broadcast_to_space_members.assert_awaited_once()
+    assert (
+        "gfs_published"
+        not in (federation.broadcast_to_space_members.call_args.args[2]["public_relay"])
+    )
+
+
+async def test_a_publish_failure_is_swallowed():
+    member = _MemberGfs([_Conn("gfs-a")], publish_raises=True)
+    bus, federation, post = _member_setup(member)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    federation.broadcast_to_space_members.assert_awaited_once()

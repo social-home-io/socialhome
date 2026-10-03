@@ -99,6 +99,7 @@ from ..domain.events import SpacePostCreated
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.writer_cert import WRITER_SCOPE_WRITE, scope_permits
 from ..infrastructure.event_bus import EventBus
+from .gfs_member_publish_service import GFS_PUBLISHED_FIELD
 from .space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
@@ -353,6 +354,16 @@ class SpacePublicOutbound:
                 event.space_id,
             )
             return
+        # v_49 host dedupe: connection servers the author published this
+        # post to itself (trusted member publish) are skipped below; the
+        # list is the author's own routing hint and never travels on.
+        raw_skip = relay.get(GFS_PUBLISHED_FIELD)
+        skip = (
+            frozenset(x for x in raw_skip if isinstance(x, str))
+            if isinstance(raw_skip, list)
+            else frozenset()
+        )
+        relay = {k: v for k, v in relay.items() if k != GFS_PUBLISHED_FIELD}
         restamp_for: str | None = None
         if relay.get(WRITER_CERT_FIELD) is not None:
             # v_49 author: its cert must hold before anything travels.
@@ -414,6 +425,7 @@ class SpacePublicOutbound:
                 space_id=event.space_id,
                 event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
                 payload=envelope,
+                skip_gfs_instance_ids=skip,
             )
         except Exception:
             log.exception(
