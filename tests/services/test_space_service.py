@@ -9407,3 +9407,95 @@ async def test_admin_demotion_with_v44_rotation_skips_the_scope_rotation(
         await stack.space_repo.get(space.id), target=target, role="subscriber"
     )
     assert rekeys == []
+
+
+# ─── Round 4: the deferred rotation never fails open ──────────────────────
+
+
+async def _crypto_space(stack, *, delegation: bool, shared_seed: bool = False):
+    """A cert space with a real content key, an admin seat on peer-a."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    stack.space_svc._space_crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(stack.db),
+        KeyManager(b"\x0a" * 32),
+        own_instance_id=stack.iid,
+    )
+    await stack.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=?,"
+        " authority_seed_shared_epoch=? WHERE id=?",
+        (int(delegation), 0 if shared_seed else None, space.id),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="admin")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    return space
+
+
+async def _epoch(stack, space_id):
+    return await stack.space_svc._space_crypto.get_current_epoch(space_id)
+
+
+async def test_a_failing_authority_rotation_still_rotates_the_content_key(stack):
+    """The bus swallows handler errors: when the v_44 rotation the leave
+    deferred to fails, the content epoch must still advance."""
+    space = await _crypto_space(stack, delegation=True)
+    before = await _epoch(stack, space.id)
+
+    async def _boom(_event):
+        raise RuntimeError("authority rotation failed")
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _boom)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await _epoch(stack, space.id) == before + 1
+
+
+async def test_a_working_authority_rotation_is_the_only_rotation(stack):
+    space = await _crypto_space(stack, delegation=True)
+    before = await _epoch(stack, space.id)
+    crypto = stack.space_svc._space_crypto
+
+    async def _v44(event):
+        await crypto.rotate_epoch(event.space_id)
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _v44)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await _epoch(stack, space.id) == before + 1
+
+
+async def test_delegation_off_but_seed_shared_is_one_epoch(stack):
+    """Delegation off, yet a seed was shared at the current key epoch: the
+    v_44 rotation still runs, so the scope rotation is deferred to it."""
+    space = await _crypto_space(stack, delegation=False, shared_seed=True)
+    before = await _epoch(stack, space.id)
+    crypto = stack.space_svc._space_crypto
+
+    async def _v44(event):
+        await crypto.rotate_epoch(event.space_id)
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _v44)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await _epoch(stack, space.id) == before + 1
+
+
+async def test_delegation_off_no_seed_rotates_itself(stack):
+    space = await _crypto_space(stack, delegation=False)
+    before = await _epoch(stack, space.id)
+    assert await stack.space_svc.on_remote_member_left(space.id, "peer-a", "u-a")
+    assert await _epoch(stack, space.id) == before + 1
+
+
+async def test_failing_authority_rotation_on_demotion_still_rotates(stack):
+    space = await _crypto_space(stack, delegation=True)
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (space.id,)
+    )
+    before = await _epoch(stack, space.id)
+
+    async def _boom(_event):
+        raise RuntimeError("authority rotation failed")
+
+    stack.bus.subscribe(SpaceAdminAuthorityRevoked, _boom)
+    target = await stack.space_svc._remote_members.get(space.id, "peer-a", "u-a")
+    await stack.space_svc._apply_remote_role(
+        await stack.space_repo.get(space.id), target=target, role="subscriber"
+    )
+    assert await _epoch(stack, space.id) == before + 1

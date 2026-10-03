@@ -2780,20 +2780,25 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 role=seat.role,
                 tombstoned=True,
             )
-        admin_ended = any(r.role == SpaceRole.ADMIN for r in ending) and not any(
-            r.role == SpaceRole.ADMIN for r in remaining
+        admin_ended = any(r.role == SpaceRole.ADMIN for r in ending)
+        follows = admin_ended and await self._authority_rotation_follows(
+            space, instance_id
         )
-        if admin_ended:
-            await self._bus.publish(
-                SpaceAdminAuthorityRevoked(space_id=space_id, instance_id=instance_id)
-            )
         await self.rotate_if_writer_scope_weakened(
             space_id,
             instance_id,
             scope_before,
-            authority_rotation_follows=admin_ended
-            and space.features.delegated_admin_authority,
+            authority_rotation_follows=follows,
         )
+        if admin_ended:
+            await self._publish_admin_revoked(
+                space_id,
+                instance_id,
+                deferred=follows
+                and await self._writer_scope_weakened(
+                    space_id, instance_id, scope_before
+                ),
+            )
         # LAST, as on a kick: a link-joined household's §D2b seat loses its
         # reason to exist once it shares no space with us any more.
         if not remaining:
@@ -2892,6 +2897,63 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # v_49 — our own household's write right just got weaker: rotate so
         # its old writer cert dies with the epoch.
         await self.rotate_if_writer_scope_weakened(space_id, own, scope_before)
+
+    async def _authority_rotation_follows(self, space: Space, instance_id: str) -> bool:
+        """Whether ``SpaceAuthorityRotationService._on_revoked`` will rotate
+        (and so rotate the content key) for this household's ended admin
+        seat — the SAME gate: we host, the household keeps no admin seat,
+        and delegation is on or a seed was shared at the current key epoch.
+        """
+        if self._remote_members is None or not self._own_instance_id:
+            return False
+        if space.owner_instance_id != self._own_instance_id:
+            return False
+        if any(
+            r.role == SpaceRole.ADMIN
+            for r in await self._remote_members.list_for_instance(
+                space.id, instance_id, include_tombstoned=False
+            )
+        ):
+            return False
+        if space.features.delegated_admin_authority:
+            return True
+        shared = await self._spaces.get_seed_shared_epoch(space.id)
+        return shared is not None and shared == space.authority_key_epoch
+
+    async def _writer_scope_weakened(
+        self, space_id: str, instance_id: str, scope_before: str | None
+    ) -> bool:
+        if self._writer_certs is None:
+            return False
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return False
+        after = await self._writer_certs.scope_for_instance(space, instance_id)
+        return scope_weakened(scope_before, after)
+
+    async def _publish_admin_revoked(
+        self, space_id: str, instance_id: str, *, deferred: bool
+    ) -> None:
+        """Publish :class:`SpaceAdminAuthorityRevoked`. When a writer-scope
+        rotation was ``deferred`` to the v_44 rotation it triggers, check
+        that the content epoch actually moved — the bus swallows handler
+        errors, and a failed rotation must not leave the old writer cert
+        valid — and rotate here if it did not (fail closed)."""
+        crypto = self._space_crypto if deferred else None
+        before = await crypto.get_current_epoch(space_id) if crypto else None
+        await self._bus.publish(
+            SpaceAdminAuthorityRevoked(space_id=space_id, instance_id=instance_id)
+        )
+        if crypto is None:
+            return
+        if await crypto.get_current_epoch(space_id) == before:
+            log.warning(
+                "space %s: the authority rotation for %s did not rotate the "
+                "content key — rotating it here",
+                space_id,
+                instance_id,
+            )
+            await self._rotate_and_distribute_space_key(space_id)
 
     async def writer_scope(self, space: Space, instance_id: str) -> str | None:
         """Household ``instance_id``'s writer-cert scope (v_49), or ``None``
@@ -3751,27 +3813,23 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # gets a fresh one at its current scope. Stronger (a follower made a
         # member): re-deliver its cert at the new scope, in a roster snapshot
         # addressed to that household alone. No rotation for a promotion.
-        # An admin seat that ended under delegation triggers the v_44
-        # authority rotation, which rotates the content key itself — the
-        # scope rotation is skipped then (one epoch, not two).
-        admin_ended = (
-            target.role == SpaceRole.ADMIN
-            and role != SpaceRole.ADMIN
-            and space.features.delegated_admin_authority
-            and space.owner_instance_id == self._own_instance_id
-            and not any(
-                r.role == SpaceRole.ADMIN
-                for r in await self._remote_members.list_for_instance(
-                    space_id, instance_id, include_tombstoned=False
-                )
-            )
+        # An admin seat that ended where the v_44 authority rotation will run
+        # (delegation on, or a seed shared at the current key epoch) — that
+        # rotation rotates the content key itself, so the scope rotation is
+        # deferred to it (one epoch, not two) and checked afterwards.
+        admin_ended = target.role == SpaceRole.ADMIN and role != SpaceRole.ADMIN
+        follows = admin_ended and await self._authority_rotation_follows(
+            space, instance_id
+        )
+        deferred = follows and await self._writer_scope_weakened(
+            space_id, instance_id, scope_before
         )
         if (
             not await self.rotate_if_writer_scope_weakened(
                 space_id,
                 instance_id,
                 scope_before,
-                authority_rotation_follows=admin_ended,
+                authority_rotation_follows=follows,
             )
             and self._writer_certs is not None
             and (
@@ -3792,13 +3850,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and space.owner_instance_id == self._own_instance_id
         ):
             await self.share_admin_signing_seed(space, instance_id=instance_id)
-        if target.role == SpaceRole.ADMIN and role != SpaceRole.ADMIN:
+        if admin_ended:
             # v_44 — an admin seat just ended. If it was that household's
             # last one, the rotation service retires the authority key the
             # household may hold (callers only reach here on the host).
-            await self._bus.publish(
-                SpaceAdminAuthorityRevoked(space_id=space_id, instance_id=instance_id)
-            )
+            await self._publish_admin_revoked(space_id, instance_id, deferred=deferred)
 
     # ── Per-space profile (§4.1.6) ─────────────────────────────────────
 
