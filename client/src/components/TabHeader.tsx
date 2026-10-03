@@ -49,7 +49,10 @@ export function TabHeader<T extends string>({
 }: TabHeaderProps<T>) {
   const stripRef = useRef<HTMLElement | null>(null)
   const overflowing = useTabStripOverflow(stripRef, [visibleTabs])
-  useScrollActiveTabIntoView(stripRef, activeTab)
+  // Stable string key — see SpaceSubHeader for why not the objects.
+  useScrollActiveTabIntoView(
+    stripRef, activeTab, [visibleTabs.map((t) => labels[t]).join('\u0000')],
+  )
 
   return (
     <div class="sh-space-subheader" role="presentation">

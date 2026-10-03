@@ -16,6 +16,55 @@
 import type { JSX, RefObject } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 
+/** Width (px) of the edge fade the strip CSS paints on a side that
+ *  still has hidden tabs. Kept in sync with the ``mask-image`` stops
+ *  on ``.sh-space-subheader .sh-space-tabs[data-fade-*]`` so a tab we
+ *  "reveal" is never left sitting under the fade. */
+export const TAB_STRIP_FADE_PX = 16
+
+interface HorizontalSpan {
+  left: number
+  right: number
+}
+
+/**
+ * How far (physical px, for ``Element.scrollBy``) the strip must scroll
+ * so the active tab is fully readable.
+ *
+ * Returns 0 when the tab already sits inside the strip's visible window
+ * shrunk by ``inset`` on each side (the edge fade), so tapping a visible
+ * tab never makes the row jump. Otherwise it centres the tab, which also
+ * shows its neighbours — the cue that more tabs exist either side. The
+ * browser clamps the result at the scroll bounds, so a first/last tab
+ * simply lands flush against its edge. Works in RTL too because it is
+ * computed from viewport rects, not from ``scrollLeft`` (whose sign
+ * convention differs between LTR and RTL).
+ */
+export function activeTabScrollDelta(
+  strip: HorizontalSpan,
+  tab: HorizontalSpan,
+  inset: number = TAB_STRIP_FADE_PX,
+): number {
+  const visibleLeft = strip.left + inset
+  const visibleRight = strip.right - inset
+  if (tab.left >= visibleLeft - 0.5 && tab.right <= visibleRight + 0.5) return 0
+  const stripCentre = (strip.left + strip.right) / 2
+  const tabCentre = (tab.left + tab.right) / 2
+  return tabCentre - stripCentre
+}
+
+/** Resolve the physical scroll range of a horizontal scroller in a
+ *  direction-agnostic way (Chrome/Firefox report a negative
+ *  ``scrollLeft`` under ``direction: rtl``). */
+function edgeState(el: HTMLElement): { moreLeft: boolean; moreRight: boolean } {
+  const max = el.scrollWidth - el.clientWidth
+  if (max <= 1) return { moreLeft: false, moreRight: false }
+  const rtl = getComputedStyle(el).direction === 'rtl'
+  // Distance scrolled from the physical left edge.
+  const fromLeft = rtl ? max + el.scrollLeft : el.scrollLeft
+  return { moreLeft: fromLeft > 1, moreRight: max - fromLeft > 1 }
+}
+
 export function useTabStripOverflow(
   stripRef: RefObject<HTMLElement>,
   // The deps that should re-trigger an overflow re-measure (e.g. the
@@ -26,7 +75,15 @@ export function useTabStripOverflow(
   useLayoutEffect(() => {
     const el = stripRef.current
     if (!el) return
-    const check = () => setOverflowing(el.scrollWidth - el.clientWidth > 1)
+    const check = () => {
+      setOverflowing(el.scrollWidth - el.clientWidth > 1)
+      // Fade only the edge(s) that actually hide tabs. A permanent
+      // right-edge fade sat over the last tab's label even when the
+      // strip was scrolled all the way to it.
+      const { moreLeft, moreRight } = edgeState(el)
+      el.toggleAttribute('data-fade-left', moreLeft)
+      el.toggleAttribute('data-fade-right', moreRight)
+    }
     check()
     // ``ResizeObserver`` is not in jsdom by default — guard the
     // construction so existing component tests don't have to stub
@@ -36,9 +93,11 @@ export function useTabStripOverflow(
       typeof ResizeObserver !== 'undefined' ? ResizeObserver : undefined
     const ro = RO ? new RO(check) : null
     ro?.observe(el)
+    el.addEventListener('scroll', check, { passive: true })
     window.addEventListener('resize', check)
     return () => {
       ro?.disconnect()
+      el.removeEventListener('scroll', check)
       window.removeEventListener('resize', check)
     }
     // ``stripRef`` itself is stable across renders (the consumer
@@ -48,18 +107,54 @@ export function useTabStripOverflow(
   return overflowing
 }
 
+/**
+ * Keep the active tab fully visible inside the horizontally-scrolling
+ * strip.
+ *
+ * Runs when the active tab changes AND whenever the strip or its tabs
+ * change size. The second trigger is the mobile fix: the strip's width
+ * is not final at mount — the tab list grows once permissions load,
+ * the trailing actions (notification bell, settings) mount, and the ⋯
+ * overflow button appears once overflow is measured — so a one-shot
+ * reveal at mount saw a roomy strip, did nothing, and left e.g. "Pages"
+ * clipped under the ⋯ button on a 390 px phone once the strip shrank.
+ *
+ * Uses ``scrollBy`` on the strip itself rather than ``scrollIntoView``,
+ * which would also scroll every scrollable ancestor (the page).
+ */
 export function useScrollActiveTabIntoView(
   stripRef: RefObject<HTMLElement>,
   activeKey: string,
+  deps: ReadonlyArray<unknown> = [],
 ): void {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = stripRef.current
     if (!el) return
-    const active = el.querySelector('[aria-selected="true"]') as HTMLElement | null
-    // ``scrollIntoView`` is missing in jsdom by default — silently
-    // skip the pin so component tests don't have to stub it.
-    active?.scrollIntoView?.({ behavior: 'auto', inline: 'center', block: 'nearest' })
-  }, [activeKey])
+    const reveal = () => {
+      const active = el.querySelector<HTMLElement>('[aria-selected="true"]')
+      if (!active) return
+      const delta = activeTabScrollDelta(
+        el.getBoundingClientRect(),
+        active.getBoundingClientRect(),
+      )
+      if (Math.abs(delta) < 1) return
+      if (typeof el.scrollBy === 'function') {
+        el.scrollBy({ left: delta, behavior: 'auto' })
+      } else {
+        el.scrollLeft += delta
+      }
+    }
+    reveal()
+    const RO: typeof ResizeObserver | undefined =
+      typeof ResizeObserver !== 'undefined' ? ResizeObserver : undefined
+    const ro = RO ? new RO(reveal) : null
+    if (ro) {
+      ro.observe(el)
+      // Tab widths shift when web fonts land or a label is renamed.
+      for (const child of Array.from(el.children)) ro.observe(child)
+    }
+    return () => ro?.disconnect()
+  }, [activeKey, ...deps])
 }
 
 interface TabOverflowMenuProps<T extends string> {
