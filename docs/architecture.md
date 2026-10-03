@@ -502,6 +502,19 @@ unsolicited offer minted a session with no provider and no space, and its
 chunks wrote members (role included), bans and content for any space the
 sender named.
 
+**A sync tells the GFS nothing.** The OFFER, ANSWER and every ICE candidate
+ride the signed household-to-household path (or `SPACE_ROUTED` over the mesh);
+the GFS is not on the sync path at all. Households used to call
+`POST /cluster/signaling-session` (and `/release`) on their GFS before and
+after every direct sync, with `from_instance` and a household signature, so
+the GFS logged which household started a direct sync, when, and how long its
+ICE phase ran. The `signaling_node` URL it returned rode in the OFFER but no
+receiver ever used it. Households no longer make that call, the OFFER carries
+no `signaling_node`, and `FederationService` holds no GFS client at all
+(tripwire: `tests/protocol/test_gfs_no_sync_signaling.py`). The GFS still
+answers the endpoint so an older household keeps working; a newer requester
+ignores the field in an older provider's OFFER.
+
 ## Space cryptographic identity (§4.3)
 
 Every space has its own Ed25519 keypair and a per-epoch AES-256

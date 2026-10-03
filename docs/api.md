@@ -1185,8 +1185,8 @@ sync. The GFS holds no PeerConnection.
 |---|---|---|
 | POST | `/cluster/sync` | Cluster-node state sync. |
 | GET | `/cluster/health` | Node health. |
-| POST | `/cluster/signaling-session` | Pick a least-loaded signaling node for a sync session (spec §24.10.7). |
-| POST | `/cluster/signaling-session/release` | Release a signaling session on `SPACE_SYNC_DIRECT_READY` / `DIRECT_FAILED`. |
+| POST | `/cluster/signaling-session` | **Legacy.** Pick a least-loaded signaling node for a sync session (spec §24.10.7). Kept for older households; current households never call it (a sync tells the GFS nothing — see `protocol/sync.md`). |
+| POST | `/cluster/signaling-session/release` | **Legacy.** Release a signaling session on `SPACE_SYNC_DIRECT_READY` / `DIRECT_FAILED`. Older households only. |
 
 ## GFS — Admin portal
 
@@ -1249,7 +1249,7 @@ These pages are server-rendered HTML and require no auth.
 | `GET /api/calls/ice-servers` | 30 / min / user |
 | `POST /api/link-preview` | 30 / min / user — on top, the service caps **fresh page fetches** (cache misses, including the ones a post create causes) at 20 / 5 min per member and 60 / 5 min per household; over budget the answer is simply "no card". |
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
-| `POST /cluster/signaling-session{,/release}` | 60 / min / paired instance |
+| `POST /cluster/signaling-session{,/release}` (legacy) | 60 / min / paired instance |
 | `GET /` + `GET /spaces/{id}` + `GET /join/{token}` (GFS public pages) | 30 / min / IP — `/join/` rides the same window: it is the page an attacker would hammer to walk the token space, and since it writes nothing there is no household identity to key a limiter on. |
 | `GET /api/invite-links/{token}/code` | 30 / min / IP — the endpoint is unauthenticated (the token IS the credential), so the client address is the only handle. Not brute-force protection: a token is a uuid4 hex and is not guessable. It is ordinary anonymous-endpoint shedding, and one visitor legitimately hits it once per link they open. Live and dead tokens answer identically apart from the status code. |
 | `POST /gfs/spaces/{id}/invite` | 20 / min / **instance** — the mint is signature-authenticated, so the accountable identity is known before anything is written and the limiter keys on the household rather than on an address it could rotate. Far above a human minting invites, while bounding how many rows one household can park on a server per minute. |

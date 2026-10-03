@@ -143,7 +143,7 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
   consuming chunks off the channel.
 - Timeout / channel never opens → the requester's ICE watcher emits
   `SPACE_SYNC_DIRECT_FAILED {reason: "ice_timeout"}` to the provider so it
-  releases its half-session (RTC handle + signaling node), and the
+  releases its half-session (its RTC handle), and the
   **requester** — not the provider — re-issues the BEGIN via
   `trigger_relay_sync` (`SPACE_SYNC_BEGIN {prefer_direct: false}`). The
   provider must not mint a BEGIN of its own here: a bounced BEGIN would land
@@ -265,42 +265,43 @@ per stream and `MAX_ROUTE_COOLDOWN_WAIT_S` per wait, so a household that
 is genuinely unreachable still terminates the stream. At most one flood
 per cooldown period per stream still reaches the wire.
 
-## Round-robin signaling-node selection (cluster GFS)
+## No GFS on the sync path
 
-When a Social Home instance is connected to a multi-node GFS cluster,
-the load of relaying ICE candidates between requester and provider
-must be spread across nodes rather than always landing on the
-caller's preferred GFS. Spec §24.10.7.
+The OFFER, ANSWER and every `SPACE_SYNC_ICE` candidate travel between the
+two households as signed federation events (`send_event` for a paired peer,
+`SPACE_ROUTED` over the mesh) — the GFS never carries sync signalling and
+is never told that a sync is happening. The OFFER payload is exactly
+`{sync_id, sdp_offer, ice_servers}`.
 
-- The provider, before generating `SPACE_SYNC_OFFER`, calls
-  `POST /cluster/signaling-session` on its connected GFS node. The
-  GFS picks the least-loaded online cluster node by weighted
-  least-connections (min-heap on `(active_sync_sessions, node_id)`)
-  and increments its counter, returning the chosen URL. The SH
-  client wrapper that issues this call is
-  `GfsConnectionService.request_signaling_node`.
-- The provider includes that URL in the OFFER as `signaling_node`.
-  Single-node deployments (or no paired GFS) return `null` and the
-  field is omitted from the offer.
-- The requester sends `SPACE_SYNC_ANSWER` and trickles `SPACE_SYNC_ICE`
-  directly to `signaling_node`.
-- On `SPACE_SYNC_DIRECT_READY` or `SPACE_SYNC_DIRECT_FAILED` the
-  provider calls `POST /cluster/signaling-session/release` (via
-  `GfsConnectionService.release_signaling_node`) to decrement the
-  counter.
+Earlier builds (spec §24.10.7, "round-robin signaling-node selection") had
+the provider call `POST /cluster/signaling-session` on its GFS before every
+direct sync and `POST /cluster/signaling-session/release` on
+`SPACE_SYNC_DIRECT_READY` / `SPACE_SYNC_DIRECT_FAILED`. Both bodies carried
+`from_instance`, a random `sync_id` and a household Ed25519 signature, so the
+GFS learned **which household** began a direct sync, **when**, and **how long**
+the ICE phase lasted — per sync. The returned `signaling_node` URL was put in
+the OFFER, but no requester ever read it: ICE never went to a GFS node. The
+round trip bought no load spreading and leaked activity metadata, so it is
+gone:
 
-Counters are local-per-node (no consensus). They propagate via
-`NODE_HEARTBEAT` so peers' selectors see fresh load on the next pick.
-The same heartbeat also carries each node's live connected-client count
-(GFS↔SH WebSocket sessions); peers mirror it in memory so the admin
+- households never call `/cluster/signaling-session` or its `/release`;
+- the provider's OFFER no longer carries `signaling_node`;
+- a requester ignores `signaling_node` in an OFFER from an older provider
+  and answers over federation as always;
+- the GFS keeps answering both endpoints so older households still sync
+  (legacy only — no current household path reaches them).
+
+Cluster nodes still share load over `NODE_HEARTBEAT`: the legacy
+signaling counters, plus each node's live connected-client count
+(GFS↔SH WebSocket sessions), which peers mirror in memory so the admin
 portal's Cluster tab shows per-node load across the whole cluster. That
 count is ephemeral (never persisted) and fail-soft — a heartbeat that
 omits it leaves the last-known value untouched, so an older peer never
 clobbers it to zero.
-A node at `MAX_SIGNALING_SESSIONS = 200` is filtered out of the
-candidate set; if every node is at the cap the GFS replies with
-`503 {reason: "node_capacity"}` and the SH provider falls back to
-relay sync.
+
+Tripwire: `tests/protocol/test_gfs_no_sync_signaling.py` (§27.9) — no
+household module may name the endpoint or put `signaling_node` on the wire,
+and the sync handlers make no HTTP request.
 
 ## Implementation
 
