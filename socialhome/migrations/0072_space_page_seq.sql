@@ -1,0 +1,23 @@
+-- 0072 — host-sequenced space pages (federation v_48).
+--
+-- A space page's host (the space owner's household) is its only
+-- sequencer: it numbers every canonical version it commits, and member
+-- households mirror the host by that number instead of guessing an order
+-- from timestamps or content (the v_48 review showed every decentralised
+-- order diverges). A member edit is an optimistic local draft until the
+-- host's version that sequenced it comes back.
+--
+-- ``space_pages.seq`` — the host's sequence number of the version this row
+-- holds (0: never sequenced — a pre-v_48 row, or a member's own create the
+-- host has not acknowledged yet). Monotonic per page; a mirror only moves
+-- it forward.
+--
+-- ``space_pages.pending_base_seq`` — NULL unless this household holds an
+-- unacknowledged local draft; then the ``seq`` that draft was based on
+-- (it stays the original base until the host acknowledges it).
+--
+-- Not derivable: ``updated_at`` is each household's own stamp, version
+-- hashes carry no order, and history rows are per-household. Additive and
+-- NULL/0-defaulted: existing rows read as "never sequenced, no draft".
+ALTER TABLE space_pages ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE space_pages ADD COLUMN pending_base_seq INTEGER;

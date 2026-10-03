@@ -40,6 +40,7 @@ import signal
 import subprocess
 import sqlite3
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -11009,6 +11010,236 @@ def cmd_forwarded_role_change() -> None:
     print("forwarded-role-change: ok")
 
 
+def cmd_page_concurrent_edit() -> None:
+    """Host-sequenced space pages: one order, one state everywhere (v_48).
+
+    Beta (b) hosts a fresh "Wiki club" and seats Alice (a) and Carol (c);
+    b is the page's only sequencer. Alice creates a page with three
+    paragraphs; once b and c hold it:
+
+    1. **Concurrent edits.** At the same time (three threads) a edits
+       paragraph 1, c edits paragraph 3 and the host b appends a paragraph.
+       a and c propose to b alone; b merges each proposal against the
+       version it was made from and broadcasts the canonical version with
+       its ``seq``. **a, b and c end on the same ``seq`` and the same body**
+       holding all three edits, with no conflict.
+    2. **Same paragraph.** a and c both rewrite paragraph 2 at once. The
+       host keeps the first and makes the second a conflict side: **all
+       three hold the identical conflict** (same side hashes, same
+       ``current_hash``). A conflict never blocks edits: a ``PATCH`` on a
+       conflicted page answers 200. (If the two edits happen to serialise —
+       no concurrency — the round is retried, up to three times.)
+    3. **Resolution.** a resolves with ``resolution: "side"`` + ``sides``;
+       it is a proposal like any edit, the host retires every side and
+       broadcasts: a, b and c converge on one ``seq``, no conflict left.
+
+    The space is this step's own, so no earlier assertion changes.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' + 'pair' first")
+    inst = state["instances"]
+    a, b, c = inst["a"], inst["b"], inst["c"]
+    base_of = {k: f"http://127.0.0.1:{inst[k]['port']}" for k in ("a", "b", "c")}
+    b_base = base_of["b"]
+    s, space = _request(
+        f"{b_base}/api/spaces",
+        token=b["token"],
+        method="POST",
+        body={"name": "Wiki club", "join_mode": "invite_only"},
+    )
+    space_id = _must("space create(b)", s, space, ok=(201,))["id"]
+    print(f"  b: space {space_id[:8]} created")
+
+    for label, who in (("a", a), ("c", c)):
+        s, inv = _request(
+            f"{b_base}/api/spaces/{space_id}/remote-invites",
+            token=b["token"],
+            method="POST",
+            body={"invitee_instance_id": who["instance_id"], "invitee_user_id": who["user_id"]},
+        )
+        _must(f"remote-invite({label})", s, inv, ok=(201,))
+        base = base_of[label]
+
+        def _invite_token(base=base, who=who) -> str | None:
+            s, invites = _request(f"{base}/api/remote_invites", token=who["token"])
+            items = (
+                invites if isinstance(invites, list) else (invites or {}).get("items") or []
+            )
+            hit = next((i for i in items if i.get("space_id") == space_id), None)
+            return hit["invite_token"] if s == 200 and hit else None
+
+        _wait_for(
+            f"{label} to receive b's invite",
+            lambda f=_invite_token: f() is not None,
+            timeout=60.0,
+        )
+        s, r = _request(
+            f"{base}/api/remote_invites/{_invite_token()}/accept",
+            token=who["token"],
+            method="POST",
+        )
+        _must(f"accept-invite({label})", s, r, ok=(204,))
+        _wait_for(
+            f"b to seat {label}",
+            lambda who=who: bool(
+                _rows(
+                    "b",
+                    "SELECT 1 FROM space_remote_members WHERE space_id=? AND user_id=?"
+                    " AND tombstoned=0",
+                    (space_id, who["user_id"]),
+                )
+            ),
+            timeout=60.0,
+        )
+
+    houses = {k: (base_of[k], inst[k]["token"]) for k in ("a", "b", "c")}
+    pages = f"/api/spaces/{space_id}/pages"
+    s, page = _request(
+        f"{base_of['a']}{pages}",
+        token=a["token"],
+        method="POST",
+        body={"title": "Rules", "content": "Para one.\n\nPara two.\n\nPara three."},
+    )
+    page_id = _must("page create(a)", s, page, ok=(201,))["id"]
+
+    def _get(label: str) -> dict | None:
+        base, token = houses[label]
+        s, body = _request(f"{base}{pages}/{page_id}", token=token)
+        return body if s == 200 else None
+
+    def _all() -> dict[str, dict | None]:
+        return {k: _get(k) for k in houses}
+
+    _wait_for(
+        "every household to hold the host-sequenced page",
+        lambda: all(p and p.get("seq", 0) >= 1 and not p.get("pending") for p in _all().values()),
+        timeout=60.0,
+    )
+    print(f"  a: page {page_id[:8]} created, sequenced by b, held by a/b/c")
+
+    def _patch_all(edits: dict[str, str]) -> dict[str, int]:
+        statuses: dict[str, int] = {}
+
+        def _one(label: str, content: str) -> None:
+            base, token = houses[label]
+            st, _b = _request(
+                f"{base}{pages}/{page_id}",
+                token=token,
+                method="PATCH",
+                body={"content": content},
+            )
+            statuses[label] = st
+
+        threads = [threading.Thread(target=_one, args=kv) for kv in edits.items()]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return statuses
+
+    def _same(check) -> bool:
+        ps = _all()
+        if not all(ps.values()):
+            return False
+        vals = list(ps.values())
+        first = vals[0]
+        return all(
+            p["seq"] == first["seq"]
+            and p["title"] == first["title"]
+            and p["content"] == first["content"]
+            and not p.get("pending")
+            for p in vals
+        ) and check(ps)
+
+    # 1. Concurrent edits from two members and the host → one seq, one body.
+    statuses = _patch_all(
+        {
+            "a": "Para one, by Alice.\n\nPara two.\n\nPara three.",
+            "c": "Para one.\n\nPara two.\n\nPara three, by Carol.",
+            "b": "Para one.\n\nPara two.\n\nPara three.\n\nAppended by Beta.",
+        }
+    )
+    if any(st != 200 for st in statuses.values()):
+        raise SystemExit(f"page-concurrent-edit: edits answered {statuses}")
+    _wait_for(
+        "a, b and c to hold the same seq and merged body",
+        lambda: _same(
+            lambda ps: all(
+                w in ps["b"]["content"] for w in ("by Alice", "by Carol", "by Beta")
+            )
+            and not any(p.get("conflict") for p in ps.values())
+        ),
+        timeout=90.0,
+    )
+    print(f"  concurrent edits: a/b/c on seq {_get('b')['seq']} with one merged body ✓")
+
+    # 2. Same paragraph → the identical conflict on all three.
+    def _conflicted(ps: dict) -> bool:
+        cs = [p.get("conflict") for p in ps.values()]
+        if not all(cs):
+            return False
+        key = lambda cf: (cf["current_hash"], sorted(x["hash"] for x in cf["sides"]))  # noqa: E731
+        return all(key(cf) == key(cs[0]) for cf in cs)
+
+    for attempt in range(1, 4):
+        _patch_all(
+            {
+                "a": _get("a")["content"].replace("Para two.", f"Two by Alice #{attempt}."),
+                "c": _get("c")["content"].replace("Para two.", f"Two by Carol #{attempt}."),
+            }
+        )
+        try:
+            _wait_for("a, b and c to hold the same conflict", lambda: _same(_conflicted), timeout=45.0)
+            break
+        except SystemExit:
+            print(f"  same paragraph: edits serialised (attempt {attempt}) — retrying")
+    else:
+        raise SystemExit("page-concurrent-edit: never produced a concurrent conflict")
+    print("  same paragraph: a/b/c hold the identical conflict ✓")
+    base, token = houses["b"]
+    current = _get("b")
+    st, body = _request(
+        f"{base}{pages}/{page_id}",
+        token=token,
+        method="PATCH",
+        body={"content": current["content"] + "\n\nEdited while conflicted."},
+    )
+    if st != 200:
+        raise SystemExit(
+            f"page-concurrent-edit: PATCH while conflicted answered {st} {body!r}"
+        )
+    _wait_for("the edit to reach a and c", lambda: _same(_conflicted), timeout=60.0)
+    print("  PATCH on a conflicted page: 200, the conflict stays ✓")
+
+    # 3. a resolves by side; everyone converges, no conflict left.
+    conflict = _get("a")["conflict"]
+    keep = conflict["sides"][0]
+    s, body = _request(
+        f"{base_of['a']}{pages}/{page_id}/resolve-conflict",
+        token=a["token"],
+        method="POST",
+        body={
+            "resolution": "side",
+            "side": keep["hash"],
+            "sides": [x["hash"] for x in conflict["sides"]],
+        },
+    )
+    _must("a: resolve-conflict", s, body)
+    _wait_for(
+        "a, b and c to converge on the resolution",
+        lambda: _same(
+            lambda ps: not any(p.get("conflict") for p in ps.values())
+            and ps["b"]["content"] == keep["content"]
+        ),
+        timeout=90.0,
+    )
+    print(f"  resolution: a/b/c on seq {_get('b')['seq']}, no conflict left ✓")
+    state["page_concurrent_edit_space_id"] = space_id
+    _save(state)
+    print("page-concurrent-edit: ok")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -11141,6 +11372,12 @@ def main() -> None:
         # forwarded, the host applies it and a, b, c, d all see the
         # moderator; the new moderator's own role change is refused.
         cmd_forwarded_role_change()
+        # ``page-concurrent-edit`` (v_48 host-sequenced pages): in a space
+        # hosted by b, a and c propose concurrent edits while b appends — all
+        # three end on one seq and body; same-paragraph edits leave the
+        # identical conflict everywhere (edits still allowed); a resolves by
+        # side and everyone converges.
+        cmd_page_concurrent_edit()
         # ``admin-revoke-rotation`` (v_44): a demotes delegated admin b; a
         # rotates the space authority key, c and b re-pin from the owner's
         # cert, b's old seed is cleared and b can no longer sign.

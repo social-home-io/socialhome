@@ -9260,9 +9260,81 @@ button.sh-shopping-item__text:focus-visible {
   max-height: 300px;
   overflow-y: auto;
 }
-@media (max-width: 640px) {
-  .sh-conflict-panels { grid-template-columns: 1fr; }
+/* Federated page conflicts (v_48): up to three versions + a draft. */
+.sh-conflict-panels--many {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
+.sh-conflict-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  min-width: 0;
+}
+.sh-conflict-panel h3 { margin: 0; overflow-wrap: anywhere; }
+.sh-conflict-panel > .sh-btn,
+.sh-conflict-panel > button { align-self: flex-start; min-height: 36px; }
+.sh-conflict-panel--shown { border-color: var(--sh-warning); }
+.sh-conflict-panel-meta { font-size: var(--sh-font-size-sm); }
+.sh-conflict-panel-body {
+  flex: 1;
+  max-height: 420px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.sh-page-conflict .sh-form-actions { flex-wrap: wrap; margin-top: var(--sh-space-md); }
+.sh-page-conflict-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+}
+.sh-page-conflict-banner > div { flex: 1 1 220px; min-width: 0; }
+.sh-badge--conflict {
+  align-self: flex-start;
+  background: color-mix(in srgb, var(--sh-warning) 16%, transparent);
+  border-color: color-mix(in srgb, var(--sh-warning) 45%, transparent);
+  color: color-mix(in srgb, var(--sh-warning) 70%, var(--sh-text));
+}
+@media (max-width: 640px) {
+  .sh-conflict-panels,
+  .sh-conflict-panels--many { grid-template-columns: 1fr; }
+}
+/* v_48 host-sequenced pages: this household's edit waits for the host. */
+.sh-page-pending-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  max-width: 100%;
+  min-height: 28px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--sh-font-size-sm);
+  background: var(--sh-primary-soft);
+  color: var(--sh-primary-on-soft);
+  overflow-wrap: anywhere;
+}
+.sh-page-pending-pill::before { content: "⏳"; }
+.sh-page-viewer-byline + .sh-page-pending-pill { margin-top: var(--sh-space-xs); }
+.sh-page-refusal {
+  margin: var(--sh-space-sm) 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid color-mix(in srgb, var(--sh-danger) 45%, transparent);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-danger) 10%, transparent);
+  color: var(--sh-text);
+}
+.sh-page-refusal p { margin: 0 0 var(--sh-space-sm); overflow-wrap: anywhere; }
+.sh-page-refusal-actions { flex-wrap: wrap; gap: var(--sh-space-sm); }
+.sh-page-refusal-actions > .sh-btn { min-height: 36px; }
+.sh-page-editor .sh-page-conflict-banner { margin: var(--sh-space-sm) 0; }
+.sh-page-card-main .sh-badge--pending { align-self: flex-start; }
+@media (max-width: 640px) {
+  /* The pill gets a row of its own above the editor's buttons. */
+  .sh-page-editor-actions { flex-wrap: wrap; }
+  .sh-page-editor-actions .sh-page-pending-pill { flex-basis: 100%; justify-content: center; }
+}
+
 
 /* HR — visual separators */
 hr {

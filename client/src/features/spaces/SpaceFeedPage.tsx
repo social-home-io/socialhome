@@ -738,6 +738,7 @@ export default function SpaceFeedPage() {
           writable={roleKnown.value && canWrite('pages')}
           adminOnly={adminOnly('pages')}
           archived={!!s?.archived}
+          hostInstanceId={s?.owner_instance_id ?? null}
         />
       )}
 

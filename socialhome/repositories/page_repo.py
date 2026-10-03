@@ -13,16 +13,26 @@ Locks (§5.2 page locking):
 
 Versions: every save appends a row to ``page_edit_history`` keyed on
 ``(page_id, version)`` so rollback and diff tooling can reconstruct state.
+For a space page that history is also its v_48 ancestry (the versions its
+body absorbed), so it keeps :data:`MAX_SPACE_HISTORY` rows.
+
+Snapshots (``space_page_snapshots``): the open sides of a concurrent-edit
+conflict (``conflict=1``, each a whole version as canonical JSON) and a
+short record of resolved ones (``conflict=0``).
 """
 
 from __future__ import annotations
 
 import builtins
+import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.page_version import DraftBase, PageConflictSide, version_hash
 from ..federation.owner_bound_id import SPACE_PAGE_KIND, mint_owner_bound_id
 from .base import row_to_dict, rows_to_dicts
 
@@ -33,13 +43,20 @@ from .base import row_to_dict, rows_to_dicts
 #: expired rows every 30 s so stale locks never pile up.
 LOCK_TTL = timedelta(seconds=60)
 
-#: Maximum number of edit-history rows retained per page (spec §31901).
-#: Older versions are pruned on each ``save_version`` write.
+#: Maximum number of edit-history rows retained per household page (spec
+#: §31901). Older versions are pruned on each ``save_version`` write.
 MAX_HISTORY = 5
 
-#: Cap on conflict snapshots per page. Each row carries a full page body,
-#: appended per federated conflict merge, so this is the largest-row table.
+#: Edit-history cap for a SPACE page (v_48). On the space's host the
+#: history is also where a proposal's base is looked up (by hash) for a
+#: three-way merge, so it keeps enough rows for a member that edited a
+#: while ago (``HOST_HISTORY`` in the sequencer).
+MAX_SPACE_HISTORY = 50
+
+#: Cap on resolved (``conflict=0``) snapshot rows kept per page and scope.
 #: Pruned on each ``insert_snapshot`` write and dropped with the page.
+#: Open sides (``conflict=1``) and a draft's base (``side='base'``) are
+#: never pruned: the sequencer caps sides itself.
 MAX_PAGE_SNAPSHOTS = 10
 
 
@@ -114,13 +131,31 @@ class AbstractPageRepo(Protocol):
         author_user_id: str,
         side: str,
         conflict: bool,
+        title: str | None = None,
     ) -> None: ...
     async def has_active_conflict(self, page_id: str, *, space_id: str) -> bool: ...
-    async def last_base_snapshot(self, page_id: str, *, space_id: str) -> str: ...
-    async def last_theirs_snapshot(
+    async def list_conflict_sides(
         self, page_id: str, *, space_id: str
-    ) -> str | None: ...
+    ) -> builtins.list[PageConflictSide]: ...
+    async def set_conflict_sides(
+        self,
+        page_id: str,
+        *,
+        space_id: str,
+        sides: Sequence[PageConflictSide],
+    ) -> None: ...
+    async def space_pages_in_conflict(self, space_id: str) -> set[str]: ...
     async def clear_conflict_flag(self, page_id: str, *, space_id: str) -> None: ...
+    async def set_draft_base(
+        self, page_id: str, *, space_id: str, base: DraftBase
+    ) -> None: ...
+    async def get_draft_base(
+        self, page_id: str, *, space_id: str
+    ) -> DraftBase | None: ...
+    async def clear_draft_base(self, page_id: str, *, space_id: str) -> None: ...
+    async def list_pending_drafts(
+        self, *, space_id: str | None = None
+    ) -> builtins.list[tuple[str, str]]: ...
 
 
 class SqlitePageRepo:
@@ -205,19 +240,22 @@ class SqlitePageRepo:
                     last_editor_user_id, last_edited_at,
                     locked_by, locked_at, lock_expires_at,
                     delete_requested_by, delete_requested_at,
-                    delete_approved_by,  delete_approved_at
+                    delete_approved_by,  delete_approved_at,
+                    seq, pending_base_seq
                 ) VALUES(?,?,?,?,?,?,
                          COALESCE(?, datetime('now')),
                          COALESCE(?, datetime('now')),
                          ?,?,
-                         ?,?,?, ?,?, ?,?)
+                         ?,?,?, ?,?, ?,?, ?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     content=excluded.content,
                     cover_image_url=excluded.cover_image_url,
                     updated_at=excluded.updated_at,
                     last_editor_user_id=excluded.last_editor_user_id,
-                    last_edited_at=excluded.last_edited_at
+                    last_edited_at=excluded.last_edited_at,
+                    seq=excluded.seq,
+                    pending_base_seq=excluded.pending_base_seq
                 WHERE space_pages.space_id = excluded.space_id
                 """,
                 (
@@ -238,6 +276,8 @@ class SqlitePageRepo:
                     page.delete_requested_at,
                     page.delete_approved_by,
                     page.delete_approved_at,
+                    int(page.seq),
+                    page.pending_base_seq,
                 ),
             )
         return n > 0
@@ -561,18 +601,28 @@ class SqlitePageRepo:
         # batch so order is preserved. The DELETE filters on
         # ``version`` descending, so it never touches the row we just
         # inserted unless we actually overflow the cap.
+        # A space page keeps more (its history is its v_48 ancestry), and
+        # only rows of the same scope count against — or are pruned by —
+        # the cap (``IS`` matches NULL to NULL for a household page).
+        cap = MAX_HISTORY if version.space_id is None else MAX_SPACE_HISTORY
         await self._db.enqueue(
             """
             DELETE FROM page_edit_history
-             WHERE page_id=?
+             WHERE page_id=? AND space_id IS ?
                AND version NOT IN (
                    SELECT version FROM page_edit_history
-                    WHERE page_id=?
+                    WHERE page_id=? AND space_id IS ?
                     ORDER BY version DESC
                     LIMIT ?
                )
             """,
-            (version.page_id, version.page_id, MAX_HISTORY),
+            (
+                version.page_id,
+                version.space_id,
+                version.page_id,
+                version.space_id,
+                cap,
+            ),
         )
         return version
 
@@ -621,7 +671,17 @@ class SqlitePageRepo:
         author_user_id: str,
         side: str,
         conflict: bool,
+        title: str | None = None,
     ) -> None:
+        """Store one version of a page as a snapshot row.
+
+        ``title`` given: the row's ``body`` holds the whole version as
+        canonical JSON ``{"content", "title"}`` (an open conflict side,
+        v_48), so a side can be restored with its own title. Without it,
+        ``body`` is the bare content.
+        """
+        if title is not None:
+            body = encode_side_body(title, body)
         # microsecond-precision timestamp avoids primary-key collisions
         # under rapid concurrent inserts.
         now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -642,21 +702,24 @@ class SqlitePageRepo:
                 1 if conflict else 0,
             ),
         )
-        # Prune to the newest ``MAX_PAGE_SNAPSHOTS`` per page. Both
-        # statements share the same async-write batch so the INSERT lands
-        # before this DELETE.
+        # Prune the RESOLVED snapshots of this page in this scope to the
+        # newest ``MAX_PAGE_SNAPSHOTS``. Never an open side (``conflict=1``
+        # — pruning one would silently drop a version nobody resolved), and
+        # never another scope's rows sharing the page id. Both statements
+        # share the same async-write batch so the INSERT lands first.
         await self._db.enqueue(
             """
             DELETE FROM space_page_snapshots
-             WHERE page_id=?
+             WHERE page_id=? AND space_id IS ? AND conflict=0 AND side!='base'
                AND rowid NOT IN (
                    SELECT rowid FROM space_page_snapshots
-                    WHERE page_id=?
+                    WHERE page_id=? AND space_id IS ? AND conflict=0
+                      AND side!='base'
                     ORDER BY snapshot_at DESC
                     LIMIT ?
                )
             """,
-            (page_id, page_id, MAX_PAGE_SNAPSHOTS),
+            (page_id, space_id, page_id, space_id, MAX_PAGE_SNAPSHOTS),
         )
 
     async def has_active_conflict(self, page_id: str, *, space_id: str) -> bool:
@@ -667,30 +730,225 @@ class SqlitePageRepo:
         )
         return row is not None
 
-    async def last_base_snapshot(self, page_id: str, *, space_id: str) -> str:
-        row = await self._db.fetchone(
-            "SELECT body FROM space_page_snapshots "
-            "WHERE page_id=? AND space_id=? AND side='base' "
-            "ORDER BY snapshot_at DESC LIMIT 1",
+    async def list_conflict_sides(
+        self, page_id: str, *, space_id: str
+    ) -> builtins.list[PageConflictSide]:
+        """The open conflict sides of a space page, oldest first. A legacy
+        row (bare content) reads with the page's current title."""
+        rows = await self._db.fetchall(
+            "SELECT s.body, s.snapshot_by, s.snapshot_at, p.title AS page_title"
+            " FROM space_page_snapshots s"
+            " LEFT JOIN space_pages p ON p.id = s.page_id AND p.space_id = s.space_id"
+            " WHERE s.page_id=? AND s.space_id=? AND s.conflict=1"
+            " ORDER BY s.snapshot_at ASC",
             (page_id, space_id),
         )
-        return str(row["body"]) if row else ""
+        out: builtins.list[PageConflictSide] = []
+        for d in rows_to_dicts(rows):
+            v = decode_side_body(
+                str(d["body"]), fallback_title=str(d.get("page_title") or "")
+            )
+            out.append(
+                PageConflictSide(
+                    hash=version_hash(v.title, v.content, v.cover_image_url),
+                    title=v.title,
+                    content=v.content,
+                    cover_image_url=v.cover_image_url,
+                    base_seq=v.seq,
+                    by=str(d["snapshot_by"]),
+                    at=str(d["snapshot_at"]),
+                )
+            )
+        return out
 
-    async def last_theirs_snapshot(self, page_id: str, *, space_id: str) -> str | None:
-        row = await self._db.fetchone(
-            "SELECT body FROM space_page_snapshots "
-            "WHERE page_id=? AND space_id=? AND side='theirs' AND conflict=1 "
-            "ORDER BY snapshot_at DESC LIMIT 1",
-            (page_id, space_id),
+    async def set_conflict_sides(
+        self,
+        page_id: str,
+        *,
+        space_id: str,
+        sides: Sequence[PageConflictSide],
+    ) -> None:
+        """Make ``sides`` the page's open conflict — exactly them, with
+        their own ``at`` (the host's stamps, so every household holds the
+        same set). Atomic."""
+        rows = [
+            (
+                page_id,
+                space_id,
+                side.at,
+                encode_side_body(
+                    side.title,
+                    side.content,
+                    cover_image_url=side.cover_image_url,
+                    seq=side.base_seq,
+                ),
+                side.by,
+            )
+            for side in sides
+        ]
+
+        def _run(conn):
+            conn.execute(
+                "DELETE FROM space_page_snapshots"
+                " WHERE page_id=? AND space_id=? AND conflict=1",
+                (page_id, space_id),
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO space_page_snapshots("
+                " page_id, space_id, snapshot_at, body, snapshot_by, side, conflict"
+                ") VALUES(?,?,?,?,?,'theirs',1)",
+                rows,
+            )
+
+        await self._db.transact(_run)
+
+    async def space_pages_in_conflict(self, space_id: str) -> set[str]:
+        """Ids of this space's pages with an open conflict (the list badge)."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT page_id FROM space_page_snapshots"
+            " WHERE space_id=? AND conflict=1",
+            (space_id,),
         )
-        return str(row["body"]) if row else None
+        return {str(r["page_id"]) for r in rows}
 
     async def clear_conflict_flag(self, page_id: str, *, space_id: str) -> None:
+        """Drop every open side of the page (their bodies live on in the
+        history, written by the sequencer before it clears them)."""
         await self._db.enqueue(
-            "UPDATE space_page_snapshots SET conflict=0"
+            "DELETE FROM space_page_snapshots"
             " WHERE page_id=? AND space_id=? AND conflict=1",
             (page_id, space_id),
         )
+
+    # ── A member's draft base (v_48) ────────────────────────────────────
+
+    async def set_draft_base(
+        self, page_id: str, *, space_id: str, base: DraftBase
+    ) -> None:
+        """Remember the canonical version a local draft was made from (one
+        row per page, ``side='base'``) — sent as the proposal's base."""
+        body = encode_side_body(
+            base.title,
+            base.content,
+            cover_image_url=base.cover_image_url,
+            seq=base.seq,
+            resolves=base.resolves,
+        )
+
+        def _run(conn):
+            conn.execute(
+                "DELETE FROM space_page_snapshots"
+                " WHERE page_id=? AND space_id=? AND side='base'",
+                (page_id, space_id),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO space_page_snapshots("
+                " page_id, space_id, snapshot_at, body, snapshot_by, side, conflict"
+                ") VALUES(?,?,?,?,?,'base',0)",
+                (page_id, space_id, f"base:{page_id}", body, base.by),
+            )
+
+        await self._db.transact(_run)
+
+    async def get_draft_base(self, page_id: str, *, space_id: str) -> DraftBase | None:
+        row = await self._db.fetchone(
+            "SELECT body, snapshot_by FROM space_page_snapshots"
+            " WHERE page_id=? AND space_id=? AND side='base' LIMIT 1",
+            (page_id, space_id),
+        )
+        if row is None:
+            return None
+        v = decode_side_body(str(row["body"]), fallback_title="")
+        return DraftBase(
+            title=v.title,
+            content=v.content,
+            cover_image_url=v.cover_image_url,
+            seq=v.seq,
+            by=str(row["snapshot_by"]),
+            resolves=v.resolves,
+        )
+
+    async def clear_draft_base(self, page_id: str, *, space_id: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM space_page_snapshots"
+            " WHERE page_id=? AND space_id=? AND side='base'",
+            (page_id, space_id),
+        )
+
+    async def list_pending_drafts(
+        self, *, space_id: str | None = None
+    ) -> builtins.list[tuple[str, str]]:
+        """``(space_id, page_id)`` of every page holding a local draft."""
+        if space_id is None:
+            rows = await self._db.fetchall(
+                "SELECT space_id, id FROM space_pages"
+                " WHERE pending_base_seq IS NOT NULL ORDER BY updated_at",
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT space_id, id FROM space_pages"
+                " WHERE space_id=? AND pending_base_seq IS NOT NULL"
+                " ORDER BY updated_at",
+                (space_id,),
+            )
+        return [(str(r["space_id"]), str(r["id"])) for r in rows]
+
+
+@dataclass(slots=True, frozen=True)
+class _StoredVersion:
+    """Repo-local DTO: a decoded snapshot ``body``."""
+
+    title: str
+    content: str
+    cover_image_url: str | None = None
+    seq: int = 0
+    resolves: tuple[str, ...] = ()
+
+
+def encode_side_body(
+    title: str,
+    content: str,
+    *,
+    cover_image_url: str | None = None,
+    seq: int = 0,
+    resolves: Sequence[str] = (),
+) -> str:
+    """A whole version as a snapshot ``body`` — canonical JSON."""
+    data: dict = {"content": content, "title": title}
+    if cover_image_url:
+        data["cover"] = cover_image_url
+    if seq:
+        data["seq"] = int(seq)
+    if resolves:
+        data["resolves"] = list(resolves)
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def decode_side_body(body: str, *, fallback_title: str) -> _StoredVersion:
+    """A snapshot ``body``: the JSON a v_48 row is stored as, else a legacy
+    bare-content row under ``fallback_title``."""
+    if body.startswith("{"):
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
+        if (
+            isinstance(data, dict)
+            and {"content", "title"} <= set(data)
+            and set(data) <= {"content", "title", "cover", "seq", "resolves"}
+            and isinstance(data["content"], str)
+            and isinstance(data["title"], str)
+        ):
+            cover = data.get("cover")
+            resolves = data.get("resolves") or []
+            return _StoredVersion(
+                title=data["title"],
+                content=data["content"],
+                cover_image_url=cover if isinstance(cover, str) else None,
+                seq=int(data.get("seq") or 0),
+                resolves=tuple(str(r) for r in resolves if isinstance(r, str)),
+            )
+    return _StoredVersion(title=fallback_title, content=body)
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
@@ -717,6 +975,12 @@ def _row_to_page(row: dict | None) -> Page | None:
         delete_requested_at=row.get("delete_requested_at"),
         delete_approved_by=row.get("delete_approved_by"),
         delete_approved_at=row.get("delete_approved_at"),
+        seq=int(row.get("seq") or 0),
+        pending_base_seq=(
+            int(row["pending_base_seq"])
+            if row.get("pending_base_seq") is not None
+            else None
+        ),
     )
 
 

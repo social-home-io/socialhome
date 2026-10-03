@@ -14,9 +14,16 @@ feature toggle are checked by the route first; this service owns the rest:
   ``MODERATED`` a member's new page, and their edit / delete / conflict
   resolution of somebody else's, waits in the space moderation queue
   (:class:`PageModerationHandler` replays it on approval);
+* pages are **host-sequenced** (v_48,
+  :class:`~.page_conflict_service.PageConflictService`): on the space's
+  host an edit is committed as the next canonical version and broadcast;
+  on a member household of a v_48 host it is an optimistic draft the
+  :class:`~.page_proposal_forwarder.PageProposalForwarder` proposes to the
+  host; under an older host, last write wins as before. A conflict never
+  blocks an edit; resolving one retires every open side;
 * each write publishes :class:`PageCreated` / :class:`PageUpdated` /
   :class:`PageDeleted` with the actor, which ``PageFederationOutbound``
-  federates to the space's member households.
+  federates (a member's draft is a ``proposal`` — never broadcast).
 
 Bodies are stored canonical: a signed ``/api/media/…?exp=&sig=`` URL the
 editor echoed back is stripped on save, and re-signed on each read by the
@@ -26,6 +33,7 @@ route.
 from __future__ import annotations
 
 import builtins
+import contextlib
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -33,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
+from ..domain.page_version import PageConflictSide, is_version_hash
 from ..domain.space import (
     AccessDecision,
     ContentAction,
@@ -46,7 +55,12 @@ from ..media_signer import strip_signature_query, strip_signed_media_in_markdown
 from ..repositories.page_repo import mint_page_id, new_page
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
-from .page_conflict_service import NoActiveConflictError
+from .page_conflict_service import (
+    RESOLUTIONS,
+    NoActiveConflictError,
+    PageConflictStaleError,
+    PageMode,
+)
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
 
@@ -217,7 +231,17 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
             cover_image_url=cover,
             page_id=page_id,
         )
-        await self._pages.save(page, space_id=space_id)
+        mode = await self._mode(space_id)
+        if mode is PageMode.HOST:
+            assert self._conflicts is not None
+            # The host's own create is its first canonical version.
+            return await self._conflicts.host_create(page, actor_user_id=actor_user_id)
+        if mode is PageMode.MEMBER:
+            assert self._conflicts is not None
+            # A draft until the host sequences it: proposed, never broadcast.
+            page = await self._conflicts.member_create(page)
+        else:
+            await self._pages.save(page, space_id=space_id)
         await self._emit(
             PageCreated(
                 page_id=page.id,
@@ -225,9 +249,19 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                 title=page.title,
                 content=page.content,
                 actor_user_id=actor_user_id,
+                proposal=mode is PageMode.MEMBER,
             )
         )
         return page
+
+    async def _mode(self, space_id: str) -> PageMode:
+        """How this household writes the space's pages (v_48): sequences
+        them (host), proposes them (member of a v_48 host), or last write
+        wins (an older host / no conflict service)."""
+        if self._conflicts is None:
+            return PageMode.LEGACY
+        mode, _host = await self._conflicts.mode(space_id)
+        return mode
 
     async def update(
         self,
@@ -269,28 +303,92 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                     "target_id": page.id,
                     "patch": patch,
                     "base_updated_at": page.updated_at,
+                    # v_48: the host judges staleness by its own sequence.
+                    "base_seq": page.seq,
                 },
                 snapshot={k: before[k] for k in patch},
             )
+        return await self._write(
+            space_id,
+            page_id,
+            actor_user_id=actor_user_id,
+            patch=patch,
+            base_updated_at=base_updated_at,
+        )
+
+    async def _write(
+        self,
+        space_id: str,
+        page_id: str,
+        *,
+        actor_user_id: str,
+        patch: dict[str, Any],
+        base_updated_at: str | None = None,
+        resolves: builtins.list[str] | None = None,
+        sides_seen: builtins.list[str] | None = None,
+    ) -> Page:
+        """Persist an edit the gates admitted, by mode (v_48): sequenced
+        here on the host, an optimistic draft proposed to a v_48 host, or
+        last write wins under an older one."""
+
+        async def _check(current: Page) -> None:
+            # Re-checked under the page lock: an inbound version (or another
+            # local save) may have landed since the gate.
+            if base_updated_at and base_updated_at != current.updated_at:
+                raise PageStaleError(current)
+            if sides_seen is not None:
+                hashes = [s.hash for s in await self.conflict_sides(space_id, page_id)]
+                if set(sides_seen) != set(hashes):
+                    raise PageConflictStaleError(hashes)
+
+        mode = await self._mode(space_id)
+        if mode is PageMode.HOST:
+            assert self._conflicts is not None
+            # Sequenced and broadcast by the conflict service (it writes
+            # the replaced version to history).
+            return await self._conflicts.commit_local(
+                space_id=space_id,
+                page_id=page_id,
+                actor_user_id=actor_user_id,
+                patch=patch,
+                resolves=resolves or (),
+                precheck=_check,
+            )
         now_iso = datetime.now(timezone.utc).isoformat()
-        fields: dict = {
-            "updated_at": now_iso,
-            "last_editor_user_id": actor_user_id,
-            "last_edited_at": now_iso,
-            **patch,
-        }
-        updated = replace(page, **fields)
-        await self._pages.save(updated, space_id=space_id)
-        # The stored row is the answer: the upsert stamps its own
-        # ``updated_at``, and the editor sends exactly that back as the
-        # next save's ``base_updated_at`` — echoing ``now_iso`` instead
-        # made every second save of one editing session a false 409.
-        updated = (
-            await self._pages.get_space_page(page.id, space_id=space_id) or updated
-        )
-        await snapshot_page_version(
-            self._pages, previous=page, editor_user_id=actor_user_id
-        )
+        async with self._page_lock(space_id, page_id):
+            page = await self.get(space_id, page_id)
+            await _check(page)
+            updated = replace(
+                page,
+                updated_at=now_iso,
+                last_editor_user_id=actor_user_id,
+                last_edited_at=now_iso,
+                **patch,
+            )
+            if mode is PageMode.MEMBER:
+                assert self._conflicts is not None
+                updated = await self._conflicts.member_draft(
+                    page,
+                    updated,
+                    space_id=space_id,
+                    actor_user_id=actor_user_id,
+                    resolves=resolves or (),
+                )
+            else:
+                await self._pages.save(updated, space_id=space_id)
+                # The stored row is the answer: the upsert stamps its own
+                # ``updated_at``, and the editor sends exactly that back as
+                # the next save's ``base_updated_at`` — echoing ``now_iso``
+                # instead made every second save a false 409.
+                updated = (
+                    await self._pages.get_space_page(page.id, space_id=space_id)
+                    or updated
+                )
+                await snapshot_page_version(
+                    self._pages, previous=page, editor_user_id=actor_user_id
+                )
+                if resolves:
+                    await self._pages.clear_conflict_flag(page.id, space_id=space_id)
         await self._emit(
             PageUpdated(
                 page_id=updated.id,
@@ -298,9 +396,32 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                 title=updated.title,
                 content=updated.content,
                 actor_user_id=actor_user_id,
+                proposal=mode is PageMode.MEMBER,
             )
         )
         return updated
+
+    def _page_lock(
+        self, space_id: str, page_id: str
+    ) -> contextlib.AbstractAsyncContextManager[Any]:
+        """The per-page lock shared with inbound versions (v_48)."""
+        if self._conflicts is None:
+            return contextlib.nullcontext()
+        return self._conflicts.lock_for(space_id, page_id)
+
+    async def conflict_sides(
+        self, space_id: str, page_id: str
+    ) -> builtins.list[PageConflictSide]:
+        """The open conflict's versions (empty: none)."""
+        if self._conflicts is None:
+            return []
+        return await self._conflicts.sides(space_id, page_id)
+
+    async def pages_in_conflict(self, space_id: str) -> set[str]:
+        """Ids of this space's pages with an open conflict."""
+        if self._conflicts is None:
+            return set()
+        return await self._pages.space_pages_in_conflict(space_id)
 
     async def delete(
         self,
@@ -342,12 +463,20 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
         actor_user_id: str,
         resolution: str,
         merged_content: str | None = None,
+        side: str | None = None,
+        sides: builtins.list[str] | None = None,
         approved_by: str | None = None,
-    ) -> str:
-        """Pick a side of an open edit conflict (§4.4.4.1) — an EDIT of the
-        page. Returns the body that is now current."""
+    ) -> Page:
+        """Settle an open edit conflict (§4.4.4.1) — an EDIT of the page,
+        gated like one, that also retires every open side (``resolves``).
+        ``side`` names the kept version (``resolution "side"``); ``sides``
+        the versions the user saw (409 ``STALE`` when they changed). On a
+        member household it is a proposal like any edit. Returns the page
+        as it now is."""
         if self._conflicts is None:
             raise RuntimeError("SpacePageService: conflict service not attached")
+        if resolution not in RESOLUTIONS:
+            raise ValueError(f"Unknown resolution: {resolution!r}")
         page = await self.get(space_id, page_id)
         decision = await self._gate(
             space_id,
@@ -356,7 +485,22 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
             ContentAction.EDIT,
             approved_by is None and page.created_by == actor_user_id,
         )
+        merged = (
+            strip_signed_media_in_markdown(merged_content)
+            if merged_content is not None
+            else None
+        )
+        open_sides = await self._conflicts.sides(space_id, page_id)
+        if not open_sides:
+            raise NoActiveConflictError(f"page {page_id!r} has no unresolved conflict")
+        hashes = [s.hash for s in open_sides]
+        if sides is not None and set(sides) != set(hashes):
+            raise PageConflictStaleError(hashes)
+        title, content, cover = await self._conflicts.resolution_body(
+            page, open_sides, resolution=resolution, side=side, merged_content=merged
+        )
         if decision is AccessDecision.QUEUE:
+            chosen = next((s for s in open_sides if s.hash == side), None)
             await self._submit_for_review(
                 space_id,
                 actor_user_id,
@@ -367,17 +511,24 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
                     "target_id": page.id,
                     "op": "resolve_conflict",
                     "resolution": resolution,
-                    "merged_content": merged_content,
+                    "merged_content": merged,
+                    "side": side if resolution == "side" else None,
+                    # For the reviewer's preview only — the release is
+                    # bound to the side's hash.
+                    "side_content": chosen.content if chosen is not None else None,
+                    "sides": hashes,
                     "base_updated_at": page.updated_at,
+                    "base_seq": page.seq,
                 },
                 snapshot={"content": page.content},
             )
-        return await self._conflicts.resolve_conflict(
-            space_id=space_id,
-            page_id=page_id,
-            user_id=actor_user_id,
-            resolution=resolution,
-            merged_content=merged_content,
+        return await self._write(
+            space_id,
+            page_id,
+            actor_user_id=actor_user_id,
+            patch={"title": title, "content": content, "cover_image_url": cover},
+            resolves=hashes,
+            sides_seen=hashes,
         )
 
 
@@ -407,14 +558,29 @@ def _page_dict(page: Page) -> dict[str, Any]:
     }
 
 
-_RESOLUTIONS = ("mine", "theirs", "merged_content")
+def _seq(value: object) -> int | None:
+    """A queue payload's ``base_seq``: a non-negative int, or ``None``."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _hashes(value: object) -> builtins.list[str] | None:
+    """A queue payload's ``sides``: a list of version hashes, or ``None``."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(is_version_hash(v) for v in value):
+        raise ValueError("sides must be a list of version hashes")
+    return [str(v) for v in value]
 
 
 class PageModerationHandler:
     """Queue items of a space's wiki (``pages`` create / edit / delete, a
-    conflict resolution riding ``edit``). An edit whose page changed since
-    it was submitted is :class:`ModerationStaleError` (409 ``STALE``) until
-    the approver forces it — then latest wins."""
+    conflict resolution riding ``edit``). Applied on the space's host only.
+    An edit whose page moved on since it was submitted (its ``seq``) is
+    :class:`ModerationStaleError` (409 ``STALE``) until the approver forces
+    it — then its patch fast-forwards. A resolution whose sides changed is
+    STALE even when forced."""
 
     __slots__ = ("_svc",)
 
@@ -428,13 +594,22 @@ class PageModerationHandler:
             raise ValueError("not a page submission")
         out: dict[str, Any] = {"entity": "page", "target_id": payload["target_id"]}
         if payload.get("op") == "resolve_conflict":
-            if payload.get("resolution") not in _RESOLUTIONS:
+            resolution = payload.get("resolution")
+            if resolution not in RESOLUTIONS:
                 raise ValueError("unknown conflict resolution")
+            side = payload.get("side")
+            if resolution == "side" and not is_version_hash(side):
+                raise ValueError("a side resolution names the kept version")
+            side_content = payload.get("side_content")
             out.update(
                 op="resolve_conflict",
-                resolution=payload["resolution"],
+                resolution=resolution,
                 merged_content=payload.get("merged_content"),
+                side=side if resolution == "side" else None,
+                side_content=side_content if isinstance(side_content, str) else None,
+                sides=_hashes(payload.get("sides")),
                 base_updated_at=payload.get("base_updated_at"),
+                base_seq=_seq(payload.get("base_seq")),
             )
         elif "patch" in payload:
             raw = payload["patch"]
@@ -448,6 +623,7 @@ class PageModerationHandler:
                 ),
             )
             out["base_updated_at"] = payload.get("base_updated_at")
+            out["base_seq"] = _seq(payload.get("base_seq"))
         elif "title" in payload:
             out["title"] = _title(payload["title"])
             out["content"] = strip_signed_media_in_markdown(
@@ -487,19 +663,8 @@ class PageModerationHandler:
             case ContentAction.EDIT.value:
                 if live is None:
                     raise ModerationTargetGoneError(target)
-                base = p.get("base_updated_at")
-                if base and live["updated_at"] != base and not force:
-                    proposed = (
-                        dict(p.get("patch") or {})
-                        if p.get("op") != "resolve_conflict"
-                        else {"content": p.get("merged_content")}
-                    )
-                    snapshot = item_payload_snapshot(item) or {}
-                    raise ModerationStaleError(
-                        current={k: live.get(k) for k in (proposed or live)},
-                        proposed=proposed,
-                        base=snapshot,
-                    )
+                if p.get("op") != "resolve_conflict" and not force:
+                    await self._refuse_stale_edit(item, live)
                 if p.get("op") == "resolve_conflict":
                     try:
                         await self._svc.resolve_conflict(
@@ -508,10 +673,18 @@ class PageModerationHandler:
                             actor_user_id=item.submitted_by,
                             resolution=p["resolution"],
                             merged_content=p.get("merged_content"),
+                            side=p.get("side"),
+                            sides=p.get("sides"),
                             approved_by=approved_by,
                         )
                     except NoActiveConflictError as exc:
                         raise ModerationTargetGoneError(target) from exc
+                    except PageConflictStaleError as exc:
+                        raise ModerationStaleError(
+                            current={"sides": exc.sides},
+                            proposed={"sides": p.get("sides")},
+                            base=item_payload_snapshot(item) or {},
+                        ) from exc
                 else:
                     await self._svc.update(
                         item.space_id,
@@ -530,6 +703,29 @@ class PageModerationHandler:
                     )
         return ApplyResult(target_id=target)
 
+    async def _refuse_stale_edit(self, item: SpaceModerationItem, live: dict) -> None:
+        """An edit whose page moved on since it was submitted is
+        :class:`ModerationStaleError` until the approver forces it — then
+        the item's patch fast-forwards over the current version (never a
+        merge: the approval is bound to exactly that patch). The v_48 check
+        is the host's ``seq``; an older item falls back to ``updated_at``.
+        A resolution is judged by the ``sides`` it settles instead."""
+        p = item.payload
+        base_seq = p.get("base_seq")
+        if isinstance(base_seq, int):
+            page = await self._svc.get(item.space_id, str(p["target_id"]))
+            moved = page.seq != base_seq
+        else:
+            base = p.get("base_updated_at")
+            moved = bool(base) and live["updated_at"] != base
+        if moved:
+            proposed = dict(p.get("patch") or {})
+            raise ModerationStaleError(
+                current={k: live.get(k) for k in (proposed or live)},
+                proposed=proposed,
+                base=item_payload_snapshot(item) or {},
+            )
+
     def preview(self, item: SpaceModerationItem) -> dict:
         p = item.payload
         if item.action == ContentAction.DELETE.value:
@@ -538,7 +734,9 @@ class PageModerationHandler:
             if p.get("op") == "resolve_conflict":
                 return {
                     "resolution": p.get("resolution"),
-                    "content": p.get("merged_content"),
+                    "content": p.get("merged_content")
+                    if p.get("resolution") == "merged_content"
+                    else p.get("side_content"),
                 }
             return dict(p.get("patch") or {})
         return {

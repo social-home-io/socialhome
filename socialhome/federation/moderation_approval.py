@@ -37,6 +37,7 @@ from typing import Any
 
 from ..domain.federation import FederationEventType
 from ..domain.link_preview import link_preview_from_dict, link_preview_to_dict
+from ..domain.page_version import is_version_hash, version_hash
 from ..domain.space import ContentAction, SpaceModerationItem
 from ..utils.datetime import parse_iso8601_optional
 
@@ -68,6 +69,19 @@ FEATURE_OF_EVENT: Mapping[FederationEventType, str] = {
 
 _ROUTING = frozenset({"space_id", "actor_user_id", "moderation"})
 _STAMPS = frozenset({"created_at", "updated_at", "occurred_at"})
+_PAGE_SEQUENCING = frozenset(
+    {
+        "id",
+        "page_id",
+        "seq",
+        "version_hash",
+        "conflict",
+        "sequenced",
+        "last_editor_user_id",
+        "cover_image_url",
+        "updated_at",
+    }
+)
 
 #: Per event type, the keys a release may carry WITHOUT comparison: ids and
 #: routing, timestamps the receiver derives, layout. Everything else on the
@@ -77,8 +91,12 @@ FREE_KEYS: Mapping[FederationEventType, frozenset[str]] = {
     | frozenset({"id", "post_id", "occurred_at", "public_relay"}),
     FET.SPACE_SCHEDULE_CREATED: _ROUTING | frozenset({"post_id"}),
     FET.BAZAAR_LISTING_CREATED: _ROUTING | frozenset({"post_id", "created_at"}),
-    FET.SPACE_PAGE_CREATED: _ROUTING | _STAMPS | frozenset({"id", "page_id"}),
-    FET.SPACE_PAGE_UPDATED: _ROUTING | _STAMPS | frozenset({"id", "page_id"}),
+    # v_48 host-sequencing bookkeeping (the host's ``seq``, the version's
+    # hash, its conflict list, which proposal it answers, who edited it
+    # last) rides freely. ``cover_image_url`` is free too — but the rules
+    # still compare it whenever the wire carries it.
+    FET.SPACE_PAGE_CREATED: _ROUTING | _STAMPS | _PAGE_SEQUENCING,
+    FET.SPACE_PAGE_UPDATED: _ROUTING | _STAMPS | _PAGE_SEQUENCING,
     FET.SPACE_PAGE_DELETED: _ROUTING | frozenset({"id", "page_id"}),
     FET.SPACE_TASK_CREATED: _ROUTING
     | _STAMPS
@@ -428,15 +446,38 @@ def _page_edit(p: Mapping, by: str, w: Mapping, h: Mapping) -> tuple[dict, dict]
 
 
 def _page_resolution(p: Mapping, by: str, w: Mapping, h: Mapping) -> tuple[dict, dict]:
-    """A conflict resolution: the title never changes; merged text is the
-    item's, "mine" / "theirs" pick one of two versions already published
-    (the content is not compared)."""
-    expected: dict[str, Any] = {"title": h["title"]}
-    actual: dict[str, Any] = {"title": w.get("title")}
-    for key in ("cover_image_url", "created_by"):
-        if key in w:
-            expected[key] = h[key]
-            actual[key] = w.get(key)
+    """A conflict resolution. ``side`` (v_48) keeps one published version:
+    the wire's title + content + cover must hash to exactly the item's
+    ``side``. Merged text is the item's, under the held title and cover;
+    the two-way "mine" / "theirs" pick one of two versions already
+    published (the content is not compared)."""
+    expected: dict[str, Any] = {}
+    actual: dict[str, Any] = {}
+    if "created_by" in w:
+        expected["created_by"] = h["created_by"]
+        actual["created_by"] = w.get("created_by")
+    if p.get("resolution") == "side":
+        side = p.get("side")
+        if not is_version_hash(side):
+            raise ValueError("a side resolution without the kept version")
+        expected["version"] = side
+        actual["version"] = version_hash(
+            str(w.get("title") or ""),
+            str(w.get("content") or ""),
+            w.get("cover_image_url")
+            if "cover_image_url" in w
+            else h.get("cover_image_url"),
+        )
+        # All three are compared through the version; mark them classified.
+        for key in ("title", "content", "cover_image_url"):
+            if key in w:
+                actual[key] = expected[key] = w.get(key)
+        return expected, actual
+    if "cover_image_url" in w:
+        expected["cover_image_url"] = h["cover_image_url"]
+        actual["cover_image_url"] = w.get("cover_image_url")
+    expected["title"] = h["title"]
+    actual["title"] = w.get("title")
     if p.get("resolution") == "merged_content":
         expected["content"] = p.get("merged_content")
     else:

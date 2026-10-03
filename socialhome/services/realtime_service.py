@@ -69,6 +69,7 @@ from ..domain.events import (
     NotificationCreated,
     NotificationReadChanged,
     PageConflictEmitted,
+    PageProposalSettled,
     PageEditLockAcquired,
     PageEditLockReleased,
     PeerHomeChanged,
@@ -419,6 +420,7 @@ class RealtimeService:
         self._bus.subscribe(PageEditLockAcquired, self._on_page_lock_acquired)
         self._bus.subscribe(PageEditLockReleased, self._on_page_lock_released)
         self._bus.subscribe(PageConflictEmitted, self._on_page_conflict)
+        self._bus.subscribe(PageProposalSettled, self._on_page_sequenced)
         self._bus.subscribe(StickyCreated, self._on_sticky_created)
         self._bus.subscribe(StickyUpdated, self._on_sticky_updated)
         self._bus.subscribe(StickyDeleted, self._on_sticky_deleted)
@@ -1568,11 +1570,27 @@ class RealtimeService:
             "space_id": event.space_id,
             "theirs": event.theirs,
             "theirs_by": event.theirs_by,
+            "federated": event.federated,
         }
         if event.space_id is None:
             await self._broadcast_household(payload)
         else:
             await self._broadcast_space(event.space_id, payload)
+
+    async def _on_page_sequenced(self, event: PageProposalSettled) -> None:
+        """v_48: the space's host answered this household's page edit —
+        an open viewer drops its "waiting for the host" pill, or shows the
+        refusal (``reason``)."""
+        await self._broadcast_space(
+            event.space_id,
+            {
+                "type": "page.sequenced",
+                "page_id": event.page_id,
+                "space_id": event.space_id,
+                "outcome": event.outcome,
+                "reason": event.reason,
+            },
+        )
 
     # ─── Stickies (§19) ───────────────────────────────────────────────────
 

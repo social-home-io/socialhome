@@ -111,6 +111,22 @@ async function refreshConnections(): Promise<void> {
   }
 }
 
+let connectionsLoad: Promise<void> | null = null
+
+/** Load the paired households once if nothing has filled the store yet —
+ *  for a surface that only needs a name (e.g. a space's host). Best-effort:
+ *  a failure leaves the store as it was. */
+export function ensureConnections(): Promise<void> {
+  if (connections.value.length || connectionsLoad) return connectionsLoad ?? Promise.resolve()
+  connectionsLoad = api.get('/api/connections')
+    .then((rows) => {
+      if (!connections.value.length) connections.value = rows as Connection[]
+    })
+    .catch(() => {})
+    .finally(() => { connectionsLoad = null })
+  return connectionsLoad
+}
+
 export function wireConnectionsWs(): void {
   ws.on('connection.reachable', (e) => {
     const d = e.data as unknown as { instance_id: string, last_seen_at?: string }

@@ -19,6 +19,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.page_repo import SqlitePageRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.domain.page_version import version_hash
 from socialhome.services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictService,
@@ -74,7 +75,7 @@ async def env(tmp_dir):
         e.pages,
         space_repo=SqliteSpaceRepo(db),
         bus=bus,
-        conflict_service=PageConflictService(e.pages),
+        conflict_service=PageConflictService(e.pages, bus=bus),
     )
     yield e
     await db.shutdown()
@@ -348,13 +349,33 @@ async def test_moderated_page_delete_queues_and_gone_edit_410(env):
     ).status is ModerationStatus.EXPIRED
 
 
+async def _open_conflict(env, page, *bodies: str) -> list[str]:
+    """Seed an open conflict on ``page``: one side per body, the page
+    showing the first. Returns the side hashes."""
+    for i, body in enumerate(bodies):
+        await env.pages.insert_snapshot(
+            page_id=page.id,
+            space_id="sp-a",
+            body=body,
+            title=page.title,
+            author_user_id=f"u-side-{i}",
+            side="mine" if i == 0 else "theirs",
+            conflict=True,
+        )
+    await env.db.enqueue(
+        "UPDATE space_pages SET content=? WHERE id=?", (bodies[0], page.id)
+    )
+    return [version_hash(page.title, b) for b in bodies]
+
+
 async def test_moderated_resolve_conflict_queues_and_gone_conflict_410(env):
 
     mod = await _moderated(env)
     page = await env.svc.create(
         "sp-a", actor_user_id="u-owner", title="T", content="v1"
     )
-    with pytest.raises(ContentQueuedForReview) as exc:
+    # Nothing to resolve: refused at submit, never queued.
+    with pytest.raises(NoActiveConflictError):
         await env.svc.resolve_conflict(
             "sp-a",
             page.id,
@@ -362,11 +383,187 @@ async def test_moderated_resolve_conflict_queues_and_gone_conflict_410(env):
             resolution="merged_content",
             merged_content="merged",
         )
+    sides = await _open_conflict(env, page, "one", "two")
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.resolve_conflict(
+            "sp-a",
+            page.id,
+            actor_user_id="u-member",
+            resolution="side",
+            side=sides[1],
+            sides=sides,
+        )
     item = exc.value.item
     assert item.payload["op"] == "resolve_conflict"
-    # No conflict is open any more → nothing to resolve.
+    assert item.payload["side"] == sides[1]
+    assert sorted(item.payload["sides"]) == sorted(sides)
+    assert PageModerationHandler(env.svc).preview(item)["content"] == "two"
+    # Resolved by somebody else meanwhile → nothing to resolve any more.
+    await env.pages.clear_conflict_flag(page.id, space_id="sp-a")
     with pytest.raises(ModerationTargetGoneError):
         await mod.approve("sp-a", item.id, actor_user_id="u-mod")
+
+
+async def test_moderated_resolution_is_released_by_side(env):
+    mod = await _moderated(env)
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="v1"
+    )
+    sides = await _open_conflict(env, page, "one", "two")
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.resolve_conflict(
+            "sp-a",
+            page.id,
+            actor_user_id="u-member",
+            resolution="side",
+            side=sides[1],
+            sides=sides,
+        )
+    env.events.clear()
+    await mod.approve("sp-a", exc.value.item.id, actor_user_id="u-mod")
+    assert (await env.svc.get("sp-a", page.id)).content == "two"
+    (event,) = env.events
+    assert isinstance(event, PageUpdated)
+    # Sequenced on this (host) household: every side retired.
+    assert event.canonical["conflict"] == []
+    assert await env.svc.conflict_sides("sp-a", page.id) == []
+
+
+async def test_moderated_resolution_with_changed_sides_is_stale_even_forced(env):
+    mod = await _moderated(env)
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="v1"
+    )
+    sides = await _open_conflict(env, page, "one", "two")
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.resolve_conflict(
+            "sp-a",
+            page.id,
+            actor_user_id="u-member",
+            resolution="side",
+            side=sides[1],
+            sides=sides,
+        )
+    # A third household's version joined the conflict meanwhile.
+    await env.pages.insert_snapshot(
+        page_id=page.id,
+        space_id="sp-a",
+        body="three",
+        title="T",
+        author_user_id="u-x",
+        side="theirs",
+        conflict=True,
+    )
+    for force in (False, True):
+        with pytest.raises(ModerationStaleError):
+            await mod.approve(
+                "sp-a", exc.value.item.id, actor_user_id="u-mod", force=force
+            )
+
+
+async def test_a_moderated_edit_approved_while_conflicted_still_lands(env):
+    """v_48: a conflict never blocks an edit — not a released one either."""
+    mod = await _moderated(env)
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="v1"
+    )
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.update("sp-a", page.id, actor_user_id="u-member", content="v2")
+    await _open_conflict(env, page, "v1", "two")
+    await mod.approve("sp-a", exc.value.item.id, actor_user_id="u-mod")
+    assert (await env.svc.get("sp-a", page.id)).content == "v2"
+    assert len(await env.svc.conflict_sides("sp-a", page.id)) == 2
+
+
+def test_validate_carries_the_resolution_sides():
+    handler = PageModerationHandler.__new__(PageModerationHandler)
+    side = version_hash("T", "two")
+    out = handler.validate(
+        None,  # type: ignore[arg-type]
+        {
+            "entity": "page",
+            "target_id": "pg",
+            "op": "resolve_conflict",
+            "resolution": "side",
+            "side": side,
+            "sides": [side],
+            "extra": "dropped",
+        },
+    )
+    assert out["side"] == side and out["sides"] == [side]
+    assert "extra" not in out
+    for bad in (
+        {"resolution": "side", "side": "nope"},
+        {"resolution": "side", "side": side, "sides": ["nope"]},
+        {"resolution": "bogus"},
+    ):
+        with pytest.raises(ValueError):
+            handler.validate(
+                None,  # type: ignore[arg-type]
+                {"entity": "page", "target_id": "pg", "op": "resolve_conflict", **bad},
+            )
+
+
+async def test_an_update_while_a_conflict_is_open_is_allowed(env):
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-member", title="T", content="v1"
+    )
+    await _open_conflict(env, page, "one", "two")
+    updated = await env.svc.update(
+        "sp-a", page.id, actor_user_id="u-member", content="v2"
+    )
+    assert updated.content == "v2"
+    assert len(await env.svc.conflict_sides("sp-a", page.id)) == 2
+    assert await env.svc.pages_in_conflict("sp-a") == {page.id}
+    assert await env.svc.pages_in_conflict("sp-b") == set()
+
+
+async def test_the_host_sequences_its_own_edits(env):
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-member", title="T", content="v1"
+    )
+    assert page.seq == 1
+    await env.svc.update("sp-a", page.id, actor_user_id="u-member", content="v2")
+    await env.svc.update("sp-a", page.id, actor_user_id="u-member", content="v3")
+    updates = [e for e in env.events if isinstance(e, PageUpdated)]
+    assert [e.canonical["seq"] for e in updates] == [2, 3]
+    assert not any(e.proposal for e in updates)
+    assert (await env.svc.get("sp-a", page.id)).seq == 3
+
+
+class _MemberFed:
+    def __init__(self, version: int) -> None:
+        self.version = version
+
+    async def peer_supports(self, instance_id, *, min_version):
+        return self.version >= min_version
+
+
+@pytest.mark.parametrize(("version", "proposal"), [(48, True), (47, False)])
+async def test_a_member_household_drafts_or_stays_last_write_wins(
+    env, version, proposal
+):
+    """Under a v_48 host a member's edit is a draft (proposed, never
+    broadcast); under an older host it is last write wins, as before."""
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-member", title="T", content="v1"
+    )
+    env.svc._conflicts.attach_federation(
+        _MemberFed(version), own_instance_id="me", space_repo=SqliteSpaceRepo(env.db)
+    )
+    env.events.clear()
+    updated = await env.svc.update(
+        "sp-a", page.id, actor_user_id="u-member", content="v2"
+    )
+    (event,) = env.events
+    assert event.proposal is proposal and event.canonical is None
+    assert updated.content == "v2"
+    assert updated.pending_base_seq == (1 if proposal else None)
+    created = await env.svc.create(
+        "sp-a", actor_user_id="u-member", title="N", content="x"
+    )
+    assert env.events[-1].proposal is proposal
+    assert created.pending_base_seq == (0 if proposal else None)
 
 
 async def test_moderated_moderator_writes_directly(env):

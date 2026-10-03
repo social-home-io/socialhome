@@ -1674,6 +1674,13 @@ class PageCreated(DomainEvent):
     #: payload so receivers judge it against the space's access level.
     #: Empty for a write applied from a peer, or one nobody made.
     actor_user_id: str = ""
+    #: v_48: the host's canonical-version fields (``seq``, ``version_hash``,
+    #: ``conflict``, ``sequenced`` …) — set only by the space's host; the
+    #: outbound broadcasts them to v_48 members.
+    canonical: dict | None = None
+    #: v_48: a member's local draft, sent to the host as a proposal by the
+    #: forwarder — never broadcast.
+    proposal: bool = False
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1687,6 +1694,31 @@ class PageUpdated(DomainEvent):
     #: payload so receivers judge it against the space's access level.
     #: Empty for a write applied from a peer, or one nobody made.
     actor_user_id: str = ""
+    #: v_48: the host's canonical-version fields (``seq``, ``version_hash``,
+    #: ``conflict``, ``sequenced`` …) — set only by the space's host; the
+    #: outbound broadcasts them to v_48 members.
+    canonical: dict | None = None
+    #: v_48: a member's local draft, sent to the host as a proposal by the
+    #: forwarder — never broadcast.
+    proposal: bool = False
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class PageProposalSettled(DomainEvent):
+    """The host answered one of this household's page proposals (v_48):
+    ``applied`` (sequenced — merged, fast-forwarded or kept as a conflict
+    side) or ``refused`` with a ``reason`` (``access`` / ``archived`` /
+    ``gone`` / ``rate_limited`` / ``bad_base``). The forwarder sends the
+    next draft; the WS ``page.sequenced`` frame updates an open viewer."""
+
+    page_id: str
+    space_id: str
+    proposal_hash: str
+    outcome: str
+    reason: str | None = None
+    #: The host's ``seq`` that answered it (0: unknown).
+    seq: int = 0
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1739,6 +1771,9 @@ class PageConflictEmitted(DomainEvent):
     space_id: str | None
     theirs: str
     theirs_by: str
+    #: Recorded from another household's concurrent edit (v_48) — the page
+    #: now holds an open conflict; an open viewer refetches it.
+    federated: bool = False
     occurred_at: datetime = field(default_factory=_now)
 
 

@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 47
+    assert fc.OURS == 48
 
 
 def test_space_authority_rotation_capability_threshold():
@@ -24,12 +24,17 @@ def test_space_authority_rotation_capability_threshold():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert fc.features_missing_below(45) == [
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
-    assert fc.features_missing_below(46) == ["Role changes from member households"]
+    assert fc.features_missing_below(46) == [
+        "Role changes from member households",
+        "Host-sequenced shared pages",
+    ]
 
 
 def test_authority_epoch_echo_capability_threshold():
@@ -44,8 +49,12 @@ def test_authority_epoch_echo_capability_threshold():
     assert fc.space_features_missing_below(45) == [
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
-    assert fc.features_missing_below(46) == ["Role changes from member households"]
+    assert fc.features_missing_below(46) == [
+        "Role changes from member households",
+        "Host-sequenced shared pages",
+    ]
 
 
 def test_space_report_scope_capability_threshold():
@@ -59,6 +68,7 @@ def test_space_report_scope_capability_threshold():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
 
 
@@ -77,6 +87,7 @@ def test_federated_moderation_capability_threshold():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert "Reviewed across households" not in fc.features_missing_below(43)
 
@@ -97,6 +108,7 @@ def test_content_access_enforcement_capability_threshold():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -118,6 +130,7 @@ def test_space_moderator_role_capability_threshold():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -140,6 +153,7 @@ def test_task_priority_labels_capability_threshold():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -202,6 +216,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
 
 
@@ -226,6 +241,7 @@ def test_moment_origin_signature_capability_threshold():
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
 
 
@@ -479,6 +495,19 @@ def test_forwarded_role_change_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.space_features_missing_below(46) == [
-        "Role changes from member households"
+        "Role changes from member households",
+        "Host-sequenced shared pages",
     ]
-    assert fc.features_missing_below(47) == []
+    assert fc.features_missing_below(47) == ["Host-sequenced shared pages"]
+
+
+def test_host_sequenced_pages_capability_threshold():
+    """v_48 — host-sequenced space pages. Space-scoped: under a host below
+    it the whole space's wiki stays last write wins."""
+    assert fc.FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES == 48
+    assert fc.FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.space_features_missing_below(47) == ["Host-sequenced shared pages"]
+    assert fc.features_missing_below(48) == []

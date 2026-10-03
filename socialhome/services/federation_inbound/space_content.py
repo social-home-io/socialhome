@@ -109,6 +109,11 @@ from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
 from ..inbound_media_store import local_media_ref, local_media_refs
+from ..page_conflict_service import (
+    PageMode,
+    canonical_from_wire,
+    proposal_from_wire,
+)
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -122,6 +127,7 @@ if TYPE_CHECKING:
     from ...repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..gallery_tombstones import GalleryAlbumTombstones
     from ...repositories.page_repo import AbstractPageRepo
+    from ..page_conflict_service import PageConflictService
     from ...repositories.space_poll_repo import AbstractSpacePollRepo
     from ...repositories.space_post_repo import AbstractSpacePostRepo
     from ...repositories.space_zone_repo import AbstractSpaceZoneRepo
@@ -140,6 +146,24 @@ def _has_ended(end_time: str | None) -> bool:
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
     return end <= datetime.now(timezone.utc)
+
+
+def _page_from_payload(p: dict, page_id: str, space_id: str) -> Page:
+    cover = p.get("cover_image_url")
+    return Page(
+        id=page_id,
+        title=str(p.get("title") or ""),
+        content=str(p.get("content") or ""),
+        created_by=str(p.get("created_by") or ""),
+        created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
+        updated_at=str(p.get("updated_at") or p.get("occurred_at") or ""),
+        space_id=space_id,
+        cover_image_url=cover if isinstance(cover, str) else None,
+        last_editor_user_id=str(
+            p.get("last_editor_user_id") or p.get("actor_user_id") or ""
+        )
+        or None,
+    )
 
 
 class SpaceContentInboundHandlers:
@@ -161,6 +185,7 @@ class SpaceContentInboundHandlers:
         "_media_dir",
         "_media_refs",
         "_album_tombstones",
+        "_page_conflicts",
     )
 
     def __init__(
@@ -181,8 +206,12 @@ class SpaceContentInboundHandlers:
         media_dir: "pathlib.Path | None" = None,
         media_refs: "AbstractMediaReferenceRepo | None" = None,
         gallery_tombstones: "GalleryAlbumTombstones | None" = None,
+        page_conflicts: "PageConflictService | None" = None,
     ) -> None:
         self._bus = bus
+        #: v_48 — applies another household's version of an existing page
+        #: (fast-forward / merge / conflict). ``None``: last write wins.
+        self._page_conflicts = page_conflicts
         self._authorship = authorship
         self._post_repo = post_repo
         self._page_repo = page_repo
@@ -726,7 +755,18 @@ class SpaceContentInboundHandlers:
     # ─── Pages ───────────────────────────────────────────────────────────
 
     async def _on_page_saved(self, event: "FederationEvent") -> None:
-        """Mirror a remote page into the local ``space_pages`` table.
+        """A space page from another household (v_48: host-sequenced).
+
+        * **Under a pre-v_48 host** (or none wired): mirrored as sent, last
+          write wins.
+        * **On the host**: every member's ``SPACE_PAGE_CREATED`` /
+          ``_UPDATED`` is a *proposal* — after the gates (a refusal is
+          answered ``refused``/``access``) it goes to
+          :meth:`PageConflictService.sequence`.
+        * **On a member household**: only the host's versions are taken,
+          ordered by ``seq`` (:meth:`PageConflictService.mirror`); another
+          member's version of a page held here is ignored, and an unknown
+          page another member creates is stored as before, unsequenced.
 
         Page timestamps are ISO strings (matches the domain type —
         `Page.created_at`/`updated_at` are `str`).
@@ -737,34 +777,70 @@ class SpaceContentInboundHandlers:
         p = event.payload
         page_id = str(p.get("id") or p.get("page_id") or "")
         title = str(p.get("title") or "")
-        if not page_id or not title:
+        if not page_id or (not title and "sequenced" not in p):
             log.debug("SPACE_PAGE_* missing required field")
             return
-        page = Page(
-            id=page_id,
-            title=title,
-            content=str(p.get("content") or ""),
-            created_by=str(p.get("created_by") or ""),
-            created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
-            updated_at=str(p.get("updated_at") or p.get("occurred_at") or ""),
-            space_id=space_id,
-            cover_image_url=p.get("cover_image_url"),
-        )
-        # Collaborative (any member edits a space page locally): an edit
-        # needs a writer household, and the upsert keeps the row's own
-        # ``created_by``. A NEW page is attributed to whoever the payload
-        # names, so that name must be the sender's (or the host's relay).
         existing = await self._page_repo.get(page_id)
         if existing is not None and existing.space_id != space_id:
             log_cross_space_refusal(
                 event, space_id=space_id, what="page", row_id=page_id
             )
             return
+        engine = self._page_conflicts
+        mode, host = (
+            await engine.mode(space_id) if engine is not None else (PageMode.LEGACY, "")
+        )
+        if mode is PageMode.HOST:
+            await self._on_page_proposal(event, space_id, page_id, existing)
+            return
+        if mode is PageMode.MEMBER and event.from_instance == host:
+            await self._on_host_page_version(event, space_id, page_id, existing)
+            return
+        if mode is PageMode.MEMBER and existing is not None:
+            log.debug(
+                "%s from %s: page %s in space %s — only its host sequences a "
+                "held page; ignored",
+                event.event_type,
+                event.from_instance,
+                page_id,
+                space_id,
+            )
+            return
+        if "sequenced" in p or not title:
+            return
+        page = _page_from_payload(p, page_id, space_id)
+        if mode is PageMode.MEMBER and (
+            event.event_type is not FederationEventType.SPACE_PAGE_CREATED
+        ):
+            return  # an update of a page we never held, not from the host
+        if not await self._page_write_gates(event, space_id, page_id, page, existing):
+            return
+        if existing is not None and engine is not None:
+            # A pre-v_48 host: last write wins, the old body kept in history.
+            await engine.legacy_apply(existing, page, space_id=space_id)
+            return
+        if not await self._page_repo.save(page, space_id=space_id):
+            log_cross_space_refusal(
+                event, space_id=space_id, what="page", row_id=page_id
+            )
+
+    async def _page_write_gates(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        page_id: str,
+        page: Page,
+        existing: Page | None,
+    ) -> bool:
+        """Collaborative (any member edits a space page locally): an edit
+        needs a writer household; a NEW page is attributed to whoever the
+        payload names, so that name must be the sender's (or the host's
+        relay), and its id must be bound to that creator."""
         if existing is None and self._bound_id_refused(
             event, SPACE_PAGE_KIND, page_id, space_id, page.created_by
         ):
-            return
-        if not await self._collaborative_write_allowed(
+            return False
+        return await self._collaborative_write_allowed(
             event,
             space_id,
             what="page",
@@ -773,12 +849,121 @@ class SpaceContentInboundHandlers:
             feature="pages",
             action=ContentAction.CREATE if existing is None else ContentAction.EDIT,
             row_owner=page.created_by if existing is None else existing.created_by,
-        ):
+        )
+
+    async def _on_page_proposal(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        page_id: str,
+        existing: Page | None,
+    ) -> None:
+        """The host: a member household proposes a version of a page."""
+        engine = self._page_conflicts
+        assert engine is not None
+        p = event.payload
+        if "sequenced" in p:
+            log.debug("a host takes no host versions (page %s) — ignored", page_id)
             return
-        if not await self._page_repo.save(page, space_id=space_id):
-            log_cross_space_refusal(
-                event, space_id=space_id, what="page", row_id=page_id
+        proposal = proposal_from_wire(p)
+        if proposal is None or not proposal.title:
+            log.warning(
+                "%s from %s: page %s in space %s — malformed proposal; refused",
+                event.event_type,
+                event.from_instance,
+                page_id,
+                space_id,
             )
+            return
+        page = _page_from_payload(p, page_id, space_id)
+        if existing is None and (proposal.base_seq or 0) > 0:
+            await engine.refuse(
+                space_id=space_id,
+                page_id=page_id,
+                proposal_hash=proposal.hash,
+                proposer_instance=event.from_instance,
+                reason="gone",
+            )
+            return
+        if existing is None and not proposal.created_by:
+            return
+        if not await self._page_write_gates(event, space_id, page_id, page, existing):
+            await engine.refuse(
+                space_id=space_id,
+                page_id=page_id,
+                proposal_hash=proposal.hash,
+                proposer_instance=event.from_instance,
+                reason="access",
+            )
+            return
+        await engine.sequence(
+            space_id=space_id,
+            page_id=page_id,
+            proposal=proposal,
+            proposer_instance=event.from_instance,
+        )
+
+    async def _on_host_page_version(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        page_id: str,
+        existing: Page | None,
+    ) -> None:
+        """A member household: the host's canonical version (or its answer
+        to our proposal), mirrored by ``seq``."""
+        engine = self._page_conflicts
+        assert engine is not None
+        p = event.payload
+        version = canonical_from_wire(p)
+        if version is None:
+            if "seq" in p or "sequenced" in p:
+                log.warning(
+                    "%s from host %s: page %s in space %s — malformed version; ignored",
+                    event.event_type,
+                    event.from_instance,
+                    page_id,
+                    space_id,
+                )
+            return
+        if existing is None and (
+            event.event_type is not FederationEventType.SPACE_PAGE_CREATED
+            or not version.has_state
+        ):
+            return  # an update of a page we never held
+        refusal = (
+            version.sequenced is not None and version.sequenced.outcome == "refused"
+        )
+        if version.has_state and not refusal:
+            # The host already ran the access gate on the edit it sequenced
+            # (its ``actor_user_id`` may be any household's member, never
+            # seated on the host): only the authorship of a new page — an
+            # id bound to its creator, whom the host relays — is checked.
+            page = _page_from_payload(p, page_id, space_id)
+            if existing is None and self._bound_id_refused(
+                event, SPACE_PAGE_KIND, page_id, space_id, page.created_by
+            ):
+                return
+            if not await self._authorship_allows(
+                event,
+                space_id,
+                what="page",
+                row_id=page_id,
+                claimed_author=page.created_by if existing is None else "",
+            ):
+                return
+            # A moderation release is still checked against the item this
+            # household holds (v_43 defence in depth).
+            if MODERATION_BLOCK_KEY in p and not await self._authorship.access_admits(
+                event,
+                space_id,
+                "pages",
+                ContentAction.CREATE if existing is None else ContentAction.EDIT,
+                actor=payload_actor(event),
+                row_owner=page.created_by if existing is None else existing.created_by,
+            ):
+                return
+        await engine.mirror(space_id=space_id, page_id=page_id, version=version)
 
     async def _on_page_deleted(self, event: "FederationEvent") -> None:
         space_id = resolve_space_id(event)

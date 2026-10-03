@@ -3840,6 +3840,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3871,6 +3872,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     )
 
 
@@ -3914,6 +3916,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3972,6 +3975,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Space reports for moderators",
         "Space key epoch echo",
         "Role changes from member households",
+        "Host-sequenced shared pages",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features

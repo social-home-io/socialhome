@@ -798,6 +798,40 @@ export interface Page {
   locked_by: string | null
   locked_at: string | null
   lock_expires_at: string | null
+  /** Space pages: concurrent edits from other households wait for a
+   *  resolution (v_48). Set on the list and the detail. */
+  in_conflict?: boolean
+  /** Space page detail: the open conflict's versions, ``null`` without. */
+  conflict?: PageConflict | null
+  /** Space pages (v_48): the host's sequence number of this version. */
+  seq?: number
+  /** Space pages: the version this household's unacknowledged edit was
+   *  based on — ``null`` when there is none. */
+  base_seq?: number | null
+  /** Space pages: this household's edit is saved here but still waits for
+   *  the space's host to sequence it. */
+  pending?: boolean
+}
+
+/** One version of an open space-page conflict (§4.4.4.1, v_48). */
+export interface PageConflictSide {
+  /** ``sha256:…`` version id — what ``resolve-conflict`` names. */
+  hash: string
+  title: string
+  content: string
+  /** Who wrote this version. */
+  by: string
+  /** When the host recorded it. */
+  at: string
+  cover_image_url?: string | null
+  /** The host version its author edited from. */
+  base_seq?: number
+}
+
+export interface PageConflict {
+  sides: PageConflictSide[]
+  /** The version the page shows meanwhile (the same on every household). */
+  current_hash: string
 }
 
 export interface PageVersion {

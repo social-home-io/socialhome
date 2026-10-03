@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import copy
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -33,6 +35,11 @@ from socialhome.federation.sync.space.resume import (
 class _FakeFederation:
     def __init__(self) -> None:
         self.sent: list[dict] = []
+        #: Advertised proto_version per peer (default: current).
+        self.versions: dict[str, int] = {}
+
+    async def peer_supports(self, instance_id, *, min_version):
+        return self.versions.get(instance_id, 48) >= min_version
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         self.sent.append(
@@ -128,6 +135,12 @@ class _FakeListSinceRepo:
                 return self._lists[:limit]
 
             return _lists
+        if name == "list_conflict_sides":
+
+            async def _sides(page_id, *, space_id):
+                return []
+
+            return _sides
         if name in ("list_since", "list_events_since", "list_items_since"):
 
             async def _impl(space_id, since, *, limit=500):
@@ -625,6 +638,24 @@ async def test_handle_request_replays_pages(provider_factory):
     )
     assert sent == 2
     assert all(s["type"] == FederationEventType.SPACE_PAGE_CREATED for s in fed.sent)
+
+
+async def test_replayed_pages_carry_seq_for_a_v48_peer_only(provider_factory):
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    iso = (base + timedelta(minutes=1)).isoformat()
+    page = replace(_page(0, iso), seq=6)
+    provider, fed, _ = provider_factory(pages=[page], members=["peer-a", "peer-b"])
+    fed.versions["peer-b"] = 47
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    await provider.handle_request(
+        _event("peer-b", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    by_peer = {s["to"]: s["payload"] for s in fed.sent}
+    assert by_peer["peer-a"]["seq"] == 6
+    assert by_peer["peer-a"]["conflict"] == []
+    assert "seq" not in by_peer["peer-b"]
 
 
 async def test_handle_request_replays_stickies(provider_factory):

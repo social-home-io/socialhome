@@ -21,6 +21,7 @@
 import { currentUser } from '@/store/auth'
 import { householdDisplayName, loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers } from '@/store/spaceMembers'
+import { connections, ensureConnections } from '@/store/connections'
 import { t } from '@/i18n/i18n'
 import { spacePeople, personName } from '@/features/tasks/scope'
 import { canModerate, type SpaceRole } from '@/features/spaces/spaceRoles'
@@ -50,6 +51,9 @@ export interface PageScope {
   nameOf: (uid: string) => string
   /** Make sure ``nameOf`` can resolve. */
   loadPeople: () => void
+  /** Space pages (v_48): the household that sequences this wiki's pages —
+   *  named in the "waiting for …" pill. */
+  hostName: () => string
 }
 
 export function householdPageScope(): PageScope {
@@ -65,6 +69,7 @@ export function householdPageScope(): PageScope {
     reviewedCreate: false,
     nameOf: uid => householdDisplayName(uid),
     loadPeople: () => { void loadHouseholdUsers() },
+    hostName: () => t('pages.pending.host_fallback'),
   }
 }
 
@@ -76,10 +81,12 @@ export interface SpacePageScopeOpts {
   /** May write: a writer seat the level lets in (``canContribute``). */
   writable: boolean
   archived: boolean
+  /** The space's host household (``owner_instance_id``), when known. */
+  hostInstanceId?: string | null
 }
 
 export function spacePageScope({
-  spaceId, role, level, writable, archived,
+  spaceId, role, level, writable, archived, hostInstanceId,
 }: SpacePageScopeOpts): PageScope {
   const me = currentUser.value?.user_id
   // Under "Reviewed" a moderator / admin / owner writes directly; a member
@@ -96,6 +103,16 @@ export function spacePageScope({
     reviewed: page => reviewing && page.created_by !== me,
     reviewedCreate: reviewing,
     nameOf: uid => personName(spacePeople(spaceId, { subscribers: true }), uid),
-    loadPeople: () => { void loadSpaceMembers(spaceId) },
+    loadPeople: () => {
+      void loadSpaceMembers(spaceId)
+      // The host's name for the "waiting for …" pill.
+      if (hostInstanceId) void ensureConnections()
+    },
+    hostName: () => {
+      const host = hostInstanceId
+        ? connections.value.find(c => c.instance_id === hostInstanceId)
+        : undefined
+      return host?.display_name || t('pages.pending.host_fallback')
+    },
   }
 }

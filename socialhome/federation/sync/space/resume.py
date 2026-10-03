@@ -47,7 +47,10 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ....domain.federation import FederationEventType
+from ....domain.federation_capabilities import FederationCapability
 from ....domain.link_preview import link_preview_to_dict
+from ....domain.page_version import version_hash
+from ....services.page_conflict_service import side_to_wire
 from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
@@ -402,10 +405,33 @@ class SpaceSyncResumeProvider:
             since,
             limit=MAX_PER_RESOURCE,
         )
+        # v_48: each replayed page carries the host's ``seq`` (and, from the
+        # host, its version hash + conflict list), so a member mirrors it by
+        # sequence; a replay from anyone but the host never updates a page
+        # the receiver holds. An older peer gets the plain fields.
+        sequenced = await self._federation.peer_supports(
+            to, min_version=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES
+        )
+        payloads: dict[str, dict] = {}
+        for page in pages:
+            payload = _page_to_payload(page)
+            if sequenced:
+                sides = await self._page_repo.list_conflict_sides(
+                    page.id, space_id=space_id
+                )
+                payload.update(
+                    seq=page.seq,
+                    version_hash=version_hash(
+                        page.title, page.content, page.cover_image_url
+                    ),
+                    last_editor_user_id=page.last_editor_user_id or page.created_by,
+                    conflict=[side_to_wire(s) for s in sides],
+                )
+            payloads[page.id] = payload
         return await self._send_each(
             pages,
             FederationEventType.SPACE_PAGE_CREATED,
-            _page_to_payload,
+            lambda page: payloads[page.id],
             space_id=space_id,
             to=to,
         )

@@ -308,8 +308,12 @@ async def test_pages_exporter():
         async def list(self, *, space_id):
             return [page]
 
+        async def list_conflict_sides(self, page_id, *, space_id):
+            return []
+
     recs = await PagesExporter(_Repo()).list_records("sp-1")
     assert recs[0]["id"] == "pg-1"
+    assert recs[0]["seq"] == 0 and recs[0]["conflict"] == []
 
 
 async def test_stickies_exporter():

@@ -674,18 +674,42 @@ same `_stop`/`_wake` `asyncio.Event` scheduler family as the other
 background services, with jittered exponential backoff that flips a job
 to `status='failed'` after its retry budget.
 
-### Page conflict resolution
+### Host-sequenced documents (space pages, v_48)
 
-Concurrent edits to a space page produce a `space_page_snapshots`
-row with `conflict=1`. The space's editing UI offers
-`mine | theirs | merged_content` resolution before further edits are
-allowed. Lives in `socialhome/services/page_conflict_service.py`; the
-space wiki's own writes (create / update with the stale-update check /
-delete / resolve-conflict / versions) live in
-`socialhome/services/space_page_service.py` (`SpacePageService`) — path-space
-scoping, the writer seat, the `pages` access level and the
-`PageCreated` / `PageUpdated` / `PageDeleted` events with their actor —
-so `routes/pages.py` stays thin.
+A space page is shared by every member household, and any writer may
+edit it while others are offline. A decentralised merge, where each
+household merges what it receives, cannot guarantee convergence: merges
+are not associative, an undo looks like an old version, history caps
+create spurious conflicts, and households end up holding different
+conflict sets. Space pages therefore have **one sequencer, the space's
+host**, which is already the roster and moderation authority:
+
+- **Members propose.** A local edit is an optimistic draft
+  (`space_pages.pending_base_seq`). `PageProposalForwarder` sends it to
+  the host alone, stop and wait: one outstanding proposal per page,
+  nothing while the host is unreachable, a flush on `ConnectionReachable`,
+  at startup and every 30 min.
+- **The host decides.** `PageConflictService.sequence` gates the
+  proposal and either fast-forwards it, merges it three-way against its
+  base (a bounded Myers diff with an ops budget, run in a thread under
+  the page lock) or keeps it as a conflict side (one per user, capped,
+  overflow to history; conflicts never block edits). Each commit bumps
+  `space_pages.seq` and is broadcast with the conflict list.
+- **Members mirror by `seq`** (`PageConflictService.mirror`). A newer
+  version applies (over a draft only when it answers that draft), an
+  older one is ignored, and versions from anyone but the host never touch
+  a held page. Sync and resume carry `seq` the same way.
+
+A host below v_48 keeps last write wins. Lives in
+`socialhome/services/page_conflict_service.py` and
+`socialhome/services/page_proposal_forwarder.py`. The space wiki's own
+writes (create / update with the stale-update check / delete /
+resolve-conflict / versions, each by mode) live in
+`socialhome/services/space_page_service.py` (`SpacePageService`). That
+covers path-space scoping, the writer seat, the `pages` access level and
+the `PageCreated` / `PageUpdated` / `PageDeleted` events with their actor,
+so `routes/pages.py` stays thin. Protocol:
+[`protocol/pages.md`](./protocol/pages.md).
 
 ### Implementation pointers
 
@@ -693,7 +717,8 @@ so `routes/pages.py` stays thin.
 - `socialhome/infrastructure/outbox_processor.py`.
 - `socialhome/infrastructure/idempotency.py`.
 - `socialhome/infrastructure/reconnect_queue.py`.
-- `socialhome/services/page_conflict_service.py`.
+- `socialhome/services/page_conflict_service.py`,
+  `socialhome/services/page_proposal_forwarder.py`.
 
 ## Social Home Apps
 

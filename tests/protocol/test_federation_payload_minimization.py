@@ -207,3 +207,46 @@ async def test_task_list_name_and_labels_ride_only_sealed(env, event_type, paylo
     envelope = capture.bodies[0]
     assert set(envelope) - _ALLOWED_PLAINTEXT_FIELDS == set()
     assert "list-name-very-distinctive" not in json.dumps(envelope)
+
+
+async def test_page_sequencing_fields_ride_only_sealed(env):
+    """v_48: a host version's ``seq``, hash, conflict sides and which
+    proposal it answers are space content — inside ``encrypted_payload``
+    only, as is a proposal's ``base_seq`` / ``base_hash`` / ``resolves``."""
+    svc, peer, capture = env
+    marker = "d1571ec7" * 8
+    for payload in (
+        {
+            "id": "pg-1",
+            "page_id": "pg-1",
+            "space_id": "sp-1",
+            "title": "t",
+            "content": "c",
+            "seq": 41,
+            "version_hash": "sha256:" + marker,
+            "conflict": [{"side_id": "sha256:" + marker, "content": "side words"}],
+            "sequenced": {"proposal_hash": "sha256:" + marker, "outcome": "applied"},
+        },
+        {
+            "id": "pg-1",
+            "page_id": "pg-1",
+            "space_id": "sp-1",
+            "title": "t",
+            "content": "c",
+            "base_seq": 41,
+            "base_hash": "sha256:" + marker,
+            "resolves": ["sha256:" + marker],
+        },
+    ):
+        capture.bodies.clear()
+        await svc.send_event(
+            to_instance_id=peer.id,
+            event_type=FederationEventType.SPACE_PAGE_UPDATED,
+            payload=payload,
+            space_id="sp-1",
+        )
+        envelope = capture.bodies[0]
+        assert set(envelope) - _ALLOWED_PLAINTEXT_FIELDS == set()
+        dumped = json.dumps(envelope)
+        for leak in (marker, "side words", "base_seq", "conflict", "sequenced"):
+            assert leak not in dumped
