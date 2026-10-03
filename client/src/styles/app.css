@@ -11873,14 +11873,35 @@ a.sh-welcome-card:hover {
   flex: 1;
   min-width: 0;
   -webkit-overflow-scrolling: touch;
-  /* Soft fade on the right edge so the user notices the row is
-   * scrollable without a scrollbar. The mask spans 16px on each
-   * side — shorter than the calendar picker because the tab text
-   * already provides a strong horizontal rhythm. */
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 16px), transparent 100%);
-          mask-image: linear-gradient(90deg, transparent 0, #000 12px, #000 calc(100% - 16px), transparent 100%);
+  /* Soft fade on whichever edge still hides tabs, so the user notices
+   * the row is scrollable without a scrollbar. ``useTabStripOverflow``
+   * toggles ``data-fade-left`` / ``data-fade-right`` from the scroll
+   * position; an edge with nothing beyond it stays crisp, so the
+   * active tab (kept in view by ``useScrollActiveTabIntoView``, which
+   * insets by the same 16 px) is never washed out. The base
+   * ``.sh-space-tabs`` rule's permanent right fade is reset here. */
+  -webkit-mask-image: none;
+          mask-image: none;
+}
+.sh-space-subheader .sh-space-tabs[data-fade-right] {
+  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 16px), transparent 100%);
+          mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 16px), transparent 100%);
+}
+.sh-space-subheader .sh-space-tabs[data-fade-left] {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 100%);
+          mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 100%);
+}
+.sh-space-subheader .sh-space-tabs[data-fade-left][data-fade-right] {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+          mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
 }
 .sh-space-subheader .sh-space-tabs::-webkit-scrollbar { display: none; }
+/* The strip is an overflow container, so the global 2 px-offset focus
+ * ring would be clipped top and bottom. Draw it inside the pill. */
+.sh-space-subheader .sh-tab:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+}
 .sh-space-subheader .sh-space-tabs > * { flex-shrink: 0; }
 .sh-space-subheader .sh-tab {
   border-radius: var(--sh-radius-md);

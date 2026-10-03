@@ -15,8 +15,10 @@
  * Mobile overflow: when the strip can't fit every tab in its
  * container (measured by ``useTabStripOverflow``), a ⋯ More button
  * appears next to the actions slot and opens a vertical popover
- * listing every section. The active tab is auto-scrolled into view
- * on mount + when it changes via ``useScrollActiveTabIntoView``.
+ * listing every section. The active tab is kept fully visible — on
+ * mount, when it changes, and whenever the strip resizes (actions and
+ * the ⋯ button mount after the first paint) — via
+ * ``useScrollActiveTabIntoView``.
  */
 import type { Signal } from '@preact/signals'
 import { useRef } from 'preact/hooks'
@@ -63,12 +65,16 @@ export function SpaceSubHeader({
   activeTab, visibleTabs, onSelectTab, tabLabels, actions,
 }: SpaceSubHeaderProps) {
   const stripRef = useRef<HTMLElement | null>(null)
-  const overflowing = useTabStripOverflow(stripRef, [visibleTabs])
-  useScrollActiveTabIntoView(stripRef, activeTab.value)
-
   const labels = Object.fromEntries(
     visibleTabs.map((t) => [t, tabLabels?.[t] ?? tabLabel(t)]),
   ) as Record<SpaceTab, string>
+  const overflowing = useTabStripOverflow(stripRef, [visibleTabs])
+  // A string key, not the arrays/objects themselves: hosts often pass
+  // fresh literals each render, and re-running the reveal on every
+  // render would yank back a strip the user just scrolled by hand.
+  useScrollActiveTabIntoView(
+    stripRef, activeTab.value, [visibleTabs.map((t) => labels[t]).join('\u0000')],
+  )
 
   return (
     <div class="sh-space-subheader" role="presentation">
