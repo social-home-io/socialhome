@@ -1983,9 +1983,16 @@ class SqliteGfsEnvelopeQueueRepo:
                 return False
             conn.execute(
                 "INSERT INTO gfs_envelope_queue("
-                "to_instance, sealed_json, created_at, expires_at, frame_type"
-                ") VALUES(?,?,?,?,?)",
-                (to_instance, sealed_json, created_at, expires_at, frame_type),
+                "to_instance, sealed_json, created_at, expires_at, frame_type,"
+                " size_bytes) VALUES(?,?,?,?,?,?)",
+                (
+                    to_instance,
+                    sealed_json,
+                    created_at,
+                    expires_at,
+                    frame_type,
+                    len(sealed_json),
+                ),
             )
             return True
 
@@ -2087,13 +2094,16 @@ class SqliteGfsEnvelopeQueueRepo:
         ):
             return False
 
+        # Every sum and the largest-holder pick read ``size_bytes`` through
+        # the covering index ``idx_gfs_envelope_queue_relay_size`` (0014) —
+        # never the blobs — so this transaction stays short at a full cap.
         def _run(conn) -> bool:
             live = "frame_type='relay' AND expires_at > ?"
             while True:
                 row = conn.execute(
-                    "SELECT COUNT(*), COALESCE(SUM(LENGTH(sealed_json)), 0)"
-                    f" FROM gfs_envelope_queue WHERE to_instance=? AND {live}",
-                    (to_instance, created_at),
+                    "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)"
+                    f" FROM gfs_envelope_queue WHERE {live} AND to_instance=?",
+                    (created_at, to_instance),
                 ).fetchone()
                 if (
                     int(row[0]) < max_per_recipient
@@ -2110,7 +2120,7 @@ class SqliteGfsEnvelopeQueueRepo:
                     return False
             while True:
                 total = conn.execute(
-                    "SELECT COALESCE(SUM(LENGTH(sealed_json)), 0)"
+                    "SELECT COALESCE(SUM(size_bytes), 0)"
                     f" FROM gfs_envelope_queue WHERE {live}",
                     (created_at,),
                 ).fetchone()[0]
@@ -2122,7 +2132,7 @@ class SqliteGfsEnvelopeQueueRepo:
                 biggest = conn.execute(
                     "SELECT to_instance FROM gfs_envelope_queue"
                     f" WHERE {live} GROUP BY to_instance"
-                    " ORDER BY SUM(LENGTH(sealed_json)) DESC, to_instance = ? ASC"
+                    " ORDER BY SUM(size_bytes) DESC, to_instance = ? ASC"
                     " LIMIT 1",
                     (created_at, to_instance),
                 ).fetchone()
@@ -2136,8 +2146,9 @@ class SqliteGfsEnvelopeQueueRepo:
                 )
             conn.execute(
                 "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
-                " created_at, expires_at, frame_type) VALUES(?,?,?,?, 'relay')",
-                (to_instance, frame_json, created_at, expires_at),
+                " created_at, expires_at, frame_type, size_bytes)"
+                " VALUES(?,?,?,?, 'relay', ?)",
+                (to_instance, frame_json, created_at, expires_at, size),
             )
             return True
 
@@ -2147,7 +2158,7 @@ class SqliteGfsEnvelopeQueueRepo:
         """Bytes held in unexpired RELAY rows across every recipient — what
         the server-wide relay cap (``RELAY_QUEUE_MAX_TOTAL_BYTES``) bounds."""
         row = await self._db.fetchone(
-            "SELECT COALESCE(SUM(LENGTH(sealed_json)), 0) AS n "
+            "SELECT COALESCE(SUM(size_bytes), 0) AS n "
             "FROM gfs_envelope_queue WHERE frame_type='relay' AND expires_at > ?",
             (now,),
         )

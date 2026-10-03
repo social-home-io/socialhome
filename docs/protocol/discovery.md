@@ -937,6 +937,19 @@ POST /gfs/member-publish
   hold at most 500 subscriptions. Subscribers dedupe by item id, as for
   host-relayed copies.
 
+**Operator notes (connection server).**
+
+- **Public servers: turn `auto_accept_clients` off** (`[policy]` in
+  `global_server.toml`) and approve households in the admin console. Every
+  registered household can subscribe to listed spaces; registrations are
+  the unit every per-household limit counts.
+- **Offline delivery is best effort.** Queued member items are shared
+  fairly — the largest holder's oldest item makes room at the server-wide
+  cap — but a crowd of registered, connected households that subscribe to
+  many spaces still dilutes every recipient's share. What is evicted is
+  caught up through space sync; live delivery is unaffected. This residual
+  is accepted, not a guarantee.
+
 **Hard requirements on households** (the GFS check is only as sound as
 these; adversarial review of PR 2):
 

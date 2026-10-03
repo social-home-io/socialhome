@@ -1047,3 +1047,60 @@ async def test_enqueue_relay_refuses_an_item_bigger_than_a_cap(gfs_db):
     assert not await _relay(queue, "a" * 32, "r" * 50, per=10)
     assert not await _relay(queue, "a" * 32, "r" * 50, total=10)
     assert not await _relay(queue, "a" * 32, "r" * 5, rows=0)
+
+
+_RELAY_SUM_QUERIES = (
+    "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+    " WHERE frame_type='relay' AND expires_at > 0 AND to_instance='a'",
+    "SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
+    " WHERE frame_type='relay' AND expires_at > 0",
+    "SELECT to_instance FROM gfs_envelope_queue"
+    " WHERE frame_type='relay' AND expires_at > 0 GROUP BY to_instance"
+    " ORDER BY SUM(size_bytes) DESC, to_instance = 'a' ASC LIMIT 1",
+)
+
+
+@pytest.mark.parametrize("sql", _RELAY_SUM_QUERIES)
+async def test_relay_cap_queries_read_only_the_covering_index(gfs_db, sql):
+    """The relay caps are summed inside the writer transaction on every
+    insert — they must never read the stored blobs (round-3 review)."""
+    rows = await gfs_db.fetchall("EXPLAIN QUERY PLAN " + sql)
+    plan = " ".join(str(dict(r).get("detail", "")) for r in rows)
+    assert "USING COVERING INDEX idx_gfs_envelope_queue_relay_size" in plan, plan
+
+
+async def test_relay_insert_cost_stays_flat_at_a_full_cap(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    blob = "x" * (64 * 1024)
+    cap = 40 * 4 * len(blob)
+
+    async def _put(to: str) -> float:
+        started = time.perf_counter()
+        assert await _relay(queue, to, blob, rows=250, per=4 * len(blob), total=cap)
+        return time.perf_counter() - started
+
+    early = [await _put(f"r{i % 40}") for i in range(20)]
+    for i in range(20, 160):
+        await _put(f"r{i % 40}")
+    at_cap = [await _put(f"new{i}") for i in range(20)]
+    assert await queue.relay_bytes(0) <= cap
+    # Flat: the full-cap insert (eviction included) costs about what an
+    # insert into a near-empty queue does, never orders of magnitude more.
+    assert sorted(at_cap)[10] < max(5 * sorted(early)[10], 0.02)
+
+
+async def test_size_bytes_is_written_for_every_row(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    await _relay(queue, "a" * 32, '{"r":1}')
+    await queue.enqueue(
+        "a" * 32,
+        '{"e":2}',
+        created_at=0,
+        expires_at=100,
+        max_per_recipient=10,
+        max_bytes_per_recipient=10**6,
+    )
+    rows = await gfs_db.fetchall(
+        "SELECT size_bytes, LENGTH(sealed_json) AS n FROM gfs_envelope_queue"
+    )
+    assert all(r["size_bytes"] == r["n"] for r in rows)

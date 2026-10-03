@@ -41,7 +41,9 @@
 --       a bare WS hello touches it, so it costs a sybil nothing; the new
 --       ``client_instances.relay_seen_at`` is written only for a session held
 --       for a minimum duration.
---   (3) Smallest possible change: additive ``ADD COLUMN``s and one index.
+--   (3) Smallest possible change: additive ``ADD COLUMN``s and one covering
+--       index (``size_bytes`` was chosen over running-total counter rows: a
+--       new structure to keep consistent, where a column + index suffices).
 --       The five epoch columns and ``client_instances.relay_seen_at`` are NULL-defaulted (NULL = no epoch learned yet; no
 --       backfill). ``frame_type`` defaults to ``'envelope'``, which is what
 --       every existing row is, so no row is rewritten.
@@ -70,10 +72,17 @@ ALTER TABLE global_spaces ADD COLUMN content_epoch_raised_at INTEGER;
 ALTER TABLE gfs_envelope_queue ADD COLUMN frame_type TEXT NOT NULL
     DEFAULT 'envelope' CHECK (frame_type IN ('envelope', 'relay'));
 
--- The server-wide relay byte cap sums unexpired relay rows on every member
--- publish fan-out; this keeps that read off the envelope rows.
-CREATE INDEX IF NOT EXISTS idx_gfs_envelope_queue_kind
-    ON gfs_envelope_queue(frame_type, expires_at);
+-- ``size_bytes``: the row's ``LENGTH(sealed_json)``, written on insert. The
+-- relay caps (per recipient, server-wide, and the largest-holder pick that
+-- makes room) are summed inside the writer transaction on every member
+-- fan-out insert; summing ``LENGTH(sealed_json)`` read every stored blob
+-- (tens of ms per insert at a full cap, blocking every GFS write). With the
+-- size in its own column the covering index below answers all three from the
+-- index alone. Existing (envelope) rows keep 0; the envelope caps still read
+-- ``LENGTH`` and are unaffected.
+ALTER TABLE gfs_envelope_queue ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_gfs_envelope_queue_relay_size
+    ON gfs_envelope_queue(frame_type, to_instance, expires_at, size_bytes);
 
 -- When a household last held its ``/gfs/ws`` session for at least
 -- ``RELAY_SEEN_MIN_SESSION_S`` (unix seconds). Offline member-published items
