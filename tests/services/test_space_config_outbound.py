@@ -223,6 +223,78 @@ async def test_config_changed_skipped_when_not_owner(fed):
     fed.broadcast_to_space_members.assert_not_awaited()
 
 
+def _seed_holding_admin_repo() -> MagicMock:
+    """A delegated admin household: holds the space seed, does not own it."""
+    kp = generate_space_keypair()
+    space = dataclasses.replace(
+        _make_space(owner_instance_id="inst-owner"),
+        identity_public_key=kp.public_key.hex(),
+    )
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=space)
+    repo.get_space_seed = AsyncMock(return_value=kp.private_key)
+    return repo
+
+
+def _inbound_config_mirror() -> SpaceConfigChanged:
+    """What ``FederationService`` publishes for every INBOUND
+    ``SPACE_CONFIG_CHANGED`` (the receiver-side realtime mirror)."""
+    return SpaceConfigChanged(
+        space_id="sp-1",
+        event_type=FederationEventType.SPACE_CONFIG_CHANGED.value,
+        payload={"name": "Renamed elsewhere"},
+        sequence=6,
+    )
+
+
+async def test_a_seed_holding_admin_never_echoes_an_inbound_config(fed):
+    """Regression (federation-demo replay / unpair flakes): the owner answers a
+    delegated admin's edit with its own snapshot, and the admin — also a seed
+    holder — used to re-broadcast THAT, so owner and admin bounced
+    SPACE_CONFIG_CHANGED back and forth forever (~12/s), flooding every member
+    household's inbox until it 429'd unrelated envelopes. Only the household
+    that made the edit (or the owner) federates it; an inbound copy stops at a
+    non-owner."""
+    bus = EventBus()
+    SpaceConfigOutbound(
+        bus=bus,
+        federation_service=fed,
+        space_repo=_seed_holding_admin_repo(),
+    ).wire()
+    await bus.publish(_inbound_config_mirror())
+    fed.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_seed_holding_admin_still_federates_its_own_edit(fed):
+    """The admin's OWN edit (a local ``rename``) still goes out, signed."""
+    bus = EventBus()
+    SpaceConfigOutbound(
+        bus=bus,
+        federation_service=fed,
+        space_repo=_seed_holding_admin_repo(),
+    ).wire()
+    await bus.publish(
+        SpaceConfigChanged(
+            space_id="sp-1", event_type="rename", payload={"name": "x"}, sequence=6
+        ),
+    )
+    fed.broadcast_to_space_members.assert_awaited_once()
+
+
+async def test_the_owner_still_rebroadcasts_an_inbound_admin_edit(fed, space_repo):
+    """The owner relays a delegated admin's edit once (it reaches members the
+    admin's signed broadcast could not — see the v_24 fallback); that relay is
+    what the admin must not echo back."""
+    bus = EventBus()
+    SpaceConfigOutbound(
+        bus=bus,
+        federation_service=fed,
+        space_repo=space_repo,
+    ).wire()
+    await bus.publish(_inbound_config_mirror())
+    fed.broadcast_to_space_members.assert_awaited_once()
+
+
 async def test_config_changed_skipped_when_space_missing(fed):
     bus = EventBus()
     space_repo = MagicMock()

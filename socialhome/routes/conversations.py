@@ -55,8 +55,10 @@ class ConversationCollectionView(BaseView):
             own_last_read_at: str | None = None
             own_muted_until: str | None = None
             own_notif_level = "all"
+            own_seat_active = False
             for m in members:
                 if m.username == ctx.username:
+                    own_seat_active = m.deleted_at is None
                     own_notif_level = m.notif_level
                     # The caller's own mute, when still on (a past
                     # ``muted_until`` reads as unmuted).
@@ -109,7 +111,15 @@ class ConversationCollectionView(BaseView):
                         "picture_url": _picture_url(ru.user_id, ru.picture_hash),
                     }
                 )
-            unread = await svc.count_unread(c.id, username=ctx.username)
+            if not own_seat_active:
+                # The caller was removed (or left) after ``list_conversations``
+                # took its snapshot — e.g. the group authority's roster update
+                # landed mid-listing. Drop that one row; re-checking membership
+                # per row would 403 the caller's whole inbox instead.
+                continue
+            # Membership is established by the snapshot above, so read the
+            # count straight from the repo (``svc.count_unread`` re-checks it).
+            unread = await repo.count_unread(c.id, ctx.username)
             rows.append(
                 {
                     "id": c.id,

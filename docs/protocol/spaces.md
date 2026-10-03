@@ -69,7 +69,11 @@ retention / about) while the owner is offline; every member household,
 including the offline owner on reconnect, accepts it. A present-but-invalid
 signature is dropped (fail-closed); a non-owner edit with no signature is
 dropped (legacy behaviour); an owner edit with no signature still applies via
-the legacy `from_instance == owner` path. Concurrent same-`config_sequence`
+the legacy `from_instance == owner` path. Only the household that made an
+edit broadcasts it, plus the owner, which relays an inbound admin edit to the
+members once. A seed-holding admin never re-broadcasts a config it
+*received*. Without that rule the owner's relay and the admin's echo bounced
+the event back and forth indefinitely. Concurrent same-`config_sequence`
 edits from two admins converge by a deterministic
 `(config_sequence, config_hlc, config_author_instance)` last-writer-wins
 tie-break: at an equal sequence the LATER concurrent edit wins by Hybrid

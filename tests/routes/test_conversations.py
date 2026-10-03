@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -12,6 +13,7 @@ from socialhome.app_keys import db_key as _db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id, generate_identity_keypair
+from socialhome.services.dm_service import DmService
 
 
 def _auth(token: str) -> dict:
@@ -475,6 +477,56 @@ async def test_list_conversations(client):
     assert resp.status == 200
     body = await resp.json()
     assert len(body) >= 1
+
+
+async def test_list_conversations_survives_a_removal_landing_mid_listing(client):
+    """A group seat removed while the list is being built drops that one
+    row — it never 403s the caller's whole inbox.
+
+    Regression for the federation-demo ``group-dm`` flake: the authority's
+    roster update (removing carol) landed on c between ``list_for_user``
+    and the per-row reads, and the row's membership re-check raised
+    ``PermissionError`` → 403 for ``GET /api/conversations``.
+    """
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT OR IGNORE INTO users(username, user_id, display_name)"
+        " VALUES('carol', 'c-id', 'Carol')",
+    )
+    r = await client.post(
+        "/api/conversations/group",
+        json={"members": ["bob", "carol"], "name": "Lunch crew"},
+        headers=_auth(client._admin_token),
+    )
+    gid = (await r.json())["id"]
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "pascal"},
+        headers=_auth(client._bob_token),
+    )
+    dm_id = (await r.json())["id"]
+
+    original = DmService.list_conversations
+
+    async def _list_then_remove(self, username):
+        convs = await original(self, username)
+        # The removal lands after the snapshot, before the per-row reads.
+        await db.enqueue(
+            "UPDATE conversation_members SET deleted_at=datetime('now')"
+            " WHERE conversation_id=? AND username='bob'",
+            (gid,),
+        )
+        return convs
+
+    with patch.object(DmService, "list_conversations", _list_then_remove):
+        resp = await client.get(
+            "/api/conversations",
+            headers=_auth(client._bob_token),
+        )
+    assert resp.status == 200
+    ids = {row["id"] for row in await resp.json()}
+    assert dm_id in ids
+    assert gid not in ids
 
 
 async def test_create_dm_with_self_is_error(client):
