@@ -37,6 +37,7 @@ from .domain import (
     GfsInviteToken,
     GfsMomentFollow,
     GfsQueuedEnvelope,
+    GfsSpaceEpoch,
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GfsUserPicture,
@@ -335,6 +336,11 @@ class SqliteGfsFederationRepo:
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE global_spaces SET identity_public_key=?, authority_cert=?,"
+            # v_49: the proven content epoch belongs to the OLD authority key
+            # (certs under it stop verifying now) — a revoked seed holder must
+            # not leave an inflated epoch behind, so it is forgotten here.
+            " content_epoch=NULL, content_epoch_prev=NULL,"
+            " content_epoch_seen_at=NULL,"
             " authority_rotation_seq=CASE WHEN authority_rotation_seq >= ?"
             " THEN ? ELSE authority_rotation_seq + 1 END"
             " WHERE space_id=? AND COALESCE(identity_public_key, '')=?"
@@ -1849,6 +1855,7 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         expires_at: int,
         max_per_recipient: int,
         max_bytes_per_recipient: int,
+        frame_type: str = "envelope",
     ) -> bool: ...
 
     async def list_for(
@@ -1887,8 +1894,13 @@ class SqliteGfsEnvelopeQueueRepo:
         expires_at: int,
         max_per_recipient: int,
         max_bytes_per_recipient: int,
+        frame_type: str = "envelope",
     ) -> bool:
         """Append one envelope unless this recipient is at cap.
+
+        ``frame_type`` (migration 0014) is ``"envelope"`` or ``"relay"``; the
+        two ceilings apply per frame type, so member-published relay items
+        can never crowd a household's sealed envelopes out of its queue.
 
         Returns ``True`` when the row was written, ``False`` when it was
         **tail-dropped** — the caller answers the same uniform ``202``
@@ -1913,8 +1925,9 @@ class SqliteGfsEnvelopeQueueRepo:
         def _run(conn) -> bool:
             row = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(LENGTH(sealed_json)), 0) "
-                "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ?",
-                (to_instance, created_at),
+                "FROM gfs_envelope_queue "
+                "WHERE to_instance=? AND frame_type=? AND expires_at > ?",
+                (to_instance, frame_type, created_at),
             ).fetchone()
             count = int(row[0] or 0)
             total_bytes = int(row[1] or 0)
@@ -1924,9 +1937,9 @@ class SqliteGfsEnvelopeQueueRepo:
                 return False
             conn.execute(
                 "INSERT INTO gfs_envelope_queue("
-                "to_instance, sealed_json, created_at, expires_at"
-                ") VALUES(?,?,?,?)",
-                (to_instance, sealed_json, created_at, expires_at),
+                "to_instance, sealed_json, created_at, expires_at, frame_type"
+                ") VALUES(?,?,?,?,?)",
+                (to_instance, sealed_json, created_at, expires_at, frame_type),
             )
             return True
 
@@ -1945,7 +1958,8 @@ class SqliteGfsEnvelopeQueueRepo:
         blob whose TTL has already run out.
         """
         rows = await self._db.fetchall(
-            "SELECT id, to_instance, sealed_json, created_at, expires_at "
+            "SELECT id, to_instance, sealed_json, created_at, expires_at, "
+            "frame_type "
             "FROM gfs_envelope_queue WHERE to_instance=? AND expires_at > ? "
             "ORDER BY created_at ASC, id ASC",
             (to_instance, now),
@@ -1971,6 +1985,7 @@ class SqliteGfsEnvelopeQueueRepo:
                     sealed=sealed,
                     created_at=int(d["created_at"]),
                     expires_at=int(d["expires_at"]),
+                    frame_type=str(d.get("frame_type") or "envelope"),
                 )
             )
         return out
@@ -2002,6 +2017,60 @@ class SqliteGfsEnvelopeQueueRepo:
         )
         d = _as_dict(row)
         return int(d["n"]) if d else 0
+
+
+# ─── Space content epochs (member publish, v_49) ─────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsSpaceEpochRepo(Protocol):
+    """The newest proven content epoch per space (migration 0014)."""
+
+    async def get(self, space_id: str) -> GfsSpaceEpoch | None: ...
+
+    async def advance(self, space_id: str, epoch: int, *, seen_at: int) -> bool: ...
+
+
+class SqliteGfsSpaceEpochRepo:
+    """SQLite-backed :class:`AbstractGfsSpaceEpochRepo` over the three
+    ``global_spaces.content_epoch*`` columns. The reset on an authority
+    re-pin lives in :meth:`SqliteGfsFederationRepo.set_space_authority`, in
+    the same statement as the re-pin."""
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def get(self, space_id: str) -> GfsSpaceEpoch | None:
+        row = _as_dict(
+            await self._db.fetchone(
+                "SELECT content_epoch, content_epoch_prev, content_epoch_seen_at "
+                "FROM global_spaces WHERE space_id=?",
+                (space_id,),
+            )
+        )
+        if not row or row.get("content_epoch") is None:
+            return None
+        prev = row.get("content_epoch_prev")
+        return GfsSpaceEpoch(
+            space_id=space_id,
+            current=int(row["content_epoch"]),
+            previous=int(prev) if prev is not None else None,
+            current_seen_at=int(row.get("content_epoch_seen_at") or 0),
+        )
+
+    async def advance(self, space_id: str, epoch: int, *, seen_at: int) -> bool:
+        """Move the space to ``epoch`` iff it is newer than the stored one
+        (monotonic, one statement — two concurrent advances can't interleave).
+        Returns whether the row changed."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE global_spaces SET content_epoch_prev=content_epoch,"
+            " content_epoch=?, content_epoch_seen_at=?"
+            " WHERE space_id=? AND (content_epoch IS NULL OR content_epoch < ?)",
+            (epoch, seen_at, space_id, epoch),
+        )
+        return changed > 0
 
 
 # ─── Invite tokens ───────────────────────────────────────────────────────

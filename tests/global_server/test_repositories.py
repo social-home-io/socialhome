@@ -18,6 +18,7 @@ from socialhome.global_server.repositories import (
     SqliteGfsAdminRepo,
     SqliteGfsFederationRepo,
     SqliteGfsInviteRepo,
+    SqliteGfsSpaceEpochRepo,
 )
 
 
@@ -855,3 +856,66 @@ async def test_authority_rotation_seq_is_capped_at_int64_max(gfs_db):
     row = await repo.get_space("sp")
     assert row.authority_rotation_seq == cap
     assert isinstance(row.authority_rotation_seq, int)
+
+
+# ── Space content epochs (v_49, migration 0014) ──────────────────────
+
+
+async def test_space_epoch_is_none_until_one_is_learned(gfs_db):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
+    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
+    assert await epochs.get("sp") is None
+    assert await epochs.get("unknown") is None
+
+
+async def test_space_epoch_advances_monotonically_and_keeps_the_previous(gfs_db):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
+    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
+
+    assert await epochs.advance("sp", 3, seen_at=100)
+    state = await epochs.get("sp")
+    assert (state.current, state.previous, state.current_seen_at) == (3, None, 100)
+
+    assert await epochs.advance("sp", 5, seen_at=200)
+    state = await epochs.get("sp")
+    assert (state.current, state.previous, state.current_seen_at) == (5, 3, 200)
+
+    # Equal or older never moves it (a replayed notice can't roll it back).
+    assert not await epochs.advance("sp", 5, seen_at=300)
+    assert not await epochs.advance("sp", 4, seen_at=300)
+    state = await epochs.get("sp")
+    assert (state.current, state.previous, state.current_seen_at) == (5, 3, 200)
+
+
+async def test_space_epoch_survives_a_publish_refresh(gfs_db):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    space = GlobalSpace(space_id="sp", owning_instance="o")
+    await repo.upsert_space(space)
+    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
+    await epochs.advance("sp", 7, seen_at=1)
+    await repo.upsert_space(replace(space, name="renamed"))
+    assert (await epochs.get("sp")).current == 7
+
+
+async def test_space_epoch_is_forgotten_when_the_authority_key_is_repinned(gfs_db):
+    """A revoked seed holder must not leave an inflated epoch behind."""
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(
+        GlobalSpace(space_id="sp", owning_instance="o", identity_public_key="aa" * 32)
+    )
+    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
+    await epochs.advance("sp", 2**40, seen_at=1)
+    assert await repo.set_space_authority(
+        "sp",
+        expected_pk="aa" * 32,
+        expected_cert=None,
+        new_pk="bb" * 32,
+        cert={"key_epoch": 1},
+    )
+    assert await epochs.get("sp") is None

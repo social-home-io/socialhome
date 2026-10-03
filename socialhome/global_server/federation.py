@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from ..authority_sig import (
+    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
     AUTHORITY_RELAY_EVENT_TYPES,
     UnsupportedAuthoritySuite,
@@ -40,6 +41,7 @@ from ..authority_cert import (
 from ..crypto import b64url_decode, verify_ed25519
 from ..peer_http import post_to_peer
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
+from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from ..domain.space import (
     normalize_category,
     normalize_join_mode,
@@ -53,7 +55,7 @@ from .domain import (
 from .repositories import AbstractGfsFederationRepo
 
 if TYPE_CHECKING:
-    from .repositories import AbstractGfsInviteRepo
+    from .repositories import AbstractGfsInviteRepo, AbstractGfsSpaceEpochRepo
     from .ws_registry import GfsWebSocketRegistry
 
 log = logging.getLogger(__name__)
@@ -340,6 +342,7 @@ class GfsFederationService:
     """
 
     __slots__ = (
+        "_epoch_repo",
         "_invite_repo",
         "_reconnect_tasks",
         "_repo",
@@ -352,8 +355,13 @@ class GfsFederationService:
         repo: AbstractGfsFederationRepo,
         ws_registry: "GfsWebSocketRegistry | None" = None,
         invite_repo: "AbstractGfsInviteRepo | None" = None,
+        epoch_repo: "AbstractGfsSpaceEpochRepo | None" = None,
     ) -> None:
         self._repo = repo
+        # Optional (v_49): when wired, the plaintext ``epoch`` of an
+        # authority-signed ``space_post_public`` relay advances the space's
+        # proven content epoch, which member publishes are checked against.
+        self._epoch_repo = epoch_repo
         self._ws_registry = ws_registry
         # Optional: only :meth:`hide_space` touches it, to take a withdrawn
         # space's public invite pages down with the listing. ``None`` in the
@@ -482,6 +490,7 @@ class GfsFederationService:
         # receiving the relay, so ``withdrawn`` is deliberately not a reject.
 
         self._authorize_authority_relay(space_id, event_type, payload, existing)
+        await self._learn_epoch(space_id, event_type, payload)
 
         # Replay suppression — AFTER authorization, never before. Recording a
         # rejected payload would let a forged frame mute the legitimate relay
@@ -519,6 +528,24 @@ class GfsFederationService:
         )
 
         return await self._fan_out(subscribers, event_body, session)
+
+    async def _learn_epoch(
+        self, space_id: str, event_type: str, payload: object
+    ) -> None:
+        """Advance the space's proven content epoch from an AUTHORIZED
+        ``space_post_public`` relay — its ``epoch`` is inside the authority
+        signature that just verified, so it is the authority's own statement.
+        Monotonic; a malformed value is ignored (the relay itself proceeds)."""
+        if self._epoch_repo is None or event_type != AUTHORITY_EVENT_SPACE_POST_PUBLIC:
+            return
+        epoch = payload.get("epoch") if isinstance(payload, dict) else None
+        if (
+            not isinstance(epoch, int)
+            or isinstance(epoch, bool)
+            or not 0 <= epoch <= MAX_WRITER_CERT_EPOCH
+        ):
+            return
+        await self._epoch_repo.advance(space_id, epoch, seen_at=int(time.time()))
 
     async def _verify_legacy_publish_sig(
         self,

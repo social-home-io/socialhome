@@ -466,12 +466,35 @@ implies `comment`); every failure raises. Receivers additionally require
 the item's epoch to be the newest they hold, or the previous one for
 `WRITER_CERT_EPOCH_GRACE_S` (600 s) after the newest key arrived, so an
 old epoch's cert cannot authorize items forever; any scope-reducing change
-rotates the content epoch. A cert is not secret, but it always travels
-inside encrypted payloads: each household is delivered its own, and once it
-posts, the cert rides in the item to every member and on to subscribers. No
+rotates the content epoch. A cert is not secret. It is delivered to each
+household inside encrypted payloads and rides inside the encrypted item to
+every member and subscriber — with one deliberate exception: a trusted-mode
+member publish (below) carries it in PLAINTEXT to the connection server and
+in the fan-out frame, because the server authorizes the publish with it. No
 new key: it is
 signed by the space authority key every member already pins, and binds the
 household identity key every peer already pins.
+
+**Trusted-mode member publish** (`domain/gfs_member_publish.py`,
+`global_server/member_publish.py`, v_49) — `POST /gfs/member-publish`. The
+household signs canonical JSON (sorted keys, compact — the encoding every
+signed household→GFS request uses) of `{action: "gfs-member-publish:v1",
+instance_id, ts, target, event_type: "space_item", epoch, writer_cert,
+payload}` with its Ed25519 identity seed; the GFS verifies it against the
+registered `client_instances.public_key` with the ±300 s `ts` window. The
+`action` value is the domain separator — distinct from `subscribe` /
+`unsubscribe` / `unpublish` — so the signature cannot be replayed as any
+other request; no new key or suite (it is the household identity signature,
+`ed25519`). The GFS then runs `verify_writer_cert` against the pinned space
+key with `author_pk` = that same registered key and scope `comment` (the
+item type is hidden in the ciphertext; receivers enforce the real scope).
+`payload` is AES-256-GCM under the existing per-space epoch content key —
+the GFS holds no key. **Content-epoch notice** — `POST
+/gfs/spaces/{id}/epoch` carries a space-authority signature (`authority_sig.py`,
+suite `authority_sig_suite`) over `{space_id, epoch}` under the new event
+type `space_epoch_notice`, which is deliberately outside
+`AUTHORITY_RELAY_EVENT_TYPES` so neither a notice nor a relay payload can be
+lifted onto the other path.
 
 **GFS capability block** (`capabilities_sig.py`) — `GET
 /gfs/info` is unauthenticated, so the capability that decides whether a

@@ -176,6 +176,26 @@ ENVELOPE_QUEUE_MAX_PER_RECIPIENT: int = 2000
 ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 64 * 1024 * 1024
 
 
+#: WebSocket frame type of a queued member-published space item (migration
+#: 0014). The same ``"relay"`` type every GFS space fan-out uses, so a
+#: drained item is indistinguishable from a live one.
+RELAY_FRAME_TYPE: str = "relay"
+
+#: ``gfs_envelope_queue.frame_type`` values (CHECK-constrained in 0014).
+QUEUE_KIND_ENVELOPE: str = "envelope"
+QUEUE_KIND_RELAY: str = RELAY_FRAME_TYPE
+
+#: Per-recipient caps for queued RELAY items (member-published space items,
+#: ``POST /gfs/member-publish``). Counted separately from the envelope caps
+#: above so a busy public space can never tail-drop a household's sealed
+#: invite / link-federation envelopes. 1000 items or 16 MiB a day is far more
+#: than a household follows in real spaces; past it the NEW item is dropped
+#: (tail-drop, same reasoning as for envelopes) and the household catches up
+#: through space sync.
+RELAY_QUEUE_MAX_PER_RECIPIENT: int = 1000
+RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 16 * 1024 * 1024
+
+
 class InvalidEnvelope(ValueError):
     """The posted body is not a well-formed routing envelope."""
 
@@ -270,6 +290,7 @@ class GfsEnvelopeRelay:
             expires_at=now + self._ttl,
             max_per_recipient=self._max_queued,
             max_bytes_per_recipient=self._max_bytes,
+            frame_type=QUEUE_KIND_ENVELOPE,
         )
         if not queued:
             # The caller still gets the same 202 — a different answer here
@@ -285,6 +306,37 @@ class GfsEnvelopeRelay:
             )
             return
         log.debug("gfs.envelope: queued for offline recipient %s", to_instance)
+
+    async def push_or_queue_relay(self, to_instance: str, frame: dict) -> bool:
+        """Push a member-published space item to a subscriber, or queue it.
+
+        ``frame`` is the identity-free fan-out frame (``SpaceItemFrame``
+        shape); it goes out as ``{type: "relay", **frame}``. A live socket
+        takes it at once; otherwise it waits in the shared queue under the
+        RELAY caps for :data:`ENVELOPE_QUEUE_TTL_SECONDS`. Returns whether the
+        item was pushed or queued (``False`` = tail-dropped at the cap).
+        Callers pass only active subscribers (``list_subscribers``)."""
+        if await self._ws_registry.send(
+            to_instance, {"type": RELAY_FRAME_TYPE, **frame}
+        ):
+            return True
+        now = int(time.time())
+        queued = await self._queue_repo.enqueue(
+            to_instance,
+            orjson.dumps(frame).decode(),
+            created_at=now,
+            expires_at=now + self._ttl,
+            max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
+            max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
+            frame_type=QUEUE_KIND_RELAY,
+        )
+        if not queued:
+            log.warning(
+                "gfs.envelope: relay queue full for %s — dropping a queued "
+                "space item; the subscriber catches up through space sync",
+                to_instance,
+            )
+        return queued
 
     async def drain(self, to_instance: str) -> int:
         """Flush queued envelopes to a freshly-connected household.
@@ -302,10 +354,11 @@ class GfsEnvelopeRelay:
             return 0
         delivered = 0
         for envelope in pending:
-            sent = await self._ws_registry.send(
-                to_instance,
-                {"type": ENVELOPE_FRAME_TYPE, "sealed": envelope.sealed},
-            )
+            if envelope.frame_type == QUEUE_KIND_RELAY:
+                frame = {"type": RELAY_FRAME_TYPE, **envelope.sealed}
+            else:
+                frame = {"type": ENVELOPE_FRAME_TYPE, "sealed": envelope.sealed}
+            sent = await self._ws_registry.send(to_instance, frame)
             if not sent:
                 break
             await self._queue_repo.delete(envelope.id)

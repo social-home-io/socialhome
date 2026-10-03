@@ -94,11 +94,19 @@ class GfsInfoView(GfsBaseView):
         # key from an owner-signed cert on publish. Signed like its siblings:
         # a stripped flag only makes a household warn that a revoked admin's
         # old key may keep authorizing relays here.
+        # ``member_publish_trusted`` (v_49): this GFS carries
+        # ``POST /gfs/member-publish`` (identified, writer-cert-authorized
+        # member items under the generic ``space_item`` type) and the
+        # authority-signed ``POST /gfs/spaces/{id}/epoch`` notice. Signed
+        # because a household sends an IDENTIFIED body only to a server that
+        # opted in — a forged flag must not be able to make it reveal itself
+        # to a server that never agreed to the trusted-mode contract.
         capabilities = {
             "anonymous_publish": True,
             "envelope_relay": True,
             "invite_links": True,
             "authority_rotation": True,
+            "member_publish_trusted": True,
         }
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {

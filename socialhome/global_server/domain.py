@@ -313,9 +313,53 @@ class GfsQueuedEnvelope:
 
     id: int
     to_instance: str
-    sealed: dict[str, str]
+    sealed: dict
     created_at: int
     expires_at: int
+    #: ``"envelope"`` (a §D2b sealed blob, pushed as ``{type: "envelope",
+    #: sealed}``) or ``"relay"`` (a member-published space item, migration
+    #: 0014 — ``sealed`` then holds the identity-free fan-out frame, pushed as
+    #: ``{type: "relay", **frame}``). Opaque either way: never parsed for
+    #: content, never logged.
+    frame_type: str = "envelope"
+
+
+@dataclass(slots=True, frozen=True)
+class GfsSpaceEpoch:
+    """The newest space content epoch this server has seen proven (v_49).
+
+    Learned only from space-AUTHORITY-signed statements: a writer cert that
+    verified at ``/gfs/member-publish``, the ``epoch`` of an authority-signed
+    ``space_post_public`` relay, or an authority-signed epoch notice. Kept off
+    :class:`GlobalSpace` on purpose so the public directory (which serialises
+    that dataclass) never shows it. Reset whenever the space authority key is
+    re-pinned — certs under the old key stop verifying anyway, and a revoked
+    seed holder must not leave an inflated epoch behind.
+    """
+
+    space_id: str
+    current: int
+    #: The epoch that was current before ``current`` (``None`` when only one
+    #: has been seen).
+    previous: int | None
+    #: Unix seconds at which ``current`` was first seen.
+    current_seen_at: int
+
+    def admits(self, epoch: int, *, now: int, grace_s: int) -> bool:
+        """Whether a cert for ``epoch`` is fresh enough to relay.
+
+        The newest known epoch (or a newer one — the cert itself proves the
+        authority issued it) is always fresh. An older one is fresh only while
+        the newest is younger than ``grace_s`` and only back to ``previous``:
+        a member whose new cert is still in flight keeps publishing, a
+        household removed at the last rotation stops once the grace runs out.
+        Receivers apply their own (exact) freshness rule on top.
+        """
+        if epoch >= self.current:
+            return True
+        if self.previous is None or epoch < self.previous:
+            return False
+        return now - self.current_seen_at <= grace_s
 
 
 @dataclass(slots=True, frozen=True)

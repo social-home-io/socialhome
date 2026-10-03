@@ -46,6 +46,7 @@ from .admin import (
     AdminUiIndexView,
 )
 from .envelope import EnvelopeRelayView
+from .member_publish import MemberPublishView, SpaceEpochNoticeView
 from .invites import SpaceInviteTokenView, SpaceInviteView
 from .cluster import (
     ClusterHealthView,
@@ -156,6 +157,11 @@ def register_routes(
     # by design: the body names only the recipient, the payload is sealed
     # end-to-end, and every well-formed request gets the same 202.
     app.router.add_view("/gfs/envelope", EnvelopeRelayView)
+    # Trusted-mode member publish (v_49): identified by the household
+    # signature, authorized by a space-authority-signed writer cert; plus the
+    # authority-signed content-epoch notice the freshness check relies on.
+    app.router.add_view("/gfs/member-publish", MemberPublishView)
+    app.router.add_view("/gfs/spaces/{space_id}/epoch", SpaceEpochNoticeView)
     app.router.add_view("/gfs/report", ReportView)
     app.router.add_view("/gfs/appeal", AppealView)
     app.router.add_view("/gfs/spaces", SpacesListView)

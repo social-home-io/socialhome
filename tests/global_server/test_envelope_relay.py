@@ -15,6 +15,7 @@ import logging
 import pytest
 
 from socialhome.crypto import derive_instance_id
+from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.envelope_relay import (
     ENVELOPE_FRAME_TYPE,
@@ -24,6 +25,9 @@ from socialhome.global_server.envelope_relay import (
     ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT,
     ENVELOPE_QUEUE_MAX_PER_RECIPIENT,
     ENVELOPE_QUEUE_TTL_SECONDS,
+    QUEUE_KIND_ENVELOPE,
+    QUEUE_KIND_RELAY,
+    RELAY_FRAME_TYPE,
     GfsEnvelopeRelay,
     InvalidEnvelope,
     validate_envelope,
@@ -589,3 +593,93 @@ def test_validate_envelope_accepts_a_real_derived_instance_id():
         {"to_instance": real, "sealed": _sealed()},
     )
     assert to_instance == real
+
+
+# ── Relay frames: member-published space items (migration 0014) ──────────
+
+
+def _item(marker: str = "ct") -> dict:
+    return {
+        "space_id": "sp-1",
+        "event_type": "space_item",
+        "epoch": 3,
+        "writer_cert": {"cert_suite": "ed25519"},
+        "payload": marker,
+    }
+
+
+async def test_relay_frame_goes_to_a_live_socket_as_a_relay_frame(wiring):
+    _fed, queue_repo, registry, relay = wiring
+    registry.online.add("recipient2home2222222222222222aa")
+
+    assert await relay.push_or_queue_relay("recipient2home2222222222222222aa", _item())
+
+    assert registry.sent == [
+        ("recipient2home2222222222222222aa", {"type": RELAY_FRAME_TYPE, **_item()})
+    ]
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
+
+
+async def test_relay_frame_is_queued_offline_and_drained_as_a_relay_frame(wiring):
+    _fed, queue_repo, registry, relay = wiring
+    await relay.accept("recipient2home2222222222222222aa", _sealed("env-0"))
+    assert await relay.push_or_queue_relay(
+        "recipient2home2222222222222222aa", _item("item-1")
+    )
+    queued = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
+    assert [q.frame_type for q in queued] == [QUEUE_KIND_ENVELOPE, QUEUE_KIND_RELAY]
+
+    registry.online.add("recipient2home2222222222222222aa")
+    assert await relay.drain("recipient2home2222222222222222aa") == 2
+
+    assert [frame for _t, frame in registry.sent] == [
+        {"type": ENVELOPE_FRAME_TYPE, "sealed": _sealed("env-0")},
+        {"type": RELAY_FRAME_TYPE, **_item("item-1")},
+    ]
+
+
+async def test_relay_items_have_their_own_cap_and_never_crowd_out_envelopes(
+    wiring,
+):
+    _fed, queue_repo, _registry, _relay = wiring
+    relay = GfsEnvelopeRelay(
+        fed_repo=_fed,
+        queue_repo=queue_repo,
+        ws_registry=_registry,
+        max_queued_per_recipient=2,
+    )
+    for i in range(2):
+        await relay.accept("recipient2home2222222222222222aa", _sealed(f"e{i}"))
+    # The envelope budget is exhausted, yet a relay item still queues …
+    assert await relay.push_or_queue_relay("recipient2home2222222222222222aa", _item())
+    # … and a relay item never consumed envelope budget.
+    await relay.accept("recipient2home2222222222222222aa", _sealed("e-late"))
+    rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
+    assert sum(1 for r in rows if r.frame_type == QUEUE_KIND_ENVELOPE) == 2
+
+
+async def test_relay_queue_tail_drops_at_its_cap(wiring, monkeypatch, caplog):
+    _fed, queue_repo, _registry, relay = wiring
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_PER_RECIPIENT", 1)
+    assert await relay.push_or_queue_relay(
+        "recipient2home2222222222222222aa", _item("first")
+    )
+    with caplog.at_level(logging.WARNING, logger="socialhome.global_server"):
+        assert not await relay.push_or_queue_relay(
+            "recipient2home2222222222222222aa", _item("second")
+        )
+    rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
+    assert [r.sealed["payload"] for r in rows] == ["first"]
+    assert "relay queue full" in caplog.text
+    assert "second" not in caplog.text
+
+
+async def test_a_corrupt_frame_type_is_refused_by_the_database(gfs_db):
+    with pytest.raises(Exception):
+        await gfs_db.transact(
+            lambda conn: conn.execute(
+                "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
+                " created_at, expires_at, frame_type) VALUES(?,?,?,?,?)",
+                ("x" * 32, "{}", 0, 1, "bogus"),
+            )
+        )

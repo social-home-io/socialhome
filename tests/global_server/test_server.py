@@ -293,6 +293,10 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # cert on publish. A household warns when its GFS lacks it: there,
         # a revoked admin's old key keeps authorizing relays.
         "authority_rotation": True,
+        # v_49 — this GFS carries the identified, writer-cert-authorized
+        # ``POST /gfs/member-publish``. A household sends an identified item
+        # body only to a server whose signed block proves it.
+        "member_publish_trusted": True,
     }
     assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
     assert verify_capabilities(
