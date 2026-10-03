@@ -938,19 +938,26 @@ class SpaceSyncReceiver:
     async def _apply_page_version(
         self, page: Page, r: dict[str, Any], space_id: str, provider: str
     ) -> bool:
-        """v_48 host-sequenced pages. A record streamed by the space's HOST
-        carrying ``seq`` is the host's version: mirrored by ``seq`` (newer
-        applies, older never reverts). Any other record never updates a
-        page held here and lands unsequenced (``seq`` 0 — a member cannot
-        forge the host's order). Under a pre-v_48 host the record is taken
-        as before. ``True`` when handled here."""
+        """v_48 host-sequenced pages. ``True`` when handled here:
+
+        * on the **host** every page record is ignored — it is the pages'
+          sequencer; a member's new page reaches it as a create proposal,
+          never as an unsequenced row it would hold but never broadcast;
+        * a record streamed by the space's host carrying ``seq`` is the
+          host's version: mirrored by ``seq`` (newer applies, older never
+          reverts) — even when we have not seen the host's v_48
+          capabilities yet;
+        * any other record never updates a page held here and lands
+          unsequenced (``seq`` 0 — a member cannot forge the host's order);
+        * under a pre-v_48 host a record without ``seq`` is taken as before.
+        """
         engine = self._page_conflicts
         if engine is None:
             return False
         mode, host = await engine.mode(space_id)
-        if mode is PageMode.LEGACY:
-            return False
-        if provider == host and "seq" in r:
+        if mode is PageMode.HOST:
+            return True
+        if host and provider == host and "seq" in r:
             version = canonical_from_wire(r)
             if version is None:
                 log.warning(
@@ -961,6 +968,8 @@ class SpaceSyncReceiver:
                 return True
             await engine.mirror(space_id=space_id, page_id=page.id, version=version)
             return True
+        if mode is PageMode.LEGACY:
+            return False
         held = await self._page_repo.get_space_page(page.id, space_id=space_id)
         return held is not None
 

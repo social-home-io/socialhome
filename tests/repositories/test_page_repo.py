@@ -638,3 +638,40 @@ async def test_history_prune_is_scoped_to_its_space(scoped, monkeypatch):
     assert [
         v.version for v in await repo.list_versions("shared", space_id="space-a")
     ] == [3]
+
+
+async def test_commit_version_is_atomic_and_scoped(scoped):
+    from dataclasses import replace
+
+    from socialhome.domain.page_version import PageConflictSide, version_hash
+
+    repo = scoped.page_repo
+    page = await repo.get_space_page("pg-a", space_id="space-a")
+    side = PageConflictSide(
+        hash=version_hash("T", "s"), title="T", content="s", by="u", at="t1"
+    )
+    history = [_version("pg-a", "space-a", 0), _version("pg-a", "space-a", 0)]
+    assert await repo.commit_version(
+        replace(page, content="new", seq=2),
+        space_id="space-a",
+        history=history,
+        sides=[side],
+    )
+    got = await repo.get_space_page("pg-a", space_id="space-a")
+    assert (got.content, got.seq) == ("new", 2)
+    assert [
+        v.version for v in await repo.list_versions("pg-a", space_id="space-a")
+    ] == [1, 2]
+    assert await repo.list_conflict_sides("pg-a", space_id="space-a") == [side]
+    # Another space's id: nothing written, history rolled back too.
+    other = await repo.get_space_page("pg-b", space_id="space-b")
+    assert not await repo.commit_version(
+        replace(other, content="stolen"),
+        space_id="space-a",
+        history=[_version("pg-b", "space-a", 0)],
+        sides=[],
+    )
+    assert (
+        await repo.get_space_page("pg-b", space_id="space-b")
+    ).content == "body-pg-b"
+    assert await repo.list_versions("pg-b", space_id="space-a") == []

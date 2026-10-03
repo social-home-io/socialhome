@@ -842,3 +842,137 @@ async def test_history_rows_are_hashed_newest_first(env):
         )
     hist = await env.svc._history(SID, env.pid)
     assert [h for h, _v in hist] == [version_hash("T", "b"), version_hash("T", "a")]
+
+
+# ─── Review round 2 ──────────────────────────────────────────────────────
+
+
+async def test_refusals_are_rate_limited_per_sender_and_page(env):
+    for _ in range(3):
+        await env.svc.refuse(
+            space_id=SID,
+            page_id=env.pid,
+            proposal_hash=_H,
+            proposer_instance="iid-a",
+            reason="access",
+        )
+    assert len(env.fed.sent) == 1
+    await env.svc.refuse(
+        space_id=SID,
+        page_id=env.pid,
+        proposal_hash=_H,
+        proposer_instance="iid-b",
+        reason="access",
+    )
+    assert len(env.fed.sent) == 2
+
+
+async def test_a_rate_limited_refusal_carries_no_page_state(env):
+    await env.svc.refuse(
+        space_id=SID,
+        page_id=env.pid,
+        proposal_hash=_H,
+        proposer_instance="iid-a",
+        reason="rate_limited",
+    )
+    (_to, _et, ack) = env.fed.sent[-1]
+    assert "content" not in ack and "title" not in ack
+    assert ack["sequenced"]["reason"] == "rate_limited"
+
+
+async def test_on_archived_write_answers_a_proposal_archived(env):
+    from types import SimpleNamespace
+
+    from socialhome.domain.federation import FederationEventType
+
+    space = SimpleNamespace(id=SID, owner_instance_id="host")
+    proposal = {"id": env.pid, "title": "T", "content": "x", "base_seq": 1}
+    event = SimpleNamespace(
+        event_type=FederationEventType.SPACE_PAGE_UPDATED,
+        payload=proposal,
+        from_instance="iid-a",
+    )
+    await env.svc.on_archived_write(event, space)
+    assert env.fed.sent[-1][2]["sequenced"]["reason"] == "archived"
+    # Not a proposal, not a page, not our space: nothing.
+    sent = len(env.fed.sent)
+    for ev, sp in (
+        (
+            SimpleNamespace(
+                event_type=FederationEventType.SPACE_PAGE_UPDATED,
+                payload={"id": "x", "title": "T"},
+                from_instance="iid-c",
+            ),
+            space,
+        ),
+        (
+            SimpleNamespace(
+                event_type=FederationEventType.SPACE_STICKY_UPDATED,
+                payload=proposal,
+                from_instance="iid-c",
+            ),
+            space,
+        ),
+        (event, SimpleNamespace(id=SID, owner_instance_id="other")),
+        (event, None),
+    ):
+        await env.svc.on_archived_write(ev, sp)
+    assert len(env.fed.sent) == sent
+
+
+async def test_a_duplicate_on_an_unsequenced_page_is_sequenced(env):
+    page = await _page(env)
+    await env.repo.save(replace(page, seq=0), space_id=SID)
+    r = await _propose(env, BASE, base_seq=0)
+    assert r.outcome is SequenceOutcome.APPLIED and r.created
+    assert (await _page(env)).seq == 1
+    assert env.bus.of(PageCreated)[-1].canonical["seq"] == 1
+
+
+async def test_a_version_ships_with_the_sides_it_was_committed_with(env):
+    await _propose(env, _body("a", "p2", "p3"), by="u-a")
+    r = await _propose(env, _body("b", "p2", "p3"), by="u-b", proposer="iid-b")
+    assert [s.content for s in r.sides] == [_body("b", "p2", "p3")]
+    update = env.bus.of(PageUpdated)[-1]
+    assert [s["content"] for s in update.canonical["conflict"]] == [
+        _body("b", "p2", "p3")
+    ]
+
+
+async def test_draft_resolves_keep_only_open_sides_up_to_the_cap(member):
+    env = member
+    page = await _page(env)
+    sides = [
+        PageConflictSide(
+            hash=version_hash("T", f"s{i}"),
+            title="T",
+            content=f"s{i}",
+            by=f"u{i}",
+            at=f"2026-10-03T00:00:00.00000{i}+00:00",
+        )
+        for i in range(3)
+    ]
+    await env.repo.set_conflict_sides(env.pid, space_id=SID, sides=sides)
+    gone = version_hash("T", "long gone")
+    async with env.svc.lock_for(SID, env.pid):
+        await env.svc.member_draft(
+            page,
+            replace(page, content="r1"),
+            space_id=SID,
+            actor_user_id="u",
+            resolves=[sides[0].hash, gone],
+        )
+    for _ in range(4):
+        page = await _page(env)
+        async with env.svc.lock_for(SID, env.pid):
+            await env.svc.member_draft(
+                page,
+                replace(page, content="r2"),
+                space_id=SID,
+                actor_user_id="u",
+                resolves=[s.hash for s in sides],
+            )
+    base = await env.repo.get_draft_base(env.pid, space_id=SID)
+    assert gone not in base.resolves
+    assert len(base.resolves) <= mod.MAX_RESOLVES
+    assert set(base.resolves) == {s.hash for s in sides}

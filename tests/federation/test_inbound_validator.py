@@ -806,6 +806,9 @@ class _StubPipelineOwner:
     _on_tombstone_contact = None
     _own_instance_id = "own-1"
 
+    async def _notify_archived_write(self, event, space) -> None:
+        return None
+
     def post_decrypt_gate_steps(self, *, include_ban_check: bool = False):
         # The real method, so the mutation guards below exercise the
         # actual composition rather than a stand-in.

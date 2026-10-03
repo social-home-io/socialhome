@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 
 from socialhome.app_keys import (
     event_bus_key,
@@ -39,8 +41,11 @@ async def _seed_conflict(client, *, member: bool = True):
     (displayed) and "theirs-version" by u2."""
     await _seed_space(client, member=member)
     repo = client.app[page_repo_key]
-    page = new_page(
-        title="t", content="mine-version", created_by=client._uid, space_id="sp-1"
+    page = replace(
+        new_page(
+            title="t", content="mine-version", created_by=client._uid, space_id="sp-1"
+        ),
+        seq=1,
     )
     await repo.save(page, space_id=page.space_id)
     for body, by, side in (
@@ -224,7 +229,7 @@ async def test_patch_while_conflicted_is_allowed(client):
     assert r.status == 200, await r.text()
     data = await r.json()
     assert data["content"] == "my edit"
-    assert (data["seq"], data["base_seq"], data["pending"]) == (1, None, False)
+    assert (data["seq"], data["base_seq"], data["pending"]) == (2, None, False)
     assert await client.app[page_conflict_service_key].has_active_conflict(
         page.id, space_id="sp-1"
     )

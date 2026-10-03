@@ -82,7 +82,8 @@ from ...federation.space_scope import (
     resolve_space_id,
 )
 from ...domain.gallery import GalleryAlbum, GalleryItem
-from ...domain.page import Page
+from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
+from ...domain.page_version import version_hash
 from ...domain.post import (
     BAZAAR_MAX_IMAGES,
     BazaarBid,
@@ -146,6 +147,16 @@ def _has_ended(end_time: str | None) -> bool:
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
     return end <= datetime.now(timezone.utc)
+
+
+def _payload_hash(p: dict) -> str:
+    """The version hash a (possibly malformed) proposal stands for."""
+    cover = p.get("cover_image_url")
+    return version_hash(
+        str(p.get("title") or ""),
+        str(p.get("content") or ""),
+        cover if isinstance(cover, str) else None,
+    )
 
 
 def _page_from_payload(p: dict, page_id: str, space_id: str) -> Page:
@@ -793,6 +804,18 @@ class SpaceContentInboundHandlers:
         if mode is PageMode.HOST:
             await self._on_page_proposal(event, space_id, page_id, existing)
             return
+        if (
+            mode is PageMode.LEGACY
+            and host
+            and event.from_instance == host
+            and "seq" in p
+            and canonical_from_wire(p) is not None
+        ):
+            # The host sequences (it sent ``seq``) even if we have not seen
+            # its v_48 capabilities yet: mirror it as the host's version,
+            # never last write wins on our possibly stale view.
+            await self._on_host_page_version(event, space_id, page_id, existing)
+            return
         if mode is PageMode.MEMBER and event.from_instance == host:
             await self._on_host_page_version(event, space_id, page_id, existing)
             return
@@ -858,15 +881,42 @@ class SpaceContentInboundHandlers:
         page_id: str,
         existing: Page | None,
     ) -> None:
-        """The host: a member household proposes a version of a page."""
+        """The host: a member household proposes a version of a page.
+
+        A replay is not a proposal: a payload carrying ``seq`` (a version
+        shape) or a ``SPACE_PAGE_CREATED`` without ``base_seq`` (the resume
+        replay) never changes a page held here. A live update without
+        ``base_seq`` is a pre-v_48 (or not-yet-upgraded) sender's — based on
+        the current version. The named actor must be seated on the sender
+        at EVERY access level (no other household's user is ever a page's
+        editor or a side's author); then the space's level must admit them.
+        """
         engine = self._page_conflicts
         assert engine is not None
         p = event.payload
         if "sequenced" in p:
             log.debug("a host takes no host versions (page %s) — ignored", page_id)
             return
+        if existing is not None and (
+            "seq" in p
+            or (
+                event.event_type is FederationEventType.SPACE_PAGE_CREATED
+                and "base_seq" not in p
+            )
+        ):
+            log.debug(
+                "%s from %s: page %s — a replay, not a proposal; ignored",
+                event.event_type,
+                event.from_instance,
+                page_id,
+            )
+            return
         proposal = proposal_from_wire(p)
-        if proposal is None or not proposal.title:
+        if (
+            proposal is None
+            or not proposal.title
+            or len(proposal.title) > MAX_PAGE_TITLE_LENGTH
+        ):
             log.warning(
                 "%s from %s: page %s in space %s — malformed proposal; refused",
                 event.event_type,
@@ -874,8 +924,14 @@ class SpaceContentInboundHandlers:
                 page_id,
                 space_id,
             )
+            await engine.refuse(
+                space_id=space_id,
+                page_id=page_id,
+                proposal_hash=_payload_hash(p),
+                proposer_instance=event.from_instance,
+                reason="bad_base",
+            )
             return
-        page = _page_from_payload(p, page_id, space_id)
         if existing is None and (proposal.base_seq or 0) > 0:
             await engine.refuse(
                 space_id=space_id,
@@ -885,9 +941,38 @@ class SpaceContentInboundHandlers:
                 reason="gone",
             )
             return
-        if existing is None and not proposal.created_by:
+        if existing is None and (
+            not proposal.created_by
+            or self._bound_id_refused(
+                event, SPACE_PAGE_KIND, page_id, space_id, proposal.created_by
+            )
+        ):
             return
-        if not await self._page_write_gates(event, space_id, page_id, page, existing):
+        actor = proposal.actor_user_id
+        bound = await self._authorship.acts_for(event, space_id, actor)
+        if bound and existing is None and proposal.created_by != actor:
+            bound = False  # a create is its creator's own write
+        if not bound:
+            held = await self._authorship.hold_or_refuse(
+                event, space_id=space_id, what="page", row_id=page_id, user_id=actor
+            )
+            if not held:
+                await engine.refuse(
+                    space_id=space_id,
+                    page_id=page_id,
+                    proposal_hash=proposal.hash,
+                    proposer_instance=event.from_instance,
+                    reason="access",
+                )
+            return
+        if not await self._authorship.access_admits(
+            event,
+            space_id,
+            "pages",
+            ContentAction.CREATE if existing is None else ContentAction.EDIT,
+            actor=actor,
+            row_owner=proposal.created_by if existing is None else existing.created_by,
+        ):
             await engine.refuse(
                 space_id=space_id,
                 page_id=page_id,

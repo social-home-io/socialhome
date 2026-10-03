@@ -68,6 +68,10 @@ class PageNotFoundError(Exception):
     """Raised when an operation targets a missing page id."""
 
 
+class _CrossSpaceWrite(Exception):
+    """Rolls a :meth:`SqlitePageRepo.commit_version` transaction back."""
+
+
 # Domain dataclasses live in ``socialhome/domain/page.py``. They are
 # re-exported here so existing repo-level imports keep working.
 from ..domain.page import Page, PageVersion  # noqa: F401,E402
@@ -145,6 +149,14 @@ class AbstractPageRepo(Protocol):
         sides: Sequence[PageConflictSide],
     ) -> None: ...
     async def space_pages_in_conflict(self, space_id: str) -> set[str]: ...
+    async def commit_version(
+        self,
+        page: Page,
+        *,
+        space_id: str,
+        history: Sequence[PageVersion],
+        sides: Sequence[PageConflictSide],
+    ) -> bool: ...
     async def clear_conflict_flag(self, page_id: str, *, space_id: str) -> None: ...
     async def set_draft_base(
         self, page_id: str, *, space_id: str, base: DraftBase
@@ -233,52 +245,7 @@ class SqlitePageRepo:
             )
         else:
             n = await self._db.enqueue_rowcount(
-                """
-                INSERT INTO space_pages(
-                    id, space_id, title, content, cover_image_url, created_by,
-                    created_at, updated_at,
-                    last_editor_user_id, last_edited_at,
-                    locked_by, locked_at, lock_expires_at,
-                    delete_requested_by, delete_requested_at,
-                    delete_approved_by,  delete_approved_at,
-                    seq, pending_base_seq
-                ) VALUES(?,?,?,?,?,?,
-                         COALESCE(?, datetime('now')),
-                         COALESCE(?, datetime('now')),
-                         ?,?,
-                         ?,?,?, ?,?, ?,?, ?,?)
-                ON CONFLICT(id) DO UPDATE SET
-                    title=excluded.title,
-                    content=excluded.content,
-                    cover_image_url=excluded.cover_image_url,
-                    updated_at=excluded.updated_at,
-                    last_editor_user_id=excluded.last_editor_user_id,
-                    last_edited_at=excluded.last_edited_at,
-                    seq=excluded.seq,
-                    pending_base_seq=excluded.pending_base_seq
-                WHERE space_pages.space_id = excluded.space_id
-                """,
-                (
-                    page.id,
-                    space_id,
-                    page.title,
-                    page.content,
-                    page.cover_image_url,
-                    page.created_by,
-                    page.created_at,
-                    stamp,
-                    page.last_editor_user_id,
-                    page.last_edited_at,
-                    page.locked_by,
-                    page.locked_at,
-                    page.lock_expires_at,
-                    page.delete_requested_by,
-                    page.delete_requested_at,
-                    page.delete_approved_by,
-                    page.delete_approved_at,
-                    int(page.seq),
-                    page.pending_base_seq,
-                ),
+                _SPACE_PAGE_UPSERT, _space_page_params(page, space_id)
             )
         return n > 0
 
@@ -802,6 +769,86 @@ class SqlitePageRepo:
 
         await self._db.transact(_run)
 
+    async def commit_version(
+        self,
+        page: Page,
+        *,
+        space_id: str,
+        history: Sequence[PageVersion],
+        sides: Sequence[PageConflictSide],
+    ) -> bool:
+        """One sequenced step of a space page, atomically: the ``history``
+        rows (numbered here, then pruned to :data:`MAX_SPACE_HISTORY`), the
+        page row, and exactly ``sides`` as its open conflict. ``False``
+        (nothing written) when the page id belongs to another space."""
+        side_rows = [
+            (
+                page.id,
+                space_id,
+                side.at,
+                encode_side_body(
+                    side.title,
+                    side.content,
+                    cover_image_url=side.cover_image_url,
+                    seq=side.base_seq,
+                ),
+                side.by,
+            )
+            for side in sides
+        ]
+
+        def _run(conn) -> bool:
+            for v in history:
+                (number,) = conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM page_edit_history"
+                    " WHERE page_id=?",
+                    (page.id,),
+                ).fetchone()
+                conn.execute(
+                    "INSERT INTO page_edit_history(id, page_id, space_id, title,"
+                    " content, cover_image_url, edited_by, edited_at, version)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        v.id,
+                        page.id,
+                        space_id,
+                        v.title,
+                        v.content,
+                        v.cover_image_url,
+                        v.edited_by,
+                        v.edited_at,
+                        int(number),
+                    ),
+                )
+            if history:
+                conn.execute(
+                    "DELETE FROM page_edit_history WHERE page_id=? AND space_id IS ?"
+                    " AND version NOT IN (SELECT version FROM page_edit_history"
+                    " WHERE page_id=? AND space_id IS ? ORDER BY version DESC"
+                    " LIMIT ?)",
+                    (page.id, space_id, page.id, space_id, MAX_SPACE_HISTORY),
+                )
+            cur = conn.execute(_SPACE_PAGE_UPSERT, _space_page_params(page, space_id))
+            if cur.rowcount == 0:
+                raise _CrossSpaceWrite
+            conn.execute(
+                "DELETE FROM space_page_snapshots"
+                " WHERE page_id=? AND space_id=? AND conflict=1",
+                (page.id, space_id),
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO space_page_snapshots("
+                " page_id, space_id, snapshot_at, body, snapshot_by, side, conflict"
+                ") VALUES(?,?,?,?,?,'theirs',1)",
+                side_rows,
+            )
+            return True
+
+        try:
+            return await self._db.transact(_run)
+        except _CrossSpaceWrite:
+            return False
+
     async def space_pages_in_conflict(self, space_id: str) -> set[str]:
         """Ids of this space's pages with an open conflict (the list badge)."""
         rows = await self._db.fetchall(
@@ -949,6 +996,60 @@ def decode_side_body(body: str, *, fallback_title: str) -> _StoredVersion:
                 resolves=tuple(str(r) for r in resolves if isinstance(r, str)),
             )
     return _StoredVersion(title=fallback_title, content=body)
+
+
+#: Upsert of a space page — ``space_id`` decides which rows it may update
+#: (an id of another space is refused by the WHERE).
+_SPACE_PAGE_UPSERT = """
+INSERT INTO space_pages(
+    id, space_id, title, content, cover_image_url, created_by,
+    created_at, updated_at,
+    last_editor_user_id, last_edited_at,
+    locked_by, locked_at, lock_expires_at,
+    delete_requested_by, delete_requested_at,
+    delete_approved_by,  delete_approved_at,
+    seq, pending_base_seq
+) VALUES(?,?,?,?,?,?,
+         COALESCE(?, datetime('now')),
+         COALESCE(?, datetime('now')),
+         ?,?,
+         ?,?,?, ?,?, ?,?, ?,?)
+ON CONFLICT(id) DO UPDATE SET
+    title=excluded.title,
+    content=excluded.content,
+    cover_image_url=excluded.cover_image_url,
+    updated_at=excluded.updated_at,
+    last_editor_user_id=excluded.last_editor_user_id,
+    last_edited_at=excluded.last_edited_at,
+    seq=excluded.seq,
+    pending_base_seq=excluded.pending_base_seq
+WHERE space_pages.space_id = excluded.space_id
+"""
+
+
+def _space_page_params(page: Page, space_id: str) -> tuple:
+    stamp = page.updated_at or datetime.now(timezone.utc).isoformat()
+    return (
+        page.id,
+        space_id,
+        page.title,
+        page.content,
+        page.cover_image_url,
+        page.created_by,
+        page.created_at,
+        stamp,
+        page.last_editor_user_id,
+        page.last_edited_at,
+        page.locked_by,
+        page.locked_at,
+        page.lock_expires_at,
+        page.delete_requested_by,
+        page.delete_requested_at,
+        page.delete_approved_by,
+        page.delete_approved_at,
+        int(page.seq),
+        page.pending_base_seq,
+    )
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────

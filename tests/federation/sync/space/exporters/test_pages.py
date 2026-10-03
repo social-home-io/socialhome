@@ -21,7 +21,6 @@ class _Repo:
             space_id="sp-1",
             cover_image_url="/c.webp",
             seq=5,
-            pending_base_seq=4,
         )
         self.side = PageConflictSide(
             hash=version_hash("T", "side"),
@@ -48,3 +47,24 @@ async def test_records_carry_seq_hash_and_conflict_but_no_draft_state():
     (side,) = record["conflict"]
     assert side["side_id"] == version_hash("T", "side")
     assert (side["by"], side["base_seq"]) == ("u-2", 3)
+
+
+async def test_an_unacked_draft_exports_its_canonical_base_or_nothing():
+    from dataclasses import replace
+
+    from socialhome.domain.page_version import DraftBase
+
+    repo = _Repo()
+    repo.page = replace(repo.page, content="my draft", pending_base_seq=4)
+    bases = {"pg-1": DraftBase(title="T", content="canonical", seq=4, by="u-1")}
+
+    async def get_draft_base(page_id, *, space_id):
+        return bases.get(page_id)
+
+    repo.get_draft_base = get_draft_base
+    (record,) = await PagesExporter(repo).list_records("sp-1")
+    assert (record["content"], record["seq"]) == ("canonical", 4)
+    assert "pending_base_seq" not in record
+    # Our own create the host never sequenced: not exported at all.
+    bases["pg-1"] = DraftBase(title="", content="", seq=0, by="u-1")
+    assert await PagesExporter(repo).list_records("sp-1") == []

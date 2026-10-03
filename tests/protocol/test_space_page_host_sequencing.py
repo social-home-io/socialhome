@@ -943,3 +943,213 @@ async def test_a_members_new_page_is_sequenced_by_the_host(mesh):
     await _pump(mesh)
     content, sides, seq, pending = _converged(await _states(mesh, pid))
     assert (content, sides, seq, pending) == ("hello", (), 1, None)
+
+
+# ── Review round 2 (repros of the adversarial review) ────────────────────
+
+
+async def _fake_send_event(
+    self, *, to_instance_id, event_type, payload, space_id=None, **kw
+):
+    OUTBOX.setdefault(self._own_instance_id, []).append(
+        (to_instance_id, event_type, copy.deepcopy(payload))
+    )
+    return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+
+async def test_i1_a_members_resume_replay_never_rolls_the_host_back(mesh, monkeypatch):
+    monkeypatch.setattr(FederationService, "send_event", _fake_send_event)
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(h, pid, _with(BASE, p1="v2"))
+    await _pump(mesh)
+    await _edit(h, pid, _with(BASE, p1="v3 newest"))
+    _drop(*mesh.values())  # A misses v3
+    assert (await _seq(h, pid), await _seq(a, pid)) == (3, 2)
+    # The host asks A to resume (a long offline / operator resync).
+    await _receive(
+        a,
+        _event(
+            h,
+            FET.SPACE_SYNC_RESUME,
+            {"space_id": SID, "since": "1970-01-01T00:00:00+00:00"},
+            a,
+        ),
+    )
+    # A replays no page to the host: the host is the pages' authority.
+    assert not [p for t, e, p in a.sent if t == h.iid and e is FET.SPACE_PAGE_CREATED]
+    await _pump(mesh)
+    assert await _content(h, pid) == _with(BASE, p1="v3 newest")
+    assert await _seq(h, pid) == 3
+
+
+async def test_i1_a_seq_carrying_or_baseless_replay_from_a_v48_member_is_ignored(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(h, pid, _with(BASE, p1="v2"))
+    _drop(*mesh.values())
+    stale = {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "Rules",
+        "content": BASE,
+        "created_by": h.user_id,
+        "actor_user_id": a.user_id,
+    }
+    for payload, et in (
+        ({**stale, "seq": 1}, FET.SPACE_PAGE_CREATED),
+        (stale, FET.SPACE_PAGE_CREATED),
+        ({**stale, "seq": 1}, FET.SPACE_PAGE_UPDATED),
+    ):
+        await _receive(h, _event(a, et, payload, h))
+    assert await _content(h, pid) == _with(BASE, p1="v2")
+    assert await _seq(h, pid) == 2
+
+
+async def test_i2_a_proposal_naming_another_households_user_is_refused(mesh):
+    a, b, h = mesh["A"], mesh["B"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(h, pid, _with(BASE, p2="hanna p2"))
+    await _edit(b, pid, _with(BASE, p2="bert p2"))
+    await _pump(mesh)
+    for content in (
+        _with(BASE, p2="anna pretending to be bert"),
+        _with(BASE, p1="vandalism"),
+    ):
+        forged = {
+            "id": pid,
+            "page_id": pid,
+            "space_id": SID,
+            "title": "Rules",
+            "content": content,
+            "actor_user_id": b.user_id,
+            "base_seq": 1,
+            "base_hash": version_hash("Rules", BASE),
+        }
+        await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, forged, h))
+    page = await _page(h, pid)
+    assert not any("pretending" in s["content"] for s in page["conflict"]["sides"])
+    assert [s["by"] for s in page["conflict"]["sides"]] == [b.user_id]
+    assert "vandalism" not in page["content"]
+    assert page["last_editor_user_id"] != b.user_id or "bert" in page["content"]
+    refusals = [
+        p for p in _sent_to(h, a) if p.get("sequenced", {}).get("outcome") == "refused"
+    ]
+    assert refusals and refusals[0]["sequenced"]["reason"] == "access"
+    # At most one refusal per (sender, page) per window (M1).
+    assert len(refusals) == 1
+
+
+async def test_i3_a_member_unaware_of_the_hosts_v48_still_mirrors_it(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    VERSIONS[h.iid] = 1  # A has not seen H's capabilities yet
+    await _edit(h, pid, _with(BASE, p1="hanna"))
+    await _pump(mesh)
+    assert await _content(a, pid) == await _content(h, pid) == _with(BASE, p1="hanna")
+    assert await _seq(a, pid) == 2
+
+
+async def test_i4_a_member_chunk_never_creates_a_page_on_the_host(mesh):
+    a, h = mesh["A"], mesh["H"]
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Anna's", "content": "hello"},
+        headers=a.headers,
+    )
+    pid = (await r.json())["id"]
+    held = _take(a, h)  # the create proposal is in flight
+    records = [
+        r
+        for r in await PagesExporter(a.app[page_repo_key]).list_records(SID)
+        if r["id"] == pid
+    ]
+    # The unacked draft is never exported (M3).
+    assert records == []
+    receiver = h.app[federation_service_key]._space_sync_receiver
+    forged = {
+        "id": pid,
+        "title": "Anna's",
+        "content": "hello",
+        "created_by": a.user_id,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    await receiver._dispatch("pages", SID, [forged], provider=a.iid)
+    assert await _content(h, pid) is None
+    a.sent.extend((h.iid, et, p) for et, p in held)
+    await _pump(mesh)
+    content, sides, seq, pending = _converged(await _states(mesh, pid))
+    assert (content, seq, pending) == ("hello", 1, None)
+
+
+async def test_i4_a_duplicate_on_an_unsequenced_page_is_sequenced_and_broadcast(mesh):
+    a, b, h = mesh["A"], mesh["B"], mesh["H"]
+    pid = await _create(mesh)
+    for house in mesh.values():  # a pre-v_48 page everywhere: seq 0
+        await house.db.enqueue("UPDATE space_pages SET seq=0 WHERE id=?", (pid,))
+    proposal = {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "Rules",
+        "content": BASE,
+        "actor_user_id": a.user_id,
+        "base_seq": 0,
+        "base_hash": version_hash("Rules", BASE),
+    }
+    await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, proposal, h))
+    assert await _seq(h, pid) == 1
+    assert _sent_to(h, b, FET.SPACE_PAGE_UPDATED) or _sent_to(
+        h, b, FET.SPACE_PAGE_CREATED
+    )
+    await _pump(mesh)
+    assert await _seq(b, pid) == 1
+
+
+async def test_i5_an_archived_host_refuses_and_the_member_stops_waiting(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    await h.db.enqueue("UPDATE spaces SET archived=1 WHERE id=?", (SID,))
+    await _edit(a, pid, _with(BASE, p1="late"))
+    await _pump(mesh)
+    assert await _pending(a, pid) is None
+    assert await _content(a, pid) == BASE
+    assert await _content(h, pid) == BASE
+
+
+async def test_i5_a_malformed_proposal_is_answered_bad_base(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    bad = {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "Rules",
+        "content": "x",
+        "actor_user_id": a.user_id,
+        "base_seq": "three",
+    }
+    await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, bad, h))
+    await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, bad, h))
+    refusals = _sent_to(h, a)
+    assert len(refusals) == 1
+    assert refusals[0]["sequenced"]["reason"] == "bad_base"
+
+
+async def test_m5_an_overlong_title_is_refused(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid = await _create(mesh)
+    long = {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "x" * 201,
+        "content": BASE,
+        "actor_user_id": a.user_id,
+        "base_seq": 1,
+        "base_hash": version_hash("Rules", BASE),
+    }
+    await _receive(h, _event(a, FET.SPACE_PAGE_UPDATED, long, h))
+    assert (await _page(h, pid))["title"] == "Rules"

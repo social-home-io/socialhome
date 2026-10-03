@@ -737,7 +737,11 @@ _HELD_WRITE = {"status": "ok", "held": "awaiting-seat"}
 _ARCHIVED_WRITE = {"status": "ok", "dropped": "archived-space"}
 
 
-def make_check_space_archived(*, space_repo: "AbstractSpaceRepo") -> InboundStep:
+def make_check_space_archived(
+    *,
+    space_repo: "AbstractSpaceRepo",
+    on_refused: "Callable[[FederationEvent, Any], Awaitable[None]] | None" = None,
+) -> InboundStep:
     """Step 12a: refuse a space-content write into a locally archived space.
 
     An archived space is read-only on this household — the REST layer
@@ -766,6 +770,10 @@ def make_check_space_archived(*, space_repo: "AbstractSpaceRepo") -> InboundStep
     space — the roster, bans, config (including the ``SPACE_CONFIG_CHANGED``
     that unarchives it), dissolve / removal, content-key epochs, sync
     machinery and reports — because none of it is in the write vocabulary.
+
+    ``on_refused`` (when wired) hears every refused write with the space —
+    the page sequencer answers a member's page proposal ``refused/archived``
+    so the member stops waiting for it (v_48).
 
     Runs BEFORE :func:`make_check_space_writer` so a write into an archived
     space is refused rather than held for a seat. A space we don't hold is
@@ -803,6 +811,11 @@ def make_check_space_archived(*, space_repo: "AbstractSpaceRepo") -> InboundStep
             reason,
         )
         ctx.early_response = dict(_ARCHIVED_WRITE)
+        if on_refused is not None:
+            try:
+                await on_refused(event, space)
+            except Exception as exc:  # pragma: no cover — defensive
+                log.warning("inbound: archived-write listener failed: %s", exc)
 
     return check_space_archived
 

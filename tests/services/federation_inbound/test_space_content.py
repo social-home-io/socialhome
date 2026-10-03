@@ -1043,7 +1043,7 @@ async def test_the_host_answers_gone_for_an_unknown_page(bus, repos):
 @pytest.mark.parametrize(
     "bad", [{"base_seq": -1}, {"base_seq": 1, "base_hash": "nope"}, {"resolves": "x"}]
 )
-async def test_the_host_drops_a_malformed_proposal(bus, repos, bad):
+async def test_the_host_refuses_a_malformed_proposal_bad_base(bus, repos, bad):
     engine = _FakeConflicts("host", host="self")
     h = _page_handlers(bus, repos, engine)
     _held(repos)
@@ -1051,6 +1051,70 @@ async def test_the_host_drops_a_malformed_proposal(bus, repos, bad):
         _event(
             FederationEventType.SPACE_PAGE_UPDATED,
             {"id": "p-1", "title": "T", "content": "x", **bad},
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == []
+    assert [r["reason"] for r in engine.refused] == ["bad_base"]
+
+
+async def test_the_host_ignores_a_replay_of_a_held_page(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    for et, extra in (
+        (FederationEventType.SPACE_PAGE_CREATED, {}),
+        (FederationEventType.SPACE_PAGE_UPDATED, {"seq": 3}),
+    ):
+        await h._on_page_saved(
+            _event(
+                et,
+                {"id": "p-1", "title": "T", "content": "x", **extra},
+                space_id="sp-1",
+            )
+        )
+    assert engine.sequenced == [] and engine.refused == []
+
+
+async def test_the_host_refuses_an_unbound_actor(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine, auth=_AllowAuthorship(answer=False))
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": "x",
+                "base_seq": 1,
+                "actor_user_id": "u-x",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == []
+    assert [r["reason"] for r in engine.refused] == ["access"]
+
+
+async def test_the_host_sends_no_refusal_for_a_held_write(bus, repos):
+    class _Holds(_AllowAuthorship):
+        async def hold_or_refuse(self, event, *, space_id, what, row_id, user_id):
+            return True
+
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine, auth=_Holds(answer=False))
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": "x",
+                "base_seq": 1,
+                "actor_user_id": "u-new",
+            },
             space_id="sp-1",
         )
     )

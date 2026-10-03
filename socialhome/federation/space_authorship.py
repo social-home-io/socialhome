@@ -831,10 +831,11 @@ class SpaceAuthorship:
         what: str,
         row_id: str,
         user_id: str,
-    ) -> None:
+    ) -> bool:
         """Refuse a write naming ``user_id`` — or, when this space has no
         record of that user at all (the roster gossip seating them has not
-        reached us yet), hold it until their seat lands.
+        reached us yet), hold it until their seat lands. ``True`` when it
+        was held (it is replayed later — not a refusal to answer).
 
         A user seated on ANOTHER household, or one who was removed, is
         known, so that is always a refusal: those are not a race.
@@ -857,10 +858,11 @@ class SpaceAuthorship:
                 space_id,
                 user_id,
             )
-            return
+            return True
         self.log_refusal(
             event, space_id=space_id, what=what, row_id=row_id, user_id=user_id
         )
+        return False
 
     @staticmethod
     def log_refusal(

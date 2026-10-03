@@ -83,11 +83,14 @@ above. It carries the current state and `seq`, plus `sequenced` with
 
 | `reason` | When |
 |---|---|
-| `access` | the gates refused it (authorship, owner-bound id, the space's `pages` access level) |
+| `access` | the gates refused it: the named `actor_user_id` is not seated on the sending household (checked at **every** access level, so no household ever edits as — or evicts the side of — another household's user), the owner-bound id, or the space's `pages` access level. Not sent when the write is *held* for an actor whose seat has not reached the host yet (it is replayed when it does) |
 | `gone` | the page no longer exists on the host (`base_seq ≥ 1`); the payload carries no state, `seq: 0` |
-| `rate_limited` | more than 120 proposals / minute from that household for that space |
-| `bad_base` | `base_seq` is ahead of the host's `seq` |
-| `archived` | reserved: today the post-decrypt archived-space gate drops a proposal before the handler, so no ack is sent and the draft stays pending (see [Edge cases](#edge-cases)) |
+| `rate_limited` | more than 120 proposals / minute from that household for that space; carries **no page state** (the member keeps its draft for the next tick) |
+| `bad_base` | `base_seq` is ahead of the host's `seq`, or the proposal is malformed (bad `base_seq` / `base_hash` / `resolves`, a missing or over-long title) |
+| `archived` | the space is archived on the host: the post-decrypt archived gate refuses the write and tells the page sequencer, which answers it (`FederationService.add_archived_write_listener`) |
+
+At most **one refusal per (sender, page) per minute** goes out, so bad
+proposals cannot turn the host into an amplifier.
 
 ## Version identity
 
@@ -104,18 +107,28 @@ does that.
 `PageConflictService.sequence` (and `commit_local`, the host's own edits)
 runs these steps in order:
 
-1. **Gates.** The inbound gates run first: owner-bound id (creates),
-   authorship, and the space's `pages` access level. A refusal is
-   answered `refused`/`access`. A page this household no longer holds,
-   proposed with `base_seq ≥ 1`, is answered `gone`.
-2. **Rate limit.** 120 proposals per minute per (proposer household,
+1. **Replays are not proposals.** For a page the host holds, a payload
+   carrying `seq` (a version shape) or a `SPACE_PAGE_CREATED` without
+   `base_seq` (a resume replay) is ignored — a member can never roll the
+   host back. A live `SPACE_PAGE_UPDATED` without `base_seq` is a
+   pre-v_48 (or not-yet-upgraded) sender's update, based on the current
+   version.
+2. **Gates.** Malformed → `bad_base`. A page this household no longer
+   holds, proposed with `base_seq ≥ 1` → `gone`. Then the owner-bound id
+   (creates; a create must be its creator's own write), the actor's seat
+   on the sender (`acts_for`, every access level — held, not refused,
+   while the roster gossip catches up) and the space's `pages` access
+   level; a refusal is `refused`/`access`.
+3. **Rate limit.** 120 proposals per minute per (proposer household,
    space) (`rate_limiter.py`). Beyond that it is `refused`/`rate_limited`.
-3. Under the **per-page lock**:
+4. Under the **per-page lock**:
    - **`resolves`.** The listed sides are retired; they will be written
      to history.
    - **Duplicate.** If the proposal's hash equals the current version or
      an open side, and nothing was resolved, it is a no-op plus an
-     `applied` ack.
+     `applied` ack — unless the page was never sequenced (`seq` 0, a
+     pre-v_48 row): then it is committed as `seq` 1 and broadcast as
+     `SPACE_PAGE_CREATED`, so every member household gets it.
    - **Base check.** `base_seq > seq` → `bad_base`. A proposal that is
      the current body (a resolution keeping it) changes no body. One
      equal to an open side makes that side current. With
@@ -136,7 +149,9 @@ runs these steps in order:
      refused, never lost.** Conflicts **never block edits**.
    - **Commit.** If the body or the sides changed, retired sides go to
      history, and the previous body goes to history if the body changed.
-     Then `seq += 1`, the row is saved, the sides are set exactly, and
+     Then `seq += 1`, the row is saved and the sides are set exactly — all
+     in **one transaction** (`commit_version`); the sides snapshotted under
+     the lock ship with that `seq`. After the commit,
      `PageUpdated` / `PageCreated` carries the canonical fields to the
      outbound broadcast. A new side also emits
      `PageConflictEmitted(federated)`. If nothing changed, the host sends
@@ -225,15 +240,24 @@ household converges.
 ## Sync and resume
 
 - **§25.6 sync**: `pages` records carry `seq`, `version_hash` and
-  `conflict`; `pending_base_seq` never leaves a household. A record from
-  the **host** with `seq` is mirrored by `seq`, so it never overwrites a
-  newer version and never reverts one. A record from any other household
-  never updates a held page, and a new page lands with `seq` 0. Under a
-  pre-v_48 host, records are taken as before.
-- **Resume** (`SPACE_SYNC_RESUME`): each page replays as
-  `SPACE_PAGE_CREATED` with `seq`, `version_hash`, `last_editor_user_id`
-  and `conflict` (to a v_48 peer). It is handled like a live version, so
-  only the host's replay updates a held page.
+  `conflict`. An unacknowledged draft never leaves a household: the page
+  is exported as the canonical version the draft was made from (or not at
+  all, for a create the host has not sequenced). A record from the
+  **host** with `seq` is mirrored by `seq` — even before we have seen the
+  host's v_48 capabilities — so it never overwrites a newer version and
+  never reverts one. A record from any other household never updates a
+  held page, and a new page lands with `seq` 0. **The host takes no page
+  record at all**: a member's new page reaches it as a create proposal,
+  never as an unsequenced row it would hold but never broadcast. Under a
+  pre-v_48 host, records without `seq` are taken as before.
+- **Resume** (`SPACE_SYNC_RESUME`): a member replays **no page to the
+  v_48 host** (its own drafts reach it as proposals). To anyone else each
+  page replays as `SPACE_PAGE_CREATED` with `seq`, `version_hash`,
+  `last_editor_user_id` and `conflict` (to a v_48 peer), drafts as their
+  canonical base. Only the host's replay updates a held page.
+- **Host versions under a stale view**: a member that has not yet seen the
+  host's v_48 capabilities still mirrors a host payload carrying `seq` as
+  the host's version (live or sync), never last write wins.
 
 ## Moderation
 
@@ -260,10 +284,17 @@ forced. See [`moderation.md`](./moderation.md).
 - **Gates first**: a refused or forged proposal changes nothing and is
   answered `refused`/`access`.
 - **Archived space**: content is dropped by the post-decrypt archived
-  gate. *Deviation:* that gate runs before the handler, so the host
-  sends no `refused`/`archived` ack and a member's draft stays pending
-  until the space is unarchived (local writes in an archived space are 403
-  anyway).
+  gate, which tells the page sequencer: the host answers a member's
+  proposal `refused`/`archived`, and the member restores the canonical
+  version and stops waiting (local writes in an archived space are 403).
+- **Ownership transfer while drafts are pending** *(known limitation)*:
+  a member's draft is proposed to whichever household hosts the space
+  when the forwarder sends it. If the space's host changes while drafts
+  are pending, the new host does not hold the old host's history or
+  sides, so a draft based on the old host's `seq` arrives with an unknown
+  base and becomes a conflict side there (nothing is lost; a user
+  resolves it), and an outstanding proposal to the old host is only
+  re-sent on the next flush.
 - **Delete while pending or conflicted**: `SPACE_PAGE_DELETED` removes
   the page, its open sides and the draft base. A later proposal for it is
   answered `gone`, the member keeps the words, and the SPA offers "Save

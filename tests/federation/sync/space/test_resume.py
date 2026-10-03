@@ -59,6 +59,10 @@ class _FakeSpaceRepo:
     async def list_member_instances(self, space_id: str) -> list[str]:
         return list(self._members)
 
+    async def get(self, space_id: str):
+        # Hosted elsewhere: this provider is a member household.
+        return SimpleNamespace(id=space_id, owner_instance_id="the-host")
+
 
 class _FakePostRepo:
     """Posts + comments live on the same repo to mirror prod."""
@@ -135,6 +139,12 @@ class _FakeListSinceRepo:
                 return self._lists[:limit]
 
             return _lists
+        if name == "get_draft_base":
+
+            async def _base(page_id, *, space_id):
+                return getattr(self, "bases", {}).get(page_id)
+
+            return _base
         if name == "list_conflict_sides":
 
             async def _sides(page_id, *, space_id):
@@ -656,6 +666,41 @@ async def test_replayed_pages_carry_seq_for_a_v48_peer_only(provider_factory):
     assert by_peer["peer-a"]["seq"] == 6
     assert by_peer["peer-a"]["conflict"] == []
     assert "seq" not in by_peer["peer-b"]
+
+
+async def test_no_page_is_replayed_to_the_v48_host(provider_factory):
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    iso = (base + timedelta(minutes=1)).isoformat()
+    provider, fed, _ = provider_factory(pages=[_page(0, iso)], members=["the-host"])
+    await provider.handle_request(
+        _event("the-host", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert not [
+        s for s in fed.sent if s["type"] is FederationEventType.SPACE_PAGE_CREATED
+    ]
+
+
+async def test_a_draft_is_replayed_as_its_canonical_base(provider_factory):
+    from socialhome.domain.page_version import DraftBase
+
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    iso = (base + timedelta(minutes=1)).isoformat()
+    draft = replace(_page(0, iso), content="my draft", seq=4, pending_base_seq=3)
+    create = replace(_page(1, iso), seq=0, pending_base_seq=0)
+    provider, fed, _ = provider_factory(pages=[draft, create], members=["peer-a"])
+    provider._page_repo.bases = {
+        draft.id: DraftBase(title="T", content="canonical", seq=3, by="u"),
+        create.id: DraftBase(title="", content="", seq=0, by="u"),
+    }
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    pages = [
+        s["payload"]
+        for s in fed.sent
+        if s["type"] is FederationEventType.SPACE_PAGE_CREATED
+    ]
+    assert [(p["content"], p["seq"]) for p in pages] == [("canonical", 3)]
 
 
 async def test_handle_request_replays_stickies(provider_factory):

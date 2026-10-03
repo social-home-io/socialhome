@@ -582,6 +582,9 @@ class SequenceResult:
     page: Page | None = None
     #: The proposal created the page (its first version).
     created: bool = False
+    #: The open sides as committed with this version (snapshotted under
+    #: the page lock, so version N ships with N's sides).
+    sides: tuple[PageConflictSide, ...] = ()
 
 
 def _now() -> str:
@@ -861,6 +864,7 @@ class PageConflictService(BusPublisherMixin):
                 actor=proposal.actor_user_id,
                 sequenced=sequenced,
                 created=result.created,
+                sides=result.sides,
             )
             if result.outcome is SequenceOutcome.SIDE:
                 await self._emit(
@@ -921,7 +925,14 @@ class PageConflictService(BusPublisherMixin):
             state.retired.extend(s for s in state.sides if s.hash in proposal.resolves)
             state.sides = keep
         side_hashes = {s.hash for s in state.sides}
-        if (ph == cur_hash or ph in side_hashes) and not state.retired:
+        # A page the host never sequenced (seq 0: a pre-v_48 row) gets its
+        # first canonical version even from a duplicate — and is broadcast.
+        unsequenced = page.seq == 0
+        if (
+            (ph == cur_hash or ph in side_hashes)
+            and not state.retired
+            and not unsequenced
+        ):
             return SequenceResult(SequenceOutcome.DUPLICATE, None, page)
         if proposal.base_seq is not None and proposal.base_seq > page.seq:
             return SequenceResult(SequenceOutcome.REFUSED, "bad_base", page)
@@ -960,23 +971,33 @@ class PageConflictService(BusPublisherMixin):
             page.cover_image_url,
         )
         changed_sides = [s.hash for s in state.sides] != before_sides
-        if not changed_body and not changed_sides:
+        if not changed_body and not changed_sides and not unsequenced:
             return SequenceResult(SequenceOutcome.DUPLICATE, None, page)
-        for side in state.retired:
-            await self._remember_side(page, side, space_id)
         now = _now()
+        history = [self._version_of(page, side, space_id) for side in state.retired]
         updated = replace(page, seq=page.seq + 1, updated_at=now)
         if changed_body:
             assert new_body is not None
-            await self._remember_page(page, space_id)
-            if absorbed:
-                await self._remember(
+            history.append(
+                self._version_row(
                     page,
-                    title=proposal.title,
-                    content=proposal.content,
-                    cover_image_url=proposal.cover_image_url,
-                    edited_by=proposal.actor_user_id,
-                    space_id=space_id,
+                    space_id,
+                    title=page.title,
+                    content=page.content,
+                    cover_image_url=page.cover_image_url,
+                    edited_by=_editor(page),
+                )
+            )
+            if absorbed:
+                history.append(
+                    self._version_row(
+                        page,
+                        space_id,
+                        title=proposal.title,
+                        content=proposal.content,
+                        cover_image_url=proposal.cover_image_url,
+                        edited_by=proposal.actor_user_id,
+                    )
                 )
             title, content, cover = new_body
             updated = replace(
@@ -987,13 +1008,56 @@ class PageConflictService(BusPublisherMixin):
                 last_editor_user_id=proposal.actor_user_id or page.last_editor_user_id,
                 last_edited_at=now,
             )
-        await self._pages.save(updated, space_id=space_id)
-        await self._pages.set_conflict_sides(
-            page.id, space_id=space_id, sides=state.sides
-        )
+        # One transaction: history, the page row and its sides together;
+        # the canonical version is published only after it commits.
+        if not await self._pages.commit_version(
+            updated, space_id=space_id, history=history, sides=state.sides
+        ):
+            return SequenceResult(SequenceOutcome.REFUSED, "gone", page)
         stored = await self._pages.get_space_page(page.id, space_id=space_id)
         outcome = SequenceOutcome.SIDE if as_side else SequenceOutcome.APPLIED
-        return SequenceResult(outcome, None, stored or updated)
+        return SequenceResult(
+            outcome,
+            None,
+            stored or updated,
+            created=unsequenced,
+            sides=tuple(state.sides),
+        )
+
+    @staticmethod
+    def _version_row(
+        page: Page,
+        space_id: str,
+        *,
+        title: str,
+        content: str,
+        cover_image_url: str | None,
+        edited_by: str,
+    ) -> PageVersion:
+        """A history row (numbered by the repo inside the transaction)."""
+        return PageVersion(
+            id=uuid.uuid4().hex,
+            page_id=page.id,
+            version=0,
+            title=title,
+            content=content,
+            edited_by=edited_by or page.created_by,
+            edited_at=_now(),
+            space_id=space_id,
+            cover_image_url=cover_image_url,
+        )
+
+    def _version_of(
+        self, page: Page, side: PageConflictSide, space_id: str
+    ) -> PageVersion:
+        return self._version_row(
+            page,
+            space_id,
+            title=side.title,
+            content=side.content,
+            cover_image_url=side.cover_image_url,
+            edited_by=side.by,
+        )
 
     def _add_side(self, state: _HostState, proposal: Proposal, ph: str) -> None:
         """One side per user (a newer one retires the older), then the
@@ -1021,7 +1085,10 @@ class PageConflictService(BusPublisherMixin):
         )
 
         def _bytes() -> int:
-            return sum(len(s.content.encode("utf-8")) for s in state.sides)
+            return sum(
+                len(s.content.encode("utf-8")) + len(s.title.encode("utf-8"))
+                for s in state.sides
+            )
 
         while len(state.sides) > 1 and (
             len(state.sides) > MAX_CONFLICT_SIDES or _bytes() > SIDES_MAX_BYTES
@@ -1069,8 +1136,21 @@ class PageConflictService(BusPublisherMixin):
         proposer_instance: str,
         reason: str,
     ) -> None:
-        """Tell ``proposer_instance`` its proposal was refused (``reason``)."""
-        page = await self._pages.get_space_page(page_id, space_id=space_id)
+        """Tell ``proposer_instance`` its proposal was refused (``reason``) —
+        at most once per (sender, page) per minute, so a flood of bad
+        proposals cannot turn the host into an amplifier. ``rate_limited``
+        carries no page state (the proposer keeps its draft for a retry)."""
+        if not self._limiter.is_allowed(
+            f"page-refusals:{proposer_instance}:{space_id}:{page_id}",
+            limit=1,
+            window_s=60,
+        ):
+            return
+        page = (
+            None
+            if reason == "rate_limited"
+            else await self._pages.get_space_page(page_id, space_id=space_id)
+        )
         await self._ack(
             space_id=space_id,
             page_id=page_id,
@@ -1082,6 +1162,32 @@ class PageConflictService(BusPublisherMixin):
                 reason=reason,
             ),
             proposer_instance=proposer_instance,
+        )
+
+    async def on_archived_write(self, event: Any, space: Any) -> None:
+        """The archived-space gate refused a write. A member's page proposal
+        to us (the host) is answered ``refused/archived`` so the member
+        stops waiting for it."""
+        if space is None or space.owner_instance_id != self._own_instance_id:
+            return
+        if event.event_type not in (
+            FederationEventType.SPACE_PAGE_CREATED,
+            FederationEventType.SPACE_PAGE_UPDATED,
+        ):
+            return
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        if "base_seq" not in payload or "sequenced" in payload:
+            return
+        proposal = proposal_from_wire(payload)
+        page_id = str(payload.get("id") or payload.get("page_id") or "")
+        if proposal is None or not page_id:
+            return
+        await self.refuse(
+            space_id=str(space.id),
+            page_id=page_id,
+            proposal_hash=proposal.hash,
+            proposer_instance=str(event.from_instance or ""),
+            reason="archived",
         )
 
     async def _ack(
@@ -1136,10 +1242,11 @@ class PageConflictService(BusPublisherMixin):
         actor: str,
         sequenced: Sequenced | None,
         created: bool,
+        sides: Sequence[PageConflictSide] = (),
     ) -> None:
         """Publish the canonical version — the outbound broadcasts it to
-        every member household (it doubles as the proposer's ack)."""
-        sides = await self.sides(space_id, page.id)
+        every member household (it doubles as the proposer's ack).
+        ``sides`` are the ones committed with it."""
         extras = canonical_extras(page, sides, sequenced)
         if created:
             await self._emit(
@@ -1196,6 +1303,15 @@ class PageConflictService(BusPublisherMixin):
         """Store a local edit as an optimistic draft on top of the host's
         version (call under :meth:`lock_for`). The draft's base stays the
         canonical version it was first made from until the host answers."""
+        open_now = (
+            {s.hash for s in await self.sides(space_id, page.id)} if resolves else set()
+        )
+
+        def _capped(*groups: Sequence[str]) -> tuple[str, ...]:
+            # Only sides still open, at most what one proposal may carry.
+            merged = dict.fromkeys(r for g in groups for r in g if r in open_now)
+            return tuple(merged)[:MAX_RESOLVES]
+
         if page.pending_base_seq is None:
             await self._pages.set_draft_base(
                 page.id,
@@ -1206,7 +1322,7 @@ class PageConflictService(BusPublisherMixin):
                     cover_image_url=page.cover_image_url,
                     seq=page.seq,
                     by=_editor(page),
-                    resolves=tuple(resolves),
+                    resolves=_capped(resolves),
                 ),
             )
         elif resolves:
@@ -1215,9 +1331,7 @@ class PageConflictService(BusPublisherMixin):
                 await self._pages.set_draft_base(
                     page.id,
                     space_id=space_id,
-                    base=replace(
-                        base, resolves=tuple(dict.fromkeys((*base.resolves, *resolves)))
-                    ),
+                    base=replace(base, resolves=_capped(resolves, base.resolves)),
                 )
         draft = replace(
             updated,

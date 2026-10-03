@@ -742,9 +742,21 @@ async def test_a_new_page_from_a_non_host_lands_unsequenced(setup):
 
 async def test_under_a_legacy_host_records_are_taken_whole(setup):
     r, c, kp = setup
-    r._page_conflicts = _FakeConflicts("legacy")
-    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": 3}])
+    conflicts = _FakeConflicts("legacy")
+    r._page_conflicts = conflicts
+    await _send(r, kp, "pages", [_PAGE_RECORD])
     assert [p.content for p in c.pages] == ["Hi again"]
+    # … but a record from the host WITH ``seq`` is its version, mirrored
+    # even before we saw its v_48 capabilities.
+    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": 3}])
+    assert [m["version"].seq for m in conflicts.mirrored] == [3]
+
+
+async def test_the_host_takes_no_page_record(setup):
+    r, c, kp = setup
+    r._page_conflicts = _FakeConflicts("host", host="self")
+    await _send(r, kp, "pages", [{**_PAGE_RECORD, "seq": 3}, _PAGE_RECORD])
+    assert c.pages == []
 
 
 async def test_stickies(setup):

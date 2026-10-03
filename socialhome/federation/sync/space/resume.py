@@ -43,6 +43,7 @@ re-emitted event with no special-case logic and dedups by primary key.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -400,6 +401,14 @@ class SpaceSyncResumeProvider:
     ) -> int:
         if self._page_repo is None:
             return 0
+        sequenced = await self._federation.peer_supports(
+            to, min_version=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES
+        )
+        space = await self._space_repo.get(space_id)
+        if sequenced and space is not None and space.owner_instance_id == to:
+            # v_48: the host sequences the pages — a replay to it could only
+            # roll it back. Our own drafts reach it as proposals (forwarder).
+            return 0
         pages = await self._page_repo.list_since(
             space_id,
             since,
@@ -408,12 +417,23 @@ class SpaceSyncResumeProvider:
         # v_48: each replayed page carries the host's ``seq`` (and, from the
         # host, its version hash + conflict list), so a member mirrors it by
         # sequence; a replay from anyone but the host never updates a page
-        # the receiver holds. An older peer gets the plain fields.
-        sequenced = await self._federation.peer_supports(
-            to, min_version=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES
-        )
+        # the receiver holds. An unacknowledged local draft is never
+        # replayed — the canonical version it was made from is (or nothing,
+        # for an unsequenced create). An older peer gets the plain fields.
         payloads: dict[str, dict] = {}
+        replayed = []
         for page in pages:
+            if page.pending_base_seq is not None:
+                base = await self._page_repo.get_draft_base(page.id, space_id=space_id)
+                if base is None or not base.title:
+                    continue
+                page = replace(
+                    page,
+                    title=base.title,
+                    content=base.content,
+                    cover_image_url=base.cover_image_url,
+                    seq=base.seq,
+                )
             payload = _page_to_payload(page)
             if sequenced:
                 sides = await self._page_repo.list_conflict_sides(
@@ -428,6 +448,8 @@ class SpaceSyncResumeProvider:
                     conflict=[side_to_wire(s) for s in sides],
                 )
             payloads[page.id] = payload
+            replayed.append(page)
+        pages = replayed
         return await self._send_each(
             pages,
             FederationEventType.SPACE_PAGE_CREATED,
