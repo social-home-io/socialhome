@@ -177,6 +177,17 @@ class SpaceConfigOutbound:
         is_owner = bool(own) and space.owner_instance_id == own
         if seed is None and not is_owner:
             return
+        # An INBOUND copy (``FederationService`` mirrors every received
+        # SPACE_CONFIG_CHANGED onto the bus for realtime) is relayed by the
+        # owner only. The owner answers a delegated admin's edit with its own
+        # snapshot; were the admin — also a seed-holder — to re-broadcast that
+        # copy, owner and admin would bounce the event back and forth forever,
+        # flooding every member household's inbox. Only local edits (a
+        # :class:`SpaceConfigEventType` value) federate from a non-owner.
+        if event.event_type == FederationEventType.SPACE_CONFIG_CHANGED.value and (
+            not is_owner
+        ):
+            return
         min_proto_version: int | None = (
             FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS
             if seed is not None

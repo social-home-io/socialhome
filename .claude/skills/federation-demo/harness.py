@@ -10117,6 +10117,7 @@ def cmd_unpair() -> None:
     spaces_on_c = _space_rows("c", a["instance_id"])
 
     started = time.monotonic()
+    a_log_at, c_log_at = _log_size("a"), _log_size("c")
     s, resp = _pairing_call(
         "a",
         f"http://127.0.0.1:{a['port']}/api/pairing/connections/{c['instance_id']}",
@@ -10125,7 +10126,20 @@ def cmd_unpair() -> None:
     )
     _must("a unpairs c", s, resp, ok=(200,))
     if resp.get("peer_notified") is not True:
-        raise SystemExit(f"unpair: a could not tell c (response={resp!r})")
+        # a's own account of why the first notify did not land (timeout,
+        # HTTP status, RTC fallback) plus c's inbox view of the same window.
+        evidence = [
+            f"    a: {line}"
+            for line in _log_lines_matching("a", c["instance_id"], offset=a_log_at)
+        ] + [
+            f"    c: {line}"
+            for line in _log_lines_matching("c", "federation", offset=c_log_at)
+        ]
+        raise SystemExit(
+            f"unpair: a could not tell c after "
+            f"{time.monotonic() - started:.1f}s (response={resp!r})\n"
+            + "\n".join(evidence[-40:])
+        )
     print(f"  a unpaired c in {time.monotonic() - started:.1f}s (peer_notified) ✓")
 
     if c["instance_id"] in _peer_ids(a):
