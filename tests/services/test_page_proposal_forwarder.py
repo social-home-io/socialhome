@@ -28,6 +28,7 @@ class _Conflicts:
         self.mode_ = PageMode.MEMBER
         self.drafts: dict[str, Proposal] = {}
         self.rebased: list[tuple[str, int]] = []
+        self.marked: list[tuple[str, str]] = []
 
     async def mode(self, space_id):
         return self.mode_, HOST
@@ -37,6 +38,9 @@ class _Conflicts:
 
     async def rebase_draft(self, space_id, page_id, *, sent, seq):
         self.rebased.append((sent.content, seq))
+
+    async def mark_sent(self, space_id, page_id, proposal_hash):
+        self.marked.append((page_id, proposal_hash))
 
 
 class _Pages:
@@ -112,6 +116,8 @@ async def test_a_draft_is_proposed_to_the_host_once(env):
     )
     assert len(env.fed.sent) == 1
     assert env.fwd.outstanding() == {(SID, "pg"): _draft("one").hash}
+    # What went out is remembered on the draft (settle-by-content needs it).
+    assert env.conflicts.marked == [("pg", _draft("one").hash)]
 
 
 async def test_an_answer_releases_the_next_draft_rebased(env):

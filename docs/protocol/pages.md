@@ -198,11 +198,17 @@ and `proposal_hash` is the hash of the draft.
 | Incoming | No draft | Draft, not answered | Draft answered |
 |---|---|---|---|
 | refusal | — | — | settle (any `seq`): `rate_limited` keeps the draft; `gone` keeps the words but stops proposing; anything else restores the host's version (or the draft's base when the refusal carries no state) |
-| `seq` > local | apply; previous body → history; sides := `conflict` | if the version already holds the draft (as its body or as one of its sides) → settle like an answer; else keep the draft on top, the host's version → history, `seq` updated, sides := `conflict` | apply; draft and its base cleared; sides := `conflict` |
+| `seq` > local | apply; previous body → history; sides := `conflict` | if the draft was **sent** (unchanged since), resolves nothing, and the version's body is the draft — or a side of it is ours (our actor, our base) → settle like an answer; else keep the draft on top, the host's version → history, `seq` updated, sides := `conflict` | apply; draft and its base cleared; sides := `conflict` |
 | `seq` == local | ignored | ignored (an answer to an older proposal only releases the next draft) | apply / settle |
 | `seq` < local | ignored | ignored | **late answer** (it arrived after a newer version): settle — the draft is sequenced; the newest host version mirrored meanwhile (the newest history row) is shown |
 
-So a draft settles whatever order the host's versions arrive in, and even
+A resolution draft hashes like the version it keeps (its `resolves` are
+not in the hash), and an unsent draft has never reached the host — so
+neither ever settles by content; they always go to the host, which
+acknowledges a duplicate and applies `resolves`. The hash of the draft as
+last sent is kept on its base row (`sent`), surviving a restart.
+
+So a sent draft settles whatever order the host's versions arrive in, and even
 if its own answer is lost (a resent proposal the host already absorbed is
 answered `applied` at the current `seq`). A forwarder entry for a page with
 no pending draft is dropped, so a settle never strands the page.

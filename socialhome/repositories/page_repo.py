@@ -880,6 +880,7 @@ class SqlitePageRepo:
             cover_image_url=base.cover_image_url,
             seq=base.seq,
             resolves=base.resolves,
+            sent=base.sent,
         )
 
         def _run(conn):
@@ -913,6 +914,7 @@ class SqlitePageRepo:
             seq=v.seq,
             by=str(row["snapshot_by"]),
             resolves=v.resolves,
+            sent=v.sent,
         )
 
     async def clear_draft_base(self, page_id: str, *, space_id: str) -> None:
@@ -950,6 +952,7 @@ class _StoredVersion:
     cover_image_url: str | None = None
     seq: int = 0
     resolves: tuple[str, ...] = ()
+    sent: str | None = None
 
 
 def encode_side_body(
@@ -959,6 +962,7 @@ def encode_side_body(
     cover_image_url: str | None = None,
     seq: int = 0,
     resolves: Sequence[str] = (),
+    sent: str | None = None,
 ) -> str:
     """A whole version as a snapshot ``body`` — canonical JSON."""
     data: dict = {"content": content, "title": title}
@@ -968,6 +972,8 @@ def encode_side_body(
         data["seq"] = int(seq)
     if resolves:
         data["resolves"] = list(resolves)
+    if sent:
+        data["sent"] = sent
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -982,18 +988,20 @@ def decode_side_body(body: str, *, fallback_title: str) -> _StoredVersion:
         if (
             isinstance(data, dict)
             and {"content", "title"} <= set(data)
-            and set(data) <= {"content", "title", "cover", "seq", "resolves"}
+            and set(data) <= {"content", "title", "cover", "seq", "resolves", "sent"}
             and isinstance(data["content"], str)
             and isinstance(data["title"], str)
         ):
             cover = data.get("cover")
             resolves = data.get("resolves") or []
+            sent = data.get("sent")
             return _StoredVersion(
                 title=data["title"],
                 content=data["content"],
                 cover_image_url=cover if isinstance(cover, str) else None,
                 seq=int(data.get("seq") or 0),
                 resolves=tuple(str(r) for r in resolves if isinstance(r, str)),
+                sent=sent if isinstance(sent, str) else None,
             )
     return _StoredVersion(title=fallback_title, content=body)
 

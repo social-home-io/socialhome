@@ -221,6 +221,7 @@ class PageProposalForwarder:
                 return False
             # A direct send that failed is in the outbox already: it stays
             # the outstanding proposal — no second row for this page.
+        await self._conflicts.mark_sent(space_id, page_id, proposal.hash)
         return True
 
     def outstanding(self) -> dict[tuple[str, str], str]:

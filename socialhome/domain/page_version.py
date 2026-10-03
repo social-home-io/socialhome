@@ -62,6 +62,10 @@ class DraftBase:
     by: str
     cover_image_url: str | None = None
     resolves: tuple[str, ...] = ()
+    #: Hash of the draft as last SENT to the host (``None``: never sent).
+    #: Only a sent, resolve-free draft may be settled by a host version's
+    #: content — an unsent one always goes to the host.
+    sent: str | None = None
 
 
 def version_hash(title: str, content: str, cover_image_url: str | None = None) -> str:

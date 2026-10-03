@@ -1505,15 +1505,8 @@ class PageConflictService(BusPublisherMixin):
                 # A newer version settles our draft when it answers it — or,
                 # whatever order versions arrive in, when it already holds
                 # the draft: as its body, or as one of its sides.
-                held = draft_hash is not None and (
-                    await asyncio.to_thread(
-                        version_hash,
-                        version.title,
-                        version.content,
-                        version.cover_image_url,
-                    )
-                    == draft_hash
-                    or draft_hash in {s.hash for s in version.conflict}
+                held = draft_hash is not None and await self._holds_sent_draft(
+                    space_id, page, draft_hash, version
                 )
                 settles = answers_draft or held
                 await self._mirror_apply(
@@ -1569,6 +1562,47 @@ class PageConflictService(BusPublisherMixin):
         if settled is not None:
             await self._emit(settled)
         return changed
+
+    async def _holds_sent_draft(
+        self, space_id: str, page: Page, draft_hash: str, version: CanonicalVersion
+    ) -> bool:
+        """May ``version`` settle our draft by its content, without the
+        host's answer to it? Only a draft that was SENT, unchanged since,
+        and that resolves nothing (a resolution hashes like the version it
+        keeps — its ``resolves`` are not in the hash), and then only when
+        the version's BODY is the draft, or a side of it is ours (our
+        actor, our base). Anything else stays pending and goes to the host,
+        which acknowledges a duplicate and applies ``resolves``."""
+        base = await self._pages.get_draft_base(page.id, space_id=space_id)
+        if base is None or base.sent != draft_hash or base.resolves:
+            return False
+        body = await asyncio.to_thread(
+            version_hash, version.title, version.content, version.cover_image_url
+        )
+        if body == draft_hash:
+            return True
+        actor = page.last_editor_user_id or page.created_by
+        return any(
+            s.hash == draft_hash
+            and s.by == actor
+            and s.base_seq == page.pending_base_seq
+            for s in version.conflict
+        )
+
+    async def mark_sent(self, space_id: str, page_id: str, proposal_hash: str) -> None:
+        """The forwarder sent ``proposal_hash``: remember it on the draft's
+        base (it survives a restart) — if the draft is still that one."""
+        async with self.lock_for(space_id, page_id):
+            page = await self._pages.get_space_page(page_id, space_id=space_id)
+            if page is None or page.pending_base_seq is None:
+                return
+            if await asyncio.to_thread(_page_hash, page) != proposal_hash:
+                return
+            base = await self._pages.get_draft_base(page_id, space_id=space_id)
+            if base is not None and base.sent != proposal_hash:
+                await self._pages.set_draft_base(
+                    page_id, space_id=space_id, base=replace(base, sent=proposal_hash)
+                )
 
     async def _settle_late(self, space_id: str, page: Page) -> None:
         """Drop a draft the host already sequenced, showing the newest host

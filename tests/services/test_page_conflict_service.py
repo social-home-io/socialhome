@@ -1026,15 +1026,80 @@ def test_parsers_bound_seq():
 
 
 async def test_a_newer_version_holding_the_draft_as_a_side_settles_it(member):
+    """Only a SENT draft settles by content — and by a side only when the
+    side is ours (our actor, our base)."""
+    env = member
+    page = await _page(env)
+    async with env.svc.lock_for(SID, env.pid):
+        await env.svc.member_draft(
+            page,
+            replace(page, content="mine", last_editor_user_id="u-me"),
+            space_id=SID,
+            actor_user_id="u-me",
+        )
+    h = version_hash("T", "mine")
+    ours = PageConflictSide(
+        hash=h, title="T", content="mine", by="u-me", at="t1", base_seq=1
+    )
+    theirs = replace(ours, by="u-other")
+    # Not sent yet: nothing settles it.
+    await env.svc.mirror(
+        space_id=SID, page_id=env.pid, version=_version(page, "v2", 2, sides=[ours])
+    )
+    assert (await _page(env)).pending_base_seq == 1
+    await env.svc.mark_sent(SID, env.pid, h)
+    # Sent, but the side is somebody else's: still pending.
+    await env.svc.mirror(
+        space_id=SID, page_id=env.pid, version=_version(page, "v3", 3, sides=[theirs])
+    )
+    assert (await _page(env)).pending_base_seq == 1
+    # Sent and the side is ours: settled.
+    await env.svc.mirror(
+        space_id=SID, page_id=env.pid, version=_version(page, "v4", 4, sides=[ours])
+    )
+    page = await _page(env)
+    assert (page.content, page.pending_base_seq) == ("v4", None)
+    assert env.bus.of(PageProposalSettled)[-1].proposal_hash == h
+
+
+async def test_a_sent_draft_settles_when_a_newer_body_is_it(member):
     env = member
     await _draft(env, "mine")
+    await env.svc.mark_sent(SID, env.pid, version_hash("T", "mine"))
     page = await _page(env)
-    side = PageConflictSide(
-        hash=version_hash("T", "mine"), title="T", content="mine", by="u-me", at="t1"
-    )
     await env.svc.mirror(
-        space_id=SID, page_id=env.pid, version=_version(page, "other", 3, sides=[side])
+        space_id=SID, page_id=env.pid, version=_version(page, "mine", 2)
     )
+    assert (await _page(env)).pending_base_seq is None
+
+
+async def test_a_sent_resolution_never_settles_by_content(member):
+    env = member
+    side = PageConflictSide(
+        hash=version_hash("T", "s"), title="T", content="s", by="u-b", at="t1"
+    )
+    await env.repo.set_conflict_sides(env.pid, space_id=SID, sides=[side])
     page = await _page(env)
-    assert (page.content, page.pending_base_seq) == ("other", None)
-    assert env.bus.of(PageProposalSettled)[-1].proposal_hash == side.hash
+    async with env.svc.lock_for(SID, env.pid):
+        await env.svc.member_draft(
+            page,
+            replace(page, content="s"),
+            space_id=SID,
+            actor_user_id="u-me",
+            resolves=[side.hash],
+        )
+    await env.svc.mark_sent(SID, env.pid, side.hash)
+    await env.svc.mirror(
+        space_id=SID, page_id=env.pid, version=_version(page, "s", 2, sides=[side])
+    )
+    assert (await _page(env)).pending_base_seq == 1
+
+
+async def test_mark_sent_ignores_a_changed_draft(member):
+    env = member
+    await _draft(env, "one")
+    await env.svc.mark_sent(SID, env.pid, version_hash("T", "something else"))
+    assert (await env.repo.get_draft_base(env.pid, space_id=SID)).sent is None
+    await env.svc.mark_sent(SID, env.pid, version_hash("T", "one"))
+    base = await env.repo.get_draft_base(env.pid, space_id=SID)
+    assert base.sent == version_hash("T", "one")

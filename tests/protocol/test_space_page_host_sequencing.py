@@ -1497,3 +1497,111 @@ async def test_a_merged_draft_settles_on_its_late_ack(mesh):
     assert await _seq(c, pid) == 4
     await _pump(mesh)
     _converged(await _states(mesh, pid))
+
+
+# ── Review round 5: only a SENT, resolve-free draft settles by content ──
+
+
+async def _host_offline_for(a: House, h: House, offline: bool) -> None:
+    await a.db.enqueue(
+        "UPDATE remote_instances SET unreachable_since="
+        + ("datetime('now')" if offline else "NULL")
+        + " WHERE id=?",
+        (h.iid,),
+    )
+
+
+async def _reconnect(a: House, h: House, mesh) -> None:
+    from socialhome.app_keys import event_bus_key
+    from socialhome.domain.events import ConnectionReachable
+
+    await _host_offline_for(a, h, False)
+    await a.app[event_bus_key].publish(ConnectionReachable(instance_id=h.iid))
+    await _pump(mesh)
+
+
+async def _with_bert_side(mesh) -> tuple[str, list[str]]:
+    a, b, h = mesh["A"], mesh["B"], mesh["H"]
+    pid = await _create(mesh)
+    await _edit(h, pid, _with(BASE, p2="hanna p2"))
+    await _edit(b, pid, _with(BASE, p2="bert p2"))
+    await _pump(mesh)
+    sides = await _sides(a, pid)
+    assert len(sides) == 1
+    return pid, sides
+
+
+async def test_r4_1_an_unsent_side_resolution_survives_a_newer_host_version(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid, sides = await _with_bert_side(mesh)
+    await _host_offline_for(a, h, True)
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages/{pid}/resolve-conflict",
+        json={"resolution": "side", "side": sides[0], "sides": sides},
+        headers=a.headers,
+    )
+    assert r.status == 200, await r.text()
+    assert _sent_to(a, h) == []
+    # The host edits elsewhere; bert's side stays open in that version.
+    await _edit(h, pid, _with(BASE, p2="hanna p2", p5="hanna p5"))
+    await _pump(mesh)
+    assert await _pending(a, pid) is not None  # not settled by content
+    await _reconnect(a, h, mesh)
+    assert "bert p2" in await _content(h, pid)
+    assert await _sides(h, pid) == []
+    _converged(await _states(mesh, pid))
+
+
+async def test_r4_1_an_unsent_mine_resolution_survives_a_newer_host_version(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid, sides = await _with_bert_side(mesh)
+    await _host_offline_for(a, h, True)
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages/{pid}/resolve-conflict",
+        json={"resolution": "mine", "sides": sides},
+        headers=a.headers,
+    )
+    assert r.status == 200, await r.text()
+    # A newer host version with the same body: carl's conflicting edit
+    # only adds a side.
+    seq_before = await _seq(h, pid)
+    c = mesh["C"]
+    late = {
+        "id": pid,
+        "page_id": pid,
+        "space_id": SID,
+        "title": "Rules",
+        "content": _with(BASE, p2="carl p2"),
+        "actor_user_id": c.user_id,
+        "base_seq": 1,
+        "base_hash": version_hash("Rules", BASE),
+    }
+    await _receive(h, _event(c, FET.SPACE_PAGE_UPDATED, late, h))
+    await _pump(mesh)
+    assert await _seq(a, pid) > seq_before  # the newer version reached A
+    assert await _pending(a, pid) is not None
+    await _reconnect(a, h, mesh)
+    # Anna's resolution retired the side she saw (bert's); carl's, which
+    # she never saw, stays open.
+    page = await _page(h, pid)
+    assert await _content(h, pid) == _with(BASE, p2="hanna p2")
+    assert [s["by"] for s in page["conflict"]["sides"]] == [mesh["C"].user_id]
+    _converged(await _states(mesh, pid))
+
+
+async def test_r4_1_an_unsent_edit_equal_to_another_users_side_is_still_proposed(mesh):
+    a, h = mesh["A"], mesh["H"]
+    pid, _sides_ = await _with_bert_side(mesh)
+    await _host_offline_for(a, h, True)
+    # Anna independently writes exactly bert's version (not via resolve).
+    await _edit(a, pid, _with(BASE, p2="bert p2"))
+    await _edit(h, pid, _with(BASE, p2="hanna p2", p5="hanna p5"))
+    await _pump(mesh)
+    assert await _pending(a, pid) is not None  # bert's side is not ours
+    await _reconnect(a, h, mesh)
+    assert await _pending(a, pid) is None
+    _converged(await _states(mesh, pid))
+    # The host had it: anna's proposal reached it and was sequenced.
+    assert any(
+        p.get("sequenced", {}).get("proposer_instance") == a.iid for _et, p in a.seen
+    )
