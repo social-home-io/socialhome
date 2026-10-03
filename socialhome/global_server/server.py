@@ -369,6 +369,8 @@ class GfsApp:
             fed_repo=repos.federation,
             epoch_repo=repos.space_epochs,
             relay=envelope_relay,
+            # What households pin from ``/gfs/info`` and sign into each request.
+            gfs_instance_id=config.instance_id,
         )
         # Periodic retention sweep — purges expired admin sessions, expired
         # highlight publications, aged pair tokens, and envelopes whose TTL
@@ -481,10 +483,12 @@ class GfsApp:
         # Recurring retention sweep — runs the purge again on its first tick
         # then hourly (the boot purge above stays for an immediate clean).
         await self.services.maintenance.start()
+        await self.services.member_publish.start()
 
     async def _on_cleanup(self, app: web.Application) -> None:
         log.info("GFS: shutting down")
         await self.services.maintenance.stop()
+        await self.services.member_publish.stop()
         await self.services.cluster.stop()
         await self.services.ws_registry.close_all()
         session = app.get(K.gfs_http_session_key)

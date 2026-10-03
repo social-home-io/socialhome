@@ -38,6 +38,7 @@ guaranteed is that queued envelopes are delivered in queue order.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -45,12 +46,8 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from .public import ClientIpResolver
+from .public import ClientIpResolver, build_window_limiter
 
-# The window-limiter factory is module-private in ``.public`` and every
-# limiter on this server is built from it; importing it beats a fourth
-# hand-rolled copy of the same middleware.
-from .public import _build_window_limiter
 
 if TYPE_CHECKING:
     from .repositories import AbstractGfsEnvelopeQueueRepo, AbstractGfsFederationRepo
@@ -195,6 +192,16 @@ QUEUE_KIND_RELAY: str = RELAY_FRAME_TYPE
 RELAY_QUEUE_MAX_PER_RECIPIENT: int = 1000
 RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 16 * 1024 * 1024
 
+#: Server-wide ceiling on bytes held in queued RELAY rows. The per-recipient
+#: caps bound one household; this bounds the sum, so N self-subscribed
+#: households cannot turn every publish into N stored copies without limit.
+#: Past it, offline subscribers simply get no queued copy (live pushes are
+#: unaffected) and catch up through space sync.
+RELAY_QUEUE_MAX_TOTAL_BYTES: int = 256 * 1024 * 1024
+
+#: Max simultaneous live pushes for one member-published item.
+RELAY_FAN_OUT_CONCURRENCY: int = 8
+
 
 class InvalidEnvelope(ValueError):
     """The posted body is not a well-formed routing envelope."""
@@ -307,36 +314,71 @@ class GfsEnvelopeRelay:
             return
         log.debug("gfs.envelope: queued for offline recipient %s", to_instance)
 
-    async def push_or_queue_relay(self, to_instance: str, frame: dict) -> bool:
-        """Push a member-published space item to a subscriber, or queue it.
+    async def fan_out_relay(
+        self,
+        targets: list[str],
+        *,
+        queue_ok: set[str],
+        frame: dict,
+    ) -> int:
+        """Deliver a member-published space item to *targets*.
 
         ``frame`` is the identity-free fan-out frame (``SpaceItemFrame``
-        shape); it goes out as ``{type: "relay", **frame}``. A live socket
-        takes it at once; otherwise it waits in the shared queue under the
-        RELAY caps for :data:`ENVELOPE_QUEUE_TTL_SECONDS`. Returns whether the
-        item was pushed or queued (``False`` = tail-dropped at the cap).
-        Callers pass only active subscribers (``list_subscribers``)."""
-        if await self._ws_registry.send(
-            to_instance, {"type": RELAY_FRAME_TYPE, **frame}
-        ):
-            return True
+        shape); it goes out as ``{type: "relay", **frame}``. Live sockets are
+        pushed with at most :data:`RELAY_FAN_OUT_CONCURRENCY` sends in flight.
+        A target without a live socket gets the frame queued for
+        :data:`ENVELOPE_QUEUE_TTL_SECONDS` ONLY when it is in *queue_ok* (seen
+        recently — the caller decides), under the per-recipient RELAY caps
+        and the server-wide :data:`RELAY_QUEUE_MAX_TOTAL_BYTES`. Callers pass
+        only active subscribers. Returns how many targets were pushed or
+        queued."""
+        push = {"type": RELAY_FRAME_TYPE, **frame}
+        limit = asyncio.Semaphore(RELAY_FAN_OUT_CONCURRENCY)
+        offline: list[str] = []
+
+        async def _push(target: str) -> bool:
+            async with limit:
+                if await self._ws_registry.send(target, push):
+                    return True
+            offline.append(target)
+            return False
+
+        results = await asyncio.gather(*(_push(t) for t in targets))
+        reached = sum(1 for ok in results if ok)
+        to_queue = [t for t in offline if t in queue_ok]
+        if not to_queue:
+            return reached
+        blob = orjson.dumps(frame).decode()
         now = int(time.time())
-        queued = await self._queue_repo.enqueue(
-            to_instance,
-            orjson.dumps(frame).decode(),
-            created_at=now,
-            expires_at=now + self._ttl,
-            max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
-            max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
-            frame_type=QUEUE_KIND_RELAY,
-        )
-        if not queued:
-            log.warning(
-                "gfs.envelope: relay queue full for %s — dropping a queued "
-                "space item; the subscriber catches up through space sync",
-                to_instance,
+        total = await self._queue_repo.relay_bytes(now)
+        for target in to_queue:
+            if total + len(blob) > RELAY_QUEUE_MAX_TOTAL_BYTES:
+                log.warning(
+                    "gfs.envelope: server-wide relay queue cap reached — not "
+                    "queueing a space item for %d offline subscriber(s); they "
+                    "catch up through space sync",
+                    len(to_queue) - to_queue.index(target),
+                )
+                break
+            queued = await self._queue_repo.enqueue(
+                target,
+                blob,
+                created_at=now,
+                expires_at=now + self._ttl,
+                max_per_recipient=RELAY_QUEUE_MAX_PER_RECIPIENT,
+                max_bytes_per_recipient=RELAY_QUEUE_MAX_BYTES_PER_RECIPIENT,
+                frame_type=QUEUE_KIND_RELAY,
             )
-        return queued
+            if queued:
+                total += len(blob)
+                reached += 1
+            else:
+                log.warning(
+                    "gfs.envelope: relay queue full for %s — dropping a queued "
+                    "space item; the subscriber catches up through space sync",
+                    target,
+                )
+        return reached
 
     async def drain(self, to_instance: str) -> int:
         """Flush queued envelopes to a freshly-connected household.
@@ -378,7 +420,7 @@ def build_envelope_rate_limit(resolver: ClientIpResolver):
     The relay is anonymous by design, so — exactly as for ``/gfs/publish`` —
     the client address is the only handle available for shedding a flood.
     """
-    return _build_window_limiter(
+    return build_window_limiter(
         resolver,
         ENVELOPE_MAX_PER_MINUTE,
         lambda path: path == ENVELOPE_ROUTE_PATH,

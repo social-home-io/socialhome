@@ -870,7 +870,7 @@ path only against a GFS whose signed `/gfs/info` block carries
 
 ```
 POST /gfs/member-publish
-{instance_id, ts, signature, target: <space_id>, event_type: "space_item",
+{instance_id, gfs_instance_id, ts, signature, target: <space_id>, event_type: "space_item",
  epoch, writer_cert: {…}, payload: <ciphertext>}
 ```
 
@@ -879,8 +879,11 @@ POST /gfs/member-publish
   `space_item`.
 - `signature` is the household identity signature over canonical JSON of
   the other fields plus `action: "gfs-member-publish:v1"`.
+  `gfs_instance_id` is the server id pinned from `/gfs/info`; the server
+  refuses any other, so a request can't be replayed to another GFS.
 - The GFS checks, in order: the household signature against its registered
-  key (±300 s, instance active); a per-(household, space) rate limit; the
+  key (±300 s, instance active, addressed to this server); a
+  per-(household, space) and a per-space rate limit; the
   space is listed, not banned, publicly readable and pinned;
   `verify_writer_cert(cert, space_pubkey=pinned, space_id=target,
   epoch=epoch, author_pk=<registered key>, required_scope="comment")`;
@@ -898,20 +901,50 @@ POST /gfs/member-publish
   holder's **epoch notice** — `POST /gfs/spaces/{id}/epoch` with a
   space-authority signature over `{space_id, epoch}` under
   `space_epoch_notice`, sent when the content key rotates. It relays a cert
-  of the newest known epoch (or newer), or of an older one back to the
-  previous epoch for 600 s after the newer one was first seen. Without the
+  of the newest known epoch or exactly one newer, or of an older one back
+  to the previous epoch for 600 s after the newer one was first seen (the
+  first epoch learned gets `epoch − 1` as predecessor). **Inflation bound:**
+  any seed holder can sign a cert, a notice or a relay — a demoted one too,
+  until the authority re-pin — so a cert may raise the epoch by one step
+  only, and a notice or relay no further than `max(current + 1000, now +
+  1 day)` (the v_44 post-restore jump to unix seconds still lands). Without the
   notice the GFS would keep relaying a writer removed at the last rotation
   until somebody else happened to publish; receivers would still drop the
   items, but the relay would be an amplifier for them. The state is stored
   per space (GFS migration `0014`), monotonic, and cleared when the space
   authority key is re-pinned.
-- **Fan-out** goes to every active subscriber except the publisher, as
+- **Fan-out** runs in the background after the 200 (bounded workers and
+  backlog — `503` when full, at most 8 live pushes in flight) and goes to
+  every active subscriber except the publisher, as
   `{type:"relay", space_id, event_type:"space_item", epoch, writer_cert,
   payload}` — no `from_instance`: receivers authenticate the item by the
   cert and the inner author signature. An offline subscriber's frame waits
-  in the GFS queue for 24 h (shared with `/gfs/envelope`, separately capped)
-  and is drained on its next hello. Subscribers dedupe by item id, as for
+  in the GFS queue for 24 h (shared with `/gfs/envelope`, separately capped
+  per recipient and server-wide) and is drained on its next hello — but only
+  for a subscriber whose WS session was seen within those 24 h, so
+  self-subscribed households that never connect cannot multiply each item
+  into stored copies. Subscribers dedupe by item id, as for
   host-relayed copies.
+
+**Hard requirements on households** (the GFS check is only as sound as
+these; adversarial review of PR 2):
+
+1. **Epoch notice at every rotation.** A seed holder sends the
+   `space_epoch_notice` for the new epoch to EVERY GFS the space is listed
+   on, at every content-key rotation — kick, ban, leave, scope drop
+   (demotion, follower comments turned off) — through the GFS publish retry
+   queue, and BEFORE it re-seals the content key to subscribers. Until the
+   notice lands, a writer removed by that rotation can still be relayed
+   (receivers drop its items, but the relay amplifies them).
+2. **Re-send after every authority re-pin.** A re-pin clears the GFS epoch
+   state, so the owner re-sends the current epoch's notice right after any
+   authority-key rotation.
+3. **`gfs_instance_id` in every signed request** — the id pinned from that
+   server's `/gfs/info`, never a value from another server.
+4. **Strict mode (PR 4) moves `writer_cert` inside the ciphertext.** In
+   trusted mode it is plaintext only because the server authorizes with it;
+   strict mode authorizes with the writer group key, so the cert (which
+   names the household) must not stay visible.
 
 ```mermaid
 sequenceDiagram
@@ -1008,7 +1041,7 @@ contest a ban.
 - `socialhome/global_server/member_publish.py`,
   `socialhome/global_server/routes/member_publish.py` — GFS side of
   `/gfs/member-publish` and the epoch notice; queued delivery via
-  `GfsEnvelopeRelay.push_or_queue_relay` (`envelope_relay.py`).
+  `GfsEnvelopeRelay.fan_out_relay` (`envelope_relay.py`).
 - `socialhome/federation/keywrap_seal.py` — `seal_to_keywrap` /
   `open_keywrap` / `verify_keywrap_binding` (static-recipient sealed box).
 - `socialhome/global_server/routes/public.py`,

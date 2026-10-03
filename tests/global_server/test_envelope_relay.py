@@ -10,8 +10,10 @@ server never learns or reveals who is talking to whom, and it never opens
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
+import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id
@@ -608,11 +610,18 @@ def _item(marker: str = "ct") -> dict:
     }
 
 
+async def _send(relay, frame, *, queue_ok=True) -> int:
+    target = "recipient2home2222222222222222aa"
+    return await relay.fan_out_relay(
+        [target], queue_ok={target} if queue_ok else set(), frame=frame
+    )
+
+
 async def test_relay_frame_goes_to_a_live_socket_as_a_relay_frame(wiring):
     _fed, queue_repo, registry, relay = wiring
     registry.online.add("recipient2home2222222222222222aa")
 
-    assert await relay.push_or_queue_relay("recipient2home2222222222222222aa", _item())
+    assert await _send(relay, _item()) == 1
 
     assert registry.sent == [
         ("recipient2home2222222222222222aa", {"type": RELAY_FRAME_TYPE, **_item()})
@@ -623,9 +632,7 @@ async def test_relay_frame_goes_to_a_live_socket_as_a_relay_frame(wiring):
 async def test_relay_frame_is_queued_offline_and_drained_as_a_relay_frame(wiring):
     _fed, queue_repo, registry, relay = wiring
     await relay.accept("recipient2home2222222222222222aa", _sealed("env-0"))
-    assert await relay.push_or_queue_relay(
-        "recipient2home2222222222222222aa", _item("item-1")
-    )
+    assert await _send(relay, _item("item-1")) == 1
     queued = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
     assert [q.frame_type for q in queued] == [QUEUE_KIND_ENVELOPE, QUEUE_KIND_RELAY]
 
@@ -651,7 +658,7 @@ async def test_relay_items_have_their_own_cap_and_never_crowd_out_envelopes(
     for i in range(2):
         await relay.accept("recipient2home2222222222222222aa", _sealed(f"e{i}"))
     # The envelope budget is exhausted, yet a relay item still queues …
-    assert await relay.push_or_queue_relay("recipient2home2222222222222222aa", _item())
+    assert await _send(relay, _item()) == 1
     # … and a relay item never consumed envelope budget.
     await relay.accept("recipient2home2222222222222222aa", _sealed("e-late"))
     rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
@@ -661,13 +668,9 @@ async def test_relay_items_have_their_own_cap_and_never_crowd_out_envelopes(
 async def test_relay_queue_tail_drops_at_its_cap(wiring, monkeypatch, caplog):
     _fed, queue_repo, _registry, relay = wiring
     monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_PER_RECIPIENT", 1)
-    assert await relay.push_or_queue_relay(
-        "recipient2home2222222222222222aa", _item("first")
-    )
+    assert await _send(relay, _item("first")) == 1
     with caplog.at_level(logging.WARNING, logger="socialhome.global_server"):
-        assert not await relay.push_or_queue_relay(
-            "recipient2home2222222222222222aa", _item("second")
-        )
+        assert await _send(relay, _item("second")) == 0
     rows = await queue_repo.list_for("recipient2home2222222222222222aa", now=0)
     assert [r.sealed["payload"] for r in rows] == ["first"]
     assert "relay queue full" in caplog.text
@@ -683,3 +686,43 @@ async def test_a_corrupt_frame_type_is_refused_by_the_database(gfs_db):
                 ("x" * 32, "{}", 0, 1, "bogus"),
             )
         )
+
+
+async def test_a_target_not_in_queue_ok_gets_no_row(wiring):
+    _fed, queue_repo, _registry, relay = wiring
+    assert await _send(relay, _item(), queue_ok=False) == 0
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
+
+
+async def test_the_server_wide_relay_byte_cap_stops_queueing(
+    wiring, monkeypatch, caplog
+):
+    _fed, queue_repo, _registry, relay = wiring
+    one = len(orjson.dumps(_item("x")))
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_TOTAL_BYTES", one + 1)
+    assert await _send(relay, _item("x")) == 1
+    with caplog.at_level(logging.WARNING, logger="socialhome.global_server"):
+        assert await _send(relay, _item("y")) == 0
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 1
+    assert "server-wide relay queue cap" in caplog.text
+
+
+async def test_live_pushes_run_concurrently_but_bounded(wiring, monkeypatch):
+    _fed, _queue, _registry, relay = wiring
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_FAN_OUT_CONCURRENCY", 3)
+    in_flight = 0
+    peak = 0
+
+    class _Slow:
+        async def send(self, instance_id, payload):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return True
+
+    relay._ws_registry = _Slow()
+    targets = [f"t{i}" for i in range(12)]
+    assert await relay.fan_out_relay(targets, queue_ok=set(), frame=_item()) == 12
+    assert 1 < peak <= 3

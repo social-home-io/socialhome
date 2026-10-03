@@ -16,6 +16,7 @@ from socialhome.global_server.domain import (
 )
 from socialhome.global_server.repositories import (
     SqliteGfsAdminRepo,
+    SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
     SqliteGfsInviteRepo,
     SqliteGfsSpaceEpochRepo,
@@ -878,7 +879,8 @@ async def test_space_epoch_advances_monotonically_and_keeps_the_previous(gfs_db)
 
     assert await epochs.advance("sp", 3, seen_at=100)
     state = await epochs.get("sp")
-    assert (state.current, state.previous, state.current_seen_at) == (3, None, 100)
+    # The first epoch learned gets ``epoch - 1`` as its predecessor (grace).
+    assert (state.current, state.previous, state.current_seen_at) == (3, 2, 100)
 
     assert await epochs.advance("sp", 5, seen_at=200)
     state = await epochs.get("sp")
@@ -919,3 +921,55 @@ async def test_space_epoch_is_forgotten_when_the_authority_key_is_repinned(gfs_d
         cert={"key_epoch": 1},
     )
     assert await epochs.get("sp") is None
+
+
+async def test_the_first_epoch_zero_has_predecessor_zero(gfs_db):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
+    epochs = SqliteGfsSpaceEpochRepo(gfs_db)
+    await epochs.advance("sp", 0, seen_at=1)
+    assert (await epochs.get("sp")).previous == 0
+
+
+async def test_relay_bytes_sums_only_unexpired_relay_rows(gfs_db):
+    queue = SqliteGfsEnvelopeQueueRepo(gfs_db)
+    kw = dict(max_per_recipient=10, max_bytes_per_recipient=10**6)
+    await queue.enqueue("a" * 32, "x" * 10, created_at=0, expires_at=100, **kw)
+    await queue.enqueue(
+        "a" * 32, "y" * 7, created_at=0, expires_at=100, frame_type="relay", **kw
+    )
+    await queue.enqueue(
+        "a" * 32, "z" * 5, created_at=0, expires_at=50, frame_type="relay", **kw
+    )
+    assert await queue.relay_bytes(60) == 7
+    assert await queue.relay_bytes(0) == 12
+
+
+async def test_recently_seen_subscribers_need_a_recent_ws_session(gfs_db):
+    repo = SqliteGfsFederationRepo(gfs_db)
+    await _owner_row(repo)
+    await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o"))
+    for iid, status in (
+        ("seen", "active"),
+        ("never", "active"),
+        ("old", "active"),
+        ("banned", "banned"),
+    ):
+        await repo.upsert_instance(
+            ClientInstance(
+                instance_id=iid,
+                display_name=iid,
+                public_key="ab" * 32,
+                inbox_url="http://x",
+                status=status,
+            )
+        )
+        await repo.add_subscriber(space_id="sp", instance_id=iid)
+    for iid in ("seen", "old", "banned"):
+        await repo.upsert_rtc_connection(iid, transport="https")
+    await gfs_db.enqueue(
+        "UPDATE rtc_connections SET last_ping_at=datetime('now','-2 days')"
+        " WHERE instance_id='old'",
+    )
+    assert await repo.list_recently_seen_subscribers("sp", within_s=86400) == {"seen"}

@@ -18,7 +18,7 @@ from aiohttp import web
 
 from ...domain.gfs_member_publish import InvalidMemberPublish, MemberPublishRequest
 from .. import app_keys as K
-from ..member_publish import MemberPublishRateLimited
+from ..member_publish import MemberPublishBusy, MemberPublishRateLimited
 from ..public import PUBLISH_MAX_BODY_BYTES
 from .base import GfsBaseView
 
@@ -33,7 +33,8 @@ class MemberPublishView(GfsBaseView):
 
     ``200 {"status": "published"}`` once accepted (a suppressed replay is the
     same answer); ``400`` for a malformed body; ``403`` (uniform) for any
-    authorization failure; ``429`` past the per-household limit."""
+    authorization failure; ``429`` past a per-household or per-space limit;
+    ``503`` while the background fan-out is stopped or its backlog is full."""
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_member_publish_key)
@@ -47,6 +48,10 @@ class MemberPublishView(GfsBaseView):
         except MemberPublishRateLimited:
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
+            return resp
+        except MemberPublishBusy:
+            resp = web.json_response({"error": "busy"}, status=503)
+            resp.headers["Retry-After"] = "5"
             return resp
         except PermissionError as exc:
             log.debug("GFS member publish refused for space %s: %s", req.target, exc)

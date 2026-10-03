@@ -37,7 +37,9 @@ from socialhome.domain.gfs_member_publish import (
     MemberPublishRequest,
 )
 from socialhome.global_server import member_publish as mp_mod
+from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server.app_keys import (
+    gfs_db_key,
     gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
     gfs_federation_key,
@@ -51,12 +53,14 @@ from socialhome.global_server.member_publish import (
     MEMBER_PUBLISH_MAX_PER_MINUTE,
     _is_member_publish_path,
 )
+from socialhome.domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from socialhome.global_server.server import create_gfs_app
 from socialhome.writer_cert import sign_writer_cert
 
 SPACE_ID = "sp-public"
 OTHER_SPACE = "sp-other"
 CIPHERTEXT = "bm9uY2U:c3BhY2UtaXRlbS1jaXBoZXJ0ZXh0"
+GFS_ID = "gfs-node-a"
 
 
 class _Household:
@@ -112,9 +116,11 @@ def _body(
     payload: str = CIPHERTEXT,
     ts: str | None = None,
     signer: _Household | None = None,
+    gfs_instance_id: str = GFS_ID,
 ) -> dict:
     req = MemberPublishRequest(
         instance_id=publisher.instance_id,
+        gfs_instance_id=gfs_instance_id,
         ts=ts or _now_iso(),
         signature="",
         target=target,
@@ -161,6 +167,8 @@ async def gfs(tmp_dir):
         # The publisher is subscribed too — it must never get its own echo.
         for h in (tc.publisher, tc.subscriber):
             await fed.add_subscriber(space_id=SPACE_ID, instance_id=h.instance_id)
+        # Seen recently (a WS session that ended): offline items queue for it.
+        await fed.upsert_rtc_connection(tc.subscriber.instance_id, transport="https")
         yield tc
 
 
@@ -173,7 +181,13 @@ async def _wait_connected(app, instance_id: str) -> None:
     raise AssertionError(f"{instance_id} never connected")
 
 
+async def _settle(gfs) -> None:
+    """Wait until the background fan-out has handled every accepted item."""
+    await gfs.app_[gfs_member_publish_key].wait_idle()
+
+
 async def _queued(gfs, household: _Household) -> list:
+    await _settle(gfs)
     return await gfs.app_[gfs_envelope_queue_repo_key].list_for(
         household.instance_id, now=0
     )
@@ -653,3 +667,198 @@ async def test_a_tail_dropped_subscriber_does_not_fail_the_publish(gfs, monkeypa
     resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
     assert resp.status == 200
     assert await _queued(gfs, gfs.subscriber) == []
+
+
+# ── Review fixes: epoch inflation (I1), first-epoch grace (M5) ───────────
+
+
+async def _epoch(gfs):
+    return await gfs.app_[gfs_space_epoch_repo_key].get(SPACE_ID)
+
+
+@pytest.mark.security
+async def test_a_cert_at_an_absurd_epoch_neither_publishes_nor_inflates(gfs):
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json=_body(gfs.publisher, epoch=MAX_WRITER_CERT_EPOCH),
+    )
+    await _assert_refused(resp)
+    assert await _epoch(gfs) is None
+    # Legit writers at the real epoch are untouched.
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=3))
+    assert resp.status == 200
+
+
+@pytest.mark.security
+async def test_a_cert_may_step_the_epoch_by_at_most_one(gfs):
+    assert (
+        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=3))
+    ).status == 200
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=5))
+    await _assert_refused(resp)
+    assert (await _epoch(gfs)).current == 3
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=4))
+    assert resp.status == 200
+    assert (await _epoch(gfs)).current == 4
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("epoch", [MAX_WRITER_CERT_EPOCH, 10**12])
+async def test_an_epoch_notice_beyond_the_ceiling_is_refused(gfs, epoch):
+    resp = await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(epoch))
+    assert resp.status == 403
+    assert await _epoch(gfs) is None
+
+
+async def test_an_epoch_notice_may_jump_to_wall_clock_after_a_restore(gfs):
+    """v_44 post-restore rotation lifts the epoch to unix seconds."""
+    await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(5))
+    now = int(datetime.now(timezone.utc).timestamp())
+    resp = await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(now))
+    assert resp.status == 200
+    assert (await _epoch(gfs)).current == now
+
+
+async def test_an_epoch_notice_may_step_up_to_a_thousand(gfs):
+    await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(5))
+    big = int(datetime.now(timezone.utc).timestamp()) + 90_000
+    await gfs.app_[gfs_space_epoch_repo_key].advance(SPACE_ID, big, seen_at=0)
+    assert (
+        await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(big + 1000))
+    ).status == 200
+    assert (
+        await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(big + 2001))
+    ).status == 403
+
+
+@pytest.mark.security
+async def test_an_authority_relay_at_an_absurd_epoch_teaches_nothing(gfs):
+    envelope = {
+        "space_id": SPACE_ID,
+        "epoch": MAX_WRITER_CERT_EPOCH,
+        "encrypted_payload": CIPHERTEXT,
+    }
+    envelope.update(
+        sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            space_id=SPACE_ID,
+            payload=strip_authority_sig_fields(envelope),
+            space_seed=SPACE_SEED,
+        )
+    )
+    await gfs.app_[gfs_federation_key].publish_event(
+        SPACE_ID, AUTHORITY_EVENT_SPACE_POST_PUBLIC, envelope
+    )
+    assert await _epoch(gfs) is None
+
+
+async def test_the_first_learned_epoch_gives_the_previous_one_its_grace(gfs):
+    await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(4))
+    state = await _epoch(gfs)
+    assert (state.current, state.previous) == (4, 3)
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=3))
+    assert resp.status == 200
+
+
+# ── Review fixes: sybil amplification (I2) ───────────────────────────────
+
+
+async def _add_sybils(gfs, n: int, *, seen: bool = False) -> list[_Household]:
+    fed = gfs.app_[gfs_fed_repo_key]
+    out = []
+    for _ in range(n):
+        h = _Household()
+        await fed.upsert_instance(h.instance())
+        await fed.add_subscriber(space_id=SPACE_ID, instance_id=h.instance_id)
+        if seen:
+            await fed.upsert_rtc_connection(h.instance_id, transport="https")
+        out.append(h)
+    return out
+
+
+@pytest.mark.security
+async def test_never_seen_offline_subscribers_get_no_queue_rows(gfs):
+    sybils = await _add_sybils(gfs, 200)
+    big = "A" * (200 * 1024)
+    started = asyncio.get_running_loop().time()
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, payload=big))
+    elapsed = asyncio.get_running_loop().time() - started
+    assert resp.status == 200
+    assert elapsed < 2.0
+    for h in sybils:
+        assert await _queued(gfs, h) == []
+    # The genuine, recently-seen subscriber still gets its copy.
+    assert len(await _queued(gfs, gfs.subscriber)) == 1
+
+
+@pytest.mark.security
+async def test_a_subscriber_last_seen_beyond_the_queue_ttl_gets_no_row(gfs):
+    db = gfs.app_[gfs_db_key]
+    await db.enqueue(
+        "UPDATE rtc_connections SET last_ping_at=datetime('now', '-2 days')"
+        " WHERE instance_id=?",
+        (gfs.subscriber.instance_id,),
+    )
+    assert (
+        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    ).status == 200
+    assert await _queued(gfs, gfs.subscriber) == []
+
+
+@pytest.mark.security
+async def test_the_global_relay_byte_cap_stops_queueing(gfs, monkeypatch):
+    monkeypatch.setattr(envelope_relay_mod, "RELAY_QUEUE_MAX_TOTAL_BYTES", 1500)
+    for i in range(3):
+        resp = await gfs.post(
+            "/gfs/member-publish",
+            json=_body(gfs.publisher, payload="B" * 400 + str(i)),
+        )
+        assert resp.status == 200
+    rows = await _queued(gfs, gfs.subscriber)
+    assert 1 <= len(rows) < 3
+
+
+@pytest.mark.security
+async def test_the_per_space_aggregate_rate_limit_answers_429(gfs, monkeypatch):
+    svc = gfs.app_[gfs_member_publish_key]
+    monkeypatch.setattr(svc._space_limiter, "_limit", 1)
+    assert (
+        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    ).status == 200
+    # A different household, same space: the space budget is spent.
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.subscriber))
+    assert resp.status == 429
+
+
+async def test_a_full_fan_out_backlog_answers_503(gfs, monkeypatch):
+    svc = gfs.app_[gfs_member_publish_key]
+
+    class _Full(asyncio.Queue):
+        def put_nowait(self, item):
+            raise asyncio.QueueFull
+
+    monkeypatch.setattr(svc, "_queue", _Full())
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    assert resp.status == 503
+    assert resp.headers["Retry-After"] == "5"
+
+
+async def test_stop_drains_the_workers_and_refuses_new_jobs(gfs):
+    svc = gfs.app_[gfs_member_publish_key]
+    await svc.stop()
+    assert svc._tasks == []
+    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    assert resp.status == 503
+    await svc.start()
+
+
+# ── Review fixes: audience binding (M4) ──────────────────────────────────
+
+
+@pytest.mark.security
+async def test_a_request_signed_for_another_gfs_is_refused(gfs):
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json=_body(gfs.publisher, gfs_instance_id="gfs-node-b"),
+    )
+    await _assert_refused(resp)

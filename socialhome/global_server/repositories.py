@@ -141,6 +141,9 @@ class AbstractGfsFederationRepo(Protocol):
     ) -> None: ...
     async def purge_subscribers(self, space_id: str) -> int: ...
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]: ...
+    async def list_recently_seen_subscribers(
+        self, space_id: str, *, within_s: int
+    ) -> set[str]: ...
     async def list_subscribers_with_keys(
         self,
         space_id: str,
@@ -553,6 +556,28 @@ class SqliteGfsFederationRepo:
             )
             for r in rows
         ]
+
+    async def list_recently_seen_subscribers(
+        self, space_id: str, *, within_s: int
+    ) -> set[str]:
+        """Active subscribers of *space_id* whose ``/gfs/ws`` session last
+        started or ended within *within_s* seconds (``rtc_connections
+        .last_ping_at``, touched on every hello and every disconnect). Only
+        these get offline items queued: a subscriber that never connected,
+        or vanished longer ago than the queue TTL, would only ever hold rows
+        until they expire — exactly what a self-subscribed sybil wants."""
+        rows = await self._db.fetchall(
+            """
+            SELECT ss.instance_id
+            FROM space_subscribers ss
+            JOIN client_instances ci USING (instance_id)
+            JOIN rtc_connections rc USING (instance_id)
+            WHERE ss.space_id = ? AND ci.status = 'active'
+              AND rc.last_ping_at >= datetime('now', ?)
+            """,
+            (space_id, f"-{int(within_s)} seconds"),
+        )
+        return {r["instance_id"] for r in rows}
 
     async def list_subscribers_with_keys(
         self,
@@ -1869,6 +1894,8 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
 
     async def prune_expired(self, now: int) -> int: ...
 
+    async def relay_bytes(self, now: int) -> int: ...
+
     async def count_for(self, to_instance: str) -> int: ...
 
 
@@ -2010,6 +2037,17 @@ class SqliteGfsEnvelopeQueueRepo:
 
         return await self._db.transact(_run)
 
+    async def relay_bytes(self, now: int) -> int:
+        """Bytes held in unexpired RELAY rows across every recipient — what
+        the server-wide relay cap (``RELAY_QUEUE_MAX_TOTAL_BYTES``) bounds."""
+        row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(LENGTH(sealed_json)), 0) AS n "
+            "FROM gfs_envelope_queue WHERE frame_type='relay' AND expires_at > ?",
+            (now,),
+        )
+        d = _as_dict(row)
+        return int(d["n"]) if d else 0
+
     async def count_for(self, to_instance: str) -> int:
         row = await self._db.fetchone(
             "SELECT COUNT(*) AS n FROM gfs_envelope_queue WHERE to_instance=?",
@@ -2063,12 +2101,17 @@ class SqliteGfsSpaceEpochRepo:
     async def advance(self, space_id: str, epoch: int, *, seen_at: int) -> bool:
         """Move the space to ``epoch`` iff it is newer than the stored one
         (monotonic, one statement — two concurrent advances can't interleave).
-        Returns whether the row changed."""
+        Callers bound the raise first (``domain.epoch_ceiling``). Returns
+        whether the row changed."""
         changed = await self._db.enqueue_rowcount(
-            "UPDATE global_spaces SET content_epoch_prev=content_epoch,"
+            # The first epoch learned gets ``epoch - 1`` as its predecessor,
+            # so a member still on that one keeps the same grace as after
+            # any later rotation.
+            "UPDATE global_spaces"
+            " SET content_epoch_prev=COALESCE(content_epoch, MAX(? - 1, 0)),"
             " content_epoch=?, content_epoch_seen_at=?"
             " WHERE space_id=? AND (content_epoch IS NULL OR content_epoch < ?)",
-            (epoch, seen_at, space_id, epoch),
+            (epoch, epoch, seen_at, space_id, epoch),
         )
         return changed > 0
 

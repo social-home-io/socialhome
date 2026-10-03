@@ -37,6 +37,7 @@ def _cert(epoch: int = 3):
 def _wire(**over) -> dict:
     body = {
         "instance_id": "a" * 32,
+        "gfs_instance_id": "gfs-node-a",
         "ts": "2026-10-03T10:00:00+00:00",
         "signature": "c2ln",
         "target": "sp-1",
@@ -97,6 +98,8 @@ def test_an_unknown_field_is_refused(extra):
         ("target", ["sp-1"]),
         ("instance_id", ""),
         ("instance_id", "x" * 129),
+        ("gfs_instance_id", ""),
+        ("gfs_instance_id", "g" * 129),
         ("ts", 12345),
         ("signature", ""),
         ("writer_cert", "not-a-dict"),
@@ -183,3 +186,12 @@ def test_space_item_frame_refuses_a_non_object():
 
 def test_the_event_type_property_is_the_generic_type():
     assert MemberPublishRequest.from_wire(_wire()).event_type == SPACE_ITEM_EVENT_TYPE
+
+
+def test_the_signed_bytes_name_the_audience_gfs():
+    """M4: a request signed for one connection server can't be replayed to
+    another — the GFS's pinned id is inside the signature."""
+    req = MemberPublishRequest.from_wire(_wire())
+    assert req.signing_payload()["gfs_instance_id"] == "gfs-node-a"
+    other = MemberPublishRequest.from_wire(_wire(gfs_instance_id="gfs-node-b"))
+    assert other.signing_bytes() != req.signing_bytes()

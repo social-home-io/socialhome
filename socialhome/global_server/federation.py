@@ -51,6 +51,7 @@ from .domain import (
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GlobalSpace,
+    epoch_ceiling,
 )
 from .repositories import AbstractGfsFederationRepo
 
@@ -535,7 +536,9 @@ class GfsFederationService:
         """Advance the space's proven content epoch from an AUTHORIZED
         ``space_post_public`` relay — its ``epoch`` is inside the authority
         signature that just verified, so it is the authority's own statement.
-        Monotonic; a malformed value is ignored (the relay itself proceeds)."""
+        Monotonic and bounded by :func:`~.domain.epoch_ceiling` (a seed
+        holder must not inflate it); a malformed or out-of-bound value is
+        ignored — the relay itself proceeds."""
         if self._epoch_repo is None or event_type != AUTHORITY_EVENT_SPACE_POST_PUBLIC:
             return
         epoch = payload.get("epoch") if isinstance(payload, dict) else None
@@ -545,7 +548,15 @@ class GfsFederationService:
             or not 0 <= epoch <= MAX_WRITER_CERT_EPOCH
         ):
             return
-        await self._epoch_repo.advance(space_id, epoch, seen_at=int(time.time()))
+        now = int(time.time())
+        state = await self._epoch_repo.get(space_id)
+        if epoch > epoch_ceiling(state.current if state else None, now):
+            log.warning(
+                "GFS: ignoring an implausible content epoch on a relay for space %s",
+                space_id,
+            )
+            return
+        await self._epoch_repo.advance(space_id, epoch, seen_at=now)
 
     async def _verify_legacy_publish_sig(
         self,

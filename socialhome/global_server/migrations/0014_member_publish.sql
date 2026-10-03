@@ -37,7 +37,8 @@
 --       a discriminator so the drain knows which frame to rebuild; and storing
 --       the discriminator inside the JSON blob was rejected because that
 --       column is opaque by contract and a DB-level CHECK beats a convention.
---   (3) Smallest possible change: four additive ``ADD COLUMN``s. The three
+--   (3) Smallest possible change: four additive ``ADD COLUMN``s and one
+--       index. The three
 --       epoch columns are NULL-defaulted (NULL = no epoch learned yet; no
 --       backfill). ``frame_type`` defaults to ``'envelope'``, which is what
 --       every existing row is, so no row is rewritten.
@@ -57,3 +58,8 @@ ALTER TABLE global_spaces ADD COLUMN content_epoch_seen_at INTEGER;
 -- can never crowd a household's invite / link-federation envelopes out.
 ALTER TABLE gfs_envelope_queue ADD COLUMN frame_type TEXT NOT NULL
     DEFAULT 'envelope' CHECK (frame_type IN ('envelope', 'relay'));
+
+-- The server-wide relay byte cap sums unexpired relay rows on every member
+-- publish fan-out; this keeps that read off the envelope rows.
+CREATE INDEX IF NOT EXISTS idx_gfs_envelope_queue_kind
+    ON gfs_envelope_queue(frame_type, expires_at);

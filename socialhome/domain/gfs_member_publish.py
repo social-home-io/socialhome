@@ -17,7 +17,8 @@ and RECEIVERS enforce the scope the real type needs.
 
 Request (``POST /gfs/member-publish``, every field required, no others)::
 
-    {"instance_id", "ts": <tz-aware ISO 8601>, "signature": <b64url>,
+    {"instance_id", "gfs_instance_id", "ts": <tz-aware ISO 8601>,
+     "signature": <b64url>,
      "target": <space_id>, "event_type": "space_item", "epoch": N,
      "writer_cert": {<WriterCert wire dict>}, "payload": <ciphertext str>}
 
@@ -27,7 +28,10 @@ Request (``POST /gfs/member-publish``, every field required, no others)::
 MEMBER_PUBLISH_ACTION``. That is the same scheme as every other signed
 household→GFS request (``subscribe`` / ``unsubscribe`` / ``unpublish``);
 the ``action`` value is the domain separator, so a member-publish signature
-can never be replayed as another request and vice versa.
+can never be replayed as another request and vice versa. ``gfs_instance_id``
+is the connection server's own id as the household pinned it from
+``/gfs/info``: the server refuses any other value, so a request signed for
+one server can't be replayed to another.
 
 Fan-out frame (to the space's subscribers, never naming the publisher)::
 
@@ -77,6 +81,7 @@ _MAX_SHORT_FIELD_CHARS: int = 256
 MEMBER_PUBLISH_REQUEST_KEYS: frozenset[str] = frozenset(
     {
         "instance_id",
+        "gfs_instance_id",
         "ts",
         "signature",
         "target",
@@ -136,6 +141,7 @@ class MemberPublishRequest:
     """One trusted-mode member-publish request (see the module docstring)."""
 
     instance_id: str
+    gfs_instance_id: str
     ts: str
     signature: str
     target: str
@@ -153,6 +159,7 @@ class MemberPublishRequest:
         return {
             "action": MEMBER_PUBLISH_ACTION,
             "instance_id": self.instance_id,
+            "gfs_instance_id": self.gfs_instance_id,
             "ts": self.ts,
             "target": self.target,
             "event_type": SPACE_ITEM_EVENT_TYPE,
@@ -195,6 +202,7 @@ class MemberPublishRequest:
         _event_type(raw)
         return cls(
             instance_id=_short_str(raw, "instance_id", MAX_WIRE_ID_CHARS),
+            gfs_instance_id=_short_str(raw, "gfs_instance_id", MAX_WIRE_ID_CHARS),
             ts=_short_str(raw, "ts", _MAX_SHORT_FIELD_CHARS),
             signature=_short_str(raw, "signature", _MAX_SHORT_FIELD_CHARS),
             target=_short_str(raw, "target", MAX_WIRE_ID_CHARS),

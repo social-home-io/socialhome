@@ -37,6 +37,7 @@ from socialhome.domain.gfs_member_publish import (
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
+    gfs_member_publish_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
@@ -71,6 +72,7 @@ class _Household:
 def _request(publisher: _Household) -> dict:
     req = MemberPublishRequest(
         instance_id=publisher.instance_id,
+        gfs_instance_id="gfs-node-a",
         ts=datetime.now(timezone.utc).isoformat(),
         signature="",
         target=SPACE_ID,
@@ -128,6 +130,7 @@ async def gfs(tmp_dir):
         await fed.add_subscriber(
             space_id=SPACE_ID, instance_id=tc.subscriber.instance_id
         )
+        await fed.upsert_rtc_connection(tc.subscriber.instance_id, transport="https")
         yield tc
 
 
@@ -145,7 +148,8 @@ async def test_the_gfs_never_sees_content_or_the_real_item_type(gfs, caplog):
 
     with caplog.at_level(logging.DEBUG):
         resp = await gfs.post("/gfs/member-publish", json=body)
-    assert resp.status == 200
+        assert resp.status == 200
+        await gfs.app_[gfs_member_publish_key].wait_idle()
     _assert_blind(caplog.text, "the GFS logs")
 
     # What the GFS keeps for the offline subscriber, and later fans out.

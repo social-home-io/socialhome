@@ -322,15 +322,16 @@ class PairingTokenService:
 # ─── Per-IP rate-limit middlewares ─────────────────────────────────────
 
 
-def _build_window_limiter(
+def build_window_limiter(
     resolver: ClientIpResolver,
     limit: int,
     applies: Callable[[str], bool],
 ):
     """Build a middleware that sheds >*limit* hits/minute per client IP.
 
-    One implementation for all three limiters below: they differ only in which
-    paths they gate (*applies*) and the *limit*. The client address comes from
+    One implementation for every per-IP limiter on this server (the three
+    below, ``envelope_relay`` and ``member_publish``): they differ only in
+    which paths they gate (*applies*) and the *limit*. The client address comes from
     *resolver*, which is the only component allowed to look at
     ``X-Forwarded-For`` (see :class:`ClientIpResolver`).
     """
@@ -376,14 +377,14 @@ def build_listing_rate_limit(resolver: ClientIpResolver):
 
     Spec §24.7.3: 30 GETs per minute on ``/`` and ``/spaces/{id}``.
     """
-    return _build_window_limiter(resolver, LISTING_MAX_PER_MINUTE, _is_public_listing)
+    return build_window_limiter(resolver, LISTING_MAX_PER_MINUTE, _is_public_listing)
 
 
 def build_public_rtc_rate_limit(resolver: ClientIpResolver):
     """Per-IP rate limiter for the anonymous public-content RTC entry
     points. Each offer/relay request pushes a WS frame to the author, so a
     flood is an amplification vector; cap it per IP."""
-    return _build_window_limiter(
+    return build_window_limiter(
         resolver,
         PUBLIC_RTC_MAX_PER_MINUTE,
         _is_public_rtc_entry,
@@ -396,7 +397,7 @@ def build_publish_rate_limit(resolver: ClientIpResolver):
     The relay is authorized by the space-authority signature alone, so the GFS
     cannot (and must not) identify the publishing household — per-IP is the
     only rate handle available."""
-    return _build_window_limiter(
+    return build_window_limiter(
         resolver,
         PUBLISH_MAX_PER_MINUTE,
         lambda path: path == "/gfs/publish",

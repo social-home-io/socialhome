@@ -324,6 +324,29 @@ class GfsQueuedEnvelope:
     frame_type: str = "envelope"
 
 
+#: Largest raise of a space's proven content epoch one authority statement
+#: (an epoch notice or an authorized host relay) may make beyond the stored
+#: one — unless it stays within :data:`MAX_EPOCH_CLOCK_LEAD_S` of wall-clock
+#: now, which is how far a v_44 post-restore rotation (epoch lifted to unix
+#: seconds) may legitimately jump.
+MAX_EPOCH_STEP: int = 1000
+
+#: How far ahead of wall-clock now (seconds) a proven epoch may ever be.
+MAX_EPOCH_CLOCK_LEAD_S: int = 24 * 60 * 60
+
+
+def epoch_ceiling(current: int | None, now: int) -> int:
+    """The highest content epoch an authority statement may raise a space to.
+
+    ``max(current + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)`` — so one
+    seed holder (say, a demoted one whose seed still matches until the
+    re-pin) cannot sign an epoch near 2^63 and lock every writer out, while a
+    restored owner's wall-clock epoch still lands. A verified writer cert is
+    held to a tighter rule (+1, see ``member_publish``)."""
+    base = current if current is not None else 0
+    return max(base + MAX_EPOCH_STEP, now + MAX_EPOCH_CLOCK_LEAD_S)
+
+
 @dataclass(slots=True, frozen=True)
 class GfsSpaceEpoch:
     """The newest space content epoch this server has seen proven (v_49).
@@ -339,8 +362,9 @@ class GfsSpaceEpoch:
 
     space_id: str
     current: int
-    #: The epoch that was current before ``current`` (``None`` when only one
-    #: has been seen).
+    #: The epoch that was current before ``current``; ``current - 1`` for the
+    #: first epoch learned, so its predecessor gets the same grace. ``None``
+    #: only for rows written before that rule.
     previous: int | None
     #: Unix seconds at which ``current`` was first seen.
     current_seen_at: int

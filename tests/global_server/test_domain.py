@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from socialhome.global_server.domain import GfsSpaceEpoch
+from socialhome.global_server.domain import (
+    MAX_EPOCH_CLOCK_LEAD_S,
+    MAX_EPOCH_STEP,
+    GfsSpaceEpoch,
+    epoch_ceiling,
+)
 
 
 def _state(current=5, previous=4, seen_at=1000) -> GfsSpaceEpoch:
@@ -37,3 +42,11 @@ def test_without_a_previous_epoch_only_current_or_newer_is_admitted():
     state = _state(previous=None)
     assert not state.admits(4, now=1000, grace_s=600)
     assert state.admits(5, now=10**9, grace_s=600)
+
+
+def test_epoch_ceiling_allows_a_thousand_steps_or_a_day_past_the_clock():
+    now = 1_800_000_000
+    assert epoch_ceiling(5, now) == now + MAX_EPOCH_CLOCK_LEAD_S
+    far = now * 2
+    assert epoch_ceiling(far, now) == far + MAX_EPOCH_STEP
+    assert epoch_ceiling(None, now) == now + MAX_EPOCH_CLOCK_LEAD_S

@@ -479,12 +479,12 @@ household identity key every peer already pins.
 `global_server/member_publish.py`, v_49) — `POST /gfs/member-publish`. The
 household signs canonical JSON (sorted keys, compact — the encoding every
 signed household→GFS request uses) of `{action: "gfs-member-publish:v1",
-instance_id, ts, target, event_type: "space_item", epoch, writer_cert,
+instance_id, gfs_instance_id, ts, target, event_type: "space_item", epoch, writer_cert,
 payload}` with its Ed25519 identity seed; the GFS verifies it against the
 registered `client_instances.public_key` with the ±300 s `ts` window. The
 `action` value is the domain separator — distinct from `subscribe` /
 `unsubscribe` / `unpublish` — so the signature cannot be replayed as any
-other request; no new key or suite (it is the household identity signature,
+other request, and `gfs_instance_id` (the server id the household pinned from `/gfs/info`, refused unless it is the receiving server's) binds it to one server so it cannot be replayed to another; no new key or suite (it is the household identity signature,
 `ed25519`). The GFS then runs `verify_writer_cert` against the pinned space
 key with `author_pk` = that same registered key and scope `comment` (the
 item type is hidden in the ciphertext; receivers enforce the real scope).
