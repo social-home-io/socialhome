@@ -7,20 +7,35 @@ outbound targeting and the remote-payload sanitiser over stubs.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from socialhome.domain.federation import DeliveryResult, FederationEventType
+from socialhome.crypto import (
+    derive_instance_id,
+    derive_user_id,
+    generate_identity_keypair,
+)
+from socialhome.domain.post import Post, PostType
 from socialhome.domain.space import (
+    ContentAction,
     HostTooOldError,
+    SpaceType,
     ModerationStatus,
     SpaceModerationItem,
 )
+from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.services.space_moderation_federation import (
     SpaceModerationFederation,
+    _signed_copy,
     sanitize_remote_payload,
+)
+from socialhome.services.space_public_author import (
+    build_signed_author_inner,
+    verify_signed_author_inner,
 )
 
 FET = FederationEventType
@@ -248,3 +263,157 @@ async def test_a_reviewer_households_approval_goes_to_the_host_only():
     host_side, host_fed = _fed(own="host")
     await host_side.send_release_request(SPACE, _item(), decided_by="u-h")
     assert host_fed.sent == []
+
+
+# ─── A queued public post carries its author-signed copy ────────────────
+
+_AUTHOR_KP = generate_identity_keypair()
+_AUTHOR = derive_user_id(_AUTHOR_KP.public_key, "alice")
+_POST_ID = mint_owner_bound_id(SPACE_POST_KIND, space_id="sp", owner_user_id=_AUTHOR)
+
+
+class _Users:
+    async def get_by_user_id(self, user_id):
+        if user_id != _AUTHOR:
+            return None
+        return SimpleNamespace(username="alice", identity_anchor="alice")
+
+
+def _public_space(space_type=SpaceType.GLOBAL, allow_subscribers=True):
+    return SimpleNamespace(
+        id="sp",
+        owner_instance_id="host",
+        space_type=space_type,
+        features=SimpleNamespace(allow_subscribers=allow_subscribers),
+    )
+
+
+def _post_item(submitted_by=_AUTHOR, feature="posts", entity="post"):
+    item = _item(
+        feature=feature,
+        payload={
+            "entity": entity,
+            "target_id": _POST_ID,
+            "post_id": _POST_ID,
+            "type": "text",
+            "content": "queued words",
+            "image_urls": [],
+            "hidden_from_feed": False,
+        },
+    )
+    return dataclasses.replace(item, submitted_by=submitted_by)
+
+
+def _signing_fed():
+    out, fed = _fed(own=derive_instance_id(_AUTHOR_KP.public_key))
+    out.attach_identity(
+        own_instance_pk=_AUTHOR_KP.public_key,
+        own_identity_seed=_AUTHOR_KP.private_key,
+        user_repo=_Users(),  # type: ignore[arg-type]
+    )
+    return out, fed
+
+
+async def test_a_queued_public_post_carries_its_authors_signed_copy():
+    out, fed = _signing_fed()
+    await out.send_submitted(_public_space(), _post_item(), ["host"])
+    relay = fed.sent[0][2]["public_relay"]
+    assert verify_signed_author_inner(relay)
+    assert relay["post_id"] == _POST_ID
+    assert relay["author_user_id"] == _AUTHOR
+    assert relay["content"] == "queued words"
+    # Signed over the submission time — the approval time is not known yet.
+    assert relay["created_at"] == NOW.isoformat()
+    # The queue payload itself is untouched.
+    assert "public_relay" not in fed.sent[0][2]["payload"]
+
+
+@pytest.mark.parametrize(
+    "case", ["private", "no_followers", "sticky", "remote_user", "no_identity"]
+)
+async def test_no_signed_copy_where_nothing_may_reach_followers(case):
+    out, fed = _signing_fed()
+    space = _public_space()
+    item = _post_item()
+    if case == "private":
+        space = _public_space(space_type=SpaceType.PRIVATE)
+    elif case == "no_followers":
+        space = _public_space(allow_subscribers=False)
+    elif case == "sticky":
+        item = _item()
+    elif case == "remote_user":
+        item = _post_item(submitted_by="someone-else")
+    else:
+        out, fed = _fed()
+    await out.send_submitted(space, item, ["host"])
+    assert "public_relay" not in fed.sent[0][2]
+
+
+def _copy(**over):
+    post = Post(
+        id=_POST_ID,
+        author=_AUTHOR,
+        type=PostType.TEXT,
+        content="queued words",
+        created_at=NOW,
+    )
+    relay = build_signed_author_inner(
+        post=post,
+        space_id="sp",
+        author_username="alice",
+        author_pk=_AUTHOR_KP.public_key,
+        author_identity_seed=_AUTHOR_KP.private_key,
+        origin_instance_id=derive_instance_id(_AUTHOR_KP.public_key),
+    )
+    relay.update(over)
+    return relay
+
+
+def _keep(raw, *, space=None, feature="posts", action=ContentAction.CREATE):
+    return _signed_copy(
+        raw,
+        space=space or _public_space(),  # type: ignore[arg-type]
+        feature=feature,
+        action=action,
+        target_id=_POST_ID,
+        submitted_by=_AUTHOR,
+    )
+
+
+def test_the_host_keeps_a_signed_copy_that_verifies():
+    assert _keep(_copy()) == _copy()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "not_a_dict",
+        "tampered",
+        "other_post",
+        "other_author",
+        "other_space",
+        "private",
+        "not_posts",
+        "an_edit",
+    ],
+)
+def test_the_host_drops_a_signed_copy_it_cannot_use(case):
+    raw: object = _copy()
+    kwargs: dict = {}
+    if case == "not_a_dict":
+        raw = "x"
+    elif case == "tampered":
+        raw = _copy(content="other words")
+    elif case == "other_post":
+        raw = _copy(post_id="p-other")
+    elif case == "other_author":
+        raw = _copy(author_user_id="u-other")
+    elif case == "other_space":
+        raw = _copy(space_id="sp-other")
+    elif case == "private":
+        kwargs["space"] = _public_space(space_type=SpaceType.PRIVATE)
+    elif case == "not_posts":
+        kwargs["feature"] = "stickies"
+    else:
+        kwargs["action"] = ContentAction.EDIT
+    assert _keep(raw, **kwargs) is None

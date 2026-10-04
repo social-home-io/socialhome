@@ -365,11 +365,13 @@ class PostModerationHandler:
     ) -> ApplyResult:
         post = post_from_queue_payload(item)
         if await self._svc.get_space_post(item.space_id, post.id) is None:
+            relay = item.payload.get("public_relay")
             await self._svc.publish_approved_post(
                 item.space_id,
                 post,
                 approved_by=approved_by,
                 attachments=dict(item.payload.get("attachments") or {}),
+                public_relay=relay if isinstance(relay, dict) else None,
             )
         return ApplyResult(target_id=post.id, post_id=post.id)
 

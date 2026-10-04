@@ -5991,21 +5991,30 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         *,
         approved_by: str,
         attachments: dict | None = None,
+        public_relay: dict | None = None,
     ) -> Post:
         """Publish a post released from the moderation queue — the same
         persist + :class:`SpacePostCreated` path as a direct post, the
         approver named as its ``approved_by`` (v_42). The posts level is
         checked for the APPROVER: ADMIN_ONLY takes a release from an admin
-        only."""
+        only. ``public_relay`` is the submitter's author-signed copy the
+        queue kept, which a seed holder relays to GFS followers."""
         space = await self._require_writable_space(space_id)
         await self._gate(space, approved_by, "posts", ContentAction.CREATE, False)
-        await self._persist_post(space_id, post, approved_by=approved_by)
+        await self._persist_post(
+            space_id, post, approved_by=approved_by, public_relay=public_relay
+        )
         if attachments:
             await self._post_attachments.apply(space_id, post, attachments)
         return post
 
     async def _persist_post(
-        self, space_id: str, post: Post, *, approved_by: str | None = None
+        self,
+        space_id: str,
+        post: Post,
+        *,
+        approved_by: str | None = None,
+        public_relay: dict | None = None,
     ) -> Post:
         """Persist a Post and publish SpacePostCreated.
 
@@ -6027,6 +6036,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 # The approver of a queued post made it appear — the actor
                 # receivers check against the posts level (v_42).
                 approved_by=approved_by,
+                public_relay=public_relay,
             )
         )
         return post

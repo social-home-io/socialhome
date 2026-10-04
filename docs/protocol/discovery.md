@@ -566,7 +566,10 @@ boundary on both ends:
   that doesn't understand it simply ignores it and the broadcast still
   delivers; no new event type and no capability bump.
 - **Consumer** (`services/space_public_inbound.py`) handles the relayed
-  `space_post_public` frame off the SH↔GFS WebSocket. Defence-in-depth —
+  `space_post_public` frame off the SH↔GFS WebSocket. (An inner with no
+  `author_sig` is a removal notice; an approved post carries the authority's
+  mark — see
+  [Moderation outcomes on the host relay](#moderation-outcomes-on-the-host-relay).) Defence-in-depth —
   the GFS already verified, but the relay is never trusted: it (1)
   re-verifies the authority signature against the locally-mirrored
   `spaces.identity_public_key`, (2) decrypts under the per-space content
@@ -666,7 +669,10 @@ State this precisely; do not soften it:
    space-level ban (`status='banned'`) is the only moderation lever left on
    the relay path.
 4. **The GFS still sees `space_id`, `event_type`, payload size and timing**,
-   plus the subscriber set — it is the directory.
+   plus the subscriber set — it is the directory. Payload size is a bucket:
+   every host-relay plaintext is padded to `ITEM_SIZE_BUCKETS`, and removal
+   notices and approved posts ride the same `space_post_public` type, so a
+   moderation looks like a short post.
 
 The whole shape is pinned by the §27.9 release blocker
 `tests/protocol/test_gfs_payload_minimization.py`, which drives the real
@@ -945,7 +951,9 @@ POST /gfs/member-publish
   them — the binding itself rides only inside the ciphertext; the plaintext
   `writer_cert` the server sees is the v1 fields alone, and the server
   refuses any other key — (so a plain member of a `MODERATED` or `ADMIN_ONLY` space never
-  member-publishes: its post goes to the host, into the queue or refused) —
+  member-publishes: its post goes to the host, into the queue or refused;
+  an approved one reaches followers on the host's authority — see
+  [Moderation outcomes on the host relay](#moderation-outcomes-on-the-host-relay)) —
   in a PUBLIC/GLOBAL space with `allow_subscribers`, to every active
   connection server that lists the space AND proves
   `member_publish_trusted` in its signed capability block. "Lists" is read
@@ -1151,10 +1159,10 @@ that the household is a follower or a plain member under a restricted posts
 level. The size bucket separates long items from short ones. Strict mode
 (the cert moves inside the ciphertext) removes the scope residuals.
 
-**Follow-up (unchanged by this release).** A moderator's or admin's removal
-of someone else's post or comment is not relayed to followers — it stays on
-the host path (`SPACE_POST_DELETED` / `SPACE_COMMENT_DELETED` to members), as
-it always was; followers keep the item until they re-sync.
+**Moderators' removals** of someone else's item stay on the host path
+toward members (`SPACE_POST_DELETED` / `SPACE_COMMENT_DELETED`); they reach
+followers through the host relay as authority-signed removal notices — see
+[Moderation outcomes on the host relay](#moderation-outcomes-on-the-host-relay).
 
 ```mermaid
 sequenceDiagram
@@ -1174,6 +1182,102 @@ sequenceDiagram
     end
     S->>S: decrypt, check cert + scope for the real type, author_sig, dedupe
 ```
+
+### Moderation outcomes on the host relay
+
+Two things a follower needs never travel on the author-only member relay:
+the **removal** of a post or comment on the host path (a moderator's, an
+admin's, the owner's, or the author's own when it could not use the member
+relay), and a post **approved** from the review queue of a `MODERATED`
+space (its author's household holds only a `comment`-scope cert there). The
+space authority already vouches for content to followers, so both ride the
+host relay (`services/space_public_authority.py`).
+
+**Same wire shape as a post.** Both are `space_post_public` relays: the
+envelope `{space_id, epoch, encrypted_payload, authority_sig,
+authority_sig_suite}`, authority-signed with the space seed, POSTed to
+`/gfs/publish` like any post. The GFS sees the same event type, the same
+cleartext keys and a ciphertext in the same size bucket — it cannot tell a
+removal or an approval from a post, and never sees the item id, the author,
+the moderator or the content. The GFS needed no change and no capability:
+`space_post_public` is already in `AUTHORITY_RELAY_EVENT_TYPES`, and a new
+event type would only have told it that a moderation happened.
+
+**Size padding, both relays.** Every host-relay plaintext — posts,
+removals, approved posts — is now padded to the `ITEM_SIZE_BUCKETS` of the
+member relay (1 / 4 / 16 / 64 / 128 KiB, `_pad` inside the AEAD). The pad
+sits outside the fixed field list of every author signature, so a follower
+from before padding still verifies and shows the post.
+
+**The inner (inside the ciphertext only).**
+
+| Kind | Inner | Who sends it | Follower checks |
+|---|---|---|---|
+| removal | `{authority_kind: "removal", space_id, target: "post" \| "comment", item_id, post_id, author_user_id?}` — never who removed it or why | any seed holder (the owner or a delegated admin) that applies a space post / comment delete it holds — local, or a federated delete from a moderator household | authority signature; inner `space_id` = envelope's |
+| approved post | the **author-signed** post inner the submitter's household made when it submitted the item, plus — outside the author signature — `authority_kind: "approved_post"` and the author household's `writer_cert` | the host, which applies an approved item (a delegated admin's approval reaches the host first; a link-joined admin acts through the host) | every check of a relayed post (authority signature, author signature and self-cert, owner-bound post id, origin = the author key's household, inner `space_id`); the writer cert REQUIRED — pinned space key, this space, the envelope's epoch, `author_pk` — at `comment` scope at least |
+
+**Approved posts keep the author's signature.** When a plain member's
+household submits a post to the queue of a public / global space with
+followers, it signs the post inner (`build_signed_author_inner`, with
+`created_at` = the submission time) and sends it **next to** the queue
+payload as `public_relay` in `SPACE_MODERATION_SUBMITTED`. The host keeps
+it in its queue row only when it verifies for that space, post id and
+submitter; anything under that key inside the payload itself is dropped.
+When the host applies the approved item, it relays that copy only if every
+content field equals the post it publishes — followers see exactly what
+the reviewers approved — drops the link card, re-stamps the household's
+cert for the relay epoch (its live seat; none → not relayed) and adds the
+mark. The mark is the authority's statement that the post was approved;
+it is what lets a follower accept a `comment`-scope cert for a post. A seed
+holder refuses to relay a member's own `public_relay` that already names an
+authority kind, so only a seed holder sets it. No signed copy (a submitter
+from before this release) → nothing is relayed: a seed holder never
+attributes a post on its own word. The follower's copy shows the
+submission time; the members' copy the approval time.
+
+**Removals have no author signature.** That absence is what receivers key
+on: an inner WITHOUT `author_sig` can only be a removal (anything else
+unsigned is dropped), and an inner WITH one is always verified as an
+author-signed post. A member's pre-signed inner therefore can never pass as
+a removal; the member relay (`space_item`) names only member item types;
+and a household without the space seed can't sign the envelope — the GFS
+refuses it, and so does every follower.
+
+**Applying a removal** (`SpaceItemInbound.apply_authority_removal`). Not
+author-bound — the space authority may remove anyone's item, as a moderator
+may on the host path — but ordered like a member delete:
+
+- held in this space → soft-deleted (a comment's count goes down, and it
+  must be on the named post), and `PostDeleted` / `CommentDeleted`
+  published with the space's owner household as origin, so it is never
+  fanned back out and never credited to anyone;
+- not held yet → the soft-deleted tombstone under the id, but **only when
+  the id is owner-bound to the notice's `author_user_id` in this space**
+  (and, for a comment, its post is held here) — so a removal that overtakes
+  its create keeps the item gone, and a seed holder of one space can never
+  pre-empt another space's row on a household that follows both;
+- already deleted → nothing (duplicates from several seed holders or
+  connection servers are harmless).
+
+**Seed holders relay every delete they apply** to an item they hold, the
+author's own included, so a follower also loses a post whose author could
+not use the member relay (a plain member of a `MODERATED` space). Nothing is
+relayed for an item the seed holder never held, a calendar-derived post, or
+an archived space. A follower may get the same removal more than once (the
+author's `post_delete`, the host's notice, other seed holders); the repeat
+changes nothing. A comment removal that arrives before its post is held is
+dropped; if the comment then arrives over the member relay it shows until
+the next sync. Media a removed post referenced stays on a follower's disk
+until it is pruned, as for every other remote delete path.
+
+**Versions.** No OURS bump and no GFS capability: the GFS leg has no proto
+negotiation. A follower from before this release drops a removal (its
+author check fails closed) and keeps the item; it drops an approved post's
+`comment`-scope cert (it requires `write` on a relayed post), so it never
+shows it — exactly as before, nothing is misapplied. A submitter from
+before this release attaches no signed copy; its approved posts still reach
+members only. A host from before this release keeps ignoring the copy
+(older peers ignore unknown payload fields).
 
 ### Member publish, strict mode (v_50)
 
@@ -1729,6 +1833,11 @@ contest a ban.
 - `socialhome/services/space_public_outbound.py`,
   `socialhome/services/space_public_inbound.py` — Phase 5a public
   space-content relay producer/consumer.
+- `socialhome/services/space_public_authority.py` — the authority kinds of
+  that relay (the approved-post mark; removal notices are
+  `domain/space_item.AuthorityRemoval`, applied by
+  `SpaceItemInbound.apply_authority_removal`); the submitter's signed copy
+  is attached in `services/space_moderation_federation.py`.
 - `socialhome/services/space_subscriber_key_outbound.py`,
   `socialhome/services/space_subscriber_key_inbound.py` — Phase 5b-b
   subscriber content-key handoff (seal + relay / unseal + import).

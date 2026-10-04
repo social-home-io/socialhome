@@ -253,6 +253,7 @@ class _SpaceService:
         self.attachments = SpacePostAttachments()
         self.posts: dict[str, Post] = {}
         self.published: list[tuple] = []
+        self.relays: list = []
 
     def post_attachments(self):
         return self.attachments
@@ -260,9 +261,12 @@ class _SpaceService:
     async def get_space_post(self, space_id, post_id):
         return self.posts.get(post_id)
 
-    async def publish_approved_post(self, space_id, post, *, approved_by, attachments):
+    async def publish_approved_post(
+        self, space_id, post, *, approved_by, attachments, public_relay=None
+    ):
         self.posts[post.id] = post
         self.published.append((space_id, post.id, approved_by, attachments))
+        self.relays.append(public_relay)
         return post
 
 
@@ -296,3 +300,23 @@ async def test_handler_validate_snapshot_apply_preview():
     assert await h.snapshot("sp", "p-9") == {"type": "text", "content": "c"}
     preview = h.preview(_item({**clean, "attachments": {"poll": {"question": "Q"}}}))
     assert preview["content"] == "c" and preview["poll"] == {"question": "Q"}
+
+
+async def test_handler_apply_hands_the_signed_copy_on():
+    """The submitter's author-signed copy the queue kept goes with the
+    approved post, so a seed holder can relay it to GFS followers."""
+    svc = _SpaceService()
+    h = PostModerationHandler(svc)  # type: ignore[arg-type]
+    clean = h.validate(_space(), _payload())
+    await h.apply(
+        _item({**clean, "public_relay": {"post_id": "p-9"}}),
+        approved_by="u-mod",
+        force=False,
+    )
+    assert svc.relays == [{"post_id": "p-9"}]
+    svc2 = _SpaceService()
+    h2 = PostModerationHandler(svc2)  # type: ignore[arg-type]
+    await h2.apply(
+        _item({**clean, "public_relay": "junk"}), approved_by="u-mod", force=False
+    )
+    assert svc2.relays == [None]

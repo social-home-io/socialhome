@@ -46,6 +46,15 @@ trusted by the receiver:
    ``origin_instance_id`` set (so the local realtime/search surfaces light
    up AND the federation outbound bridge's loop-guard skips re-fanning).
 
+**Authority kinds** (:mod:`socialhome.services.space_public_authority`).
+A host-relay inner with NO ``author_sig`` can only be a **removal** notice,
+its envelope's authority signature (step 1) the only authorizer
+(soft-delete or tombstone, through
+:meth:`SpaceItemInbound.apply_authority_removal`); anything else unsigned is
+dropped. An author-signed post the seed holder marked ``approved_post``
+(released from the moderation queue) gets every post check, and its writer
+cert is REQUIRED but may be ``comment``-scope.
+
 Member-published ``space_item`` frames (v_49) carry posts AND comments,
 comment edits / deletes, the author's own post edits / deletes and
 reactions; :meth:`SpacePublicInbound._on_space_item` runs the checks every
@@ -84,13 +93,16 @@ from ..domain.presence import truncate_coord
 from ..crypto import derive_instance_id
 from ..domain.space import SpaceRole
 from ..domain.space_item import (
+    AUTHORITY_KIND_FIELD,
+    AUTHORITY_KIND_REMOVAL,
     ITEM_TYPE_POST_EDIT,
     POST_SHAPED_ITEM_TYPES,
     item_stamp,
     required_scope,
     stamp_to_db,
+    AuthorityRemoval,
 )
-from ..domain.writer_cert import WRITER_SCOPE_WRITE, WriterCert
+from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..writer_cert import verify_writer_users
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
@@ -108,9 +120,11 @@ from .space_public_author import (
     verified_link_preview,
     verify_signed_author_inner,
 )
+from .space_public_authority import is_approved, is_authority_inner
 from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
+    from ..domain.space import Space
     from ..federation.space_authorship import SpaceAuthorship
     from .space_authority_pin import AuthorityPinRefresher
     from ..repositories.space_post_repo import AbstractSpacePostRepo
@@ -248,7 +262,7 @@ class SpacePublicInbound:
             )
             return
         pinned_pk_hex = space.identity_public_key
-        if not self._verify_authority(space_id, envelope, space.identity_public_key):
+        if not self._verify_authority(space_id, envelope, pinned_pk_hex):
             # v_44 — the owner may have rotated the space authority key
             # since we pinned it: heal from the GFS listing's owner cert
             # (rate-limited) and verify ONCE more against the new pin.
@@ -265,6 +279,7 @@ class SpacePublicInbound:
                     space_id,
                 )
                 return
+            space = healed
             pinned_pk_hex = healed.identity_public_key
         epoch = envelope.get("epoch")
         ciphertext = envelope.get("encrypted_payload")
@@ -297,6 +312,12 @@ class SpacePublicInbound:
             )
             return
         if not isinstance(inner, dict):
+            return
+        # No author signature → an authority removal notice, authorized by
+        # the envelope's authority signature verified above. An inner WITH an
+        # author signature is always a post, whatever else it claims.
+        if is_authority_inner(inner):
+            await self._on_authority_inner(space, inner)
             return
 
         post_id = str(inner.get("post_id") or "")
@@ -345,10 +366,28 @@ class SpacePublicInbound:
                 post_id,
             )
             return
+        # A post a seed holder released from the moderation queue: its author
+        # household may hold only a comment-scope cert (a plain member of a
+        # MODERATED space), and the authority's mark — outside the author
+        # signature, under the authority signature — vouches for the
+        # approval. The cert is REQUIRED then: it proves the author's
+        # household holds a seat this epoch.
+        approved = is_approved(inner)
+        if approved and inner.get(WRITER_CERT_FIELD) is None:
+            log.warning(
+                "space_public.inbound: approved post %s without a writer cert "
+                "— dropped",
+                post_id,
+            )
+            return
         # v_49 — a v_49 author's item carries its household's writer cert;
         # present means it MUST hold (an absent one is a pre-v_49 author).
         if inner.get(WRITER_CERT_FIELD) is not None and not await self._writer_cert_ok(
-            space, inner, epoch=epoch, pinned_pk_hex=pinned_pk_hex
+            space,
+            inner,
+            epoch=epoch,
+            pinned_pk_hex=pinned_pk_hex,
+            required_scope=WRITER_SCOPE_COMMENT if approved else WRITER_SCOPE_WRITE,
         ):
             log.warning(
                 "space_public.inbound: writer cert failed for space %s post %s "
@@ -397,6 +436,41 @@ class SpacePublicInbound:
                 ),
                 origin_instance_id=origin_instance_id,
             )
+        )
+
+    # ── Authority-only notices (host relay) ──────────────────────────────
+
+    async def _on_authority_inner(self, space: "Space", inner: dict) -> None:
+        """An inner with no author signature, under a verified authority
+        signature: a removal notice (see
+        :mod:`~socialhome.services.space_public_authority`). Anything else is
+        dropped — an approved post always carries its author's signature."""
+        if str(inner.get("space_id") or "") != space.id:
+            log.warning(
+                "space_public.inbound: authority notice names another space "
+                "(inner=%s envelope=%s) — dropped",
+                inner.get("space_id"),
+                space.id,
+            )
+            return
+        kind = inner.get(AUTHORITY_KIND_FIELD)
+        if kind == AUTHORITY_KIND_REMOVAL:
+            try:
+                removal = AuthorityRemoval.from_inner(inner)
+            except ValueError as exc:
+                log.warning(
+                    "space_public.inbound: malformed removal for space %s (%s) "
+                    "— dropped",
+                    space.id,
+                    exc,
+                )
+                return
+            await self._items.apply_authority_removal(space=space, removal=removal)
+            return
+        log.warning(
+            "space_public.inbound: relayed inner for space %s has no author "
+            "signature and is no removal — dropped",
+            space.id,
         )
 
     # ── Member-published items (v_49 trusted mode) ───────────────────────
@@ -703,7 +777,13 @@ class SpacePublicInbound:
         )
 
     async def _writer_cert_ok(
-        self, space, inner: dict, *, epoch: int, pinned_pk_hex: str
+        self,
+        space,
+        inner: dict,
+        *,
+        epoch: int,
+        pinned_pk_hex: str,
+        required_scope: str = WRITER_SCOPE_WRITE,
     ) -> bool:
         try:
             author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
@@ -721,7 +801,7 @@ class SpacePublicInbound:
             inner.get(WRITER_CERT_FIELD),
             epoch=epoch,
             author_pk=author_pk,
-            required_scope=WRITER_SCOPE_WRITE,
+            required_scope=required_scope,
             space_pubkey_hex=pinned_pk_hex,
         )
 

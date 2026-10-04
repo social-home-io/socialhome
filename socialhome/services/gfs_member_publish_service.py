@@ -101,7 +101,13 @@ from ..domain.gfs_member_publish import (
 )
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, SpaceType
-from ..domain.space_item import ITEM_TYPE_POST, SUPPORTED_ITEM_TYPES, required_scope
+from ..domain.space_item import (
+    ITEM_SIZE_BUCKETS as ITEM_SIZE_BUCKETS,
+    ITEM_TYPE_POST,
+    SUPPORTED_ITEM_TYPES,
+    pad_json_object,
+    required_scope,
+)
 from ..domain.writer_cert import WriterCert, scope_permits
 from .gfs_publish_retry import (
     GfsPublish,
@@ -157,19 +163,6 @@ def _cert_lets(cert: dict, author_user_id: str, item_type: str) -> bool:
     )
 
 
-#: Plaintext sizes a member item is padded up to before encryption, so the
-#: ciphertext length tells a connection server (or anyone on the wire) only
-#: the bucket — a reaction, a comment and a short post all look alike. The
-#: largest stays well under the GFS payload cap once encrypted and base64'd.
-ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 4096, 16384, 65536, 131072)
-
-#: The padding field. A JSON key, so the padding sits INSIDE the AEAD
-#: (authenticated with the item) and a receiver from before padding — which
-#: reads ``item_type`` / ``inner`` off the object and ignores other keys —
-#: still parses a padded item.
-_PAD_FIELD: str = "_pad"
-
-
 #: Random offset (seconds, either way) on an anonymous request's ``ts``. Well
 #: inside the server's ±300 s window, wide enough that the stamp says nothing
 #: about this household's clock.
@@ -187,16 +180,10 @@ def _anon_ts() -> str:
 
 def build_item_plaintext(item_type: str, inner: dict) -> bytes:
     """The bytes a member publish encrypts: the real type + the inner,
-    padded with ASCII ``0`` in :data:`_PAD_FIELD` to exactly the smallest
+    padded with ASCII ``0`` in :data:`~socialhome.domain.space_item.PAD_FIELD` to exactly the smallest
     :data:`ITEM_SIZE_BUCKETS` size that fits. An item larger than the
     largest bucket is left unpadded (its size is then its own)."""
-    body = {"item_type": item_type, "inner": inner, _PAD_FIELD: ""}
-    base = json.dumps(body).encode("utf-8")
-    bucket = next((b for b in ITEM_SIZE_BUCKETS if b >= len(base)), None)
-    if bucket is None:
-        return base
-    body[_PAD_FIELD] = "0" * (bucket - len(base))
-    return json.dumps(body).encode("utf-8")
+    return pad_json_object({"item_type": item_type, "inner": inner})
 
 
 def parse_item_plaintext(plaintext: bytes) -> tuple[str, dict] | None:

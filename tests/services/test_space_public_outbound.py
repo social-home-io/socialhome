@@ -9,8 +9,11 @@ spaces, and inbound-driven (loop) events do not relay.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import logging
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -33,8 +36,19 @@ from socialhome.services.space_public_author import (
 )
 from tests.services.test_space_public_author import _v25_author_signing_bytes
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import SpacePostCreated
-from socialhome.domain.post import Post, PostType
+from socialhome.domain.events import CommentDeleted, PostDeleted, SpacePostCreated
+from socialhome.domain.space_item import (
+    AUTHORITY_KIND_FIELD,
+    AUTHORITY_KIND_REMOVAL,
+    ITEM_SIZE_BUCKETS,
+    PAD_FIELD,
+)
+from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
+from socialhome.crypto import derive_instance_id
+from socialhome.domain.space import SpaceFeatureAccess
+from socialhome.services.space_public_authority import is_approved
+from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -49,6 +63,11 @@ from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import verify_writer_cert
 from socialhome.domain.writer_cert import WriterCert
 from socialhome.writer_cert import sign_writer_cert
+
+
+def _unpadded(inner: dict) -> dict:
+    """The decrypted inner without its size padding (``_pad``)."""
+    return {k: v for k, v in inner.items() if k != PAD_FIELD}
 
 
 class _CaptureGfs:
@@ -315,7 +334,7 @@ async def test_remote_authored_relay_happy_path(env):
         "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
     )
     inner = json.loads(pt)
-    assert inner == relay
+    assert _unpadded(inner) == relay
     assert inner["author_pk"] == author_kp.public_key.hex()
     assert inner["author_user_id"] == author_user_id
     assert verify_ed25519(
@@ -854,7 +873,7 @@ async def test_pre_v49_author_without_a_cert_keeps_the_host_path(env):
         )
     )
     _envelope, inner = await _decrypted(env, "sp-pub")
-    assert inner == relay
+    assert _unpadded(inner) == relay
 
 
 async def test_v49_origin_without_a_cert_is_not_relayed(env, caplog):
@@ -915,3 +934,409 @@ async def test_a_member_published_post_is_still_relayed_by_the_host(env):
         )
     )
     assert len(env["gfs"].calls) == 1
+
+
+# ─── Size padding: every host-relay plaintext lands on a bucket ─────────
+
+
+async def test_relayed_post_plaintext_is_padded_to_a_bucket(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    envelope = env["gfs"].calls[-1]["payload"]
+    pt = await env["crypto"].decrypt(
+        "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
+    )
+    assert len(pt) in ITEM_SIZE_BUCKETS
+    # The padding sits outside the author signature.
+    assert verify_signed_author_inner(json.loads(pt))
+
+
+async def test_a_member_hint_carrying_an_authority_kind_is_not_relayed(env, caplog):
+    """A member's own pre-signed inner must never look like an authority
+    notice on the follower side — the seed holder refuses it outright."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    _kp, author_user_id, relay = _remote_relay()
+    relay[AUTHORITY_KIND_FIELD] = AUTHORITY_KIND_REMOVAL
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=_post(author_user_id),
+            space_id="sp-pub",
+            origin_instance_id="beta.home",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+    assert "authority" in caplog.text
+
+
+# ─── Removals: a seed holder relays every host-path delete ──────────────
+
+
+_ENVELOPE_KEYS = {
+    "space_id",
+    "epoch",
+    "encrypted_payload",
+    "authority_sig",
+    "authority_sig_suite",
+}
+
+
+async def _removal_inner(env, skp, space_id="sp-pub") -> dict:
+    call = env["gfs"].calls[-1]
+    assert call["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
+    envelope = call["payload"]
+    assert set(envelope) == _ENVELOPE_KEYS
+    assert verify_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        space_id=space_id,
+        payload=strip_authority_sig_fields(envelope),
+        authority_sig=envelope["authority_sig"],
+        authority_sig_suite=envelope["authority_sig_suite"],
+        space_public_key=skp.public_key,
+    )
+    pt = await env["crypto"].decrypt(
+        space_id, envelope["epoch"], envelope["encrypted_payload"]
+    )
+    # Padded like every other relay item: a removal looks like a short post.
+    assert len(pt) in ITEM_SIZE_BUCKETS
+    return json.loads(pt)
+
+
+async def test_a_moderator_post_removal_is_relayed_without_who_removed_it(env):
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["bus"].publish(
+        PostDeleted(
+            post_id="post-9",
+            space_id="sp-pub",
+            actor_user_id="moderator-user",
+            author_user_id="author-user",
+        )
+    )
+    assert len(env["gfs"].calls) == 1
+    blob = json.dumps(env["gfs"].calls[0])
+    # The GFS sees no item id, author or moderator.
+    for secret in ("post-9", "moderator-user", "author-user"):
+        assert secret not in blob
+    inner = await _removal_inner(env, skp)
+    assert _unpadded(inner) == {
+        AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL,
+        "space_id": "sp-pub",
+        "target": "post",
+        "item_id": "post-9",
+        "post_id": "post-9",
+        # Whose it was — for the follower's tombstone rule; inside only.
+        "author_user_id": "author-user",
+    }
+    # Followers learn nothing about who removed it.
+    assert "moderator-user" not in json.dumps(inner)
+
+
+async def test_a_comment_removal_is_relayed(env):
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    await env["bus"].publish(
+        CommentDeleted(
+            post_id="post-1",
+            comment_id="c-1",
+            space_id="sp-pub",
+            actor_user_id="mod",
+            author_user_id="someone",
+        )
+    )
+    inner = await _removal_inner(env, skp)
+    assert _unpadded(inner) == {
+        AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL,
+        "space_id": "sp-pub",
+        "target": "comment",
+        "item_id": "c-1",
+        "post_id": "post-1",
+        "author_user_id": "someone",
+    }
+
+
+async def test_a_federated_delete_applied_here_is_relayed_too(env):
+    """A moderator on another household removes the post; the host applies
+    the federated delete and relays the removal on its authority."""
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["bus"].publish(
+        PostDeleted(post_id="post-2", space_id="sp-pub", origin_instance_id="m.home")
+    )
+    inner = await _removal_inner(env, skp)
+    assert inner["item_id"] == "post-2"
+
+
+@pytest.mark.parametrize("case", ["no_seed", "private", "no_subscribers", "feed"])
+async def test_removal_is_not_relayed_where_nothing_was(env, case):
+    if case == "no_seed":
+        await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=False)
+    elif case == "private":
+        await env["make_space"]("sp-pub", SpaceType.PRIVATE, with_seed=True)
+    elif case == "no_subscribers":
+        await env["make_space"](
+            "sp-pub", SpaceType.PUBLIC, with_seed=True, allow_subscribers=False
+        )
+    else:
+        await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["bus"].publish(
+        PostDeleted(post_id="post-3", space_id=None if case == "feed" else "sp-pub")
+    )
+    await env["bus"].publish(
+        CommentDeleted(
+            post_id="post-3",
+            comment_id="c-3",
+            space_id=None if case == "feed" else "sp-pub",
+        )
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_a_calendar_post_removal_is_not_relayed(env):
+    """Calendar-derived posts are never relayed, so neither is their removal."""
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+
+    class _Posts:
+        async def get(self, post_id):
+            post = _post("x")
+            return "sp-pub", Post(
+                id=post_id,
+                author=post.author,
+                type=PostType.TEXT,
+                content=None,
+                created_at=post.created_at,
+                linked_event_id="ev-1",
+            )
+
+    env["sub"].attach_posts(_Posts())
+    await env["bus"].publish(PostDeleted(post_id="post-cal", space_id="sp-pub"))
+    assert env["gfs"].calls == []
+
+
+async def test_a_removal_with_an_unusable_id_is_not_relayed(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await env["bus"].publish(PostDeleted(post_id="x" * 500, space_id="sp-pub"))
+    assert env["gfs"].calls == []
+
+
+async def test_a_removal_without_a_content_key_is_dropped(env, caplog):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+
+    async def _no_key(*_a, **_k):
+        raise RuntimeError("no key")
+
+    with patch.object(SpaceContentEncryption, "encrypt", _no_key):
+        await env["bus"].publish(PostDeleted(post_id="post-4", space_id="sp-pub"))
+    assert env["gfs"].calls == []
+    assert "no content key" in caplog.text
+
+
+# ─── Approved moderated posts: relayed under the author's signature ─────
+
+
+async def _approved_env(env, *, seats=("member",)):
+    """A remote author household whose instance id is its key fingerprint,
+    a MODERATED public space, and the post the host just published from the
+    queue with the submitter's signed copy."""
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    space = await env["space_repo"].get("sp-pub")
+    await env["space_repo"].save(_with_posts_level(space, "moderated"))
+    author_kp = generate_identity_keypair()
+    author_iid = derive_instance_id(author_kp.public_key)
+    author_user_id = derive_user_id(author_kp.public_key, "bob")
+    await _with_certs(
+        env,
+        seats={author_iid: list(seats)},
+        pks={author_iid: author_kp.public_key},
+    )
+    post = Post(
+        id=mint_owner_bound_id(
+            SPACE_POST_KIND, space_id="sp-pub", owner_user_id=author_user_id
+        ),
+        author=author_user_id,
+        type=PostType.TEXT,
+        content="reviewed and released",
+        created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    # Signed by the submitter at submission time (created_at = submitted).
+    relay = build_signed_author_inner(
+        post=post,
+        space_id="sp-pub",
+        author_username="bob",
+        author_pk=author_kp.public_key,
+        author_identity_seed=author_kp.private_key,
+        origin_instance_id=author_iid,
+    )
+    return skp, author_kp, author_iid, post, relay
+
+
+def _with_posts_level(space, level):
+    return dataclasses.replace(
+        space,
+        features=dataclasses.replace(
+            space.features, posts_access=SpaceFeatureAccess(level)
+        ),
+    )
+
+
+async def test_an_approved_remote_post_is_relayed_under_its_authors_signature(env):
+    skp, author_kp, author_iid, post, relay = await _approved_env(env)
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=post,
+            space_id="sp-pub",
+            approved_by="the-moderator",
+            public_relay=relay,
+        )
+    )
+    assert len(env["gfs"].calls) == 1
+    blob = json.dumps(env["gfs"].calls[0])
+    for secret in (post.id, post.author, "the-moderator", "reviewed and released"):
+        assert secret not in blob
+    inner = await _removal_inner(env, skp)
+    assert is_approved(inner)
+    # The author's own signature still proves authorship.
+    assert verify_signed_author_inner(inner)
+    assert inner["author_sig"] == relay["author_sig"]
+    assert inner["post_id"] == post.id
+    assert inner["origin_instance_id"] == author_iid
+    assert "the-moderator" not in json.dumps(inner)
+    envelope = env["gfs"].calls[0]["payload"]
+    verify_writer_cert(
+        WriterCert.from_wire(inner["writer_cert"]),
+        space_pubkey=skp.public_key,
+        space_id="sp-pub",
+        epoch=envelope["epoch"],
+        author_pk=author_kp.public_key,
+        required_scope="comment",
+    )
+
+
+async def test_an_approved_post_without_a_signed_copy_is_not_relayed(env, caplog):
+    """An older submitter attached none: a seed holder never vouches for
+    authorship on its own."""
+    caplog.set_level(logging.INFO)
+    _skp, _kp, _iid, post, _relay = await _approved_env(env)
+    await env["bus"].publish(
+        SpacePostCreated(post=post, space_id="sp-pub", approved_by="mod")
+    )
+    assert env["gfs"].calls == []
+    assert "no valid author-signed copy" in caplog.text
+
+
+async def test_a_remote_post_without_an_approval_is_not_relayed(env):
+    _skp, _kp, _iid, post, relay = await _approved_env(env)
+    await env["bus"].publish(
+        SpacePostCreated(post=post, space_id="sp-pub", public_relay=relay)
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_a_signed_copy_of_other_words_is_not_relayed(env):
+    """Followers see exactly what the reviewers approved, or nothing."""
+    _skp, _kp, _iid, post, relay = await _approved_env(env)
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=dataclasses.replace(post, content="what the moderators saw"),
+            space_id="sp-pub",
+            approved_by="mod",
+            public_relay=relay,
+        )
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_an_approved_post_of_a_household_without_a_seat_is_not_relayed(
+    env, caplog
+):
+    _skp, _kp, _iid, post, relay = await _approved_env(env, seats=())
+    await env["bus"].publish(
+        SpacePostCreated(
+            post=post, space_id="sp-pub", approved_by="mod", public_relay=relay
+        )
+    )
+    assert env["gfs"].calls == []
+    assert "writer" in caplog.text
+
+
+async def test_an_approved_post_without_a_content_key_is_dropped(env, caplog):
+    _skp, _kp, _iid, post, relay = await _approved_env(env)
+
+    async def _no_key(*_a, **_k):
+        return None
+
+    with patch.object(SpaceContentEncryption, "get_current_epoch", _no_key):
+        await env["bus"].publish(
+            SpacePostCreated(
+                post=post, space_id="sp-pub", approved_by="mod", public_relay=relay
+            )
+        )
+    assert env["gfs"].calls == []
+    assert "no content key" in caplog.text
+
+
+async def test_a_failed_gfs_publish_is_logged_not_raised(env, caplog):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+
+    async def _boom(**_kw):
+        raise RuntimeError("gfs down")
+
+    env["gfs"].publish_space_event = _boom
+    await env["bus"].publish(PostDeleted(post_id="post-5", space_id="sp-pub"))
+    assert "post removal relay failed" in caplog.text
+
+
+async def _posts_env(env):
+    repo = SqliteSpacePostRepo(env["db"])
+    env["sub"].attach_posts(repo)
+    return repo
+
+
+async def test_a_federated_delete_carries_the_author_from_the_held_row(env):
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    posts = await _posts_env(env)
+    await posts.save("sp-pub", _post("row-author"))
+    await env["bus"].publish(
+        PostDeleted(post_id="post-1", space_id="sp-pub", origin_instance_id="m.home")
+    )
+    inner = await _removal_inner(env, skp)
+    assert inner["author_user_id"] == "row-author"
+
+
+async def test_a_removal_of_an_item_never_held_here_is_not_relayed(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    await _posts_env(env)
+    await env["bus"].publish(PostDeleted(post_id="ghost", space_id="sp-pub"))
+    await env["bus"].publish(
+        CommentDeleted(post_id="ghost", comment_id="c-ghost", space_id="sp-pub")
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_a_comment_removal_carries_the_author_from_the_held_row(env):
+    skp = await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    posts = await _posts_env(env)
+    await posts.save("sp-pub", _post("post-author"))
+    await posts.add_comment(
+        Comment(
+            id="c-held",
+            post_id="post-1",
+            author="comment-author",
+            type=CommentType.TEXT,
+            content="hi",
+            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+        ),
+        space_id="sp-pub",
+    )
+    await env["bus"].publish(
+        CommentDeleted(post_id="post-1", comment_id="c-held", space_id="sp-pub")
+    )
+    inner = await _removal_inner(env, skp)
+    assert inner["author_user_id"] == "comment-author"
+
+
+async def test_a_removal_in_an_archived_space_is_not_relayed(env):
+    await env["make_space"]("sp-pub", SpaceType.PUBLIC, with_seed=True)
+    space = await env["space_repo"].get("sp-pub")
+    await env["space_repo"].save(dataclasses.replace(space, archived=True))
+    await env["bus"].publish(PostDeleted(post_id="post-1", space_id="sp-pub"))
+    assert env["gfs"].calls == []

@@ -10,6 +10,7 @@ edit that arrives before its create, edits and reactions out of order).
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -29,6 +30,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.domain.space_item import AuthorityRemoval
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -629,3 +631,101 @@ async def test_a_reaction_changed_on_another_path_is_not_undone_by_a_late_copy(e
     await env["posts"].remove_reaction(env["post_id"], "👍", AUTHOR, space_id=SPACE)
     assert not await _apply(env, "reaction_add", _react(env, "reaction_add", "👍", 1))
     assert "👍" not in await _reactions(env)
+
+
+# ─── Authority removals (host relay) ────────────────────────────────────
+
+
+def _removal(target: str, item_id: str, post_id: str, author: str = AUTHOR):
+    return AuthorityRemoval(
+        space_id=SPACE,
+        target=target,
+        item_id=item_id,
+        post_id=post_id,
+        author_user_id=author,
+    )
+
+
+async def _space(env):
+    return await env["spaces"].get(SPACE)
+
+
+async def test_an_authority_removal_is_not_author_bound(env):
+    """The space authority may remove anyone's post, as a moderator may."""
+    space = await _space(env)
+    removal = _removal("post", env["post_id"], env["post_id"], author="")
+    assert await env["applier"].apply_authority_removal(space=space, removal=removal)
+    _sid, row = await env["posts"].get(env["post_id"])
+    assert row.deleted
+    (event,) = [e for e in env["events"] if isinstance(e, PostDeleted)]
+    assert event.origin_instance_id == "host.home"
+    assert event.author_user_id == AUTHOR
+    # Final: a duplicate changes nothing.
+    assert not await env["applier"].apply_authority_removal(
+        space=space, removal=removal
+    )
+
+
+async def test_an_authority_removal_of_another_spaces_post_is_refused(env):
+    other = dataclasses.replace(await _space(env), id="sp-other")
+    await env["spaces"].save(other)
+    removal = AuthorityRemoval(
+        space_id="sp-other",
+        target="post",
+        item_id=env["post_id"],
+        post_id=env["post_id"],
+    )
+    assert not await env["applier"].apply_authority_removal(
+        space=other, removal=removal
+    )
+    _sid, row = await env["posts"].get(env["post_id"])
+    assert not row.deleted
+
+
+async def test_an_authority_comment_removal_soft_deletes_and_counts_down(env):
+    cid = _cid()
+    await _apply(env, "comment", _comment(env, cid))
+    space = await _space(env)
+    assert await env["applier"].apply_authority_removal(
+        space=space, removal=_removal("comment", cid, env["post_id"])
+    )
+    assert (await env["posts"].get_comment(cid)).deleted
+    _sid, post = await env["posts"].get(env["post_id"])
+    assert post.comment_count == 0
+    # Already deleted → nothing more.
+    assert not await env["applier"].apply_authority_removal(
+        space=space, removal=_removal("comment", cid, env["post_id"])
+    )
+
+
+async def test_an_authority_comment_removal_naming_another_post_is_refused(env):
+    cid = _cid()
+    await _apply(env, "comment", _comment(env, cid))
+    other_post = mint_owner_bound_id(
+        SPACE_POST_KIND, space_id=SPACE, owner_user_id=AUTHOR
+    )
+    await env["posts"].save(
+        SPACE,
+        Post(id=other_post, author=AUTHOR, type=PostType.TEXT, created_at=T0),
+    )
+    assert not await env["applier"].apply_authority_removal(
+        space=await _space(env), removal=_removal("comment", cid, other_post)
+    )
+    assert not (await env["posts"].get_comment(cid)).deleted
+
+
+async def test_an_authority_tombstone_needs_an_id_bound_here(env):
+    space = await _space(env)
+    bound = mint_owner_bound_id(SPACE_POST_KIND, space_id=SPACE, owner_user_id=AUTHOR)
+    assert await env["applier"].apply_authority_removal(
+        space=space, removal=_removal("post", bound, bound)
+    )
+    _sid, row = await env["posts"].get(bound)
+    assert row.deleted and row.author == AUTHOR
+    elsewhere = mint_owner_bound_id(
+        SPACE_POST_KIND, space_id="sp-other", owner_user_id=AUTHOR
+    )
+    assert not await env["applier"].apply_authority_removal(
+        space=space, removal=_removal("post", elsewhere, elsewhere)
+    )
+    assert await env["posts"].get(elsewhere) is None

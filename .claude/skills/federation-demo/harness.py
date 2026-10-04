@@ -3669,9 +3669,15 @@ def cmd_gfs_member_publish() -> None:
     _assert_post_stays_deleted(state, space_id, second_id, edited)
     state["gfs_member_publish_post_id"] = post_id
     _save(state)
+
+    # 7. Moderation outcomes reach the follower on the host's authority: a
+    #    moderator's removal of e's post, and e's post approved from the
+    #    review queue of the space switched to MODERATED.
+    _moderation_outcomes_reach_followers(state, space_id)
     print(
         "gfs-member-publish: ok (member posts, comments, reactions, edits and "
-        "deletes reach followers without the host)"
+        "deletes reach followers without the host; moderator removals and "
+        "approved posts reach them on the host's authority)"
     )
 
 
@@ -3815,6 +3821,137 @@ def _assert_post_stays_deleted(
                 f"{post_id}: {rows!r}"
             )
     print("  a and d keep e's deleted post deleted after a came back ✓")
+
+
+def _inst_request(
+    state: dict, label: str, method: str, path: str, body: dict | None = None
+):
+    """One REST call as ``label``'s admin, backing off on the 60/min bucket."""
+    inst = state["instances"][label]
+    for _attempt in range(4):
+        st, resp = _request(
+            f"http://127.0.0.1:{inst['port']}{path}",
+            token=inst["token"],
+            method=method,
+            body=body,
+        )
+        if st != 429:
+            return st, resp
+        time.sleep(15.0)
+    return st, resp
+
+
+def _set_posts_access(state: dict, space_id: str, level: str) -> None:
+    """The owner a sets the space's posts level; waits until e sees it."""
+    st, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"posts_access": level}, "force": True},
+    )
+    _must(f"a: posts_access={level}", st, body)
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        st, sp = _e_request(state, "GET", f"/api/spaces/{space_id}")
+        if st == 200 and ((sp or {}).get("features") or {}).get("posts_access") == level:
+            return
+        time.sleep(3.0)
+    raise SystemExit(
+        f"gfs-member-publish: e never saw posts_access={level} within 60 s"
+    )
+
+
+def _moderation_outcomes_reach_followers(state: dict, space_id: str) -> None:
+    """With a (host, seed holder) back: (1) e posts, d gets it; a removes
+    it as a moderator and d — a follower with no seat, which no ``SPACE_*``
+    event reaches — drops it, from a's authority-signed removal notice on
+    the host relay. (2) a switches posts to MODERATED; e's post queues; a
+    approves it; d receives it attributed to e — under the signature e made
+    when it submitted the item, relayed and marked by a (e's cert is
+    comment-scope now, so e could not publish it). The
+    GFS log carries neither text nor id. (3) posts back to OPEN.
+    DB polls every 3 s; REST calls back off on 429."""
+    e = state["instances"]["e"]
+    base = f"/api/spaces/{space_id}/posts"
+    gfs_off = _gfs_log_size()
+
+    # (1) A moderator's removal.
+    doomed = f"A post a moderator removes — {time.time_ns()}"
+    st, post = _e_request(state, "POST", base, {"type": "text", "content": doomed})
+    doomed_id = _must("e posts a post to be moderated", st, post, ok=(201,))["id"]
+    _poll_rows(
+        "d",
+        "SELECT content FROM space_posts WHERE id = ? AND deleted = 0",
+        (doomed_id,),
+        lambda rows: bool(rows) and rows[0][0] == doomed,
+        what=f"d never received e's post {doomed_id}",
+    )
+    st, body = _inst_request(state, "a", "DELETE", f"{base}/{doomed_id}")
+    _must("a removes e's post as a moderator", st, body)
+    _poll_rows(
+        "d",
+        "SELECT deleted, content FROM space_posts WHERE id = ?",
+        (doomed_id,),
+        lambda rows: bool(rows) and rows[0][0] == 1 and rows[0][1] is None,
+        what="d (follower) never dropped the post a moderator removed",
+        timeout=90.0,
+    )
+    print("  d (follower) dropped the post a moderator removed ✓")
+
+    # (2) An approved post in a MODERATED space.
+    _set_posts_access(state, space_id, "moderated")
+    print("  a switched the space's posts to Reviewed (e sees it)")
+    reviewed = f"A post released from review — {time.time_ns()}"
+    st, queued = _e_request(state, "POST", base, {"type": "text", "content": reviewed})
+    if st != 202 or not (queued or {}).get("queued"):
+        raise SystemExit(
+            f"gfs-member-publish: e's post under Reviewed -> {st} {queued!r} "
+            "(expected 202 queued)"
+        )
+    item_id = queued["item_id"]
+    approved_id = queued.get("target_id")
+    deadline = time.monotonic() + 60.0
+    listed = False
+    while time.monotonic() < deadline and not listed:
+        time.sleep(3.0)
+        st, items = _inst_request(state, "a", "GET", f"/api/spaces/{space_id}/moderation")
+        listed = st == 200 and any(i.get("id") == item_id for i in items)
+    if not listed:
+        raise SystemExit(
+            f"gfs-member-publish: a's moderation queue never listed e's item {item_id}"
+        )
+    st, body = _inst_request(
+        state, "a", "POST", f"/api/spaces/{space_id}/moderation/{item_id}/approve", {}
+    )
+    body = _must("a approves e's post", st, body)
+    approved_id = body.get("target_id") or approved_id
+    print(f"  a approved e's queued post → id={approved_id}")
+    rows = _poll_rows(
+        "d",
+        "SELECT content, author, deleted FROM space_posts WHERE id = ?",
+        (approved_id,),
+        lambda rows: bool(rows) and rows[0][0] == reviewed and rows[0][2] == 0,
+        what=f"d (follower) never received the approved post {approved_id}",
+        timeout=90.0,
+    )
+    if rows[0][1] != e["user_id"]:
+        raise SystemExit(
+            f"gfs-member-publish: d attributes the approved post to {rows[0][1]!r}, "
+            f"expected e's user {e['user_id']!r}"
+        )
+    print("  d (follower) received the approved post, attributed to e ✓")
+    for needle in (doomed, reviewed, doomed_id, approved_id, item_id):
+        leaked = _gfs_log_lines_matching(needle, offset=gfs_off)
+        if leaked:
+            raise SystemExit(
+                f"gfs-member-publish: the GFS log carries {needle!r}: {leaked[:1]!r}"
+            )
+    print("  the GFS logged none of the moderated items' text or ids ✓")
+
+    # (3) Back to OPEN for the steps that follow.
+    _set_posts_access(state, space_id, "open")
+    print("  a switched the space's posts back to open")
 
 
 def cmd_gfs_member_publish_strict() -> None:

@@ -760,6 +760,15 @@ After a restarts and catches up, a holds the second post deleted, and a's
 relayed copy of its create never resurrects it on d (receiver dedupe against
 the soft-deleted row). Reads d's / a's DB for these checks (no REST bucket).
 
+Finally, with a back (moderation outcomes on the host relay): e posts, d gets
+it, and a removes it as a moderator — d, a follower no ``SPACE_*`` event
+reaches, drops it from a's authority-signed removal notice. Then a switches
+the space's posts to Reviewed, e's post queues (202) with e's author-signed
+copy attached, a approves it, and d receives it attributed to e — under e's
+own signature, relayed and marked by a (e's writer cert is comment-scope
+under Reviewed, so e could not publish it itself). The GFS
+log carries neither text nor ids. Posts go back to open afterwards.
+
 ### ``gfs-member-publish-strict`` — anonymous member publish (v_50)
 
 Needs ``gfs-member-publish``. The owner a switches its global space to
