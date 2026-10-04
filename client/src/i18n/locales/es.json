@@ -1476,5 +1476,7 @@
   "invite.via.gfs_off": "Este espacio no usa el servidor de conexión. Solo su propietario puede activarlo.",
   "invite.via.created_internal": "Enlace interno: solo pueden usarlo los hogares ya emparejados o conectados con el tuyo.",
   "invite.via.badge_gfs": "Servidor de conexión",
-  "invite.via.badge_internal": "Interno"
+  "invite.via.badge_internal": "Interno",
+  "invite.via.badge_legacy": "Enlace anterior",
+  "invite.via.badge_legacy_hint": "Creado antes de que este espacio tuviera la opción de servidor de conexión. Sigue funcionando; la primera persona que se una con él activa el servidor de conexión para este espacio."
 }

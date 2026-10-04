@@ -59,7 +59,9 @@ interface InviteGfsRef {
 /** How a link is redeemed. ``gfs`` — through the connection-server relay,
  *  so a household that never met ours can join; ``internal`` — only
  *  households already paired or reachable over the mesh. */
-export type InviteVia = 'gfs' | 'internal'
+/** ``gfs_legacy``: a link minted before private spaces had the GFS option
+ *  — still redeemable; the first join through it turns the option on. */
+export type InviteVia = 'gfs' | 'internal' | 'gfs_legacy'
 
 interface InviteTokenRow {
   token: string
@@ -721,10 +723,15 @@ export function SpaceInviteDialog() {
                   </span>
                   {l.via && (
                     <span class="sh-chip sh-invite-via-badge"
-                          data-testid={`invite-via-badge-${l.token}`}>
+                          data-testid={`invite-via-badge-${l.token}`}
+                          title={l.via === 'gfs_legacy'
+                            ? t('invite.via.badge_legacy_hint')
+                            : undefined}>
                       {l.via === 'internal'
                         ? t('invite.via.badge_internal')
-                        : t('invite.via.badge_gfs')}
+                        : l.via === 'gfs_legacy'
+                          ? t('invite.via.badge_legacy')
+                          : t('invite.via.badge_gfs')}
                     </span>
                   )}
                   {l.gfs && (

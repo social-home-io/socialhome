@@ -834,3 +834,14 @@ describe('SpaceInviteDialog — link type badge in the list', () => {
     expect(result.queryByTestId('invite-via-badge-tok-old')).toBeNull()
   })
 })
+
+describe('SpaceInviteDialog — grandfathered links', () => {
+  it('marks an earlier link and says it turns the connection server on when used', async () => {
+    mockReads({ tokens: [makeRow({ token: 'tok-legacy', via: 'gfs_legacy' })] })
+    const result = await openDialog()
+    await waitFor(() => result.getByTestId('invite-link-row-tok-legacy'))
+    const badge = result.getByTestId('invite-via-badge-tok-legacy')
+    expect(badge.textContent).toBe('Earlier link')
+    expect(badge.getAttribute('title')).toMatch(/turns the connection server on/i)
+  })
+})

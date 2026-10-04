@@ -1449,5 +1449,7 @@
   "invite.via.gfs_off": "Deze ruimte gebruikt de verbindingsserver niet. Alleen de eigenaar kan hem aanzetten.",
   "invite.via.created_internal": "Interne link: alleen huishoudens die al met het jouwe gekoppeld of verbonden zijn, kunnen hem gebruiken.",
   "invite.via.badge_gfs": "Verbindingsserver",
-  "invite.via.badge_internal": "Intern"
+  "invite.via.badge_internal": "Intern",
+  "invite.via.badge_legacy": "Eerdere link",
+  "invite.via.badge_legacy_hint": "Gemaakt voordat deze ruimte de verbindingsserver-optie had. Hij werkt nog; wie er als eerste mee lid wordt, zet de verbindingsserver voor deze ruimte aan."
 }

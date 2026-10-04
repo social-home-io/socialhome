@@ -1454,5 +1454,7 @@
   "invite.via.gfs_off": "Dieser Raum nutzt den Verbindungsserver nicht. Nur der Eigentümer kann ihn einschalten.",
   "invite.via.created_internal": "Interner Link: Nur Haushalte, die bereits mit deinem gekoppelt oder verbunden sind, können ihn nutzen.",
   "invite.via.badge_gfs": "Verbindungsserver",
-  "invite.via.badge_internal": "Intern"
+  "invite.via.badge_internal": "Intern",
+  "invite.via.badge_legacy": "Älterer Link",
+  "invite.via.badge_legacy_hint": "Erstellt, bevor dieser Raum die Verbindungsserver-Option hatte. Er funktioniert weiterhin; wer als Erstes darüber beitritt, schaltet den Verbindungsserver für diesen Raum ein."
 }

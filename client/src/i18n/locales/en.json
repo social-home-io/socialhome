@@ -1766,5 +1766,7 @@
   "invite.via.gfs_off": "This space doesn't use the connection server. Only its owner can turn it on.",
   "invite.via.created_internal": "Internal link: only households already paired or connected with yours can use it.",
   "invite.via.badge_gfs": "Connection server",
-  "invite.via.badge_internal": "Internal"
+  "invite.via.badge_internal": "Internal",
+  "invite.via.badge_legacy": "Earlier link",
+  "invite.via.badge_legacy_hint": "Made before this space had the connection server option. It still works; the first person who joins through it turns the connection server on for this space."
 }
