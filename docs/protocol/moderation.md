@@ -27,8 +27,10 @@ the wire protocol.
   - **Plain member households** — never see a pending item. They receive the
     approved content like any other write.
 - **GFS**: never sees a pending item. Submissions and decisions are pairwise,
-  sealed sends (see *Confidentiality*); nothing is published to a
-  connection server.
+  sealed sends (see *Confidentiality*); nothing about the queue is published
+  to a connection server. Only the **outcome** reaches the followers of a
+  public / global space with `allow_subscribers`, on the host relay and
+  content-blind — see *Outcomes for GFS followers* below.
 
 ## Event types
 
@@ -67,7 +69,7 @@ event.
 
 | Event | Body |
 |---|---|
-| `SPACE_MODERATION_SUBMITTED` | `space_id`, `item_id`, `feature`, `action` (`create` / `edit` / `delete`), `target_id`, `submitted_by`, `payload` (the feature handler's item payload), `snapshot`, `submitted_at`, `expires_at` |
+| `SPACE_MODERATION_SUBMITTED` | `space_id`, `item_id`, `feature`, `action` (`create` / `edit` / `delete`), `target_id`, `submitted_by`, `payload` (the feature handler's item payload), `snapshot`, `submitted_at`, `expires_at`, `public_relay?` (a post create in a public / global space with followers: the submitter's author-signed post inner, for GFS followers — see *Outcomes for GFS followers*) |
 | `SPACE_MODERATION_DECIDED` | `space_id`, `item_id`, `decision` (`approved` / `rejected`), `decided_by`, `decided_at`, `reason?` |
 
 Plaintext on the envelope: the routing `space_id` only (encryption-first,
@@ -83,7 +85,7 @@ envelope carries no routing field.
 | Submitter → reviewer (link-joined, §D2b) | The pairwise session, carried by the connection-server relay as an opaque sealed envelope — the GFS can't read it. |
 | Media of a pending post | `SpaceMediaSyncService.enqueue_for_post(…, target_instance_ids=<the reviewers>)` — the bytes go to the reviewer households only. |
 | A plain member household | Never a target. A submission that reaches a household with no local content-authority member anyway (misdirected) is dropped and not stored. |
-| Approved content | The ordinary write: `broadcast_to_space_members` to member households only. |
+| Approved content | The ordinary write: `broadcast_to_space_members` to member households only. In a public / global space with followers, the host also relays an approved post to the GFS on its authority, encrypted and padded (see *Outcomes for GFS followers*). |
 | Decisions | Pairwise, sealed: an approval request to the host only; the host's announcement and any rejection to the host, the reviewers and the submitter's household. |
 | Queued retries | The outbox re-checks a retried `SPACE_MODERATION_SUBMITTED` at send time and drops it when the target no longer reviews the space. |
 | A household that stops reviewing | When it loses its last content-authority seat in the space, it expires the pending items of other households' members it holds and NULLs their content (its own members' items stay). |
@@ -91,6 +93,39 @@ envelope carries no routing field.
 A reviewer household's local content authority sees pending items through
 the Moderation tab, the `space.moderation.*` frames and the title-only
 `moderation_pending` bell — exactly as on the host.
+
+## Outcomes for GFS followers
+
+GFS followers of a public / global space with `allow_subscribers` hold no
+seat and receive no `SPACE_*` event, so the host relay carries the two
+outcomes they need, as `space_post_public` relays authority-signed with the
+space seed (wire shape, checks and residuals:
+[`discovery.md` — Moderation outcomes on the host relay](./discovery.md#moderation-outcomes-on-the-host-relay)):
+
+- **An approved post.** In such a space the submitter's household adds the
+  post's **author-signed** inner to `SPACE_MODERATION_SUBMITTED`, next to
+  the payload, as `public_relay` (signed over the queued post,
+  `created_at` = the submission time). A reviewer household keeps it in its
+  queue row only when it verifies for this space, this post id and the
+  submitter; the same key inside the payload is dropped. When the host
+  applies the approved post, it relays that copy — only if it is exactly
+  the post it publishes — marked `approved_post`, with the author
+  household's writer cert (a plain member of a `MODERATED` space holds
+  `comment` scope). Followers verify the author's own signature, so no
+  seed holder can attribute a post. No copy (an older submitter) → members
+  only, as before. Rejected and expired items, and anything still
+  pending, never reach a connection server.
+- **A removal.** Every post or comment delete a seed holder applies to an
+  item it holds — a moderator's, an admin's or the author's, local or a
+  federated `SPACE_POST_DELETED` / `SPACE_COMMENT_DELETED` from a moderator
+  household — is relayed as a removal notice naming the item and its
+  author. Followers soft-delete it, or leave a tombstone (only for an id
+  owner-bound to that author in this space) if it has not reached them
+  yet, so a late create never brings it back.
+
+**Never on that path:** who approved or removed the item, a rejection
+reason, the queue item, or anything that is still pending. The GFS sees the
+same event type and size bucket as for any post, and none of the inner.
 
 ## Receiver rules
 

@@ -47,13 +47,21 @@ federated copy, the retry queues and space sync interleave with it.
 
 A comment, reaction or edit whose post is not held here yet is dropped:
 the federated copy (members) or a later space sync carries it.
+
+**Authority removals** (:meth:`SpaceItemInbound.apply_authority_removal`)
+come over the host relay, not ``space_item``: a seed holder's notice that a
+post or comment was removed (by anyone the host path allowed). Not
+author-bound — the space authority may remove any item — but a tombstone
+for an item not held yet needs an id owner-bound to the notice's author in
+this space, so a removal that overtakes its create keeps the item gone and
+can never claim another space's id.
 """
 
 from __future__ import annotations
 
 import logging
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ..domain.events import (
@@ -72,6 +80,8 @@ from ..domain.space_item import (
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
     MAX_REACTION_EMOJI_CHARS,
+    REMOVAL_TARGET_POST,
+    AuthorityRemoval,
     StaleItemStamp,
     item_stamp,
     stamp_to_db,
@@ -501,6 +511,102 @@ class SpaceItemInbound:
         )
         return True
 
+    # ── Authority removals (host relay) ─────────────────────────────────
+
+    async def apply_authority_removal(
+        self, *, space: "Space", removal: AuthorityRemoval
+    ) -> bool:
+        """Apply a space-authority removal notice (its authority signature
+        and space already verified by the caller). Unlike a member's
+        ``post_delete`` / ``comment_delete`` it is not author-bound: the
+        space authority may remove anyone's item, as a moderator may on the
+        host path. Same ordering rules as a member delete — a removal for an
+        item not held yet leaves the soft-deleted tombstone, so the later
+        create is a duplicate on every path; a removal is final, so a
+        duplicate changes nothing. The events it publishes carry the space's
+        owner household as their origin: never fanned back out, never
+        credited to the remover (whom the notice does not name)."""
+        if removal.target == REMOVAL_TARGET_POST:
+            return await self._remove_post(space, removal)
+        return await self._remove_comment(space, removal)
+
+    async def _remove_post(self, space: "Space", removal: AuthorityRemoval) -> bool:
+        pid = removal.item_id
+        got = await self._posts.get(pid)
+        if got is not None and got[0] != space.id:
+            log.warning(
+                "space_item: removal of post %s of another space — dropped", pid
+            )
+            return False
+        if got is None:
+            if not _bound_here(SPACE_POST_KIND, pid, space, removal):
+                return False
+            tombstone = Post(
+                id=pid,
+                author=removal.author_user_id,
+                type=PostType.TEXT,
+                created_at=datetime.now(timezone.utc),
+                deleted=True,
+            )
+            return await self._posts.save(space.id, tombstone) is not None
+        row = got[1]
+        if row.deleted:
+            return False
+        if not await self._posts.soft_delete(pid, space_id=space.id):
+            return False
+        await self._bus.publish(
+            PostDeleted(
+                post_id=pid,
+                space_id=space.id,
+                origin_instance_id=space.owner_instance_id,
+                author_user_id=row.author,
+            )
+        )
+        return True
+
+    async def _remove_comment(self, space: "Space", removal: AuthorityRemoval) -> bool:
+        cid = removal.item_id
+        got = await self._posts.get(removal.post_id)
+        if got is None or got[0] != space.id:
+            log.info(
+                "space_item: removal of comment %s on a post not held here — dropped",
+                cid,
+            )
+            return False
+        comment = await self._posts.get_comment(cid)
+        if comment is None:
+            if not _bound_here(SPACE_COMMENT_KIND, cid, space, removal):
+                return False
+            tombstone = Comment(
+                id=cid,
+                post_id=removal.post_id,
+                author=removal.author_user_id,
+                type=CommentType.TEXT,
+                created_at=datetime.now(timezone.utc),
+                deleted=True,
+            )
+            return await self._posts.add_comment(tombstone, space_id=space.id)
+        if comment.post_id != removal.post_id:
+            log.warning(
+                "space_item: removal of comment %s names another post — dropped", cid
+            )
+            return False
+        if comment.deleted:
+            return False
+        if not await self._posts.soft_delete_comment(cid, space_id=space.id):
+            return False
+        await self._posts.decrement_comment_count(comment.post_id, space_id=space.id)
+        await self._bus.publish(
+            CommentDeleted(
+                post_id=comment.post_id,
+                comment_id=cid,
+                space_id=space.id,
+                origin_instance_id=space.owner_instance_id,
+                author_user_id=comment.author,
+            )
+        )
+        return True
+
     # ── Reactions ────────────────────────────────────────────────────────
 
     async def _reaction(self, item: _Item, *, added: bool) -> bool:
@@ -568,3 +674,27 @@ class SpaceItemInbound:
             )
         )
         return True
+
+
+def _bound_here(
+    kind: str, row_id: str, space: "Space", removal: AuthorityRemoval
+) -> bool:
+    """A removal may leave a tombstone for an id not held here only when the
+    id is owner-bound to the named author in THIS space — otherwise a seed
+    holder of one space could pre-empt another space's row on a household
+    that follows both. (Logged.)"""
+    if (
+        removal.author_user_id
+        and check_owner_bound_id(
+            kind, row_id, space_id=space.id, owner_user_id=removal.author_user_id
+        )
+        is OwnerBinding.VALID
+    ):
+        return True
+    log.info(
+        "space_item: removal of %s %s, not held here and not bound to this "
+        "space — no tombstone",
+        kind,
+        row_id,
+    )
+    return False

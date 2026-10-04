@@ -34,8 +34,8 @@ household's locally-authored posts (the producer's ``author`` must be a local
 user — enforced below — so this household always holds the author's identity
 seed and can produce ``author_sig``). A plain member's public post reaches
 subscribers only when a seed-holder (owner or delegated admin) relays —
-accepted for this phase. Deletes/edits are a follow-up (the GFS relay is
-created-only today).
+accepted for this phase. Authors' own edits and deletes travel over the
+member relay (``space_item``); see below for removals.
 
 Remote-author relay (Phase 5a relay): a *remote* member's public post — where
 this seed-holder does NOT hold the author's identity seed — is relayed when it
@@ -78,6 +78,30 @@ from an origin below v_49 whose pinned identity key is the inner's
 stripped cert). That no-cert branch is the
 migration tripwire — once every member ships v_49 it can become a refusal.
 
+Authority-only items (:mod:`socialhome.services.space_public_authority`):
+
+* **Removals.** Every space post or comment delete this seed holder applies —
+  a moderator's, an admin's or the author's own, local or federated (the host
+  path already authorized it) — is relayed as an
+  :class:`~socialhome.domain.space_item.AuthorityRemoval` naming the item
+  and its author: never who removed it or why. Followers soft-delete, or keep
+  a tombstone under an id owner-bound to that author in this space.
+  Calendar-derived posts are skipped (never relayed).
+* **Approved posts.** A remote member's post released from the moderation
+  queue is applied here as the submitter's; the queue kept the submitter's
+  author-signed copy (signed at submission), and
+  :meth:`SpacePublicOutbound._relay_approved` relays it — when it is exactly
+  the published post — marked ``approved_post``, with the author household's
+  writer cert re-stamped for the relay epoch at ``comment`` scope at least.
+  The approver is never named; without a signed copy nothing is relayed. A
+  local author's approved post goes out author-signed like any local post.
+
+Both ride ``space_post_public`` like a post — the connection server cannot
+tell them apart — and every plaintext of this relay is padded to
+:data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS`, inside the AEAD and
+outside every author signature. A member's ``public_relay`` that names an
+authority kind is refused.
+
 This service is the encryption boundary: the cleartext post never leaves
 in a GFS-bound envelope (CLAUDE.md Encryption-First Rule). If the space
 has no content key, :meth:`SpaceContentEncryption.encrypt` raises
@@ -86,7 +110,6 @@ has no content key, :meth:`SpaceContentEncryption.encrypt` raises
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -95,17 +118,32 @@ from ..authority_sig import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
-from ..domain.events import SpacePostCreated
+from ..domain.events import CommentDeleted, PostDeleted, SpacePostCreated
 from ..domain.space import PUBLIC_SPACE_TIERS
-from ..domain.writer_cert import WRITER_SCOPE_WRITE, scope_permits
+from ..domain.space_item import (
+    AUTHORITY_KIND_FIELD,
+    REMOVAL_TARGET_COMMENT,
+    REMOVAL_TARGET_POST,
+    AuthorityRemoval,
+    pad_json_object,
+)
+from ..domain.writer_cert import (
+    WRITER_SCOPE_COMMENT,
+    WRITER_SCOPE_WRITE,
+    scope_permits,
+)
+from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from .space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
 )
+from .space_public_authority import approved_relay_for
 from .space_writer_cert_service import WRITER_CERT_FIELD, SpaceWriterCertService
 
 if TYPE_CHECKING:
+    from ..domain.space import Space
+    from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .gfs_connection_service import GfsConnectionService
@@ -127,6 +165,7 @@ class SpacePublicOutbound:
         "_own_instance_pk",
         "_own_identity_seed",
         "_writer_certs",
+        "_posts",
     )
 
     def __init__(
@@ -156,6 +195,13 @@ class SpacePublicOutbound:
         self._own_identity_seed: bytes = b""
         #: v_49 writer certs — ``None`` keeps the pre-v_49 relay unchanged.
         self._writer_certs: SpaceWriterCertService | None = None
+        #: The space post store — only read to skip the removal of a
+        #: calendar-derived post (never relayed, so nothing to remove).
+        self._posts: "AbstractSpacePostRepo | None" = None
+
+    def attach_posts(self, posts: "AbstractSpacePostRepo") -> None:
+        """Wire the space post store (see :attr:`_posts`)."""
+        self._posts = posts
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         """Wire the v_49 writer-cert service (see the module docstring)."""
@@ -174,6 +220,8 @@ class SpacePublicOutbound:
 
     def wire(self) -> None:
         self._bus.subscribe(SpacePostCreated, self._on_space_post_created)
+        self._bus.subscribe(PostDeleted, self._on_post_deleted)
+        self._bus.subscribe(CommentDeleted, self._on_comment_deleted)
 
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
         # Inbound (another member's post). Relay it to the GFS subscribers
@@ -226,9 +274,13 @@ class SpacePublicOutbound:
         if author is None:
             # Author isn't a LOCAL user (system/bot/remote member). We don't
             # hold their identity seed, so we cannot produce the per-author
-            # ``author_sig`` — skip rather than relay an unattributable post.
-            # Relaying remote-authored posts is a follow-up (see module
-            # docstring): it needs the author_sig propagated through the mesh.
+            # ``author_sig``. A remote member's own post reaches us with its
+            # pre-signed ``public_relay`` (the inbound branch above); the one
+            # we apply locally is a post released from the moderation queue,
+            # which we relay on the authority's word. Anything else is skipped
+            # rather than relayed unattributable.
+            if event.approved_by:
+                await self._relay_approved(event, space, seed)
             return
 
         # Per-author signature: the author's household identity seed signs the
@@ -266,30 +318,7 @@ class SpacePublicOutbound:
                 post.id,
             )
             return
-        envelope: dict = {
-            "space_id": event.space_id,
-            "epoch": epoch,
-            "encrypted_payload": ct,
-        }
-        sig = sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=event.space_id,
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=seed,
-        )
-        envelope.update(sig)
-        try:
-            await self._gfs.publish_space_event(
-                space_id=event.space_id,
-                event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-                payload=envelope,
-            )
-        except Exception:
-            log.exception(
-                "space_public.outbound: relay failed for space=%s post=%s",
-                event.space_id,
-                post.id,
-            )
+        await self._publish(event.space_id, seed, epoch, ct, what=f"post {post.id}")
 
     async def _relay_remote_authored(self, event: SpacePostCreated) -> None:
         """Relay another member household's public/global post to the GFS
@@ -353,6 +382,16 @@ class SpacePublicOutbound:
                 event.space_id,
             )
             return
+        # An authority notice carries NO author signature; a member's signed
+        # inner that names an authority kind is a forgery attempt — followers
+        # would read it as a post anyway, but it never travels.
+        if AUTHORITY_KIND_FIELD in relay:
+            log.warning(
+                "space_public.outbound: public_relay names an authority kind "
+                "for space=%s — not relaying",
+                event.space_id,
+            )
+            return
         restamp_for: str | None = None
         if relay.get(WRITER_CERT_FIELD) is not None:
             # v_49 author: its cert must hold before anything travels.
@@ -379,7 +418,7 @@ class SpacePublicOutbound:
                 )
             else:
                 epoch, ct = await self._crypto.encrypt(
-                    event.space_id, json.dumps(relay).encode("utf-8")
+                    event.space_id, pad_json_object(relay)
                 )
         except _NoWriterCert:
             log.warning(
@@ -397,28 +436,175 @@ class SpacePublicOutbound:
                 event.space_id,
             )
             return
+        await self._publish(event.space_id, seed, epoch, ct, what="remote-author post")
+
+    # ── Authority-only items: approved posts and removals ────────────────
+
+    async def _relay_approved(
+        self, event: SpacePostCreated, space: "Space", seed: bytes
+    ) -> None:
+        """Relay a remote member's post just released from the moderation
+        queue, under its AUTHOR's signature: the submitter's household signed
+        the post inner when it submitted the item, and the queue kept that
+        copy (``event.public_relay``). It must be exactly the post being
+        published (:func:`approved_relay_for`); it goes out marked
+        ``approved_post`` with the author household's writer cert re-stamped
+        for the relay epoch at ``comment`` scope at least — a plain member of
+        a ``MODERATED`` space holds only that. The approver is never named.
+        No signed copy (an older submitter) → not relayed: a seed holder
+        never vouches for authorship on its own."""
+        post = event.post
+        inner = approved_relay_for(
+            event.public_relay, post=post, space_id=event.space_id
+        )
+        if inner is None:
+            log.info(
+                "space_public.outbound: approved post %s has no valid author-"
+                "signed copy (older submitter?) — not relayed to followers",
+                post.id,
+            )
+            return
+        origin = str(inner.get("origin_instance_id") or "")
+        try:
+            epoch, ct = await self._encrypt_with_cert(
+                event.space_id,
+                inner,
+                origin,
+                expect_pk=str(inner.get("author_pk") or ""),
+                required=True,
+                required_scope=WRITER_SCOPE_COMMENT,
+            )
+        except _NoWriterCert:
+            log.warning(
+                "space_public.outbound: author household %s holds no writer "
+                "seat — approved post %s not relayed (space=%s)",
+                origin,
+                post.id,
+                event.space_id,
+            )
+            return
+        except RuntimeError:
+            log.warning(
+                "space_public.outbound: no content key for space %s — cannot "
+                "relay approved post %s",
+                event.space_id,
+                post.id,
+            )
+            return
+        await self._publish(
+            event.space_id, seed, epoch, ct, what=f"approved post {post.id}"
+        )
+
+    async def _on_post_deleted(self, event: PostDeleted) -> None:
+        if not event.space_id:
+            return
+        author = event.author_user_id
+        if self._posts is not None:
+            got = await self._posts.get(event.post_id)
+            if got is None or got[0] != event.space_id:
+                return  # nothing here that followers could hold
+            if got[1].linked_event_id is not None:
+                return  # a calendar-derived post was never relayed
+            author = author or got[1].author
+        await self._relay_removal(
+            event.space_id, REMOVAL_TARGET_POST, event.post_id, event.post_id, author
+        )
+
+    async def _on_comment_deleted(self, event: CommentDeleted) -> None:
+        if not event.space_id:
+            return
+        author = event.author_user_id
+        if self._posts is not None:
+            comment = await self._posts.get_comment(event.comment_id)
+            if comment is None:
+                return
+            author = author or comment.author
+        await self._relay_removal(
+            event.space_id,
+            REMOVAL_TARGET_COMMENT,
+            event.comment_id,
+            event.post_id,
+            author,
+        )
+
+    async def _relay_removal(
+        self, space_id: str, target: str, item_id: str, post_id: str, author: str
+    ) -> None:
+        """Relay a post or comment removal applied here — a moderator's, an
+        admin's or the author's own, local or federated (the host path
+        already authorized it) — to the space's GFS followers, on this seed
+        holder's authority. The notice names the item and its author (for
+        the follower's tombstone rule) — never who removed it or why. Inside
+        the ciphertext and padded, so the connection server cannot tell it
+        from a short post. A follower that already applied it is unaffected
+        by a duplicate."""
+        space = await self._spaces.get(space_id)
+        if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+            return
+        if not space.features.allow_subscribers:
+            return
+        if archive_refusal(space, "") is not None:
+            return  # read-only: followers drop it anyway
+        seed = await self._spaces.get_space_seed(space_id)
+        if seed is None:
+            return  # only a seed holder speaks for the space
+        try:
+            removal = AuthorityRemoval(
+                space_id=space_id,
+                target=target,
+                item_id=item_id,
+                post_id=post_id,
+                author_user_id=author,
+            )
+        except ValueError:
+            log.warning(
+                "space_public.outbound: unusable %s id for a removal in space %s "
+                "— not relayed",
+                target,
+                space_id,
+            )
+            return
+        try:
+            epoch, ct = await self._crypto.encrypt(
+                space_id, pad_json_object(removal.to_inner())
+            )
+        except RuntimeError:
+            log.warning(
+                "space_public.outbound: no content key for space %s — cannot "
+                "relay a %s removal",
+                space_id,
+                target,
+            )
+            return
+        await self._publish(space_id, seed, epoch, ct, what=f"{target} removal")
+
+    async def _publish(
+        self, space_id: str, seed: bytes, epoch: int, ct: str, *, what: str
+    ) -> None:
+        """Authority-sign ``{space_id, epoch, encrypted_payload}`` under
+        ``space_post_public`` and hand it to every GFS the space is on."""
         envelope: dict = {
-            "space_id": event.space_id,
+            "space_id": space_id,
             "epoch": epoch,
             "encrypted_payload": ct,
         }
-        sig = sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=event.space_id,
-            payload=strip_authority_sig_fields(envelope),
-            space_seed=seed,
+        envelope.update(
+            sign_authority_event(
+                event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+                space_id=space_id,
+                payload=strip_authority_sig_fields(envelope),
+                space_seed=seed,
+            )
         )
-        envelope.update(sig)
         try:
             await self._gfs.publish_space_event(
-                space_id=event.space_id,
+                space_id=space_id,
                 event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
                 payload=envelope,
             )
         except Exception:
             log.exception(
-                "space_public.outbound: remote-author relay failed for space=%s",
-                event.space_id,
+                "space_public.outbound: %s relay failed for space=%s", what, space_id
             )
 
     # ── v_49 writer certs ─────────────────────────────────────────────────
@@ -494,9 +680,7 @@ class SpacePublicOutbound:
         if self._writer_certs is None:
             if required:
                 raise _NoWriterCert(instance_id)
-            return await self._crypto.encrypt(
-                space_id, json.dumps(inner).encode("utf-8")
-            )
+            return await self._crypto.encrypt(space_id, pad_json_object(inner))
         for _attempt in range(2):
             current = await self._crypto.get_current_epoch(space_id)
             if current is None:
@@ -526,9 +710,7 @@ class SpacePublicOutbound:
             body.pop(WRITER_CERT_FIELD, None)
             if cert is not None:
                 body[WRITER_CERT_FIELD] = cert.to_wire()
-            epoch, ct = await self._crypto.encrypt(
-                space_id, json.dumps(body).encode("utf-8")
-            )
+            epoch, ct = await self._crypto.encrypt(space_id, pad_json_object(body))
             if cert is None or epoch == cert.epoch:
                 return epoch, ct
         log.warning(
@@ -539,7 +721,7 @@ class SpacePublicOutbound:
         if required:
             raise _NoWriterCert(instance_id)
         body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
-        return await self._crypto.encrypt(space_id, json.dumps(body).encode("utf-8"))
+        return await self._crypto.encrypt(space_id, pad_json_object(body))
 
 
 class _NoWriterCert(Exception):

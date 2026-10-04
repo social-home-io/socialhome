@@ -1363,3 +1363,45 @@ async def test_an_admin_overturns_a_moderators_rejection(mesh):
     await _pump(mesh)
     assert await _tasks(h) == [("Buy milk", a.user_id)]
     assert await _tasks(a) == [("Buy milk", a.user_id)]
+
+
+async def test_a_signed_copy_rides_next_to_the_payload_and_only_verified(mesh):
+    """A queued public post's author-signed copy (for GFS followers) is kept
+    only when it verifies, and only from beside the payload — one smuggled
+    INSIDE the payload is dropped before the codecs see it."""
+    a, h = mesh["A"], mesh["H"]
+    await h.db.enqueue(
+        "UPDATE spaces SET space_type='global', allow_subscribers=1 WHERE id=?",
+        (SID,),
+    )
+    target = mint_owner_bound_id(SPACE_POST_KIND, space_id=SID, owner_user_id=a.user_id)
+    now = datetime.now(timezone.utc)
+    smuggled = {"post_id": target, "author_sig": "AAAA"}
+    submission = {
+        "space_id": SID,
+        "item_id": f"item-{next(_IDS)}",
+        "feature": "posts",
+        "action": "create",
+        "target_id": target,
+        "submitted_by": a.user_id,
+        "payload": {
+            "entity": "post",
+            "target_id": target,
+            "post_id": target,
+            "type": "text",
+            "content": "queued words",
+            "public_relay": smuggled,
+        },
+        # Not verifiable (the mesh's user ids derive from no key): dropped.
+        "public_relay": {**smuggled, "space_id": SID, "author_user_id": a.user_id},
+        "snapshot": None,
+        "submitted_at": now.isoformat(),
+        "expires_at": (now + timedelta(days=7)).isoformat(),
+    }
+    await _receive(h, _event(a, FET.SPACE_MODERATION_SUBMITTED, submission, h))
+    rows = await h.db.fetchall(
+        "SELECT payload_json FROM space_moderation_queue WHERE submitted_by=?",
+        (a.user_id,),
+    )
+    assert len(rows) == 1
+    assert "public_relay" not in json.loads(rows[0]["payload_json"])

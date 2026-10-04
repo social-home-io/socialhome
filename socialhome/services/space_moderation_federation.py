@@ -68,6 +68,7 @@ from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     ContentAction,
     HostTooOldError,
+    PUBLIC_SPACE_TIERS,
     ModerationStatus,
     Space,
     SpaceFeatureAccess,
@@ -91,6 +92,11 @@ from ..federation.space_scope import resolve_space_id
 from ..repositories.base import dump_json
 from ..utils.datetime import parse_iso8601_optional
 from .inbound_media_store import local_media_ref
+from .space_post_moderation import post_from_queue_payload
+from .space_public_author import (
+    build_signed_author_inner,
+    verify_signed_author_inner,
+)
 from .space_moderation_service import (
     MAX_PAYLOAD_BYTES,
     MAX_PENDING_PER_SPACE,
@@ -108,6 +114,7 @@ if TYPE_CHECKING:
         AbstractSpaceRemoteMemberRepo,
     )
     from ..repositories.space_repo import AbstractSpaceRepo
+    from ..repositories.user_repo import AbstractUserRepo
     from .space_media_sync_service import SpaceMediaSyncService
     from .space_moderation_service import SpaceModerationService
 
@@ -153,6 +160,9 @@ class SpaceModerationFederation:
         "_authorship",
         "_media_sync",
         "_moderation",
+        "_own_pk",
+        "_own_seed",
+        "_users",
     )
 
     def __init__(
@@ -170,6 +180,24 @@ class SpaceModerationFederation:
         self._authorship = authorship
         self._media_sync = media_sync
         self._moderation: "SpaceModerationService | None" = None
+        #: Our household identity + local users — to author-sign a queued
+        #: public post's inner for the GFS followers (see
+        #: :meth:`_public_relay_for`). Unset → no signed copy is attached.
+        self._own_pk: bytes = b""
+        self._own_seed: bytes = b""
+        self._users: "AbstractUserRepo | None" = None
+
+    def attach_identity(
+        self,
+        *,
+        own_instance_pk: bytes,
+        own_identity_seed: bytes,
+        user_repo: "AbstractUserRepo",
+    ) -> None:
+        """Wire what author-signing a queued public post needs."""
+        self._own_pk = own_instance_pk
+        self._own_seed = own_identity_seed
+        self._users = user_repo
 
     def bind(self, moderation: "SpaceModerationService") -> None:
         """Wire both directions: the queue sends through us, and what we
@@ -225,6 +253,7 @@ class SpaceModerationFederation:
     ) -> None:
         """One targeted, sealed send per reviewer household — never a
         broadcast — and the item's media to those households only."""
+        relay = await self._public_relay_for(space, item)
         payload = {
             # Also in the sealed payload: the routing field is absent on a
             # mesh-relayed envelope, and the space-writer gate needs it.
@@ -239,6 +268,8 @@ class SpaceModerationFederation:
             "submitted_at": _aware(item.submitted_at).isoformat(),
             "expires_at": _aware(item.expires_at).isoformat(),
         }
+        if relay is not None:
+            payload["public_relay"] = relay
         for iid in targets:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=iid,
@@ -254,6 +285,44 @@ class SpaceModerationFederation:
                     result.error,
                 )
         await self._send_media(space, item, targets)
+
+    async def _public_relay_for(
+        self, space: Space, item: SpaceModerationItem
+    ) -> dict | None:
+        """The submitter's author-signed inner of a queued post in a
+        PUBLIC / GLOBAL space that admits followers — so the host, once it
+        approves the post, can relay it to the GFS followers under the
+        AUTHOR's signature (a seed holder can't forge authorship). Signed
+        over the post as queued, ``created_at`` = the submission time.
+        ``None`` for anything else: other features and actions, a private
+        space (never relayed to a connection server), a space without
+        followers, or a submitter that is not one of our users."""
+        if (
+            not (self._own_pk and self._own_seed and self._own)
+            or self._users is None
+            or item.feature != "posts"
+            or item.action != ContentAction.CREATE.value
+            or (item.payload or {}).get("entity") != "post"
+            or space.space_type not in PUBLIC_SPACE_TIERS
+            or not space.features.allow_subscribers
+        ):
+            return None
+        author = await self._users.get_by_user_id(item.submitted_by)
+        if author is None:
+            return None
+        try:
+            post = post_from_queue_payload(item, created_at=_aware(item.submitted_at))
+        except ValueError:
+            return None
+        return build_signed_author_inner(
+            post=post,
+            space_id=space.id,
+            author_username=author.username,
+            author_pk=self._own_pk,
+            author_identity_seed=self._own_seed,
+            origin_instance_id=self._own,
+            author_identity_anchor=author.identity_anchor,
+        )
 
     async def _send_media(
         self, space: Space, item: SpaceModerationItem, targets: list[str]
@@ -463,12 +532,26 @@ class SpaceModerationFederation:
             return self._refuse(event, space_id, item_id, f"{feature} is switched off")
         # 5. The live codecs and caps — and the inbound media rules: what a
         # reviewer's preview renders is never a remote URL (a beacon).
+        # The author's signed copy of a queued public post travels next to
+        # the payload, never inside it: anything under that key in the body
+        # is dropped, and only a copy that verifies is kept (below).
+        body = {k: v for k, v in body.items() if k != PUBLIC_RELAY_KEY}
         try:
             clean = self._moderation.validate_payload(
                 space, feature, action, sanitize_remote_payload(feature, body)
             )
         except Exception as exc:
             return self._refuse(event, space_id, item_id, f"invalid payload ({exc})")
+        relay = _signed_copy(
+            p.get(PUBLIC_RELAY_KEY),
+            space=space,
+            feature=feature,
+            action=action,
+            target_id=target_id,
+            submitted_by=submitted_by,
+        )
+        if relay is not None:
+            clean[PUBLIC_RELAY_KEY] = relay
         # The "before" values a reviewer compares against come from OUR copy
         # of the target, never the sender's (whose snapshot could carry
         # anything, a remote image URL included).
@@ -635,6 +718,48 @@ class SpaceModerationFederation:
             reason,
         )
         return None
+
+
+#: The queue-payload key of a queued public post's author-signed inner — the
+#: copy the host relays to GFS followers once it approves the post
+#: (``space_public_outbound``; ``docs/protocol/moderation.md``).
+PUBLIC_RELAY_KEY: str = "public_relay"
+
+
+def _signed_copy(
+    raw: object,
+    *,
+    space: Space,
+    feature: str,
+    action: ContentAction,
+    target_id: str,
+    submitted_by: str,
+) -> dict | None:
+    """The submitter's signed copy of a queued post worth keeping: a post
+    create in a space whose content may reach followers, author-signed by
+    the submitter for this space and this post id. Whether it matches the
+    post is checked again when the approved post is relayed."""
+    if (
+        not isinstance(raw, dict)
+        or feature != "posts"
+        or action is not ContentAction.CREATE
+        or space.space_type not in PUBLIC_SPACE_TIERS
+        or not space.features.allow_subscribers
+    ):
+        return None
+    if (
+        raw.get("space_id") != space.id
+        or raw.get("post_id") != target_id
+        or raw.get("author_user_id") != submitted_by
+        or not verify_signed_author_inner(raw)
+    ):
+        log.info(
+            "moderation: signed copy of queued post %s does not verify — "
+            "kept without it (its approval will not reach GFS followers)",
+            target_id,
+        )
+        return None
+    return dict(raw)
 
 
 def _local_ref_or_none(value: object) -> str | None:

@@ -32,11 +32,24 @@ from socialhome.crypto import (
 )
 from socialhome.services.space_public_author import (
     author_signing_bytes,
+    build_signed_author_inner,
     link_preview_signing_bytes,
 )
-from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
+from socialhome.federation.owner_bound_id import (
+    SPACE_COMMENT_KIND,
+    SPACE_POST_KIND,
+    mint_owner_bound_id,
+)
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import SpacePostCreated
+from socialhome.domain.events import CommentDeleted, PostDeleted, SpacePostCreated
+from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.space_item import (
+    AUTHORITY_KIND_APPROVED_POST,
+    AUTHORITY_KIND_FIELD,
+    AUTHORITY_KIND_REMOVAL,
+    AuthorityRemoval,
+    pad_json_object,
+)
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -1531,3 +1544,415 @@ async def test_a_channel_item_runs_every_cert_check(item_env, case):
         "sp-1", epoch=frame["epoch"], payload=frame["payload"]
     )
     assert await item_env["post_repo"].get("post-1") is None
+
+
+# ─── Authority-only notices: removals and approved posts ────────────────
+
+
+async def _authority_envelope(
+    env, inner: dict, *, space_id: str = "sp-1", space_seed: bytes | None = None
+) -> dict:
+    """An authority-signed ``space_post_public`` envelope over ``inner``
+    (padded, as the seed holder sends it)."""
+    epoch, ct = await env["crypto"].encrypt(space_id, pad_json_object(inner))
+    envelope = {"space_id": space_id, "epoch": epoch, "encrypted_payload": ct}
+    envelope.update(
+        sign_authority_event(
+            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            space_id=space_id,
+            payload=strip_authority_sig_fields(envelope),
+            space_seed=space_seed
+            if space_seed is not None
+            else env["space_kp"].private_key,
+        )
+    )
+    return envelope
+
+
+def _frame(envelope: dict) -> dict:
+    return {
+        "type": "relay",
+        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+        "payload": envelope,
+    }
+
+
+async def _held_post(env, post_id: str = "post-held", *, space_id: str = "sp-1"):
+    await env["post_repo"].save(
+        space_id,
+        Post(
+            id=post_id,
+            author=env["author_user_id"],
+            type=PostType.TEXT,
+            content="visible words",
+            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+        ),
+    )
+
+
+def _removal(
+    target: str, item_id: str, post_id: str, space_id="sp-1", author: str = ""
+) -> dict:
+    return AuthorityRemoval(
+        space_id=space_id,
+        target=target,
+        item_id=item_id,
+        post_id=post_id,
+        author_user_id=author,
+    ).to_inner()
+
+
+def _record(env, event_type):
+    seen: list = []
+
+    async def _rec(e):
+        seen.append(e)
+
+    env["bus"].subscribe(event_type, _rec)
+    return seen
+
+
+async def test_a_removal_soft_deletes_a_held_post(env):
+    await _held_post(env)
+    deleted = _record(env, PostDeleted)
+    await env["inbound"].handle(
+        _frame(
+            await _authority_envelope(env, _removal("post", "post-held", "post-held"))
+        )
+    )
+    _space, row = await env["post_repo"].get("post-held")
+    assert row.deleted
+    assert row.content is None
+    assert len(deleted) == 1
+    # Applied from the relay: never fanned back out (origin set) and never
+    # attributed to anybody's household but the space's.
+    assert deleted[0].origin_instance_id == "remote.home"
+    assert deleted[0].space_id == "sp-1"
+
+
+async def test_a_late_create_after_a_removal_is_not_resurrected(env):
+    await _held_post(env, "post-1")
+    await env["inbound"].handle(
+        _frame(await _authority_envelope(env, _removal("post", "post-1", "post-1")))
+    )
+    # The host relay re-delivers the original create (a retry, a second GFS).
+    await env["inbound"].handle(_frame(await _make_envelope(env, post_id="post-1")))
+    _space, row = await env["post_repo"].get("post-1")
+    assert row.deleted
+
+
+async def test_a_removal_before_its_create_leaves_a_tombstone(env):
+    pid = mint_owner_bound_id(
+        SPACE_POST_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
+    )
+    deleted = _record(env, PostDeleted)
+    await env["inbound"].handle(
+        _frame(
+            await _authority_envelope(
+                env, _removal("post", pid, pid, author=env["author_user_id"])
+            )
+        )
+    )
+    space_id, row = await env["post_repo"].get(pid)
+    assert space_id == "sp-1"
+    assert row.deleted
+    assert row.author == env["author_user_id"]
+    # Nothing was visible here, so nothing to announce.
+    assert deleted == []
+    await env["inbound"].handle(_frame(await _make_envelope(env, post_id=pid)))
+    _space, row = await env["post_repo"].get(pid)
+    assert row.deleted
+    assert env["events"] == []
+
+
+@pytest.mark.parametrize("case", ["no_author", "legacy_id", "other_space_id"])
+async def test_a_removal_never_tombstones_an_id_not_bound_to_this_space(env, case):
+    """A seed holder of this space cannot pre-empt another space's row on a
+    household that follows both: no tombstone without an id owner-bound to
+    the named author in THIS space."""
+    author = env["author_user_id"]
+    if case == "no_author":
+        pid = mint_owner_bound_id(
+            SPACE_POST_KIND, space_id="sp-1", owner_user_id=author
+        )
+        author = ""
+    elif case == "legacy_id":
+        pid = "legacy-post-id"
+    else:
+        pid = mint_owner_bound_id(
+            SPACE_POST_KIND, space_id="sp-2", owner_user_id=author
+        )
+    await env["inbound"].handle(
+        _frame(
+            await _authority_envelope(env, _removal("post", pid, pid, author=author))
+        )
+    )
+    assert await env["post_repo"].get(pid) is None
+
+
+async def test_a_duplicate_removal_changes_nothing(env):
+    await _held_post(env)
+    deleted = _record(env, PostDeleted)
+    env_ = await _authority_envelope(env, _removal("post", "post-held", "post-held"))
+    await env["inbound"].handle(_frame(env_))
+    await env["inbound"].handle(_frame(env_))
+    assert len(deleted) == 1
+
+
+async def test_a_removal_never_touches_another_space(env):
+    await env["space_repo"].save(
+        Space(
+            id="sp-2",
+            name="Other",
+            owner_instance_id="remote.home",
+            owner_username="bob",
+            identity_public_key=generate_space_keypair().public_key.hex(),
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PUBLIC,
+            join_mode=JoinMode.OPEN,
+        )
+    )
+    await _held_post(env, "post-elsewhere", space_id="sp-2")
+    await env["inbound"].handle(
+        _frame(
+            await _authority_envelope(
+                env, _removal("post", "post-elsewhere", "post-elsewhere")
+            )
+        )
+    )
+    _space, row = await env["post_repo"].get("post-elsewhere")
+    assert not row.deleted
+
+
+async def _held_comment(env, comment_id="c-1", post_id="post-held"):
+    await env["post_repo"].add_comment(
+        Comment(
+            id=comment_id,
+            post_id=post_id,
+            author=env["author_user_id"],
+            type=CommentType.TEXT,
+            content="a comment",
+            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+        ),
+        space_id="sp-1",
+    )
+    await env["post_repo"].increment_comment_count(post_id, space_id="sp-1")
+
+
+async def test_a_removal_soft_deletes_a_held_comment(env):
+    await _held_post(env)
+    await _held_comment(env)
+    seen = _record(env, CommentDeleted)
+    await env["inbound"].handle(
+        _frame(await _authority_envelope(env, _removal("comment", "c-1", "post-held")))
+    )
+    comment = await env["post_repo"].get_comment("c-1")
+    assert comment.deleted
+    _space, post = await env["post_repo"].get("post-held")
+    assert post.comment_count == 0
+    assert len(seen) == 1
+    assert seen[0].origin_instance_id == "remote.home"
+
+
+async def test_a_comment_removal_before_its_create_leaves_a_tombstone(env):
+    await _held_post(env)
+    cid = mint_owner_bound_id(
+        SPACE_COMMENT_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
+    )
+    await env["inbound"].handle(
+        _frame(
+            await _authority_envelope(
+                env,
+                _removal("comment", cid, "post-held", author=env["author_user_id"]),
+            )
+        )
+    )
+    comment = await env["post_repo"].get_comment(cid)
+    assert comment is not None and comment.deleted
+    _space, post = await env["post_repo"].get("post-held")
+    assert post.comment_count == 0
+
+
+async def test_a_comment_removal_of_an_unbound_id_leaves_no_tombstone(env):
+    await _held_post(env)
+    await env["inbound"].handle(
+        _frame(
+            await _authority_envelope(
+                env,
+                _removal(
+                    "comment", "c-legacy", "post-held", author=env["author_user_id"]
+                ),
+            )
+        )
+    )
+    assert await env["post_repo"].get_comment("c-legacy") is None
+
+
+async def test_a_comment_removal_for_a_post_not_held_is_dropped(env):
+    await env["inbound"].handle(
+        _frame(await _authority_envelope(env, _removal("comment", "c-9", "post-x")))
+    )
+    assert await env["post_repo"].get_comment("c-9") is None
+
+
+async def test_a_comment_removal_naming_the_wrong_post_is_dropped(env):
+    await _held_post(env)
+    await _held_post(env, "post-other")
+    await _held_comment(env)
+    await env["inbound"].handle(
+        _frame(await _authority_envelope(env, _removal("comment", "c-1", "post-other")))
+    )
+    assert not (await env["post_repo"].get_comment("c-1")).deleted
+
+
+@pytest.mark.parametrize("case", ["forged_sig", "wrong_space", "author_signed"])
+async def test_a_forged_removal_is_refused(env, case, caplog):
+    """No authority signature from the space key, an inner for another
+    space, or an inner that carries an author signature (a member's own
+    pre-signed inner is always read as a post) — nothing is removed."""
+    await _held_post(env)
+    inner = _removal("post", "post-held", "post-held")
+    seed = None
+    if case == "forged_sig":
+        # A household that does not hold the space seed signs it itself.
+        seed = generate_space_keypair().private_key
+    elif case == "wrong_space":
+        inner["space_id"] = "sp-2"
+    else:
+        inner["author_sig"] = b64url_encode(b"\0" * 64)
+    caplog.set_level(logging.INFO)
+    await env["inbound"].handle(
+        _frame(await _authority_envelope(env, inner, space_seed=seed))
+    )
+    _space, row = await env["post_repo"].get("post-held")
+    assert not row.deleted
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        {AUTHORITY_KIND_FIELD: "promote"},
+        {AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL, "space_id": "sp-1"},
+        {"post_id": "post-held"},
+    ],
+)
+async def test_an_unsigned_inner_that_is_no_known_notice_is_dropped(env, inner):
+    await _held_post(env)
+    await env["inbound"].handle(_frame(await _authority_envelope(env, inner)))
+    _space, row = await env["post_repo"].get("post-held")
+    assert not row.deleted
+
+
+def _approved_post_obj(env, *, post_id=None, content="released words") -> Post:
+    return Post(
+        id=post_id
+        or mint_owner_bound_id(
+            SPACE_POST_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
+        ),
+        author=env["author_user_id"],
+        type=PostType.TEXT,
+        content=content,
+        created_at=datetime(2026, 6, 11, tzinfo=timezone.utc),
+    )
+
+
+async def _approved_inner(env, *, cert="comment", post=None, mark=True) -> dict:
+    """The author's signed inner as the host relays an approved post: the
+    seed holder's ``approved_post`` mark and the author household's cert,
+    both outside the author signature."""
+    inner = build_signed_author_inner(
+        post=post or _approved_post_obj(env),
+        space_id="sp-1",
+        author_username="bob",
+        author_pk=env["author_kp"].public_key,
+        author_identity_seed=env["author_kp"].private_key,
+        origin_instance_id=env["author_origin"],
+    )
+    if mark:
+        inner[AUTHORITY_KIND_FIELD] = AUTHORITY_KIND_APPROVED_POST
+    if cert is not None:
+        epoch = await env["crypto"].get_current_epoch("sp-1")
+        inner["writer_cert"] = sign_writer_cert(
+            space_seed=env["space_kp"].private_key,
+            space_id="sp-1",
+            epoch=epoch,
+            instance_pk=env["author_kp"].public_key,
+            scope=cert,
+        ).to_wire()
+    return inner
+
+
+async def test_an_approved_post_reaches_the_follower_with_its_author(env):
+    post = _approved_post_obj(env)
+    await env["inbound"].handle(
+        _frame(await _authority_envelope(env, await _approved_inner(env, post=post)))
+    )
+    space_id, row = await env["post_repo"].get(post.id)
+    assert space_id == "sp-1"
+    assert row.author == env["author_user_id"]
+    assert row.content == "released words"
+    assert len(env["events"]) == 1
+    assert env["events"][0].origin_instance_id == env["author_origin"]
+
+
+async def test_an_approved_post_with_a_write_cert_is_accepted_too(env):
+    post = _approved_post_obj(env)
+    await env["inbound"].handle(
+        _frame(
+            await _authority_envelope(
+                env, await _approved_inner(env, post=post, cert="write")
+            )
+        )
+    )
+    assert await env["post_repo"].get(post.id) is not None
+
+
+@pytest.mark.parametrize("case", ["no_cert", "unmarked_comment_cert", "forged_cert"])
+async def test_an_approved_post_needs_the_mark_and_a_valid_cert(env, case):
+    """Without the authority's mark a comment-scope cert is no right to
+    post; with the mark the cert is still required, and must verify."""
+    post = _approved_post_obj(env)
+    if case == "no_cert":
+        inner = await _approved_inner(env, post=post, cert=None)
+    elif case == "unmarked_comment_cert":
+        inner = await _approved_inner(env, post=post, mark=False)
+    else:
+        inner = await _approved_inner(env, post=post)
+        inner["writer_cert"] = sign_writer_cert(
+            space_seed=generate_space_keypair().private_key,
+            space_id="sp-1",
+            epoch=await env["crypto"].get_current_epoch("sp-1"),
+            instance_pk=env["author_kp"].public_key,
+            scope="comment",
+        ).to_wire()
+    await env["inbound"].handle(_frame(await _authority_envelope(env, inner)))
+    assert await env["post_repo"].get(post.id) is None
+
+
+async def test_an_unsigned_approved_post_is_dropped(env):
+    """An approved post always carries its author's signature: a seed
+    holder can't attribute a post on its own word."""
+    post = _approved_post_obj(env)
+    inner = await _approved_inner(env, post=post)
+    del inner["author_sig"]
+    await env["inbound"].handle(_frame(await _authority_envelope(env, inner)))
+    assert await env["post_repo"].get(post.id) is None
+
+
+async def test_an_approved_post_after_its_removal_stays_removed(env):
+    post = _approved_post_obj(env)
+    await env["inbound"].handle(
+        _frame(
+            await _authority_envelope(
+                env,
+                _removal("post", post.id, post.id, author=env["author_user_id"]),
+            )
+        )
+    )
+    await env["inbound"].handle(
+        _frame(await _authority_envelope(env, await _approved_inner(env, post=post)))
+    )
+    _space, row = await env["post_repo"].get(post.id)
+    assert row.deleted
+    assert env["events"] == []

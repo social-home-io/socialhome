@@ -3027,6 +3027,7 @@ def create_app(config: Config | None = None) -> web.Application:
             own_identity_seed=identity_seed,
         )
         space_public_outbound.attach_writer_certs(writer_certs)
+        space_public_outbound.attach_posts(space_post_repo)
         space_public_outbound.wire()
         space_public_inbound = SpacePublicInbound(
             bus=bus,
@@ -3166,6 +3167,11 @@ def create_app(config: Config | None = None) -> web.Application:
             media_sync=space_media_sync_service,
         )
         moderation_federation.attach_to(federation_service)
+        moderation_federation.attach_identity(
+            own_instance_pk=identity_pk,
+            own_identity_seed=identity_seed,
+            user_repo=user_repo,
+        )
         space_moderation = _build_space_moderation(
             space_repo=space_repo,
             user_repo=user_repo,

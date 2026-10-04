@@ -370,6 +370,21 @@ move one to another post. `SUPPORTED_LINK_PREVIEW_SIG_SUITES` +
 `UnsupportedLinkPreviewSigSuite`, no default — the PQ sibling is a suite
 bump.
 
+**Authority kinds (GFS public relay)**
+(`services/space_public_authority.py`) — a removal notice rides the
+`space_post_public` envelope with **no** per-author signature: the
+space-authority signature over the envelope (`authority_sig` +
+`authority_sig_suite`, unchanged) is its only authorizer. Receivers key on
+the absence: an inner WITHOUT `author_sig` can only be a removal, an inner
+WITH one is always verified as an author-signed post. A post approved from
+the moderation queue keeps its author's signature — the submitter signs the
+inner at submission and the host relays that copy — with an
+`authority_kind: "approved_post"` mark outside the author signature, under
+the authority signature. No new signed shape and no new suite. Every
+host-relay plaintext is padded to the member relay's size buckets (`_pad`,
+inside the AEAD, outside every author signature's fixed field list). See
+[`protocol/discovery.md`](protocol/discovery.md#moderation-outcomes-on-the-host-relay).
+
 The key-wrap pubkey is **self-signed by the identity** so the seal path
 never trusts the GFS-served value. At identity setup each household
 produces `keywrap_sig = b64url(sign_ed25519(identity_seed,

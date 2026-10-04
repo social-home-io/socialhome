@@ -17,11 +17,26 @@ Two author-signed inner shapes carry them:
   (its own signature domain and suite) for comments, the post delete and
   reactions.
 
+**Authority kinds** ride the host's ``space_post_public`` relay instead
+(:data:`SUPPORTED_AUTHORITY_KINDS`): a space-authority-signed removal of a
+post or comment (:class:`AuthorityRemoval`) — no author signature, the
+authority signature over the envelope its only authorizer — and the
+``approved_post`` mark a seed holder sets on an author-signed post it
+released from the moderation queue. A member can never send either: a
+``space_item`` names only the member types above, an unsigned inner is
+only ever a removal, and a seed holder refuses to relay a member's inner
+that names an authority kind.
+
+Both relays pad their plaintext to :data:`ITEM_SIZE_BUCKETS`
+(:func:`pad_json_object`).
+
 Pure module — no I/O.
 """
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
@@ -125,3 +140,131 @@ def stamp_to_db(stamp: datetime) -> str:
 class StaleItemStamp(Exception):
     """A stamped write is not newer than the one already applied for the
     same row (or reaction) — a late duplicate, never applied."""
+
+
+# ── Size padding ─────────────────────────────────────────────────────────
+
+#: Plaintext sizes a relayed item is padded up to before encryption, so the
+#: ciphertext length tells a connection server (or anyone on the wire) only
+#: the bucket — a reaction, a comment, a removal notice and a short post all
+#: look alike. The largest stays well under the GFS payload cap once
+#: encrypted and base64'd.
+ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 4096, 16384, 65536, 131072)
+
+#: The padding field. A JSON key, so the padding sits INSIDE the AEAD
+#: (authenticated with the item) and a receiver from before padding — which
+#: reads the keys it knows and ignores the rest — still parses a padded item.
+#: Never covered by an author signature (those sign a fixed field list).
+PAD_FIELD: str = "_pad"
+
+
+def pad_json_object(body: dict) -> bytes:
+    """``body`` as JSON, padded with ASCII ``0`` in :data:`PAD_FIELD` to
+    exactly the smallest :data:`ITEM_SIZE_BUCKETS` size that fits. A pad the
+    body already carries is replaced. A body larger than the largest bucket
+    is left unpadded (its size is then its own). ``body`` is not mutated."""
+    out = {k: v for k, v in body.items() if k != PAD_FIELD}
+    out[PAD_FIELD] = ""
+    base = json.dumps(out).encode("utf-8")
+    bucket = next((b for b in ITEM_SIZE_BUCKETS if b >= len(base)), None)
+    if bucket is None:
+        return base
+    out[PAD_FIELD] = "0" * (bucket - len(base))
+    return json.dumps(out).encode("utf-8")
+
+
+# ── Authority-only notices (host relay, ``space_post_public``) ───────────
+
+#: The inner key naming an authority-only notice. Only ever read on an inner
+#: WITHOUT an author signature; a seed holder refuses to relay a member's
+#: author-signed inner that carries it.
+AUTHORITY_KIND_FIELD: str = "authority_kind"
+#: A seed holder's removal of a post or comment (a moderator's, an admin's or
+#: the author's own delete, applied on the host path).
+AUTHORITY_KIND_REMOVAL: str = "removal"
+#: A seed holder's mark on an AUTHOR-SIGNED post inner it relays after
+#: releasing it from the moderation queue: the author's household may hold
+#: only a ``comment``-scope writer cert there, and the mark (outside the author
+#: signature, under the authority signature) is what lets a follower accept
+#: that. A seed holder never relays a member's inner that already carries it.
+AUTHORITY_KIND_APPROVED_POST: str = "approved_post"
+SUPPORTED_AUTHORITY_KINDS: frozenset[str] = frozenset(
+    {AUTHORITY_KIND_REMOVAL, AUTHORITY_KIND_APPROVED_POST}
+)
+
+REMOVAL_TARGET_POST: str = "post"
+REMOVAL_TARGET_COMMENT: str = "comment"
+REMOVAL_TARGETS: frozenset[str] = frozenset(
+    {REMOVAL_TARGET_POST, REMOVAL_TARGET_COMMENT}
+)
+
+#: Upper bound on an id in a removal notice (post / comment ids are uuid4
+#: hex or owner-bound ids — both far shorter).
+_MAX_REMOVAL_ID: int = 128
+
+
+def _removal_id(value: object, what: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > _MAX_REMOVAL_ID:
+        raise ValueError(f"removal notice: bad {what}")
+    return value
+
+
+@dataclass(slots=True, frozen=True)
+class AuthorityRemoval:
+    """A space-authority removal notice for one post or comment.
+
+    Carries exactly what a follower needs to apply it — never who removed
+    it or why. ``post_id`` is the post itself for a post removal and the
+    comment's post for a comment removal. ``author_user_id`` is the item's
+    author (empty when the seed holder does not know it): a follower already
+    shows it with the item, and needs it to leave a tombstone for an item it
+    does not hold yet — only under an id owner-bound to that author in THIS
+    space, so a notice can never pre-empt another space's row.
+    """
+
+    space_id: str
+    target: str
+    item_id: str
+    post_id: str
+    author_user_id: str = ""
+
+    def __post_init__(self) -> None:
+        _removal_id(self.space_id, "space_id")
+        _removal_id(self.item_id, "item_id")
+        _removal_id(self.post_id, "post_id")
+        if self.author_user_id:
+            _removal_id(self.author_user_id, "author_user_id")
+        if self.target not in REMOVAL_TARGETS:
+            raise ValueError(f"removal notice: bad target {self.target!r}")
+        if self.target == REMOVAL_TARGET_POST and self.post_id != self.item_id:
+            raise ValueError("removal notice: a post removal names its own post")
+
+    def to_inner(self) -> dict:
+        inner = {
+            AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL,
+            "space_id": self.space_id,
+            "target": self.target,
+            "item_id": self.item_id,
+            "post_id": self.post_id,
+        }
+        if self.author_user_id:
+            inner["author_user_id"] = self.author_user_id
+        return inner
+
+    @classmethod
+    def from_inner(cls, inner: dict) -> "AuthorityRemoval":
+        """Parse a decrypted inner; :class:`ValueError` when it is not a
+        well-formed removal notice."""
+        if inner.get(AUTHORITY_KIND_FIELD) != AUTHORITY_KIND_REMOVAL:
+            raise ValueError("not a removal notice")
+        target = inner.get("target")
+        author = inner.get("author_user_id")
+        if author is not None and not isinstance(author, str):
+            raise ValueError("removal notice: bad author_user_id")
+        return cls(
+            space_id=_removal_id(inner.get("space_id"), "space_id"),
+            target=str(target) if isinstance(target, str) else "",
+            item_id=_removal_id(inner.get("item_id"), "item_id"),
+            post_id=_removal_id(inner.get("post_id"), "post_id"),
+            author_user_id=author or "",
+        )
