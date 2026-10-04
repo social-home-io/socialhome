@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import replace
 
@@ -425,6 +426,25 @@ async def test_pair_token_single_use_and_ttl(admin):
     assert await admin.consume_pair_token("tok-1") is False
     # Unknown token.
     assert await admin.consume_pair_token("nope") is False
+
+
+async def test_pair_token_concurrent_consume_succeeds_once(admin):
+    """The consume is ONE conditional UPDATE: of many concurrent consumers of
+    the same token exactly one wins."""
+    await admin.save_pair_token("tok-race", "1.2.3.4")
+    results = await asyncio.gather(
+        *[admin.consume_pair_token("tok-race") for _ in range(25)]
+    )
+    assert results.count(True) == 1
+
+
+async def test_pair_token_expired_is_refused(admin, gfs_db):
+    await admin.save_pair_token("tok-old", "1.2.3.4")
+    await gfs_db.enqueue(
+        "UPDATE gfs_pair_tokens SET created_at=? WHERE token=?",
+        (int(time.time()) - 601, "tok-old"),
+    )
+    assert await admin.consume_pair_token("tok-old") is False
 
 
 async def test_prune_old_pair_tokens_drops_old_keeps_recent(admin, gfs_db):

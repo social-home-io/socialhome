@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from socialhome import config as config_mod
 from socialhome.config import Config, _split_toml
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 
@@ -219,3 +220,86 @@ def test_write_batch_window_defaults_to_the_interactive_window(monkeypatch):
     assert Config().db_write_batch_timeout_ms == DEFAULT_WRITE_BATCH_WINDOW_MS
     assert Config.from_env().db_write_batch_timeout_ms == DEFAULT_WRITE_BATCH_WINDOW_MS
     assert DEFAULT_WRITE_BATCH_WINDOW_MS <= 20
+
+
+def test_gfs_default_url_defaults_to_the_project_gfs():
+    """Onboarding offers the project's GFS unless the operator says otherwise."""
+    assert Config().gfs_default_url == "https://gfs.social-home.io"
+    assert Config.from_env().gfs_default_url == "https://gfs.social-home.io"
+
+
+def test_gfs_default_url_from_toml_gfs_section(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text('[gfs]\ndefault_url = "https://gfs.example.org"\n')
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    assert Config.from_env().gfs_default_url == "https://gfs.example.org"
+    # A core section — never handed to the platform adapter.
+    assert "gfs" not in Config.from_env().platform_options
+
+
+def test_gfs_default_url_empty_hides_the_offer(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text('[gfs]\ndefault_url = ""\n')
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    assert Config.from_env().gfs_default_url == ""
+
+
+def test_gfs_default_url_env_overrides_toml(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text('[gfs]\ndefault_url = "https://gfs.example.org"\n')
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    monkeypatch.setenv("SH_GFS_DEFAULT_URL", "")
+    assert Config.from_env().gfs_default_url == ""
+
+
+PROJECT_KEY = "33cf798c8c8a7ae04d06a5978242b189c421fb66b2faf61749154070aa12ab0e"
+
+
+def test_shipped_default_pins_the_project_gfs_public_key():
+    """The shipped default pins the project GFS's public key (not its id,
+    which is a label), and only for the shipped URL."""
+    cfg = Config()
+    assert cfg.gfs_default_url == "https://gfs.social-home.io"
+    assert cfg.gfs_default_instance_id == ""
+    assert cfg.gfs_default_public_key == ""
+    assert cfg.gfs_default_pin() == ("", PROJECT_KEY)
+    assert Config.from_env().gfs_default_pin() == ("", PROJECT_KEY)
+
+
+def test_overridden_default_url_without_a_key_is_not_pinned(monkeypatch):
+    monkeypatch.setenv("SH_GFS_DEFAULT_URL", "https://gfs.example.org")
+    assert Config.from_env().gfs_default_pin() == ("", "")
+
+
+def test_gfs_default_pin_from_toml_and_env(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text(
+        '[gfs]\ndefault_url = "https://gfs.example.org"\n'
+        'default_instance_id = "gfs-node-0"\n'
+        'default_public_key = "ab"\n'
+    )
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    cfg = Config.from_env()
+    assert cfg.gfs_default_pin() == ("gfs-node-0", "ab")
+    monkeypatch.setenv("SH_GFS_DEFAULT_INSTANCE_ID", "other")
+    monkeypatch.setenv("SH_GFS_DEFAULT_PUBLIC_KEY", "")
+    assert Config.from_env().gfs_default_pin() == ("other", "")
+
+
+def test_shipped_pin_applies_only_to_the_shipped_url(monkeypatch):
+    """The project's own identity (once shipped) pins the project URL only —
+    an operator who points default_url elsewhere without an id gets no pin."""
+    monkeypatch.setattr(config_mod, "PROJECT_GFS_INSTANCE_ID", "gfs-project")
+    monkeypatch.setattr(config_mod, "PROJECT_GFS_PUBLIC_KEY", "cafe")
+    assert Config().gfs_default_pin() == ("gfs-project", "cafe")
+    other = Config(gfs_default_url="https://gfs.example.org")
+    assert other.gfs_default_pin() == ("", "")
+    pinned = Config(
+        gfs_default_url="https://gfs.example.org", gfs_default_instance_id="mine"
+    )
+    assert pinned.gfs_default_pin() == ("mine", "")
+
+
+def test_operator_id_with_shipped_url_keeps_the_shipped_key():
+    cfg = Config(gfs_default_instance_id="gfs-2")
+    assert cfg.gfs_default_pin() == ("gfs-2", PROJECT_KEY)

@@ -90,6 +90,7 @@ DEFAULT_TOML_FILE = f"{DEFAULT_CONFIG_DIR}/socialhome.toml"
 # through via Config.platform_options.
 _PREFIXED_SECTIONS: dict[str, str] = {
     "webrtc": "webrtc_",
+    "gfs": "gfs_",
 }
 _CORE_SECTIONS: frozenset[str] = frozenset(
     {
@@ -97,7 +98,22 @@ _CORE_SECTIONS: frozenset[str] = frozenset(
         "storage",
         "federation",
         "webrtc",
+        "gfs",
     }
+)
+
+
+#: The project's GFS — the shipped ``[gfs] default_url``.
+PROJECT_GFS_URL = "https://gfs.social-home.io"
+
+#: The project GFS's identity, pinned before an open sign-up while the
+#: household uses the shipped :data:`PROJECT_GFS_URL`. The PUBLIC KEY is the
+#: pin (owner-confirmed, 2026-10-04): it changes only with an app update or
+#: an operator override. The instance id is not pinned — on the project GFS
+#: it is a label (``gfs-2``), not derived from the key. Empty means no pin.
+PROJECT_GFS_INSTANCE_ID = ""
+PROJECT_GFS_PUBLIC_KEY = (
+    "33cf798c8c8a7ae04d06a5978242b189c421fb66b2faf61749154070aa12ab0e"
 )
 
 
@@ -192,6 +208,22 @@ class Config:
     #: substituted per request.
     map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
+    #: The GFS (Global Federation Server) household onboarding offers as a
+    #: one-click, opt-in "Connect to the GFS" step (``[gfs] default_url`` /
+    #: ``SH_GFS_DEFAULT_URL``). Nothing is sent to it unless an admin says
+    #: yes. The empty string hides the step; operators may point it at their
+    #: own GFS. The GFS must advertise ``open_signup`` in its signed
+    #: ``/gfs/info`` capability block for the one-click path to work.
+    gfs_default_url: str = PROJECT_GFS_URL
+
+    #: Optional identity pin for the default GFS (``[gfs] default_instance_id``
+    #: / ``SH_GFS_DEFAULT_INSTANCE_ID``, ``[gfs] default_public_key`` /
+    #: ``SH_GFS_DEFAULT_PUBLIC_KEY``, hex Ed25519). When set, the one-click
+    #: connect refuses a GFS whose ``/gfs/info`` names a different id / key.
+    #: See :meth:`gfs_default_pin` for how the shipped pin applies.
+    gfs_default_instance_id: str = ""
+    gfs_default_public_key: str = ""
+
     #: Set ``True`` in TLS (HTTPS) deployments to mark session cookies
     #: and the app-bundle path-scoped cookie as ``Secure`` so they are
     #: never transmitted over plain HTTP.  Defaults to ``False`` so that
@@ -206,6 +238,24 @@ class Config:
     platform_options: Mapping[str, Mapping[str, Any]] = field(
         default_factory=lambda: MappingProxyType({}),
     )
+
+    def gfs_default_pin(self) -> tuple[str, str]:
+        """``(instance_id, public_key)`` the default GFS must present, ``""``
+        meaning "not pinned".
+
+        An operator-set value always applies. Otherwise the project's shipped
+        values apply only while ``default_url`` is the shipped
+        :data:`PROJECT_GFS_URL` — an operator who points the default at
+        their own GFS without setting a key gets no pin, never the project's.
+        """
+        shipped = self.gfs_default_url.rstrip("/") == PROJECT_GFS_URL
+        instance_id = self.gfs_default_instance_id or (
+            PROJECT_GFS_INSTANCE_ID if shipped else ""
+        )
+        public_key = self.gfs_default_public_key or (
+            PROJECT_GFS_PUBLIC_KEY if shipped else ""
+        )
+        return instance_id, public_key.lower()
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -407,6 +457,23 @@ class Config:
                 "SH_MAP_TILE_URL",
                 "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
             ),
+            gfs_default_url=_str_opt(
+                "gfs_default_url",
+                "SH_GFS_DEFAULT_URL",
+                PROJECT_GFS_URL,
+            ).strip(),
+            gfs_default_instance_id=_str_opt(
+                "gfs_default_instance_id",
+                "SH_GFS_DEFAULT_INSTANCE_ID",
+                "",
+            ).strip(),
+            gfs_default_public_key=_str_opt(
+                "gfs_default_public_key",
+                "SH_GFS_DEFAULT_PUBLIC_KEY",
+                "",
+            )
+            .strip()
+            .lower(),
             db_write_batch_max=_int_opt(
                 "db_write_batch_max",
                 "SH_DB_WRITE_BATCH_MAX",

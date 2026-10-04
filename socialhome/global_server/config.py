@@ -10,12 +10,14 @@ Loaded with layered precedence:
    ``GFS_DATA_DIR``, ``GFS_DB_PATH``, ``GFS_INSTANCE_ID``,
    ``GFS_SIGNING_SEED`` — 64 hex chars, the Ed25519 identity seed;
    ``GFS_TRUSTED_PROXIES`` — comma-separated IPs/CIDRs, empty to clear;
-   ``GFS_WRITE_BATCH_WINDOW_MS`` — the DB write-coalescing window)
+   ``GFS_WRITE_BATCH_WINDOW_MS`` — the DB write-coalescing window;
+   ``GFS_OPEN_SIGNUP`` — ``true``/``false``, the ``[policy] open_signup``
+   switch)
    — override the matching ``[server]`` key when set, so an orchestrator can retarget a
    single value (e.g. a per-instance port) without rewriting the file.
    This mirrors :class:`socialhome.config.Config` (env > file > defaults).
-   Only ``[server]`` scalars have env bindings; branding/policy/webrtc/
-   cluster are file- and DB-owned. Unset vars leave the file value intact.
+   Only ``[server]`` scalars (plus ``open_signup``) have env bindings;
+   the rest of branding/policy/webrtc/cluster is file- and DB-owned. Unset vars leave the file value intact.
 3. **TOML file** at the path passed via ``--config``, or
    ``$SOCIAL_HOME_GFS_CONFIG``, or ``$SOCIAL_HOME_GFS_DATA/global_server.toml``,
    or ``./global_server.toml``.
@@ -110,6 +112,14 @@ class GfsConfig:
     auto_accept_clients: bool = True
     auto_accept_spaces: bool = False
     fraud_threshold: int = 5
+    #: Open sign-up: ``POST /gfs/signup-token`` hands any household a fresh
+    #: single-use pairing token, so it can connect without scanning the QR
+    #: code (the one-click "Connect to the GFS" step in household
+    #: onboarding). Off by default. File- and env-owned (``GFS_OPEN_SIGNUP``),
+    #: advertised inside the SIGNED ``/gfs/info`` capability block. On a
+    #: public server pair it with ``auto_accept_clients = false`` — approval
+    #: is the operator's lever against a flood of self-registered households.
+    open_signup: bool = False
 
     # [admin]
     admin_password_hash: str = ""
@@ -176,6 +186,7 @@ class GfsConfig:
             auto_accept_clients=bool(policy.get("auto_accept_clients", True)),
             auto_accept_spaces=bool(policy.get("auto_accept_spaces", False)),
             fraud_threshold=int(policy.get("fraud_threshold", 5)),
+            open_signup=bool(policy.get("open_signup", False)),
             admin_password_hash=str(admin.get("password_hash") or ""),
             stun_urls=tuple(webrtc.get("stun_urls") or default_stun),
             turn_url=str(webrtc.get("turn_url") or ""),
@@ -228,6 +239,11 @@ class GfsConfig:
             instance_id=env.get("GFS_INSTANCE_ID", self.instance_id),
             signing_seed_hex=env.get("GFS_SIGNING_SEED", self.signing_seed_hex),
             trusted_proxies=trusted_proxies,
+            open_signup=(
+                env["GFS_OPEN_SIGNUP"].strip().lower() in ("1", "true", "yes")
+                if "GFS_OPEN_SIGNUP" in env
+                else self.open_signup
+            ),
             write_batch_window_ms=(
                 _window_ms(env["GFS_WRITE_BATCH_WINDOW_MS"])
                 if "GFS_WRITE_BATCH_WINDOW_MS" in env
@@ -337,6 +353,14 @@ header_image_file = ""
 auto_accept_clients = true
 auto_accept_spaces  = false
 fraud_threshold     = 5
+# Open sign-up: hand out pairing codes automatically over
+# POST /gfs/signup-token, so a household can connect from its onboarding
+# with one click instead of scanning the QR code. Off by default. Rate
+# limited per address and globally (still ~43k registrations a day at the
+# global limit), so anyone can sign up: with open_signup on, set
+# auto_accept_clients = false above and approve households in the admin
+# console. Env override: GFS_OPEN_SIGNUP=true.
+open_signup = false
 
 [admin]
 # bcrypt hash — do NOT edit by hand. Use:

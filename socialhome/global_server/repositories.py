@@ -65,6 +65,11 @@ _MAX_ROTATION_SEQ = MAX_AUTHORITY_KEY_EPOCH
 # prunes anything older to keep the table bounded.
 PAIR_TOKEN_RETENTION_SECONDS = 86400
 
+# A pairing token is valid for this many seconds after it was minted
+# (§24.7.4). Mirrors ``public.PAIR_TOKEN_TTL_SECONDS`` — this module must not
+# import the HTTP layer.
+PAIR_TOKEN_TTL_SECONDS = 600
+
 
 # ─── Federation repo ─────────────────────────────────────────────────────
 
@@ -1107,20 +1112,21 @@ class SqliteGfsAdminRepo:
         )
 
     async def consume_pair_token(self, token: str) -> bool:
-        # Single-use + 10-min TTL: accept only if unused and < 600s old.
-        row = await self._db.fetchone(
-            "SELECT created_at, consumed_at FROM gfs_pair_tokens WHERE token=?",
-            (token,),
+        """Single-use + 10-min TTL, consumed ATOMICALLY.
+
+        One conditional ``UPDATE`` that only matches an unused, unexpired
+        row; the token counts as consumed iff exactly one row changed. A
+        SELECT-then-UPDATE let concurrent registers all see the row unused
+        and all succeed — one token minting unboundedly many households. A
+        single statement is atomic in SQLite, also across cluster nodes
+        sharing the file.
+        """
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_pair_tokens SET consumed_at=strftime('%s','now') "
+            "WHERE token=? AND consumed_at IS NULL AND created_at >= ?",
+            (token, int(time.time()) - PAIR_TOKEN_TTL_SECONDS),
         )
-        if row is None or row["consumed_at"] is not None:
-            return False
-        if int(time.time()) - int(row["created_at"]) > 600:
-            return False
-        await self._db.enqueue(
-            "UPDATE gfs_pair_tokens SET consumed_at=strftime('%s','now') WHERE token=?",
-            (token,),
-        )
-        return True
+        return changed == 1
 
     async def count_pair_tokens(self, ip: str, since: int) -> int:
         return int(

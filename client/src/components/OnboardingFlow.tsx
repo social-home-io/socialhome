@@ -6,15 +6,21 @@
  * shopping list, a sticky note, a pairing QR — so the operator sees
  * what the surface actually feels like, not just bullet points. The
  * mocks are inert; they exist only to set expectations.
+ *
+ * Admins get one more step at the end: "Connect to the GFS" — an opt-in,
+ * UNCHECKED offer to pair with the household's default GFS
+ * (``[gfs] default_url``) through its open sign-up. Whether to offer it
+ * comes from ``GET /api/gfs/connections/default``, which answers from local
+ * facts only; nothing reaches a GFS unless the admin ticks the box and
+ * presses Connect (``POST /api/gfs/connections/default``).
  */
-import { signal } from '@preact/signals'
 import { type ComponentChildren } from 'preact'
-import { useEffect } from 'preact/hooks'
-import { api } from '@/api'
+import { useEffect, useState } from 'preact/hooks'
+import { api, ApiError } from '@/api'
+import { t } from '@/i18n/i18n'
+import { isSupervisorAddon } from '@/platform'
 import { currentUser } from '@/store/auth'
 import { Button } from './Button'
-
-const step = signal(0)
 
 interface OnboardStep {
   title: string
@@ -120,9 +126,157 @@ const STEPS: OnboardStep[] = [
   },
 ]
 
+
+/** ``GET /api/gfs/connections/default``. */
+interface GfsOffer {
+  url: string
+  available: boolean
+  reason: 'disabled' | 'no_external_url' | 'already_connected' | null
+}
+
+type GfsState = 'idle' | 'connecting' | 'active' | 'pending' | 'error'
+
+/** Errors a retry can't fix: no Try again, the box unticks. */
+const FINAL_GFS_ERRORS = new Set(['GFS_SIGNUP_CLOSED', 'GFS_IDENTITY_MISMATCH'])
+
+/** Error code from ``POST /api/gfs/connections/default`` → our own words
+ *  (never the server's detail, which may quote the GFS). */
+function gfsErrorText(code: string | null): string {
+  switch (code) {
+    case 'GFS_UNREACHABLE': return t('onboarding.gfs.error_unreachable')
+    case 'GFS_SIGNUP_CLOSED': return t('onboarding.gfs.error_closed')
+    case 'GFS_BUSY': return t('onboarding.gfs.error_busy')
+    case 'GFS_IDENTITY_MISMATCH': return t('onboarding.gfs.error_identity')
+    case 'NOT_CONFIGURED': return noExternalUrlText()
+    default: return t('onboarding.gfs.error_refused')
+  }
+}
+
+/** Where the External URL comes from differs by mode: an admin types it
+ *  in standalone / ha; under the add-on Home Assistant supplies it. */
+function noExternalUrlText(): string {
+  return isSupervisorAddon()
+    ? t('onboarding.gfs.no_external_url_ha')
+    : t('onboarding.gfs.no_external_url')
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host || url
+  } catch {
+    return url
+  }
+}
+
+function GfsIllustration({ host }: { host: string }) {
+  return (
+    <div class="sh-onboard-illus">
+      <div class="sh-onboard-card sh-onboard-card--gfs">
+        <div class="sh-onboard-tape sh-onboard-tape--moss" aria-hidden="true" />
+        <div class="sh-onboard-card-kicker">GFS</div>
+        <div class="sh-onboard-card-title">{host}</div>
+        <ul class="sh-onboard-list">
+          <li><span class="sh-onboard-tick" /> {t('onboarding.gfs.illus_links')}</li>
+          <li><span class="sh-onboard-tick" /> {t('onboarding.gfs.illus_public')}</li>
+          <li><span class="sh-onboard-tick" /> {t('onboarding.gfs.illus_offline')}</li>
+        </ul>
+        <div class="sh-onboard-card-meta">🔒 {t('onboarding.gfs.illus_meta')}</div>
+      </div>
+    </div>
+  )
+}
+
+interface GfsStepProps {
+  offer: GfsOffer
+  wanted: boolean
+  state: GfsState
+  errorCode: string | null
+  onWantedChange: (next: boolean) => void
+}
+
+function GfsStepBody({ offer, wanted, state, errorCode, onWantedChange }: GfsStepProps) {
+  const canPair = offer.available
+  const done = state === 'active' || state === 'pending'
+  const closed = state === 'error' && errorCode !== null && FINAL_GFS_ERRORS.has(errorCode)
+  return (
+    <div class="sh-onboarding-gfs">
+      <p class="sh-onboarding-body">{t('onboarding.gfs.intro')}</p>
+      <div class="sh-onboarding-gfs-facts">
+        <section>
+          <h3>{t('onboarding.gfs.enables_heading')}</h3>
+          <ul>
+            <li>{t('onboarding.gfs.enables_links')}</li>
+            <li>{t('onboarding.gfs.enables_public')}</li>
+            <li>{t('onboarding.gfs.enables_offline')}</li>
+          </ul>
+        </section>
+        <section>
+          <h3>{t('onboarding.gfs.sees_heading')}</h3>
+          <p>{t('onboarding.gfs.sees_body')}</p>
+        </section>
+      </div>
+      <label class={canPair ? 'sh-onboarding-gfs-check' : 'sh-onboarding-gfs-check is-disabled'}>
+        <input
+          type="checkbox"
+          checked={wanted}
+          disabled={!canPair || done || closed || state === 'connecting'}
+          onChange={(e) => onWantedChange((e.target as HTMLInputElement).checked)}
+        />
+        <span>{t('onboarding.gfs.checkbox', { server: hostOf(offer.url) })}</span>
+      </label>
+      {!canPair && (
+        <p class="sh-onboarding-gfs-note sh-onboarding-gfs-note--hint">{noExternalUrlText()}</p>
+      )}
+      {canPair && state === 'active' && (
+        <p class="sh-onboarding-gfs-note sh-onboarding-gfs-note--ok" role="status">
+          {t('onboarding.gfs.success')}
+        </p>
+      )}
+      {canPair && state === 'pending' && (
+        <p class="sh-onboarding-gfs-note sh-onboarding-gfs-note--wait" role="status">
+          {t('onboarding.gfs.pending')}
+        </p>
+      )}
+      {canPair && state === 'error' && (
+        <p class="sh-onboarding-gfs-note sh-onboarding-gfs-note--error" role="alert">
+          {gfsErrorText(errorCode)}
+        </p>
+      )}
+      {canPair && !done && state !== 'error' && (
+        <p class="sh-onboarding-gfs-note">{t('onboarding.gfs.default_note')}</p>
+      )}
+    </div>
+  )
+}
+
 export function OnboardingFlow({ onComplete }: { onComplete: () => void }) {
-  const current = STEPS[step.value]
-  const isLast = step.value === STEPS.length - 1
+  const [step, setStep] = useState(0)
+  const [gfsOffer, setGfsOffer] = useState<GfsOffer | null>(null)
+  const [gfsWanted, setGfsWanted] = useState(false)
+  const [gfsState, setGfsState] = useState<GfsState>('idle')
+  const [gfsError, setGfsError] = useState<string | null>(null)
+  const isAdmin = !!currentUser.value?.is_admin
+
+  // Only admins can pair, and only when a default GFS is configured. The
+  // answer comes from this household alone — asking never contacts the GFS.
+  // Already connected (or no default, or no answer at all): no step.
+  useEffect(() => {
+    if (!isAdmin) return
+    let alive = true
+    api.get('/api/gfs/connections/default')
+      .then((body) => {
+        const offer = body as GfsOffer
+        if (!alive || !offer?.url) return
+        if (offer.available || offer.reason === 'no_external_url') setGfsOffer(offer)
+      })
+      .catch(() => { /* no step — onboarding must never block on this */ })
+    return () => { alive = false }
+  }, [isAdmin])
+
+  const total = STEPS.length + (gfsOffer ? 1 : 0)
+  const onGfsStep = gfsOffer !== null && step === STEPS.length
+  const current = STEPS[Math.min(step, STEPS.length - 1)]
+  const isLast = step === total - 1
 
   // Both "Let's go" and "Skip tour" mark the wizard done. ``App.tsx``
   // gates the wizard on ``currentUser.is_new_member``, so we mirror the
@@ -138,16 +292,44 @@ export function OnboardingFlow({ onComplete }: { onComplete: () => void }) {
     onComplete()
   }
 
+  const connectGfs = async () => {
+    setGfsState('connecting')
+    setGfsError(null)
+    try {
+      const conn = await api.post('/api/gfs/connections/default') as { status?: string }
+      setGfsState(conn?.status === 'pending' ? 'pending' : 'active')
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : null
+      if (code === 'ALREADY_CONNECTED') {
+        setGfsState('active')
+        return
+      }
+      // A closed sign-up or the wrong server won't change on a retry:
+      // untick, so the primary button just finishes.
+      if (code !== null && FINAL_GFS_ERRORS.has(code)) setGfsWanted(false)
+      setGfsError(code)
+      setGfsState('error')
+    }
+  }
+
+  // On the GFS step a ticked box turns the primary button into Connect
+  // (or Try again); unticked — the default — it just finishes.
+  const gfsNeedsConnect = onGfsStep && !!gfsOffer?.available && gfsWanted
+    && (gfsState === 'idle' || gfsState === 'error')
+
   const next = () => {
-    if (isLast) {
+    if (onGfsStep && gfsState === 'connecting') return
+    if (gfsNeedsConnect) {
+      void connectGfs()
+    } else if (isLast) {
       finish()
     } else {
-      step.value++
+      setStep(step + 1)
     }
   }
 
   const back = () => {
-    if (step.value > 0) step.value--
+    if (step > 0 && gfsState !== 'connecting') setStep(step - 1)
   }
 
   const skip = () => {
@@ -167,38 +349,66 @@ export function OnboardingFlow({ onComplete }: { onComplete: () => void }) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [step.value])
+  }, [step, total, gfsWanted, gfsState, gfsOffer])
+
+  let primaryLabel = isLast ? t('onboarding.finish') : t('onboarding.next')
+  if (onGfsStep && gfsState === 'connecting') primaryLabel = t('onboarding.gfs.connecting')
+  else if (gfsNeedsConnect) {
+    primaryLabel = gfsState === 'error' ? t('onboarding.gfs.retry') : t('onboarding.gfs.connect')
+  }
 
   return (
     <div class="sh-onboarding" role="dialog" aria-labelledby="sh-onboarding-title">
       <div class="sh-onboarding-card">
         <div class="sh-onboarding-illustration">
-          {current.illustration()}
+          {onGfsStep && gfsOffer
+            ? <GfsIllustration host={hostOf(gfsOffer.url)} />
+            : current.illustration()}
         </div>
-        <h2 id="sh-onboarding-title" class="sh-onboarding-title">{current.title}</h2>
-        <p class="sh-onboarding-body">{current.body}</p>
+        <h2 id="sh-onboarding-title" class="sh-onboarding-title">
+          {onGfsStep ? t('onboarding.gfs.title') : current.title}
+        </h2>
+        {onGfsStep && gfsOffer ? (
+          <GfsStepBody
+            offer={gfsOffer}
+            wanted={gfsWanted}
+            state={gfsState}
+            errorCode={gfsError}
+            onWantedChange={(v) => {
+              setGfsWanted(v)
+              if (!v && gfsState === 'error') setGfsState('idle')
+            }}
+          />
+        ) : (
+          <p class="sh-onboarding-body">{current.body}</p>
+        )}
         <div
           class="sh-onboarding-dots"
           role="progressbar"
           aria-valuemin={1}
-          aria-valuemax={STEPS.length}
-          aria-valuenow={step.value + 1}
-          aria-label={`Step ${step.value + 1} of ${STEPS.length}`}
+          aria-valuemax={total}
+          aria-valuenow={step + 1}
+          aria-label={t('onboarding.step_of', { n: String(step + 1), total: String(total) })}
         >
-          {STEPS.map((_, i) => (
+          {Array.from({ length: total }, (_, i) => (
             <span
               key={i}
-              class={i === step.value ? 'sh-dot sh-dot--active' : 'sh-dot'}
+              class={i === step ? 'sh-dot sh-dot--active' : 'sh-dot'}
             />
           ))}
         </div>
         <div class="sh-onboarding-actions">
-          <Button variant="secondary" onClick={skip}>Skip tour</Button>
+          <Button variant="secondary" onClick={skip}>{t('onboarding.skip')}</Button>
           <div class="sh-onboarding-actions-right">
-            {step.value > 0 && (
-              <Button variant="secondary" onClick={back}>Back</Button>
+            {step > 0 && (
+              <Button variant="secondary" onClick={back}
+                      disabled={gfsState === 'connecting'}>
+                {t('onboarding.back')}
+              </Button>
             )}
-            <Button onClick={next}>{isLast ? "Let's go" : 'Next'}</Button>
+            <Button onClick={next} disabled={onGfsStep && gfsState === 'connecting'}>
+              {primaryLabel}
+            </Button>
           </div>
         </div>
       </div>
