@@ -1463,6 +1463,44 @@ async def test_a_moderator_invite_link_mints_and_seats_a_moderator(client):
     assert "pending_role" not in body
 
 
+async def test_an_invite_link_is_minted_only_on_the_host(client):
+    """On a member household's stub the mint is a 409 ``NOT_SPACE_HOST``
+    and no row is written; on the host it still mints."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "HostOnlyLinks"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    ok = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"role": "moderator"},
+        headers=_auth(client._admin_token),
+    )
+    assert ok.status == 201, await ok.text()
+    db = client.app[_db_key]
+    await db.enqueue(
+        "UPDATE spaces SET owner_instance_id='some-other-household' WHERE id=?",
+        (sid,),
+    )
+    before = await db.fetchall(
+        "SELECT token FROM space_invite_tokens WHERE space_id=?", (sid,)
+    )
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"role": "moderator"},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 409, await resp.text()
+    err = (await resp.json())["error"]
+    assert err["code"] == "NOT_SPACE_HOST"
+    assert "home household" in err["detail"]
+    after = await db.fetchall(
+        "SELECT token FROM space_invite_tokens WHERE space_id=?", (sid,)
+    )
+    assert len(after) == len(before)
+
+
 @pytest.mark.parametrize("role", ["overlord", "owner", ["admin"], 1])
 async def test_an_unknown_invite_role_is_a_422_naming_the_seats(client, role):
     r = await client.post(

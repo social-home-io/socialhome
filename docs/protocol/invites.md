@@ -978,6 +978,17 @@ no settings authority and may not mint any link. `owner` is never
 mintable at all (422) — ownership moves only through
 `transfer_ownership`.
 
+**Only the host mints.** A link is a row in the issuer's
+`space_invite_tokens` table and every redeem path consumes it there, so
+only the space's **host** household (`owner_instance_id`) mints one. An
+admin seat on a member household's stub is refused with `409
+NOT_SPACE_HOST` (`NotSpaceHostError`) before anything is written: a stub's
+link would either be dead (no seed — the redeemer is seated in a roster
+nobody else trusts) or, with a delegated seed, a way to seat people past
+the host. Minting is not forwarded to the host the way a role change is
+(v_47): the forward is fire-and-forget, and a mint must hand the token and
+code back to the caller.
+
 #### A `moderator` link seats a moderator
 
 Unlike an `admin` link, a `moderator` link seats **straight through** on

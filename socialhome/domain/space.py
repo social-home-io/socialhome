@@ -1180,6 +1180,17 @@ class HostTooOldError(Exception):
         self.feature = feature
 
 
+class NotSpaceHostError(Exception):
+    """Something only the space's HOST household may do was asked of a
+    member household's stub — e.g. minting an invite link: the token row
+    lives in the host's table and only the host redeems it. 409
+    ``NOT_SPACE_HOST``; nothing is stored or sent."""
+
+    def __init__(self, host_instance_id: str) -> None:
+        super().__init__("Invite links are created by the space's home household.")
+        self.host_instance_id = host_instance_id
+
+
 class HostUnreachableError(Exception):
     """A forward to the space's host went nowhere — no route, an unknown or
     unconfirmed host, or (``reason="unknown_host"``) a stub with no recorded

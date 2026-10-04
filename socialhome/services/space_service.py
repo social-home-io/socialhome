@@ -149,6 +149,7 @@ from ..domain.space import (
     SETTINGS_AUTHORITY_ROLES,
     HostTooOldError,
     HostUnreachableError,
+    NotSpaceHostError,
     HouseholdUpgradeRequiredError,
     PublicSpaceLimitError,
     RemoteAdminOutcome,
@@ -4608,6 +4609,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
           :meth:`_require_owner`.
         * ``owner`` is never mintable — ownership moves only through
           :meth:`transfer_ownership`.
+        * only on the **host** — a member household's stub raises
+          :class:`NotSpaceHostError` (the token row and every redeem live on
+          the host).
 
         A ``subscriber`` link works regardless of any
         "strangers may subscribe" space flag: that flag governs people
@@ -4652,6 +4656,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             # ``owner`` — ownership moves only through transfer_ownership.
             raise ValueError(f"{seat.value} cannot be granted by an invite link")
         issuer = await self._require_admin_or_owner(space, actor_username)
+        if self._hosted_elsewhere(space):
+            # The token row lives in OUR table and only the host redeems it,
+            # so a stub's link would be dead — or, with a delegated seed,
+            # a way to seat people past the host. Mint on the host only.
+            raise NotSpaceHostError(space.owner_instance_id)
         if seat is SpaceRole.MODERATOR:
             # Mirrors who may PROMOTE to moderator (the owner, an admin —
             # ``role_change_allowed``), so a link can never grant a seat

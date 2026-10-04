@@ -36,6 +36,7 @@ from ..domain.space import (
     ModerationInProgressError,
     HostTooOldError,
     HostUnreachableError,
+    NotSpaceHostError,
     ModerationPayloadTooLargeError,
     ModerationQueueFullError,
     ModerationStaleError,
@@ -253,6 +254,12 @@ class BaseView(web.View):
         except ModerationInProgressError:
             return error_response(
                 409, "IN_PROGRESS", "This submission is being approved right now."
+            )
+        except NotSpaceHostError:
+            return error_response(
+                409,
+                "NOT_SPACE_HOST",
+                "Invite links are created by the space's home household.",
             )
         except HostUnreachableError as exc:
             return error_response(

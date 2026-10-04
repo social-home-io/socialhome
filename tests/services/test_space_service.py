@@ -52,6 +52,7 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceMember,
     SpacePermissionError,
+    NotSpaceHostError,
     SpaceRole,
     SpaceType,
 )
@@ -8306,6 +8307,30 @@ async def test_redeeming_a_moderator_link_seats_a_moderator_and_gossips_it(stack
         joined[0].kwargs["min_proto_version"]
         == FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE
     )
+
+
+@pytest.mark.parametrize("role", ["member", "moderator", "admin"])
+async def test_a_member_household_may_not_mint_invite_links(stack, role):
+    """An invite link is a row in the HOST's token table, redeemed by the
+    host: a stub's admin minting one gets a link nobody can honour (or,
+    holding a delegated seed, one that bypasses the host). Refused before
+    anything is written, whatever the seat."""
+    space, _u = await _space_with_roles(stack)
+    await _as_stub(stack, space)
+    with pytest.raises(NotSpaceHostError):
+        await stack.space_svc.create_invite_link(
+            space.id, actor_username="anna", role=role
+        )
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+async def test_the_host_still_mints_invite_links(stack):
+    space, _u = await _space_with_roles(stack)
+    assert stack.space_svc._own_instance_id == space.owner_instance_id
+    link = await stack.space_svc.create_invite_link(
+        space.id, actor_username="olga", role=SpaceRole.MODERATOR.value
+    )
+    assert link["role"] == SpaceRole.MODERATOR.value
 
 
 async def test_moderator_roster_gossip_is_gated_on_v30(stack):
