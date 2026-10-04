@@ -940,7 +940,7 @@ describe('SpaceInviteDialog — moderator links', () => {
       expect(result.queryByTestId('invite-created-summary')).not.toBeNull()
     })
     expect(result.getByTestId('invite-created-summary').textContent).toBe(
-      '1 Person kann damit beitreten. Er funktioniert in 7 Tagen nicht mehr.'
+      '1 Person kann damit beitreten. Der Link funktioniert in 7 Tagen nicht mehr.'
       + ' Sie treten als Follower bei.',
     )
   })

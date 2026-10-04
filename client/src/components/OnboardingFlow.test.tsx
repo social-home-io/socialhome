@@ -103,7 +103,7 @@ describe('OnboardingFlow — tour', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Weiter' }))
       expect(screen.getByText('Einkaufsliste')).toBeTruthy()
       fireEvent.click(screen.getByRole('button', { name: 'Weiter' }))
-      expect(screen.getByText(/Verschlüsselt · läuft in 5:00 ab/)).toBeTruthy()
+      expect(screen.getByText(/Verschlüsselt · noch 5:00/)).toBeTruthy()
     } finally {
       await setLocale('en')
     }

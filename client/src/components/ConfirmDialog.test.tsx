@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
+import { setLocale } from '@/i18n/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 
 describe('ConfirmDialog', () => {
@@ -38,5 +39,19 @@ describe('ConfirmDialog', () => {
     )
     fireEvent.click(getByText('Cancel'))
     expect(fn).toHaveBeenCalledOnce()
+  })
+
+  it('labels the default buttons in the UI language', async () => {
+    await setLocale('de')
+    try {
+      const { getByText } = render(
+        <ConfirmDialog open title="T" message="M"
+          onConfirm={() => {}} onCancel={() => {}} />,
+      )
+      expect(getByText('Abbrechen')).toBeTruthy()
+      expect(getByText('Bestätigen')).toBeTruthy()
+    } finally {
+      await setLocale('en')
+    }
   })
 })

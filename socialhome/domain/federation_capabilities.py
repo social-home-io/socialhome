@@ -1360,7 +1360,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
-        "Complete, up-to-date member lists",
+        "Up-to-date member lists for every household",
     ),
     (
         FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC,

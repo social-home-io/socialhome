@@ -1085,7 +1085,7 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
     fireEvent.change(selects(container).pages, { target: { value: 'admin_only' } })
     fireEvent.click(getByText('space.settings.save'))
     await findByText('space.access.peers_too_old.title')
-    fireEvent.click(getByText('Cancel'))
+    fireEvent.click(getByText('common.cancel'))
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).toHaveBeenCalledOnce()
   })

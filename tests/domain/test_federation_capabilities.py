@@ -516,8 +516,13 @@ def test_roster_snapshot_capability_threshold():
     content wrongly for the whole space."""
     assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT == 32
     assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT <= fc.OURS
-    assert "Complete, up-to-date member lists" in fc.features_missing_below(31)
-    assert "Complete, up-to-date member lists" not in fc.features_missing_below(32)
+    assert "Up-to-date member lists for every household" in fc.features_missing_below(
+        31
+    )
+    assert (
+        "Up-to-date member lists for every household"
+        not in fc.features_missing_below(32)
+    )
     assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )

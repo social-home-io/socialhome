@@ -3,6 +3,7 @@
  */
 import { Modal } from './Modal'
 import { Button } from './Button'
+import { t } from '@/i18n/i18n'
 
 interface ConfirmDialogProps {
   open: boolean
@@ -16,8 +17,8 @@ interface ConfirmDialogProps {
 }
 
 export function ConfirmDialog({
-  open, title, message, confirmLabel = 'Confirm',
-  cancelLabel = 'Cancel', destructive, onConfirm, onCancel,
+  open, title, message, confirmLabel = t('common.confirm'),
+  cancelLabel = t('common.cancel'), destructive, onConfirm, onCancel,
 }: ConfirmDialogProps) {
   return (
     <Modal open={open} onClose={onCancel} title={title}>
