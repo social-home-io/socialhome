@@ -947,8 +947,9 @@ failure unreachable, at a cost no one can perceive.
 
 ### The role a link grants
 
-A link carries the seat the redeemer lands in — `member`, `subscriber` or
-`admin` — stored on the `space_invite_tokens` row (migration 0053) and
+A link carries the seat the redeemer lands in — `member`, `subscriber`,
+`moderator` or `admin` — stored on the `space_invite_tokens` row (migration
+0053; `moderator` since 0080) and
 read back out of the atomic `consume_invite_token`. **The issuer's row
 decides.** The redeem request never names a role: the token is a bearer
 credential the redeemer holds and replays, so a role encoded in the token
@@ -962,16 +963,50 @@ grant admin on redeem — see "An `admin`/mod link is approved" below.
 
 Who may mint what:
 
-| Actor | `member` | `subscriber` | `admin` | `owner` |
-|---|---|---|---|---|
-| Owner | yes | yes | yes | never |
-| Admin | yes | yes | **no** (403) | never |
-| Member / subscriber | no | no | no | never |
+| Actor | `member` | `subscriber` | `moderator` | `admin` | `owner` |
+|---|---|---|---|---|---|
+| Owner | yes | yes | yes | yes | never |
+| Admin | yes | yes | yes | **no** (403) | never |
+| Moderator / member / subscriber | no | no | no | no | never |
 
 An admin minting an `admin` link would be self-service promotion by
-proxy, so that case re-checks with `_require_owner`. `owner` is never
+proxy, so that case re-checks with `_require_owner`. A `moderator` link
+mirrors who may **promote** to moderator — the same `role_change_allowed`
+matrix (`_check_role_change(actor, member → moderator)`), so a link never
+grants a seat its minter could not have granted by hand; a moderator holds
+no settings authority and may not mint any link. `owner` is never
 mintable at all (422) — ownership moves only through
 `transfer_ownership`.
+
+#### A `moderator` link seats a moderator
+
+Unlike an `admin` link, a `moderator` link seats **straight through** on
+every redeem path — the local `accept_invite_token`, a paired or mesh §D2
+redeem, and a link-joined §D2b one — with no pending elevation. A
+moderator holds content authority only: no settings authority, never the
+signing seed (`list_admin_instances` is role-exact `admin`), so there is no
+seed or config power for a leaked link to hand out, and a link-joined
+moderator acts through the host like any link-joined seat (it decides
+moderation items over `SPACE_MODERATION_DECIDED`, which is in
+`SPACE_SESSION_ALLOWED_EVENT_TYPES`). Promoting a link-joined household to
+moderator is likewise unrestricted, so the link mirrors that.
+
+The seat federates exactly like a promoted moderator: the redeem's roster
+gossip is an authority-signed JOINED with `role: "moderator"` on the v_30
+floor (every v_30+ receiver coerces an unknown role down to `member`), and
+the household's writer certificate is computed from the seat — `write`
+under `MODERATED` posting, where a plain member gets `comment`.
+
+**Older redeemers.** A household below v_41 cannot store a moderator
+seat. Where a promotion refuses such a household
+(`HouseholdUpgradeRequiredError`), a link is honoured as a **member** seat
+instead — never a DENY — and the issuer logs it at INFO. The issuer judges
+the version by the redeemer's `remote_instances` row (paired or
+link-joined), by the mesh version claim sealed inside a routed REDEEM (a
+mesh-only household — see `mesh_member_claim`), or, on the §D2b leg where
+no row exists yet, by the `proto_version` in the redeemer's sealed,
+identity-signed request (the value its space-session row is then seated
+with). No version or claim → `member` (fail closed).
 
 A `subscriber` link works regardless of any "strangers may subscribe"
 space setting: that setting governs people who walked up on their own,
@@ -985,8 +1020,8 @@ leaked — anyone who saw the URL could redeem it — and admin carries
 kick / ban / config, so redeeming an `admin` link seats the household as
 a **member** now and files a pending **elevation** the owner approves
 with a click. A leaked admin link is therefore at worst a revocable
-member. Member and subscriber links are unchanged: the token is the
-authorization and they seat straight through.
+member. Member, subscriber and moderator links are unchanged: the token is
+the authorization and they seat straight through.
 
 The elevation is a `space_join_requests` row with `requested_role =
 'admin'` (migration 0055) — the same table, review flow, expiry, REST

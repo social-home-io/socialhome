@@ -29,6 +29,7 @@ import pytest
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
+    ed25519_public_key,
     generate_identity_keypair,
     generate_x25519_keypair,
     sign_ed25519,
@@ -43,6 +44,7 @@ from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.space import (
     JoinMode,
     Space,
+    SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
     SpaceRole,
@@ -69,7 +71,10 @@ from socialhome.federation.invite_token_redeem import (
     SpaceInviteTokenRedeemCoordinator,
 )
 from socialhome.federation.keywrap_seal import seal_to_keywrap
+from socialhome.domain.writer_cert import WRITER_SCOPE_WRITE
 from socialhome.rate_limiter import RateLimiter
+from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
+from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 
 
 # ── Test doubles ──────────────────────────────────────────────────────
@@ -2176,8 +2181,8 @@ async def test_a_follower_link_spends_a_use_like_any_other():
 
 
 async def test_an_unseatable_role_is_refused_without_seating_anything():
-    """The two CHECKs (0053 mint, 0054 seat) agree on member|admin|
-    subscriber. A row carrying anything else — a seat minted by a future
+    """The two CHECKs (0053/0080 mint, 0054/0065 seat) agree on member|
+    admin|moderator|subscriber. A row carrying anything else — a seat minted by a future
     version, or a hand-edited DB — is refused rather than written: a
     role we cannot gate must never become a seat we cannot revoke."""
     sender, _issuer, _sf, _if, _repo, issuer_members = _wire_pair(
@@ -2665,8 +2670,7 @@ async def test_a_lost_ack_is_answered_again_on_retry():
 async def test_a_moderator_re_redeeming_the_link_keeps_their_seat():
     """M3 — a household promoted to ``moderator`` after joining re-redeems
     its link (a lost ACK, a reinstall): the re-ACK answers with the seat
-    it holds, ``moderator``, and nothing is consumed or re-seated. A NEW
-    redeem still can never seat a moderator (``SEATABLE_REMOTE_ROLES``)."""
+    it holds, ``moderator``, and nothing is consumed or re-seated."""
     env = _atomic_pair()
     env.relay.lose_to.add(env.redeemer_party.instance_id)
     with pytest.raises(TimeoutError):
@@ -2679,7 +2683,6 @@ async def test_a_moderator_re_redeeming_the_link_keeps_their_seat():
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 0
     assert len(env.issuer_members.added) == 1
     assert env.issuer_members.live[key]["role"] == SpaceRole.MODERATOR.value
-    assert SpaceRole.MODERATOR.value not in SEATABLE_REMOTE_ROLES
 
 
 async def test_a_re_ack_that_is_refused_rolls_nothing_back():
@@ -3034,3 +3037,216 @@ async def test_a_grandfathered_link_redeemed_directly_does_not_turn_it_on():
     assert result["space_id"] == "sp-1"
     assert len(issuer_members.added) == 1
     assert recorder.unlocked == []
+
+
+# ── Moderator invite links ─────────────────────────────────────────────
+
+
+def _moderator_pair():
+    sender, issuer, sender_fed, issuer_fed, repo, members = _wire_pair(
+        {
+            "space_id": "sp-mod",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "role": SpaceRole.MODERATOR.value,
+        },
+    )
+    spaces = _RecordingSpaceService()
+    issuer.attach_space_service(spaces)
+    return SimpleNamespace(
+        sender=sender,
+        issuer=issuer,
+        issuer_fed=issuer_fed,
+        repo=repo,
+        members=members,
+        spaces=spaces,
+    )
+
+
+async def test_a_paired_redeem_of_a_moderator_link_seats_a_moderator():
+    """A moderator seat needs no seed and no settings authority, so a
+    moderator link seats straight through — no pending elevation — and the
+    seat is gossiped as ``moderator`` like a promoted one."""
+    env = _moderator_pair()
+    result = await env.sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    assert result == {"space_id": "sp-mod", "role": SpaceRole.MODERATOR.value}
+    assert env.members.added[0]["role"] == SpaceRole.MODERATOR.value
+    assert env.spaces.elevations == []
+    assert [j["role"] for j in env.spaces.joined] == [SpaceRole.MODERATOR.value]
+    assert SpaceRole.MODERATOR.value in SEATABLE_REMOTE_ROLES
+
+
+async def test_a_redeemer_below_the_moderator_version_is_seated_as_a_member(caplog):
+    """A household below v_41 could not store a moderator seat. The link is
+    honoured as a member seat — never a failure — and the host logs it."""
+    env = _moderator_pair()
+    env.issuer_fed._peer_min_version = (
+        FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE - 1
+    )
+    with caplog.at_level("INFO", logger=itr.__name__):
+        result = await env.sender.request_redeem(
+            "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+        )
+    assert result == {"space_id": "sp-mod", "role": SpaceRole.MEMBER.value}
+    assert env.members.added[0]["role"] == SpaceRole.MEMBER.value
+    assert [j["role"] for j in env.spaces.joined] == [SpaceRole.MEMBER.value]
+    assert env.spaces.elevations == []
+    assert env.repo.tokens["good-token"]["uses_remaining"] == 0
+    assert "seated as a member" in caplog.text
+
+
+async def test_a_link_joined_redeem_of_a_moderator_link_seats_a_moderator():
+    """A link-joined (§D2b) household may hold a moderator seat — it acts
+    through the host, and a moderator needs no seed — so the stranger path
+    seats one directly, same as a promotion of such a household would."""
+    env = _bootstrap_pair(role=SpaceRole.MODERATOR.value)
+    spaces = _RecordingSpaceService()
+    env.issuer.attach_space_service(spaces)
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["role"] == SpaceRole.MODERATOR.value
+    assert "pending_role" not in result
+    assert env.issuer_members.added[0]["role"] == SpaceRole.MODERATOR.value
+    assert spaces.elevations == []
+    # The joiner seated itself as a moderator on its own stub.
+    (seat,) = [m for m in env.redeemer_spaces.members if m.user_id == "u-local"]
+    assert seat.role == SpaceRole.MODERATOR.value
+
+
+async def test_a_link_joined_redeemer_below_v41_is_seated_as_a_member(monkeypatch):
+    """The §D2b leg has no peer row yet: the version the redeemer put in
+    its sealed, identity-signed request decides."""
+    monkeypatch.setattr(
+        itr, "OURS", FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE - 1
+    )
+    env = _bootstrap_pair(role=SpaceRole.MODERATOR.value)
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["role"] == SpaceRole.MEMBER.value
+    assert env.issuer_members.added[0]["role"] == SpaceRole.MEMBER.value
+
+
+def _mesh_redeem_event(identity_pk: bytes, version: int, *, routed=True):
+    origin = derive_instance_id(identity_pk)
+    return FederationEvent(
+        msg_id="m-1",
+        event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        from_instance=origin,
+        to_instance="issuer-1",
+        timestamp="2026-10-04T00:00:00Z",
+        payload={
+            "member_proto_version": version,
+            "member_identity_pk": identity_pk.hex(),
+        },
+        routed_path=[origin, "issuer-1"] if routed else None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "routed", "expected"),
+    [
+        (FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE, True, True),
+        (FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE - 1, True, False),
+        # Not unwrapped from SPACE_ROUTED: the claim is not
+        # origin-authenticated and is ignored (no row → unknown → member).
+        (FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE, False, False),
+    ],
+)
+async def test_a_mesh_redeemer_is_judged_by_its_mesh_claim(version, routed, expected):
+    """A mesh-only redeemer has no ``remote_instances`` row; the version
+    claim sealed inside its routed REDEEM decides."""
+    coord = _make_coordinator(federation=_FakeFederationService(peer_min_version=0))
+    pk = generate_identity_keypair().public_key
+    event = _mesh_redeem_event(pk, version, routed=routed)
+    assert await coord._redeemer_may_moderate(event, None) is expected
+
+
+async def test_a_moderator_link_seat_writes_under_moderated_posting():
+    """The seat a moderator link lands in is a moderator seat for the
+    writer certificate too: under ``MODERATED`` posting the ACK's cert
+    carries ``write`` scope (a plain member's would be ``comment``)."""
+    env = _moderator_pair()
+    seed = b"\x07" * 32
+    env.repo.space_rows_for_get["sp-mod"] = replace(
+        _a_space("sp-mod"),
+        identity_public_key=ed25519_public_key(seed).hex(),
+        features=SpaceFeatures(
+            private_gfs=True, posts_access=SpaceFeatureAccess.MODERATED
+        ),
+    )
+    members = env.members
+    sender_pk = env.sender._federation.identity.public_key
+
+    class _Spaces:
+        async def get(self, space_id):
+            return await env.repo.get(space_id)
+
+        async def get_space_seed(self, space_id):
+            return seed
+
+        async def list_members(self, space_id):
+            return []
+
+    class _Remote:
+        async def list_for_instance(
+            self, space_id, instance_id, *, include_tombstoned=True
+        ):
+            return [
+                SpaceRemoteMember(
+                    space_id=s, instance_id=i, user_id=u, role=row["role"]
+                )
+                for (s, i, u), row in members.live.items()
+                if s == space_id and i == instance_id
+            ]
+
+    class _Keys:
+        async def get_latest(self, space_id):
+            return SimpleNamespace(epoch=1, created_at=None)
+
+    class _Fed:
+        async def space_member_supports(self, instance_id, *, min_version):
+            return True
+
+        async def peer_identity_public_key(self, instance_id):
+            return sender_pk if instance_id == "sender-1" else None
+
+        async def mesh_member_identity_pk(self, instance_id):
+            return None
+
+    certs = SpaceWriterCertService(
+        space_repo=_Spaces(),
+        remote_member_repo=_Remote(),
+        space_key_repo=_Keys(),
+        own_instance_id="issuer-1",
+        own_identity_pk=b"\x01" * 32,
+    )
+    certs.attach_federation(_Fed())
+    env.issuer.attach_writer_certs(certs)
+    sender_certs = _FakeWriterCerts()
+    env.sender.attach_writer_certs(sender_certs)
+    await env.sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    (cert,) = [raw for _sid, raw in sender_certs.accepted if "scope" in raw]
+    assert cert["scope"] == WRITER_SCOPE_WRITE
+    assert cert["writer_user_ids"] == ["u-local"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(41, 41), ("52", 52), (None, 1), (0, 1), (True, 1), ("x", 1), ([1], 1)],
+)
+def test_a_claimed_proto_version_fails_closed(raw, expected):
+    """A §D2b request's ``proto_version`` that is absent or malformed reads
+    as v1, so the moderator gate seats a member rather than raising."""
+    assert itr._int_or_one(raw) == expected

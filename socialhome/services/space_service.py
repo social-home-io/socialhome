@@ -205,6 +205,20 @@ _REMOTE_ASSIGNABLE_ROLES: frozenset[SpaceRole] = frozenset(
     {SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER}
 )
 
+#: The seats an invite link can grant — the ``space_invite_tokens.role``
+#: CHECK (migrations 0053 + 0080), in code. ``owner`` is never mintable.
+INVITE_LINK_ROLES: frozenset[str] = frozenset(
+    {
+        SpaceRole.MEMBER.value,
+        SpaceRole.SUBSCRIBER.value,
+        SpaceRole.MODERATOR.value,
+        SpaceRole.ADMIN.value,
+    }
+)
+
+#: The 422 text for a role an invite link cannot carry (shown in the SPA).
+INVITE_ROLE_ERROR: str = "role must be 'member', 'subscriber', 'moderator' or 'admin'"
+
 #: The ``SPACE_REMOTE_ADMIN_ACTION`` action a member household forwards a
 #: role change as (v_47). Params: ``{instance_id, user_id, from_role, role}`` — the
 #: target seat's home household (the host's own id for a host-local member).
@@ -4586,7 +4600,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         by the issuer, and stored on the row. The redeemer never gets to
         ask for it (see the 0053 migration header). Who may mint what:
 
-        * admin **or** owner → ``member`` / ``subscriber``;
+        * admin **or** owner → ``member`` / ``subscriber`` / ``moderator``
+          (the moderator seat mirrors who may promote to it,
+          :func:`role_change_allowed`);
         * **owner only** → ``admin``. An admin must not be able to clone
           their own privilege, so this re-checks with
           :meth:`_require_owner`.
@@ -4629,15 +4645,18 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         try:
             seat = SpaceRole(role)
         except ValueError:
-            raise ValueError(f"unknown invite role {role!r}") from None
-        if seat is SpaceRole.OWNER:
-            raise ValueError("owner cannot be granted by an invite link")
+            raise ValueError(
+                f"unknown invite role {role!r}: {INVITE_ROLE_ERROR}"
+            ) from None
+        if seat.value not in INVITE_LINK_ROLES:
+            # ``owner`` — ownership moves only through transfer_ownership.
+            raise ValueError(f"{seat.value} cannot be granted by an invite link")
+        issuer = await self._require_admin_or_owner(space, actor_username)
         if seat is SpaceRole.MODERATOR:
-            # Nobody joins as a moderator: it is granted by promotion, and
-            # neither the ``space_invite_tokens.role`` CHECK nor a remote
-            # redeem (``SEATABLE_REMOTE_ROLES``) admits it.
-            raise ValueError("moderator is granted by promotion, not an invite link")
-        await self._require_admin_or_owner(space, actor_username)
+            # Mirrors who may PROMOTE to moderator (the owner, an admin —
+            # ``role_change_allowed``), so a link can never grant a seat
+            # its minter could not have granted by hand.
+            self._check_role_change(issuer.role, SpaceRole.MEMBER, seat)
         if seat is SpaceRole.ADMIN:
             # An admin minting an admin link would be self-service
             # promotion by proxy. Only the owner delegates admin.
@@ -5553,11 +5572,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     ) -> SpaceMember:
         """Consume an invite token and seat ``user_id`` in the role it grants.
 
-        The seat comes off the stored row — ``member``, ``subscriber`` or
-        ``admin``, decided by whoever minted the link. A ``subscriber``
-        link seats a subscriber whatever the space's "strangers may
-        subscribe" setting says: that setting governs people who walked
-        up on their own; this one was invited by name.
+        The seat comes off the stored row — ``member``, ``subscriber``,
+        ``moderator`` or ``admin`` (the last seated as ``member`` plus a
+        pending elevation), decided by whoever minted the link. A
+        ``subscriber`` link seats a subscriber whatever the space's
+        "strangers may subscribe" setting says: that setting governs people
+        who walked up on their own; this one was invited by name.
         """
         # §13.7 rides INSIDE the atomic UPDATE (``redeemer_user_id``), the
         # same way the cross-household redeem does it. Consuming first and
@@ -5618,6 +5638,22 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 role=seat,
             )
         )
+        # v_23 — peer-replicate the seat to every member household, exactly
+        # like :meth:`add_member` and a promotion do: a ``moderator`` link's
+        # seat federates like a promoted moderator (the gossip floors it at
+        # v_30 like a subscriber). Skipped gracefully when we hold no seed.
+        space = await self._spaces.get(space_id)
+        if space is not None:
+            joined = await self._users.list_by_ids({user_id})
+            await self._emit_member_roster_gossip(
+                space,
+                user_id=user_id,
+                instance_id=self._own_instance_id or "",
+                display_name=joined[0].display_name if joined else None,
+                user_pk=joined[0].public_key if joined else None,
+                role=seat,
+                tombstoned=False,
+            )
         if pending_role is not None:
             await self._file_admin_elevation(space_id, user_id)
         return member

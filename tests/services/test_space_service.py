@@ -8241,13 +8241,71 @@ async def test_a_stub_with_no_recorded_host_says_so(stack):
     fed.send_with_mesh_fallback.assert_not_awaited()
 
 
-async def test_invite_links_never_seat_a_moderator(stack):
-    """Nobody joins as a moderator — it is granted by promotion."""
+@pytest.mark.parametrize("actor", ["anna", "olga"])
+async def test_an_owner_or_admin_may_mint_a_moderator_link(stack, actor):
+    """Whoever may promote someone to moderator (the owner, an admin —
+    ``role_change_allowed``) may hand out a link that seats one."""
     space, _u = await _space_with_roles(stack)
-    with pytest.raises(ValueError):
-        await stack.space_svc.create_invite_token(
-            space.id, actor_username="anna", role="moderator"
+    link = await stack.space_svc.create_invite_link(
+        space.id, actor_username=actor, role=SpaceRole.MODERATOR.value
+    )
+    assert link["role"] == SpaceRole.MODERATOR.value
+    (row,) = await stack.space_repo.list_live_invite_tokens(space.id)
+    assert row["role"] == SpaceRole.MODERATOR.value
+
+
+@pytest.mark.parametrize("actor", ["mo", "bob"])
+async def test_a_moderator_or_member_may_not_mint_a_moderator_link(stack, actor):
+    """A moderator holds no settings authority and may not promote, so it
+    may not mint the seat by proxy either; a member neither."""
+    space, _u = await _space_with_roles(stack)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.create_invite_link(
+            space.id, actor_username=actor, role=SpaceRole.MODERATOR.value
         )
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+async def test_an_unknown_invite_role_names_the_mintable_seats(stack):
+    space, _u = await _space_with_roles(stack)
+    with pytest.raises(ValueError, match="moderator"):
+        await stack.space_svc.create_invite_link(
+            space.id, actor_username="anna", role="overlord"
+        )
+
+
+async def test_redeeming_a_moderator_link_seats_a_moderator_and_gossips_it(stack):
+    """A moderator link seats straight through — no pending elevation (a
+    moderator holds no settings authority) — and the seat federates like a
+    promoted moderator: an authority-signed JOINED with ``role:
+    "moderator"`` on the v_30 floor."""
+    from socialhome.domain.federation import FederationEventType
+
+    space, _u = await _space_with_roles(stack)
+    dave = await stack.provision_user("dave")
+    link = await stack.space_svc.create_invite_link(
+        space.id, actor_username="olga", role=SpaceRole.MODERATOR.value
+    )
+    fed = _roster_gossip_fed()
+    stack.space_svc._federation = fed
+    result = await stack.space_svc.redeem_invite_token(
+        link["token"], user_id=dave.user_id
+    )
+    assert result == {"space_id": space.id, "role": SpaceRole.MODERATOR}
+    seated = await stack.space_repo.get_member(space.id, dave.user_id)
+    assert seated.role == SpaceRole.MODERATOR
+    assert await stack.space_repo.list_pending_join_requests(space.id) == []
+    joined = [
+        c
+        for c in _gossip_calls(fed, FederationEventType.SPACE_MEMBER_JOINED)
+        if c.args[2]["user_id"] == dave.user_id
+    ]
+    assert len(joined) == 1
+    assert joined[0].args[2]["role"] == SpaceRole.MODERATOR.value
+    assert (
+        joined[0].kwargs["min_proto_version"]
+        == FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE
+    )
 
 
 async def test_moderator_roster_gossip_is_gated_on_v30(stack):
