@@ -8723,6 +8723,85 @@ async def test_the_host_answers_a_malformed_forward_invalid(stack, action, param
     assert answer == {"error": "invalid"}
 
 
+async def _space_with_an_admin_link(stack):
+    space, u = await _space_with_roles(stack)
+    admin_link = await stack.space_svc.create_invite_link(
+        space.id, actor_username="anna", role="admin"
+    )
+    member_link = await stack.space_svc.create_invite_link(
+        space.id, actor_username="olga", role="member"
+    )
+    return space, u, admin_link, member_link
+
+
+async def test_only_the_owner_sees_admin_links(stack):
+    """Admin links are the owner's to mint, so they are the owner's to see:
+    a plain admin's list leaves out their tokens and codes."""
+    space, _u, admin_link, member_link = await _space_with_an_admin_link(stack)
+    owner_view = await stack.space_svc.list_invite_links(
+        space.id, actor_username="anna"
+    )
+    admin_view = await stack.space_svc.list_invite_links(
+        space.id, actor_username="olga"
+    )
+    assert {x["token"] for x in owner_view} == {
+        admin_link["token"],
+        member_link["token"],
+    }
+    assert [x["token"] for x in admin_view] == [member_link["token"]]
+
+
+async def test_only_the_owner_revokes_admin_links(stack):
+    space, _u, admin_link, member_link = await _space_with_an_admin_link(stack)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.revoke_invite_link(
+            space.id, admin_link["token"], actor_username="olga"
+        )
+    await stack.space_svc.revoke_invite_link(
+        space.id, member_link["token"], actor_username="olga"
+    )
+    live = {
+        r["token"] for r in await stack.space_repo.list_live_invite_tokens(space.id)
+    }
+    assert live == {admin_link["token"]}
+    await stack.space_svc.revoke_invite_link(
+        space.id, admin_link["token"], actor_username="anna"
+    )
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+async def test_a_forwarding_admin_neither_sees_nor_revokes_admin_links(stack):
+    """A remote seat is never the owner, so the forwarded list leaves admin
+    links out and a forwarded revoke of one is refused."""
+    space, _u, _remote = await _hosted_with_remote_seat(stack, "admin")
+    admin_link = await stack.space_svc.create_invite_link(
+        space.id, actor_username="anna", role="admin"
+    )
+    member_link = await stack.space_svc.create_invite_link(
+        space.id, actor_username="anna", role="member"
+    )
+    listed = await stack.space_svc.handle_forwarded_invite_action(
+        space.id,
+        action="list_invite_links",
+        actor_instance_id="peer-h",
+        actor_user_id="ru-1",
+        params={},
+    )
+    assert [x["token"] for x in listed["links"]] == [member_link["token"]]
+    refused = await stack.space_svc.handle_forwarded_invite_action(
+        space.id,
+        action="revoke_invite_link",
+        actor_instance_id="peer-h",
+        actor_user_id="ru-1",
+        params={"token": admin_link["token"]},
+    )
+    assert refused == {"error": "forbidden"}
+    live = {
+        r["token"] for r in await stack.space_repo.list_live_invite_tokens(space.id)
+    }
+    assert admin_link["token"] in live
+
+
 async def test_moderator_roster_gossip_is_gated_on_v30(stack):
     """A ``moderator`` role is coerced down to ``member`` by every v_30+
     receiver (``mirrorable_remote_role``) but would raise out of a sub-v_30

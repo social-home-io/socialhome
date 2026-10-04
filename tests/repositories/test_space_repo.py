@@ -1282,6 +1282,21 @@ async def test_delete_invite_token_returns_the_row_and_is_idempotent(env):
     assert await env.repo.consume_invite_token(token) is None
 
 
+async def test_get_invite_token_role_reads_any_row_of_its_space(env):
+    """Expired or spent rows still answer (a revoke works on them), and the
+    lookup is scoped to the space like the delete."""
+    await env.repo.save(_space("sp-role"))
+    await env.repo.save(_space("sp-other"))
+    admin = await env.repo.create_invite_token(
+        "sp-role", "uid-alice", role="admin", expires_at="2000-01-01T00:00:00+00:00"
+    )
+    plain = await env.repo.create_invite_token("sp-role", "uid-alice")
+    assert await env.repo.get_invite_token_role("sp-role", admin) == "admin"
+    assert await env.repo.get_invite_token_role("sp-role", plain) == "member"
+    assert await env.repo.get_invite_token_role("sp-other", admin) is None
+    assert await env.repo.get_invite_token_role("sp-role", "nope") is None
+
+
 async def test_delete_invite_token_is_scoped_to_its_space(env):
     """An admin of one space must not be able to revoke another space's
     link by guessing the token."""

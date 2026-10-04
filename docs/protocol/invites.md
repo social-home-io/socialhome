@@ -1024,11 +1024,13 @@ publish_gfs_url}`; `list_invite_links` — none; `revoke_invite_link` —
   (`publish_gfs_url`); the host publishes through ITS own connection to
   that server, or answers `error: "gfs_not_paired"`. The member household
   never parks a blob.
-* **List:** the host answers with every live link of the space — exactly
-  what its own admins and owner see (no per-minter filtering), same shape,
-  `via` included. The member household's own table holds none of them.
+* **List:** the host answers with the space's live links — exactly what its
+  own (non-owner) admins see: every link except `admin` links, which are
+  the owner's alone (a remote seat is never the owner). Same shape, `via`
+  included. The member household's own table holds none of them.
 * **Revoke:** the host deletes the row and takes a parked blob down on its
-  connection server, fail-soft, exactly like a local revoke; idempotent.
+  connection server, fail-soft, exactly like a local revoke; idempotent. An
+  `admin` link is refused (`forbidden` → 403).
 * **Never held for owner approval.** Unlike a forwarded config edit or
   role change, these need no more than the seat that acts on the host.
 * **Synchronous.** The API waits up to 20 s for the host's answer; no
@@ -1197,8 +1199,8 @@ every v_30 member household, refuses them throughout.
 
 | Endpoint | Who | Notes |
 |---|---|---|
-| `GET /api/spaces/{id}/invite-tokens` | admin or owner | Live links only — expired and exhausted rows are excluded because they grant nothing. |
-| `DELETE /api/spaces/{id}/invite-tokens/{token}` | admin or owner | `204`, idempotent. Any admin may revoke any of the space's links: a link belongs to the space, not to its minter. |
+| `GET /api/spaces/{id}/invite-tokens` | admin or owner | Live links only — expired and exhausted rows are excluded because they grant nothing. `admin` links are listed to the **owner only**: they are the owner's to mint, so a plain admin never sees their tokens or codes. |
+| `DELETE /api/spaces/{id}/invite-tokens/{token}` | admin or owner | `204`, idempotent. Any admin may revoke any of the space's links — a link belongs to the space, not to its minter — except an `admin` link, which only the owner revokes (`403` for anyone else). |
 
 Revoke is total: the local row goes AND the blob comes down on the
 connection server the link was published to (the `gfs_id` / `gfs_token` /

@@ -4860,12 +4860,17 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                         space, str(actor.role), actor_user_id, params
                     )
                 case "list_invite_links":
-                    answer = {"links": await self._invite_link_rows(space)}
+                    # A remote seat is never the owner: no admin links.
+                    answer = {
+                        "links": await self._invite_link_rows(
+                            space, include_admin=False
+                        )
+                    }
                 case "revoke_invite_link":
                     token = params.get("token")
                     if not isinstance(token, str) or not token:
                         raise ValueError("token must be a non-empty string")
-                    await self._revoke_invite_row(space, token)
+                    await self._revoke_invite_row(space, token, may_revoke_admin=False)
                     answer = {"revoked": True}
                 case _:
                     raise ValueError(f"unknown action {action!r}")
@@ -5098,10 +5103,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         Admin or owner only — the token strings ARE the credentials.
         Expired and exhausted rows are excluded by the repo: they grant
         nothing, so listing them would only invite an owner to "revoke"
-        something that is already spent.
+        something that is already spent. An ``admin`` link is the owner's
+        alone to see (as to mint and revoke): a plain admin's list leaves it
+        out.
         """
         space = await self._require_space(space_id)
-        await self._require_admin_or_owner(space, actor_username)
+        issuer = await self._require_admin_or_owner(space, actor_username)
         if self._hosted_elsewhere(space):
             # The links live on the host (v_52): show its list.
             actor = await self._users.get(actor_username)
@@ -5118,13 +5125,22 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 if isinstance(links, list)
                 else []
             )
-        return await self._invite_link_rows(space)
+        return await self._invite_link_rows(
+            space, include_admin=issuer.role == SpaceRole.OWNER
+        )
 
-    async def _invite_link_rows(self, space: Space) -> list[dict]:
-        """Every live link of ``space`` in OUR table, API shape — what an
-        admin or the owner is shown (no per-actor filtering)."""
+    async def _invite_link_rows(
+        self, space: Space, *, include_admin: bool
+    ) -> list[dict]:
+        """Every live link of ``space`` in OUR table, API shape. ``admin``
+        links only when ``include_admin`` — the viewer is the owner, who
+        alone mints them; never for a remote seat (never the owner)."""
         space_id = space.id
-        rows = await self._spaces.list_live_invite_tokens(space_id)
+        rows = [
+            r
+            for r in await self._spaces.list_live_invite_tokens(space_id)
+            if include_admin or r.get("role") != SpaceRole.ADMIN.value
+        ]
         # One lookup for the whole page: a published row's ``code`` has
         # to name the connection server's BASE url (the relay a stranger
         # hands its sealed redeem to), and the row only stores the
@@ -5169,7 +5185,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         minted — a link is the space's, not its minter's.
         """
         space = await self._require_space(space_id)
-        await self._require_admin_or_owner(space, actor_username)
+        issuer = await self._require_admin_or_owner(space, actor_username)
         if self._hosted_elsewhere(space):
             # The row (and any parked blob) is the host's (v_52).
             actor = await self._users.get(actor_username)
@@ -5181,12 +5197,24 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 params={"token": token},
             )
             return
-        await self._revoke_invite_row(space, token)
+        await self._revoke_invite_row(
+            space, token, may_revoke_admin=issuer.role == SpaceRole.OWNER
+        )
 
-    async def _revoke_invite_row(self, space: Space, token: str) -> None:
+    async def _revoke_invite_row(
+        self, space: Space, token: str, *, may_revoke_admin: bool
+    ) -> None:
         """Delete one link from OUR table and take its blob down on its
-        connection server (fail-soft). Idempotent."""
+        connection server (fail-soft). Idempotent. An ``admin`` link is the
+        owner's alone (``may_revoke_admin``): anyone else is refused (403)
+        before anything is deleted. A token's role never changes, so the
+        read-then-delete cannot race into the wrong answer."""
         space_id = space.id
+        if not may_revoke_admin and (
+            await self._spaces.get_invite_token_role(space_id, token)
+            == SpaceRole.ADMIN.value
+        ):
+            raise SpacePermissionError("only the owner revokes an admin link")
         row = await self._spaces.delete_invite_token(space_id, token)
         if row is None:
             return
