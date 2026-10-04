@@ -27,6 +27,7 @@ from ...domain.events import (
     PairingAborted,
     PairingAcceptReceived,
     PairingIntroReceived,
+    PeerCapabilitiesAdvertised,
     PeerProtoVersionRaised,
 )
 from ...crypto import derive_instance_id
@@ -296,6 +297,10 @@ class PairingInboundHandlers(ProtectionGateMixin):
         # before calling ``set_proto_version`` — so the admin panel can
         # distinguish a genuine v1 peer from one paired but never advertised.
         await self._repo.mark_capabilities_seen(event.from_instance)
+        # Sent on every startup of that household: the "it is back" edge.
+        await self._bus.publish(
+            PeerCapabilitiesAdvertised(instance_id=event.from_instance)
+        )
         # A rename re-broadcast carries the SAME proto_version but a NEW
         # display_name, so apply the advertised name BEFORE the version
         # short-circuit below — else a same-version rename is skipped. Only

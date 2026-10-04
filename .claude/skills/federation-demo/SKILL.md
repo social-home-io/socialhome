@@ -734,6 +734,7 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
+python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
@@ -778,6 +779,32 @@ refused 403. Finally a restarts, catches the post up, and switches the space
 back to trusted (the GFS follows). ``verify`` then checks e's stored writer
 group key for the strict epoch unwraps and verifies (the v_50 tripwire).
 Polls every 3 s, backs off on 429.
+
+### ``gfs-private-channel`` — a private space over an opaque channel (v_51)
+
+Needs ``gfs-member-publish-strict`` (and everything before it). First b —
+paired with a directly — becomes a GFS client if it is not one yet (d is no
+use here: it reaches a only over the mesh, a holds no peer row for it and so
+cannot know its version — like writer certs, no grant goes to it). a creates
+a PRIVATE space; e redeems an UNPUBLISHED member link (a private space is
+never listed, so its link is never parked on the GFS — e takes the §D2b
+bootstrap through ``/gfs/envelope``) and b redeems another directly. a —
+the owner — starts the space's opaque channel on e's seat (a random
+``channel_id``, a channel key derived from the space seed, registered
+anonymously). e (link-joined) gets a grant with a pass and takes the ONLY
+seat; b (paired) gets a publish-only grant — the step asserts the GFS seats
+e alone (never a, never b). Then **a** is stopped: b posts over the channel
+and e receives it decrypted (its log shows ``gfs.relay.received:
+channel=…``); e posts too (its envelope to a waits at the GFS). Asserts the
+WHOLE GFS log and its database files (``gfs.db*``) never contain the private
+space's id, its name or its authority public key (hex or base64url), nor
+either post's text — only the channel id. a restarts (bookmarked first),
+catches both posts up over the member path, and b gets e's post from a (a
+catch-up sync once a re-advertises its capabilities on startup, up to
+120 s). ``verify`` then
+checks a, b and e agree on the channel, e's grant is stored KEK-wrapped, the
+GFS row names no space and b holds no seat (the v_51 tripwire). Polls every
+3 s, backs off on 429.
 
 ### ``gfs-cluster`` — a multi-process GFS on one shared DB
 

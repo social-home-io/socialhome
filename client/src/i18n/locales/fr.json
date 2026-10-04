@@ -1421,6 +1421,7 @@
   "stickies.read_only_viewer": "Vous pouvez lire ces notes, mais pas en ajouter ni les modifier.",
   "space.gfs_publish.legend": "Publication via le serveur de connexion",
   "space.gfs_publish.intro": "Comment les publications, commentaires et réactions des membres parviennent aux abonnés via votre serveur de connexion. Vous seul, en tant que propriétaire, pouvez le modifier.",
+  "space.gfs_publish.private_intro": "Les membres qui ont rejoint via un lien communiquent entre eux par votre serveur de connexion, même quand ce foyer est hors ligne. Le serveur n'apprend jamais le nom de cet espace — seulement quels foyers en font partie. Vous seul, en tant que propriétaire, pouvez modifier ce réglage.",
   "space.gfs_publish.trusted": "De confiance",
   "space.gfs_publish.strict": "Strict",
   "space.gfs_publish.trusted_help": "Le réglage par défaut. Les membres peuvent publier via votre serveur de connexion même quand ce foyer est hors ligne. Le serveur sait quel foyer a publié, jamais ce qui a été publié.",

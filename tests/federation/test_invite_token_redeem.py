@@ -2745,6 +2745,13 @@ class _FakeWriterCerts:
         self.accepted.append((space_id, raw))
         return True
 
+    async def channel_grant_for_peer(self, space_id, instance_id, *, epoch=None):
+        return {"channel_for": instance_id}
+
+    async def accept_channel_grant(self, space_id, raw):
+        self.accepted.append((space_id, raw))
+        return True
+
 
 async def test_redeem_ack_carries_the_redeemers_own_writer_cert():
     sender, issuer, *_rest, issuer_repo, _im = _wire_pair(
@@ -2757,10 +2764,12 @@ async def test_redeem_ack_carries_the_redeemers_own_writer_cert():
     await sender.request_redeem(
         "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
     )
-    # Issued for the redeeming household only, and stored by it.
+    # Issued for the redeeming household only, and stored by it — the
+    # cert and (v_51) its private-space channel grant.
     assert issuer_certs.asked == [("sp-meta", "sender-1")]
     assert sender_certs.accepted == [
-        ("sp-meta", {"for": "sender-1", "space": "sp-meta"})
+        ("sp-meta", {"for": "sender-1", "space": "sp-meta"}),
+        ("sp-meta", {"channel_for": "sender-1"}),
     ]
 
 
@@ -2799,6 +2808,9 @@ async def test_bootstrap_ack_carries_the_link_joined_households_cert():
         bootstrap=env.hint,
     )
     assert seated_first == [True]
+    # v_51 — the link-joined household also gets its private-space channel
+    # grant in the relayed ACK (when the channel exists).
     assert redeemer_certs.accepted == [
-        ("space-1", {"for": env.redeemer_party.instance_id})
+        ("space-1", {"for": env.redeemer_party.instance_id}),
+        ("space-1", {"channel_for": env.redeemer_party.instance_id}),
     ]

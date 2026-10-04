@@ -698,3 +698,24 @@ async def test_an_advertised_downgrade_never_lowers_the_version(repo, handlers, 
             )
     assert repo.instances["peer-a"].proto_version == 43
     assert any("high-water" in r.getMessage() for r in caplog.records)
+
+
+async def test_every_capability_advertisement_is_announced_on_the_bus(
+    bus, repo, handlers
+):
+    """A household advertises on every startup — the "it is back" edge a
+    private-space member's catch-up sync keys on (v_51), same version or
+    not; an unknown sender announces nothing."""
+    from socialhome.domain.events import PeerCapabilitiesAdvertised
+
+    seen: list = []
+    bus.subscribe(PeerCapabilitiesAdvertised, seen.append)
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    for version in (51, 51):
+        await handlers._on_capabilities_updated(
+            _event(
+                FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+                {"proto_version": version},
+            )
+        )
+    assert [e.instance_id for e in seen] == ["peer-a", "peer-a"]

@@ -554,6 +554,28 @@ async def test_an_unknown_gfs_publish_mode_is_a_422(client):
     assert r.status == 422, await r.text()
 
 
+async def test_the_space_detail_says_whether_a_private_channel_is_in_use(client):
+    """v_51 — the SPA shows the publish-mode choice on a private space only
+    once it reaches link-joined members over an opaque channel."""
+    from socialhome.app_keys import space_repo_key
+
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Private link space", "space_type": "private"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["gfs_private_channel"] is False
+    await client.app[space_repo_key].set_gfs_channel(sid, "e" * 32, "pk")
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["gfs_private_channel"] is True
+
+
 def test_features_from_body_merges_onto_supplied_defaults():
     """Unit: with ``defaults`` given, an absent key takes the CURRENT space's
     value; a present key still wins (including an explicit ``False``)."""

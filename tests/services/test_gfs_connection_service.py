@@ -3565,6 +3565,36 @@ async def test_member_publish_strict_is_absent_on_a_trusted_only_server(env):
     assert not await svc.member_publish_strict_supported(conn)
 
 
+async def test_private_channels_needs_the_signed_flag(env):
+    """v_51: a private space's channel (and its members' identified seats)
+    only against a server whose SIGNED block proves the contract."""
+    _db, repo = env
+    signed = _make_conn("pc-1", public_key=_GFS_KP.public_key.hex())
+    unsigned = _make_conn("pc-2", public_key=_GFS_KP.public_key.hex())
+    older = _make_conn("pc-3", public_key=_GFS_KP.public_key.hex())
+    for conn in (signed, unsigned, older):
+        await repo.save(conn)
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=signed.gfs_instance_id,
+            capabilities={"private_channels": True},
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert await svc.private_channels_supported(signed)
+    session = _InviteSession(info={"server_name": "x", "private_channels": True})
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert not await svc.private_channels_supported(unsigned)
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=older.gfs_instance_id,
+            capabilities={"member_publish_strict": True},
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert not await svc.private_channels_supported(older)
+
+
 async def _repin_svc(env, monkeypatch, *, with_cert: bool):
     _db, repo = env
     await repo.save(_make_conn("rp-1", inbox_url="https://rp.example"))

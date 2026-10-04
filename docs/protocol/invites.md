@@ -816,6 +816,61 @@ cert (trusted-mode member publish, see
 subscribes to the space's fan-out to receive the other members' items.
 The `space_session` relay above still carries everything else.
 
+**Private spaces: members reach each other through an opaque channel
+(v_51).** In a PRIVATE space the member path above was the only one: a
+link-joined member's post reached the host over `/gfs/envelope` and the
+other members only once the host relayed it, so with the host offline it
+reached nobody. Once the first link-joined member's seat goes live, the
+owner creates an **opaque channel** for the space at its `private_channels`
+connection server — a random 128-bit id and a key derived from the space
+seed, registered anonymously, never the space id, name or key — and every
+v_51 member household gets its grant in the roster snapshot, then in every
+rekey. Only **link-joined** households get a pass and take a seat (the
+households the server already relays envelopes for); a paired member's
+grant is **publish-only**. So a paired member's items reach the link-joined
+members live through the channel (trusted: identified with a channel cert;
+strict: anonymous with the channel writer key), and the link-joined
+members' items reach a paired member from the host once it is back (a
+catch-up sync when the host is back — it re-advertises its capabilities on
+startup). Receivers map the
+channel id to the space locally and run the strict-frame checks. When the
+last link-joined member leaves, the rotation that follows retires the
+channel. Full design, wire and residuals:
+[`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as HFS host (owner)
+    participant G as GFS
+    participant E as HFS link-joined member
+    participant M as HFS paired member
+    E->>G: POST /gfs/envelope {to_instance: H, sealed redeem}
+    G->>H: ws {type: envelope, sealed}
+    Note over H: seat goes live (SpaceRemoteSeatLive)
+    H->>G: POST /gfs/channels/register (anonymous, channel-key-signed)
+    H->>G: POST /gfs/channels/epoch (channel-key-signed)
+    H->>G: POST /gfs/envelope {to_instance: E, sealed roster snapshot + grant with pass}
+    H-->>M: roster snapshot + publish-only grant (its own pair transport)
+    E->>G: POST /gfs/channels/subscribe {channel_pass}
+    Note over H: host offline
+    M->>G: POST /gfs/channels/publish(-anon) {channel_id, payload}
+    G-->>E: ws {type: relay, channel_id, space_item, epoch, payload}
+    E->>G: POST /gfs/envelope {to_instance: H, sealed post} (queued for H)
+    Note over H: host back
+    M->>H: catch-up sync (host re-advertised on startup) — E's post
+    Note over G: learns the link-joined households,<br/>timing and size — never the space
+```
+
+**What the connection server learns** on top of the link-pair residual
+(recipient ids, timing, size of each envelope): the channel's seats — the
+link-joined member households only — when items flow and their size
+bucket, and in trusted mode which member household published each item (a
+paired member only as a publisher). Never the space id, name, key or
+content. The owner is not named by channel traffic but stays inferable by
+IP and timing (it is the `to_instance` of every member's envelope). Signed
+off in [`principles.md`](../principles.md).
+
 ### Token lifetime
 
 Invite tokens minted through the SPA now carry a default expiry

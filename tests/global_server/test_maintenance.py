@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
+from socialhome.global_server.domain import (
+    CHANNEL_IDLE_TTL_SECONDS,
+    CHANNEL_UNUSED_TTL_SECONDS,
+)
 from socialhome.global_server.maintenance import GfsMaintenanceScheduler
 
 
@@ -143,3 +148,43 @@ async def test_invite_sweep_failure_does_not_skip_the_others():
     assert len(admin.purge_calls) == 1
     assert len(highlight.prune_calls) == 1
     assert len(admin.prune_token_calls) == 1
+
+
+class _StubChannelRepo:
+    def __init__(self, *, boom: bool = False) -> None:
+        self.boom = boom
+        self.cutoffs: list[int] = []
+
+    async def prune_idle(self, *, older_than: int) -> int:
+        if self.boom:
+            raise RuntimeError("boom")
+        self.cutoffs.append(older_than)
+        return 1
+
+    async def prune_unused(self, *, older_than: int) -> int:
+        self.cutoffs.append(older_than)
+        return 0
+
+
+async def test_maintain_once_sweeps_idle_channels():
+    channels = _StubChannelRepo()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=_StubAdminRepo(),
+        highlight_repo=_StubHighlightRepo(),
+        channel_repo=channels,
+    )
+    await sched._maintain_once()
+    assert len(channels.cutoffs) == 2
+    assert abs(channels.cutoffs[0] - (time.time() - CHANNEL_IDLE_TTL_SECONDS)) < 5
+    assert abs(channels.cutoffs[1] - (time.time() - CHANNEL_UNUSED_TTL_SECONDS)) < 5
+
+
+async def test_channel_sweep_failure_does_not_skip_the_others():
+    admin = _StubAdminRepo()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=admin,
+        highlight_repo=_StubHighlightRepo(),
+        channel_repo=_StubChannelRepo(boom=True),
+    )
+    await sched._maintain_once()
+    assert len(admin.purge_calls) == 1

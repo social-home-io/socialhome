@@ -113,7 +113,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -218,13 +218,22 @@ class MemberPublishBusy(Exception):
     """The background fan-out is stopped or its backlog is full."""
 
 
+#: Resolves a fan-out job's targets in the worker: ``(targets, queue_ok)`` —
+#: the households to push to, and the ones that may get an offline copy.
+FanOutResolver = Callable[[], Awaitable[tuple[list[str], set[str]]]]
+
+
 @dataclass(slots=True, frozen=True)
 class _FanOutJob:
-    """One accepted item waiting for the background fan-out."""
+    """One accepted item waiting for the background fan-out. ``space_id`` is
+    the fairness / ordering key (a space id, or ``"ch:" + channel_id`` for a
+    private channel, v_51); ``resolve`` replaces the space subscriber lookup
+    for a job that brings its own (a channel's seats)."""
 
     space_id: str
     publisher_id: str
     frame: dict
+    resolve: FanOutResolver | None = None
 
 
 class GfsMemberPublishService:
@@ -386,7 +395,30 @@ class GfsMemberPublishService:
                     self._pending.pop(job.space_id, None)
                 queue.task_done()
 
+    def submit_fan_out(
+        self, key: str, *, publisher_id: str, frame: dict, resolve: FanOutResolver
+    ) -> bool:
+        """Hand an accepted item with its own target resolver (a private
+        channel's seats, v_51) to the SAME bounded workers, backlog and
+        per-key share as member publishes. ``False`` when stopped or full."""
+        return self._submit(
+            _FanOutJob(
+                space_id=key, publisher_id=publisher_id, frame=frame, resolve=resolve
+            )
+        )
+
     async def _fan_out(self, job: _FanOutJob) -> None:
+        if job.resolve is not None:
+            resolved, queue_ok = await job.resolve()
+            targets = [t for t in resolved if t != job.publisher_id]
+            if targets:
+                reached = await self._relay.fan_out_relay(
+                    targets, queue_ok=queue_ok, frame=job.frame
+                )
+                log.debug(
+                    "gfs.channel: fan-out reached=%d of %d", reached, len(targets)
+                )
+            return
         subscribers = await self._fed_repo.list_subscribers(job.space_id)
         # Never echo an item back to its publisher.
         targets = [

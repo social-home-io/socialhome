@@ -206,11 +206,14 @@ class SpacePostOutbound:
         ):
             return False
         space = await self._spaces.get(space_id)
-        return (
-            space is not None
-            and space.space_type in PUBLIC_SPACE_TIERS
-            and bool(space.features.allow_subscribers)
-        )
+        if space is None:
+            return False
+        if space.space_type in PUBLIC_SPACE_TIERS and bool(
+            space.features.allow_subscribers
+        ):
+            return True
+        # v_51 — a private space with an opaque connection-server channel.
+        return await self._member_gfs.channel_space(space_id)
 
     async def _schedule_item(
         self,
@@ -455,7 +458,11 @@ class SpacePostOutbound:
         # copy — and receivers dedupe the two by post id. The GFS copy
         # carries its own inner, with the real item type and target bound
         # inside the author signature.
-        if self._member_gfs is not None and "public_relay" in payload:
+        if self._member_gfs is not None and (
+            "public_relay" in payload
+            # v_51 — a private space's member publishes through its channel.
+            or await self._member_gfs.channel_space(event.space_id)
+        ):
             await self._schedule_gfs_publish(event.space_id, post)
         # Hand off the bytes-federation to SpaceMediaSyncService.
         # SPACE_POST_CREATED carries only the URL strings; without

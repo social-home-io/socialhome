@@ -1421,6 +1421,7 @@
   "stickies.read_only_viewer": "Je kunt deze notities lezen, maar niet toevoegen of wijzigen.",
   "space.gfs_publish.legend": "Publiceren via de verbindingsserver",
   "space.gfs_publish.intro": "Hoe berichten, reacties en emoji-reacties van leden via je verbindingsserver bij volgers komen. Alleen jij, de eigenaar, kunt dit wijzigen.",
+  "space.gfs_publish.private_intro": "Leden die via een link lid zijn geworden, bereiken elkaar via je verbindingsserver, ook als dit huishouden offline is. De server leert nooit de naam van deze ruimte — alleen welke huishoudens erin zitten. Alleen jij, de eigenaar, kunt dit wijzigen.",
   "space.gfs_publish.trusted": "Vertrouwd",
   "space.gfs_publish.strict": "Strikt",
   "space.gfs_publish.trusted_help": "De standaard. Leden kunnen via je verbindingsserver posten, ook als dit huishouden offline is. De server weet welk huishouden iets plaatste, nooit wat er geplaatst werd.",

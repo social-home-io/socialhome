@@ -1073,6 +1073,16 @@ class FederationService:
         except ValueError:  # pragma: no cover — pinned key is always valid hex
             return None
 
+    async def is_space_session_peer(self, instance_id: str) -> bool:
+        """``True`` iff ``instance_id`` is a household seated from an invite
+        link (``InstanceSource.SPACE_SESSION``) — relay-only, no direct-sync
+        signalling either way."""
+        try:
+            peer = await self._federation_repo.get_instance(instance_id)
+        except Exception:  # pragma: no cover — defensive
+            return False
+        return peer is not None and peer.source is InstanceSource.SPACE_SESSION
+
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         """``True`` iff ``instance_id`` is a CONFIRMED peer we've paired with.
 
@@ -3154,8 +3164,14 @@ class FederationService:
         # peer) cannot complete the WebRTC handshake — ICE can't traverse a
         # relay — so force HTTPS/event-chunk mode regardless of what
         # prefer_direct says. The RTC offer below would otherwise go out over
-        # direct send_event and never reach a mesh-only peer.
-        requester_is_mesh = not await self.is_confirmed_peer(event.from_instance)
+        # direct send_event and never reach a mesh-only peer. The same holds
+        # for a household seated from an invite link (``space_session``): the
+        # pair has no address for each other by design, and its direct-sync
+        # signalling (SPACE_SYNC_OFFER / _ICE) is refused by the peer-class
+        # step on the other side — so it gets relay mode too.
+        requester_is_mesh = not await self.is_confirmed_peer(
+            event.from_instance
+        ) or await self.is_space_session_peer(event.from_instance)
 
         if decision.accepted and (
             requester_is_mesh or not bool(payload.get("prefer_direct"))

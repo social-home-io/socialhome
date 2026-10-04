@@ -64,6 +64,7 @@ from ..domain.writer_cert import (
     scope_permits,
     strongest_scope,
 )
+from ..domain.gfs_channel import GFS_CHANNEL_FIELD
 from ..domain.writer_key import WRITER_KEY_FIELD, WriterKeyGrant
 from ..writer_cert import (
     InvalidWriterCert,
@@ -85,6 +86,7 @@ if TYPE_CHECKING:
     from ..repositories.space_key_repo import AbstractSpaceKeyRepo
     from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .gfs_channel_service import GfsChannelService
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +173,7 @@ class SpaceWriterCertService:
     """Writer-cert issuer (seed holders) and holder (every household)."""
 
     __slots__ = (
+        "_channels",
         "_spaces",
         "_remote_members",
         "_keys",
@@ -203,6 +206,41 @@ class SpaceWriterCertService:
         #: (space id, instance id) pairs already warned about a binding
         #: truncated to MAX_WRITER_USERS — once each per process.
         self._truncation_warned: set[tuple[str, str]] = set()
+        #: v_51 — the private-space channel service (grants ride the same
+        #: per-peer payloads as certs). ``None`` → no channel grants.
+        self._channels: "GfsChannelService | None" = None
+
+    def attach_channels(self, channels: "GfsChannelService") -> None:
+        """Wire the v_51 private-space channel service."""
+        self._channels = channels
+
+    async def channel_grant_for_peer(
+        self, space_id: str, instance_id: str, *, epoch: int | None = None
+    ) -> dict | None:
+        """The private-space channel grant for peer ``instance_id`` (v_51),
+        or ``None``. Never raises — a grant that can't be issued never costs
+        the payload it decorates."""
+        if self._channels is None:
+            return None
+        try:
+            return await self._channels.grant_for_peer(
+                space_id, instance_id, epoch=epoch
+            )
+        except Exception:
+            log.exception(
+                "channel grant: issuing for %s in %s failed", instance_id, space_id
+            )
+            return None
+
+    async def accept_channel_grant(self, space_id: str, raw: object) -> bool:
+        """Verify + store a delivered channel grant (v_51). Never raises."""
+        if self._channels is None or raw is None:
+            return False
+        try:
+            return await self._channels.accept_grant(space_id, raw)
+        except Exception:
+            log.exception("channel grant: accepting for %s failed", space_id)
+            return False
 
     def attach_federation(self, federation_service: "FederationService") -> None:
         """Wire the federation service (peer versions + pinned peer keys)."""
@@ -395,9 +433,19 @@ class SpaceWriterCertService:
                     "writer cert: issuing for %s in %s failed", instance_id, space_id
                 )
                 return payload
+            out = dict(payload)
+            # v_51 — the peer's private-space channel grant, to every member
+            # household with a live seat (readers too: they subscribe).
+            grant = await self.channel_grant_for_peer(
+                space_id,
+                instance_id,
+                epoch=wire.get("epoch") if wire is not None else epoch,
+            )
+            if grant is not None:
+                out[GFS_CHANNEL_FIELD] = grant
             if wire is None:
-                return payload
-            out = {**payload, WRITER_CERT_FIELD: wire}
+                return out
+            out[WRITER_CERT_FIELD] = wire
             try:
                 key = await self.writer_key_for_peer(
                     space_id, instance_id, epoch=wire.get("epoch")

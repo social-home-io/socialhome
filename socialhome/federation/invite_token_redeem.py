@@ -404,6 +404,14 @@ class SpaceInviteTokenRedeemCoordinator:
                 redeemer_instance_id,
             )
             return
+        # v_51 — the redeemer's private-space channel grant (when the
+        # channel already exists; the first link-joined member's arrives in
+        # the roster snapshot sent once the channel is created).
+        grant = await self._writer_certs.channel_grant_for_peer(
+            str(ack_body.get("space_id") or ""), redeemer_instance_id
+        )
+        if grant is not None:
+            meta["gfs_channel"] = grant
         if cert is None:
             return
         meta["writer_cert"] = cert
@@ -813,6 +821,14 @@ class SpaceInviteTokenRedeemCoordinator:
                 ):
                     await self._writer_certs.accept_writer_key(
                         space_id, meta.get("writer_key")
+                    )
+                # v_51 — our private-space channel grant for that epoch.
+                if (
+                    meta.get("gfs_channel") is not None
+                    and self._writer_certs is not None
+                ):
+                    await self._writer_certs.accept_channel_grant(
+                        space_id, meta.get("gfs_channel")
                     )
                 await self._spaces.save_member(
                     SpaceMember(

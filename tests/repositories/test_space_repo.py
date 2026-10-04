@@ -1772,3 +1772,41 @@ async def test_owner_user_id_round_trips_and_survives_a_resave(env):
     await env.repo.save(replace(space, name="Renamed"))
     assert await env.repo.get_owner_user_id("sp-stub") == "u-owner"
     assert await env.repo.get_owner_user_id("sp-missing") is None
+
+
+# ─── Private-space channels (migration 0077) ─────────────────────────────
+
+
+async def test_gfs_channel_round_trip_and_candidate_lookup(env):
+    await env.repo.save(_space("sp-1"))
+    await env.repo.save(_space("sp-2"))
+    assert await env.repo.get_gfs_channel("sp-1") is None
+    assert await env.repo.set_gfs_channel("sp-1", "c" * 32, "pk-1")
+    assert await env.repo.get_gfs_channel("sp-1") == ("c" * 32, "pk-1")
+    assert await env.repo.spaces_for_gfs_channel("c" * 32) == ["sp-1"]
+    # No first-come claim: another space may name the same id too (inbound
+    # frames try each candidate; the content key decides).
+    assert await env.repo.set_gfs_channel("sp-2", "c" * 32, "pk-2")
+    assert await env.repo.spaces_for_gfs_channel("c" * 32) == ["sp-1", "sp-2"]
+    assert await env.repo.set_gfs_channel("sp-2", None, None)
+    # A save of the space (config upsert) keeps the channel.
+    await env.repo.save(_space("sp-1", name="Renamed"))
+    assert await env.repo.get_gfs_channel("sp-1") == ("c" * 32, "pk-1")
+    # Forget it.
+    assert await env.repo.set_gfs_channel("sp-1", None, None)
+    assert await env.repo.get_gfs_channel("sp-1") is None
+    assert await env.repo.spaces_for_gfs_channel("c" * 32) == []
+    assert not await env.repo.set_gfs_channel("sp-missing", "d" * 32, "pk")
+
+
+async def test_gfs_channel_healed_at_round_trip(env):
+    await env.repo.save(_space("sp-1"))
+    assert await env.repo.get_gfs_channel_healed_at("sp-1") is None
+    await env.repo.set_gfs_channel_healed_at("sp-1", "2026-10-04T12:00:00+00:00")
+    assert (
+        await env.repo.get_gfs_channel_healed_at("sp-1") == "2026-10-04T12:00:00+00:00"
+    )
+    # A save of the space (config upsert) keeps it.
+    await env.repo.save(_space("sp-1", name="Renamed"))
+    assert await env.repo.get_gfs_channel_healed_at("sp-1") is not None
+    assert await env.repo.get_gfs_channel_healed_at("sp-missing") is None

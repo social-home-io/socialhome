@@ -781,7 +781,21 @@ from __future__ import annotations
 #:   fallback**: a household below v_50 is sent no writer key; its posts take
 #:   the host path (its identified publish into a strict space is refused by
 #:   the GFS, and the member broadcast to the host always runs anyway).
-OURS: int = 50
+#: * **v_51** (2026-10-04) — opaque connection-server channels for PRIVATE
+#:   spaces with link-joined members. The owner registers a random channel
+#:   (id + a channel key HKDF-derived from the space seed) anonymously at its
+#:   ``private_channels`` GFS, and a seed holder delivers each member
+#:   household its per-epoch grant — ``gfs_channel`` (``{channel_suite,
+#:   space_id, channel_id, channel_pk, epoch, gfs_ids, binding_sig_suite,
+#:   binding_sig, channel_pass, channel_cert?, writer_key?}``,
+#:   :mod:`socialhome.gfs_channel`) — sealed per peer in the same four
+#:   channels. Members subscribe (with the pass) and publish over
+#:   ``/gfs/channels/*`` (trusted with the channel cert, strict with the
+#:   channel writer key); the GFS never sees the space id, name or key.
+#:   **Gated, degraded fallback**: a household below v_51 is sent no grant,
+#:   so it neither subscribes nor publishes to the channel — its items keep
+#:   the host path, and it receives other members' items from the host.
+OURS: int = 51
 
 
 class FederationCapability:
@@ -1206,6 +1220,12 @@ class FederationCapability:
     #: key, so their items take the host path.
     MIN_FOR_STRICT_MEMBER_PUBLISH = 50
 
+    #: Private-space channels (v_51): a seed holder delivers each member
+    #: household of a private space with link-joined members its per-epoch
+    #: ``gfs_channel`` grant. Older households get none and keep the host
+    #: path.
+    MIN_FOR_PRIVATE_CHANNELS = 51
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1361,6 +1381,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     (
         FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH,
         "Anonymous posting over the connection server",
+    ),
+    (
+        FederationCapability.MIN_FOR_PRIVATE_CHANNELS,
+        "Private spaces over the connection server",
     ),
 ]
 

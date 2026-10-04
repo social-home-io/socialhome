@@ -9,6 +9,7 @@ from aiohttp.web import AppKey
 
 from ..db import AsyncDatabase
 from .admin_service import GfsAdminService
+from .channels import GfsChannelService
 from .cluster import ClusterService
 from .config import GfsConfig
 from .envelope_relay import GfsEnvelopeRelay
@@ -18,6 +19,7 @@ from .member_publish import GfsMemberPublishService
 from .repositories import (
     AbstractClusterRepo,
     AbstractGfsAdminRepo,
+    AbstractGfsChannelRepo,
     AbstractGfsEnvelopeQueueRepo,
     AbstractGfsFederationRepo,
     AbstractGfsHighlightPublicationRepo,
@@ -100,3 +102,8 @@ gfs_space_epoch_repo_key: AppKey[AbstractGfsSpaceEpochRepo] = AppKey(
 )
 #: Trusted-mode member publish + the authority-signed epoch notice (v_49).
 gfs_member_publish_key: AppKey[GfsMemberPublishService] = AppKey("gfs_member_publish")
+
+#: Opaque channels for private spaces (v_51): registration, pins, epochs,
+#: seats and relay — keyed by a random id, never by a space.
+gfs_channel_repo_key: AppKey[AbstractGfsChannelRepo] = AppKey("gfs_channel_repo")
+gfs_channel_service_key: AppKey[GfsChannelService] = AppKey("gfs_channel_service")

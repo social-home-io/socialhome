@@ -146,3 +146,16 @@ async def test_a_baseline_reset_clears_the_writer_key(repo):
     await repo.set_writer_key("sp-1", 1, "old-authority-grant")
     await repo.reset_to(_key("sp-1", 1, "owner"), authority_epoch=1)
     assert await repo.get_writer_key("sp-1", 1) is None
+
+
+# ─── Private-space channel grants (migration 0077) ───────────────────────
+
+
+async def test_channel_grant_stored_per_epoch_and_cleared_on_reset(repo):
+    await repo.save(_key("sp-1", 1))
+    assert await repo.get_gfs_channel("sp-1", 1) is None
+    assert await repo.set_gfs_channel("sp-1", 1, "wrapped-grant") is True
+    assert await repo.get_gfs_channel("sp-1", 1) == "wrapped-grant"
+    assert await repo.set_gfs_channel("sp-1", 9, "x") is False
+    await repo.reset_to(_key("sp-1", 1, "owner"), authority_epoch=1)
+    assert await repo.get_gfs_channel("sp-1", 1) is None

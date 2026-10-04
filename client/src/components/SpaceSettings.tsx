@@ -243,14 +243,18 @@ export function SpaceSettings({
   )
   // Shown only where members actually publish over a connection server:
   // a public / global space whose posts followers may read (the backend's
-  // ``_publicly_readable``). The live followers switch counts, so turning
-  // it on reveals the choice; a space already strict keeps it visible so
-  // the owner can always switch back.
+  // ``_publicly_readable``), or (v_51) a private space that reaches
+  // link-joined members over an opaque channel. The live followers switch
+  // counts, so turning it on reveals the choice; a space already strict
+  // keeps it visible so the owner can always switch back.
+  const privateChannel = space.space_type === 'private'
+    && Boolean(space.gfs_private_channel)
   const showGfsPublishMode = isOwner && (
     (
       (space.space_type === 'public' || space.space_type === 'global')
       && allowSubscribers.value
     )
+    || privateChannel
     || (space.features?.gfs_publish_mode ?? 'trusted') !== 'trusted'
   )
   // Subscriber-engagement opt-ins (§23.49) — admins flip these when
@@ -902,7 +906,9 @@ export function SpaceSettings({
               📡 {t('space.gfs_publish.legend')}
             </legend>
             <p class="sh-muted" style={{ marginTop: 0 }}>
-              {t('space.gfs_publish.intro')}
+              {t(privateChannel
+                ? 'space.gfs_publish.private_intro'
+                : 'space.gfs_publish.intro')}
             </p>
             <ChipRadioGroup<GfsPublishMode>
               labelledBy="space-settings-gfs-publish-legend"

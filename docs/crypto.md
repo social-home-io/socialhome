@@ -605,6 +605,82 @@ epoch), shared by every household allowed to publish anything there (both
   authority seed must not spread to every publisher; the household identity
   key is exactly what strict mode withholds from the server.
 
+**Opaque channels for private spaces** (`gfs_channel.py`, wire shapes in
+`domain/gfs_channel.py`, v_51) — a PRIVATE space with link-joined members
+publishes over the connection server through a channel the server knows
+only by a random 128-bit `channel_id` (32 hex, `secrets.token_hex(16)`,
+minted by the owner, never derived from the `space_id`) and a **channel
+key**. Two derived keys, both from the space authority seed, so every seed
+holder derives them and nobody stores them:
+
+- `channel_seed = HKDF-SHA256(ikm = space seed, salt =
+  b"socialhome-gfs-channel-key:v1", info = b"<space_id>:<channel_id>", 32
+  bytes)`;
+- `channel_writer_seed = HKDF-SHA256(ikm = space seed, salt =
+  b"socialhome-gfs-channel-writer-key:v1", info =
+  b"<space_id>:<channel_id>:<channel epoch>", 32 bytes)` (strict mode);
+- `epoch_offset = int(HKDF-SHA256(ikm = space seed, salt =
+  b"socialhome-gfs-channel-epoch-offset:v1", info =
+  b"<space_id>:<channel_id>", 5 bytes))` — every epoch on the wire is
+  `content epoch + epoch_offset`, so a server cannot match channel epochs to
+  content epochs it saw for the space elsewhere.
+
+The salts differ from each other and from the writer group key's, so neither
+key equals or relates to the space key or to the writer key a server sees
+for a PUBLIC space at the same epoch. HKDF is one-way: a server that holds
+`channel_pk` — even one that also knows the space public key (a space that
+was public before) — cannot link the two without the seed. A v_44 authority
+rotation changes the seed, and the owner then starts a FRESH channel (a new
+id) — there is no re-pin at all: the revoked seed holder still derives the
+old channel key and could race any re-pin chained to it, and a future suite
+migration also starts a fresh channel. The owner unregisters the old channel
+before the seed is swapped.
+
+Every channel statement is Ed25519 over `prefix + canonical JSON` of the
+statement minus its signature, one prefix per statement so no signature can
+be lifted onto another, and carries a suite tag:
+
+| Statement | Signed by | Prefix |
+|---|---|---|
+| registration `{channel_suite, channel_id, channel_pk, gfs_instance_id, ts, nonce}` | the key being registered (proof of possession) | `gfs-channel-register:v1:` |
+| epoch notice `{channel_suite, channel_id, gfs_instance_id, ts, nonce, epoch, publish_mode, writer_key_cert?}` | channel key | `gfs-channel-epoch:v1:` |
+| unregister `{channel_suite, channel_id, gfs_instance_id, ts, nonce}` | channel key | `gfs-channel-unregister:v1:` |
+| `ChannelCert {channel_suite, channel_id, epoch, instance_pk, scope, issued_at}` | channel key | `gfs-channel-cert:v1:` |
+| `ChannelPass {channel_suite, channel_id, epoch, instance_pk, issued_at}` (scope-free) | channel key | `gfs-channel-pass:v1:` |
+| `ChannelWriterKeyCert {writer_key_suite, channel_suite, channel_id, epoch, writer_pk}` | channel key (suite `channel_suite`) | `gfs-channel-writer-key-cert:v1:` |
+| anonymous publish `{gfs_instance_id, channel_id, ts, nonce, event_type, epoch, payload, writer_sig_suite}` | channel writer key | `gfs-channel-publish-anon:v1:` |
+| grant binding `{channel_suite, space_id, channel_id, channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite}` | space AUTHORITY key | `gfs-channel-binding:v1:` |
+
+Suites: `channel_suite` = `CHANNEL_SUITE_ED25519 = "ed25519"`
+(`SUPPORTED_CHANNEL_SUITES`, unknown → `UnsupportedChannelSuite`, never a
+default) for the channel key and everything it signs; `binding_sig_suite` =
+`CHANNEL_BINDING_SUITE_ED25519` (`SUPPORTED_CHANNEL_BINDING_SUITES`) for the
+space authority's binding; the writer key reuses `WRITER_KEY_SUITE_ED25519`.
+The household-signed channel requests (subscribe / unsubscribe / trusted
+publish) are the ordinary household identity signature over canonical JSON
+with an `action` domain separator (`gfs-channel-subscribe:v1`,
+`gfs-channel-unsubscribe:v1`, `gfs-channel-publish:v1`) — no new key.
+
+**Delivery: the grant** (`gfs_channel`) — `{channel_suite, space_id,
+channel_id, channel_pk, epoch, gfs_ids, binding_sig_suite, binding_sig,
+channel_pass?, channel_cert?, writer_key?}` (`channel_pass` only for a link-joined household — a paired member's grant is publish-only), issued per member household per
+epoch by a seed holder whose seed matches the pin, riding only inside the
+per-peer encrypted payloads of the four writer-cert channels, only to v_51
+households. The member verifies the binding against the space key it
+already pins (so no other member can hand it a channel of their choosing),
+the pass / cert naming its own identity key under `channel_pk`, and the
+writer seed matching its pin; it stores the grant KEK-wrapped (AAD
+`socialhome-gfs-channel:<space_id>:<epoch>`) on `space_keys.gfs_channel`.
+Content stays AES-256-GCM under the space's epoch content key, with the
+space writer cert inside the ciphertext as for strict frames; the server
+holds no key.
+
+**Why a new key** (the "no new key" rule): the server must authorize
+channel statements and pin something, and the only existing candidate — the
+space authority key — is exactly what identifies the space; a household
+identity key would name the owner. The channel key is derived (nothing new
+to store or back up) and lives exactly as long as the authority seed.
+
 **GFS capability block** (`capabilities_sig.py`) — `GET
 /gfs/info` is unauthenticated, so the capability that decides whether a
 household may relay identity-free (`anonymous_publish`) is signed with the

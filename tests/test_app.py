@@ -393,6 +393,40 @@ async def test_gfs_relay_dispatches_a_member_published_space_item():
     assert keys.frames == []
 
 
+class _RecordingChannels:
+    def __init__(self) -> None:
+        self.frames: list[dict] = []
+
+    async def handle_frame(self, frame: dict) -> None:
+        self.frames.append(frame)
+
+
+async def test_gfs_relay_routes_a_private_channel_frame_to_the_channel_service():
+    """v_51: a channel frame names no space — it never reaches the
+    public-content consumer, only the channel service (which maps it)."""
+    posts, channels = _RecordingConsumer(), _RecordingChannels()
+    frame = {
+        "type": "relay",
+        "channel_id": "a" * 32,
+        "event_type": "space_item",
+        "epoch": 3,
+        "payload": "ct",
+    }
+    await dispatch_gfs_relay_frame(
+        frame,
+        space_public_inbound=posts,
+        space_subscriber_key_inbound=None,
+        gfs_channels=channels,  # type: ignore[arg-type]
+    )
+    assert channels.frames == [frame]
+    assert posts.frames == []
+    # Without a channel service it is dropped, never handed to the space path.
+    await dispatch_gfs_relay_frame(
+        frame, space_public_inbound=posts, space_subscriber_key_inbound=None
+    )
+    assert posts.frames == []
+
+
 async def test_gfs_relay_never_logs_an_outer_from_instance(caplog):
     """A legacy GFS may still ship ``from_instance``. It is a household
     identity the GFS is not supposed to know — it must reach no log line."""

@@ -42,6 +42,10 @@ class AbstractSpaceKeyRepo(Protocol):
     async def get_writer_cert(self, space_id: str, epoch: int) -> str | None: ...
     async def set_writer_key(self, space_id: str, epoch: int, wrapped: str) -> bool: ...
     async def get_writer_key(self, space_id: str, epoch: int) -> str | None: ...
+    async def set_gfs_channel(
+        self, space_id: str, epoch: int, wrapped: str
+    ) -> bool: ...
+    async def get_gfs_channel(self, space_id: str, epoch: int) -> str | None: ...
 
 
 class SqliteSpaceKeyRepo:
@@ -176,7 +180,8 @@ class SqliteSpaceKeyRepo:
                     rotated_by=excluded.rotated_by,
                     authority_epoch=excluded.authority_epoch,
                     writer_cert=NULL,
-                    writer_key=NULL
+                    writer_key=NULL,
+                    gfs_channel=NULL
                 """,
                 (
                     key.space_id,
@@ -239,6 +244,26 @@ class SqliteSpaceKeyRepo:
         if row is None or row["writer_key"] is None:
             return None
         return str(row["writer_key"])
+
+    async def set_gfs_channel(self, space_id: str, epoch: int, wrapped: str) -> bool:
+        """Store the KEK-wrapped private-space channel grant this household
+        holds for ``(space, epoch)`` (v_51, migration 0077). ``False`` when
+        no key row exists for that epoch."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE space_keys SET gfs_channel=? WHERE space_id=? AND epoch=?",
+            (wrapped, space_id, epoch),
+        )
+        return changed > 0
+
+    async def get_gfs_channel(self, space_id: str, epoch: int) -> str | None:
+        """The stored KEK-wrapped channel grant for ``(space, epoch)``."""
+        row = await self._db.fetchone(
+            "SELECT gfs_channel FROM space_keys WHERE space_id=? AND epoch=?",
+            (space_id, epoch),
+        )
+        if row is None or row["gfs_channel"] is None:
+            return None
+        return str(row["gfs_channel"])
 
 
 def _row(row) -> SpaceKey:

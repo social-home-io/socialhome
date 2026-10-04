@@ -190,6 +190,11 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # bundle (signed with the NEW key). Builds signatures over state
         # every member already may see; no actor, no route.
         "roster_snapshot_entries",
+        # v_51 — a read of whether a private space uses an opaque
+        # connection-server channel, for the space detail the route already
+        # authorized (``_require_space`` + the caller's membership read).
+        # Returns a boolean about a space the caller may already see.
+        "uses_gfs_private_channel",
         # Owner-side seed share (v_22, public since v_44 so the rotation
         # service re-shares after a rotation). Self-gates on owning the
         # space, the delegation flag's caller and the peer's version; no

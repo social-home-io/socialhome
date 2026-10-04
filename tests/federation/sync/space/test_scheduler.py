@@ -55,6 +55,12 @@ class _FakeFederation:
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
 
+    #: Instance ids seated from an invite link (relay-only).
+    space_session: set[str] = set()
+
+    async def is_space_session_peer(self, instance_id: str) -> bool:
+        return instance_id in self.space_session
+
     async def begin_mesh_catchup_sync(
         self, *, space_id, host_instance_id, extra_payload=None
     ):
@@ -223,6 +229,32 @@ async def test_enqueue_sync_for_space_sends_begin(bus, queue, sync_manager):
     assert fed.sent[0]["payload"]["space_id"] == "sp-1"
     assert fed.sent[0]["payload"]["sync_mode"] == "initial"
     assert fed.sent[0]["payload"]["prefer_direct"] is True
+
+
+async def test_a_link_joined_provider_is_asked_for_relay_mode(bus, queue, sync_manager):
+    """A household seated from an invite link is relay-only: asking it for
+    a direct sync would make it send SPACE_SYNC_OFFER, which our own
+    peer-class step refuses from a space-scoped peer."""
+    fed = _FakeFederation()
+    fed.space_session = {"link-peer"}
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([]),
+        space_repo=_FakeSpaceRepo(spaces_by_type={}, members_by_space={}),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    await queue.start()
+    try:
+        await sched.enqueue_sync_for_space(
+            space_id="sp-1", peer_instance_id="link-peer"
+        )
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    assert fed.sent[0]["payload"]["prefer_direct"] is False
 
 
 async def test_periodic_tick_enqueues_for_every_confirmed_peer(

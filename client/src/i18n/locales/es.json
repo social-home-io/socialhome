@@ -1448,6 +1448,7 @@
   "stickies.read_only_viewer": "Puedes leer estas notas, pero no añadir ni cambiar ninguna.",
   "space.gfs_publish.legend": "Publicar a través del servidor de conexión",
   "space.gfs_publish.intro": "Cómo llegan a los seguidores las publicaciones, comentarios y reacciones de los miembros a través de tu servidor de conexión. Solo tú, como propietario, puedes cambiarlo.",
+  "space.gfs_publish.private_intro": "Los miembros que se unieron mediante un enlace se comunican entre sí a través de tu servidor de conexión, incluso cuando este hogar está desconectado. El servidor nunca conoce el nombre de este espacio, solo qué hogares participan. Solo tú, como propietario, puedes cambiar esto.",
   "space.gfs_publish.trusted": "De confianza",
   "space.gfs_publish.strict": "Estricto",
   "space.gfs_publish.trusted_help": "La opción predeterminada. Los miembros pueden publicar a través de tu servidor de conexión aunque este hogar esté desconectado. El servidor sabe qué hogar publicó, nunca qué se publicó.",

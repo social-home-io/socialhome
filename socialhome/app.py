@@ -193,6 +193,7 @@ from .services.gfs_member_publish_service import GfsMemberPublishService
 from .services.space_post_outbound import SpacePostOutbound
 from .services.space_authority_rotation_service import SpaceAuthorityRotationService
 from .services.space_public_inbound import SpacePublicInbound
+from .services.gfs_channel_service import GfsChannelService
 from .services.space_mentions import SpaceMentionResolver
 from .services.space_public_outbound import SpacePublicOutbound
 from .services.space_subscriber_key_inbound import SpaceSubscriberKeyInbound
@@ -773,6 +774,7 @@ async def dispatch_gfs_relay_frame(
     *,
     space_public_inbound: SpacePublicInbound | None,
     space_subscriber_key_inbound: SpaceSubscriberKeyInbound | None,
+    gfs_channels: GfsChannelService | None = None,
 ) -> None:
     """Route one inbound GFS fan-out frame to its consumer.
 
@@ -782,6 +784,17 @@ async def dispatch_gfs_relay_frame(
     ``from_instance``; it is ignored — attribution comes from the encrypted,
     authority-signed inner alone.
     """
+    # v_51 — a private space's opaque channel: the frame names a channel,
+    # never a space; the channel service maps it locally.
+    if "channel_id" in frame:
+        log.info(
+            "gfs.relay.received: channel=%s event=%s",
+            frame.get("channel_id"),
+            frame.get("event_type"),
+        )
+        if gfs_channels is not None:
+            await gfs_channels.handle_frame(frame)
+        return
     log.info(
         "gfs.relay.received: space=%s event=%s",
         frame.get("space_id"),
@@ -2447,6 +2460,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # the identity seed + KEK are available at startup.
     space_public_outbound: SpacePublicOutbound | None = None
     gfs_member_publish: GfsMemberPublishService | None = None
+    gfs_channels: GfsChannelService | None = None
     space_public_inbound: SpacePublicInbound | None = None
     space_authority_rotation: SpaceAuthorityRotationService | None = None
     # Phase 5b-b: deliver the per-space content key to a GFS subscriber so it
@@ -2960,7 +2974,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # ``space_crypto``, which only exists once the seed/KEK are wired.
         nonlocal space_public_outbound, space_public_inbound
         nonlocal space_subscriber_key_outbound, space_subscriber_key_inbound
-        nonlocal gfs_member_publish
+        nonlocal gfs_member_publish, gfs_channels
         # v_49 trusted-mode member publish (household side): our own posts
         # to each capable GFS, epoch notices on rotation, member subscriptions.
         gfs_member_publish = GfsMemberPublishService(
@@ -2980,6 +2994,26 @@ def create_app(config: Config | None = None) -> web.Application:
 
         gfs_connection_service.attach_on_repinned(_announce_after_repin)
         gfs_member_publish.wire(bus)
+        # v_51 — opaque connection-server channels for PRIVATE spaces with
+        # link-joined members: created by the owner, grants ride the writer
+        # cert channels, members subscribe and publish through them.
+        gfs_channels = GfsChannelService(
+            gfs=gfs_connection_service,
+            conn_repo=repos.gfs_connection,
+            space_repo=space_repo,
+            space_key_repo=space_key_repo,
+            remote_member_repo=repos.space_remote_member,
+            federation_repo=repos.federation,
+            space_crypto=space_crypto,
+            writer_certs=writer_certs,
+            own_instance_id=real_instance_id,
+            own_identity_seed=identity_seed,
+            key_manager=key_manager,
+        )
+        gfs_member_publish.attach_channels(gfs_channels)
+        writer_certs.attach_channels(gfs_channels)
+        gfs_channels.attach_space_service(real_space_service)
+        gfs_channels.wire(bus)
         space_public_outbound = SpacePublicOutbound(
             bus=bus,
             space_repo=space_repo,
@@ -3008,6 +3042,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # guard drops on.
         space_public_inbound.attach_identity(own_instance_id=real_instance_id)
         space_public_inbound.attach_writer_certs(writer_certs)
+        gfs_channels.attach_inbound(space_public_inbound)
         # v_44 — a relayed frame signed by a rotated authority key heals the
         # subscriber's pin from the GFS listing's owner cert, then retries.
         gfs_space_mirror.attach_identity(own_instance_id=real_instance_id)
@@ -3114,6 +3149,9 @@ def create_app(config: Config | None = None) -> web.Application:
             remote_member_repo=repos.space_remote_member,
         )
         writer_certs.attach_federation(federation_service)
+        if gfs_channels is not None:
+            gfs_channels.attach_federation(federation_service)
+            gfs_channels.attach_sync_scheduler(app[K.space_sync_scheduler_key])
         app[K.private_invite_handler_key].attach_writer_certs(writer_certs)
         # A space-session seat is dropped through the same purge as an
         # unpair, so its queued envelopes and mesh hints go with it.
@@ -3486,6 +3524,7 @@ def create_app(config: Config | None = None) -> web.Application:
                 frame,
                 space_public_inbound=space_public_inbound,
                 space_subscriber_key_inbound=space_subscriber_key_inbound,
+                gfs_channels=gfs_channels,
             )
 
         # §D2b inbound leg — the GFS pushes ``{type:"envelope", sealed}``
@@ -3661,6 +3700,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await gfs_connection_service.start()
         if gfs_member_publish is not None:
             await gfs_member_publish.start()
+        if gfs_channels is not None:
+            await gfs_channels.start()
 
         # v_48: page drafts waiting for their host — flushed now, then on a
         # tick and whenever a host answers again.
@@ -3938,6 +3979,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await gfs_connection_service.stop()
         if gfs_member_publish is not None:
             await gfs_member_publish.stop()
+        if gfs_channels is not None:
+            await gfs_channels.stop()
         gfs_publish_session = gfs_connection_service.publish_client()
         if gfs_publish_session is not None:
             await gfs_publish_session.close()

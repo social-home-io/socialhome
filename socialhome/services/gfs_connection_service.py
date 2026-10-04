@@ -188,6 +188,7 @@ class GfsConnectionService:
         "_envelope_relay",
         "_invite_links",
         "_member_publish_strict",
+        "_private_channels",
         "_member_publish_trusted",
         "_authority_rotation",
         "_rotation_warned",
@@ -265,6 +266,7 @@ class GfsConnectionService:
         # ``publish_mode`` / ``writer_key_cert`` on the epoch notice (an older
         # server would refuse an owner notice carrying them).
         self._member_publish_strict: dict[str, bool] = {}
+        self._private_channels: dict[str, bool] = {}
         # Same again for ``authority_rotation`` (v_44): whether the GFS
         # re-pins a space's authority key from an owner cert. A GFS without
         # it keeps the OLD key — and so keeps honouring a revoked admin's
@@ -719,6 +721,22 @@ class GfsConnectionService:
             conn,
             "member_publish_strict",
             self._member_publish_strict,
+        )
+
+    async def private_channels_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``private_channels`` on /gfs/info
+        (v_51).
+
+        Gates every opaque private-space channel request
+        (:mod:`socialhome.services.gfs_channel_service`): a household creates
+        a private space's channel, and its members subscribe (identified),
+        only against a server whose signed capability block proved it
+        carries the ``/gfs/channels/*`` contract. Without it a private
+        space's items take the host path."""
+        return await self._signed_capability_supported(
+            conn,
+            "private_channels",
+            self._private_channels,
         )
 
     async def _signed_capability_supported(

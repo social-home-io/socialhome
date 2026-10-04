@@ -1493,3 +1493,41 @@ async def test_a_strict_frame_needs_the_user_binding(item_env):
     frame = _strict(await _item_frame(item_env, cert=_v1(cert)))
     await item_env["inbound"].handle(frame)
     assert await item_env["post_repo"].get("post-1") is None
+
+
+# ── Private-space channel items (v_51) ───────────────────────────────────
+
+
+async def test_a_channel_item_gets_the_strict_frame_checks(item_env):
+    """The channel frame names no space; the household maps it locally and
+    the item then passes exactly the strict-frame checks."""
+    frame = _strict(await _item_frame(item_env))
+    await item_env["inbound"].handle_channel_item(
+        "sp-1", epoch=frame["epoch"], payload=frame["payload"]
+    )
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "member-published content"
+
+
+async def test_a_channel_item_mapped_to_another_space_is_dropped(item_env):
+    """A channel item lands only in the space its channel maps to: under any
+    other space id it neither decrypts nor matches the inner's signed
+    ``space_id``."""
+    frame = _strict(await _item_frame(item_env))
+    await item_env["inbound"].handle_channel_item(
+        "sp-other", epoch=frame["epoch"], payload=frame["payload"]
+    )
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+@pytest.mark.parametrize("case", ["forged", "other_household"])
+async def test_a_channel_item_runs_every_cert_check(item_env, case):
+    over: dict = {
+        "forged": {"space_seed": generate_space_keypair().private_key},
+        "other_household": {"instance_pk": generate_identity_keypair().public_key},
+    }[case]
+    frame = _strict(await _item_frame(item_env, cert=await _cert(item_env, **over)))
+    await item_env["inbound"].handle_channel_item(
+        "sp-1", epoch=frame["epoch"], payload=frame["payload"]
+    )
+    assert await item_env["post_repo"].get("post-1") is None

@@ -462,6 +462,17 @@ class SpaceAuthorityRotationService:
             # taken before a rotation must still issue a HIGHER epoch than
             # the one its members already hold (they refuse anything else).
             epoch = max(space.authority_key_epoch + 1, int(time.time()), min_epoch or 0)
+            # v_51 — a private space's channel key derives from the seed
+            # being retired: unregister the channel while we can still sign
+            # for it (a fresh one is started before the bundles go out).
+            if self._member_gfs is not None:
+                try:
+                    await self._member_gfs.retire_channel(space_id)
+                except Exception:
+                    log.exception(
+                        "authority rotation: retiring the channel failed for %s",
+                        space_id,
+                    )
             if not await self._spaces.rotate_authority_key(
                 space_id,
                 public_key_hex=kp.public_key.hex(),
@@ -618,6 +629,16 @@ class SpaceAuthorityRotationService:
                 space_seed=seed,
             )
         )
+        # v_51 — a private space's channel derives from the seed: start the
+        # fresh one under the new seed (and announce it) BEFORE the bundles,
+        # so they carry grants a member can subscribe with at once.
+        if only_instance is None and self._member_gfs is not None:
+            try:
+                await self._member_gfs.reconcile_channel(space.id)
+            except Exception:
+                log.exception(
+                    "authority rotation: channel reconcile failed for %s", space.id
+                )
         targets = (
             [only_instance]
             if only_instance is not None
@@ -705,6 +726,19 @@ class SpaceAuthorityRotationService:
                             writer_key = None
                         if writer_key is not None:
                             payload["writer_key"] = writer_key
+                    # v_51 — and its channel grant for the fresh channel the
+                    # new seed derives (readers too).
+                    grant = await self._writer_certs.channel_grant_for_peer(
+                        space.id,
+                        inst,
+                        epoch=(
+                            content_key.get("epoch")
+                            if content_key is not None
+                            else None
+                        ),
+                    )
+                    if grant is not None:
+                        payload["gfs_channel"] = grant
                 await self._send(
                     inst, FederationEventType.SPACE_AUTHORITY_ROTATED, payload, space.id
                 )
@@ -1215,6 +1249,16 @@ class SpaceAuthorityRotationService:
                         await self._writer_certs.accept_writer_key(
                             space_id, p.get("writer_key")
                         )
+            # v_51 — our private-space channel grant (a fresh channel under
+            # the new seed), from the owner household only.
+            if p.get("gfs_channel") is not None and self._writer_certs is not None:
+                space = await self._spaces.get(space_id)
+                if space is not None and event.from_instance == (
+                    space.owner_instance_id
+                ):
+                    await self._writer_certs.accept_channel_grant(
+                        space_id, p.get("gfs_channel")
+                    )
 
     async def _apply_bundle(self, space_id: str, p: dict, sender: str) -> None:
         space = await self._spaces.get(space_id)

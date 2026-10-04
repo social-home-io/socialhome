@@ -4098,6 +4098,328 @@ def cmd_gfs_member_publish_strict() -> None:
     )
 
 
+def _check_private_channel(state: dict, failures: list[str], cap) -> None:
+    """v_51 tripwire for ``verify``: the private space's channel round-trips
+    (a, b, e agree on the id; e holds a wrapped grant; the GFS holds the
+    channel and never the space)."""
+    space_id = state["gfs_private_channel_space_id"]
+    channel_id = state.get("gfs_private_channel_id")
+    if int(cap.MIN_FOR_PRIVATE_CHANNELS) != 51:
+        failures.append("MIN_FOR_PRIVATE_CHANNELS moved off v_51")
+    for label in ("a", "b", "e"):
+        try:
+            rows = _rows(
+                label, "SELECT gfs_channel_id FROM spaces WHERE id = ?", (space_id,)
+            )
+        except Exception as exc:
+            failures.append(f"{label}: private-channel read failed: {exc!r}")
+            continue
+        if not rows or rows[0][0] != channel_id:
+            failures.append(
+                f"{label}: private space {space_id} points at channel "
+                f"{rows[0][0] if rows else None!r}, expected {channel_id!r}"
+            )
+    grants = _rows(
+        "e",
+        "SELECT gfs_channel FROM space_keys WHERE space_id = ? AND gfs_channel IS NOT NULL",
+        (space_id,),
+    )
+    if not grants:
+        failures.append("e: holds no channel grant for the private space")
+    elif "channel_id" in str(grants[0][0]):
+        failures.append("e: the stored channel grant is plaintext (not KEK-wrapped)")
+    if not _gfs_rows("SELECT 1 FROM gfs_channels WHERE channel_id = ?", (channel_id,)):
+        failures.append(f"GFS: no row for channel {channel_id}")
+    b_id = state["instances"]["b"]["instance_id"]
+    if _gfs_rows(
+        "SELECT 1 FROM gfs_channel_subscribers WHERE instance_id = ?", (b_id,)
+    ):
+        failures.append("GFS: the paired member b holds a channel seat")
+    if _gfs_rows(
+        "SELECT 1 FROM gfs_channels WHERE channel_id = ? OR channel_pk LIKE ?",
+        (space_id, f"%{space_id}%"),
+    ):
+        failures.append("GFS: a channel row names the private space")
+
+
+def _poll_gfs_rows(sql: str, params: tuple, ok, *, what: str, timeout: float = 60.0):
+    """Poll the GFS DB every 3 s until ``ok(rows)``; SystemExit naming
+    ``what`` otherwise."""
+    deadline = time.monotonic() + timeout
+    rows: list[tuple] = []
+    while time.monotonic() < deadline:
+        rows = _gfs_rows(sql, params)
+        if ok(rows):
+            return rows
+        time.sleep(3.0)
+    raise SystemExit(
+        f"gfs-private-channel: {what} within {timeout:.0f} s (last rows {rows!r}). "
+        f"Check the GFS log and {_instance_dir('a') / 'log.txt'} for 'gfs.channel'."
+    )
+
+
+def _join_private_link(state: dict, label: str, space_id: str, owner_base: str) -> None:
+    """``label`` redeems a fresh, UNPUBLISHED member link to a's private
+    space (a private space is never listed, so its link is never parked on
+    the connection server): e takes the §D2b bootstrap through the relay, a
+    paired household the direct path."""
+    a = state["instances"]["a"]
+    inst = state["instances"][label]
+    s, link = _request(
+        f"{owner_base}/api/spaces/{space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "member", "uses": 1},
+    )
+    link = _must(f"a mints a private link for {label}", s, link, ok=(201,))
+    payload = _decode_invite_blob(link["code"])
+    if payload.get("via_gfs"):
+        raise SystemExit(
+            "gfs-private-channel: a private space's link names a connection "
+            f"server ({payload['via_gfs']!r}) — it must never be published."
+        )
+    s, joined = _request(
+        f"http://127.0.0.1:{inst['port']}/api/spaces/join",
+        token=inst["token"],
+        method="POST",
+        body=_join_body_from_blob(payload),
+        timeout=40.0,
+    )
+    _must(f"{label} redeems the private link", s, joined, ok=(200, 201))
+
+
+def _ensure_gfs_client(state: dict, label: str) -> None:
+    """Pair ``label`` with the GFS if ``gfs-pair`` did not (it pairs a, d and
+    e) and wait for its WebSocket — every channel frame is pushed over it."""
+    pairings = state.setdefault("gfs", {}).setdefault("pairings", {})
+    info = state["instances"][label]
+    if label not in pairings:
+        s, resp = _request(
+            f"http://127.0.0.1:{info['port']}/api/gfs/connections",
+            token=info["token"],
+            method="POST",
+            body={
+                "gfs_url": f"http://127.0.0.1:{GFS_PORT}",
+                "token": _gfs_mint_pair_token(),
+            },
+        )
+        resp = _must(f"gfs-pair({label})", s, resp, ok=(201,))
+        pairings[label] = {
+            "id": resp["id"],
+            "gfs_instance_id": resp["gfs_instance_id"],
+            "status": resp["status"],
+        }
+        _save(state)
+        print(f"  {label}: paired with the GFS for this step")
+    _wait_for_gfs_ws(info["instance_id"])
+
+
+def cmd_gfs_private_channel() -> None:
+    """v_51: a PRIVATE space with a link-joined member gets member
+    publishing over the connection server through an OPAQUE channel — and
+    the server never learns the space.
+
+    Prereqs: the gfs chain through ``gfs-member-publish-strict`` (a and e
+    are GFS clients; e is paired with nobody; a↔b are paired).
+
+    Sequence:
+    1. b (paired with a) becomes a GFS client too, if it is not one yet.
+       (d reaches a only over the mesh: a holds no peer row, so it cannot
+       know d's version and — like writer certs — sends it no grant.)
+    2. a creates a PRIVATE space. e redeems an unpublished member link (the
+       §D2b bootstrap through ``/gfs/envelope``), then b redeems another
+       (the direct path).
+    3. a — the owner — creates the space's channel on e's seat: a random
+       ``channel_id`` and a channel key registered anonymously at the GFS.
+       e (link-joined) gets a grant with a pass and takes the ONLY seat; b
+       (paired) gets a publish-only grant and never subscribes.
+    4. Stop **a**. b posts over the channel; e receives it decrypted while
+       the host is offline. Then e posts (its envelope to a waits at the GFS).
+    5. The GFS log and its whole database never contain the private space's
+       id, its name or its authority public key (hex or base64url) — only
+       the channel id — and b never holds a seat.
+    6. Restart a (bookmark first); a catches both posts up over the member
+       path, and b gets e's post from a (a catch-up sync triggered by a's
+       capabilities re-advertisement on startup).
+
+    Polls every 3 s and backs off on 429.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run the gfs chain through 'gfs-member-publish-strict' first")
+    a = state["instances"]["a"]
+    b = state["instances"]["b"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    if _instance_row("a", b["instance_id"]) is None:
+        raise SystemExit("gfs-private-channel: a and b are not paired — run 'pair'")
+    _ensure_gfs_client(state, "b")
+    gfs_off = _gfs_log_size()
+
+    # 2. The private space and its two remote members.
+    space_name = f"Private channel space {time.time_ns()}"
+    s, space = _request(
+        f"{a_base}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={"name": space_name, "space_type": "private"},
+    )
+    space = _must("a creates a private space", s, space, ok=(200, 201))
+    space_id = space["id"]
+    pk_rows = _rows(
+        "a", "SELECT identity_public_key FROM spaces WHERE id = ?", (space_id,)
+    )
+    space_pk_hex = pk_rows[0][0] if pk_rows else ""
+    if not space_pk_hex:
+        raise SystemExit("gfs-private-channel: a's private space has no authority key")
+    space_pk_b64 = (
+        base64.urlsafe_b64encode(bytes.fromhex(space_pk_hex)).rstrip(b"=").decode()
+    )
+    _join_private_link(state, "e", space_id, a_base)
+    print(f"  e joined private space {space_id} through the relay ✓")
+    _join_private_link(state, "b", space_id, a_base)
+    print("  b (paired with a) joined it directly ✓")
+
+    # 3. The channel, the grants, the seats.
+    rows = _poll_rows(
+        "a",
+        "SELECT gfs_channel_id FROM spaces WHERE id = ?",
+        (space_id,),
+        lambda r: bool(r) and bool(r[0][0]),
+        what="a never created the private space's channel",
+    )
+    channel_id = rows[0][0]
+    if space_id in channel_id or len(channel_id) != 32:
+        raise SystemExit(f"gfs-private-channel: odd channel id {channel_id!r}")
+    for label in ("e", "b"):
+        _poll_rows(
+            label,
+            "SELECT gfs_channel_id FROM spaces WHERE id = ?",
+            (space_id,),
+            lambda r: bool(r) and r[0][0] == channel_id,
+            what=f"{label} never took its channel grant",
+        )
+    print(f"  a started channel {channel_id}; e and b hold their grants ✓")
+    seats = _poll_gfs_rows(
+        "SELECT instance_id FROM gfs_channel_subscribers WHERE channel_id = ?",
+        (channel_id,),
+        lambda r: e["instance_id"] in {x[0] for x in r},
+        what="e never took its seat on the channel",
+    )
+    held = {x[0] for x in seats}
+    if held != {e["instance_id"]}:
+        raise SystemExit(
+            f"gfs-private-channel: the channel's seats are {sorted(held)} — only "
+            "the link-joined household e may take one (never the owner, never "
+            "the paired member b)."
+        )
+    print("  the GFS seats only the link-joined household e (not a, not b) ✓")
+
+    # 4. Host offline; b (paired, publish-only) posts; e gets it live.
+    e_off = _log_size("e")
+    _kill_household("a", a)
+    b_content = f"Paired member posts with the host offline — {time.time_ns()}"
+    st, b_post = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": b_content},
+    )
+    b_post = _must("b posts with the host offline", st, b_post, ok=(201,))
+    b_post_id = b_post["id"]
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (b_post_id,),
+        lambda r: bool(r) and r[0][0] == b_content,
+        what=f"e never received b's post {b_post_id} while a was down",
+    )
+    if not _log_lines_matching(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    ):
+        raise SystemExit(
+            "gfs-private-channel: e logged no channel frame — b's post reached "
+            "it some other way."
+        )
+    print("  e received b's post over the channel with the host offline ✓")
+    # e posts too: its envelope to a waits at the GFS; b has no seat.
+    content = f"Posted into a private space with the host offline — {time.time_ns()}"
+    st, post = _e_request(
+        state,
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": content},
+    )
+    post = _must("e posts with the host offline", st, post, ok=(201,))
+    post_id = post["id"]
+
+    # 5. What the GFS knows.
+    leaks = (space_id, space_name, space_pk_hex, space_pk_b64)
+    log_text = "\n".join(_gfs_log_lines_matching("", offset=0))
+    db_bytes = b"".join(p.read_bytes() for p in GFS_DIR.glob("gfs.db*") if p.is_file())
+    for needle in leaks:
+        if needle in log_text:
+            raise SystemExit(
+                f"gfs-private-channel: the GFS log names the private space "
+                f"({needle[:24]!r}…)."
+            )
+        if needle.encode() in db_bytes:
+            raise SystemExit(
+                f"gfs-private-channel: the GFS database holds the private space "
+                f"({needle[:24]!r}…)."
+            )
+    for text in (content, b_content):
+        if text in log_text or text.encode() in db_bytes:
+            raise SystemExit("gfs-private-channel: the GFS saw a post's text")
+    if _gfs_rows(
+        "SELECT 1 FROM gfs_channel_subscribers WHERE instance_id = ?",
+        (b["instance_id"],),
+    ):
+        raise SystemExit("gfs-private-channel: the paired member b holds a seat")
+    if channel_id not in "\n".join(
+        _gfs_log_lines_matching("gfs.channel", offset=gfs_off)
+    ):
+        raise SystemExit(
+            "gfs-private-channel: the GFS logged nothing about the channel — "
+            "check that it booted at DEBUG."
+        )
+    print(
+        "  the GFS log and database hold the channel id only — never the "
+        "space id, name or key ✓"
+    )
+
+    # 6. The host comes back and catches the post up over the member path.
+    new_pid = _spawn("a", a["port"])
+    state["instances"]["a"]["pid"] = new_pid
+    _save(state)
+    _wait_ready(a["port"])
+    for pid, text, who in ((post_id, content, "e"), (b_post_id, b_content, "b")):
+        _poll_rows(
+            "a",
+            "SELECT content FROM space_posts WHERE id = ?",
+            (pid,),
+            lambda r, text=text: bool(r) and r[0][0] == text,
+            what=f"a (host) never caught {who}'s post {pid} up after restarting",
+        )
+    print("  a caught e's and b's posts up over the member path ✓")
+    _poll_rows(
+        "b",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (post_id,),
+        lambda r: bool(r) and r[0][0] == content,
+        what=f"b never got e's post {post_id} from a after a came back",
+        timeout=120.0,
+    )
+    print("  b got e's post from a (catch-up sync on a's return) ✓")
+    state["gfs_private_channel_space_id"] = space_id
+    state["gfs_private_channel_id"] = channel_id
+    _save(state)
+    print(
+        "gfs-private-channel: ok (link-joined member reaches another member of "
+        "a private space over an opaque channel, the GFS never sees the space)"
+    )
+
+
 def cmd_gfs_down() -> None:
     """Stop the GFS started by :func:`cmd_gfs_up` (idempotent)."""
     state = _load()
@@ -5027,6 +5349,13 @@ def cmd_verify() -> None:
         _check_writer_key_on_e(state, failures, _Cap)
     else:
         print("  (v_50 writer-key check skipped — run 'gfs-member-publish-strict')")
+    # 0d-ter. v_51 private-space channel: e and b still point the private
+    #     space at the channel a owns, e holds a KEK-wrapped grant, and the
+    #     GFS never stored the space id.
+    if state.get("gfs_private_channel_space_id"):
+        _check_private_channel(state, failures, _Cap)
+    else:
+        print("  (v_51 private-channel check skipped — run 'gfs-private-channel')")
 
     # 0b-bis. v_31 — the mesh-routed origin signature (#692). Every
     #     SPACE_ROUTED leg carries ``origin_sig`` inside its sealed blob

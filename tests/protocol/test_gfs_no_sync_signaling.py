@@ -34,7 +34,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+)
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.sync_rtc import SyncSessionRecord
 from socialhome.services.gfs_connection_service import GfsConnectionService
@@ -132,7 +136,9 @@ def svc():
     s._ice_servers = []
     s._federation_repo = MagicMock()
     s._federation_repo.get_instance = AsyncMock(
-        return_value=SimpleNamespace(status=PairingStatus.CONFIRMED),
+        return_value=SimpleNamespace(
+            status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL
+        ),
     )
     return s
 

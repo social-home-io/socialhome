@@ -20,7 +20,11 @@ from socialhome.domain.events import (
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
-from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+)
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.sync_manager import PendingSyncRequest
 
@@ -71,7 +75,9 @@ def svc():
     # flip ``get_instance`` to return ``None`` (no pairing row).
     s._federation_repo = MagicMock()
     s._federation_repo.get_instance = AsyncMock(
-        return_value=SimpleNamespace(status=PairingStatus.CONFIRMED),
+        return_value=SimpleNamespace(
+            status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL
+        ),
     )
     return s
 
@@ -506,6 +512,49 @@ async def test_handle_space_sync_begin_rejected_silent_for_sub_v20_peer(svc):
             ),
         )
     send_mock.assert_not_awaited()
+
+
+async def test_handle_space_sync_begin_link_joined_requester_forced_https(svc):
+    """A requester seated from an invite link (``space_session``) is CONFIRMED
+    but relay-only: its own peer-class step refuses SPACE_SYNC_OFFER / _ICE
+    from us, so the host streams in relay mode even on ``prefer_direct``."""
+    record = SimpleNamespace(sync_id="l1", rtc=None, transport_mode="rtc")
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(accepted=True, next_event=None, next_payload=None),
+    )
+    svc._sync_manager.get_session = MagicMock(return_value=record)
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_initial = AsyncMock()
+    svc._federation_repo.get_instance = AsyncMock(
+        return_value=SimpleNamespace(
+            status=PairingStatus.CONFIRMED, source=InstanceSource.SPACE_SESSION
+        ),
+    )
+    with patch.object(
+        FederationService, "send_event", new_callable=AsyncMock
+    ) as send_mock:
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN",
+                {
+                    "sync_id": "l1",
+                    "space_id": "sp",
+                    "sync_mode": "initial",
+                    "prefer_direct": True,
+                },
+                space_id="sp",
+            ),
+        )
+        await asyncio.sleep(0)
+    assert record.transport_mode == "https"
+    svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
+    assert not [
+        c
+        for c in send_mock.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_SYNC_OFFER
+    ]
+    assert await svc.is_space_session_peer("x")
 
 
 async def test_handle_space_sync_begin_mesh_requester_forced_https(svc):

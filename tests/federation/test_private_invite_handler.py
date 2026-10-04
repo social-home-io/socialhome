@@ -1982,3 +1982,58 @@ async def test_rekey_cert_from_an_unauthorised_sender_is_ignored():
         )
     )
     certs.accept.assert_not_awaited()
+
+
+# ─── v_51 private-space channel grants ride the same channels ────────────
+
+
+async def test_rekey_hands_the_channel_grant_to_the_holder_after_the_key():
+    h, certs, crypto = _cert_handler()
+    order: list[str] = []
+    crypto.import_key = AsyncMock(side_effect=lambda *a, **k: order.append("key"))
+    certs.accept_channel_grant = AsyncMock(
+        side_effect=lambda *a, **k: order.append("grant")
+    )
+    await h._on_key_exchange_rekey(
+        _event(
+            "SPACE_KEY_EXCHANGE_REKEY",
+            {
+                "space_id": "sp-c",
+                "space_content_key": {
+                    "epoch": 3,
+                    "key_suite": "aesgcm-256",
+                    "key_base64": base64.b64encode(bytes(32)).decode("ascii"),
+                },
+                "gfs_channel": {"grant": 1},
+            },
+        )
+    )
+    certs.accept_channel_grant.assert_awaited_once_with("sp-c", {"grant": 1})
+    assert order == ["key", "grant"]
+
+
+async def test_roster_snapshot_with_only_a_channel_grant_still_stores_it():
+    """A reader household gets a grant but no writer cert."""
+    h, certs, _crypto = _cert_handler()
+    certs.accept_channel_grant = AsyncMock(return_value=True)
+    await h._on_space_roster_snapshot(
+        _event(
+            "SPACE_ROSTER_SNAPSHOT",
+            {"space_id": "sp-c", "entries": [], "gfs_channel": {"grant": 2}},
+        )
+    )
+    certs.accept_channel_grant.assert_awaited_once_with("sp-c", {"grant": 2})
+    certs.accept.assert_not_awaited()
+
+
+async def test_roster_snapshot_channel_grant_from_a_non_host_is_ignored():
+    h, certs, _crypto = _cert_handler()
+    certs.accept_channel_grant = AsyncMock(return_value=True)
+    await h._on_space_roster_snapshot(
+        _event(
+            "SPACE_ROSTER_SNAPSHOT",
+            {"space_id": "sp-c", "entries": [], "gfs_channel": {"grant": 3}},
+            from_instance="peer-2",
+        )
+    )
+    certs.accept_channel_grant.assert_not_awaited()

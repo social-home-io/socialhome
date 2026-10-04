@@ -1366,6 +1366,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if send_snapshot:
             await self.send_roster_snapshot(space.id, to_instance_id=instance_id)
 
+    async def uses_gfs_private_channel(self, space: Space) -> bool:
+        """Whether this PRIVATE space uses an opaque connection-server
+        channel (v_51): created by its owner once a member joined through an
+        invite link. Its owner's ``gfs_publish_mode`` choice then applies."""
+        if space.space_type is not SpaceType.PRIVATE:
+            return False
+        return await self._spaces.get_gfs_channel(space.id) is not None
+
     async def send_roster_snapshot(self, space_id: str, *, to_instance_id: str) -> bool:
         """Send household ``to_instance_id`` the whole roster of a space we host.
 
@@ -1452,6 +1460,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     writer_key = None
                 if writer_key is not None:
                     payload["writer_key"] = writer_key
+            # v_51 — the recipient's private-space channel grant (readers
+            # too, so not nested under the cert).
+            grant = await self._writer_certs.channel_grant_for_peer(
+                space.id, to_instance_id
+            )
+            if grant is not None:
+                payload["gfs_channel"] = grant
         try:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=to_instance_id,
@@ -2443,7 +2458,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
           the owner's notice right away (members holding a key for the current
           epoch keep publishing anonymously, which the server accepts in
           either mode, until the next rotation hands out no key)."""
-        if space.features.gfs_publish_mode == "strict":
+        # A private space's channel (v_51) takes a mode change only with an
+        # epoch raise, so either direction rotates there.
+        channel_space = self._member_gfs is not None and (
+            await self._member_gfs.channel_space(space.id)
+        )
+        if space.features.gfs_publish_mode == "strict" or channel_space:
             await self._rotate_and_distribute_space_key(space.id)
             return
         if self._member_gfs is not None:

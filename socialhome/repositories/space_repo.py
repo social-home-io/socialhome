@@ -101,6 +101,13 @@ class AbstractSpaceRepo(Protocol):
     async def get_seed_shared_epoch(self, space_id: str) -> int | None: ...
     async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None: ...
     async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None: ...
+    async def get_gfs_channel(self, space_id: str) -> tuple[str, str] | None: ...
+    async def set_gfs_channel(
+        self, space_id: str, channel_id: str | None, channel_pk: str | None
+    ) -> bool: ...
+    async def spaces_for_gfs_channel(self, channel_id: str) -> list[str]: ...
+    async def get_gfs_channel_healed_at(self, space_id: str) -> str | None: ...
+    async def set_gfs_channel_healed_at(self, space_id: str, at: str) -> None: ...
     async def get_owner_user_id(self, space_id: str) -> str | None: ...
     async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
@@ -1005,6 +1012,54 @@ class SqliteSpaceRepo:
         if row is None:
             return None
         return row["host_identity_pk"]
+
+    async def get_gfs_channel(self, space_id: str) -> tuple[str, str] | None:
+        """The opaque connection-server channel ``(channel_id, channel_pk)``
+        this private space uses (v_51, migration 0077), or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT gfs_channel_id, gfs_channel_pk FROM spaces WHERE id=?",
+            (space_id,),
+        )
+        if row is None or not row["gfs_channel_id"] or not row["gfs_channel_pk"]:
+            return None
+        return str(row["gfs_channel_id"]), str(row["gfs_channel_pk"])
+
+    async def set_gfs_channel(
+        self, space_id: str, channel_id: str | None, channel_pk: str | None
+    ) -> bool:
+        """Point the space at a channel (``None`` forgets it). ``False`` for
+        an unknown space. Several spaces may name one id (no first-come
+        claim another space's owner could take): inbound frames try each
+        and the content key decides."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET gfs_channel_id=?, gfs_channel_pk=? WHERE id=?",
+            (channel_id, channel_pk if channel_id is not None else None, space_id),
+        )
+        return changed > 0
+
+    async def spaces_for_gfs_channel(self, channel_id: str) -> list[str]:
+        """Every space that names ``channel_id`` (normally exactly one)."""
+        rows = await self._db.fetchall(
+            "SELECT id FROM spaces WHERE gfs_channel_id=? ORDER BY id", (channel_id,)
+        )
+        return [str(r["id"]) for r in rows]
+
+    async def get_gfs_channel_healed_at(self, space_id: str) -> str | None:
+        """When the owner last replaced this space's channel after a
+        take-over or a squat (UTC ISO 8601), or ``None`` — the per-space
+        self-heal cooldown (migration 0077)."""
+        row = await self._db.fetchone(
+            "SELECT gfs_channel_healed_at FROM spaces WHERE id=?", (space_id,)
+        )
+        if row is None or not row["gfs_channel_healed_at"]:
+            return None
+        return str(row["gfs_channel_healed_at"])
+
+    async def set_gfs_channel_healed_at(self, space_id: str, at: str) -> None:
+        """Record a take-over replacement (``at``: UTC ISO 8601)."""
+        await self._db.enqueue(
+            "UPDATE spaces SET gfs_channel_healed_at=? WHERE id=?", (at, space_id)
+        )
 
     async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None:
         """Record the owner's ``user_id`` on a stub (migration 0070); ``None``
