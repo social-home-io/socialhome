@@ -55,6 +55,8 @@ class _FakeRepos:
         self.members = []
         self.bans = []
         self.posts = []
+        #: post id → Post held here before the sync (for the tombstone skip).
+        self.held_posts = {}
         self.comments = []
         self.tasks = []
         self.task_lists = []
@@ -120,6 +122,10 @@ class _PostRepoStub:
     async def save(self, space_id, post):
         self._c.posts.append((space_id, post))
         return post
+
+    async def get(self, post_id):
+        held = self._c.held_posts.get(post_id)
+        return ("sp-1", held) if held is not None else None
 
     async def add_comment(self, comment, *, space_id):
         self._c.comments.append(comment)
@@ -360,6 +366,32 @@ async def test_posts(setup):
     space_id, post = c.posts[0]
     assert space_id == "sp-1"
     assert post.id == "p-1"
+
+
+async def test_a_post_deleted_here_is_never_resurrected_by_a_sync(setup):
+    """v_49: a delete can overtake its create (a member-published delete
+    leaves a soft-deleted row); a provider that missed the delete must not
+    bring the post back."""
+    from datetime import datetime, timezone
+
+    from socialhome.domain.post import Post, PostType
+
+    r, c, kp = setup
+    c.held_posts["p-gone"] = Post(
+        id="p-gone",
+        author="u-1",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 18, tzinfo=timezone.utc),
+        deleted=True,
+    )
+    record = {
+        "author": "u-1",
+        "type": "text",
+        "content": "hi",
+        "created_at": "2026-04-18T00:00:00+00:00",
+    }
+    await _send(r, kp, "posts", [{"id": "p-gone", **record}, {"id": "p-2", **record}])
+    assert [post.id for _sid, post in c.posts] == ["p-2"]
 
 
 async def test_posts_keep_their_image_urls(setup):
@@ -1472,3 +1504,151 @@ async def test_bad_timetable_records_are_skipped_the_rest_apply(bus, peer, caplo
 async def test_timetables_skipped_when_repo_not_wired(bus, peer):
     r = _timetable_receiver(bus, peer, None)
     await _send(r, peer[1], "timetables", [_tt_record()])  # no raise
+
+
+async def test_a_held_comment_mid_chunk_never_stops_the_rest(setup, tmp_dir):
+    """Review repro I3: a comment the member relay already delivered, or a
+    delete-before-create tombstone, used to make the plain INSERT raise and
+    lose the rest of the chunk. Held rows stay as they are; the later
+    records land."""
+    from datetime import datetime, timezone
+
+    from socialhome.db.database import AsyncDatabase
+    from socialhome.domain.post import Comment, CommentType, Post, PostType
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+
+    r, _c, kp = setup
+    db = AsyncDatabase(tmp_dir / "sync.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES('sp-1','S','peer-a','o','ab')"
+        )
+        repo = SqliteSpacePostRepo(db)
+        now = datetime.now(timezone.utc)
+        await repo.save(
+            "sp-1",
+            Post(id="p-1", author="u-1", type=PostType.TEXT, created_at=now),
+        )
+        await repo.add_comment(
+            Comment(
+                id="c-held",
+                post_id="p-1",
+                author="u-1",
+                type=CommentType.TEXT,
+                created_at=now,
+                content="from the relay",
+            ),
+            space_id="sp-1",
+        )
+        await repo.add_comment(
+            Comment(
+                id="c-gone",
+                post_id="p-1",
+                author="u-1",
+                type=CommentType.TEXT,
+                created_at=now,
+                deleted=True,
+            ),
+            space_id="sp-1",
+        )
+        r._space_post_repo = repo
+        rec = {"post_id": "p-1", "author": "u-1", "type": "text"}
+        await _send(
+            r,
+            kp,
+            "comments",
+            [
+                {"id": "c-held", **rec, "content": "from sync"},
+                {"id": "c-gone", **rec, "content": "resurrected"},
+                {"id": "c-new", **rec, "content": "later record"},
+            ],
+        )
+        assert (await repo.get_comment("c-held")).content == "from the relay"
+        gone = await repo.get_comment("c-gone")
+        assert gone.deleted and gone.content is None
+        assert (await repo.get_comment("c-new")).content == "later record"
+    finally:
+        await db.shutdown()
+
+
+async def test_a_sync_keeps_a_held_posts_reactions_and_comment_count(setup):
+    """Review repro S1: re-sending a held post must not wipe the reactions
+    (or comment count) held here — the stamps would then refuse the copy
+    that could restore them."""
+    from datetime import datetime, timezone
+
+    from socialhome.domain.post import Post, PostType
+
+    r, c, kp = setup
+    c.held_posts["p-1"] = Post(
+        id="p-1",
+        author="u-1",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 18, tzinfo=timezone.utc),
+        content="hi",
+        reactions={"👍": frozenset({"u-2"})},
+        comment_count=3,
+    )
+    record = {"id": "p-1", "author": "u-1", "type": "text", "content": "hi"}
+    await _send(r, kp, "posts", [record])
+    _sid, saved = c.posts[0]
+    assert saved.reactions == {"👍": frozenset({"u-2"})}
+    assert saved.comment_count == 3
+
+
+async def test_a_new_post_from_a_sync_carries_its_reactions(setup):
+    r, c, kp = setup
+    record = {
+        "id": "p-new",
+        "author": "u-1",
+        "type": "text",
+        "reactions": {"👍": ["u-2", "u-3"], "bad": "x", "🎉": [4]},
+    }
+    await _send(r, kp, "posts", [record])
+    _sid, saved = c.posts[0]
+    assert saved.reactions == {"👍": frozenset({"u-2", "u-3"})}
+
+
+async def test_relayed_reactions_survive_a_sync_end_to_end(setup, tmp_dir):
+    """S1 on real SQLite: a relayed reaction, a sync re-sending the post, a
+    duplicate copy of the add — the reaction is still there."""
+    from datetime import datetime, timezone
+
+    from socialhome.db.database import AsyncDatabase
+    from socialhome.domain.post import Post, PostType
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+
+    r, _c, kp = setup
+    db = AsyncDatabase(tmp_dir / "sync.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES('sp-1','S','peer-a','o','ab')"
+        )
+        repo = SqliteSpacePostRepo(db)
+        await repo.save(
+            "sp-1",
+            Post(
+                id="p-1",
+                author="u-1",
+                type=PostType.TEXT,
+                created_at=datetime.now(timezone.utc),
+                content="hi",
+            ),
+        )
+        await repo.add_reaction(
+            "p-1", "👍", "u-2", space_id="sp-1", stamp="2026-10-03 12:00:00"
+        )
+        r._space_post_repo = repo
+        await _send(
+            r,
+            kp,
+            "posts",
+            [{"id": "p-1", "author": "u-1", "type": "text", "content": "hi"}],
+        )
+        assert "u-2" in (await repo.get("p-1"))[1].reactions["👍"]
+    finally:
+        await db.shutdown()

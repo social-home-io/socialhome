@@ -546,6 +546,10 @@ class RealtimeService:
         )
 
     async def _on_post_reaction(self, event: PostReactionChanged) -> None:
+        # Household-feed reactions only: a space reaction (published for the
+        # v_49 member relay) must not reach non-members' sockets.
+        if event.space_id:
+            return
         await self._broadcast_household(
             {
                 "type": "post.reaction_changed",

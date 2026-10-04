@@ -24,12 +24,17 @@ the post takes today's path: the normal member federation, from which a seed
 holder relays it.
 
 **What a member publish carries.** ``payload`` is the space-content-key
-ciphertext of ``{"item_type": "post", "inner": <author-signed inner +
-writer_cert>}`` — the inner is the same ``build_signed_author_inner`` object
-the host relay carries, so receivers verify it with the same code. The real
-type never leaves the ciphertext (the outer type is always ``space_item``).
-PR 3 adds comment / reaction / edit / delete item types; their type must then
-be bound inside the author signature.
+ciphertext of ``{"item_type": <type>, "inner": <author-signed inner +
+writer_cert>}``. A ``post`` / ``post_edit`` inner is the
+``build_signed_author_inner`` object the host relay carries (receivers
+verify it with the same code); comments, comment edits / deletes, post
+deletes and reactions carry the generic inner of
+:mod:`socialhome.services.space_item_author`. Either way the real type and
+its target are bound inside the author signature, and never leave the
+ciphertext (the outer type is always ``space_item``). Which types exist and
+the scope each needs: :mod:`socialhome.domain.space_item`. A seed holder
+publishes no posts here (it relays them with the authority signature) but
+does publish its other items, which no other path carries to followers.
 
 **No host dedupe.** The host keeps relaying the member's post to every
 GFS (``space_post_public``) exactly as before, because followers on an older
@@ -69,7 +74,8 @@ from ..domain.gfs_member_publish import (
     owner_epoch_notice_signing_payload,
 )
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole
-from ..domain.writer_cert import WRITER_SCOPE_WRITE, WriterCert, scope_permits
+from ..domain.space_item import ITEM_TYPE_POST, SUPPORTED_ITEM_TYPES, required_scope
+from ..domain.writer_cert import WriterCert, scope_permits
 from .gfs_publish_retry import (
     GfsPublish,
     GfsPublishRetryQueue,
@@ -89,9 +95,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: The only item type PR 2 carries over the member relay.
-ITEM_TYPE_POST: str = "post"
-SUPPORTED_ITEM_TYPES: frozenset[str] = frozenset({ITEM_TYPE_POST})
 
 #: How long a "space X is listed on GFS Y" answer is trusted (seconds).
 LISTING_TTL_S: float = 600.0
@@ -108,26 +111,52 @@ _KIND_NOTICE = "space_epoch_notice"
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
-def _cert_lets_post(cert: dict, author_user_id: str) -> bool:
-    """Whether our wire cert lets ``author_user_id`` post: ``write`` scope
-    and a v2 user binding naming them."""
+def _cert_lets(cert: dict, author_user_id: str, item_type: str) -> bool:
+    """Whether our wire cert lets ``author_user_id`` publish ``item_type``:
+    the scope the type needs (:func:`required_scope` — ``write`` for a post
+    and its edit / delete, ``comment`` for comments and reactions) and a v2
+    user binding naming them. The binding names the users holding the
+    cert's scope, so a comment-only user of a household holding a ``write``
+    cert is not bound and keeps the host path."""
     users = cert.get("writer_user_ids")
     return (
-        scope_permits(str(cert.get("scope") or ""), WRITER_SCOPE_WRITE)
+        scope_permits(str(cert.get("scope") or ""), required_scope(item_type))
         and bool(cert.get("users_sig"))
         and isinstance(users, list)
         and author_user_id in users
     )
 
 
+#: Plaintext sizes a member item is padded up to before encryption, so the
+#: ciphertext length tells a connection server (or anyone on the wire) only
+#: the bucket — a reaction, a comment and a short post all look alike. The
+#: largest stays well under the GFS payload cap once encrypted and base64'd.
+ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 4096, 16384, 65536, 131072)
+
+#: The padding field. A JSON key, so the padding sits INSIDE the AEAD
+#: (authenticated with the item) and a receiver from before padding — which
+#: reads ``item_type`` / ``inner`` off the object and ignores other keys —
+#: still parses a padded item.
+_PAD_FIELD: str = "_pad"
+
+
 def build_item_plaintext(item_type: str, inner: dict) -> bytes:
-    """The bytes a member publish encrypts: the real type + the inner."""
-    return json.dumps({"item_type": item_type, "inner": inner}).encode("utf-8")
+    """The bytes a member publish encrypts: the real type + the inner,
+    padded with ASCII ``0`` in :data:`_PAD_FIELD` to exactly the smallest
+    :data:`ITEM_SIZE_BUCKETS` size that fits. An item larger than the
+    largest bucket is left unpadded (its size is then its own)."""
+    body = {"item_type": item_type, "inner": inner, _PAD_FIELD: ""}
+    base = json.dumps(body).encode("utf-8")
+    bucket = next((b for b in ITEM_SIZE_BUCKETS if b >= len(base)), None)
+    if bucket is None:
+        return base
+    body[_PAD_FIELD] = "0" * (bucket - len(base))
+    return json.dumps(body).encode("utf-8")
 
 
 def parse_item_plaintext(plaintext: bytes) -> tuple[str, dict] | None:
     """``(item_type, inner)`` from decrypted bytes, or ``None`` if malformed
-    or of a type this build does not carry."""
+    or of a type this build does not carry. The size padding is ignored."""
     try:
         body = json.loads(plaintext)
     except ValueError:
@@ -279,43 +308,61 @@ class GfsMemberPublishService:
     async def plan_post(
         self, space_id: str, author_user_id: str
     ) -> list[GfsConnection]:
+        """:meth:`plan_item` for a post. A seed holder publishes no posts
+        here — it relays them with the authority signature instead."""
+        return await self.plan_item(space_id, author_user_id, ITEM_TYPE_POST)
+
+    async def plan_item(
+        self, space_id: str, author_user_id: str, item_type: str
+    ) -> list[GfsConnection]:
         """The connection servers this household will publish
-        ``author_user_id``'s post in *space_id* to, or ``[]`` — not
-        public/readable, a seed holder (it relays with the authority
-        signature instead), or our cert for the current epoch does not let
-        THIS author post (no cert, ``comment`` scope, or the v2 user binding
-        does not name them — e.g. a plain member of a moderated space, whose
-        post must wait in the host's queue). ``[]`` means today's host path."""
+        ``author_user_id``'s ``item_type`` item in *space_id* to, or ``[]`` —
+        not public/readable; a POST from a seed holder (it relays posts with
+        the authority signature; nothing else reaches followers, so a seed
+        holder's comments, reactions and own edits / deletes do go here); or
+        our cert for the current epoch does not let THIS author publish THIS
+        type (no cert, too weak a scope, or the v2 user binding does not name
+        them — e.g. a plain member of a moderated space, whose post must
+        wait in the host's queue). ``[]`` means today's host path."""
         space = await self._spaces.get(space_id)
         if not self._publicly_readable(space):
             return []
-        if await self._holds_seed(space_id):
+        seed_holder = await self._holds_seed(space_id)
+        if item_type == ITEM_TYPE_POST and seed_holder:
             return []
         cert = await self._writer_certs.current_own_cert_wire(space_id)
-        if cert is None or not _cert_lets_post(cert, author_user_id):
+        if cert is None or not _cert_lets(cert, author_user_id, item_type):
             return []
         targets = await self._capable_listed(space_id)
-        # A writer that publishes wants the other members' items too.
-        await self._subscribe(targets, space_id)
+        # A writer that publishes wants the other members' items too (a seed
+        # holder receives them over federation).
+        if not seed_holder:
+            await self._subscribe(targets, space_id)
         return targets
 
     # ── Publishing an item ────────────────────────────────────────────────
 
     def schedule_post(self, space_id: str, author_user_id: str, inner: dict) -> bool:
-        """Plan and publish ``author_user_id``'s post in the BACKGROUND, so
-        post creation never waits on a connection server. Returns whether a
-        task was started (``False`` when stopping or too many are pending —
-        the host's relay still carries the post)."""
+        """:meth:`schedule_item` for a post."""
+        return self.schedule_item(space_id, author_user_id, ITEM_TYPE_POST, inner)
+
+    def schedule_item(
+        self, space_id: str, author_user_id: str, item_type: str, inner: dict
+    ) -> bool:
+        """Plan and publish ``author_user_id``'s ``item_type`` item in the
+        BACKGROUND, so the local write never waits on a connection server.
+        Returns whether a task was started (``False`` when stopping or too
+        many are pending — the host path still carries the write)."""
         if self._stopping or len(self._tasks) >= MAX_PENDING_PUBLISHES:
             log.warning(
                 "gfs.member_publish: background publish for space %s skipped "
-                "(%s) — the host relays the post",
+                "(%s) — the host path carries it",
                 space_id,
                 "stopping" if self._stopping else "too many pending",
             )
             return False
         task = asyncio.create_task(
-            self._plan_and_publish(space_id, author_user_id, inner),
+            self._plan_and_publish(space_id, author_user_id, item_type, inner),
             name=f"gfs-member-publish-{space_id}",
         )
         self._tasks.add(task)
@@ -323,12 +370,12 @@ class GfsMemberPublishService:
         return True
 
     async def _plan_and_publish(
-        self, space_id: str, author_user_id: str, inner: dict
+        self, space_id: str, author_user_id: str, item_type: str, inner: dict
     ) -> None:
         try:
-            targets = await self.plan_post(space_id, author_user_id)
+            targets = await self.plan_item(space_id, author_user_id, item_type)
             if targets:
-                await self.publish_post(space_id, inner, targets)
+                await self.publish_item(space_id, item_type, inner, targets)
         except Exception:
             log.exception(
                 "gfs.member_publish: background publish failed for %s", space_id
@@ -345,14 +392,24 @@ class GfsMemberPublishService:
         inner: dict,
         targets: list[GfsConnection],
     ) -> list[GfsConnection]:
-        """Encrypt the author-signed post *inner* (built with its bound
-        ``item_type`` / ``item_target``) with our writer cert for the epoch
-        it is sealed under and publish it to *targets*. Returns the servers
-        that accepted it on the first attempt; transient failures go to the
-        retry queue."""
+        """:meth:`publish_item` for a post."""
+        return await self.publish_item(space_id, ITEM_TYPE_POST, inner, targets)
+
+    async def publish_item(
+        self,
+        space_id: str,
+        item_type: str,
+        inner: dict,
+        targets: list[GfsConnection],
+    ) -> list[GfsConnection]:
+        """Encrypt the author-signed *inner* (built with its bound
+        ``item_type`` / ``item_target``) as ``item_type`` with our writer
+        cert for the epoch it is sealed under, and publish it to *targets*.
+        Returns the servers that accepted it on the first attempt; transient
+        failures go to the retry queue."""
         if not targets:
             return []
-        sealed = await self._seal(space_id, inner)
+        sealed = await self._seal(space_id, item_type, inner)
         if sealed is None:
             return []
         epoch, cert, ciphertext = sealed
@@ -371,23 +428,25 @@ class GfsMemberPublishService:
         return accepted
 
     async def _seal(
-        self, space_id: str, inner: dict
+        self, space_id: str, item_type: str, inner: dict
     ) -> tuple[int, WriterCert, str] | None:
         body = {k: v for k, v in inner.items() if k != WRITER_CERT_FIELD}
+        needed = required_scope(item_type)
         for _attempt in range(2):
             epoch = await self._crypto.get_current_epoch(space_id)
             if epoch is None:
                 return None
             cert = await self._writer_certs.own_cert(space_id, epoch)
-            if cert is None or not scope_permits(cert.scope, WRITER_SCOPE_WRITE):
+            if cert is None or not scope_permits(cert.scope, needed):
                 log.info(
-                    "gfs.member_publish: no write cert for space %s epoch %d",
+                    "gfs.member_publish: no %s cert for space %s epoch %d",
+                    needed,
                     space_id,
                     epoch,
                 )
                 return None
             plaintext = build_item_plaintext(
-                ITEM_TYPE_POST, {**body, WRITER_CERT_FIELD: cert.to_wire()}
+                item_type, {**body, WRITER_CERT_FIELD: cert.to_wire()}
             )
             try:
                 sealed_epoch, ct = await self._crypto.encrypt(space_id, plaintext)

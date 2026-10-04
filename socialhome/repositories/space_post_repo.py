@@ -16,7 +16,9 @@ Scope:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+
+from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -27,6 +29,7 @@ from ..domain.post import (
     Post,
     PostType,
 )
+from ..domain.space_item import StaleItemStamp, stamp_to_db
 from ..utils.datetime import parse_iso8601_optional
 from .base import bool_col, row_to_dict, rows_to_dicts
 from .post_repo import (  # reuse the household post helpers verbatim
@@ -98,6 +101,7 @@ class AbstractSpacePostRepo(Protocol):
         *,
         space_id: str,
         clear_link_preview: bool = False,
+        edited_at: str | None = None,
     ) -> bool: ...
 
     async def add_reaction(
@@ -107,6 +111,7 @@ class AbstractSpacePostRepo(Protocol):
         user_id: str,
         *,
         space_id: str,
+        stamp: str | None = None,
     ) -> Post: ...
     async def remove_reaction(
         self,
@@ -115,6 +120,7 @@ class AbstractSpacePostRepo(Protocol):
         user_id: str,
         *,
         space_id: str,
+        stamp: str | None = None,
     ) -> Post: ...
 
     async def increment_comment_count(
@@ -153,6 +159,7 @@ class AbstractSpacePostRepo(Protocol):
         new_content: str,
         *,
         space_id: str,
+        edited_at: str | None = None,
     ) -> bool: ...
 
 
@@ -361,16 +368,42 @@ class SqliteSpacePostRepo:
         *,
         space_id: str,
         clear_link_preview: bool = False,
+        edited_at: str | None = None,
     ) -> bool:
         """Replace a post's body. ``False`` = not in ``space_id``.
         ``clear_link_preview`` drops the link card (the edit changed or
-        removed the link it was built for)."""
+        removed the link it was built for).
+
+        ``edited_at`` (v_49, a member-published edit) is the author's signed
+        edit time in the column's naive-UTC shape: the edit lands only on a
+        live post whose stored ``edited_at`` is older (last writer wins), so
+        ``False`` also means "a newer edit — or a delete — is already held".
+        Without it the edit is stamped ``datetime('now')`` as before."""
+        if edited_at is None:
+            return (
+                await self._db.enqueue_rowcount(
+                    "UPDATE space_posts SET content=?, edited_at=datetime('now'), "
+                    "link_preview_json=CASE WHEN ? THEN NULL "
+                    "ELSE link_preview_json END "
+                    "WHERE id=? AND space_id=?",
+                    (new_content, int(clear_link_preview), post_id, space_id),
+                )
+                > 0
+            )
         return (
             await self._db.enqueue_rowcount(
-                "UPDATE space_posts SET content=?, edited_at=datetime('now'), "
+                "UPDATE space_posts SET content=?, edited_at=?, "
                 "link_preview_json=CASE WHEN ? THEN NULL ELSE link_preview_json END "
-                "WHERE id=? AND space_id=?",
-                (new_content, int(clear_link_preview), post_id, space_id),
+                "WHERE id=? AND space_id=? AND deleted=0 "
+                "AND (edited_at IS NULL OR edited_at < ?)",
+                (
+                    new_content,
+                    edited_at,
+                    int(clear_link_preview),
+                    post_id,
+                    space_id,
+                    edited_at,
+                ),
             )
             > 0
         )
@@ -406,6 +439,15 @@ class SqliteSpacePostRepo:
         return urls
 
     # ── Reactions (atomic) ─────────────────────────────────────────────
+    #
+    # Every add / remove also records, in the same transaction, WHEN it was
+    # made for its (user, emoji) in ``reaction_stamps_json`` (migration
+    # 0075): ``stamp`` is a member-relayed reaction's signed time (naive
+    # UTC), a local or unstamped write is stamped now. A stamped write that
+    # is not newer than the recorded one raises :class:`StaleItemStamp` and
+    # changes nothing — a late duplicate add can never bring back a removed
+    # reaction, across restarts too. A removal keeps its entry (added =
+    # false) as the tombstone.
 
     async def add_reaction(
         self,
@@ -414,6 +456,7 @@ class SqliteSpacePostRepo:
         user_id: str,
         *,
         space_id: str,
+        stamp: str | None = None,
     ) -> Post:
         """Add a reaction inside ``space_id``.
 
@@ -421,34 +464,9 @@ class SqliteSpacePostRepo:
         belonging to another space raises ``KeyError`` instead of being
         mutated.
         """
-
-        def _run(conn):
-            row = conn.execute(
-                "SELECT * FROM space_posts WHERE id=? AND space_id=? AND deleted=0",
-                (post_id, space_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(f"space post {post_id!r} not found or deleted")
-            row_dict = {k: row[k] for k in row.keys()}
-            reactions = _decode_reactions(row_dict["reactions"])
-            if (
-                emoji not in reactions
-                and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
-            ):
-                raise ValueError("too many distinct reactions on this post")
-            reactions.setdefault(emoji, set()).add(user_id)
-            conn.execute(
-                "UPDATE space_posts SET reactions=? WHERE id=? AND space_id=?",
-                (_encode_reactions(_to_frozenset(reactions)), post_id, space_id),
-            )
-            row = conn.execute(
-                "SELECT * FROM space_posts WHERE id=? AND space_id=?",
-                (post_id, space_id),
-            ).fetchone()
-            return {k: row[k] for k in row.keys()}
-
-        row = await self._db.transact(_run)
-        return _row_to_space_post(row)
+        return await self._react(
+            post_id, emoji, user_id, space_id=space_id, stamp=stamp, added=True
+        )
 
     async def remove_reaction(
         self,
@@ -457,32 +475,69 @@ class SqliteSpacePostRepo:
         user_id: str,
         *,
         space_id: str,
+        stamp: str | None = None,
     ) -> Post:
         """Remove a reaction inside ``space_id`` — see
         :meth:`add_reaction` for the scoping rule."""
+        return await self._react(
+            post_id, emoji, user_id, space_id=space_id, stamp=stamp, added=False
+        )
+
+    async def _react(
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
+        *,
+        space_id: str,
+        stamp: str | None,
+        added: bool,
+    ) -> Post:
+        at = stamp or stamp_to_db(datetime.now(timezone.utc))
 
         def _run(conn):
+            where = "id=? AND space_id=?" + (" AND deleted=0" if added else "")
             row = conn.execute(
-                "SELECT * FROM space_posts WHERE id=? AND space_id=?",
+                f"SELECT * FROM space_posts WHERE {where}",
                 (post_id, space_id),
             ).fetchone()
             if row is None:
                 raise KeyError(f"space post {post_id!r} not found")
             row_dict = {k: row[k] for k in row.keys()}
+            stamps = _decode_stamps(row_dict.get("reaction_stamps_json"))
+            key = f"{user_id}\x00{emoji}"
+            held = stamps.get(key)
+            if stamp is not None and held is not None and held[0] >= stamp:
+                raise StaleItemStamp(f"reaction on {post_id!r} is not newer")
             reactions = _decode_reactions(row_dict["reactions"])
-            bucket = reactions.get(emoji)
-            if bucket and user_id in bucket:
-                bucket.discard(user_id)
-                if not bucket:
-                    reactions.pop(emoji, None)
-                conn.execute(
-                    "UPDATE space_posts SET reactions=? WHERE id=? AND space_id=?",
-                    (_encode_reactions(_to_frozenset(reactions)), post_id, space_id),
-                )
-                row = conn.execute(
-                    "SELECT * FROM space_posts WHERE id=? AND space_id=?",
-                    (post_id, space_id),
-                ).fetchone()
+            if added:
+                if (
+                    emoji not in reactions
+                    and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
+                ):
+                    raise ValueError("too many distinct reactions on this post")
+                reactions.setdefault(emoji, set()).add(user_id)
+            else:
+                bucket = reactions.get(emoji)
+                if bucket and user_id in bucket:
+                    bucket.discard(user_id)
+                    if not bucket:
+                        reactions.pop(emoji, None)
+            stamps[key] = [at, added]
+            conn.execute(
+                "UPDATE space_posts SET reactions=?, reaction_stamps_json=? "
+                "WHERE id=? AND space_id=?",
+                (
+                    _encode_reactions(_to_frozenset(reactions)),
+                    _encode_stamps(stamps),
+                    post_id,
+                    space_id,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM space_posts WHERE id=? AND space_id=?",
+                (post_id, space_id),
+            ).fetchone()
             return {k: row[k] for k in row.keys()}
 
         row = await self._db.transact(_run)
@@ -526,7 +581,10 @@ class SqliteSpacePostRepo:
     # ── Comments ───────────────────────────────────────────────────────
 
     async def add_comment(self, comment: Comment, *, space_id: str) -> bool:
-        """Insert a comment, but only onto a post in ``space_id``.
+        """Insert a comment, but only onto a post in ``space_id``. ``False``
+        also for an id already held (a member-relayed copy, a tombstone):
+        the held row is kept, never overwritten, and never an error — so a
+        batch (a sync chunk) carries on past it.
 
         A reply's ``parent_id`` must name a comment on the *same* post —
         a thread cannot hang under a comment of another post (or space).
@@ -541,9 +599,9 @@ class SqliteSpacePostRepo:
                 """
                 INSERT INTO space_post_comments(
                     id, post_id, parent_id, author, type, content, media_url,
-                    deleted, created_at
+                    deleted, edited_at, created_at
                 )
-                SELECT ?,?,?,?,?,?,?,?, COALESCE(?, datetime('now'))
+                SELECT ?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now'))
                  WHERE EXISTS (
                      SELECT 1 FROM space_posts WHERE id=? AND space_id=?
                  )
@@ -553,6 +611,7 @@ class SqliteSpacePostRepo:
                           WHERE id=? AND post_id=?
                      )
                    )
+                ON CONFLICT(id) DO NOTHING
                 """,
                 (
                     comment.id,
@@ -563,6 +622,11 @@ class SqliteSpacePostRepo:
                     comment.content,
                     comment.media_url,
                     int(comment.deleted),
+                    (
+                        stamp_to_db(comment.edited_at)
+                        if comment.edited_at is not None
+                        else None
+                    ),
                     _iso_or_none(comment.created_at),
                     comment.post_id,
                     space_id,
@@ -645,19 +709,24 @@ class SqliteSpacePostRepo:
         new_content: str,
         *,
         space_id: str,
+        edited_at: str | None = None,
     ) -> bool:
-        """Edit a comment whose parent post is in ``space_id``."""
+        """Edit a comment whose parent post is in ``space_id``.
+
+        ``edited_at`` — see :meth:`edit`: with it, the edit lands only over
+        an older stored stamp (last writer wins)."""
         return (
             await self._db.enqueue_rowcount(
                 """
                 UPDATE space_post_comments
-                   SET content=?, edited_at=datetime('now')
+                   SET content=?, edited_at=COALESCE(?, datetime('now'))
                  WHERE id=? AND deleted=0 AND EXISTS (
                      SELECT 1 FROM space_posts
                       WHERE id = space_post_comments.post_id AND space_id=?
                  )
+                   AND (? IS NULL OR edited_at IS NULL OR edited_at < ?)
                 """,
-                (new_content, comment_id, space_id),
+                (new_content, edited_at, comment_id, space_id, edited_at, edited_at),
             )
             > 0
         )
@@ -712,3 +781,58 @@ def _row_to_space_comment(row: dict | None) -> Comment | None:
         deleted=bool_col(row.get("deleted", 0)),
         edited_at=parse_iso8601_optional(row.get("edited_at")),
     )
+
+
+#: How long a reaction removal's tombstone is kept: longer than any
+#: duplicate of the add can still arrive — the GFS holds queued items for
+#: 24 h, the publisher's retry queue adds its backoff on top. Past it the
+#: tombstone is dropped.
+REACTION_TOMBSTONE_HORIZON_S: int = 48 * 3600
+
+#: Entries one user may hold per post. Over it, that user's OWN oldest
+#: tombstones go first, so nobody can push out someone else's.
+MAX_REACTION_STAMPS_PER_USER: int = 64
+
+#: Last-resort bound per post (oldest tombstones first, then oldest).
+MAX_REACTION_STAMPS_PER_POST: int = 4096
+
+
+def _decode_stamps(raw: object) -> dict[str, list]:
+    """``reaction_stamps_json`` → ``{"user\\0emoji": [stamp, added]}``."""
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(k): [str(v[0]), bool(v[1])]
+        for k, v in data.items()
+        if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str)
+    }
+
+
+def _encode_stamps(stamps: dict[str, list]) -> str:
+    """Bound the map by AGE first — a tombstone lives
+    :data:`REACTION_TOMBSTONE_HORIZON_S` — then per user, then per post;
+    each cap evicts tombstones before live entries, oldest first."""
+    cutoff = stamp_to_db(
+        datetime.now(timezone.utc) - timedelta(seconds=REACTION_TOMBSTONE_HORIZON_S)
+    )
+    for k in [k for k, (at, added) in stamps.items() if not added and at < cutoff]:
+        del stamps[k]
+
+    def _evict(keys: list[str], cap: int) -> None:
+        order = sorted(keys, key=lambda k: (bool(stamps[k][1]), stamps[k][0]))
+        for k in order[: max(0, len(keys) - cap)]:
+            del stamps[k]
+
+    by_user: dict[str, list[str]] = {}
+    for k in stamps:
+        by_user.setdefault(k.split("\x00", 1)[0], []).append(k)
+    for keys in by_user.values():
+        _evict(keys, MAX_REACTION_STAMPS_PER_USER)
+    _evict(list(stamps), MAX_REACTION_STAMPS_PER_POST)
+    return json.dumps(stamps, ensure_ascii=False, sort_keys=True)

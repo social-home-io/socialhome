@@ -9664,3 +9664,57 @@ async def test_a_new_seat_in_a_space_we_do_not_host_re_issues_nothing(
         SpaceRemoteSeatLive(space_id=space.id, instance_id="peer-a", user_id="u")
     )
     assert snapshots == []
+
+
+# ─── v_49 PR 3: events the member-publish bridge reads ─────────────────
+
+
+async def test_space_reactions_publish_who_reacted_with_what(stack):
+    from socialhome.domain.events import PostReactionChanged
+
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    seen: list = []
+    stack.space_svc._bus.subscribe(PostReactionChanged, seen.append)
+    await stack.space_svc.add_reaction(p.id, user_id=anna.user_id, emoji=" 👍 ")
+    await stack.space_svc.remove_reaction(p.id, user_id=anna.user_id, emoji="👍")
+    assert [(e.space_id, e.reactor_user_id, e.emoji, e.added) for e in seen] == [
+        (s.id, anna.user_id, "👍", True),
+        (s.id, anna.user_id, "👍", False),
+    ]
+    assert seen[0].origin_instance_id is None
+
+
+async def test_comment_and_post_events_name_the_actor_and_the_author(stack):
+    from socialhome.domain.events import CommentDeleted, CommentUpdated, PostDeleted
+
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=bob.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=bob.user_id, content="nice"
+    )
+    seen: list = []
+    for cls in (CommentUpdated, CommentDeleted, PostDeleted):
+        stack.space_svc._bus.subscribe(cls, seen.append)
+    await stack.space_svc.edit_comment(
+        c.id, editor_user_id=bob.user_id, new_content="nicer"
+    )
+    await stack.space_svc.delete_comment(c.id, actor_user_id=anna.user_id)
+    await stack.space_svc.delete_post(p.id, actor_user_id=bob.user_id)
+    assert seen[0].actor_user_id == bob.user_id
+    assert (seen[1].actor_user_id, seen[1].author_user_id) == (
+        anna.user_id,
+        bob.user_id,
+    )
+    assert (seen[2].actor_user_id, seen[2].author_user_id) == (
+        bob.user_id,
+        bob.user_id,
+    )

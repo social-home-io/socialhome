@@ -563,3 +563,161 @@ async def test_malformed_stored_link_preview_reads_as_none(env):
     )
     _, fetched = await env.repo.get("lp-2")
     assert fetched.link_preview is None
+
+
+# ─── v_49: last-writer-wins stamps for member-published edits ──────────
+
+
+async def _edited_at(env, table: str, row_id: str) -> str | None:
+    row = await env.db.fetchone(f"SELECT edited_at FROM {table} WHERE id=?", (row_id,))
+    return row["edited_at"]
+
+
+async def test_a_stamped_post_edit_applies_only_over_an_older_stamp(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    s1, s2 = "2026-10-03 12:00:01.000000", "2026-10-03 12:00:02.000000"
+    assert await env.repo.edit("p1", "second", space_id=env.space_id, edited_at=s2)
+    # An older edit arriving late never wins over the newer one.
+    assert not await env.repo.edit("p1", "first", space_id=env.space_id, edited_at=s1)
+    # Neither does a replay of the same stamp.
+    assert not await env.repo.edit("p1", "again", space_id=env.space_id, edited_at=s2)
+    _sid, post = await env.repo.get("p1")
+    assert post.content == "second"
+    assert await _edited_at(env, "space_posts", "p1") == s2
+
+
+async def test_a_stamped_post_edit_never_touches_a_deleted_post(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    await env.repo.soft_delete("p1", space_id=env.space_id)
+    assert not await env.repo.edit(
+        "p1", "back", space_id=env.space_id, edited_at="2026-10-03 12:00:00.000000"
+    )
+    _sid, post = await env.repo.get("p1")
+    assert post.deleted and post.content is None
+
+
+async def test_an_unstamped_post_edit_keeps_todays_behaviour(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    assert await env.repo.edit("p1", "local", space_id=env.space_id)
+    assert await _edited_at(env, "space_posts", "p1") is not None
+
+
+async def test_a_stamped_comment_edit_applies_only_over_an_older_stamp(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    await env.repo.add_comment(_comment("c1", "p1"), space_id=env.space_id)
+    s1, s2 = "2026-10-03 12:00:01.000000", "2026-10-03 12:00:02.000000"
+    assert await env.repo.edit_comment(
+        "c1", "second", space_id=env.space_id, edited_at=s2
+    )
+    assert not await env.repo.edit_comment(
+        "c1", "first", space_id=env.space_id, edited_at=s1
+    )
+    assert (await env.repo.get_comment("c1")).content == "second"
+
+
+async def test_add_comment_keeps_the_rows_edited_at(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    stamped = Comment(
+        id="c1",
+        post_id="p1",
+        author="uid-alice",
+        type=CommentType.TEXT,
+        created_at=datetime.now(timezone.utc),
+        content="edited before it arrived",
+        edited_at=datetime(2026, 10, 3, 12, tzinfo=timezone.utc),
+    )
+    assert await env.repo.add_comment(stamped, space_id=env.space_id)
+    assert (await _edited_at(env, "space_post_comments", "c1")).startswith("2026-10-03")
+
+
+# ─── v_49: persisted reaction stamps (member relay ordering) ───────────
+
+
+async def test_a_stamped_reaction_lands_only_over_an_older_stamp(env):
+    from socialhome.domain.space_item import StaleItemStamp
+
+    await env.repo.save(env.space_id, _post("p1"))
+    s1, s2 = "2026-10-03 12:00:01.000000", "2026-10-03 12:00:02.000000"
+    await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id, stamp=s1)
+    await env.repo.remove_reaction("p1", "👍", "u-bob", space_id=env.space_id, stamp=s2)
+    # A duplicate of the older add — another server's copy, a queued copy,
+    # after a restart — never brings the reaction back.
+    with pytest.raises(StaleItemStamp):
+        await env.repo.add_reaction(
+            "p1", "👍", "u-bob", space_id=env.space_id, stamp=s1
+        )
+    _sid, post = await env.repo.get("p1")
+    assert "👍" not in post.reactions
+
+
+async def test_an_unstamped_reaction_is_stamped_with_now(env):
+    """A local reaction (or any path without a signed stamp) records the
+    current time, so an older relayed copy can't undo it either."""
+    from socialhome.domain.space_item import StaleItemStamp
+
+    await env.repo.save(env.space_id, _post("p1"))
+    await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id)
+    await env.repo.remove_reaction("p1", "👍", "u-bob", space_id=env.space_id)
+    with pytest.raises(StaleItemStamp):
+        await env.repo.add_reaction(
+            "p1", "👍", "u-bob", space_id=env.space_id, stamp="2000-01-01 00:00:00"
+        )
+
+
+async def _stamps(env, post_id="p1") -> dict:
+    import json
+
+    row = await env.db.fetchone(
+        "SELECT reaction_stamps_json FROM space_posts WHERE id=?", (post_id,)
+    )
+    return json.loads(row["reaction_stamps_json"] or "{}")
+
+
+def _ago(hours: float) -> str:
+    from datetime import timedelta
+
+    from socialhome.domain.space_item import stamp_to_db
+
+    return stamp_to_db(datetime.now(timezone.utc) - timedelta(hours=hours))
+
+
+async def test_a_removal_tombstone_outlives_the_duplicate_horizon_only(env):
+    """A removal is remembered for longer than any duplicate can arrive
+    (the GFS queue's 24 h plus retries); past that it is dropped."""
+    await env.repo.save(env.space_id, _post("p1"))
+    for user, hours in (("u-old", 72), ("u-recent", 30)):
+        await env.repo.add_reaction(
+            "p1", "👍", user, space_id=env.space_id, stamp=_ago(hours + 1)
+        )
+        await env.repo.remove_reaction(
+            "p1", "👍", user, space_id=env.space_id, stamp=_ago(hours)
+        )
+    stamps = await _stamps(env)
+    assert "u-recent\x00👍" in stamps
+    assert "u-old\x00👍" not in stamps
+
+
+async def test_one_user_cannot_push_out_anothers_tombstones(env, monkeypatch):
+    import socialhome.repositories.space_post_repo as mod
+
+    monkeypatch.setattr(mod, "MAX_REACTION_STAMPS_PER_USER", 3)
+    await env.repo.save(env.space_id, _post("p1"))
+    await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id)
+    await env.repo.remove_reaction("p1", "👍", "u-bob", space_id=env.space_id)
+    for n in range(6):
+        emoji = f"e{n}"
+        await env.repo.add_reaction("p1", emoji, "u-eve", space_id=env.space_id)
+        await env.repo.remove_reaction("p1", emoji, "u-eve", space_id=env.space_id)
+    stamps = await _stamps(env)
+    assert "u-bob\x00👍" in stamps
+    eve = [k for k in stamps if k.startswith("u-eve\x00")]
+    assert len(eve) == 3
+    assert "u-eve\x00e5" in stamps and "u-eve\x00e0" not in stamps
+
+
+async def test_add_comment_of_a_held_id_is_a_no_op_not_an_error(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    assert await env.repo.add_comment(_comment("c1", "p1"), space_id=env.space_id)
+    dup = _comment("c1", "p1")
+    assert not await env.repo.add_comment(dup, space_id=env.space_id)
+    assert (await env.repo.get_comment("c1")).content == "Great post!"

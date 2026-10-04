@@ -1418,6 +1418,69 @@ async def test_space_comment_created_persists_and_publishes(db, bus, inbound):
     assert len(captured) == 1
 
 
+async def test_a_space_comment_already_held_is_not_applied_twice(db, bus, inbound):
+    """v_49: the member relay usually delivers a comment before its
+    federated copy (or leaves a tombstone for a delete that overtook it).
+    The federated create of a held id is a no-op — never an insert error,
+    never a second count, never a resurrection."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        (
+            "sp-1",
+            "Space 1",
+            "peer-a",
+            "owner",
+            "aa" * 32,
+            SpaceType.HOUSEHOLD.value,
+            JoinMode.INVITE_ONLY.value,
+        ),
+    )
+    repo = SqliteSpacePostRepo(db)
+    await repo.save(
+        "sp-1",
+        Post(
+            id="p-1",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="post",
+        ),
+    )
+    await repo.add_comment(
+        Comment(
+            id="c-1",
+            post_id="p-1",
+            author="u-r",
+            type=CommentType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            deleted=True,
+        ),
+        space_id="sp-1",
+    )
+    captured: list[CommentAdded] = []
+    bus.subscribe(CommentAdded, captured.append)
+    await _seat(db, "sp-1", "u-r")
+    await inbound._on_space_comment_added(
+        _event(
+            FederationEventType.SPACE_COMMENT_CREATED,
+            {
+                "space_id": "sp-1",
+                "post_id": "p-1",
+                "comment_id": "c-1",
+                "author": "u-r",
+                "type": "text",
+                "content": "back from the dead",
+            },
+        )
+    )
+    held = await repo.get_comment("c-1")
+    assert held.deleted and held.content is None
+    assert captured == []
+    assert (await repo.get("p-1"))[1].comment_count == 0
+
+
 async def test_space_report_inbound_persists_remote_report(db, bus):
     """Inbound SPACE_REPORT calls through to ReportService, landing a row
     with ``reporter_instance_id = event.from_instance``.

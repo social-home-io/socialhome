@@ -235,12 +235,25 @@ carries its writer cert in plaintext. **What it concedes, exactly:**
   household's identity tied to a space and a timing, which the
   identity-free `/gfs/publish` relay above deliberately withholds. It is
   the reason this mode needs a sign-off at all.
-- **It never learns content or the item type.** The payload is ciphertext
-  under the space content key; the outer type is always the generic
-  `space_item`, with the real type (post, comment, …) inside the
-  ciphertext. The request has an exact key set, so nothing can ride
-  alongside the ciphertext in plaintext (pinned by
+- **It never learns content, and never the item type outright.** The
+  payload is ciphertext under the space content key; the outer type is
+  always the generic `space_item`, with the real type (post, comment,
+  reaction, edit, delete) inside the ciphertext, padded to a size bucket
+  (1 / 4 / 16 / 64 / 128 KiB) inside the AEAD so a reaction and a short
+  post are the same length. The request has an exact key set, so nothing
+  can ride alongside the ciphertext in plaintext (pinned by
   `tests/protocol/test_gfs_member_publish_blind.py`).
+- **Trusted-mode residuals about the type — for owner sign-off** (strict
+  mode, PR 4, removes them by moving the cert into the ciphertext):
+  - the plaintext writer cert names its **scope**. A `comment`-scope
+    publisher cannot post, so its items are visibly *not posts* (comments,
+    reactions, comment edits / deletes — not which);
+  - the same scope reveals the household's **role**: a follower (with
+    follower comments on), or a plain member under a restricted posts
+    level (`MODERATED` / `ADMIN_ONLY`);
+  - the **size bucket** still separates a long post or comment (4 KiB and
+    up) from everything short, and an item above 128 KiB is not padded at
+    all (its exact size shows).
 - **Subscribers learn nothing new from the frame.** The fan-out frame names
   no publisher id; it carries the writer cert (the author's household key,
   which every receiver needs anyway to verify the author signature inside).

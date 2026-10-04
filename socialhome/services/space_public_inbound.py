@@ -46,6 +46,12 @@ trusted by the receiver:
    ``origin_instance_id`` set (so the local realtime/search surfaces light
    up AND the federation outbound bridge's loop-guard skips re-fanning).
 
+Member-published ``space_item`` frames (v_49) carry posts AND comments,
+comment edits / deletes, the author's own post edits / deletes and
+reactions; :meth:`SpacePublicInbound._on_space_item` runs the checks every
+type shares and applies posts and post edits here, the rest through
+:class:`~socialhome.services.space_item_inbound.SpaceItemInbound`.
+
 Attribution comes from the **encrypted, authority-signed inner only**. The
 fan-out frame carries no household identity (the GFS never learns which
 household relayed); a frame from an older GFS may still carry an outer
@@ -66,7 +72,8 @@ from ..authority_sig import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from ..domain.events import SpacePostCreated
+from ..domain.events import PostEdited, SpacePostCreated
+from ..domain.link_preview import card_survives_edit
 from ..domain.gfs_member_publish import (
     SPACE_ITEM_EVENT_TYPE,
     InvalidMemberPublish,
@@ -76,6 +83,13 @@ from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
 from ..crypto import derive_instance_id
 from ..domain.space import SpaceRole
+from ..domain.space_item import (
+    ITEM_TYPE_POST_EDIT,
+    POST_SHAPED_ITEM_TYPES,
+    item_stamp,
+    required_scope,
+    stamp_to_db,
+)
 from ..domain.writer_cert import WRITER_SCOPE_WRITE, WriterCert
 from ..writer_cert import verify_writer_users
 from ..federation.space_scope import archive_refusal
@@ -84,6 +98,11 @@ from ..utils.datetime import parse_iso8601_lenient
 from .gfs_member_publish_service import parse_item_plaintext
 from .inbound_media_store import local_media_ref, local_media_refs
 from .link_preview_service import wire_link_preview
+from .space_item_author import (
+    UnsupportedItemAuthorSigSuite,
+    verify_signed_item_inner,
+)
+from .space_item_inbound import SpaceItemInbound
 from .space_public_author import (
     UnsupportedLinkPreviewSigSuite,
     verified_link_preview,
@@ -115,6 +134,7 @@ class SpacePublicInbound:
         "_pin_refresher",
         "_writer_certs",
         "_authorship",
+        "_items",
     )
 
     def __init__(
@@ -142,6 +162,13 @@ class SpacePublicInbound:
         #: v_49 — a member household's own view of the access levels and the
         #: roster, run on member-published items as defence in depth.
         self._authorship: "SpaceAuthorship | None" = None
+        #: v_49 — applies member-published comments, deletes and reactions.
+        self._items = SpaceItemInbound(
+            bus=bus,
+            space_repo=space_repo,
+            space_post_repo=space_post_repo,
+            mention_resolver=mention_resolver,
+        )
 
     def attach_authorship(self, authorship: "SpaceAuthorship") -> None:
         """Wire the access-level / seat check for ``space_item``."""
@@ -362,11 +389,18 @@ class SpacePublicInbound:
         writer cert, checked HERE with epoch freshness and the scope the real
         item type needs (the GFS can see neither): decrypt; read the real
         type and the author-signed inner; drop our own echo; verify the
-        author signature + self-cert + owner-bound id; require the inner
-        cert (identical to the frame's), valid for this space, the frame's
-        epoch, the inner's ``author_pk`` and ``write``, at an epoch still
-        open here; then dedupe by post id against the host-relayed /
-        federated copy."""
+        author signature + self-cert (the post-shaped inner of a ``post`` /
+        ``post_edit`` also its owner-bound id; the generic inner of every
+        other type its own domain and suite); require the author-bound
+        ``item_type`` (and for a post-shaped inner ``item_target ==
+        post_id``); require the origin to be the author's household and the
+        inner cert (identical to the frame's) valid for this space, the
+        frame's epoch, the inner's ``author_pk`` and
+        :func:`~socialhome.domain.space_item.required_scope`, at an epoch
+        still open here, with a v2 user binding naming the author. Then
+        apply by type: a post dedupes by id; a post edit lands last-writer-
+        wins (:meth:`_apply_post_edit`); every other type goes to
+        :class:`SpaceItemInbound`."""
         try:
             item = SpaceItemFrame.from_wire(frame)
         except InvalidMemberPublish:
@@ -401,41 +435,46 @@ class SpacePublicInbound:
             )
             return
         item_type, inner = parsed
-        post_id = str(inner.get("post_id") or "")
+        post_shaped = item_type in POST_SHAPED_ITEM_TYPES
+        item_id = str(
+            (inner.get("post_id") if post_shaped else inner.get("item_target")) or ""
+        )
         author_user_id = str(inner.get("author_user_id") or "")
         origin_instance_id = str(inner.get("origin_instance_id") or "")
         if origin_instance_id and origin_instance_id == self._own_instance_id:
-            log.debug("space_public.inbound: self-echo for item %s — dropped", post_id)
+            log.debug("space_public.inbound: self-echo for item %s — dropped", item_id)
             return
-        if not verify_signed_author_inner(inner):
+        if not _item_author_verified(inner, post_shaped=post_shaped):
             log.warning(
                 "space_public.inbound: author verification failed for space_item "
                 "%s in space %s",
-                post_id,
+                item_id,
                 item.space_id,
             )
             return
         if str(inner.get("space_id") or "") != item.space_id:
             log.warning(
                 "space_public.inbound: space_item %s names another space — dropped",
-                post_id,
+                item_id,
             )
             return
         # The real type and its target are bound inside the author signature
         # (verified above): nobody holding the content key can re-wrap a
-        # signed post as another kind of item.
-        if inner.get("item_type") != item_type or inner.get("item_target") != post_id:
+        # signed item as another kind of item, or point it at another row.
+        if inner.get("item_type") != item_type or (
+            post_shaped and inner.get("item_target") != item_id
+        ):
             log.warning(
                 "space_public.inbound: space_item %s has no author-bound type — "
                 "dropped",
-                post_id,
+                item_id,
             )
             return
         if not _origin_is_author_household(inner, origin_instance_id):
             log.warning(
                 "space_public.inbound: space_item %s names an origin that is not "
                 "the author's household — dropped",
-                post_id,
+                item_id,
             )
             return
         raw_cert = inner.get(WRITER_CERT_FIELD)
@@ -449,7 +488,7 @@ class SpacePublicInbound:
             log.warning(
                 "space_public.inbound: space_item %s cert differs from the frame's "
                 "— dropped",
-                post_id,
+                item_id,
             )
             return
         try:
@@ -461,17 +500,19 @@ class SpacePublicInbound:
             raw_cert,
             epoch=item.epoch,
             author_pk=author_pk,
-            required_scope=WRITER_SCOPE_WRITE,
+            required_scope=required_scope(item_type),
         ):
             log.warning(
-                "space_public.inbound: writer cert refused for space_item %s in "
-                "space %s — dropped",
-                post_id,
+                "space_public.inbound: writer cert refused for space_item %s (%s) "
+                "in space %s — dropped",
+                item_id,
+                item_type,
                 item.space_id,
             )
             return
-        # v2 user binding: the cert names the household's users that may post
-        # — a member-published item requires it, and its author must be one.
+        # v2 user binding: the cert names the household's users that hold its
+        # scope — a member-published item requires it, and its author must
+        # be one.
         try:
             verify_writer_users(
                 inner_cert,
@@ -482,15 +523,28 @@ class SpacePublicInbound:
             log.warning(
                 "space_public.inbound: space_item %s author not bound by the "
                 "writer cert (%s) — dropped",
-                post_id,
+                item_id,
                 exc,
             )
             return
+        member_household = await self._holds_writer_seat(item.space_id)
+        if not post_shaped:
+            await self._items.apply(
+                space=space,
+                item_type=item_type,
+                inner=inner,
+                origin_instance_id=origin_instance_id,
+                cert_scope=inner_cert.scope,
+                member_household=member_household,
+                authorship=self._authorship,
+            )
+            return
         # Defence in depth on a member household, which holds the roster and
-        # the access levels: the author's own seat must let them post here.
+        # the access levels: the author's own seat must let them post here
+        # (a post edit needs the same ``write`` right as the post).
         if (
             self._authorship is not None
-            and await self._holds_writer_seat(item.space_id)
+            and member_household
             and not await self._authorship.item_access_admits(
                 origin_instance_id=origin_instance_id,
                 space_id=item.space_id,
@@ -501,11 +555,117 @@ class SpacePublicInbound:
             log.warning(
                 "space_public.inbound: space_item %s refused by the posts access "
                 "level / the author's seat here — dropped",
-                post_id,
+                item_id,
+            )
+            return
+        if item_type == ITEM_TYPE_POST_EDIT:
+            await self._apply_post_edit(
+                item.space_id, item_id, author_user_id, origin_instance_id, inner
             )
             return
         await self._persist(
-            item.space_id, post_id, author_user_id, origin_instance_id, inner
+            item.space_id, item_id, author_user_id, origin_instance_id, inner
+        )
+
+    async def _apply_post_edit(
+        self,
+        space_id: str,
+        post_id: str,
+        author_user_id: str,
+        origin_instance_id: str,
+        inner: dict,
+    ) -> None:
+        """The author's own edit of their post (v_49 ``post_edit``): the full
+        signed snapshot plus its signed ``edited_at``.
+
+        * Held here: only the post's author, in this space, on a live post,
+          and only over an older stored stamp (last writer wins).
+        * Not held yet — the edit overtook its create: the snapshot IS the
+          post, at its newest content, admitted under the post's own rules
+          (already checked by the caller); the later create is a duplicate.
+        * A deleted post stays deleted.
+        """
+        stamp = item_stamp(inner.get("edited_at"))
+        content = inner.get("content")
+        if stamp is None or not isinstance(content, str):
+            log.warning(
+                "space_public.inbound: post edit %s without a valid stamp or "
+                "content — dropped",
+                post_id,
+            )
+            return
+        got = await self._posts.get(post_id)
+        if got is None:
+            post = self._post_from_inner(post_id, author_user_id, inner)
+            if await self._posts.save(space_id, post) is None:
+                log.warning(
+                    "space_public.inbound: post %s already exists in another space "
+                    "— refusing the relayed write",
+                    post_id,
+                )
+                return
+            await self._posts.edit(
+                post_id, content, space_id=space_id, edited_at=stamp_to_db(stamp)
+            )
+            refreshed = await self._posts.get(post_id)
+            if refreshed is None:
+                return
+            await self._bus.publish(
+                SpacePostCreated(
+                    post=refreshed[1],
+                    space_id=space_id,
+                    mentions=(
+                        await self._mentions.resolve(
+                            space_id, content, author_id=author_user_id
+                        )
+                        if self._mentions is not None
+                        else ()
+                    ),
+                    origin_instance_id=origin_instance_id,
+                )
+            )
+            return
+        row_space, row = got
+        if row_space != space_id or row.author != author_user_id:
+            log.warning(
+                "space_public.inbound: post edit %s by someone other than its "
+                "author, or for another space — dropped",
+                post_id,
+            )
+            return
+        if row.deleted:
+            log.debug(
+                "space_public.inbound: post %s is deleted — edit dropped", post_id
+            )
+            return
+        if not await self._posts.edit(
+            post_id,
+            content,
+            space_id=space_id,
+            clear_link_preview=row.link_preview is not None
+            and not card_survives_edit(row.content, content),
+            edited_at=stamp_to_db(stamp),
+        ):
+            log.debug(
+                "space_public.inbound: post %s holds a newer edit — dropped", post_id
+            )
+            return
+        refreshed = await self._posts.get(post_id)
+        if refreshed is None:
+            return
+        await self._bus.publish(
+            PostEdited(
+                post=refreshed[1],
+                space_id=space_id,
+                origin_instance_id=origin_instance_id,
+                new_mentions=(
+                    await self._mentions.added(
+                        space_id, row.content, content, author_id=author_user_id
+                    )
+                    if self._mentions is not None
+                    else ()
+                ),
+            )
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────
@@ -612,4 +772,18 @@ def _origin_is_author_household(inner: dict, origin_instance_id: str) -> bool:
             origin_instance_id
         )
     except ValueError:
+        return False
+
+
+def _item_author_verified(inner: dict, *, post_shaped: bool) -> bool:
+    """The inner's author signature and self-cert, by its shape: the post
+    inner (``space_public_author``, incl. the owner-bound post id) for a
+    ``post`` / ``post_edit``, the generic item inner
+    (``space_item_author``, its own domain and suite) for every other type.
+    An unknown generic suite is a refusal, never a fallback."""
+    if post_shaped:
+        return verify_signed_author_inner(inner)
+    try:
+        return verify_signed_item_inner(inner)
+    except UnsupportedItemAuthorSigSuite:
         return False

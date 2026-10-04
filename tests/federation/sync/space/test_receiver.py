@@ -101,6 +101,9 @@ class _FakeSpacePostRepo:
         self.saved.append((space_id, post))
         return post
 
+    async def get(self, post_id):
+        return None
+
     async def add_comment(self, comment, *, space_id):
         self.comments.append(comment)
         return True

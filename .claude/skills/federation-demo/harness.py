@@ -3494,6 +3494,12 @@ def cmd_gfs_member_publish() -> None:
     5. d holds exactly ONE copy of e's post: it received it twice (e's own
        publish, then the host's relay) and the receiver dedupes by post id.
 
+    Between 3 and 4 (PR 3, host still offline): e comments on and reacts to
+    its post, posts a second post, edits it and deletes it; d (follower)
+    reflects each step from the member relay alone, and the GFS log carries
+    none of the text. After 5: a, back and caught up, holds the second post
+    deleted, and its relayed copy of the create never resurrects it on d.
+
     Polls every 3 s (the per-user 60/min bucket on ``/api/spaces/*``).
     """
     state = _load()
@@ -3571,6 +3577,11 @@ def cmd_gfs_member_publish() -> None:
         )
     print(f"  the GFS fanned the member-published item out ({fanned[-1].strip()}) ✓")
 
+    # 3b. PR 3 — comments, reactions and own edits / deletes, still with the
+    #     host offline. d (a follower) reads them only from the member relay:
+    #     no other path ever carried them to a follower.
+    second_id, edited = _member_publish_items(state, space_id, post_id, gfs_off)
+
     # 4. The host comes back and relays the post as before. Bookmark the GFS
     #    log BEFORE the respawn: a relays the queued post as soon as it is up,
     #    often before ``_wait_ready`` returns.
@@ -3608,9 +3619,160 @@ def cmd_gfs_member_publish() -> None:
     if len(rows) != 1:
         raise SystemExit(f"gfs-member-publish: d holds {len(rows)} copies of the post")
     print("  d holds exactly one copy (receiver dedupe by post id) ✓")
+
+    # 6. e's deleted post stays deleted everywhere once a is back: a got the
+    #    create, edit and delete over the member path in order and relayed
+    #    the create to the GFS again — d's copy is a duplicate of a deleted
+    #    row and is dropped, never resurrected.
+    _assert_post_stays_deleted(state, space_id, second_id, edited)
     state["gfs_member_publish_post_id"] = post_id
     _save(state)
-    print("gfs-member-publish: ok (member posts reach followers without the host)")
+    print(
+        "gfs-member-publish: ok (member posts, comments, reactions, edits and "
+        "deletes reach followers without the host)"
+    )
+
+
+def _poll_rows(
+    label: str,
+    sql: str,
+    params: tuple,
+    ok,
+    *,
+    what: str,
+    timeout: float = 60.0,
+) -> list[tuple]:
+    """Poll ``label``'s DB every 3 s until ``ok(rows)``; SystemExit naming
+    ``what`` otherwise. (DB reads — no REST rate-limit bucket involved.)"""
+    deadline = time.monotonic() + timeout
+    rows: list[tuple] = []
+    while time.monotonic() < deadline:
+        rows = _rows(label, sql, params)
+        if ok(rows):
+            return rows
+        time.sleep(3.0)
+    raise SystemExit(
+        f"gfs-member-publish: {what} within {timeout:.0f} s (last rows {rows!r}). "
+        f"Check {_instance_dir(label) / 'log.txt'} for 'space_item' and "
+        f"{_instance_dir('e') / 'log.txt'} for 'gfs.member_publish'."
+    )
+
+
+def _e_request(state: dict, method: str, path: str, body: dict | None = None):
+    """One REST call as e's user, backing off on the 60/min bucket."""
+    e = state["instances"]["e"]
+    for _attempt in range(4):
+        st, resp = _request(
+            f"http://127.0.0.1:{e['port']}{path}",
+            token=e["token"],
+            method=method,
+            body=body,
+        )
+        if st != 429:
+            return st, resp
+        time.sleep(15.0)
+    return st, resp
+
+
+def _member_publish_items(
+    state: dict, space_id: str, post_id: str, gfs_off: int
+) -> tuple[str, str]:
+    """While host a is offline: e comments on and reacts to its post, posts
+    a second one, edits it, then deletes it. d (follower) reflects each
+    step from the member relay alone. Returns ``(second post id, edited
+    text)``."""
+    base = f"/api/spaces/{space_id}/posts"
+    comment_text = f"A comment with the host offline — {time.time_ns()}"
+    st, comment = _e_request(
+        state, "POST", f"{base}/{post_id}/comments", {"content": comment_text}
+    )
+    comment = _must("e comments with the host offline", st, comment, ok=(200, 201))
+    comment_id = comment["id"]
+    st, body = _e_request(state, "POST", f"{base}/{post_id}/reactions", {"emoji": "🎉"})
+    _must("e reacts with the host offline", st, body, ok=(200, 201))
+    _poll_rows(
+        "d",
+        "SELECT content FROM space_post_comments WHERE id = ? AND deleted = 0",
+        (comment_id,),
+        lambda rows: bool(rows) and rows[0][0] == comment_text,
+        what=f"d never received e's comment {comment_id}",
+    )
+    print("  d (follower) received e's comment over the member relay ✓")
+    _poll_rows(
+        "d",
+        "SELECT reactions FROM space_posts WHERE id = ?",
+        (post_id,),
+        lambda rows: bool(rows) and "🎉" in (rows[0][0] or ""),
+        what="d never received e's reaction",
+    )
+    print("  d (follower) received e's reaction over the member relay ✓")
+
+    original = f"A post to edit and delete — {time.time_ns()}"
+    st, second = _e_request(state, "POST", base, {"type": "text", "content": original})
+    second_id = _must("e posts a second post", st, second, ok=(201,))["id"]
+    _poll_rows(
+        "d",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (second_id,),
+        lambda rows: bool(rows) and rows[0][0] == original,
+        what=f"d never received e's second post {second_id}",
+    )
+    edited = f"Edited with the host offline — {time.time_ns()}"
+    st, body = _e_request(state, "PATCH", f"{base}/{second_id}", {"content": edited})
+    _must("e edits its post", st, body)
+    _poll_rows(
+        "d",
+        "SELECT content, edited_at FROM space_posts WHERE id = ?",
+        (second_id,),
+        lambda rows: bool(rows) and rows[0][0] == edited and rows[0][1],
+        what="d never reflected e's edit",
+    )
+    print("  d (follower) reflected e's post edit ✓")
+    st, body = _e_request(state, "DELETE", f"{base}/{second_id}")
+    _must("e deletes its post", st, body)
+    _poll_rows(
+        "d",
+        "SELECT deleted, content FROM space_posts WHERE id = ?",
+        (second_id,),
+        lambda rows: bool(rows) and rows[0][0] == 1 and rows[0][1] is None,
+        what="d never reflected e's delete",
+    )
+    print("  d (follower) reflected e's post delete ✓")
+    for text in (comment_text, edited, original):
+        leaked = _gfs_log_lines_matching(text, offset=gfs_off)
+        if leaked:
+            raise SystemExit(
+                f"gfs-member-publish: the GFS log carries item text: {leaked[:1]!r}"
+            )
+    print("  the GFS logged none of the items' text ✓")
+    return second_id, edited
+
+
+def _assert_post_stays_deleted(
+    state: dict, space_id: str, post_id: str, edited: str
+) -> None:
+    """After a's restart and catch-up: a holds e's second post deleted
+    (never live), and so does d."""
+    _poll_rows(
+        "a",
+        "SELECT deleted FROM space_posts WHERE id = ?",
+        (post_id,),
+        lambda rows: bool(rows) and rows[0][0] == 1,
+        what=f"a (host) never caught up e's delete of {post_id}",
+    )
+    time.sleep(6.0)  # let a's relayed copy of the create reach d
+    for label in ("a", "d"):
+        rows = _rows(
+            label,
+            "SELECT deleted, content FROM space_posts WHERE id = ?",
+            (post_id,),
+        )
+        if not rows or rows[0][0] != 1 or rows[0][1] is not None:
+            raise SystemExit(
+                f"gfs-member-publish: {label} resurrected e's deleted post "
+                f"{post_id}: {rows!r}"
+            )
+    print("  a and d keep e's deleted post deleted after a came back ✓")
 
 
 def cmd_gfs_down() -> None:

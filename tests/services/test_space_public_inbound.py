@@ -1141,3 +1141,303 @@ async def test_a_follower_household_relies_on_the_cert_alone(item_env):
     await item_env["inbound"].handle(await _item_frame(item_env))
     assert await item_env["post_repo"].get("post-1") is not None
     assert access.calls == []
+
+
+# ─── v_49 PR 3: post edits and generic items over the member relay ──────
+
+
+def _now_iso(seconds: float = 0) -> str:
+    from datetime import timedelta
+
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+def _signed_edit(env, *, content: str, edited_at: str, post_id: str = "post-1"):
+    inner = _signed_inner(env, post_id=post_id, item_type="post_edit")
+    inner = {k: v for k, v in inner.items() if k != "author_sig"}
+    inner["content"] = content
+    inner["edited_at"] = edited_at
+    inner["author_sig"] = b64url_encode(
+        sign_ed25519(env["author_kp"].private_key, author_signing_bytes(inner))
+    )
+    return inner
+
+
+async def test_the_author_edits_their_post_over_the_relay(item_env):
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    frame = await _item_frame(
+        item_env,
+        inner=_signed_edit(item_env, content="edited", edited_at=_now_iso(-10)),
+        item_type="post_edit",
+    )
+    await item_env["inbound"].handle(frame)
+    _sid, post = await item_env["post_repo"].get("post-1")
+    assert post.content == "edited"
+    assert post.edited_at is not None
+
+
+async def test_out_of_order_post_edits_keep_the_newest(item_env):
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    for content, at in (("newer", -5), ("older", -50)):
+        await item_env["inbound"].handle(
+            await _item_frame(
+                item_env,
+                inner=_signed_edit(item_env, content=content, edited_at=_now_iso(at)),
+                item_type="post_edit",
+            )
+        )
+    assert (await item_env["post_repo"].get("post-1"))[1].content == "newer"
+
+
+async def test_a_post_edit_before_its_create_is_the_post_at_its_newest_content(
+    item_env,
+):
+    await item_env["inbound"].handle(
+        await _item_frame(
+            item_env,
+            inner=_signed_edit(item_env, content="edited", edited_at=_now_iso(-5)),
+            item_type="post_edit",
+        )
+    )
+    # The create lands afterwards and is a duplicate.
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    _sid, post = await item_env["post_repo"].get("post-1")
+    assert post.content == "edited"
+    assert len(item_env["events"]) == 1
+
+
+async def test_a_post_edit_never_resurrects_a_deleted_post(item_env):
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    await item_env["post_repo"].soft_delete("post-1", space_id="sp-1")
+    await item_env["inbound"].handle(
+        await _item_frame(
+            item_env,
+            inner=_signed_edit(item_env, content="back", edited_at=_now_iso()),
+            item_type="post_edit",
+        )
+    )
+    _sid, post = await item_env["post_repo"].get("post-1")
+    assert post.deleted and post.content is None
+
+
+async def test_a_post_edit_by_someone_else_is_refused(item_env):
+    """The stored post belongs to another author: the edit's signer, even
+    with a valid cert of its own, may not change it."""
+    from socialhome.domain.post import Post, PostType
+
+    await item_env["post_repo"].save(
+        "sp-1",
+        Post(
+            id="post-1",
+            author="someone-else",
+            type=PostType.TEXT,
+            created_at=datetime.now(timezone.utc),
+            content="theirs",
+        ),
+    )
+    await item_env["inbound"].handle(
+        await _item_frame(
+            item_env,
+            inner=_signed_edit(item_env, content="hijack", edited_at=_now_iso()),
+            item_type="post_edit",
+        )
+    )
+    assert (await item_env["post_repo"].get("post-1"))[1].content == "theirs"
+
+
+async def test_a_comment_scope_cert_cannot_edit_a_post(item_env):
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    await item_env["inbound"].handle(
+        await _item_frame(
+            item_env,
+            inner=_signed_edit(item_env, content="edited", edited_at=_now_iso()),
+            cert=await _cert(item_env, scope="comment"),
+            item_type="post_edit",
+        )
+    )
+    assert (await item_env["post_repo"].get("post-1"))[1].content == (
+        "member-published content"
+    )
+
+
+async def test_a_post_edit_without_a_stamp_is_refused(item_env):
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    inner = _signed_inner(item_env, item_type="post_edit")
+    await item_env["inbound"].handle(
+        await _item_frame(item_env, inner=inner, item_type="post_edit")
+    )
+    assert (await item_env["post_repo"].get("post-1"))[1].edited_at is None
+
+
+async def test_a_signed_post_cannot_be_rewrapped_as_an_edit(item_env):
+    """A post inner (``item_type: post``) inside a ``post_edit`` wrapper."""
+    await item_env["inbound"].handle(
+        await _item_frame(
+            item_env, inner=_signed_inner(item_env), item_type="post_edit"
+        )
+    )
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+def _generic(env, item_type: str, target: str, post_id: str, **kw) -> dict:
+    from socialhome.services.space_item_author import build_signed_item_inner
+
+    return build_signed_item_inner(
+        item_type=item_type,
+        item_target=target,
+        space_id=kw.pop("space_id", "sp-1"),
+        post_id=post_id,
+        author_user_id=env["author_user_id"],
+        author_username="bob",
+        author_pk=env["author_kp"].public_key,
+        author_identity_seed=env["author_kp"].private_key,
+        origin_instance_id=kw.pop("origin", env["author_origin"]),
+        ts=kw.pop("ts", _now_iso(-1)),
+        **kw,
+    )
+
+
+async def _seed_post(env) -> str:
+    bound = mint_owner_bound_id(
+        SPACE_POST_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
+    )
+    await env["inbound"].handle(
+        await _item_frame(env, inner=_signed_inner(env, post_id=bound))
+    )
+    return bound
+
+
+def _comment_id(env) -> str:
+    from socialhome.federation.owner_bound_id import SPACE_COMMENT_KIND
+
+    return mint_owner_bound_id(
+        SPACE_COMMENT_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
+    )
+
+
+async def test_a_member_published_comment_is_persisted(item_env):
+    post_id = await _seed_post(item_env)
+    cid = _comment_id(item_env)
+    inner = _generic(
+        item_env, "comment", cid, post_id, comment_type="text", content="nice"
+    )
+    await item_env["inbound"].handle(
+        await _item_frame(
+            item_env,
+            inner=inner,
+            cert=await _cert(item_env, scope="comment"),
+            item_type="comment",
+        )
+    )
+    got = await item_env["post_repo"].get_comment(cid)
+    assert got is not None and got.content == "nice"
+
+
+@pytest.mark.parametrize(
+    "case", ["rewrap", "forged", "other_space", "origin", "post_shape", "suite"]
+)
+async def test_a_generic_item_is_refused_unless_signed_for_what_it_is(item_env, case):
+    post_id = await _seed_post(item_env)
+    cid = _comment_id(item_env)
+    inner = _generic(
+        item_env, "comment", cid, post_id, comment_type="text", content="nice"
+    )
+    item_type = "comment"
+    if case == "rewrap":
+        item_type = "comment_edit"  # signed as a comment
+    elif case == "forged":
+        inner["content"] = "changed after signing"
+    elif case == "other_space":
+        inner = _generic(
+            item_env,
+            "comment",
+            cid,
+            post_id,
+            space_id="sp-2",
+            comment_type="text",
+            content="x",
+        )
+    elif case == "origin":
+        inner = _generic(
+            item_env,
+            "comment",
+            cid,
+            post_id,
+            origin="victim.home",
+            comment_type="text",
+            content="x",
+        )
+    elif case == "post_shape":
+        item_type = "post_delete"
+        inner = _signed_inner(item_env, post_id=post_id, item_type="post_delete")
+    elif case == "suite":
+        inner["author_sig_suite"] = "mldsa65"
+    await item_env["inbound"].handle(
+        await _item_frame(item_env, inner=inner, item_type=item_type)
+    )
+    assert await item_env["post_repo"].get_comment(cid) is None
+    assert not (await item_env["post_repo"].get(post_id))[1].deleted
+
+
+async def test_a_post_delete_needs_a_write_cert(item_env):
+    post_id = await _seed_post(item_env)
+    inner = _generic(item_env, "post_delete", post_id, post_id)
+    await item_env["inbound"].handle(
+        await _item_frame(
+            item_env,
+            inner=inner,
+            cert=await _cert(item_env, scope="comment"),
+            item_type="post_delete",
+        )
+    )
+    assert not (await item_env["post_repo"].get(post_id))[1].deleted
+    await item_env["inbound"].handle(
+        await _item_frame(item_env, inner=inner, item_type="post_delete")
+    )
+    assert (await item_env["post_repo"].get(post_id))[1].deleted
+
+
+async def test_a_member_published_delete_is_refused_at_a_stale_epoch(item_env):
+    post_id = await _seed_post(item_env)
+    old_epoch = await item_env["crypto"].get_current_epoch("sp-1")
+    old_cert = await _cert(item_env)
+    inner = dict(_generic(item_env, "post_delete", post_id, post_id))
+    inner["writer_cert"] = old_cert
+    _e, ct = await item_env["crypto"].encrypt(
+        "sp-1", json.dumps({"item_type": "post_delete", "inner": inner}).encode()
+    )
+    await item_env["crypto"].rotate_epoch("sp-1")
+    await item_env["crypto"].rotate_epoch("sp-1")
+    await item_env["inbound"].handle(
+        {
+            "type": "relay",
+            "space_id": "sp-1",
+            "event_type": "space_item",
+            "epoch": old_epoch,
+            "writer_cert": _v1(old_cert),
+            "payload": ct,
+        }
+    )
+    assert not (await item_env["post_repo"].get(post_id))[1].deleted
+
+
+async def test_a_member_household_hands_its_roster_view_to_the_applier(item_env):
+    await _seat_us(item_env, "member")
+
+    class _Seat(_Access):
+        async def item_seat_admits(self, **kw):
+            self.calls.append(kw)
+            return False
+
+    access = _Seat(True)
+    item_env["inbound"].attach_authorship(access)
+    post_id = await _seed_post(item_env)
+    cid = _comment_id(item_env)
+    inner = _generic(
+        item_env, "comment", cid, post_id, comment_type="text", content="nice"
+    )
+    await item_env["inbound"].handle(
+        await _item_frame(item_env, inner=inner, item_type="comment")
+    )
+    assert await item_env["post_repo"].get_comment(cid) is None
+    assert access.calls[-1]["subscriber_ok"] is False

@@ -27,6 +27,7 @@ CLAUDE.md "Encryption-First Rule").
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -35,14 +36,25 @@ from ..domain.events import (
     CommentUpdated,
     PostDeleted,
     PostEdited,
+    PostReactionChanged,
     SpacePostCreated,
 )
 from ..domain.federation import FederationEventType
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
+from ..domain.space_item import (
+    ITEM_TYPE_COMMENT,
+    ITEM_TYPE_COMMENT_DELETE,
+    ITEM_TYPE_COMMENT_EDIT,
+    ITEM_TYPE_POST,
+    ITEM_TYPE_POST_DELETE,
+    ITEM_TYPE_POST_EDIT,
+    ITEM_TYPE_REACTION_ADD,
+    ITEM_TYPE_REACTION_REMOVE,
+)
 from ..infrastructure.event_bus import EventBus
-from .gfs_member_publish_service import ITEM_TYPE_POST
 from .moderation_release import current_release, with_release
+from .space_item_author import build_signed_item_inner
 from .space_public_author import build_signed_author_inner
 
 if TYPE_CHECKING:
@@ -123,6 +135,9 @@ class SpacePostOutbound:
         self._bus.subscribe(CommentAdded, self._on_comment_added)
         self._bus.subscribe(CommentUpdated, self._on_comment_updated)
         self._bus.subscribe(CommentDeleted, self._on_comment_deleted)
+        # v_49 — a local user's space reaction rides only the member relay
+        # (space reactions are not federated events).
+        self._bus.subscribe(PostReactionChanged, self._on_reaction_changed)
 
     def attach_writer_certs(self, writer_certs: "SpaceWriterCertService") -> None:
         """Wire the v_49 writer-cert holder for the relay hint."""
@@ -172,6 +187,115 @@ class SpacePostOutbound:
                 space_id,
                 post.id,
             )
+
+    # ── v_49 member publish of comments, reactions, own edits / deletes ──
+
+    async def _member_publishable(self, space_id: str | None) -> bool:
+        """A local write in ``space_id`` may go over the member relay: a
+        PUBLIC/GLOBAL space that admits followers, with our identity and
+        the member publisher wired. The publisher then decides by our cert
+        whether THIS author may publish THIS item (else the host path)."""
+        if (
+            not space_id
+            or self._member_gfs is None
+            or not (
+                self._own_instance_id
+                and self._own_instance_pk
+                and self._own_identity_seed
+            )
+        ):
+            return False
+        space = await self._spaces.get(space_id)
+        return (
+            space is not None
+            and space.space_type in PUBLIC_SPACE_TIERS
+            and bool(space.features.allow_subscribers)
+        )
+
+    async def _schedule_item(
+        self,
+        space_id: str,
+        author_user_id: str,
+        item_type: str,
+        *,
+        target: str,
+        post_id: str,
+        **fields: str | None,
+    ) -> None:
+        """Sign a generic item inner for our own user and hand it to the
+        member publisher's background queue. Never raises."""
+        assert self._member_gfs is not None
+        try:
+            author = await self._users.get_by_user_id(author_user_id)
+            if author is None:
+                return
+            inner = build_signed_item_inner(
+                item_type=item_type,
+                item_target=target,
+                space_id=space_id,
+                post_id=post_id,
+                author_user_id=author_user_id,
+                author_username=author.username,
+                author_pk=self._own_instance_pk,
+                author_identity_seed=self._own_identity_seed,
+                origin_instance_id=self._own_instance_id,
+                author_identity_anchor=author.identity_anchor,
+                ts=datetime.now(timezone.utc).isoformat(),
+                **fields,
+            )
+            self._member_gfs.schedule_item(space_id, author_user_id, item_type, inner)
+        except Exception:
+            log.exception(
+                "member GFS %s could not be scheduled for space=%s target=%s",
+                item_type,
+                space_id,
+                target,
+            )
+
+    async def _schedule_post_edit(self, space_id: str, post: Post) -> None:
+        """The author's edit as a signed snapshot of the edited post plus its
+        signed ``edited_at`` (receivers keep the newest). Never raises."""
+        assert self._member_gfs is not None
+        try:
+            author = await self._users.get_by_user_id(post.author)
+            if author is None:
+                return
+            inner = build_signed_author_inner(
+                post=post,
+                space_id=space_id,
+                author_username=author.username,
+                author_pk=self._own_instance_pk,
+                author_identity_seed=self._own_identity_seed,
+                origin_instance_id=self._own_instance_id,
+                author_identity_anchor=author.identity_anchor,
+                item_type=ITEM_TYPE_POST_EDIT,
+                item_target=post.id,
+                edited_at=datetime.now(timezone.utc).isoformat(),
+            )
+            self._member_gfs.schedule_item(
+                space_id, post.author, ITEM_TYPE_POST_EDIT, inner
+            )
+        except Exception:
+            log.exception(
+                "member GFS post edit could not be scheduled for space=%s post=%s",
+                space_id,
+                post.id,
+            )
+
+    async def _on_reaction_changed(self, event: PostReactionChanged) -> None:
+        if event.origin_instance_id is not None or not event.reactor_user_id:
+            return
+        if not await self._member_publishable(event.space_id):
+            return
+        assert event.space_id is not None
+        await self._schedule_item(
+            event.space_id,
+            event.reactor_user_id,
+            ITEM_TYPE_REACTION_ADD if event.added else ITEM_TYPE_REACTION_REMOVE,
+            target=event.post.id,
+            post_id=event.post.id,
+            emoji=event.emoji,
+        )
 
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
         """Fan ``SPACE_POST_CREATED`` to every member household.
@@ -415,6 +539,12 @@ class SpacePostOutbound:
                 event.space_id,
                 post.id,
             )
+        # v_49 — only the author's own edit goes over the member relay; a
+        # moderator's edit of someone else's post stays on the host path.
+        if event.actor_user_id == post.author and await self._member_publishable(
+            event.space_id
+        ):
+            await self._schedule_post_edit(event.space_id, post)
 
     async def _on_post_deleted(self, event: PostDeleted) -> None:
         if not event.space_id:
@@ -439,6 +569,18 @@ class SpacePostOutbound:
                 "SPACE_POST_DELETED broadcast failed for space=%s post=%s",
                 event.space_id,
                 event.post_id,
+            )
+        if (
+            event.actor_user_id
+            and event.actor_user_id == event.author_user_id
+            and await self._member_publishable(event.space_id)
+        ):
+            await self._schedule_item(
+                event.space_id,
+                event.actor_user_id,
+                ITEM_TYPE_POST_DELETE,
+                target=event.post_id,
+                post_id=event.post_id,
             )
 
     # ── Comments ─────────────────────────────────────────────────────────
@@ -473,6 +615,19 @@ class SpacePostOutbound:
                 event.space_id,
                 c.id,
             )
+        if await self._member_publishable(event.space_id):
+            await self._schedule_item(
+                event.space_id,
+                c.author,
+                ITEM_TYPE_COMMENT,
+                target=c.id,
+                post_id=event.post_id,
+                comment_type=c.type.value,
+                parent_id=c.parent_id,
+                content=c.content,
+                media_url=c.media_url,
+                created_at=c.created_at.isoformat() if c.created_at else None,
+            )
 
     async def _on_comment_updated(self, event: CommentUpdated) -> None:
         if not event.space_id:
@@ -499,6 +654,22 @@ class SpacePostOutbound:
                 event.space_id,
                 c.id,
             )
+        # The edit carries the whole comment, so a receiver that never saw
+        # the comment stores it at its newest content.
+        if event.actor_user_id == c.author and await self._member_publishable(
+            event.space_id
+        ):
+            await self._schedule_item(
+                event.space_id,
+                c.author,
+                ITEM_TYPE_COMMENT_EDIT,
+                target=c.id,
+                post_id=event.post_id,
+                comment_type=c.type.value,
+                parent_id=c.parent_id,
+                content=c.content,
+                created_at=c.created_at.isoformat() if c.created_at else None,
+            )
 
     async def _on_comment_deleted(self, event: CommentDeleted) -> None:
         if not event.space_id:
@@ -522,4 +693,16 @@ class SpacePostOutbound:
                 "SPACE_COMMENT_DELETED broadcast failed for space=%s comment=%s",
                 event.space_id,
                 event.comment_id,
+            )
+        if (
+            event.actor_user_id
+            and event.actor_user_id == event.author_user_id
+            and await self._member_publishable(event.space_id)
+        ):
+            await self._schedule_item(
+                event.space_id,
+                event.actor_user_id,
+                ITEM_TYPE_COMMENT_DELETE,
+                target=event.comment_id,
+                post_id=event.post_id,
             )

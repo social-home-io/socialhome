@@ -2134,6 +2134,14 @@ class FederationInboundService(ProtectionGateMixin):
                 user_id=author,
             )
             return
+        # A held id is a duplicate: the v_49 member relay often delivers the
+        # comment first, or left a soft-deleted row for a delete that
+        # overtook its create — which must stay deleted.
+        if await self._space_post_repo.get_comment(comment_id) is not None:
+            log_not_applied(
+                event, what="comment", row_id=comment_id, reason="already held"
+            )
+            return
         comment_type_str = str(p.get("type") or "text")
         try:
             comment_type = CommentType(comment_type_str)
