@@ -1438,6 +1438,20 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 writer_cert = None
             if writer_cert is not None:
                 payload["writer_cert"] = writer_cert
+                # v_50 — in a strict space, the epoch's writer group key too.
+                try:
+                    writer_key = await self._writer_certs.writer_key_for_peer(
+                        space.id, to_instance_id, epoch=writer_cert.get("epoch")
+                    )
+                except Exception:
+                    log.exception(
+                        "roster-snapshot: writer key for %s failed in %s",
+                        to_instance_id,
+                        space.id,
+                    )
+                    writer_key = None
+                if writer_key is not None:
+                    payload["writer_key"] = writer_key
         try:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=to_instance_id,
@@ -1599,10 +1613,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             return event.old_version < line <= event.new_version
 
         # v_32 — the first snapshot it can take. v_49 — the snapshot now
-        # carries its writer cert, which it could not hold before.
+        # carries its writer cert, which it could not hold before. v_50 — and,
+        # in a strict space, its writer group key.
         if not (
             _crossed(FederationCapability.MIN_FOR_ROSTER_SNAPSHOT)
             or _crossed(FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH)
+            or _crossed(FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH)
         ):
             return
         own = self._own_instance_id
@@ -2003,6 +2019,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and features.allow_subscribers != space.features.allow_subscribers
         ):
             await self._require_owner(space, actor_username)
+        # SECURITY: and so is how members publish over a connection server
+        # (v_50 ``gfs_publish_mode``): whether the server learns which
+        # household posted is a privacy decision for the whole space.
+        if (
+            features is not None
+            and features.gfs_publish_mode != space.features.gfs_publish_mode
+        ):
+            await self._require_owner(space, actor_username)
         # §4.3 / v_42: a level an older member household cannot enforce is
         # applied only once the admin has seen which households lag — and a
         # feature newly set to ``MODERATED`` needs every member household to
@@ -2390,6 +2414,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and features.posts_access != space.features.posts_access
         ):
             await self._writer_certs_after_posts_access_change(space, updated)
+        if (
+            features is not None
+            and features.gfs_publish_mode != space.features.gfs_publish_mode
+            and space.owner_instance_id == self._own_instance_id
+        ):
+            await self._after_gfs_publish_mode_change(updated)
         # Delegated-admin authority just flipped OFF on the space we host:
         # every seed ever shared is now unauthorized. Rotate the authority
         # key and re-share it with nobody (v_44).
@@ -2399,6 +2429,28 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         ):
             await self._bus.publish(SpaceAdminAuthorityRevoked(space_id=space_id))
         return updated
+
+    async def _after_gfs_publish_mode_change(self, space: Space) -> None:
+        """v_50 — the owner switched ``gfs_publish_mode`` on the space we host.
+
+        * → ``strict``: rotate the content key. The rotation mints the new
+          epoch's writer group key, delivers it with each publisher's cert,
+          and tells every GFS the new epoch, the mode and the key's pin in the
+          owner's notice (see :meth:`_rotate_and_distribute_space_key`) — so
+          members never sit in a strict space without a key, and the epoch
+          before the switch (whose key nobody was handed) is left behind.
+        * → ``trusted``: no new key is needed; tell every GFS the new mode in
+          the owner's notice right away (members holding a key for the current
+          epoch keep publishing anonymously, which the server accepts in
+          either mode, until the next rotation hands out no key)."""
+        if space.features.gfs_publish_mode == "strict":
+            await self._rotate_and_distribute_space_key(space.id)
+            return
+        if self._member_gfs is not None:
+            try:
+                await self._member_gfs.announce_epoch(space.id)
+            except Exception:
+                log.exception("gfs publish mode: GFS notice failed for %s", space.id)
 
     async def _writer_certs_after_posts_access_change(
         self, before: Space, after: Space
@@ -3637,12 +3689,17 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     #   admin could expose the space's content to every stranger
                     #   on a connection server (or withdraw it), which is the
                     #   owner's call alone.
+                    #
+                    # * ``gfs_publish_mode`` (v_50) — whether the connection
+                    #   server learns which household posted is the owner's
+                    #   privacy decision for the whole space.
                     kwargs["features"] = replace(
                         new_features,
                         delegated_admin_authority=(
                             space.features.delegated_admin_authority
                         ),
                         allow_subscribers=space.features.allow_subscribers,
+                        gfs_publish_mode=space.features.gfs_publish_mode,
                     )
                 # The host re-runs the PEERS_TOO_OLD check with its own view
                 # of the member households (the forwarder may not be paired

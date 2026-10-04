@@ -35,7 +35,10 @@ class _Content:
         self._raw = raw
 
     async def read(self, n: int = -1) -> bytes:
-        return self._raw if n < 0 else self._raw[:n]
+        # Consumes, like aiohttp's StreamReader (the reader loops to EOF).
+        size = len(self._raw) if n < 0 else n
+        out, self._raw = self._raw[:size], self._raw[size:]
+        return out
 
 
 class _StubResp:

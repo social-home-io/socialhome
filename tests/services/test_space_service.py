@@ -86,6 +86,7 @@ from socialhome.services.space_writer_cert_service import (
     SpaceWriterCertService,
 )
 from socialhome.domain.writer_cert import WriterCert
+from socialhome.domain.writer_key import WriterKeyGrant
 from socialhome.crypto import b64url_encode
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.space_crypto_service import SpaceContentEncryption
@@ -9718,3 +9719,142 @@ async def test_comment_and_post_events_name_the_actor_and_the_author(stack):
         bob.user_id,
         bob.user_id,
     )
+
+
+# ─── v_50: strict mode — the owner setting and the writer group key ──────
+
+
+async def _strict(stack, space_id: str) -> None:
+    await stack.db.enqueue(
+        "UPDATE spaces SET gfs_publish_mode='strict' WHERE id=?", (space_id,)
+    )
+
+
+async def test_switching_to_strict_rotates_the_content_key(stack, monkeypatch):
+    space, _fed, _remote, _pks = await _cert_space(stack, version=50)
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(gfs_publish_mode="strict"),
+    )
+    assert (await stack.space_repo.get(space.id)).features.gfs_publish_mode == "strict"
+    assert rekeys == [space.id]
+
+
+async def test_switching_back_to_trusted_tells_the_gfs_without_rotating(
+    stack, monkeypatch
+):
+    space, _fed, _remote, _pks = await _cert_space(stack, version=50)
+    await _strict(stack, space.id)
+    rekeys = await _rekeys(stack, monkeypatch)
+    member_gfs = SimpleNamespace(announce_epoch=AsyncMock(return_value=1))
+    stack.space_svc.attach_member_gfs(member_gfs)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(gfs_publish_mode="trusted"),
+    )
+    assert rekeys == []
+    member_gfs.announce_epoch.assert_awaited_once_with(space.id)
+
+
+async def test_an_unchanged_mode_does_nothing(stack, monkeypatch):
+    space, _fed, _remote, _pks = await _cert_space(stack, version=50)
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id, actor_username="hosty", features=SpaceFeatures(bazaar=False)
+    )
+    assert rekeys == []
+
+
+async def test_strict_roster_snapshot_carries_the_writer_key(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=50)
+    await _strict(stack, space.id)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    grant = WriterKeyGrant.from_wire(payload["writer_key"])
+    assert grant.epoch == _cert_of(payload).epoch == 0
+
+
+async def test_trusted_roster_snapshot_carries_no_writer_key(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=50)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert "writer_cert" in payload and "writer_key" not in payload
+
+
+async def test_strict_rekey_delivers_the_new_writer_key_only_to_publishers(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=50)
+    await _strict(stack, space.id)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await _seat(remote, space.id, "peer-b", "u-b", role=SpaceRole.SUBSCRIBER.value)
+    stack.space_svc._space_crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(stack.db),
+        KeyManager(b"\x0a" * 32),
+        own_instance_id=stack.iid,
+    )
+    await stack.space_svc._rotate_and_distribute_space_key(space.id)
+    call = fed.broadcast_to_space_members.await_args
+    hook = call.kwargs["per_peer"]
+    a = await hook("peer-a", call.args[2])
+    assert WriterKeyGrant.from_wire(a["writer_key"]).epoch == 1
+    # A follower without comment rights publishes nothing: no key.
+    assert "writer_key" not in await hook("peer-b", call.args[2])
+    assert "writer_key" not in call.args[2]
+
+
+async def test_strict_rotation_tells_the_gfs_before_the_members(stack):
+    """mint (derived) → GFS notice with the pin → member rekey: the pin is at
+    the GFS before any member can sign at the new epoch."""
+    space, fed, remote, _pks = await _cert_space(stack, version=50)
+    await _strict(stack, space.id)
+    order: list[str] = []
+
+    async def _announce(space_id):
+        order.append("gfs")
+        return 1
+
+    async def _broadcast(*a, **kw):
+        order.append("members")
+
+    stack.space_svc.attach_member_gfs(SimpleNamespace(announce_epoch=_announce))
+    fed.broadcast_to_space_members = _broadcast
+    stack.space_svc._space_crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(stack.db),
+        KeyManager(b"\x0a" * 32),
+        own_instance_id=stack.iid,
+    )
+    await stack.space_svc._rotate_and_distribute_space_key(space.id)
+    assert order[:2] == ["gfs", "members"]
+
+
+async def test_a_forwarded_config_edit_cannot_change_the_mode(stack, monkeypatch):
+    """A remote admin's forwarded ``update_config`` runs AS THE OWNER on the
+    host — the mode is pinned there like ``allow_subscribers``; the rest of
+    the edit applies."""
+    space, _fed, _remote, _pks = await _cert_space(stack, version=50)
+    rekeys = await _rekeys(stack, monkeypatch)
+    feats = {"gfs_publish_mode": "strict", "bazaar": False}
+    await stack.space_svc.apply_approved_admin_action(
+        space.id, action="update_config", params={"features": feats}
+    )
+    got = (await stack.space_repo.get(space.id)).features
+    assert got.gfs_publish_mode == "trusted"
+    assert got.bazaar is False
+    assert rekeys == []
+
+
+async def test_an_upgrade_to_v50_delivers_the_writer_key(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=50)
+    await _strict(stack, space.id)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    await stack.space_svc.on_peer_proto_version_raised(
+        PeerProtoVersionRaised(instance_id="peer-a", old_version=49, new_version=50)
+    )
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "peer-a"
+    assert "writer_key" in kw["payload"]

@@ -395,7 +395,8 @@ class SpacePublicInbound:
         ``item_type`` (and for a post-shaped inner ``item_target ==
         post_id``); require the origin to be the author's household and the
         inner cert (identical to the frame's) valid for this space, the
-        frame's epoch, the inner's ``author_pk`` and
+        frame's epoch (a strict-mode frame, v_50, carries no plaintext cert —
+        the inner one is then the only one), the inner's ``author_pk`` and
         :func:`~socialhome.domain.space_item.required_scope`, at an epoch
         still open here, with a v2 user binding naming the author. Then
         apply by type: a post dedupes by id; a post edit lands last-writer-
@@ -482,9 +483,13 @@ class SpacePublicInbound:
             inner_cert = WriterCert.from_wire(raw_cert)
         except ValueError:
             inner_cert = None
-        # The frame carries only the v1 fields (the binding never leaves the
-        # ciphertext): they must be exactly the inner cert's.
-        if inner_cert is None or inner_cert.v1() != item.writer_cert:
+        # A trusted-mode frame carries only the v1 fields (the binding never
+        # leaves the ciphertext): they must be exactly the inner cert's. A
+        # strict-mode frame (v_50) carries no cert at all — the inner one is
+        # the only one, and it gets every check below either way.
+        if inner_cert is None or (
+            item.writer_cert is not None and inner_cert.v1() != item.writer_cert
+        ):
             log.warning(
                 "space_public.inbound: space_item %s cert differs from the frame's "
                 "— dropped",

@@ -67,6 +67,42 @@ writer removed by a DELEGATED ADMIN's rotation stays relayable here (receivers
 still drop it) until the owner confirms the new epoch, which a household does
 on its next GFS connection. The state is cleared whenever the space authority
 key is re-pinned, so the owner re-sends the current notice right after one.
+
+**Strict mode (v_50)** — ``POST /gfs/member-publish-anon``
+(:meth:`GfsMemberPublishService.publish_anon`). The request names no
+household: no ``instance_id``, no household signature, no plaintext writer
+cert (the cert rides inside the ciphertext). It is authorized by
+``writer_sig``, made with the space's per-epoch writer GROUP key — shared by
+every household allowed to publish anything there — and verified against the
+key the space AUTHORITY pinned for that epoch with a ``writer_key_cert``
+(:mod:`socialhome.writer_key`). This server learns only that *some* publisher
+of the space posted, at which epoch, when, and in which size bucket.
+
+* **Pinning.** A ``writer_key_cert`` rides the epoch notice — no new endpoint.
+  The OWNER's notice pins (or corrects) the key of the epoch it confirms. A
+  delegated admin's seed-only notice pins only an epoch that the +1 rule
+  already let ``current`` reach (``confirmed <= epoch <= current``), only
+  above the newest pin, and never over an existing pin — so a seed holder
+  cannot pin a key for an inflated epoch, nor swap the owner's. The current
+  and previous pins are kept; the previous one rides the same epoch grace as
+  certs (:meth:`~.domain.GfsSpaceEpoch.admits`). Pins are forgotten on an
+  authority re-pin.
+* **Checks**, in order (every refusal the same ``403``): addressed to this
+  server; ``ts`` within ±300 s; the space is listed, not banned, publicly
+  readable and pinned; a writer key is pinned for ``epoch``; ``writer_sig``
+  verifies under it (suite checked, never defaulted); the per-space and
+  per-writer-key rate limits (``429``, after the signature — there is no
+  per-household identity to limit by); epoch freshness; a replay guard over
+  the whole signed body (``nonce`` + ``ts`` make every legitimate attempt
+  unique, so an exact copy is refused).
+* **Mode enforcement.** The owner's notice carries the space's
+  ``publish_mode``. In a ``strict`` space :meth:`publish` (identified)
+  refuses every request, so an older v_49 household or a misconfigured one
+  cannot publish identified into it; its post takes the host path. In a
+  ``trusted`` space both endpoints are accepted: the anonymous one only where
+  a writer key is pinned, and it never reveals more than the identified one —
+  so a member that learned of a switch before this server did is not
+  refused in either direction.
 """
 
 from __future__ import annotations
@@ -77,6 +113,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from ..authority_sig import (
@@ -84,18 +121,24 @@ from ..authority_sig import (
     UnsupportedAuthoritySuite,
     verify_authority_event,
 )
+from ..crypto import b64url_decode
 from ..domain.gfs_member_publish import (
+    GFS_PUBLISH_MODES,
+    MEMBER_PUBLISH_ANON_ROUTE,
     MEMBER_PUBLISH_EPOCH_GRACE_S,
     MEMBER_PUBLISH_ROUTE,
+    MemberPublishAnonRequest,
     MemberPublishRequest,
     owner_epoch_notice_signing_payload,
 )
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH, WRITER_SCOPE_COMMENT
+from ..domain.writer_key import UnsupportedWriterKeySuite, WriterKeyCert
 from ..writer_cert import (
     InvalidWriterCert,
     UnsupportedWriterCertSuite,
     verify_writer_cert,
 )
+from ..writer_key import InvalidWriterKey, verify_writer_key_cert, verify_writer_sig
 from .domain import MIN_EPOCH_STEP_INTERVAL_S, epoch_ceiling
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import SeenPayloadCache
@@ -119,6 +162,16 @@ MEMBER_PUBLISH_MAX_PER_MINUTE: int = 30
 #: per-household limit alone lets N writer households multiply it by N; this
 #: bounds the fan-out work (and queue writes) one space can cause.
 MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE: int = 120
+
+#: Accepted anonymous (strict-mode) publishes per WRITER KEY per minute. The
+#: key is shared by every publisher of the space at one epoch, so this is the
+#: finest bound there is without a household identity (a seed holder rotates
+#: the key if it is abused).
+MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY: int = 120
+
+#: How far an anonymous request's ``ts`` may be from this server's clock
+#: (seconds) — the same window as every signed household request.
+ANON_TS_SKEW_S: int = 300
 
 #: Per-IP/minute cap on the member-publish and epoch-notice routes, applied
 #: BEFORE any signature work (the per-household limit needs a verified
@@ -185,11 +238,13 @@ class GfsMemberPublishService:
         "_limiter",
         "_pending",
         "_queues",
+        "_anon_seen",
         "_relay",
         "_seen",
         "_space_limiter",
         "_stop",
         "_tasks",
+        "_writer_key_limiter",
     )
 
     def __init__(
@@ -202,6 +257,7 @@ class GfsMemberPublishService:
         gfs_instance_id: str,
         limiter: SlidingWindowCounter | None = None,
         space_limiter: SlidingWindowCounter | None = None,
+        writer_key_limiter: SlidingWindowCounter | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._federation = federation
@@ -213,7 +269,14 @@ class GfsMemberPublishService:
         self._space_limiter = space_limiter or SlidingWindowCounter(
             MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
         )
+        self._writer_key_limiter = writer_key_limiter or SlidingWindowCounter(
+            MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+        )
         self._seen = SeenPayloadCache()
+        #: Anonymous requests' replay guard. A ``ts`` up to ±300 s off is
+        #: accepted, so a body stays valid for 600 s — the guard must
+        #: remember it at least that long.
+        self._anon_seen = SeenPayloadCache(ttl_s=float(2 * ANON_TS_SKEW_S))
         self._clock = clock
         self._stop = asyncio.Event()
         self._closing = asyncio.Event()
@@ -354,6 +417,12 @@ class GfsMemberPublishService:
         if not self._space_limiter.allow(req.target):
             raise MemberPublishRateLimited()
         space = await self._readable_space(req.target)
+        strict = await self._epoch_repo.get_strict(req.target)
+        if strict is not None and strict.strict:
+            # The owner chose strict mode: nothing identified is relayed for
+            # this space — an older or misconfigured household's post takes
+            # the host path instead.
+            raise PermissionError("space is in strict mode — identified refused")
         try:
             space_pk = bytes.fromhex(space.identity_public_key)
             author_pk = bytes.fromhex(inst.public_key)
@@ -389,6 +458,63 @@ class GfsMemberPublishService:
         self._seen.record(digest)
         return True
 
+    async def publish_anon(self, req: MemberPublishAnonRequest) -> None:
+        """Authorize a strict-mode (anonymous) ``req`` and hand it to the
+        background fan-out — see the module docstring for the checks.
+
+        Raises :class:`PermissionError` on any refusal (a replay included),
+        :class:`MemberPublishRateLimited` past a per-minute budget and
+        :class:`MemberPublishBusy` when the fan-out cannot take it."""
+        if req.gfs_instance_id != self._gfs_instance_id:
+            raise PermissionError("request is addressed to another server")
+        self._check_anon_ts(req.ts)
+        await self._readable_space(req.target)
+        strict = await self._epoch_repo.get_strict(req.target)
+        pinned = strict.writer_pk_for(req.epoch) if strict is not None else None
+        if pinned is None:
+            raise PermissionError("no writer key pinned for this epoch")
+        try:
+            ok = verify_writer_sig(
+                writer_pk=b64url_decode(pinned),
+                message=req.signing_bytes(),
+                writer_sig=req.writer_sig,
+                suite=req.writer_sig_suite,
+            )
+        except (UnsupportedWriterKeySuite, ValueError) as exc:
+            raise PermissionError(f"writer signature refused: {exc}") from exc
+        if not ok:
+            raise PermissionError("writer signature does not verify")
+        if not self._space_limiter.allow(req.target):
+            raise MemberPublishRateLimited()
+        if not self._writer_key_limiter.allow(f"{req.target}\x00{req.epoch}"):
+            raise MemberPublishRateLimited()
+        state = await self._epoch_repo.get(req.target)
+        if state is None or not state.admits(
+            req.epoch, now=int(self._clock()), grace_s=MEMBER_PUBLISH_EPOCH_GRACE_S
+        ):
+            raise PermissionError("writer key epoch is not open here")
+        digest = SeenPayloadCache.digest(req.to_wire())
+        if self._anon_seen.seen(digest):
+            raise PermissionError("replayed request")
+        # No publisher to exclude: the publisher's own echo comes back and is
+        # dropped by the household (the origin is inside the ciphertext).
+        job = _FanOutJob(
+            space_id=req.target, publisher_id="", frame=req.fan_out_frame()
+        )
+        if not self._submit(job):
+            raise MemberPublishBusy()
+        self._anon_seen.record(digest)
+
+    def _check_anon_ts(self, ts: str) -> None:
+        try:
+            parsed = datetime.fromisoformat(ts)
+        except (TypeError, ValueError) as exc:
+            raise PermissionError("bad ts") from exc
+        if parsed.tzinfo is None:
+            raise PermissionError("naive ts")
+        if abs(parsed.timestamp() - self._clock()) > ANON_TS_SKEW_S:
+            raise PermissionError("stale ts")
+
     async def _check_cert_epoch(self, space_id: str, epoch: int) -> None:
         """Epoch freshness for a verified writer cert. A cert never raises
         the stored epoch: any seed holder (a demoted one too, until the
@@ -414,16 +540,31 @@ class GfsMemberPublishService:
         epoch: object,
         ts: str,
         signature: str,
+        publish_mode: object = None,
+        writer_key_cert: object = None,
     ) -> None:
         """The space OWNER's household-signed epoch notice: confirms
         ``epoch`` (any raise up to :func:`epoch_ceiling`). Signed over
         :func:`owner_epoch_notice_signing_payload` with ``ts`` (±300 s) and
         this server's id, verified against the owner's REGISTERED key; the
-        signer must be the space's ``owning_instance``. Raises
-        :class:`PermissionError` on any refusal."""
+        signer must be the space's ``owning_instance``.
+
+        v_50, both optional and signed when present: ``publish_mode`` sets
+        the space's mode (only forward in ``ts``); ``writer_key_cert`` pins
+        the writer group key of ``epoch`` — when ``epoch`` is the confirmed
+        one after this notice (a stale notice pins nothing) — replacing a
+        delegated admin's pin of the same epoch. Everything is verified
+        before anything is written. Raises :class:`PermissionError` on any
+        refusal."""
         epoch_int = _valid_epoch(epoch)
         if gfs_instance_id != self._gfs_instance_id:
             raise PermissionError("notice is addressed to another server")
+        if publish_mode is not None and publish_mode not in GFS_PUBLISH_MODES:
+            raise PermissionError("unknown publish mode")
+        if writer_key_cert is not None and not isinstance(writer_key_cert, dict):
+            raise PermissionError("malformed writer key cert")
+        mode = str(publish_mode) if publish_mode is not None else None
+        wkc = writer_key_cert if isinstance(writer_key_cert, dict) else None
         await self._federation.verify_signed_request(
             owning_instance,
             owner_epoch_notice_signing_payload(
@@ -432,6 +573,8 @@ class GfsMemberPublishService:
                 space_id=space_id,
                 epoch=epoch_int,
                 ts=ts,
+                publish_mode=mode,
+                writer_key_cert=wkc,
             ),
             signature=signature,
         )
@@ -440,11 +583,41 @@ class GfsMemberPublishService:
             raise PermissionError("space not published or banned")
         if space.owning_instance != owning_instance:
             raise PermissionError("only the space owner may confirm an epoch")
+        writer_pk = (
+            self._verified_writer_pk(space, epoch_int, wkc) if wkc is not None else None
+        )
         now = int(self._clock())
         state = await self._epoch_repo.get(space_id)
         if epoch_int > epoch_ceiling(state.confirmed if state else None, now):
             raise PermissionError("epoch notice is implausibly far ahead")
         await self._epoch_repo.confirm(space_id, epoch_int, now=now)
+        if mode is not None:
+            await self._epoch_repo.set_publish_mode(space_id, mode, at=_ts_unix(ts))
+        if writer_pk is not None:
+            state = await self._epoch_repo.get(space_id)
+            if state is not None and state.confirmed == epoch_int:
+                await self._epoch_repo.pin_writer_key(
+                    space_id, epoch_int, writer_pk, replace=True
+                )
+
+    @staticmethod
+    def _verified_writer_pk(space: "GlobalSpace", epoch: int, raw: object) -> str:
+        """The b64url writer public key of a ``writer_key_cert`` that the
+        space's PINNED authority key signed for ``epoch``, else
+        :class:`PermissionError`."""
+        if not space.identity_public_key:
+            raise PermissionError("no pinned authority key for this space")
+        try:
+            cert = WriterKeyCert.from_wire(raw)
+            verify_writer_key_cert(
+                cert,
+                space_pubkey=bytes.fromhex(space.identity_public_key),
+                space_id=space.space_id,
+                epoch=epoch,
+            )
+        except (UnsupportedWriterKeySuite, InvalidWriterKey, ValueError) as exc:
+            raise PermissionError(f"writer key cert refused: {exc}") from exc
+        return cert.writer_pk
 
     async def note_epoch(
         self,
@@ -452,12 +625,19 @@ class GfsMemberPublishService:
         epoch: object,
         authority_sig: str,
         authority_sig_suite: str,
+        writer_key_cert: object = None,
     ) -> None:
         """A seed-only (space-authority-signed) epoch notice — what a
         delegated admin sends. It may raise ``current`` by exactly +1, at
         most once a minute, and never the owner-confirmed floor; anything
         else is a 200 that changes nothing (a replay, a delegated rotation
-        racing another). Raises :class:`PermissionError` on a bad signature."""
+        racing another). Raises :class:`PermissionError` on a bad signature.
+
+        v_50: an optional ``writer_key_cert`` (authority-signed on its own)
+        pins the writer key of ``epoch`` only where the +1 rule already let
+        ``current`` reach it — ``confirmed <= epoch <= current`` after the
+        step — above the newest pin, and never over an existing pin of that
+        epoch (only the owner corrects one). Otherwise it changes nothing."""
         epoch_int = _valid_epoch(epoch)
         space = await self._fed_repo.get_space(space_id)
         if space is None or space.status == "banned":
@@ -477,11 +657,24 @@ class GfsMemberPublishService:
             raise PermissionError(f"epoch notice refused: {exc}") from exc
         if not ok:
             raise PermissionError("invalid authority signature")
+        writer_pk = (
+            self._verified_writer_pk(space, epoch_int, writer_key_cert)
+            if writer_key_cert is not None
+            else None
+        )
         await self._epoch_repo.step(
             space_id,
             epoch_int,
             now=int(self._clock()),
             min_interval_s=MIN_EPOCH_STEP_INTERVAL_S,
+        )
+        if writer_pk is None:
+            return
+        state = await self._epoch_repo.get(space_id)
+        if state is None or not state.confirmed <= epoch_int <= state.current:
+            return
+        await self._epoch_repo.pin_writer_key(
+            space_id, epoch_int, writer_pk, replace=False
         )
 
     async def _readable_space(self, space_id: str) -> "GlobalSpace":
@@ -509,14 +702,24 @@ def _valid_epoch(epoch: object) -> int:
     return epoch
 
 
+def _ts_unix(ts: str) -> int:
+    """A verified notice's ``ts`` as unix seconds (the signature check has
+    already proven it parses and is fresh)."""
+    try:
+        return int(datetime.fromisoformat(ts).timestamp())
+    except (TypeError, ValueError) as exc:
+        raise PermissionError("bad ts") from exc
+
+
 def _is_member_publish_path(path: str) -> bool:
-    return path == MEMBER_PUBLISH_ROUTE or (
+    return path in (MEMBER_PUBLISH_ROUTE, MEMBER_PUBLISH_ANON_ROUTE) or (
         path.startswith("/gfs/spaces/") and path.endswith("/epoch")
     )
 
 
 def build_member_publish_rate_limit(resolver: ClientIpResolver):
-    """Per-IP limiter for ``POST /gfs/member-publish`` and the epoch notice,
+    """Per-IP limiter for ``POST /gfs/member-publish``, ``POST
+    /gfs/member-publish-anon`` and the epoch notice,
     shedding a flood before any signature verification."""
     return build_window_limiter(
         resolver,

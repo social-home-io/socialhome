@@ -553,6 +553,56 @@ delegated admin's: a space-authority signature (`authority_sig.py`, suite
 lifted onto the other path; it raises the epoch by +1 at most. No new key
 or suite.
 
+**Writer group key + strict-mode member publish** (`writer_key.py`,
+`domain/writer_key.py`, `domain/gfs_member_publish.py`, v_50) — in a space
+whose owner set `gfs_publish_mode = "strict"`, a member household publishes
+WITHOUT identifying itself to the connection server, authorized by the
+space's per-epoch **writer group key**: one Ed25519 key per (space, content
+epoch), shared by every household allowed to publish anything there (both
+`write` and `comment` scopes, so the GFS cannot tell them apart).
+
+- **Derivation.** `writer_seed = HKDF-SHA256(ikm = space authority seed,
+  salt = b"socialhome-writer-key:v1", info = b"<space_id>:<epoch>", 32
+  bytes)`. Every seed holder (owner, delegated admin) derives the same key
+  for an epoch, so no two seed holders pin competing keys and nobody stores
+  it on the issuer side. HKDF is one-way: a publisher holding epoch N's key
+  learns nothing about the authority seed or any other epoch's key. An
+  authority-key rotation (v_44) changes every writer key with the seed.
+- **Pin: `writer_key_cert`** = `{writer_key_suite, space_id, epoch,
+  writer_pk, cert_sig}`, `cert_sig` the space AUTHORITY signature over
+  `b"space-writer-key-cert:v1:"` + canonical JSON of the other four fields.
+  It rides the content-epoch notice: the owner's notice (inside its
+  household signature) pins the key of the epoch it confirms; a delegated
+  admin's pins only an epoch the +1 rule already let the GFS's `current`
+  reach, never over an existing pin.
+- **Delivery: `writer_key`** = `{writer_key_suite, space_id, epoch,
+  writer_seed, writer_key_cert}` — SECRET, so it rides only inside the
+  per-peer encrypted payload of the four channels that carry the writer
+  cert (rekey `per_peer`, roster snapshot, redeem ACK `space_meta`, v_44
+  rotation bundle), only to a v_50 household holding a publishing scope in a
+  strict space. The receiver verifies the cert against its pinned space key
+  and that the seed's public half is `writer_pk`, then stores the grant
+  KEK-wrapped (AES-GCM, AAD `socialhome-writer-key:<space_id>:<epoch>`) on
+  that epoch's `space_keys.writer_key`. Rotates with every content epoch, so
+  every revocation (a rotation) retires it.
+- **Anonymous publish** — `POST /gfs/member-publish-anon`: `writer_sig` is
+  Ed25519 under the writer key over `b"gfs-member-publish-anon:v1:"` +
+  canonical JSON of `{gfs_instance_id, ts, nonce, target, event_type:
+  "space_item", epoch, payload, writer_sig_suite}`. `gfs_instance_id` binds
+  it to one server, `ts` (±300 s) and a random `nonce` make every attempt
+  unique (the GFS refuses an exact copy for 600 s). No household key, no
+  household signature, no plaintext cert: the writer cert stays inside the
+  AES-GCM payload, where receivers check it exactly as in trusted mode.
+- **Suite.** `writer_key_suite` / `writer_sig_suite` =
+  `WRITER_KEY_SUITE_ED25519 = "ed25519"` (`SUPPORTED_WRITER_KEY_SUITES`,
+  unknown → `UnsupportedWriterKeySuite`, never a default) — the algorithm of
+  `writer_pk`, of `writer_sig` and of the authority signature over the
+  cert. Phase 2 adds a hybrid sibling.
+- **Why a new key** (the "no new key" rule): the content key is held by every
+  reader including GFS followers, so it cannot authorize a write; the
+  authority seed must not spread to every publisher; the household identity
+  key is exactly what strict mode withholds from the server.
+
 **GFS capability block** (`capabilities_sig.py`) — `GET
 /gfs/info` is unauthenticated, so the capability that decides whether a
 household may relay identity-free (`anonymous_publish`) is signed with the

@@ -404,8 +404,24 @@ class SpaceInviteTokenRedeemCoordinator:
                 redeemer_instance_id,
             )
             return
-        if cert is not None:
-            meta["writer_cert"] = cert
+        if cert is None:
+            return
+        meta["writer_cert"] = cert
+        # v_50 — in a strict space, the epoch's writer group key too.
+        try:
+            key = await self._writer_certs.writer_key_for_peer(
+                str(ack_body.get("space_id") or ""),
+                redeemer_instance_id,
+                epoch=cert.get("epoch"),
+            )
+        except Exception:
+            log.exception(
+                "invite redeem: writer key for %s could not be issued",
+                redeemer_instance_id,
+            )
+            return
+        if key is not None:
+            meta["writer_key"] = key
 
     def attach_bootstrap(
         self,
@@ -791,6 +807,13 @@ class SpaceInviteTokenRedeemCoordinator:
                     and self._writer_certs is not None
                 ):
                     await self._writer_certs.accept(space_id, meta.get("writer_cert"))
+                if (
+                    meta.get("writer_key") is not None
+                    and self._writer_certs is not None
+                ):
+                    await self._writer_certs.accept_writer_key(
+                        space_id, meta.get("writer_key")
+                    )
                 await self._spaces.save_member(
                     SpaceMember(
                         space_id=space_id,

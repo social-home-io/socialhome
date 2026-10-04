@@ -1,0 +1,48 @@
+-- Strict (anonymous) member publish over the connection server (v_50) —
+-- ``spaces.gfs_publish_mode`` and ``space_keys.writer_key``.
+--
+-- ``spaces.gfs_publish_mode``: the space OWNER's choice of how member
+-- households publish over a connection server (GFS) — ``'trusted'``
+-- (identified; today's behaviour and the default) or ``'strict'`` (anonymous,
+-- signed with the epoch's writer group key). Owner-only, federated in
+-- ``SPACE_CONFIG_CHANGED`` like every feature flag, pinned on host inbound.
+--
+-- ``space_keys.writer_key``: the writer GROUP key grant this household holds
+-- for that (space, epoch) — the Ed25519 seed every publish-capable household
+-- of a strict space signs its anonymous publishes with, plus the authority
+-- cert that pins its public half — KEK-wrapped exactly like
+-- ``content_key_hex`` (AAD = space id + epoch). Seed holders store nothing:
+-- they derive it from the space seed (``socialhome/writer_key.py``).
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every path that touches this data. Space features live one
+--       column each on ``spaces`` (``space_repo._save_statement``,
+--       ``SpaceFeatures.to_columns``); no existing column states how members
+--       publish over a GFS (``allow_subscribers`` is readability,
+--       ``delegated_admin_authority`` is seed sharing). The writer key arrives
+--       with, and is bound to, one epoch's writer cert, which already lives on
+--       that epoch's ``space_keys`` row (0074): the rekey per-peer copy, the
+--       roster snapshot, the redeem ACK and the authority-rotation bundle
+--       carry both side by side.
+--   (2) Alternatives considered and rejected. Mode: a JSON settings blob — no
+--       such column exists, and a CHECK beats a convention; reading the mode
+--       off the GFS — the household must decide BEFORE it talks to any GFS
+--       (an identified request is the very leak strict mode prevents).
+--       Writer key: deriving it on every household — only seed holders can
+--       (HKDF over the authority seed, which must not spread); reusing the
+--       content key — every reader and GFS follower holds it, so it cannot
+--       authorize a write; folding it into the ``writer_cert`` JSON — that
+--       column is a public statement verified as a WriterCert, while the
+--       writer key is a SECRET that must be KEK-wrapped; a new table — one
+--       grant per (space, epoch), exactly the key row's grain, which dies
+--       with that epoch (and the space's ON DELETE CASCADE) for free.
+--   (3) Smallest possible change: two additive ``ADD COLUMN``s. The mode is
+--       ``NOT NULL DEFAULT 'trusted'`` with a CHECK on its two values — every
+--       existing space reads today's behaviour, nothing is rewritten. The
+--       grant is NULL-defaulted: an existing key row holds none, which is
+--       exactly the pre-v_50 state. It is cleared, like ``writer_cert``, when
+--       a v_44 baseline reset replaces the row's key.
+ALTER TABLE spaces ADD COLUMN gfs_publish_mode TEXT NOT NULL DEFAULT 'trusted'
+    CHECK (gfs_publish_mode IN ('trusted', 'strict'));
+ALTER TABLE space_keys ADD COLUMN writer_key TEXT;

@@ -409,6 +409,43 @@ class GfsSpaceEpoch:
 
 
 @dataclass(slots=True, frozen=True)
+class GfsSpaceStrictState:
+    """What this server knows for strict-mode member publish (v_50,
+    migration 0015): the owner's ``publish_mode`` and the pinned writer group
+    keys of the newest and the previous content epoch.
+
+    Kept off :class:`GlobalSpace` so the public directory never shows it. The
+    keys are cleared on an authority re-pin; the mode (the owner's household-
+    signed statement) is not.
+    """
+
+    space_id: str
+    publish_mode: str = "trusted"
+    mode_at: int | None = None
+    writer_key_epoch: int | None = None
+    writer_key_pk: str | None = None
+    writer_key_prev_epoch: int | None = None
+    writer_key_prev_pk: str | None = None
+
+    @property
+    def strict(self) -> bool:
+        return self.publish_mode == "strict"
+
+    def writer_pk_for(self, epoch: int) -> str | None:
+        """The pinned writer public key (b64url) for ``epoch``, or ``None``.
+        Only the newest and the previous pin are kept; freshness (the grace
+        on the previous epoch) is :meth:`GfsSpaceEpoch.admits`'s job."""
+        if self.writer_key_epoch is not None and epoch == self.writer_key_epoch:
+            return self.writer_key_pk
+        if (
+            self.writer_key_prev_epoch is not None
+            and epoch == self.writer_key_prev_epoch
+        ):
+            return self.writer_key_prev_pk
+        return None
+
+
+@dataclass(slots=True, frozen=True)
 class GfsInviteToken:
     """One owner-minted space invite, parked on this server's bulletin board.
 

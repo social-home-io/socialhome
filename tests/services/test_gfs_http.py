@@ -15,17 +15,48 @@ from socialhome.services.gfs_http import (
 
 
 class _Content:
-    def __init__(self, raw: bytes):
+    """A stream: ``read(n)`` consumes, at most ``chunk`` bytes per call —
+    like aiohttp's ``StreamReader``, which returns what has arrived."""
+
+    def __init__(self, raw: bytes, *, chunk: int | None = None):
         self._raw = raw
+        self._chunk = chunk
+        self.reads = 0
 
     async def read(self, n: int = -1) -> bytes:
-        return self._raw if n < 0 else self._raw[:n]
+        self.reads += 1
+        size = len(self._raw) if n < 0 else n
+        if self._chunk is not None:
+            size = min(size, self._chunk)
+        out, self._raw = self._raw[:size], self._raw[size:]
+        return out
 
 
 class _Resp:
-    def __init__(self, raw: bytes, *, content_length: int | None = None):
-        self.content = _Content(raw)
+    def __init__(
+        self,
+        raw: bytes,
+        *,
+        content_length: int | None = None,
+        chunk: int | None = None,
+    ):
+        self.content = _Content(raw, chunk=chunk)
         self.content_length = len(raw) if content_length is None else content_length
+
+
+async def test_a_body_split_over_many_chunks_is_read_whole():
+    """Regression: one ``read(n)`` returns only the chunk that has arrived —
+    a large listing used to be parsed half-read ("Unterminated string")."""
+    body = json.dumps({"spaces": [{"icon": "x" * 5000}] * 3}).encode()
+    resp = _Resp(body, chunk=1024)
+    assert await read_json_capped(resp, url="u", limit=1 << 20) == json.loads(body)
+    assert resp.content.reads > 1
+
+
+async def test_a_chunked_body_over_the_cap_is_refused():
+    resp = _Resp(b"[" + b"1," * 600 + b"1]", content_length=None, chunk=100)
+    resp.content_length = None
+    assert await read_json_capped(resp, url="u", limit=500) is None
 
 
 async def test_parses_a_normal_body():

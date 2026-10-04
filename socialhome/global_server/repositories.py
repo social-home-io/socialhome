@@ -38,6 +38,7 @@ from .domain import (
     GfsMomentFollow,
     GfsQueuedEnvelope,
     GfsSpaceEpoch,
+    GfsSpaceStrictState,
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GfsUserPicture,
@@ -346,6 +347,11 @@ class SqliteGfsFederationRepo:
             " content_epoch=NULL, content_epoch_confirmed=NULL,"
             " content_epoch_prev=NULL, content_epoch_seen_at=NULL,"
             " content_epoch_raised_at=NULL,"
+            # v_50: so are the writer-key pins — a key cert signed by the old
+            # authority means nothing now. The publish mode stays (it is the
+            # owner's household-signed statement, not an authority one).
+            " writer_key_epoch=NULL, writer_key_pk=NULL,"
+            " writer_key_prev_epoch=NULL, writer_key_prev_pk=NULL,"
             " authority_rotation_seq=CASE WHEN authority_rotation_seq >= ?"
             " THEN ? ELSE authority_rotation_seq + 1 END"
             " WHERE space_id=? AND COALESCE(identity_public_key, '')=?"
@@ -2189,6 +2195,14 @@ class AbstractGfsSpaceEpochRepo(Protocol):
         self, space_id: str, epoch: int, *, now: int, min_interval_s: int
     ) -> bool: ...
 
+    async def get_strict(self, space_id: str) -> GfsSpaceStrictState | None: ...
+
+    async def set_publish_mode(self, space_id: str, mode: str, *, at: int) -> bool: ...
+
+    async def pin_writer_key(
+        self, space_id: str, epoch: int, writer_pk: str, *, replace: bool
+    ) -> bool: ...
+
 
 class SqliteGfsSpaceEpochRepo:
     """SQLite-backed :class:`AbstractGfsSpaceEpochRepo` over the
@@ -2254,6 +2268,85 @@ class SqliteGfsSpaceEpochRepo:
             " AND content_epoch = ? - 1"
             " AND COALESCE(content_epoch_raised_at, 0) <= ?",
             (epoch, now, space_id, epoch, now - min_interval_s),
+        )
+        return changed > 0
+
+    # ── Strict mode (v_50, migration 0015) ───────────────────────────────
+
+    async def get_strict(self, space_id: str) -> GfsSpaceStrictState | None:
+        """The space's publish mode and writer-key pins, or ``None`` for a
+        space this server does not list."""
+        row = _as_dict(
+            await self._db.fetchone(
+                "SELECT member_publish_mode, member_publish_mode_at,"
+                " writer_key_epoch, writer_key_pk,"
+                " writer_key_prev_epoch, writer_key_prev_pk"
+                " FROM global_spaces WHERE space_id=?",
+                (space_id,),
+            )
+        )
+        if not row:
+            return None
+
+        def _int(name: str) -> int | None:
+            value = row.get(name)
+            return int(value) if value is not None else None
+
+        return GfsSpaceStrictState(
+            space_id=space_id,
+            publish_mode=str(row.get("member_publish_mode") or "trusted"),
+            mode_at=_int("member_publish_mode_at"),
+            writer_key_epoch=_int("writer_key_epoch"),
+            writer_key_pk=row.get("writer_key_pk"),
+            writer_key_prev_epoch=_int("writer_key_prev_epoch"),
+            writer_key_prev_pk=row.get("writer_key_prev_pk"),
+        )
+
+    async def set_publish_mode(self, space_id: str, mode: str, *, at: int) -> bool:
+        """The OWNER's notice states ``mode`` at ``at`` (its signed ``ts``, unix
+        seconds). Lands only when no older-or-equal statement is newer — a
+        replayed older notice never moves the mode back. The CHECK constraint
+        refuses any other value. Returns whether the row changed."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE global_spaces SET member_publish_mode=?,"
+            " member_publish_mode_at=?"
+            " WHERE space_id=?"
+            " AND (member_publish_mode_at IS NULL OR member_publish_mode_at <= ?)",
+            (mode, at, space_id, at),
+        )
+        return changed > 0
+
+    async def pin_writer_key(
+        self, space_id: str, epoch: int, writer_pk: str, *, replace: bool
+    ) -> bool:
+        """Pin ``writer_pk`` (b64url) as the writer key of ``epoch``. A newer
+        epoch than the pinned one moves that pin to the ``prev`` slot; the
+        same epoch is overwritten only with ``replace`` (the OWNER may correct
+        a pin, nobody else may); an older epoch changes nothing. One
+        statement — SET expressions read the pre-update row. Callers verify
+        the authority cert and the epoch tier first. Returns whether the row
+        changed."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE global_spaces SET"
+            " writer_key_prev_epoch=CASE WHEN writer_key_epoch IS NOT NULL"
+            "  AND ? > writer_key_epoch THEN writer_key_epoch"
+            "  ELSE writer_key_prev_epoch END,"
+            " writer_key_prev_pk=CASE WHEN writer_key_epoch IS NOT NULL"
+            "  AND ? > writer_key_epoch THEN writer_key_pk"
+            "  ELSE writer_key_prev_pk END,"
+            " writer_key_epoch=?, writer_key_pk=?"
+            " WHERE space_id=? AND (writer_key_epoch IS NULL"
+            "  OR ? > writer_key_epoch OR (? = 1 AND ? = writer_key_epoch))",
+            (
+                epoch,
+                epoch,
+                epoch,
+                writer_pk,
+                space_id,
+                epoch,
+                1 if replace else 0,
+                epoch,
+            ),
         )
         return changed > 0
 

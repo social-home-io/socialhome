@@ -53,6 +53,7 @@ from socialhome.services.gfs_member_publish_service import (
 )
 from socialhome.services.gfs_publish_retry import GfsPublish
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
+from socialhome.writer_key import derive_writer_seed, issue_writer_key_grant
 
 SPACE_ID = "sp-pub"
 AUTHOR = "u-me"
@@ -94,6 +95,8 @@ class _Certs:
         self.holder = holder
         self.scope: str | None = scope
         self.users: list[str] = [AUTHOR]
+        self.strict_epochs: set[int] = set()
+        self.pin_epochs: set[int] = set()
 
     async def own_cert(self, space_id, epoch) -> WriterCert | None:
         if self.scope is None:
@@ -110,6 +113,20 @@ class _Certs:
     async def current_own_cert_wire(self, space_id):
         cert = await self.own_cert(space_id, 3)
         return cert.to_wire() if cert is not None else None
+
+    # v_50 — strict mode: the writer group key, when this household holds
+    # one (``strict_epochs``), derived like a real seed holder would.
+    async def own_writer_key(self, space_id, epoch) -> bytes | None:
+        if epoch not in self.strict_epochs:
+            return None
+        return derive_writer_seed(SPACE_SEED, space_id, epoch)
+
+    async def writer_key_cert_wire(self, space_id, epoch) -> dict | None:
+        if epoch not in self.pin_epochs:
+            return None
+        return issue_writer_key_grant(
+            space_seed=SPACE_SEED, space_id=space_id, epoch=epoch
+        ).writer_key_cert.to_wire()
 
 
 @dataclass
@@ -156,7 +173,14 @@ class _Gfs:
     def __init__(self, session: aiohttp.ClientSession, *, capable: bool = True):
         self.session = session
         self.capable = capable
+        self.strict_capable = True
         self.subscribed: list[tuple[str, str]] = []
+        #: Every request that went over the IDENTIFIED session (``client``),
+        #: so strict-mode tests can prove nothing identified left.
+        self.identified_calls = 0
+
+    async def member_publish_strict_supported(self, conn):
+        return self.strict_capable
 
     def client(self):
         return self.session
@@ -817,3 +841,254 @@ def test_an_item_past_the_largest_bucket_is_left_unpadded():
     pt = build_item_plaintext("post", {"content": "x" * (ITEM_SIZE_BUCKETS[-1] + 1)})
     assert len(pt) > ITEM_SIZE_BUCKETS[-1]
     assert parse_item_plaintext(pt) is not None
+
+
+# ── Strict mode (v_50) ───────────────────────────────────────────────────
+
+
+def _strict_space(**kw) -> Space:
+    space = _space(**kw)
+    return replace(space, features=replace(space.features, gfs_publish_mode="strict"))
+
+
+async def _gfs_strict(world, epoch: int = 3) -> None:
+    """Put the real GFS where the owner's v_50 notice would: epoch confirmed,
+    strict, the writer key pinned."""
+    epochs = world["app"][gfs_space_epoch_repo_key]
+    await epochs.confirm(SPACE_ID, epoch, now=int(time.time()))
+    await epochs.set_publish_mode(SPACE_ID, "strict", at=int(time.time()))
+    wkc = issue_writer_key_grant(
+        space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=epoch
+    ).writer_key_cert
+    await epochs.pin_writer_key(SPACE_ID, epoch, wkc.writer_pk, replace=True)
+
+
+class _Recorder:
+    """Wraps an aiohttp session and records every POST (url, json)."""
+
+    def __init__(self, session: aiohttp.ClientSession) -> None:
+        self._session = session
+        self.posts: list[tuple[str, dict]] = []
+
+    def post(self, url, *, json=None, **kw):
+        self.posts.append((str(url), json))
+        return self._session.post(url, json=json, **kw)
+
+    def get(self, *a, **kw):
+        return self._session.get(*a, **kw)
+
+
+def _strict_world(world, *, key: bool = True):
+    world["spaces"].spaces[SPACE_ID] = _strict_space(owner=world["owner"].instance_id)
+    if key:
+        world["svc"]._writer_certs.strict_epochs.add(3)
+    gfs = world["gfs"]
+    identified = _Recorder(world["tc"].session)
+    anon = _Recorder(world["tc"].session)
+    gfs.client = lambda: identified  # type: ignore[method-assign]
+    gfs.publish_client = lambda: anon  # type: ignore[method-assign]
+    return identified, anon
+
+
+@pytest.mark.security
+async def test_strict_publishes_anonymously_over_the_cookie_less_session(world):
+    await _gfs_strict(world)
+    identified, anon = _strict_world(world)
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    assert [c.id for c in targets] == ["conn-1"]
+    accepted = await svc.publish_post(SPACE_ID, _inner(), targets)
+    assert [c.id for c in accepted] == ["conn-1"]
+    # Nothing went over the identified session — no publish, no subscribe.
+    assert identified.posts == []
+    assert world["gfs"].subscribed == []
+    [(url, body)] = [p for p in anon.posts if p[0].endswith("/gfs/member-publish-anon")]
+    for forbidden in ("instance_id", "signature", "writer_cert"):
+        assert forbidden not in body
+    assert world["me"].instance_id not in json.dumps(body)
+    assert b64url_encode(world["me"].pk) not in json.dumps(body)
+    # The subscriber gets a cert-less frame; the cert is inside the ciphertext.
+    [row] = await _queued(world)
+    assert "writer_cert" not in row.sealed
+    item_type, got = parse_item_plaintext(
+        world["crypto"].decrypt(row.sealed["payload"])
+    )
+    assert item_type == "post"
+    assert got["writer_cert"]["writer_user_ids"] == [AUTHOR]
+
+
+@pytest.mark.security
+async def test_strict_without_the_writer_key_takes_the_host_path(world):
+    await _gfs_strict(world)
+    identified, anon = _strict_world(world, key=False)
+    svc = world["svc"]
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
+    # Even handed targets, the item is never sent identified.
+    assert await svc.publish_post(SPACE_ID, _inner(), [world["conn"]]) == []
+    assert identified.posts == [] and anon.posts == []
+    assert world["gfs"].subscribed == []
+
+
+@pytest.mark.security
+async def test_strict_without_a_strict_capable_server_takes_the_host_path(world):
+    identified, anon = _strict_world(world)
+    world["gfs"].strict_capable = False
+    svc = world["svc"]
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
+    assert await svc.publish_post(SPACE_ID, _inner(), [world["conn"]]) == []
+    assert identified.posts == [] and anon.posts == []
+
+
+@pytest.mark.security
+async def test_strict_a_403_from_the_server_is_final_and_never_downgraded(world):
+    # The GFS pinned no writer key: the anonymous publish is refused, and
+    # the household does NOT retry identified — the host path carries it.
+    identified, anon = _strict_world(world)
+    svc = world["svc"]
+    assert await svc.publish_post(SPACE_ID, _inner(), [world["conn"]]) == []
+    assert any(u.endswith("/gfs/member-publish-anon") for u, _ in anon.posts)
+    assert identified.posts == []
+    assert not svc._retry.pending(world["conn"].id)
+
+
+@pytest.mark.security
+async def test_a_queued_identified_item_is_dropped_once_the_space_is_strict(world):
+    svc = world["svc"]
+    data = {
+        "epoch": 3,
+        "writer_cert": (await svc._writer_certs.own_cert(SPACE_ID, 3)).to_wire(),
+        "payload": "Y3Q",
+    }
+    identified, _anon = _strict_world(world, key=False)
+    outcome = await svc._post_item(world["conn"], SPACE_ID, data)
+    assert outcome.kind == "permanent"
+    assert identified.posts == []
+
+
+async def test_strict_retry_re_signs_with_a_fresh_nonce(world):
+    await _gfs_strict(world)
+    _identified, anon = _strict_world(world)
+    svc = world["svc"]
+    data = {"epoch": 3, "payload": "Y3Q"}
+    first = await svc._post_anon_item(world["conn"], SPACE_ID, data)
+    second = await svc._post_anon_item(world["conn"], SPACE_ID, data)
+    assert first.kind == second.kind == "delivered"
+    a, b = (body for _u, body in anon.posts)
+    assert a["nonce"] != b["nonce"] and a["writer_sig"] != b["writer_sig"]
+
+
+async def test_strict_retry_without_the_key_any_more_is_dropped(world):
+    _identified, anon = _strict_world(world)
+    svc = world["svc"]
+    svc._writer_certs.strict_epochs.clear()
+    outcome = await svc._post_anon_item(
+        world["conn"], SPACE_ID, {"epoch": 3, "payload": "Y3Q"}
+    )
+    assert outcome.kind == "permanent"
+    assert anon.posts == []
+
+
+async def test_strict_retry_needs_the_strict_capability(world):
+    _strict_world(world)
+    svc = world["svc"]
+    world["gfs"].strict_capable = False
+    item = GfsPublish(
+        space_id=SPACE_ID,
+        event_type="space_item_anon",
+        payload={"epoch": 3, "payload": "x"},
+    )
+    assert (await svc._retry_send("conn-1", item)).kind == "permanent"
+
+
+async def test_strict_without_a_cookie_less_session_sends_nothing(world):
+    identified, _anon = _strict_world(world)
+    world["gfs"].publish_client = lambda: None  # type: ignore[method-assign]
+    outcome = await world["svc"]._post_anon_item(
+        world["conn"], SPACE_ID, {"epoch": 3, "payload": "Y3Q"}
+    )
+    assert outcome.kind == "permanent"
+    assert identified.posts == []
+
+
+async def test_a_held_writer_key_goes_anonymous_even_before_the_mode_arrives(world):
+    """The key is only ever handed out in a strict space, so holding one for
+    the epoch is reason enough to publish anonymously — a member that got the
+    rekey before the config change never sends identified in between."""
+    await _gfs_strict(world)
+    world["svc"]._writer_certs.strict_epochs.add(3)
+    identified = _Recorder(world["tc"].session)
+    world["gfs"].client = lambda: identified  # type: ignore[method-assign]
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    assert await svc.publish_post(SPACE_ID, _inner(), targets)
+    assert identified.posts == []
+
+
+async def test_strict_comments_go_anonymous_too(world):
+    await _gfs_strict(world)
+    identified, anon = _strict_world(world)
+    svc = world["svc"]
+    svc._writer_certs.scope = "comment"
+    targets = await svc.plan_item(SPACE_ID, AUTHOR, "comment")
+    assert await svc.publish_item(SPACE_ID, "comment", {"item_target": "c"}, targets)
+    assert identified.posts == []
+
+
+async def test_the_owner_notice_carries_the_mode_and_the_writer_key_pin(world):
+    world["spaces"].spaces[SPACE_ID] = _strict_space(owner=world["owner"].instance_id)
+    owner_svc = _owner_svc(world)
+    owner_svc._writer_certs.pin_epochs.add(3)
+    assert await owner_svc.announce_epoch(SPACE_ID) == 1
+    epochs = world["app"][gfs_space_epoch_repo_key]
+    state = await epochs.get_strict(SPACE_ID)
+    assert state.strict
+    assert state.writer_pk_for(3) is not None
+    assert (await epochs.get(SPACE_ID)).confirmed == 3
+
+
+async def test_switching_back_to_trusted_reaches_the_server(world):
+    world["spaces"].spaces[SPACE_ID] = _strict_space(owner=world["owner"].instance_id)
+    owner_svc = _owner_svc(world)
+    await owner_svc.announce_epoch(SPACE_ID)
+    world["spaces"].spaces[SPACE_ID] = _space(owner=world["owner"].instance_id)
+    await owner_svc.announce_epoch(SPACE_ID)
+    state = await world["app"][gfs_space_epoch_repo_key].get_strict(SPACE_ID)
+    assert not state.strict
+
+
+async def test_a_v49_server_gets_the_v49_notice(world):
+    world["spaces"].spaces[SPACE_ID] = _strict_space(owner=world["owner"].instance_id)
+    owner_svc = _owner_svc(world)
+    owner_svc._writer_certs.pin_epochs.add(3)
+    world["gfs"].strict_capable = False
+    identified = _Recorder(world["tc"].session)
+    world["gfs"].client = lambda: identified  # type: ignore[method-assign]
+    assert await owner_svc.announce_epoch(SPACE_ID) == 1
+    [(_url, body)] = identified.posts
+    assert "publish_mode" not in body and "writer_key_cert" not in body
+
+
+async def test_a_delegated_admin_notice_carries_only_the_writer_key_pin(world):
+    world["spaces"].spaces[SPACE_ID] = _strict_space(owner="someone-else")
+    world["spaces"].seeds[SPACE_ID] = SPACE_SEED
+    svc = world["svc"]
+    svc._writer_certs.pin_epochs.add(3)
+    anon = _Recorder(world["tc"].session)
+    world["gfs"].publish_client = lambda: anon  # type: ignore[method-assign]
+    await svc.announce_epoch(SPACE_ID)
+    [(_url, body)] = [p for p in anon.posts if p[0].endswith("/epoch")]
+    assert "writer_key_cert" in body
+    assert "publish_mode" not in body and "owning_instance" not in body
+
+
+async def test_strict_auto_subscribe_is_the_plain_follower_subscribe(world):
+    """The member auto-subscribe calls the very same signed subscribe a
+    follower's subscribe / re-subscribe uses — ``(space_id, gfs_id)`` and
+    nothing else — so the server cannot tell a writer from a follower."""
+    _strict_world(world)
+    world["spaces"].local[SPACE_ID] = [AUTHOR]
+    world["spaces"].members[SPACE_ID] = [
+        SpaceMember(space_id=SPACE_ID, user_id=AUTHOR, role="member", joined_at="")
+    ]
+    assert await world["svc"].ensure_subscribed(SPACE_ID) == 1
+    assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]

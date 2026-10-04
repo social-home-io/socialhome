@@ -2948,6 +2948,7 @@ def create_app(config: Config | None = None) -> web.Application:
             space_key_repo=space_key_repo,
             own_instance_id=real_instance_id,
             own_identity_pk=identity_pk,
+            key_manager=key_manager,
         )
         real_space_service.attach_writer_certs(writer_certs)
 

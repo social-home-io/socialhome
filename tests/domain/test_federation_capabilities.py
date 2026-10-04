@@ -6,7 +6,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 49
+    assert fc.OURS == 50
 
 
 def test_space_authority_rotation_capability_threshold():
@@ -31,11 +31,13 @@ def test_space_authority_rotation_capability_threshold():
         "Role changes from member households",
         "Host-sequenced shared pages",
         "Space writer certificates",
+        "Anonymous posting over the connection server",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
         "Host-sequenced shared pages",
         "Space writer certificates",
+        "Anonymous posting over the connection server",
     ]
 
 
@@ -57,6 +59,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Role changes from member households",
         "Host-sequenced shared pages",
         "Space writer certificates",
+        "Anonymous posting over the connection server",
     ]
 
 
@@ -504,6 +507,7 @@ def test_forwarded_role_change_capability_threshold():
     assert fc.features_missing_below(47) == [
         "Host-sequenced shared pages",
         "Space writer certificates",
+        "Anonymous posting over the connection server",
     ]
 
 
@@ -516,7 +520,10 @@ def test_host_sequenced_pages_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.space_features_missing_below(47) == ["Host-sequenced shared pages"]
-    assert fc.features_missing_below(48) == ["Space writer certificates"]
+    assert fc.features_missing_below(48) == [
+        "Space writer certificates",
+        "Anonymous posting over the connection server",
+    ]
 
 
 def test_member_gfs_publish_capability_threshold():
@@ -527,4 +534,17 @@ def test_member_gfs_publish_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(49) == []
+    assert fc.features_missing_below(49) == [
+        "Anonymous posting over the connection server"
+    ]
+
+
+def test_strict_member_publish_capability_threshold():
+    """v_50 — strict member publish. Not space-scoped: an older member
+    household simply gets no writer key and its items take the host path."""
+    assert fc.FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH == 50
+    assert fc.FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH == fc.OURS
+    assert fc.FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(50) == []

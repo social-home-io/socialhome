@@ -2817,6 +2817,30 @@ class FederationInboundService(ProtectionGateMixin):
                     event.from_instance,
                 )
             refreshed = replace(refreshed, features=pinned)
+        # v_50 — ``gfs_publish_mode`` is the OWNER's alone on EVERY household,
+        # not only the host: a member that mirrored a delegated admin's
+        # strict → trusted flip would start publishing IDENTIFIED requests to
+        # the connection server — the very leak strict mode prevents (the
+        # server refuses them, but it has seen them). Only the owner
+        # household's own word moves it; otherwise keep what we store.
+        if (
+            not is_owner
+            and refreshed.features.gfs_publish_mode
+            != existing.features.gfs_publish_mode
+        ):
+            log.info(
+                "SPACE_CONFIG_CHANGED for %s from %s tried to change the "
+                "owner-only gfs_publish_mode — kept the stored value",
+                space_id,
+                event.from_instance,
+            )
+            refreshed = replace(
+                refreshed,
+                features=replace(
+                    refreshed.features,
+                    gfs_publish_mode=existing.features.gfs_publish_mode,
+                ),
+            )
         refreshed = keep_local_space_state(
             refreshed,
             existing=existing,

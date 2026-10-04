@@ -733,6 +733,7 @@ python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
 python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-member-publish
+python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
@@ -757,6 +758,26 @@ the delete from the member relay alone; the GFS log carries none of the text.
 After a restarts and catches up, a holds the second post deleted, and a's
 relayed copy of its create never resurrects it on d (receiver dedupe against
 the soft-deleted row). Reads d's / a's DB for these checks (no REST bucket).
+
+### ``gfs-member-publish-strict`` — anonymous member publish (v_50)
+
+Needs ``gfs-member-publish``. The owner a switches its global space to
+``gfs_publish_mode = "strict"`` (that rotates the content key: e gets the
+new epoch's writer group key over the relay, and the GFS gets the owner's
+notice with the mode and the writer key pin — the step waits for both).
+Then **a** and **d** are stopped and e posts: e's publisher signs ``POST
+/gfs/member-publish-anon`` with the writer key over its cookie-less session.
+Asserts the GFS access log shows the anonymous route and no identified
+``/gfs/member-publish``, no GFS log line about the publish names e, and the
+row the GFS stored for offline d carries no ``writer_cert`` and nothing of
+e's (instance id, identity key). d restarts, drains the queue and decrypts
+the post. An IDENTIFIED publish into the strict space — built by the harness
+with e's real household key (KEK-unwrapped from e's data dir) and e's real
+writer cert, i.e. what a v_49 or misconfigured household would send — is
+refused 403. Finally a restarts, catches the post up, and switches the space
+back to trusted (the GFS follows). ``verify`` then checks e's stored writer
+group key for the strict epoch unwraps and verifies (the v_50 tripwire).
+Polls every 3 s, backs off on 429.
 
 ### ``gfs-cluster`` — a multi-process GFS on one shared DB
 

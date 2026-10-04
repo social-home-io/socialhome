@@ -101,12 +101,19 @@ class GfsInfoView(GfsBaseView):
         # because a household sends an IDENTIFIED body only to a server that
         # opted in — a forged flag must not be able to make it reveal itself
         # to a server that never agreed to the trusted-mode contract.
+        # ``member_publish_strict`` (v_50): this GFS carries the anonymous
+        # ``POST /gfs/member-publish-anon`` (writer-group-key-signed), takes
+        # ``publish_mode`` / ``writer_key_cert`` on the epoch notice, and
+        # refuses identified publishes into a strict space. Signed because a
+        # household only adds those notice fields for a server that verifies
+        # them (an older one would refuse the owner's notice outright).
         capabilities = {
             "anonymous_publish": True,
             "envelope_relay": True,
             "invite_links": True,
             "authority_rotation": True,
             "member_publish_trusted": True,
+            "member_publish_strict": True,
         }
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {
