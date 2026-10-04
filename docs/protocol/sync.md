@@ -248,7 +248,13 @@ Two additions close it:
 - **Trigger** — a startup sweep (~45 s after boot, once the
   capabilities exchange has settled) plus every periodic tick walk the
   local spaces whose `owner_instance_id` is neither us nor a confirmed
-  peer, and call `begin_mesh_catchup_sync` for each. That path — unlike
+  peer **and in which we hold a local seat other than a follower
+  (`subscriber`) one**, and call `begin_mesh_catchup_sync` for each. A
+  PUBLIC space we only follow over a GFS (or merely mirror from a
+  listing, with no seat) is skipped: contacting its host would tell it we
+  exist and are interested, and the GFS shields followers from hosts. The
+  same filter governs the mesh version announcement (see
+  [`spaces.md`](spaces.md#writer-certificates-v_49)). That path — unlike
   `enqueue_sync_for_space` — registers the requester-side receive
   session the routed `SPACE_SYNC_CHUNK` replies need. Attempts are
   capped (`MAX_MESH_CATCHUP_ATTEMPTS`) so an unreachable host can't burn

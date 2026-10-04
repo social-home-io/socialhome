@@ -49,7 +49,7 @@ from ....domain.events import (
     SpaceSyncDeferred,
 )
 from ....domain.federation import FederationEventType, PairingStatus
-from ....domain.space import Space, SpaceType
+from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
 
@@ -496,7 +496,9 @@ class SpaceSyncScheduler:
 
         ``Space.owner_instance_id`` is the host, so the predicate is exact
         rather than a heuristic: a space we don't own whose owner is not a
-        confirmed peer is reachable only over the mesh. Deliberately calls
+        confirmed peer is reachable only over the mesh. Only spaces we hold
+        a non-follower seat in (:meth:`_list_joined_remote_spaces`) — a
+        space we only follow over a GFS never reveals us to its host. Deliberately calls
         ``begin_mesh_catchup_sync`` and NOT ``enqueue_sync_for_space`` —
         the latter ships a bare ``send_event`` with no requester-side
         receive session, which cannot serve a mesh host at all.
@@ -514,10 +516,8 @@ class SpaceSyncScheduler:
         30-minute tick (#648).
         """
         pending = 0
-        for space in await self._list_local_spaces():
+        for space in await self._list_joined_remote_spaces():
             host = space.owner_instance_id
-            if not host or host == self._own_instance_id:
-                continue
             key = (space.id, host)
             if key in self._mesh_catchup_done:
                 # Sentinel observed — this pair is genuinely caught up.
@@ -560,12 +560,7 @@ class SpaceSyncScheduler:
         pending = 0
         try:
             hosts = sorted(
-                {
-                    s.owner_instance_id
-                    for s in await self._list_local_spaces()
-                    if s.owner_instance_id
-                    and s.owner_instance_id != self._own_instance_id
-                }
+                {s.owner_instance_id for s in await self._list_joined_remote_spaces()}
             )
         except Exception:  # pragma: no cover — defensive
             log.exception("space-sync-scheduler: listing mesh hosts failed")
@@ -585,6 +580,26 @@ class SpaceSyncScheduler:
             else:
                 pending += 1
         return pending
+
+    async def _list_joined_remote_spaces(self) -> list[Space]:
+        """Spaces hosted elsewhere in which this household holds a local
+        seat other than a follower (``subscriber``) one.
+
+        The mesh sweeps (catch-up BEGIN, version announcement) contact the
+        host directly, which tells it we exist and care about the space. A
+        PUBLIC space we only follow — or merely mirror from a GFS listing,
+        with no seat at all — must stay invisible to its host: the GFS
+        shields followers from hosts. Only real membership justifies it.
+        """
+        out: list[Space] = []
+        for space in await self._list_local_spaces():
+            host = space.owner_instance_id
+            if not host or host == self._own_instance_id:
+                continue
+            members = await self._space_repo.list_members(space.id)
+            if any(str(m.role) != SpaceRole.SUBSCRIBER.value for m in members):
+                out.append(space)
+        return out
 
     async def _list_local_spaces(self) -> list[Space]:
         spaces = (

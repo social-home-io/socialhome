@@ -1051,9 +1051,11 @@ origin-authenticated routed inner payload:
 * its `SPACE_PRIVATE_INVITE_ACCEPT` and its mesh `SPACE_INVITE_TOKEN_REDEEM`
   (so the seat's first credentials can follow at once), and
 * an `INSTANCE_CAPABILITIES_UPDATED` (`proto_version` + the claim) sent with
-  `send_with_mesh_fallback` to every space host it is not paired with, by
-  the space sync scheduler's mesh sweep (startup with retries, then each
-  periodic tick, once per host per process).
+  `send_with_mesh_fallback` to every space host it is not paired with and
+  holds a non-follower seat with, by the space sync scheduler's mesh sweep
+  (startup with retries, then each periodic tick, once per host per
+  process). A public space we only follow over a GFS never triggers it —
+  the GFS shields followers from hosts.
 
 The inner payload is sealed end to end to the host and the v_31
 routed-origin signature covers its ciphertext, so the relay can neither read
