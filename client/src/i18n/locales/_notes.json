@@ -107,5 +107,10 @@
   "invite.via.badge_gfs": "Small badge on an invite link row. Keep short.",
   "invite.via.badge_internal": "Small badge on an invite link row ('Local'). Keep short.",
   "invite.via.badge_legacy": "Small badge on a pre-existing invite link row. Keep short.",
-  "invite.via.badge_legacy_hint": "Tooltip on the earlier-link badge: explains it still works and that using it turns the GFS on."
+  "invite.via.badge_legacy_hint": "Tooltip on the earlier-link badge: explains it still works and that using it turns the GFS on.",
+  "onboarding.step_of": "Screen-reader label of the onboarding progress dots. {n} = current step, {total} = number of steps.",
+  "onboarding.gfs.title": "Title of the optional onboarding step. 'GFS' is a product term — keep it untranslated.",
+  "onboarding.gfs.intro": "First mention of the GFS on this screen, so it is spelled out once as 'GFS (Global Federation Server)'. Keep 'Global Federation Server' in English.",
+  "onboarding.gfs.checkbox": "Label of the opt-in checkbox (unchecked by default). {server} = the GFS host name, e.g. gfs.social-home.io.",
+  "onboarding.gfs.default_note": "'Settings → Connections' must match the app's navigation labels in your language."
 }

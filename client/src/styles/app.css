@@ -8909,6 +8909,96 @@ button.sh-shopping-item__text:focus-visible {
   gap: var(--sh-space-xs);
 }
 
+/* Onboarding — the opt-in "Connect to the GFS" step. Left-aligned (it is
+   a choice to read, not a tagline), with a full-width tickable row. */
+.sh-onboarding-gfs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-onboarding-gfs-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sh-space-sm);
+}
+.sh-onboarding-gfs-facts section {
+  background: var(--sh-bg-secondary);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+}
+.sh-onboarding-gfs-facts h3 {
+  margin: 0 0 4px;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+}
+.sh-onboarding-gfs-facts ul,
+.sh-onboarding-gfs-facts p {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.45;
+  color: var(--sh-text-muted);
+}
+.sh-onboarding-gfs-facts ul { padding-left: 1.1em; }
+.sh-onboarding-gfs-check {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 44px;
+  padding: var(--sh-space-xs) var(--sh-space-md);
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  cursor: pointer;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.sh-onboarding-gfs-check input {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  accent-color: var(--sh-primary-fill);
+  cursor: inherit;
+}
+.sh-onboarding-gfs-check:focus-within {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+}
+.sh-onboarding-gfs-check.is-disabled {
+  cursor: not-allowed;
+  color: var(--sh-text-muted);
+  border-style: dashed;
+}
+.sh-onboarding-gfs-note {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.45;
+  color: var(--sh-text-muted);
+}
+.sh-onboarding-gfs-note--ok,
+.sh-onboarding-gfs-note--wait,
+.sh-onboarding-gfs-note--error,
+.sh-onboarding-gfs-note--hint {
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text);
+  border-left: 3px solid var(--sh-border-strong);
+  background: var(--sh-bg-secondary);
+}
+.sh-onboarding-gfs-note--ok {
+  border-left-color: var(--sh-success);
+  background: color-mix(in srgb, var(--sh-success) 12%, var(--sh-bg));
+}
+.sh-onboarding-gfs-note--wait,
+.sh-onboarding-gfs-note--hint {
+  border-left-color: var(--sh-warning);
+  background: color-mix(in srgb, var(--sh-warning) 14%, var(--sh-bg));
+}
+.sh-onboarding-gfs-note--error {
+  border-left-color: var(--sh-danger);
+  background: color-mix(in srgb, var(--sh-danger) 10%, var(--sh-bg));
+}
+.sh-onboard-card--gfs { transform: rotate(1.2deg); }
+
 /* Onboarding illustration — sample feature cards rendered inline so
    the operator sees what each surface feels like, not just bullets. */
 .sh-onboarding-illustration {
@@ -9091,6 +9181,7 @@ button.sh-shopping-item__text:focus-visible {
   .sh-onboard-illus--pair .sh-onboard-card:nth-child(2) { transform: rotate(1.6deg); }
   .sh-onboarding-actions { flex-direction: column-reverse; align-items: stretch; }
   .sh-onboarding-actions-right { justify-content: flex-end; }
+  .sh-onboarding-gfs-facts { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
