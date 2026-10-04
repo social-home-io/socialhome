@@ -90,9 +90,11 @@ of the space posted, at which epoch, when, and in which size bucket.
 * **Checks**, in order (every refusal the same ``403``): addressed to this
   server; ``ts`` within ±300 s; the space is listed, not banned, publicly
   readable and pinned; a writer key is pinned for ``epoch``; ``writer_sig``
-  verifies under it (suite checked, never defaulted); the per-space and
-  per-writer-key rate limits (``429``, after the signature — there is no
-  per-household identity to limit by); epoch freshness; a replay guard over
+  verifies under it (suite checked, never defaulted); the per-(space,
+  client address), per-space and per-writer-key rate limits (``429``, after
+  the signature — there is no household identity to limit by, so the
+  address is what keeps one key holder from starving the others); epoch
+  freshness; a replay guard over
   the whole signed body (``nonce`` + ``ts`` make every legitimate attempt
   unique, so an exact copy is refused).
 * **Mode enforcement.** The owner's notice carries the space's
@@ -164,10 +166,18 @@ MEMBER_PUBLISH_MAX_PER_MINUTE: int = 30
 MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE: int = 120
 
 #: Accepted anonymous (strict-mode) publishes per WRITER KEY per minute. The
-#: key is shared by every publisher of the space at one epoch, so this is the
-#: finest bound there is without a household identity (a seed holder rotates
-#: the key if it is abused).
+#: key is shared by every publisher of the space at one epoch, so this bounds
+#: the space as a whole, not any one household. Rotating the key does NOT stop
+#: an abusive key holder: the rotation hands it the new key too.
 MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY: int = 120
+
+#: Accepted anonymous publishes per (space, client IP address) per minute.
+#: Without a household identity, the address is the only thing that tells one
+#: key holder's flood apart from the other writers' posts — so one household
+#: can't burn the space-wide budget and starve everyone else. Well under the
+#: per-space limit. IP correlation is already the stated residual of every
+#: anonymous GFS path; the key lives only in this process's sliding window.
+MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP: int = 30
 
 #: How far an anonymous request's ``ts`` may be from this server's clock
 #: (seconds) — the same window as every signed household request.
@@ -238,6 +248,7 @@ class GfsMemberPublishService:
         "_limiter",
         "_pending",
         "_queues",
+        "_anon_ip_limiter",
         "_anon_seen",
         "_relay",
         "_seen",
@@ -258,6 +269,7 @@ class GfsMemberPublishService:
         limiter: SlidingWindowCounter | None = None,
         space_limiter: SlidingWindowCounter | None = None,
         writer_key_limiter: SlidingWindowCounter | None = None,
+        anon_ip_limiter: SlidingWindowCounter | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._federation = federation
@@ -271,6 +283,9 @@ class GfsMemberPublishService:
         )
         self._writer_key_limiter = writer_key_limiter or SlidingWindowCounter(
             MEMBER_PUBLISH_MAX_PER_MINUTE_PER_WRITER_KEY
+        )
+        self._anon_ip_limiter = anon_ip_limiter or SlidingWindowCounter(
+            MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
         )
         self._seen = SeenPayloadCache()
         #: Anonymous requests' replay guard. A ``ts`` up to ±300 s off is
@@ -458,7 +473,9 @@ class GfsMemberPublishService:
         self._seen.record(digest)
         return True
 
-    async def publish_anon(self, req: MemberPublishAnonRequest) -> None:
+    async def publish_anon(
+        self, req: MemberPublishAnonRequest, *, client_ip: str
+    ) -> None:
         """Authorize a strict-mode (anonymous) ``req`` and hand it to the
         background fan-out — see the module docstring for the checks.
 
@@ -484,6 +501,10 @@ class GfsMemberPublishService:
             raise PermissionError(f"writer signature refused: {exc}") from exc
         if not ok:
             raise PermissionError("writer signature does not verify")
+        # The per-address bound first: an abusive key holder is stopped here
+        # and never reaches the space-wide budget the other writers share.
+        if not self._anon_ip_limiter.allow(f"{req.target}\x00{client_ip}"):
+            raise MemberPublishRateLimited()
         if not self._space_limiter.allow(req.target):
             raise MemberPublishRateLimited()
         if not self._writer_key_limiter.allow(f"{req.target}\x00{req.epoch}"):

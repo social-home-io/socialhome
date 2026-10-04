@@ -1297,6 +1297,9 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         authority_cert=_load_cert(row.get("authority_cert")),
         authority_rotation_seq=int(row.get("authority_rotation_seq") or 0),
         withdrawn=bool(row.get("withdrawn") or 0),
+        member_publish_mode=(
+            "strict" if row.get("member_publish_mode") == "strict" else "trusted"
+        ),
     )
 
 

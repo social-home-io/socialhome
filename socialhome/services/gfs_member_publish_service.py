@@ -12,7 +12,8 @@ them (``POST /gfs/member-publish``; wire codec in
   signs it with its household key (it may jump), a delegated admin signs it
   with the space authority seed (the GFS takes it as +1 at most);
 * **auto-subscribes** a member household to the GFS fan-out of the spaces it
-  writes in (:meth:`subscribe_member_spaces`), so it receives other members'
+  writes in (:meth:`member_subscription_ids`, merged into the shuffled
+  reconnect batch), so it receives other members'
   items live;
 * decodes / encodes the encrypted item the GFS relays
   (:func:`build_item_plaintext` / :func:`parse_item_plaintext`).
@@ -83,7 +84,11 @@ import aiohttp
 
 from ..authority_sig import AUTHORITY_EVENT_SPACE_EPOCH_NOTICE, sign_authority_event
 from ..crypto import b64url_encode, sign_ed25519
-from ..domain.events import SpaceMemberJoined
+from ..domain.events import (
+    SpaceConfigChanged,
+    SpaceContentKeyImported,
+    SpaceMemberJoined,
+)
 from ..domain.federation import GfsConnection
 from ..domain.gfs_member_publish import (
     GFS_PUBLISH_MODE_STRICT,
@@ -164,6 +169,21 @@ ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 4096, 16384, 65536, 131072)
 _PAD_FIELD: str = "_pad"
 
 
+#: Random offset (seconds, either way) on an anonymous request's ``ts``. Well
+#: inside the server's ±300 s window, wide enough that the stamp says nothing
+#: about this household's clock.
+ANON_TS_JITTER_S: int = 60
+
+
+def _anon_ts() -> str:
+    """The ``ts`` of an anonymous publish: whole seconds (a microsecond clock
+    offset would fingerprint the household across requests) plus a random
+    jitter of up to :data:`ANON_TS_JITTER_S` either way."""
+    now = int(time.time())
+    jitter = secrets.randbelow(2 * ANON_TS_JITTER_S + 1) - ANON_TS_JITTER_S
+    return datetime.fromtimestamp(now + jitter, tz=timezone.utc).isoformat()
+
+
 def build_item_plaintext(item_type: str, inner: dict) -> bytes:
     """The bytes a member publish encrypts: the real type + the inner,
     padded with ASCII ``0`` in :data:`_PAD_FIELD` to exactly the smallest
@@ -231,8 +251,9 @@ class GfsMemberPublishService:
         self._writer_certs = writer_certs
         self._own_instance_id = own_instance_id
         self._own_identity_seed = own_identity_seed
-        #: conn id → (space ids in its public directory, monotonic time).
-        self._listing: dict[str, tuple[frozenset[str], float]] = {}
+        #: conn id → ({space id: publish mode} of its public directory,
+        #: monotonic time). Cleared on every key import and config change.
+        self._listing: dict[str, tuple[dict[str, str], float]] = {}
         self._retry = GfsPublishRetryQueue(self._retry_send)
         #: (conn id, space id) pairs this process already subscribed.
         self._subscribed: set[tuple[str, str]] = set()
@@ -244,6 +265,16 @@ class GfsMemberPublishService:
         """Subscribe a newly seated local writer to the GFS fan-out at once
         (the reconnect hook would otherwise only catch it next connect)."""
         bus.subscribe(SpaceMemberJoined, self._on_member_joined)
+        # v_50 — a key import (a rotation, which a switch to strict causes)
+        # or a config change (the mode itself) re-reads each server's
+        # listing before the next decision.
+        bus.subscribe(SpaceContentKeyImported, self._on_space_state_changed)
+        bus.subscribe(SpaceConfigChanged, self._on_space_state_changed)
+
+    async def _on_space_state_changed(
+        self, event: SpaceContentKeyImported | SpaceConfigChanged
+    ) -> None:
+        self.forget_directories()
 
     async def _on_member_joined(self, event: SpaceMemberJoined) -> None:
         try:
@@ -281,21 +312,23 @@ class GfsMemberPublishService:
             and bool(space.features.allow_subscribers)
         )
 
-    async def _listed(self, conn: GfsConnection, space_id: str) -> bool:
-        """Whether *space_id* is in *conn*'s public directory
-        (``GET /gfs/spaces``, the WHOLE listing, cached per connection).
-        Never a space-specific probe — asking the server about one space
-        would tell it which spaces this household cares about — and over
-        the cookie-less publish session, so it links to nothing."""
+    async def _directory(self, conn: GfsConnection) -> dict[str, str] | None:
+        """*conn*'s public directory as ``{space id: publish mode}``
+        (``GET /gfs/spaces``, the WHOLE listing, cached per connection), or
+        ``None`` when it can't be fetched. Never a space-specific probe —
+        asking the server about one space would tell it which spaces this
+        household cares about — and over the cookie-less publish session, so
+        it links to nothing. ``member_publish_mode`` (v_50) is absent on an
+        older server, which reads as ``trusted``."""
         cached = self._listing.get(conn.id)
         now = time.monotonic()
         if cached is not None:
-            listed_ids, at = cached
-            if now - at < (LISTING_TTL_S if listed_ids else LISTING_NEGATIVE_TTL_S):
-                return space_id in listed_ids
+            listed, at = cached
+            if now - at < (LISTING_TTL_S if listed else LISTING_NEGATIVE_TTL_S):
+                return listed
         client = self._gfs.publish_client()
         if client is None:
-            return False
+            return None
         try:
             async with client.get(
                 f"{conn.inbox_url}/gfs/spaces",
@@ -307,22 +340,47 @@ class GfsMemberPublishService:
             log.info(
                 "gfs.member_publish: directory fetch from %s failed: %s", conn.id, exc
             )
-            return False
+            return None
         spaces = body.get("spaces") if isinstance(body, dict) else None
-        listed_ids = frozenset(
-            str(sp.get("space_id"))
+        listed = {
+            str(sp.get("space_id")): (
+                GFS_PUBLISH_MODE_STRICT
+                if sp.get("member_publish_mode") == GFS_PUBLISH_MODE_STRICT
+                else "trusted"
+            )
             for sp in (spaces if isinstance(spaces, list) else [])
             if isinstance(sp, dict) and sp.get("space_id")
-        )
-        self._listing[conn.id] = (listed_ids, now)
-        return space_id in listed_ids
+        }
+        self._listing[conn.id] = (listed, now)
+        return listed
+
+    async def _listed(self, conn: GfsConnection, space_id: str) -> bool:
+        """Whether *space_id* is in *conn*'s public directory."""
+        listed = await self._directory(conn)
+        return listed is not None and space_id in listed
+
+    async def _listed_strict(self, conn: GfsConnection, space_id: str) -> bool:
+        """Whether *conn*'s public directory says *space_id* is in strict
+        mode (v_50) — then nothing identified may go there, whatever our own
+        copy of the setting says (it may lag the owner's switch)."""
+        listed = await self._directory(conn)
+        return listed is not None and listed.get(space_id) == GFS_PUBLISH_MODE_STRICT
+
+    def forget_directories(self, *_: object) -> None:
+        """Drop the cached directories, so the next decision re-reads each
+        server's listing — on a key import (a rotation, which a switch to
+        strict causes) and on a config change."""
+        self._listing.clear()
 
     async def _capable_listed(
-        self, space_id: str, *, strict: bool = False
+        self, space_id: str, *, strict: bool = False, identified_items: bool = False
     ) -> list[GfsConnection]:
         """Active connections that list *space_id* and proved
         ``member_publish_trusted`` (with ``strict``: ``member_publish_strict``)
-        under a valid signature."""
+        under a valid signature. With ``identified_items`` a server whose
+        listing says the space is strict is left out — never for epoch
+        notices or subscribes, which must still reach it (the owner's notice
+        is how a strict space goes back to trusted)."""
         own = {c.id for c in await self._conn_repo.list_gfs_for_space(space_id)}
         out: list[GfsConnection] = []
         for conn in await self._conn_repo.list_active():
@@ -330,6 +388,10 @@ class GfsMemberPublishService:
                 if not await self._gfs.member_publish_strict_supported(conn):
                     continue
             elif not await self._gfs.member_publish_trusted_supported(conn):
+                continue
+            elif identified_items and await self._listed_strict(conn, space_id):
+                # Identified publishing to a server that lists the space as
+                # strict would be refused — and seen. Never.
                 continue
             if conn.id in own or await self._listed(conn, space_id):
                 out.append(conn)
@@ -381,7 +443,7 @@ class GfsMemberPublishService:
                 space_id,
             )
             return []
-        targets = await self._capable_listed(space_id)
+        targets = await self._capable_listed(space_id, identified_items=True)
         # A writer that publishes wants the other members' items too (a seed
         # holder receives them over federation).
         if not seed_holder:
@@ -561,6 +623,17 @@ class GfsMemberPublishService:
             # attempt is exactly what strict mode withholds. Dropped — the
             # host path carries the item.
             return PublishOutcome.permanent()
+        if await self._listed_strict(conn, space_id):
+            # The server's listing already says strict (our copy of the
+            # setting lags the owner's switch): an identified request would
+            # be refused there — and seen. The host path carries it.
+            log.info(
+                "gfs.member_publish: GFS %s lists space %s as strict — no "
+                "identified publish",
+                conn.id,
+                space_id,
+            )
+            return PublishOutcome.permanent()
         body = self._signed_item_body(conn, space_id, data)
         return await self._post(
             self._gfs.client(), f"{conn.inbox_url}{MEMBER_PUBLISH_ROUTE}", body, conn
@@ -581,7 +654,7 @@ class GfsMemberPublishService:
             return PublishOutcome.permanent()
         req = MemberPublishAnonRequest(
             gfs_instance_id=conn.gfs_instance_id,
-            ts=datetime.now(timezone.utc).isoformat(),
+            ts=_anon_ts(),
             nonce=b64url_encode(secrets.token_bytes(16)),
             target=space_id,
             epoch=epoch,
@@ -800,19 +873,19 @@ class GfsMemberPublishService:
             done += 1
         return done
 
-    async def subscribe_member_spaces(self, gfs_id: str) -> int:
-        """Subscribe this household to *gfs_id*'s fan-out for every publicly
-        readable space it holds a writer seat in (and no seed — a seed holder
-        receives its members' posts over federation and relays them itself),
-        so other members' items arrive live. Run on every GFS-WS (re)connect;
-        the GFS subscribe is an upsert. Fail-soft per space. Returns how many
-        were (re)subscribed."""
+    async def member_subscription_ids(self, gfs_id: str) -> list[str]:
+        """The spaces this household should hold a fan-out seat in on
+        *gfs_id* because it writes there (publicly readable, a local writer
+        seat, no seed, listed there) — for the reconnect batch, which merges
+        them with the followed spaces and shuffles the lot
+        (:meth:`GfsSpaceMirrorService.resubscribe_all`). ``[]`` for an
+        inactive or incapable connection."""
         conn = await self._conn_repo.get(gfs_id)
         if conn is None or conn.status != "active":
-            return 0
+            return []
         if not await self._gfs.member_publish_trusted_supported(conn):
-            return 0
-        done = 0
+            return []
+        out: list[str] = []
         for space in await self._spaces.list_all():
             if not self._publicly_readable(space):
                 continue
@@ -820,12 +893,27 @@ class GfsMemberPublishService:
                 continue
             if not await self._local_writer(space.id):
                 continue
-            if not await self._listed(conn, space.id):
-                continue
-            # A (re)connect re-subscribes even what this process already
-            # did: the GFS may have dropped the seat meanwhile (upsert).
-            self._subscribed.discard((conn.id, space.id))
-            done += await self._subscribe([conn], space.id)
+            if await self._listed(conn, space.id):
+                out.append(space.id)
+        return out
+
+    async def subscribe_member_spaces(self, gfs_id: str) -> int:
+        """Subscribe this household to *gfs_id*'s fan-out for every publicly
+        readable space it holds a writer seat in (and no seed — a seed holder
+        receives its members' posts over federation and relays them itself),
+        so other members' items arrive live. The GFS subscribe is an upsert.
+        Fail-soft per space. Returns how many were (re)subscribed. (The
+        reconnect hook instead merges :meth:`member_subscription_ids` into
+        the shuffled follower batch.)"""
+        conn = await self._conn_repo.get(gfs_id)
+        if conn is None:
+            return 0
+        done = 0
+        for space_id in await self.member_subscription_ids(gfs_id):
+            # Re-subscribes even what this process already did: the GFS may
+            # have dropped the seat meanwhile (upsert).
+            self._subscribed.discard((conn.id, space_id))
+            done += await self._subscribe([conn], space_id)
         return done
 
     async def _local_writer(self, space_id: str) -> bool:

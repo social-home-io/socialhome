@@ -1237,9 +1237,20 @@ POST /gfs/member-publish-anon
   `b"gfs-member-publish-anon:v1:"` + canonical JSON of every other field.
 - The GFS checks: addressed to this server; `ts` within ±300 s; the space
   listed, not banned, publicly readable, pinned; a writer key pinned for
-  `epoch`; `writer_sig` verifies (unknown suite refused); 120/min per space
-  and 120/min per writer key (there is no household to limit by); epoch
-  freshness; no exact replay within 600 s. Every refusal is the same 403.
+  `epoch`; `writer_sig` verifies (unknown suite refused); 30/min per
+  (space, client address), then 120/min per space and 120/min per writer
+  key; epoch freshness; no exact replay within 600 s. Every refusal is the
+  same 403.
+- **Abuse inside a strict space is unattributable.** Every publisher holds
+  the same key — a comment-scope follower too — so a key holder can send
+  valid garbage, and nothing tells the server (or the owner) who. The
+  per-(space, address) limit is what keeps one such household from burning
+  the space-wide budget and starving the other writers (the address is the
+  only handle there is, and IP correlation is already the stated residual).
+  Rotating the key does **not** help: the rotation hands the abuser the new
+  key too. The owner's remedies are to switch the space back to **trusted**
+  mode, which attributes every publish to its household, or to remove
+  households until it stops.
 - Fan-out as in trusted mode, to every subscriber (the publisher is unknown,
   so it receives its own echo and drops it by the origin inside the
   ciphertext), frame `{type:"relay", space_id, event_type:"space_item",
@@ -1277,8 +1288,21 @@ in either direction.
 - **Auto-subscribe looks like a follower.** The member auto-subscribe (on a
   seat and on every GFS (re)connect) is the very same signed
   `{action:"subscribe", instance_id, space_id, ts}` a follower sends on
-  follow and on every reconnect (`resubscribe_all`) — nothing in it says
-  "writer" — and strict publishing never subscribes on the spot. The seed
+  follow and on every reconnect — nothing in it says "writer" — and strict
+  publishing never subscribes on the spot. On a reconnect the writer spaces
+  ride the SAME batch as the followed ones (`resubscribe_all(also=…)`),
+  de-duplicated and shuffled, so neither order nor timing separates them.
+- **No clock fingerprint.** An anonymous request's `ts` is whole seconds
+  plus a random jitter of up to ±60 s (well inside the server's ±300 s
+  window), so a household's sub-second clock offset can't link its
+  requests.
+- **The listing says strict.** The public directory a household already
+  fetches over its cookie-less session (`GET /gfs/spaces`) carries each
+  space's `member_publish_mode`. A household never plans or sends an
+  identified publish to a server whose listing says `strict` — whatever its
+  own (possibly lagging) copy of the setting says. Its cached directory is
+  dropped on every content-key import (the switch to strict rotates) and
+  every config change, so the next decision re-reads it. The seed
   holder's subscriber reconcile seals the content key to every subscriber
   alike, members included.
 - **Inbound.** A strict frame carries no cert; the receiver takes it from
@@ -1300,13 +1324,19 @@ in either direction.
   household's authenticated connection is the accepted, stated limit of
   every anonymous GFS path. A link-joined member's host path is an
   anonymous `/gfs/envelope` to the host sent at the same moment, so the
-  timing of the two can be correlated in the same way. A member whose
-  config change has not arrived yet (and that holds no key) may still send
-  one identified request in the moments after the owner's switch; the
-  server refuses it but has seen it. A delegated admin whose seed still
-  matches the pin can pin a bogus key for the next epoch before the owner's
-  notice — the owner's notice replaces it, and until then members fall back
-  to the host path.
+  timing of the two can be correlated in the same way. An identified request
+  into a freshly switched space is now possible only in the moment between
+  the owner's switch and the member's next look at the listing — the GFS
+  learns the mode from the owner's notice before the rotation's rekey
+  reaches any member, and that rekey drops the member's cached listing; a
+  request in that moment is refused but seen. **Delegated pin at an
+  unconfirmed epoch — bounded.** A delegated admin can pin the writer key of
+  the next epoch (`current + 1`, through the +1 rule) before the owner
+  confirms it; a seed holder whose seed still matches can therefore pin a
+  bogus key there. It gains nothing it doesn't already have — any seed
+  holder can derive the real key and sign certs — and the owner's notice
+  for that epoch replaces the pin; until then members' anonymous publishes
+  at that epoch are refused and their items take the host path.
 
 ```mermaid
 sequenceDiagram

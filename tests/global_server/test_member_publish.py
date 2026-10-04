@@ -1512,3 +1512,70 @@ def test_the_anon_route_is_ip_limited():
 async def test_the_info_block_advertises_member_publish_strict(gfs):
     body = await (await gfs.get("/gfs/info")).json()
     assert body["capabilities"]["member_publish_strict"] is True
+
+
+# ── X1: one writer-key holder must not starve anonymous publishing ───────
+
+
+@pytest.mark.security
+async def test_strict_one_key_holder_cannot_starve_the_space(gfs):
+    """Every publish-capable household shares the writer key, so the per-key
+    and per-space limits can't tell an abuser from the rest. A per-(space,
+    client IP) limit stops one household's flood long before the space-wide
+    budget, so writers from other addresses keep publishing."""
+    await _go_strict(gfs)
+    svc = gfs.app_[gfs_member_publish_key]
+    for i in range(mp_mod.MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP):
+        await svc.publish_anon(
+            MemberPublishAnonRequest.from_wire(_anon(payload=f"Z2FyYmFnZS0{i}")),
+            client_ip="203.0.113.7",
+        )
+    with pytest.raises(mp_mod.MemberPublishRateLimited):
+        await svc.publish_anon(
+            MemberPublishAnonRequest.from_wire(_anon(payload="b25lLW1vcmU")),
+            client_ip="203.0.113.7",
+        )
+    # A legitimate writer elsewhere is unaffected.
+    await svc.publish_anon(
+        MemberPublishAnonRequest.from_wire(_anon(payload="bGVnaXQtcG9zdA")),
+        client_ip="198.51.100.9",
+    )
+    assert (
+        mp_mod.MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
+        < mp_mod.MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
+    )
+
+
+async def test_strict_the_route_applies_the_per_address_limit(gfs, monkeypatch):
+    await _go_strict(gfs)
+    svc = gfs.app_[gfs_member_publish_key]
+    monkeypatch.setattr(svc._anon_ip_limiter, "_limit", 1, raising=False)
+    assert (await gfs.post("/gfs/member-publish-anon", json=_anon())).status == 200
+    resp = await gfs.post("/gfs/member-publish-anon", json=_anon(payload="b3RoZXI:Y3Q"))
+    assert resp.status == 429
+
+
+async def test_strict_a_refused_signature_costs_no_address_budget(gfs, monkeypatch):
+    await _go_strict(gfs)
+    svc = gfs.app_[gfs_member_publish_key]
+    monkeypatch.setattr(svc._anon_ip_limiter, "_limit", 1, raising=False)
+    await _assert_refused(
+        await gfs.post("/gfs/member-publish-anon", json=_anon(key_epoch=9))
+    )
+    assert (await gfs.post("/gfs/member-publish-anon", json=_anon())).status == 200
+
+
+async def test_the_public_listing_carries_the_publish_mode(gfs):
+    """v_50: households read the mode off the directory they already fetch
+    (cookie-less) and never send an identified publish into a strict space."""
+    listing = await (await gfs.get("/gfs/spaces")).json()
+    row = next(sp for sp in listing["spaces"] if sp["space_id"] == SPACE_ID)
+    assert row["member_publish_mode"] == "trusted"
+    await _go_strict(gfs)
+    listing = await (await gfs.get("/gfs/spaces")).json()
+    row = next(sp for sp in listing["spaces"] if sp["space_id"] == SPACE_ID)
+    assert row["member_publish_mode"] == "strict"
+    detail = await (await gfs.get(f"/gfs/spaces/{SPACE_ID}")).json()
+    assert detail["member_publish_mode"] == "strict"
+    # The writer keys never reach the public directory.
+    assert "writer_key" not in json.dumps(listing)

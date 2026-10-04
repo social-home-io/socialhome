@@ -27,10 +27,10 @@
 --       every anonymous publish) until the owner reconnects. A new table for
 --       the keys: at most two keys per space (current + previous, for the
 --       same 600 s grace the epoch tiers give), so columns on the row they
---       describe are smaller and die with it, like 0014's. Putting the mode
---       on the owner-signed listing (``GlobalSpace``): it would be served on
---       the public directory for nobody's benefit, and the listing columns are
---       rewritten on every republish. Deriving the
+--       describe are smaller and die with it, like 0014's. Taking the mode
+--       from the owner-signed listing publish: those columns are rewritten on
+--       every republish, and the mode belongs with the epoch notice that also
+--       pins the key. Deriving the
 --       mode from "a writer key is pinned": a key is pinned in every v_50
 --       space, so presence says nothing about the owner's choice.
 --   (3) Smallest possible change: additive ``ADD COLUMN``s. The mode defaults
@@ -41,8 +41,10 @@
 -- The writer-key columns are cleared with the epoch columns whenever the
 -- space authority key is re-pinned (a key cert signed by the old authority
 -- stops meaning anything). The mode is NOT cleared: it is the owner's
--- household-signed statement, not an authority one. Neither is served on the
--- public directory.
+-- household-signed statement, not an authority one. The writer keys are not
+-- served on the public directory; the MODE is (``member_publish_mode`` on the
+-- listing), so a household reads it before it would ever send an identified
+-- publish, and never sends one into a space listed as strict.
 
 -- The owner's choice, and the (unix seconds) ``ts`` of the owner notice that
 -- set it — a notice older than the stored one never moves the mode back.

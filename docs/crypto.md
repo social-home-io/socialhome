@@ -590,7 +590,9 @@ epoch), shared by every household allowed to publish anything there (both
   canonical JSON of `{gfs_instance_id, ts, nonce, target, event_type:
   "space_item", epoch, payload, writer_sig_suite}`. `gfs_instance_id` binds
   it to one server, `ts` (±300 s) and a random `nonce` make every attempt
-  unique (the GFS refuses an exact copy for 600 s). No household key, no
+  unique (the GFS refuses an exact copy for 600 s); households send `ts` in
+  whole seconds with up to ±60 s of random jitter, so it carries no clock
+  fingerprint. No household key, no
   household signature, no plaintext cert: the writer cert stays inside the
   AES-GCM payload, where receivers check it exactly as in trusted mode.
 - **Suite.** `writer_key_suite` / `writer_sig_suite` =

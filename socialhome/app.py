@@ -3522,14 +3522,24 @@ def create_app(config: Config | None = None) -> web.Application:
             # that the GFS no longer knows about and receive nothing forever.
             # The GFS-side subscribe is an upsert, so re-POSTing is free.
             # Fail-soft per space (never raises).
-            await gfs_space_mirror.resubscribe_all(gfs_id)
-            # v_49 — member publish: subscribe to the fan-out of the spaces we
-            # write in (other members' items arrive live), and re-announce the
-            # current epoch of every seed-held space (the owner's notice also
-            # confirms what a delegated admin rotated meanwhile). Fail-soft.
+            # v_49 / v_50 — the spaces we WRITE in (member auto-subscribe, so
+            # other members' items arrive live) ride the same batch, merged
+            # and shuffled with the followed ones: the server can't tell
+            # writer seats from follower seats by order or timing.
+            member_ids: list[str] = []
             if gfs_member_publish is not None:
                 try:
-                    await gfs_member_publish.subscribe_member_spaces(gfs_id)
+                    member_ids = await gfs_member_publish.member_subscription_ids(
+                        gfs_id
+                    )
+                except Exception:
+                    log.exception("gfs: member subscription list failed for %s", gfs_id)
+            await gfs_space_mirror.resubscribe_all(gfs_id, also=member_ids)
+            # Re-announce the current epoch of every seed-held space (the
+            # owner's notice also confirms what a delegated admin rotated
+            # meanwhile). Fail-soft.
+            if gfs_member_publish is not None:
+                try:
                     await gfs_member_publish.announce_held_epochs(gfs_id)
                 except Exception:
                     log.exception(

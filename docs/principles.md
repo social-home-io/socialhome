@@ -297,9 +297,16 @@ because the cert never leaves the ciphertext.
 What strict mode does **not** hide, stated so nobody reads more into it: the
 publish arrives from the household's IP address, like its identified WS, so
 IP and timing correlation with the household's authenticated connection
-remains the accepted limit of every anonymous GFS path; a household whose
-config change has not arrived yet may send one identified request right
-after the owner's switch (refused, but seen). Revocation is by rotation, as
+remains the accepted limit of every anonymous GFS path (the server also
+limits anonymous publishes per space and client address, the only handle
+on abuse it has); a household never sends an identified publish to a
+server whose public listing says the space is strict, so only one caught
+between the owner's switch and its next look at that listing could still
+send one (refused, but seen). **Abuse inside a strict space is
+unattributable**: every publisher holds the same key, so the owner cannot
+tell who floods it, and rotating the key does not help (the abuser gets the
+new one). The remedy is switching the space back to trusted mode, which
+attributes every publish, or removing households. Revocation is by rotation, as
 for certs: a removed publisher keeps the old key until the next content
 epoch, plus the 600 s grace. A household that cannot publish anonymously
 (older build, no key yet, no strict-capable server) never falls back to the

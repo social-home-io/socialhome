@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime
 from dataclasses import dataclass, field, replace
 
 import aiohttp
@@ -25,7 +26,11 @@ from socialhome.crypto import (
     derive_instance_id,
     ed25519_public_key,
 )
-from socialhome.domain.events import SpaceMemberJoined
+from socialhome.domain.events import (
+    SpaceConfigChanged,
+    SpaceContentKeyImported,
+    SpaceMemberJoined,
+)
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.space import (
     JoinMode,
@@ -47,6 +52,7 @@ from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.gfs_member_publish_service import (
+    ANON_TS_JITTER_S,
     GfsMemberPublishService,
     build_item_plaintext,
     parse_item_plaintext,
@@ -1051,7 +1057,11 @@ async def test_switching_back_to_trusted_reaches_the_server(world):
     owner_svc = _owner_svc(world)
     await owner_svc.announce_epoch(SPACE_ID)
     world["spaces"].spaces[SPACE_ID] = _space(owner=world["owner"].instance_id)
-    await owner_svc.announce_epoch(SPACE_ID)
+    # The listing now says strict — the owner's notice must still go out (it
+    # is the only way back), so only identified ITEMS skip a strict listing.
+    owner_svc.forget_directories()
+    assert await owner_svc._listed_strict(world["conn"], SPACE_ID)
+    assert await owner_svc.announce_epoch(SPACE_ID) == 1
     state = await world["app"][gfs_space_epoch_repo_key].get_strict(SPACE_ID)
     assert not state.strict
 
@@ -1092,3 +1102,70 @@ async def test_strict_auto_subscribe_is_the_plain_follower_subscribe(world):
     ]
     assert await world["svc"].ensure_subscribed(SPACE_ID) == 1
     assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
+
+
+async def test_member_subscription_ids_lists_the_writer_spaces(world):
+    world["spaces"].local[SPACE_ID] = [AUTHOR]
+    world["spaces"].members[SPACE_ID] = [
+        SpaceMember(space_id=SPACE_ID, user_id=AUTHOR, role="member", joined_at="")
+    ]
+    assert await world["svc"].member_subscription_ids("conn-1") == [SPACE_ID]
+    # Nothing subscribed by the listing itself — the reconnect batch does it.
+    assert world["gfs"].subscribed == []
+    assert await world["svc"].member_subscription_ids("nope") == []
+    world["gfs"].capable = False
+    assert await world["svc"].member_subscription_ids("conn-1") == []
+
+
+@pytest.mark.security
+async def test_strict_ts_is_whole_seconds_with_jitter(world):
+    """No sub-second clock skew to fingerprint the household by; the jitter
+    stays well inside the server's ±300 s window."""
+    await _gfs_strict(world)
+    _identified, anon = _strict_world(world)
+    svc = world["svc"]
+    for _ in range(5):
+        await svc._post_anon_item(
+            world["conn"], SPACE_ID, {"epoch": 3, "payload": "Y3Q"}
+        )
+    for _u, body in anon.posts:
+        parsed = datetime.fromisoformat(body["ts"])
+        assert parsed.microsecond == 0 and "." not in body["ts"]
+        assert abs(parsed.timestamp() - time.time()) <= ANON_TS_JITTER_S + 2
+
+
+@pytest.mark.security
+async def test_a_listing_that_says_strict_stops_an_identified_publish(world):
+    """Our copy of the mode may lag the owner's switch; the server's own
+    listing (fetched cookie-less) says strict, so nothing identified goes."""
+    await _gfs_strict(world)
+    identified = _Recorder(world["tc"].session)
+    world["gfs"].client = lambda: identified  # type: ignore[method-assign]
+    svc = world["svc"]  # local copy: trusted, no writer key
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
+    data = {
+        "epoch": 3,
+        "writer_cert": (await svc._writer_certs.own_cert(SPACE_ID, 3)).to_wire(),
+        "payload": "Y3Q",
+    }
+    assert (await svc._post_item(world["conn"], SPACE_ID, data)).kind == "permanent"
+    assert identified.posts == []
+
+
+async def test_the_directory_cache_is_dropped_on_a_key_or_config_change(world):
+    svc = world["svc"]
+    bus = EventBus()
+    svc.wire(bus)
+    assert not await svc._listed_strict(world["conn"], SPACE_ID)
+    assert svc._listing
+    await _gfs_strict(world)
+    # Still cached as trusted …
+    assert not await svc._listed_strict(world["conn"], SPACE_ID)
+    # … until a key import (the switch to strict rotates) re-reads it.
+    await bus.publish(SpaceContentKeyImported(space_id=SPACE_ID, epoch=4))
+    assert svc._listing == {}
+    assert await svc._listed_strict(world["conn"], SPACE_ID)
+    await bus.publish(
+        SpaceConfigChanged(space_id=SPACE_ID, event_type="x", payload={}, sequence=1)
+    )
+    assert svc._listing == {}

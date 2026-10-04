@@ -103,6 +103,13 @@ class GlobalSpace:
     #: space from DISCOVERY only (listing, detail route, public pages);
     #: existing subscribers and the relay keep working.
     withdrawn: bool = False
+    #: The owner's ``gfs_publish_mode`` (v_50, GFS migration 0015), learned
+    #: only from its household-signed epoch notice and never written by a
+    #: publish or cluster upsert. Served on the public directory so a
+    #: household reads it (over its cookie-less session) before it would ever
+    #: send an identified member publish — and never sends one into a space
+    #: listed as ``strict``.
+    member_publish_mode: str = "trusted"
 
 
 @dataclass(slots=True, frozen=True)

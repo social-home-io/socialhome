@@ -75,8 +75,8 @@ class MemberPublishAnonView(GfsBaseView):
     ``200 {"status": "published"}`` once accepted; ``400`` for a malformed
     body (including one carrying ``instance_id``, a household ``signature``
     or a ``writer_cert``); ``403`` (uniform, the same body as the identified
-    route) for any refusal, a replay included; ``429`` past the per-space or
-    per-writer-key limit; ``503`` while the fan-out is full. Nothing about
+    route) for any refusal, a replay included; ``429`` past the per-(space,
+    client address), per-space or per-writer-key limit; ``503`` while the fan-out is full. Nothing about
     the caller is logged — there is nothing identifying to log."""
 
     async def post(self) -> web.Response:
@@ -87,7 +87,7 @@ class MemberPublishAnonView(GfsBaseView):
         except InvalidMemberPublish as exc:
             raise web.HTTPBadRequest(reason=str(exc)) from exc
         try:
-            await svc.publish_anon(req)
+            await svc.publish_anon(req, client_ip=self.client_ip())
         except MemberPublishRateLimited:
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
