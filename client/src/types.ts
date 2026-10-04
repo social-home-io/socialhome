@@ -357,9 +357,9 @@ export interface Space {
   owner_instance_id?: string  /** ``GET /api/spaces/{id}`` only: at least one OTHER household has a
    *  member here. */
   has_remote_households?: boolean
-  /** ``GET /api/spaces/{id}`` only (v_51): this PRIVATE space reaches
-   *  members who joined through a link over an opaque connection-server
-   *  channel, so the owner's publish-mode choice applies to it. */
+  /** ``GET /api/spaces/{id}`` only (v_51): this PRIVATE space has an
+   *  opaque connection-server channel — its owner turned
+   *  ``features.private_gfs`` on and the channel is registered. */
   gfs_private_channel?: boolean
 }
 
@@ -427,6 +427,12 @@ export interface SpaceFeatures {
    *  ``strict`` — members post anonymously under a writer group key.
    *  Absent → treat as ``trusted``. */
   gfs_publish_mode?: GfsPublishMode
+  /** Owner-only, PRIVATE spaces: whether the space uses a connection
+   *  server at all. On — connection-server invite links work and member
+   *  households reach each other through the server while the host is
+   *  offline. Off (the default) — only internal links, and the space
+   *  never touches a connection server. Absent → treat as false. */
+  private_gfs?: boolean
   /** Post types members may compose in this space (§23.49). An admin
    *  toggles these in space settings to hide post kinds the space
    *  doesn't want (e.g. no polls). Absent → treat as all-allowed

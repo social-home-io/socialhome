@@ -22883,3 +22883,45 @@ button.sh-page-editor-status {
   color: var(--sh-text-muted);
   overflow-wrap: anywhere;
 }
+
+/* Space settings — whether a PRIVATE space uses the connection server.
+ * The 409 refusal lists the link-joined households on a danger tint. */
+.sh-private-gfs__blocked {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+  margin-top: var(--sh-space-sm);
+  padding: var(--sh-space-sm);
+  border: 1px solid color-mix(in srgb, var(--sh-danger) 45%, transparent);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-danger) 10%, transparent);
+  overflow-wrap: anywhere;
+}
+.sh-private-gfs__blocked-title {
+  margin: 0;
+  font-weight: 600;
+  color: var(--sh-danger-on-soft);
+}
+.sh-private-gfs__households {
+  margin: 0;
+  padding-inline-start: var(--sh-space-md);
+}
+.sh-private-gfs__members-link {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  font-weight: 600;
+}
+
+/* Invite dialog — link type on a private space. A disabled option reads
+ * as unavailable, and its hint says how to make it available. */
+.sh-invite-role--disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.sh-invite-role--disabled:hover { background: transparent; }
+.sh-invite-via-badge {
+  font-size: var(--sh-font-size-xs);
+  white-space: nowrap;
+}

@@ -10,6 +10,7 @@ vi.mock('@/api', () => {
     constructor(
       public readonly status: number,
       detail: string | null = null,
+      public readonly code: string | null = null,
     ) {
       super(detail ?? `API ${status}`)
       this.detail = detail
@@ -48,7 +49,7 @@ const { api, ApiError } = await import('@/api') as unknown as {
     post: ReturnType<typeof vi.fn>
     delete: ReturnType<typeof vi.fn>
   }
-  ApiError: new (status: number, detail?: string | null) => Error
+  ApiError: new (status: number, detail?: string | null, code?: string | null) => Error
 }
 const { confirmDialog } = await import('./confirm') as unknown as {
   confirmDialog: ReturnType<typeof vi.fn>
@@ -64,8 +65,11 @@ type Row = Record<string, unknown>
  *  list, connection servers, and the member roster it resolves minter
  *  names against. */
 function mockReads(
-  { tokens = [], servers = [], members = [], linksFail = false }:
-  { tokens?: Row[]; servers?: Row[]; members?: Row[]; linksFail?: boolean } = {},
+  { tokens = [], servers = [], members = [], linksFail = false, space = {} }:
+  {
+    tokens?: Row[]; servers?: Row[]; members?: Row[]; linksFail?: boolean
+    space?: Row
+  } = {},
 ) {
   api.get.mockImplementation((url: string) => {
     if (url.endsWith('/invite-tokens')) {
@@ -75,7 +79,7 @@ function mockReads(
     }
     if (url === '/api/gfs/connections') return Promise.resolve(servers)
     if (url.endsWith('/members')) return Promise.resolve(members)
-    return Promise.resolve({ name: 'Fetched space name' })
+    return Promise.resolve({ name: 'Fetched space name', ...space })
   })
 }
 
@@ -689,5 +693,144 @@ describe('SpaceInviteDialog — a published never-expiring link', () => {
     await generate(result, makeRow({ gfs: GFS }))
     expect(result.container
       .querySelector('[data-testid="invite-published-never-hint"]')).toBeNull()
+  })
+})
+
+describe('SpaceInviteDialog — link type on a private space', () => {
+  const privateSpace = (privateGfs: boolean) => ({
+    space_type: 'private', features: { private_gfs: privateGfs },
+  })
+  const radio = (c: Element, id: 'gfs' | 'internal') =>
+    c.querySelector(`[data-testid="invite-via-${id}"]`) as HTMLInputElement
+
+  it('keeps today\'s form on a public space: no choice, no via sent', async () => {
+    mockReads({ space: { space_type: 'public', features: {} } })
+    const result = await openDialog({ role: 'owner' })
+    await waitFor(() => expect(api.get).toHaveBeenCalled())
+    expect(result.container.querySelector('[data-testid="invite-via"]')).toBeNull()
+    await generate(result)
+    expect(api.post.mock.calls[0][1]).not.toHaveProperty('via')
+  })
+
+  it('defaults to internal and disables the connection server link when off', async () => {
+    mockReads({ space: privateSpace(false) })
+    const result = await openDialog({ role: 'owner' })
+    await waitFor(() => expect(radio(result.container, 'internal')).not.toBeNull())
+    expect(radio(result.container, 'internal').checked).toBe(true)
+    const gfs = radio(result.container, 'gfs')
+    expect(gfs.checked).toBe(false)
+    expect(gfs.disabled).toBe(true)
+    expect(gfs.getAttribute('aria-describedby')).toBe('sh-invite-via-gfs-off')
+    // The owner gets the way to turn it on, anchored on the app base.
+    const hint = result.getByTestId('invite-via-gfs-off')
+    expect(hint.textContent).toContain(
+      "This space doesn't use the connection server.",
+    )
+    expect(hint.querySelector('a')!.getAttribute('href'))
+      .toMatch(/^\/spaces\/space-[a-z0-9]+\/settings$/)
+  })
+
+  it('tells a non-owner admin that only the owner can turn it on', async () => {
+    mockReads({ space: privateSpace(false) })
+    const result = await openDialog({ role: 'admin' })
+    const hint = await waitFor(() => result.getByTestId('invite-via-gfs-off'))
+    expect(hint.textContent).toBe(
+      "This space doesn't use the connection server. Only its owner can turn it on.",
+    )
+    expect(hint.querySelector('a')).toBeNull()
+  })
+
+  it('defaults to a connection server link when on, with both enabled', async () => {
+    mockReads({ space: privateSpace(true) })
+    const result = await openDialog({ role: 'owner' })
+    await waitFor(() => expect(radio(result.container, 'gfs')?.checked).toBe(true))
+    expect(radio(result.container, 'gfs').disabled).toBe(false)
+    expect(radio(result.container, 'internal').disabled).toBe(false)
+    expect(result.queryByTestId('invite-via-gfs-off')).toBeNull()
+  })
+
+  it('sends via: "internal" by default when off', async () => {
+    mockReads({ space: privateSpace(false) })
+    const result = await openDialog({ role: 'owner' })
+    await waitFor(() => expect(radio(result.container, 'internal')).not.toBeNull())
+    await generate(result, makeRow({ via: 'internal' }))
+    expect(api.post.mock.calls[0]).toEqual([
+      expect.stringContaining('/invite-tokens'),
+      { role: 'member', uses: 1, ttl_seconds: 604_800, via: 'internal' },
+    ])
+    expect(result.getByTestId('invite-created-internal').textContent)
+      .toContain('Internal link')
+  })
+
+  it('sends the picked via when on', async () => {
+    mockReads({ space: privateSpace(true) })
+    const result = await openDialog({ role: 'owner' })
+    await waitFor(() => expect(radio(result.container, 'gfs')?.checked).toBe(true))
+    await act(async () => { fireEvent.click(radio(result.container, 'internal')) })
+    await generate(result, makeRow({ via: 'internal' }))
+    expect(api.post.mock.calls[0][1]).toMatchObject({ via: 'internal' })
+  })
+
+  it('hides publishing for an internal link and never sends publish_to_gfs', async () => {
+    mockReads({
+      space: privateSpace(true),
+      servers: [{ id: 'g1', display_name: 'Relay One', status: 'active', inbox_url: 'https://g1' }],
+    })
+    const result = await openDialog({ role: 'owner' })
+    const toggle = await waitFor(() => result.getByTestId('invite-publish-toggle'))
+    await act(async () => { fireEvent.click(toggle) })
+    await act(async () => { fireEvent.click(radio(result.container, 'internal')) })
+    expect(result.queryByTestId('invite-publish-toggle')).toBeNull()
+    // Back to a connection server link: the toggle returns, switched off.
+    await act(async () => { fireEvent.click(radio(result.container, 'gfs')) })
+    expect((result.getByTestId('invite-publish-toggle') as HTMLInputElement).checked)
+      .toBe(false)
+    await act(async () => { fireEvent.click(radio(result.container, 'internal')) })
+    await generate(result, makeRow({ via: 'internal' }))
+    expect(api.post.mock.calls[0][1]).not.toHaveProperty('publish_to_gfs')
+    expect(api.post.mock.calls[0][1]).toMatchObject({ via: 'internal' })
+  })
+
+  it('toasts a 409 PRIVATE_GFS_OFF and falls back to an internal link', async () => {
+    mockReads({ space: privateSpace(true) })
+    const result = await openDialog({ role: 'owner' })
+    await waitFor(() => expect(radio(result.container, 'gfs')?.checked).toBe(true))
+    const detail = "This private space doesn't use a connection server. Turn it on in the space settings, or create an internal link."
+    api.post.mockRejectedValueOnce(new ApiError(409, detail, 'PRIVATE_GFS_OFF'))
+    await act(async () => { fireEvent.click(result.getByText('Create invite link')) })
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(detail, 'error'))
+    expect(radio(result.container, 'internal').checked).toBe(true)
+    expect(radio(result.container, 'gfs').disabled).toBe(true)
+    expect(result.container.querySelector('[data-testid="invite-code"]')).toBeNull()
+  })
+
+  it('toasts a 422 with the server detail', async () => {
+    mockReads({ space: privateSpace(false) })
+    const result = await openDialog({ role: 'owner' })
+    await waitFor(() => expect(radio(result.container, 'internal')).not.toBeNull())
+    api.post.mockRejectedValueOnce(new ApiError(422, 'via must be gfs or internal'))
+    await act(async () => { fireEvent.click(result.getByText('Create invite link')) })
+    await waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith('via must be gfs or internal', 'error'),
+    )
+  })
+})
+
+describe('SpaceInviteDialog — link type badge in the list', () => {
+  it('labels each link with its type, and nothing for an older backend', async () => {
+    mockReads({
+      tokens: [
+        makeRow({ token: 'tok-g', via: 'gfs' }),
+        makeRow({ token: 'tok-i', via: 'internal' }),
+        makeRow({ token: 'tok-old' }),
+      ],
+    })
+    const result = await openDialog()
+    await waitFor(() => result.getByTestId('invite-link-row-tok-g'))
+    expect(result.getByTestId('invite-via-badge-tok-g').textContent)
+      .toBe('Connection server')
+    expect(result.getByTestId('invite-via-badge-tok-i').textContent)
+      .toBe('Internal')
+    expect(result.queryByTestId('invite-via-badge-tok-old')).toBeNull()
   })
 })

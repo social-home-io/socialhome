@@ -1175,33 +1175,51 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(noFollow.container)).toBeTruthy()
   })
 
-  it('renders for the owner of a private space that uses a link channel', () => {
-    // v_51 — a private space with link-joined members reaches them over an
-    // opaque connection-server channel: the same choice applies, with copy
-    // that says what the server learns there.
-    const space = {
-      ...(publicSpace({ allow_subscribers: false }, 'private') as object),
-      gfs_private_channel: true,
-    } as never
+  it('renders for the owner of a private space that uses the connection server', () => {
+    // A private space whose owner turned ``private_gfs`` on: member
+    // households reach each other over an opaque channel, so the same
+    // choice applies, with copy that says what the server learns there.
+    const space = publicSpace(
+      { allow_subscribers: false, private_gfs: true }, 'private',
+    )
     const { container, getByText, queryByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} isOwner />,
     )
     expect(group(container)).toBeTruthy()
     expect(getByText('space.gfs_publish.private_intro')).toBeTruthy()
     expect(queryByText('space.gfs_publish.intro')).toBeNull()
-    // Never for a non-owner, even with the channel.
+    // Never for a non-owner.
     const admin = render(<SpaceSettings space={space} onUpdate={() => {}} />)
     expect(group(admin.container)).toBeNull()
   })
 
-  it('a private space without a link channel shows no choice', () => {
+  it('is hidden on a private space with the connection server off', () => {
+    // Off is what matters: not a stale channel flag, and not a strict
+    // mode left over from before (it means nothing while off).
     const space = {
-      ...(publicSpace({}, 'private') as object),
-      gfs_private_channel: false,
+      ...(publicSpace(
+        { private_gfs: false, gfs_publish_mode: 'strict' }, 'private',
+      ) as object),
+      gfs_private_channel: true,
     } as never
     const { container } = render(
       <SpaceSettings space={space} onUpdate={() => {}} isOwner />,
     )
+    expect(group(container)).toBeNull()
+  })
+
+  it('follows the live connection-server switch on a private space', () => {
+    const { container, getByTestId } = render(
+      <SpaceSettings
+        space={publicSpace({ private_gfs: false }, 'private')}
+        onUpdate={() => {}}
+        isOwner
+      />,
+    )
+    expect(group(container)).toBeNull()
+    fireEvent.click(getByTestId('private-gfs-toggle'))
+    expect(group(container)).toBeTruthy()
+    fireEvent.click(getByTestId('private-gfs-toggle'))
     expect(group(container)).toBeNull()
   })
 
@@ -1288,5 +1306,152 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     await vi.waitFor(() =>
       expect(showToast).toHaveBeenCalledWith('Failed to update', 'error'),
     )
+  })
+})
+
+describe('SpaceSettings — private space connection server (owner-only)', () => {
+  beforeEach(() => {
+    apiMock.get.mockResolvedValue([])
+    apiMock.patch.mockReset()
+    vi.mocked(showToast).mockClear()
+  })
+
+  function space(features: object = {}, spaceType = 'private') {
+    return {
+      ...(makeSpace() as unknown as Record<string, unknown>),
+      space_type: spaceType,
+      features: {
+        calendar: true, todo: true, location: false,
+        stickies: false, pages: true, gallery: true,
+        posts_access: 'open', pages_access: 'open',
+        stickies_access: 'open', calendar_access: 'open',
+        tasks_access: 'open',
+        allowed_post_types: ['text'],
+        ...features,
+      },
+    } as never
+  }
+
+  /** An ``ApiError``-shaped rejection: the dialog reads ``code`` + ``extra``. */
+  function linkMembersError(households: unknown[]) {
+    return Object.assign(
+      new Error('Remove the households that joined through an invite link before turning the connection server off for this space.'),
+      { status: 409, code: 'PRIVATE_GFS_LINK_MEMBERS', extra: { households } },
+    )
+  }
+
+  it('shows the switch only to the owner of a private space', () => {
+    const owner = render(
+      <SpaceSettings space={space()} onUpdate={() => {}} isOwner />,
+    )
+    expect(owner.queryByTestId('private-gfs')).toBeTruthy()
+    expect(owner.getByText('space.private_gfs.toggle')).toBeTruthy()
+    expect(owner.getByText('space.private_gfs.on_help')).toBeTruthy()
+    expect(owner.getByText('space.private_gfs.off_help')).toBeTruthy()
+    owner.unmount()
+    // An admin who is not the owner: the server answers 403, so no switch.
+    const admin = render(<SpaceSettings space={space()} onUpdate={() => {}} />)
+    expect(admin.queryByTestId('private-gfs')).toBeNull()
+    admin.unmount()
+    // Public / global / household spaces always use it (or never) — no switch.
+    for (const kind of ['public', 'global', 'household']) {
+      const r = render(
+        <SpaceSettings space={space({}, kind)} onUpdate={() => {}} isOwner />,
+      )
+      expect(r.queryByTestId('private-gfs')).toBeNull()
+      r.unmount()
+    }
+  })
+
+  it('reflects the stored value (absent → off)', () => {
+    const off = render(<SpaceSettings space={space()} onUpdate={() => {}} isOwner />)
+    expect((off.getByTestId('private-gfs-toggle') as HTMLInputElement).checked).toBe(false)
+    off.unmount()
+    const on = render(
+      <SpaceSettings space={space({ private_gfs: true })} onUpdate={() => {}} isOwner />,
+    )
+    expect((on.getByTestId('private-gfs-toggle') as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('PATCHes exactly {features: {private_gfs: true}} when turned on', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const onUpdate = vi.fn()
+    const { getByTestId, getByText } = render(
+      <SpaceSettings space={space()} onUpdate={onUpdate} isOwner />,
+    )
+    fireEvent.click(getByTestId('private-gfs-toggle'))
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0]).toEqual([
+      '/api/spaces/s-1', { features: { private_gfs: true } },
+    ])
+    await vi.waitFor(() => expect(onUpdate).toHaveBeenCalled())
+  })
+
+  it('PATCHes exactly {features: {private_gfs: false}} and warns about keys', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const { getByTestId, getByText, queryByTestId } = render(
+      <SpaceSettings space={space({ private_gfs: true })} onUpdate={() => {}} isOwner />,
+    )
+    expect(queryByTestId('private-gfs-off-note')).toBeNull()
+    fireEvent.click(getByTestId('private-gfs-toggle'))
+    expect(getByTestId('private-gfs-off-note').textContent)
+      .toBe('space.private_gfs.off_note')
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({
+      features: { private_gfs: false },
+    })
+  })
+
+  it('lists the link-joined households on a 409 and keeps the switch on', async () => {
+    apiMock.patch.mockRejectedValueOnce(linkMembersError([
+      {
+        instance_id: 'inst-b', display_name: 'The Bakers',
+        members: [
+          { user_id: 'u1', display_name: 'Ben' },
+          { user_id: 'u2', display_name: 'Bea' },
+        ],
+      },
+      { instance_id: 'inst-c', display_name: '', members: [] },
+    ]))
+    const onUpdate = vi.fn()
+    const { getByTestId, getByText } = render(
+      <SpaceSettings space={space({ private_gfs: true })} onUpdate={onUpdate} isOwner />,
+    )
+    fireEvent.click(getByTestId('private-gfs-toggle'))
+    fireEvent.click(getByText('Save changes'))
+    const panel = await vi.waitFor(() => getByTestId('private-gfs-link-members'))
+    expect(panel.getAttribute('role')).toBe('alert')
+    expect(panel.textContent).toContain('space.private_gfs.link_members_title')
+    expect(panel.textContent).toContain('The Bakers')
+    expect(panel.textContent).toContain('Ben, Bea')
+    // A nameless household falls back to its id instead of a blank row.
+    expect(panel.textContent).toContain('inst-c')
+    const link = panel.querySelector('a') as HTMLAnchorElement
+    expect(link.getAttribute('href')).toBe('/spaces/s-1?tab=members')
+    expect(link.textContent).toBe('space.private_gfs.link_members_open')
+    // Nothing was saved: the switch shows the server's state again.
+    expect((getByTestId('private-gfs-toggle') as HTMLInputElement).checked).toBe(true)
+    expect(showToast).toHaveBeenCalledWith('space.private_gfs.link_members_toast', 'error')
+    expect(onUpdate).not.toHaveBeenCalled()
+    // Touching the switch again clears the stale refusal.
+    fireEvent.click(getByTestId('private-gfs-toggle'))
+    expect(() => getByTestId('private-gfs-link-members')).toThrow()
+  })
+
+  it('falls back to the server message on any other error', async () => {
+    apiMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('owner required'), { status: 403, code: 'FORBIDDEN' }),
+    )
+    const { getByTestId, getByText, queryByTestId } = render(
+      <SpaceSettings space={space()} onUpdate={() => {}} isOwner />,
+    )
+    fireEvent.click(getByTestId('private-gfs-toggle'))
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith('owner required', 'error'),
+    )
+    expect(queryByTestId('private-gfs-link-members')).toBeNull()
   })
 })

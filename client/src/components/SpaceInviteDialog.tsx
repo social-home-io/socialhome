@@ -34,6 +34,8 @@ import { Button } from './Button'
 import { QrCodeImg } from './QrCodeImg'
 import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
+import { t } from '@/i18n/i18n'
+import { addBase } from '@/baseUrl'
 
 /** Roles an invite link can seat someone as. ``owner`` is deliberately
  *  absent — ownership transfers are a separate, deliberate gesture, and
@@ -54,6 +56,11 @@ interface InviteGfsRef {
   url: string
 }
 
+/** How a link is redeemed. ``gfs`` — through the connection-server relay,
+ *  so a household that never met ours can join; ``internal`` — only
+ *  households already paired or reachable over the mesh. */
+export type InviteVia = 'gfs' | 'internal'
+
 interface InviteTokenRow {
   token: string
   role: InviteRole
@@ -69,6 +76,8 @@ interface InviteTokenRow {
    *  key-wrap key + signature) a stranger's redeem needs. */
   code?: string | null
   gfs?: InviteGfsRef | null
+  /** The link's type. Absent on an older backend (every link was ``gfs``). */
+  via?: InviteVia
 }
 
 const EXPIRY_CHOICES = [
@@ -113,6 +122,14 @@ const publishTo = signal<string | null>(null)
  *  explains itself instead of repeating a toast. */
 const publishBlocked = signal<Record<string, string>>({})
 const servers = signal<GfsConnection[]>([])
+/** The space's tier and whether a private one uses the connection server
+ *  (``features.private_gfs``). ``null`` until the detail read lands. */
+const spaceType = signal<string | null>(null)
+const privateGfs = signal(false)
+/** Link type picked for a PRIVATE space; ``null`` everywhere else (public
+ *  and global links are always connection-server links, and the POST then
+ *  leaves ``via`` to the server). */
+const via = signal<InviteVia | null>(null)
 const created = signal<InviteTokenRow | null>(null)
 const loading = signal(false)
 
@@ -150,7 +167,31 @@ export function openSpaceInvite(
   links.value = []
   linksError.value = false
   memberNames.value = {}
+  spaceType.value = null
+  privateGfs.value = false
+  via.value = null
   open.value = true
+}
+
+/** Record the space detail the dialog reads on open. A private space gets
+ *  the server's default link type: internal while it doesn't use the
+ *  connection server, a connection-server link once it does. */
+function applySpaceDetail(data: {
+  space_type?: string
+  features?: { private_gfs?: boolean } | null
+}) {
+  spaceType.value = data.space_type ?? null
+  privateGfs.value = Boolean(data.features?.private_gfs)
+  via.value = spaceType.value === 'private'
+    ? (privateGfs.value ? 'gfs' : 'internal')
+    : null
+}
+
+/** Pick a link type. An internal link is never published to a connection
+ *  server (the server answers 422), so that toggle resets with it. */
+function chooseVia(next: InviteVia) {
+  via.value = next
+  if (next === 'internal') publish.value = false
 }
 
 function ttlFor(id: ExpiryId): number {
@@ -265,13 +306,17 @@ export function SpaceInviteDialog() {
   useEffect(() => {
     if (!open.value || !spaceId.value) return
     let cancelled = false
-    if (!displayHint.value) {
-      api.get(`/api/spaces/${spaceId.value}`).then((data) => {
-        if (cancelled) return
-        const name = (data as { name?: string }).name
-        if (name) displayHint.value = name
-      }).catch(() => { /* swallow — hint is optional */ })
-    }
+    // Always read the detail: besides the name hint, a private space's
+    // link-type choice depends on whether it uses the connection server.
+    api.get(`/api/spaces/${spaceId.value}`).then((data) => {
+      if (cancelled) return
+      const d = data as Parameters<typeof applySpaceDetail>[0] & { name?: string }
+      if (d.name && !displayHint.value) displayHint.value = d.name
+      applySpaceDetail(d)
+    }).catch(() => {
+      // Non-fatal: the hint is optional, and without the tier the dialog
+      // offers today's link and lets the server pick the type.
+    })
     void loadLinks()
     void loadServers()
     void loadMemberNames()
@@ -287,22 +332,28 @@ export function SpaceInviteDialog() {
     ? publishBlocked.value[publishTo.value]
     : undefined
 
+  const isPrivate = spaceType.value === 'private'
+  // Publishing parks the link on a connection server: never for an
+  // internal link.
+  const canPublish = servers.value.length > 0 && via.value !== 'internal'
+
   const createToken = async () => {
     loading.value = true
+    const publishedTo = canPublish && publish.value ? publishTo.value : null
     try {
       const body: {
         role: InviteRole
         uses: number
         ttl_seconds: number
         publish_to_gfs?: string
+        via?: InviteVia
       } = {
         role: role.value,
         uses: uses.value,
         ttl_seconds: ttlFor(expiry.value),
       }
-      if (publish.value && publishTo.value) {
-        body.publish_to_gfs = publishTo.value
-      }
+      if (via.value) body.via = via.value
+      if (publishedTo) body.publish_to_gfs = publishedTo
       const result = await api.post(
         `/api/spaces/${spaceId.value}/invite-tokens`,
         body,
@@ -311,13 +362,18 @@ export function SpaceInviteDialog() {
       // Newest first — matches the order the list endpoint returns.
       links.value = [result, ...links.value]
     } catch (e: unknown) {
-      if (e instanceof ApiError && e.status === 422 && publishTo.value) {
+      if (e instanceof ApiError && e.code === 'PRIVATE_GFS_OFF') {
+        // The owner turned the connection server off since we read the
+        // space: show it as it is now, so the next try is an internal link.
+        privateGfs.value = false
+        chooseVia('internal')
+      } else if (e instanceof ApiError && e.status === 422 && publishedTo) {
         // The server named a reason (unknown connection server, or one
         // that can't serve invite links yet). Pin it to that option so
         // the picker carries the explanation.
         publishBlocked.value = {
           ...publishBlocked.value,
-          [publishTo.value]: e.detail
+          [publishedTo]: e.detail
             || "This connection server can't host invite links yet.",
         }
       }
@@ -394,6 +450,63 @@ export function SpaceInviteDialog() {
               </div>
             </fieldset>
 
+            {isPrivate && (
+              <fieldset class="sh-invite-fieldset" data-testid="invite-via">
+                <legend>{t('invite.via.legend')}</legend>
+                <div class="sh-invite-roles">
+                  <label
+                    class={[
+                      'sh-invite-role',
+                      via.value === 'gfs' ? 'sh-invite-role--active' : '',
+                      privateGfs.value ? '' : 'sh-invite-role--disabled',
+                    ].filter(Boolean).join(' ')}
+                  >
+                    <input
+                      type="radio"
+                      name="sh-invite-via"
+                      value="gfs"
+                      checked={via.value === 'gfs'}
+                      disabled={!privateGfs.value}
+                      aria-describedby={privateGfs.value ? undefined : 'sh-invite-via-gfs-off'}
+                      onChange={() => chooseVia('gfs')}
+                      data-testid="invite-via-gfs"
+                    />
+                    <span class="sh-invite-role__label">{t('invite.via.gfs')}</span>
+                    <span class="sh-invite-role__hint">{t('invite.via.gfs_hint')}</span>
+                  </label>
+                  <label
+                    class={`sh-invite-role ${via.value === 'internal' ? 'sh-invite-role--active' : ''}`}
+                  >
+                    <input
+                      type="radio"
+                      name="sh-invite-via"
+                      value="internal"
+                      checked={via.value === 'internal'}
+                      onChange={() => chooseVia('internal')}
+                      data-testid="invite-via-internal"
+                    />
+                    <span class="sh-invite-role__label">{t('invite.via.internal')}</span>
+                    <span class="sh-invite-role__hint">{t('invite.via.internal_hint')}</span>
+                  </label>
+                </div>
+                {!privateGfs.value && (
+                  <p class="sh-muted" id="sh-invite-via-gfs-off"
+                     style={{ margin: 'var(--sh-space-xs) 0 0', fontSize: 'var(--sh-font-size-xs)' }}
+                     data-testid="invite-via-gfs-off">
+                    {viewerRole.value === 'owner' ? (
+                      <>
+                        {t('invite.via.gfs_off_owner')}{' '}
+                        <a href={addBase(`/spaces/${spaceId.value}/settings`)}
+                           onClick={() => { open.value = false }}>
+                          {t('invite.via.open_settings')}
+                        </a>
+                      </>
+                    ) : t('invite.via.gfs_off')}
+                  </p>
+                )}
+              </fieldset>
+            )}
+
             <label class="sh-form-field">
               <span>How many people can use this link?</span>
               <input
@@ -435,7 +548,7 @@ export function SpaceInviteDialog() {
               </p>
             )}
 
-            {servers.value.length > 0 && (
+            {canPublish && (
               <div class="sh-invite-publish">
                 <label class="sh-invite-publish__toggle">
                   <input
@@ -513,6 +626,14 @@ export function SpaceInviteDialog() {
               {ROLE_CHOICES.find(c => c.id === row.role)?.label.toLowerCase()
                 ?? row.role}.
             </p>
+
+            {row.via === 'internal' && (
+              <p class="sh-muted"
+                 style={{ marginTop: 0, fontSize: 'var(--sh-font-size-xs)' }}
+                 data-testid="invite-created-internal">
+                {t('invite.via.created_internal')}
+              </p>
+            )}
 
             {row.gfs && !row.expires_at && (
               <p class="sh-muted"
@@ -598,6 +719,14 @@ export function SpaceInviteDialog() {
                   <span class={l.role === 'admin' ? 'sh-chip sh-chip--honey' : 'sh-chip'}>
                     {ROLE_CHOICES.find(c => c.id === l.role)?.label ?? l.role}
                   </span>
+                  {l.via && (
+                    <span class="sh-chip sh-invite-via-badge"
+                          data-testid={`invite-via-badge-${l.token}`}>
+                      {l.via === 'internal'
+                        ? t('invite.via.badge_internal')
+                        : t('invite.via.badge_gfs')}
+                    </span>
+                  )}
                   {l.gfs && (
                     <span class="sh-invite-link-row-item__web"
                           title="Published as a web link">
