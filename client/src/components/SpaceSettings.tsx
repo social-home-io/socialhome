@@ -36,15 +36,20 @@ import {
 // that aren't composed via the picker (transcript / event /
 // highlight_share) are intentionally absent here and preserved untouched
 // on save (see ``save``), so toggling these never disables them.
-const SPACE_POST_TYPES: [string, string][] = [
-  ['text', '🔤 Text'],
-  ['image', '📷 Image'],
-  ['video', '🎬 Video'],
-  ['file', '📄 File'],
-  ['poll', '📊 Poll'],
-  ['schedule', '📅 Schedule'],
-  ['location', '📍 Location'],
-  ['highlight_share', '⭕ Highlight share'],
+// Each entry: [type, icon, label key].
+// For ``i18n:check``: t('space.post_type.text') t('space.post_type.image')
+// t('space.post_type.video') t('space.post_type.file') t('space.post_type.poll')
+// t('space.post_type.schedule') t('space.post_type.location')
+// t('space.post_type.highlight_share')
+const SPACE_POST_TYPES: [string, string, string][] = [
+  ['text', '🔤', 'space.post_type.text'],
+  ['image', '📷', 'space.post_type.image'],
+  ['video', '🎬', 'space.post_type.video'],
+  ['file', '📄', 'space.post_type.file'],
+  ['poll', '📊', 'space.post_type.poll'],
+  ['schedule', '📅', 'space.post_type.schedule'],
+  ['location', '📍', 'space.post_type.location'],
+  ['highlight_share', '⭕', 'space.post_type.highlight_share'],
 ]
 const SPACE_POST_TYPE_KEYS = SPACE_POST_TYPES.map(([k]) => k)
 
@@ -163,11 +168,11 @@ function publicSpaceUrl(inboxUrl: string, spaceId: string): string {
 async function copyToClipboard(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text)
-    showToast('Public link copied', 'success')
+    showToast(t('space.gfs.public_link_copied'), 'success')
   } catch {
     // Older browsers / locked-down WebViews fall through to a manual
     // selection prompt rather than silently failing.
-    showToast('Couldn\'t copy — long-press the link to copy manually', 'info')
+    showToast(t('space.gfs.public_link_copy_failed'), 'info')
   }
 }
 
@@ -198,7 +203,7 @@ async function togglePublish(spaceId: string, gfsId: string) {
     publications.value = publications.value.filter(p => p.gfs_connection_id !== gfsId)
     showToast(t('space.unpublish_from_gfs'), 'success')
   } catch (e: any) {
-    showToast(e.message || 'Failed', 'error')
+    showToast(e.message || t('common.error'), 'error')
   } finally {
     setPending(gfsId, false)
   }
@@ -214,7 +219,7 @@ async function doPublish(spaceId: string, gfsId: string) {
     publications.value = [...publications.value, pub]
     showToast(t('space.publish_to_gfs'), 'success')
   } catch (e: any) {
-    showToast(e.message || 'Failed', 'error')
+    showToast(e.message || t('common.error'), 'error')
   } finally {
     setPending(gfsId, false)
   }
@@ -386,7 +391,7 @@ export function SpaceSettings({
     )
     const chosen = SPACE_POST_TYPE_KEYS.filter((k) => postTypeEnabled.value[k])
     if (chosen.length === 0) {
-      showToast('Enable at least one post type for the feed', 'error')
+      showToast(t('space.post_types.none_on'), 'error')
       return
     }
     const allowedPostTypesPayload = [...preserved, ...chosen].sort()
@@ -489,7 +494,7 @@ export function SpaceSettings({
     if (Object.keys(features).length > 0) body.features = features
 
     if (Object.keys(body).length === 0) {
-      showToast('No changes to save', 'info')
+      showToast(t('space.settings.no_changes'), 'info')
       return
     }
     await sendPatch(body, modeChanged)
@@ -521,12 +526,12 @@ export function SpaceSettings({
       if (modeChanged) {
         showToast(
           locationMode.value === 'zone_only'
-            ? 'Zone-only mode on. Members will see only zone labels within seconds.'
-            : 'Live GPS mode on. Members will see GPS pins within seconds.',
+            ? t('space.location.zone_on_toast')
+            : t('space.location.gps_on_toast'),
           'success',
         )
       } else {
-        showToast('Space updated', 'success')
+        showToast(t('space.settings.saved'), 'success')
       }
       onUpdate()
     } catch (e: any) {
@@ -544,7 +549,7 @@ export function SpaceSettings({
         showToast(t('space.private_gfs.link_members_toast'), 'error')
         return
       }
-      showToast(e.message || 'Failed to update', 'error')
+      showToast(e.message || t('space.settings.save_failed'), 'error')
     }
   }
 
@@ -571,21 +576,18 @@ export function SpaceSettings({
         proposal?: { status?: string; needed?: number }
       }>(`/api/spaces/${space.id}/proposals`, { action: 'dissolve' })
       if (res?.proposal?.status === 'executed') {
-        showToast('Space dissolved', 'info')
+        showToast(t('space.dissolve.done'), 'info')
         // ``addBase`` keeps the hard navigate inside the ingress prefix.
         window.location.href = addBase('/spaces')
       } else {
         // Only proposed: when the other admins approve later, the
         // dissolve frame must still move this tab off the space.
         clearLocalDissolve(space.id)
-        showToast(
-          'Dissolve proposed — it needs a majority of admins to approve.',
-          'info',
-        )
+        showToast(t('space.dissolve.proposed'), 'info')
       }
     } catch (e: any) {
       clearLocalDissolve(space.id)
-      showToast(e.message || 'Failed to dissolve', 'error')
+      showToast(e.message || t('space.dissolve.failed'), 'error')
     }
   }
 
@@ -602,16 +604,13 @@ export function SpaceSettings({
         space_type: tierChoice.value,
       })
       if (res?.proposal?.status === 'executed') {
-        showToast('Publication tier updated.', 'success')
+        showToast(t('space.tier.changed'), 'success')
         onUpdate()
       } else {
-        showToast(
-          'Tier change proposed — it needs a majority of admins to approve.',
-          'info',
-        )
+        showToast(t('space.tier.proposed'), 'info')
       }
     } catch (e: any) {
-      showToast(e.message || 'Failed to change publication tier', 'error')
+      showToast(e.message || t('space.tier.failed'), 'error')
     }
   }
 
@@ -620,50 +619,47 @@ export function SpaceSettings({
       if (archived) await api.post(`/api/spaces/${space.id}/archive`)
       else await api.delete(`/api/spaces/${space.id}/archive`)
       showToast(
-        archived ? 'Space archived — now read-only' : 'Space unarchived',
+        archived ? t('space.archive.archived_toast') : t('space.archive.unarchived_toast'),
         'success',
       )
       onUpdate()
     } catch (e: any) {
-      showToast(e.message || 'Failed to update archive state', 'error')
+      showToast(e.message || t('space.archive.failed'), 'error')
     }
   }
 
   return (
     <div class="sh-space-settings">
-      <h3>Space Settings</h3>
+      <h3>{t('space.settings.title')}</h3>
       <div class="sh-form">
-        <label>Name <input value={name.value} onInput={(e) => name.value = (e.target as HTMLInputElement).value} /></label>
-        <label>Description <textarea value={description.value} onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value} rows={2} /></label>
+        <label>{t('space.settings.name')} <input value={name.value} onInput={(e) => name.value = (e.target as HTMLInputElement).value} /></label>
+        <label>{t('space.settings.description')} <textarea value={description.value} onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value} rows={2} /></label>
         <EmojiField value={emoji} openKey="space-settings-icon" />
         <RadioCardGroup
-          legend="How people join"
+          legend={t('space.join.legend')}
           name="space-settings-join-mode"
           value={joinMode.value}
           options={joinOptionsForVisibility(space.space_type)}
           onChange={(v) => joinMode.value = v as typeof joinMode.value}
         />
         <fieldset class="sh-form-fieldset">
-          <legend>🗓 Retention</legend>
+          <legend>🗓 {t('space.retention.legend')}</legend>
           <label>
-            Auto-delete posts older than
+            {t('space.retention.label')}
             <input
               type="number"
               min={0}
               max={3650}
               inputMode="numeric"
               value={retentionDays}
-              placeholder="Forever"
+              placeholder={t('space.retention.placeholder')}
               onInput={(e) => {
                 setRetentionDays((e.target as HTMLInputElement).value)
               }}
             />
-            <span class="sh-muted"> days (leave empty or 0 to keep forever)</span>
+            <span class="sh-muted"> {t('space.retention.days_hint')}</span>
           </label>
-          <p class="sh-muted">
-            Applies to feed posts and comments in this space. Calendar
-            entries and pages themselves are never deleted.
-          </p>
+          <p class="sh-muted">{t('space.retention.applies')}</p>
           {retentionOn && (
             <fieldset
               class="sh-form-fieldset sh-retention-keep"
@@ -693,11 +689,9 @@ export function SpaceSettings({
           )}
         </fieldset>
         <fieldset class="sh-form-fieldset" data-testid="space-features">
-          <legend>🧩 Features</legend>
+          <legend>🧩 {t('space.features.legend')}</legend>
           <p class="sh-muted" style={{ marginTop: 0 }}>
-            Hide tabs that aren't used in this space. Existing pages,
-            events, tasks, stickies, or gallery albums stay in storage
-            and reappear when you turn the toggle back on.
+            {t('space.features.hint')}
           </p>
           <label class="sh-toggle-row">
             <input
@@ -707,7 +701,7 @@ export function SpaceSettings({
                 featurePages.value = (e.target as HTMLInputElement).checked
               }}
             />
-            📄 Pages
+            📄 {t('nav.pages')}
           </label>
           <label class="sh-toggle-row">
             <input
@@ -717,7 +711,7 @@ export function SpaceSettings({
                 featureCalendar.value = (e.target as HTMLInputElement).checked
               }}
             />
-            🗓 Calendar
+            🗓 {t('nav.calendar')}
           </label>
           <label class="sh-toggle-row sh-toggle-row--sub">
             <input
@@ -740,7 +734,7 @@ export function SpaceSettings({
                 featureTodo.value = (e.target as HTMLInputElement).checked
               }}
             />
-            ✅ Tasks
+            ✅ {t('nav.tasks')}
           </label>
           <label class="sh-toggle-row">
             <input
@@ -750,7 +744,7 @@ export function SpaceSettings({
                 featureStickies.value = (e.target as HTMLInputElement).checked
               }}
             />
-            📝 Stickies
+            📝 {t('nav.stickies')}
           </label>
           <label class="sh-toggle-row">
             <input
@@ -760,7 +754,7 @@ export function SpaceSettings({
                 featureGallery.value = (e.target as HTMLInputElement).checked
               }}
             />
-            🖼 Gallery
+            🖼 {t('nav.gallery')}
           </label>
           <label class="sh-toggle-row">
             <input
@@ -770,7 +764,7 @@ export function SpaceSettings({
                 featureBazaar.value = (e.target as HTMLInputElement).checked
               }}
             />
-            🛍 Bazaar
+            🛍 {t('nav.bazaar')}
           </label>
         </fieldset>
         <fieldset class="sh-form-fieldset" data-testid="space-access">
@@ -807,13 +801,11 @@ export function SpaceSettings({
           <p class="sh-muted sh-access-explain">{t('space.access.explain')}</p>
         </fieldset>
         <fieldset class="sh-form-fieldset" data-testid="space-post-types">
-          <legend>📮 Post types</legend>
+          <legend>📮 {t('space.post_types.legend')}</legend>
           <p class="sh-muted" style={{ marginTop: 0 }}>
-            Choose which kinds of posts members can create in this feed.
-            Turning one off hides it from the composer; existing posts of
-            that type stay visible.
+            {t('space.post_types.hint')}
           </p>
-          {SPACE_POST_TYPES.map(([key, label]) => (
+          {SPACE_POST_TYPES.map(([key, icon, labelKey]) => (
             <label key={key} class="sh-toggle-row">
               <input
                 type="checkbox"
@@ -825,13 +817,13 @@ export function SpaceSettings({
                   }
                 }}
               />
-              {label}
+              {icon} {t(labelKey)}
             </label>
           ))}
         </fieldset>
 
         <fieldset class="sh-form-fieldset">
-          <legend>📍 Location sharing</legend>
+          <legend>📍 {t('space.location.legend')}</legend>
           <label class="sh-toggle-row">
             <input
               type="checkbox"
@@ -840,12 +832,12 @@ export function SpaceSettings({
                 locationEnabled.value = (e.target as HTMLInputElement).checked
               }}
             />
-            Show a map tab to members of this space
+            {t('space.location.toggle')}
           </label>
           {locationEnabled.value && (
             <>
-              <fieldset class="sh-mode-fieldset" aria-label="Privacy mode">
-                <legend>Privacy mode</legend>
+              <fieldset class="sh-mode-fieldset" aria-label={t('space.location.mode_legend')}>
+                <legend>{t('space.location.mode_legend')}</legend>
                 <label class={`sh-mode-option ${locationMode.value === 'gps' ? 'sh-mode-option--selected' : ''}`}>
                   <input
                     type="radio"
@@ -856,13 +848,9 @@ export function SpaceSettings({
                   />
                   <span class="sh-mode-option__body">
                     <span class="sh-mode-option__title">
-                      🛰️ Live GPS
+                      🛰️ {t('space.location.gps')}
                     </span>
-                    <span class="sh-muted">
-                      Opted-in members broadcast their GPS to the space.
-                      Coordinates are rounded to ~10 m before they leave
-                      your home server.
-                    </span>
+                    <span class="sh-muted">{t('space.location.gps_hint')}</span>
                   </span>
                 </label>
                 <label class={`sh-mode-option ${locationMode.value === 'zone_only' ? 'sh-mode-option--selected' : ''}`}>
@@ -875,30 +863,21 @@ export function SpaceSettings({
                   />
                   <span class="sh-mode-option__body">
                     <span class="sh-mode-option__title">
-                      🔒 Zone only
-                      <span class="sh-mode-option__badge">stronger privacy</span>
+                      🔒 {t('space.location.zone')}
+                      <span class="sh-mode-option__badge">{t('space.location.zone_badge')}</span>
                     </span>
-                    <span class="sh-muted">
-                      Your home server matches each member's GPS to a
-                      space-defined zone and sends only the zone label.
-                      Raw coordinates never leave your household. Members
-                      outside every zone show nothing.
-                    </span>
+                    <span class="sh-muted">{t('space.location.zone_hint')}</span>
                   </span>
                 </label>
               </fieldset>
               <p class="sh-muted">
-                <a href={`/spaces/${space.id}/zones`}>Manage zones →</a>
+                <a href={`/spaces/${space.id}/zones`}>{t('space.location.manage_zones')} →</a>
                 {locationMode.value === 'zone_only'
-                  && ' (required for zone-only mode)'}
+                  && ` ${t('space.location.zones_required')}`}
               </p>
             </>
           )}
-          <p class="sh-muted">
-            HA-defined zone names are never sent to a space, regardless
-            of mode. Per-space zones (managed above) are the only labels
-            ever shared.
-          </p>
+          <p class="sh-muted">{t('space.location.ha_zones_note')}</p>
         </fieldset>
 
         {/* Followers (subscribers). The first switch decides whether they
@@ -1070,11 +1049,10 @@ export function SpaceSettings({
                 allowHere.value = (e.target as HTMLInputElement).checked
               }}
             />
-            Let owners and admins notify everyone with @here
+            {t('space.here.toggle')}
           </label>
           <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-            Pings every member who hasn't muted this space, at most once every
-            10 minutes per person. Members' @here doesn't notify anyone.
+            {t('space.here.hint')}
           </p>
         </fieldset>
 
@@ -1083,10 +1061,9 @@ export function SpaceSettings({
          *  meaningful for a space hosted here, so hidden on a remote stub. */}
         {!isRemoteSpace && (
           <fieldset class="sh-form-fieldset">
-            <legend>🛡️ Admin authority</legend>
+            <legend>🛡️ {t('space.admin_authority.legend')}</legend>
             <p class="sh-muted" style={{ marginTop: 0 }}>
-              Off by default. Turn it on only if you want your admins to keep
-              the space running without you.
+              {t('space.admin_authority.intro')}
             </p>
             <label>
               <input
@@ -1097,29 +1074,24 @@ export function SpaceSettings({
                     (e.target as HTMLInputElement).checked
                 }}
               />
-              Delegated admin authority
+              {t('space.admin_authority.toggle')}
             </label>
             <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-              Let space admins act (moderate, invite, publish) when you're
-              offline.
+              {t('space.admin_authority.hint')}
             </p>
           </fieldset>
         )}
 
         <div class="sh-form-actions">
-          <Button onClick={save}>Save changes</Button>
+          <Button onClick={save}>{t('space.settings.save')}</Button>
         </div>
       </div>
 
       <hr />
-      <h3>Publication tier</h3>
-      <p class="sh-muted" style={{ marginTop: 0 }}>
-        Who can discover this space. Changing it is a critical action — with
-        more than one admin it needs a majority to approve before it takes
-        effect (no single admin can publish the group alone).
-      </p>
+      <h3>{t('space.tier.heading')}</h3>
+      <p class="sh-muted" style={{ marginTop: 0 }}>{t('space.tier.intro')}</p>
       <div class="sh-form">
-        <label>Tier
+        <label>{t('space.tier.label')}
           <select
             value={tierChoice.value}
             onChange={(e) =>
@@ -1127,13 +1099,13 @@ export function SpaceSettings({
                 .value as Space['space_type'])
             }
           >
-            <option value="private">Private — invite only, not listed</option>
-            <option value="household">Household — everyone in your home</option>
+            <option value="private">{t('space.tier.private')}</option>
+            <option value="household">{t('space.tier.household')}</option>
             <option value="public" disabled={isRestricted('public_spaces')}>
-              Public — listed in this instance's directory
+              {t('space.tier.public')}
             </option>
             <option value="global" disabled={isRestricted('public_spaces')}>
-              Global — published to connected global servers
+              {t('space.tier.global')}
             </option>
           </select>
         </label>
@@ -1147,8 +1119,8 @@ export function SpaceSettings({
             onClick={proposeTier}
           >
             {tierChoice.value === space.space_type
-              ? 'Current tier'
-              : 'Propose tier change'}
+              ? t('space.tier.current')
+              : t('space.tier.propose')}
           </Button>
         </div>
       </div>
@@ -1199,7 +1171,7 @@ export function SpaceSettings({
                 </div>
                 {isLive && (
                   <div class="sh-federation-public-url">
-                    <span class="sh-muted">🔗 Public link</span>
+                    <span class="sh-muted">🔗 {t('space.gfs.public_link')}</span>
                     <a
                       href={publicUrl}
                       target="_blank"
@@ -1213,8 +1185,8 @@ export function SpaceSettings({
                       type="button"
                       class="sh-federation-public-url__copy"
                       onClick={() => void copyToClipboard(publicUrl)}
-                      aria-label="Copy public link to clipboard"
-                      title="Copy"
+                      aria-label={t('space.gfs.copy_public_link')}
+                      title={t('space.gfs.copy')}
                     >
                       📋
                     </button>
@@ -1249,53 +1221,46 @@ export function SpaceSettings({
       ))}
 
       <hr />
-      <h3>Archive</h3>
+      <h3>{t('space.archive.heading')}</h3>
       {space.archived ? (
         space.archived_reason === 'dissolved' ? (
           // Remote-terminated: the owner host dissolved the space. The
           // server rejects unarchiving, so offer no Unarchive button.
           <p class="sh-muted" style={{ marginTop: 0 }}>
-            This space was <strong>dissolved by its owner</strong> — it can't
-            be reactivated. This is a read-only archive of what you had.
+            <strong>{t('space.archive.dissolved_lead')}</strong>{' '}
+            {t('space.archive.readonly_copy')}
           </p>
         ) : space.archived_reason === 'removed' ? (
           <p class="sh-muted" style={{ marginTop: 0 }}>
-            You were <strong>removed from this space</strong> — it can't be
-            reactivated. This is a read-only archive of what you had.
+            <strong>{t('space.archive.removed_lead')}</strong>{' '}
+            {t('space.archive.readonly_copy')}
           </p>
         ) : (
           <>
             <p class="sh-muted" style={{ marginTop: 0 }}>
-              This space is <strong>archived</strong>: it's read-only and hidden
-              from your active spaces. Everything is kept — unarchive to use it
-              again.
+              <strong>{t('space.archive.archived_lead')}</strong>{' '}
+              {t('space.archive.archived_body')}
             </p>
-            <Button variant="secondary" onClick={() => setArchived(false)}>Unarchive space</Button>
+            <Button variant="secondary" onClick={() => setArchived(false)}>{t('space.archive.unarchive')}</Button>
           </>
         )
       ) : (
         <>
           <p class="sh-muted" style={{ marginTop: 0 }}>
-            Hide this space and make it read-only without deleting anything.
-            Reversible at any time.
+            {t('space.archive.intro')}
           </p>
-          <Button variant="secondary" onClick={() => setArchived(true)}>Archive space</Button>
+          <Button variant="secondary" onClick={() => setArchived(true)}>{t('space.archive.archive')}</Button>
         </>
       )}
 
       <hr />
-      <h3>Danger zone</h3>
-      <p class="sh-muted">
-        Permanently deletes the space and all its content for every member.
-        When the space has more than one admin this opens a proposal that a
-        majority of admins must approve — no single admin (not even the
-        owner) can delete the group alone.
-      </p>
-      <Button variant="danger" onClick={() => showDissolve.value = true}>Dissolve space</Button>
+      <h3>{t('space.dissolve.heading')}</h3>
+      <p class="sh-muted">{t('space.dissolve.intro')}</p>
+      <Button variant="danger" onClick={() => showDissolve.value = true}>{t('space.dissolve.button')}</Button>
       <ConfirmDialog
         open={confirmPublishGfs.value !== null}
-        title="Publish this space?"
-        message="Publishing lists this space on the global server so anyone can discover and view it. The server may hold it for moderator review before it goes live. You can unpublish at any time."
+        title={t('space.gfs.publish_confirm_title')}
+        message={t('space.gfs.publish_confirm_body')}
         confirmLabel={t('gfs.publish')}
         onConfirm={() => {
           const gfsId = confirmPublishGfs.value
@@ -1320,9 +1285,9 @@ export function SpaceSettings({
         }}
         onCancel={() => { peersTooOld.value = null }}
       />
-      <ConfirmDialog open={showDissolve.value} title="Dissolve space?"
-        message="This permanently deletes the space and all its content — posts, photos, events, everything — for every member household. This cannot be undone. With more than one admin it needs a majority to approve before it takes effect. To just hide it, use Archive instead."
-        confirmLabel="Propose dissolve" destructive
+      <ConfirmDialog open={showDissolve.value} title={t('space.dissolve.confirm_title')}
+        message={t('space.dissolve.confirm_body')}
+        confirmLabel={t('space.dissolve.confirm_ok')} destructive
         onConfirm={() => { showDissolve.value = false; dissolve() }}
         onCancel={() => showDissolve.value = false} />
     </div>

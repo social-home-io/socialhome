@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setLocale } from '@/i18n/i18n'
 import {
   relativeChatTime, relativeDocsTime, relativeFutureTime,
 } from './relativeTime'
@@ -98,11 +99,11 @@ describe('relativeFutureTime', () => {
   const ahead = (ms: number) => new Date(FIXED_NOW + ms).toISOString()
 
   it('renders minutes for something lapsing within the hour', () => {
-    expect(relativeFutureTime(ahead(5 * 60_000))).toBe('in 5 min')
+    expect(relativeFutureTime(ahead(5 * 60_000))).toBe('in 5 minutes')
   })
 
   it('renders hours within the day', () => {
-    expect(relativeFutureTime(ahead(3 * 3_600_000))).toBe('in 3h')
+    expect(relativeFutureTime(ahead(3 * 3_600_000))).toBe('in 3 hours')
   })
 
   it('renders days up to a month', () => {
@@ -130,10 +131,22 @@ describe('relativeFutureTime', () => {
   })
 
   it('treats a naive SQLite timestamp as UTC, not local time', () => {
-    expect(relativeFutureTime('2026-05-08 13:05:00')).toBe('in 5 min')
+    expect(relativeFutureTime('2026-05-08 13:05:00')).toBe('in 5 minutes')
   })
 
   it('echoes garbage back', () => {
     expect(relativeFutureTime('not-a-date')).toBe('not-a-date')
+  })
+
+  it('speaks the UI language', async () => {
+    await setLocale('de')
+    try {
+      expect(relativeFutureTime(ahead(7 * 86_400_000))).toBe('in 7 Tagen')
+      expect(relativeFutureTime(ahead(3 * 3_600_000))).toBe('in 3 Stunden')
+      expect(relativeFutureTime(iso(60_000))).toBe('abgelaufen')
+      expect(relativeFutureTime(ahead(90 * 86_400_000))).toMatch(/^am /)
+    } finally {
+      await setLocale('en')
+    }
   })
 })

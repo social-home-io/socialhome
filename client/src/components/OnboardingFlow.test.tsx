@@ -23,6 +23,7 @@ vi.mock('@/store/auth', () => ({ currentUser: userMock }))
 vi.mock('@/platform', () => ({ isSupervisorAddon: () => platformMock.addon }))
 
 import { ApiError } from '@/api'
+import { setLocale } from '@/i18n/i18n'
 import { OnboardingFlow } from './OnboardingFlow'
 
 const DEFAULT_PATH = '/api/gfs/connections/default'
@@ -71,6 +72,43 @@ beforeEach(() => {
 })
 
 describe('OnboardingFlow — tour', () => {
+  it('walks every tour step in plain English', async () => {
+    userMock.value = { ...userMock.value!, is_admin: false }
+    render(<OnboardingFlow onComplete={() => {}} />)
+    const titles = [
+      'Welcome to Social Home',
+      'A feed for the people you live with',
+      'Shared lists, calendar and chores',
+      'Connect with other households, privately',
+    ]
+    for (const [i, title] of titles.entries()) {
+      expect(await screen.findByRole('heading', { name: title })).toBeTruthy()
+      if (i < titles.length - 1) fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    }
+    // No protocol names in the tour.
+    expect(document.body.textContent).not.toMatch(/Ed25519|Federated/)
+  })
+
+  it('shows the tour steps in German', async () => {
+    userMock.value = { ...userMock.value!, is_admin: false }
+    await setLocale('de')
+    try {
+      render(<OnboardingFlow onComplete={() => {}} />)
+      expect(await screen.findByRole('heading', { name: 'Willkommen bei Social Home' })).toBeTruthy()
+      expect(screen.getByText('Familie Vizeli')).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Weiter' }))
+      expect(await screen.findByRole('heading', {
+        name: 'Ein Feed für die Menschen, mit denen du lebst',
+      })).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Weiter' }))
+      expect(screen.getByText('Einkaufsliste')).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Weiter' }))
+      expect(screen.getByText(/Verschlüsselt · läuft in 5:00 ab/)).toBeTruthy()
+    } finally {
+      await setLocale('en')
+    }
+  })
+
   it('a member sees the four-step tour and the GFS is never asked about', async () => {
     userMock.value = { ...userMock.value!, is_admin: false }
     render(<OnboardingFlow onComplete={() => {}} />)

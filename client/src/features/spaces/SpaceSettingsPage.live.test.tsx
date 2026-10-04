@@ -92,7 +92,7 @@ describe('SpaceSettingsPage live config', () => {
     const { default: Page } = await import('./SpaceSettingsPage')
     const view = render(<Page />)
     fireEvent.click(await view.findByRole('tab', { name: 'General' }))
-    await view.findByRole('heading', { name: 'Space Settings' })
+    await view.findByRole('heading', { name: 'Space settings' })
     expect(view.queryByRole('radiogroup', { name: /Posting through the GFS/ })).toBeNull()
 
     role = 'owner'

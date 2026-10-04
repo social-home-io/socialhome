@@ -26,6 +26,16 @@ export function t(key: string, params?: Record<string, string>): string {
   return text
 }
 
+/** The UI language's "one" plural category (French counts 0 as one).
+ *  Pick a ``_one`` key with it: ``t(isOne(n) ? 'k_one' : 'k', …)``. */
+export function isOne(n: number): boolean {
+  try {
+    return new Intl.PluralRules(locale.value || undefined).select(n) === 'one'
+  } catch {
+    return n === 1
+  }
+}
+
 /** localStorage cache of the last chosen locale, so a cold start (and
  *  the login screen) paints in it before ``/api/me`` answers. The
  *  durable copy is the user's ``locale`` preference

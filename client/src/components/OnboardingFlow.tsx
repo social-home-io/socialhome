@@ -23,15 +23,19 @@ import { currentUser } from '@/store/auth'
 import { Button } from './Button'
 
 interface OnboardStep {
-  title: string
-  body: string
+  /** i18n keys — resolved at render so the tour follows the UI language. */
+  titleKey: string
+  bodyKey: string
   illustration: () => ComponentChildren
 }
 
+/* For ``i18n:check``: t('onboarding.welcome.title') t('onboarding.welcome.body')
+ * t('onboarding.feed.title') t('onboarding.feed.body') t('onboarding.lists.title')
+ * t('onboarding.lists.body') t('onboarding.connect.title') t('onboarding.connect.body') */
 const STEPS: OnboardStep[] = [
   {
-    title: 'Welcome to Social Home',
-    body: "Your private household — a feed, calendar, tasks, shopping, photos, and calls, all running on your own server and connected to Home Assistant.",
+    titleKey: 'onboarding.welcome.title',
+    bodyKey: 'onboarding.welcome.body',
     illustration: () => (
       <div class="sh-onboard-illus">
         <div class="sh-onboard-card sh-onboard-card--welcome">
@@ -42,15 +46,15 @@ const STEPS: OnboardStep[] = [
             <span class="sh-onboard-avatar sh-onboard-avatar--c">L</span>
             <span class="sh-onboard-avatars-more">+2</span>
           </div>
-          <div class="sh-onboard-card-title">The Vizeli household</div>
-          <div class="sh-onboard-card-meta">5 members · paired with 3 households</div>
+          <div class="sh-onboard-card-title">{t('onboarding.welcome.illus_household')}</div>
+          <div class="sh-onboard-card-meta">{t('onboarding.welcome.illus_meta')}</div>
         </div>
       </div>
     ),
   },
   {
-    title: 'A feed for the people who actually live here',
-    body: 'Post photos, polls, and updates that stay inside your household. No ads, no algorithm — just the people you live with.',
+    titleKey: 'onboarding.feed.title',
+    bodyKey: 'onboarding.feed.body',
     illustration: () => (
       <div class="sh-onboard-illus">
         <div class="sh-onboard-card sh-onboard-card--feed">
@@ -59,12 +63,11 @@ const STEPS: OnboardStep[] = [
             <span class="sh-onboard-avatar sh-onboard-avatar--a">M</span>
             <div>
               <div class="sh-onboard-card-title">Maria</div>
-              <div class="sh-onboard-card-meta">posted in Family · 4m</div>
+              <div class="sh-onboard-card-meta">{t('onboarding.feed.illus_meta')}</div>
             </div>
           </div>
           <p class="sh-onboard-card-text">
-            Pasta night again? 🍝 New recipe from grandma —
-            calling it: <em>everyone’s in by 19:00.</em>
+            {t('onboarding.feed.illus_text')} 🍝 <em>{t('onboarding.feed.illus_em')}</em>
           </p>
           <div class="sh-onboard-reactions">
             <span>❤️ 3</span><span>🍝 2</span><span>💬 4</span>
@@ -74,37 +77,37 @@ const STEPS: OnboardStep[] = [
     ),
   },
   {
-    title: 'Shared lists, calendar, and chores',
-    body: "Shopping list at the door, calendar at the fridge, tasks split between everyone — all live, all visible from any phone or tablet you've signed in on.",
+    titleKey: 'onboarding.lists.title',
+    bodyKey: 'onboarding.lists.body',
     illustration: () => (
       <div class="sh-onboard-illus sh-onboard-illus--pair">
         <div class="sh-onboard-card sh-onboard-card--shop">
           <div class="sh-onboard-tape" aria-hidden="true" />
-          <div class="sh-onboard-card-kicker">Shopping</div>
+          <div class="sh-onboard-card-kicker">{t('nav.shopping')}</div>
           <ul class="sh-onboard-list">
-            <li class="is-done"><span class="sh-onboard-tick" /> Sourdough</li>
-            <li class="is-done"><span class="sh-onboard-tick" /> Olive oil</li>
-            <li><span class="sh-onboard-tick sh-onboard-tick--empty" /> Tomatoes <em>+ Maria</em></li>
-            <li><span class="sh-onboard-tick sh-onboard-tick--empty" /> Basil <em>+ Pascal</em></li>
+            <li class="is-done"><span class="sh-onboard-tick" /> {t('onboarding.lists.illus_bread')}</li>
+            <li class="is-done"><span class="sh-onboard-tick" /> {t('onboarding.lists.illus_oil')}</li>
+            <li><span class="sh-onboard-tick sh-onboard-tick--empty" /> {t('onboarding.lists.illus_tomatoes')} <em>+ Maria</em></li>
+            <li><span class="sh-onboard-tick sh-onboard-tick--empty" /> {t('onboarding.lists.illus_basil')} <em>+ Pascal</em></li>
           </ul>
         </div>
         <div class="sh-onboard-card sh-onboard-card--cal">
           <div class="sh-onboard-tape sh-onboard-tape--moss" aria-hidden="true" />
-          <div class="sh-onboard-card-kicker">Tue · Jul 29</div>
-          <div class="sh-onboard-card-title">Sunday brunch @ Maria's</div>
-          <div class="sh-onboard-card-meta">3 households joining</div>
+          <div class="sh-onboard-card-kicker">{t('onboarding.lists.illus_date')}</div>
+          <div class="sh-onboard-card-title">{t('onboarding.lists.illus_event')}</div>
+          <div class="sh-onboard-card-meta">{t('onboarding.lists.illus_event_meta')}</div>
         </div>
       </div>
     ),
   },
   {
-    title: 'Federated, end-to-end encrypted',
-    body: "Connect with other households over a QR code. Every message, photo, and event is encrypted in transit — your data lives on your server.",
+    titleKey: 'onboarding.connect.title',
+    bodyKey: 'onboarding.connect.body',
     illustration: () => (
       <div class="sh-onboard-illus">
         <div class="sh-onboard-card sh-onboard-card--qr">
           <div class="sh-onboard-tape sh-onboard-tape--honey" aria-hidden="true" />
-          <div class="sh-onboard-card-kicker">Pair a household</div>
+          <div class="sh-onboard-card-kicker">{t('onboarding.connect.illus_kicker')}</div>
           <div class="sh-onboard-qr" aria-hidden="true">
             <div class="sh-onboard-qr-grid">
               {Array.from({ length: 49 }, (_, i) => (
@@ -119,7 +122,7 @@ const STEPS: OnboardStep[] = [
               ))}
             </div>
           </div>
-          <div class="sh-onboard-card-meta">🔒 Ed25519 · expires in 5:00</div>
+          <div class="sh-onboard-card-meta">🔒 {t('onboarding.connect.illus_meta')}</div>
         </div>
       </div>
     ),
@@ -366,7 +369,7 @@ export function OnboardingFlow({ onComplete }: { onComplete: () => void }) {
             : current.illustration()}
         </div>
         <h2 id="sh-onboarding-title" class="sh-onboarding-title">
-          {onGfsStep ? t('onboarding.gfs.title') : current.title}
+          {onGfsStep ? t('onboarding.gfs.title') : t(current.titleKey)}
         </h2>
         {onGfsStep && gfsOffer ? (
           <GfsStepBody
@@ -380,7 +383,7 @@ export function OnboardingFlow({ onComplete }: { onComplete: () => void }) {
             }}
           />
         ) : (
-          <p class="sh-onboarding-body">{current.body}</p>
+          <p class="sh-onboarding-body">{t(current.bodyKey)}</p>
         )}
         <div
           class="sh-onboarding-dots"

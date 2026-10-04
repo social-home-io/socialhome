@@ -16,6 +16,7 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
+import { t } from '@/i18n/i18n'
 
 export interface BehindMember {
   instance_id: string
@@ -59,7 +60,7 @@ export function SpaceVersionBanner({ spaceId }: Props) {
     <div
       class="sh-space-proposals"
       role="region"
-      aria-label="Member version compatibility"
+      aria-label={t('space.version_banner.region')}
     >
       <div class="sh-proposal-banner sh-version-banner" role="status">
         <div class="sh-proposal-banner__body">
@@ -67,10 +68,9 @@ export function SpaceVersionBanner({ spaceId }: Props) {
             🔌
           </span>
           <div class="sh-proposal-banner__text">
-            <strong>Some members are on an older version</strong>
+            <strong>{t('space.version_banner.title')}</strong>
             <p class="sh-muted">
-              These space features won&apos;t work for everyone until their
-              household updates Social Home:{' '}
+              {t('space.version_banner.body')}{' '}
               {compat.lagging_features.map((f, i) => (
                 <span key={f}>
                   {i > 0 ? ', ' : ''}
@@ -81,7 +81,7 @@ export function SpaceVersionBanner({ spaceId }: Props) {
             </p>
             {compat.behind_members.length > 0 && (
               <p class="sh-muted">
-                Waiting on:{' '}
+                {t('space.version_banner.waiting_on')}{' '}
                 {compat.behind_members
                   .map((m) => `${m.display_name} (v${m.proto_version})`)
                   .join(', ')}

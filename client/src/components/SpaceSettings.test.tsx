@@ -64,6 +64,27 @@ describe('SpaceSettings', () => {
     expect(typeof mod.SpaceSettings).toBe('function')
   })
 
+  it('takes every section title from the catalog, not hard-coded English', () => {
+    const { container } = render(
+      <SpaceSettings space={makeSpace({ features: { location: true } })} onUpdate={() => {}} />,
+    )
+    const legends = [...container.querySelectorAll('legend')].map(l => l.textContent ?? '')
+    for (const key of [
+      'space.join.legend', 'space.retention.legend', 'space.features.legend',
+      'space.post_types.legend', 'space.location.legend',
+      'space.location.mode_legend', 'space.admin_authority.legend',
+    ]) {
+      expect(legends.some(l => l.includes(key)), key).toBe(true)
+    }
+    const headings = [...container.querySelectorAll('h3')].map(h => h.textContent)
+    expect(headings).toEqual(expect.arrayContaining([
+      'space.settings.title', 'space.tier.heading', 'space.archive.heading',
+      'space.dissolve.heading',
+    ]))
+    expect(container.textContent).toContain('space.post_type.highlight_share')
+    expect(container.textContent).not.toMatch(/How people join|Retention|Post types|Admin authority/)
+  })
+
   it('renders the retention input prefilled with the space value', () => {
     const space = makeSpace({ retention_days: 30 })
     const { container } = render(
@@ -86,7 +107,7 @@ describe('SpaceSettings', () => {
       'input[type="number"]',
     ) as HTMLInputElement
     fireEvent.input(input, { target: { value: '90' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).toHaveBeenCalledOnce()
     const [, body] = apiMock.patch.mock.calls[0]
@@ -103,7 +124,7 @@ describe('SpaceSettings', () => {
       'input[type="number"]',
     ) as HTMLInputElement
     fireEvent.input(input, { target: { value: '' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body.retention_days).toBe(0)
@@ -140,7 +161,7 @@ describe('SpaceSettings', () => {
     expect(
       (getByLabelText('space.followers.react') as HTMLInputElement).disabled,
     ).toBe(false)
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
     const [, body] = apiMock.patch.mock.calls[0]
     // …and the join mode is untouched (not even re-sent): the two dials are
@@ -247,7 +268,7 @@ describe('SpaceSettings', () => {
     // Flip pages OFF (was true) and gallery OFF (was true).
     fireEvent.change(checkboxes[0], { target: { checked: false } })
     fireEvent.change(checkboxes[5], { target: { checked: false } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).toHaveBeenCalledOnce()
     const [, body] = apiMock.patch.mock.calls[0]
@@ -283,7 +304,7 @@ describe('SpaceSettings', () => {
     // Flip calendar (was off) so there is something to save: the defaulted
     // gallery=true counts as unchanged, so it isn't re-sent.
     fireEvent.change(checkboxes[1], { target: { checked: true } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body).toEqual({ features: { calendar: true } })
@@ -298,7 +319,7 @@ describe('SpaceSettings', () => {
     expect(box.checked).toBe(false)
     expect(getByText('space.feature.timetable_sub')).toBeTruthy()
     fireEvent.change(box, { target: { checked: true } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body).toEqual({ features: { timetable: true } })
@@ -322,7 +343,7 @@ describe('SpaceSettings', () => {
     const box = getByLabelText(/space\.feature\.timetable/) as HTMLInputElement
     expect(box.checked).toBe(true)
     fireEvent.change(box, { target: { checked: false } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body).toEqual({ features: { timetable: false } })
@@ -376,7 +397,7 @@ describe('SpaceSettings', () => {
     ) as HTMLInputElement[]
     // Turn poll (index 4) ON in addition to the already-on text.
     fireEvent.change(boxes[4], { target: { checked: true } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     const allowed: string[] = body.features.allowed_post_types
@@ -408,7 +429,7 @@ describe('SpaceSettings', () => {
       fieldset.querySelectorAll('input[type="checkbox"]'),
     ) as HTMLInputElement[]
     boxes.forEach((b) => fireEvent.change(b, { target: { checked: false } }))
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).not.toHaveBeenCalled()
   })
@@ -437,7 +458,7 @@ describe('SpaceSettings', () => {
       'input[type="checkbox"]',
     ) as HTMLInputElement
     fireEvent.change(checkbox, { target: { checked: true } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body.name).toBe('New name')
@@ -560,7 +581,7 @@ describe('SpaceSettings', () => {
     expect(apiMock.post).not.toHaveBeenCalled()
     const dialog = container.querySelector('[role="dialog"]') as HTMLElement | null
     expect(dialog).toBeTruthy()
-    expect(dialog!.textContent).toContain('Publish this space?')
+    expect(dialog!.textContent).toContain('space.gfs.publish_confirm_title')
     // Confirm → POST fires, and the row reflects the pending status.
     const confirmBtn = dialog!.querySelector('.sh-btn--primary') as HTMLButtonElement
     fireEvent.click(confirmBtn)
@@ -574,9 +595,9 @@ describe('SpaceSettings', () => {
     const { getByText, queryByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
-    expect(getByText('Unarchive space')).toBeTruthy()
-    expect(queryByText(/dissolved by its owner/i)).toBeNull()
-    expect(queryByText(/removed from this space/i)).toBeNull()
+    expect(getByText('space.archive.unarchive')).toBeTruthy()
+    expect(queryByText(/space\.archive\.dissolved_lead/)).toBeNull()
+    expect(queryByText(/space\.archive\.removed_lead/)).toBeNull()
   })
 
   it('hides Unarchive and explains a dissolved space cannot be reactivated', () => {
@@ -584,9 +605,9 @@ describe('SpaceSettings', () => {
     const { queryByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
-    expect(queryByText('Unarchive space')).toBeNull()
-    expect(queryByText(/dissolved by its owner/i)).toBeTruthy()
-    expect(queryByText(/can't be reactivated/i)).toBeTruthy()
+    expect(queryByText('space.archive.unarchive')).toBeNull()
+    expect(queryByText(/space\.archive\.dissolved_lead/)).toBeTruthy()
+    expect(queryByText(/space\.archive\.readonly_copy/)).toBeTruthy()
   })
 
   it('hides Unarchive and explains a removed space cannot be reactivated', () => {
@@ -594,9 +615,9 @@ describe('SpaceSettings', () => {
     const { queryByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
-    expect(queryByText('Unarchive space')).toBeNull()
-    expect(queryByText(/removed from this space/i)).toBeTruthy()
-    expect(queryByText(/can't be reactivated/i)).toBeTruthy()
+    expect(queryByText('space.archive.unarchive')).toBeNull()
+    expect(queryByText(/space\.archive\.removed_lead/)).toBeTruthy()
+    expect(queryByText(/space\.archive\.readonly_copy/)).toBeTruthy()
   })
 
   it('proposes a publication-tier change via POST /proposals', async () => {
@@ -613,7 +634,7 @@ describe('SpaceSettings', () => {
     ) as HTMLSelectElement
     expect(tierSelect).toBeTruthy()
     fireEvent.change(tierSelect, { target: { value: 'public' } })
-    fireEvent.click(getByText('Propose tier change'))
+    fireEvent.click(getByText('space.tier.propose'))
     await Promise.resolve()
     expect(apiMock.post).toHaveBeenCalledWith('/api/spaces/s-1/proposals', {
       action: 'set_public_tier',
@@ -634,8 +655,8 @@ describe('SpaceSettings', () => {
       const { getByText, getByRole } = render(
         <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
       )
-      fireEvent.click(getByText('Dissolve space'))
-      fireEvent.click(getByRole('button', { name: 'Propose dissolve' }))
+      fireEvent.click(getByText('space.dissolve.button'))
+      fireEvent.click(getByRole('button', { name: 'space.dissolve.confirm_ok' }))
       await vi.waitFor(() => expect(apiMock.post).toHaveBeenCalled())
       await new Promise(r => setTimeout(r, 0))
       return { markedDuringRequest, isLocalDissolve }
@@ -685,10 +706,10 @@ describe('SpaceSettings — @here toggle', () => {
     const { getByLabelText, getByText } = render(
       <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
     )
-    const box = getByLabelText(/notify everyone with @here/) as HTMLInputElement
+    const box = getByLabelText(/space\.here\.toggle/) as HTMLInputElement
     expect(box.checked).toBe(false)
     fireEvent.click(box)
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body.allow_here_mention).toBe(true)
@@ -700,10 +721,10 @@ describe('SpaceSettings — @here toggle', () => {
     const { getByLabelText, getByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
-    const box = getByLabelText(/notify everyone with @here/) as HTMLInputElement
+    const box = getByLabelText(/space\.here\.toggle/) as HTMLInputElement
     expect(box.checked).toBe(true)
     fireEvent.click(box)
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
     expect(apiMock.patch.mock.calls[0][1].allow_here_mention).toBe(false)
   })
@@ -760,13 +781,13 @@ describe('SpaceSettings — retention exempt types', () => {
     expect(poll.checked).toBe(true)
     expect(event.checked).toBe(false)
     fireEvent.click(event)
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     const [url, body] = apiMock.patch.mock.calls[0]
     expect(url).toBe('/api/spaces/s-1')
     // The unchanged day count isn't re-sent — only the edited list.
     expect(body).toEqual({ retention_exempt_types: ['event', 'poll'] })
-    expect(showToast).toHaveBeenCalledWith('Space updated', 'success')
+    expect(showToast).toHaveBeenCalledWith('space.settings.saved', 'success')
   })
 
   it('unchecking removes the type and keeps values the UI does not offer', async () => {
@@ -777,7 +798,7 @@ describe('SpaceSettings — retention exempt types', () => {
     fireEvent.click(
       getByTestId('retention-exempt-types').querySelector('input[value="poll"]')!,
     )
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0][1].retention_exempt_types).toEqual(['text'])
   })
@@ -789,7 +810,7 @@ describe('SpaceSettings — retention exempt types', () => {
     )
     const days = container.querySelector('input[type="number"]') as HTMLInputElement
     fireEvent.input(days, { target: { value: '' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0][1]).toEqual({ retention_days: 0 })
   })
@@ -802,7 +823,7 @@ describe('SpaceSettings — retention exempt types', () => {
     fireEvent.click(
       getByTestId('retention-exempt-types').querySelector('input[value="poll"]')!,
     )
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() =>
       expect(showToast).toHaveBeenCalledWith('unknown retention exempt type', 'error'),
     )
@@ -833,7 +854,7 @@ describe('SpaceSettings — sends only what the admin changed', () => {
       <SpaceSettings space={space} onUpdate={() => {}} isRemoteSpace />,
     )
     fireEvent.input(nameInput(container), { target: { value: 'Summer trip' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0]).toEqual([
       '/api/spaces/s-1',
@@ -851,7 +872,7 @@ describe('SpaceSettings — sends only what the admin changed', () => {
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
     fireEvent.input(nameInput(container), { target: { value: 'Renamed' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0][1]).toEqual({ name: 'Renamed' })
   })
@@ -867,7 +888,7 @@ describe('SpaceSettings — sends only what the admin changed', () => {
     )
     const textarea = container.querySelector('.sh-form textarea') as HTMLTextAreaElement
     fireEvent.input(textarea, { target: { value: '' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0][1]).toEqual({ description: '' })
   })
@@ -876,10 +897,10 @@ describe('SpaceSettings — sends only what the admin changed', () => {
     const { getByText } = render(
       <SpaceSettings space={makeSpace({ retention_days: 30 })} onUpdate={() => {}} />,
     )
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).not.toHaveBeenCalled()
-    expect(showToast).toHaveBeenCalledWith('No changes to save', 'info')
+    expect(showToast).toHaveBeenCalledWith('space.settings.no_changes', 'info')
   })
 
   it('an edit reverted before saving counts as no change', async () => {
@@ -889,7 +910,7 @@ describe('SpaceSettings — sends only what the admin changed', () => {
     const days = container.querySelector('input[type="number"]') as HTMLInputElement
     fireEvent.input(days, { target: { value: '7' } })
     fireEvent.input(days, { target: { value: '30' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).not.toHaveBeenCalled()
   })
@@ -986,7 +1007,7 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
       <SpaceSettings space={makeSpace({ has_remote_households: true })} onUpdate={() => {}} />,
     )
     fireEvent.change(selects(container).tasks, { target: { value: 'moderated' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     expect(await findByText('space.access.peers_too_old.title')).toBeTruthy()
     expect(apiMock.patch.mock.calls[0][1]).toEqual({ features: { tasks_access: 'moderated' } })
   })
@@ -1013,7 +1034,7 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
       <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
     )
     fireEvent.change(selects(container).tasks, { target: { value: 'admin_only' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     expect(apiMock.patch).toHaveBeenCalledOnce()
     expect(apiMock.patch.mock.calls[0][1]).toEqual({
@@ -1037,7 +1058,7 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
       <SpaceSettings space={makeSpace()} onUpdate={onUpdate} />,
     )
     fireEvent.change(selects(container).pages, { target: { value: 'admin_only' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     // The dialog names the household and offers to apply anyway.
     expect(await findByText('space.access.peers_too_old.title')).toBeTruthy()
     expect(container.ownerDocument.body.textContent).toContain('space.access.peers_too_old.body')
@@ -1062,7 +1083,7 @@ describe('SpaceSettings — who can contribute (§4.3)', () => {
       <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
     )
     fireEvent.change(selects(container).pages, { target: { value: 'admin_only' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await findByText('space.access.peers_too_old.title')
     fireEvent.click(getByText('Cancel'))
     await new Promise(r => setTimeout(r, 0))
@@ -1085,10 +1106,10 @@ describe('SpaceSettings — an edit forwarded to the host', () => {
     )
     const sel = container.querySelector('select[data-feature="tasks"]') as HTMLSelectElement
     fireEvent.change(sel, { target: { value: 'admin_only' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     expect(showToast).toHaveBeenCalledWith('space.access.forwarded', 'info')
-    expect(showToast).not.toHaveBeenCalledWith('Space updated', 'success')
+    expect(showToast).not.toHaveBeenCalledWith('space.settings.saved', 'success')
     // The select shows the level in force (this household's copy), not the ask.
     expect((container.querySelector('select[data-feature="tasks"]') as HTMLSelectElement).value)
       .toBe('open')
@@ -1102,7 +1123,7 @@ describe('SpaceSettings — an edit forwarded to the host', () => {
     )
     const name = container.querySelector('input[type="text"], input:not([type])') as HTMLInputElement
     fireEvent.input(name, { target: { value: 'New name' } })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await new Promise(r => setTimeout(r, 0))
     expect(showToast).toHaveBeenCalledWith('space.settings.forwarded', 'info')
   })
@@ -1254,13 +1275,13 @@ describe('SpaceSettings — GFS publish mode (owner-only)', () => {
     )
     fireEvent.click(radio(container, 'space.gfs_publish.strict'))
     expect(getByText('space.gfs_publish.strict_switch_note')).toBeTruthy()
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0]).toEqual([
       '/api/spaces/s-1', { features: { gfs_publish_mode: 'strict' } },
     ])
     await vi.waitFor(() => expect(onUpdate).toHaveBeenCalled())
-    expect(showToast).toHaveBeenCalledWith('Space updated', 'success')
+    expect(showToast).toHaveBeenCalledWith('space.settings.saved', 'success')
   })
 
   it('PATCHes back to trusted from a strict space', async () => {
@@ -1273,7 +1294,7 @@ describe('SpaceSettings — GFS publish mode (owner-only)', () => {
       />,
     )
     fireEvent.keyDown(radio(container, 'space.gfs_publish.strict'), { key: 'ArrowLeft' })
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0][1]).toEqual({
       features: { gfs_publish_mode: 'trusted' },
@@ -1289,7 +1310,7 @@ describe('SpaceSettings — GFS publish mode (owner-only)', () => {
       <SpaceSettings space={publicSpace()} onUpdate={onUpdate} isOwner />,
     )
     fireEvent.click(radio(container, 'space.gfs_publish.strict'))
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() =>
       expect(showToast).toHaveBeenCalledWith('owner required', 'error'),
     )
@@ -1302,9 +1323,9 @@ describe('SpaceSettings — GFS publish mode (owner-only)', () => {
       <SpaceSettings space={publicSpace()} onUpdate={() => {}} isOwner />,
     )
     fireEvent.click(radio(container, 'space.gfs_publish.strict'))
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() =>
-      expect(showToast).toHaveBeenCalledWith('Failed to update', 'error'),
+      expect(showToast).toHaveBeenCalledWith('space.settings.save_failed', 'error'),
     )
   })
 })
@@ -1389,7 +1410,7 @@ describe('SpaceSettings — private space GFS (owner-only)', () => {
       <SpaceSettings space={space()} onUpdate={onUpdate} isOwner />,
     )
     fireEvent.click(getByTestId('private-gfs-toggle'))
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0]).toEqual([
       '/api/spaces/s-1', { features: { private_gfs: true } },
@@ -1406,7 +1427,7 @@ describe('SpaceSettings — private space GFS (owner-only)', () => {
     fireEvent.click(getByTestId('private-gfs-toggle'))
     expect(getByTestId('private-gfs-off-note').textContent)
       .toBe('space.private_gfs.off_note')
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
     expect(apiMock.patch.mock.calls[0][1]).toEqual({
       features: { private_gfs: false },
@@ -1429,7 +1450,7 @@ describe('SpaceSettings — private space GFS (owner-only)', () => {
       <SpaceSettings space={space({ private_gfs: true })} onUpdate={onUpdate} isOwner />,
     )
     fireEvent.click(getByTestId('private-gfs-toggle'))
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     const panel = await vi.waitFor(() => getByTestId('private-gfs-link-members'))
     expect(panel.getAttribute('role')).toBe('alert')
     expect(panel.textContent).toContain('space.private_gfs.link_members_title')
@@ -1457,7 +1478,7 @@ describe('SpaceSettings — private space GFS (owner-only)', () => {
       <SpaceSettings space={space()} onUpdate={() => {}} isOwner />,
     )
     fireEvent.click(getByTestId('private-gfs-toggle'))
-    fireEvent.click(getByText('Save changes'))
+    fireEvent.click(getByText('space.settings.save'))
     await vi.waitFor(() =>
       expect(showToast).toHaveBeenCalledWith('owner required', 'error'),
     )

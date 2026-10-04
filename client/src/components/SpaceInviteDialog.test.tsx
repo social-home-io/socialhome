@@ -308,8 +308,8 @@ describe('SpaceInviteDialog — publishing to a GFS', () => {
     expect(result.container.querySelector('[data-testid="invite-link-url"]')!
       .textContent).toBe('https://relay.example.org/join/gt1')
     expect(result.container.textContent).toContain(
-      'Anyone with this link sees the space name and can request the code'
-      + ' — they join from their own Social Home.',
+      'Anyone with this link sees the space name and can ask for the code.'
+      + ' They join from their own Social Home.',
     )
   })
 
@@ -450,7 +450,7 @@ describe('SpaceInviteDialog — the links list', () => {
     expect(row.textContent).toContain('by pascal')
     // A link minted with a 7-day life reads as seven days, not six —
     // the sentence must not contradict the picker that made it.
-    expect(row.textContent).toContain('lapses in 7 days')
+    expect(row.textContent).toContain('expires in 7 days')
     expect(container.querySelector('[data-testid="invite-link-row-t2"]')!
       .textContent).toContain('Follower')
   })
@@ -564,8 +564,8 @@ describe('SpaceInviteDialog — revoke', () => {
         .querySelector('[data-testid="invite-revoke-t1"]')!)
     })
     expect(confirmDialog).toHaveBeenCalledWith(
-      'This link stops working immediately, here and on the connection '
-      + 'server. People who already joined with it stay.',
+      'This link stops working right away, here and on the GFS. People who '
+      + 'already joined with it stay.',
       expect.objectContaining({ destructive: true }),
     )
     // Declined → the row stays and nothing was deleted.
@@ -905,7 +905,7 @@ describe('SpaceInviteDialog — moderator links', () => {
       expect.stringContaining('/invite-tokens'),
       expect.objectContaining({ role: 'moderator' }),
     )
-    expect(result.container.textContent).toContain('They join as moderator.')
+    expect(result.container.textContent).toContain('They join as a moderator.')
   })
 
   it('uses the translated role labels and hints', async () => {
@@ -915,6 +915,42 @@ describe('SpaceInviteDialog — moderator links', () => {
       .toEqual(['Mitglied', 'Follower', 'Moderator', 'Admin'])
     expect(container.querySelector('[data-testid="invite-role-member"]')!
       .closest('label')!.textContent).toContain('kann posten und mitmachen')
+  })
+
+  it('says the summary and row metadata in German, with singular forms', async () => {
+    await setLocale('de')
+    mockReads({ tokens: [makeRow({ token: 'tg', uses_remaining: 1, uses: null })] })
+    const result = await openDialog({ role: 'owner' })
+    expect(result.container.textContent).toContain('In den Raum einladen')
+    expect(result.container.textContent).toContain('Beitreten als')
+    await waitFor(() => {
+      expect(result.container.querySelector('[data-testid="invite-link-row-tg"]'))
+        .not.toBeNull()
+    })
+    const row = result.container.querySelector('[data-testid="invite-link-row-tg"]')!
+    expect(row.textContent).toContain('noch 1 Platz')
+    expect(row.textContent).toContain('läuft in 7 Tagen ab')
+    expect(row.textContent).toContain('von pascal')
+    expect(row.textContent).toContain('Widerrufen')
+    api.post.mockResolvedValueOnce(makeRow({ uses_remaining: 1, role: 'subscriber' }))
+    await act(async () => {
+      fireEvent.click(result.getByText('Einladungslink erstellen'))
+    })
+    await waitFor(() => {
+      expect(result.queryByTestId('invite-created-summary')).not.toBeNull()
+    })
+    expect(result.getByTestId('invite-created-summary').textContent).toBe(
+      '1 Person kann damit beitreten. Er funktioniert in 7 Tagen nicht mehr.'
+      + ' Sie treten als Follower bei.',
+    )
+  })
+
+  it('uses the plural summary and says when a link never expires', async () => {
+    const result = await openDialog({ role: 'owner' })
+    await generate(result, makeRow({ uses_remaining: 4, expires_at: null }))
+    expect(result.getByTestId('invite-created-summary').textContent).toBe(
+      '4 people can join with it. It never expires. They join as a member.',
+    )
   })
 
   it('shows a Moderator badge on a moderator link in the list', async () => {

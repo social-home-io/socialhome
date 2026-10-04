@@ -31,6 +31,7 @@ import { SpaceLinksTab } from './SpaceLinksTab'
 import { SpaceAgeGating } from '@/features/child-protection/SpaceAgeGating'
 import { confirmDialog } from '@/components/confirm'
 import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
+import { t } from '@/i18n/i18n'
 
 type SettingsTab = 'general' | 'about' | 'theme' | 'links' | 'age' | 'bots'
 
@@ -120,8 +121,8 @@ export default function SpaceSettingsPage() {
   if (!space) {
     return (
       <div class="sh-empty-state">
-        <h3>Space not found</h3>
-        <Button onClick={() => route(`/spaces/${spaceId}`)}>Back</Button>
+        <h3>{t('space.settings_page.not_found')}</h3>
+        <Button onClick={() => route(`/spaces/${spaceId}`)}>{t('common.back')}</Button>
       </div>
     )
   }
@@ -133,12 +134,10 @@ export default function SpaceSettingsPage() {
     return (
       <div class="sh-empty-state">
         <div aria-hidden="true">🔒</div>
-        <h3>Space members only</h3>
-        <p class="sh-muted">
-          Only members of this space can open its settings.
-        </p>
+        <h3>{t('space.settings_page.members_only')}</h3>
+        <p class="sh-muted">{t('space.settings_page.members_only_body')}</p>
         <Button onClick={() => route(`/spaces/${spaceId}`)}>
-          Back to space
+          {t('space.settings_page.back')}
         </Button>
       </div>
     )
@@ -159,24 +158,24 @@ export default function SpaceSettingsPage() {
     activeTab.value = visibleTabs[0]
   }
 
-  const tabLabel = (t: SettingsTab): string => {
-    switch (t) {
-      case 'general':       return 'General'
-      case 'about':         return 'About'
-      case 'theme':         return 'Theme'
-      case 'links':         return 'Quick links'
-      case 'age':           return 'Age & safety'
-      case 'bots':          return 'Bots & automations'
+  const tabLabel = (tab: SettingsTab): string => {
+    switch (tab) {
+      case 'general':       return t('space.settings_page.tab_general')
+      case 'about':         return t('space.settings_page.tab_about')
+      case 'theme':         return t('space.settings_page.tab_theme')
+      case 'links':         return t('space.settings_page.tab_links')
+      case 'age':           return t('space.settings_page.tab_age')
+      case 'bots':          return t('space.settings_page.tab_bots')
     }
   }
 
   return (
     <div class="sh-space-settings-page">
       <div class="sh-page-header">
-        <h1>⚙ {space.name} — settings</h1>
+        <h1>⚙ {t('space.settings_page.title', { name: space.name })}</h1>
         <Button variant="secondary"
                 onClick={() => route(`/spaces/${spaceId}`)}>
-          ← Back to space
+          ← {t('space.settings_page.back')}
         </Button>
       </div>
 
@@ -198,9 +197,7 @@ export default function SpaceSettingsPage() {
        *  in the space header for their notification level. */}
       {!canAdmin && (
         <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-sm)' }}>
-          These are <strong>your</strong> personal automations for this space.
-          Your notification level is on the 🔔 bell in the space header.
-          Space-wide admin controls live with the owner.
+          {t('space.settings_page.member_note')}
         </p>
       )}
 

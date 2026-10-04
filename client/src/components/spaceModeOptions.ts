@@ -2,36 +2,40 @@
  * Shared option lists for the space visibility + join-mode radio-card groups
  * (used by SpaceCreateDialog and SpaceSettings).
  */
+import { t } from '@/i18n/i18n'
 import type { RadioCardOption } from './RadioCardGroup'
 
 // Public requires a map location (the create dialog collects one when this
-// is chosen; the backend 422s without it).
-export const VISIBILITY_OPTIONS: RadioCardOption[] = [
-  {
-    value: 'private',
-    icon: '🔒',
-    title: 'Private',
-    subtitle: 'Hidden — only people you invite can see it.',
-  },
-  {
-    value: 'household',
-    icon: '🏠',
-    title: 'Household',
-    subtitle: 'Everyone in your home is a member automatically.',
-  },
-  {
-    value: 'public',
-    icon: '🌐',
-    title: 'Public',
-    subtitle: 'Listed on the public map for anyone to discover.',
-  },
-  {
-    value: 'global',
-    icon: '🌍',
-    title: 'Global',
-    subtitle: 'Published worldwide via your global server.',
-  },
-]
+// is chosen; the backend 422s without it). A function, not a constant, so
+// the labels follow the UI language.
+export function visibilityOptions(): RadioCardOption[] {
+  return [
+    {
+      value: 'private',
+      icon: '🔒',
+      title: t('space.visibility.private'),
+      subtitle: t('space.visibility.private_sub'),
+    },
+    {
+      value: 'household',
+      icon: '🏠',
+      title: t('space.visibility.household'),
+      subtitle: t('space.visibility.household_sub'),
+    },
+    {
+      value: 'public',
+      icon: '🌐',
+      title: t('space.visibility.public'),
+      subtitle: t('space.visibility.public_sub'),
+    },
+    {
+      value: 'global',
+      icon: '🌍',
+      title: t('space.visibility.global'),
+      subtitle: t('space.visibility.global_sub'),
+    },
+  ]
+}
 
 /** Discovery categories (§23.50) — shown for public/global spaces. Values
  *  mirror the backend ``SPACE_CATEGORIES`` (socialhome/domain/space.py) and the
@@ -54,26 +58,29 @@ export function categoryLabel(value: string | null | undefined): string {
   return SPACE_CATEGORIES.find(c => c.value === value)?.label ?? 'General'
 }
 
-export const JOIN_MODE_OPTIONS: RadioCardOption[] = [
-  {
-    value: 'invite_only',
-    icon: '✉️',
-    title: 'Invite only',
-    subtitle: 'You send invites.',
-  },
-  {
-    value: 'request',
-    icon: '🙋',
-    title: 'Request to join',
-    subtitle: 'People ask; an admin approves.',
-  },
-  {
-    value: 'open',
-    icon: '🔓',
-    title: 'Open',
-    subtitle: 'Anyone can join instantly.',
-  },
-]
+/** The join modes, in the UI language. */
+export function joinModeOptions(): RadioCardOption[] {
+  return [
+    {
+      value: 'invite_only',
+      icon: '✉️',
+      title: t('space.join.invite_only'),
+      subtitle: t('space.join.invite_only_sub'),
+    },
+    {
+      value: 'request',
+      icon: '🙋',
+      title: t('space.join.request'),
+      subtitle: t('space.join.request_sub'),
+    },
+    {
+      value: 'open',
+      icon: '🔓',
+      title: t('space.join.open'),
+      subtitle: t('space.join.open_sub'),
+    },
+  ]
+}
 
 /**
  * Join-mode options for a given visibility. A **private** space is
@@ -82,8 +89,9 @@ export const JOIN_MODE_OPTIONS: RadioCardOption[] = [
  * constraint is visible rather than hidden.
  */
 export function joinOptionsForVisibility(spaceType: string): RadioCardOption[] {
-  if (spaceType !== 'private') return JOIN_MODE_OPTIONS
-  return JOIN_MODE_OPTIONS.map((o) =>
+  const options = joinModeOptions()
+  if (spaceType !== 'private') return options
+  return options.map((o) =>
     o.value === 'invite_only' ? o : { ...o, disabled: true },
   )
 }
