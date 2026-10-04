@@ -46,6 +46,9 @@ class AbstractSpaceKeyRepo(Protocol):
         self, space_id: str, epoch: int, wrapped: str
     ) -> bool: ...
     async def get_gfs_channel(self, space_id: str, epoch: int) -> str | None: ...
+    async def latest_gfs_channel_before(
+        self, space_id: str, epoch: int
+    ) -> tuple[int, str] | None: ...
 
 
 class SqliteSpaceKeyRepo:
@@ -264,6 +267,22 @@ class SqliteSpaceKeyRepo:
         if row is None or row["gfs_channel"] is None:
             return None
         return str(row["gfs_channel"])
+
+    async def latest_gfs_channel_before(
+        self, space_id: str, epoch: int
+    ) -> tuple[int, str] | None:
+        """``(epoch, wrapped grant)`` of the newest stored grant below
+        ``epoch`` — the seat a member must drop when the current epoch came
+        without one."""
+        row = await self._db.fetchone(
+            "SELECT epoch, gfs_channel FROM space_keys"
+            " WHERE space_id=? AND epoch<? AND gfs_channel IS NOT NULL"
+            " ORDER BY epoch DESC LIMIT 1",
+            (space_id, epoch),
+        )
+        if row is None:
+            return None
+        return int(row["epoch"]), str(row["gfs_channel"])
 
 
 def _row(row) -> SpaceKey:

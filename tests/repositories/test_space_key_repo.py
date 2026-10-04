@@ -159,3 +159,15 @@ async def test_channel_grant_stored_per_epoch_and_cleared_on_reset(repo):
     assert await repo.set_gfs_channel("sp-1", 9, "x") is False
     await repo.reset_to(_key("sp-1", 1, "owner"), authority_epoch=1)
     assert await repo.get_gfs_channel("sp-1", 1) is None
+
+
+async def test_latest_channel_grant_before_an_epoch(repo):
+    for epoch in (1, 2, 3):
+        await repo.save(_key("sp-1", epoch))
+    await repo.save(_key("sp-2", 1))
+    await repo.set_gfs_channel("sp-1", 1, "g1")
+    await repo.set_gfs_channel("sp-1", 2, "g2")
+    await repo.set_gfs_channel("sp-2", 1, "other")
+    assert await repo.latest_gfs_channel_before("sp-1", 3) == (2, "g2")
+    assert await repo.latest_gfs_channel_before("sp-1", 2) == (1, "g1")
+    assert await repo.latest_gfs_channel_before("sp-1", 1) is None

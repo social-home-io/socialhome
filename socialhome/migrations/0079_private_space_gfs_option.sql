@@ -1,24 +1,18 @@
 -- Private spaces: an explicit owner option to use the connection server,
 -- and a type on every invite link — ``spaces.private_gfs`` and
--- ``space_invite_tokens.via``.
---
--- ``spaces.private_gfs``: the space OWNER's choice for a PRIVATE space —
--- may it use a connection server (GFS) at all. OFF: no invite link that
--- redeems through the relay, no opaque channel (v_51), no subscriptions.
--- ON: link-type invites are allowed, the owner registers the channel and
--- every member household connected to the channel's server takes a seat
--- (paired members included), so members reach each other while the host is
--- offline. Owner-only, federated in ``SPACE_CONFIG_CHANGED`` like every
--- feature flag, pinned on host inbound and taken only from the owner
--- household elsewhere (exactly like ``gfs_publish_mode``, 0076).
---
 -- ``space_invite_tokens.via``: what the link may use, decided by the issuer
--- at mint time. ``'gfs'`` — today's link: its code carries the issuer's
--- key-wrap key, so a household that never met the issuer redeems it through
--- the connection-server relay (§D2b). ``'internal'`` — the code carries no
--- key-wrap key, and the issuer refuses a redeem of it that arrives over the
--- relay: it works only for households paired with the issuer or reachable
--- over the mesh, and never touches a connection server.
+-- at mint time. ``'gfs'`` — a household that never met the issuer redeems it
+-- through the connection-server relay (§D2b); allowed on a private space only
+-- while ``private_gfs`` is ON. ``'internal'`` — the code carries no key-wrap
+-- key, and the issuer refuses a redeem of it that arrives over the relay: it
+-- works only for households paired with the issuer or reachable over the
+-- mesh, and never touches a connection server. ``'gfs_legacy'`` — never
+-- minted: a live link of a private space that this migration leaves OFF.
+-- Every link minted before 0079 was relay-redeemable, so such a link stays
+-- redeemable over the relay (grandfathered) until it is used up or expires,
+-- and the FIRST household that joins through one turns the space's option ON
+-- on the host (the normal ON path). Turning the option OFF deletes it like a
+-- ``'gfs'`` link.
 --
 -- CLAUDE.md "audit before a migration":
 --
@@ -46,38 +40,41 @@
 --       the token's type. Encoding it in ``gfs_id`` (a sentinel value) would
 --       overload a column whose readers revoke at a server by it. A new
 --       table — one value per token, exactly the row's grain.
---   (3) Smallest possible change: two additive ``ADD COLUMN``s with CHECKs.
---       ``private_gfs`` is ``NOT NULL DEFAULT 0`` (a new private space is
---       OFF) and ONE backfill turns it ON for the existing PRIVATE spaces
---       that already use the relay — a ``space_session`` household in
---       ``space_instances`` (a link-joined member on the host; the
---       link-joined host on a member) or a live invite link (every link
---       minted before this migration is relay-redeemable) — so nothing that
---       works today breaks. ``via`` is ``NOT NULL DEFAULT 'gfs'``: every
---       existing link keeps exactly today's behaviour.
+--   (3) Smallest possible change: two additive ``ADD COLUMN``s with CHECKs
+--       and two backfills. ``private_gfs`` is ``NOT NULL DEFAULT 0`` (a new
+--       private space is OFF); the first backfill turns it ON only for the
+--       existing PRIVATE spaces that already have a link-joined household —
+--       a ``space_session`` household in ``space_instances`` (a link-joined
+--       member on the host; the link-joined host on a member), or a stored
+--       channel (``gfs_channel_id``, 0077: a v_51 owner created one only for
+--       a space with a link-joined member, and a member holds one only from
+--       such an owner's grant — the member-side mirror of the same fact, so
+--       a paired member's stub agrees with its host). Owner decision
+--       2026-10-04: a space with only live invite links starts OFF. ``via``
+--       is ``NOT NULL DEFAULT 'gfs'``; the second backfill marks the live
+--       links of a private space left OFF ``'gfs_legacy'`` (grandfathered,
+--       above) rather than adding a separate flag column — one value per
+--       row, the column that already holds the link's type. Public / global
+--       spaces' links keep ``'gfs'``: nothing changes for them.
 ALTER TABLE spaces ADD COLUMN private_gfs INTEGER NOT NULL DEFAULT 0
     CHECK (private_gfs IN (0, 1));
 ALTER TABLE space_invite_tokens ADD COLUMN via TEXT NOT NULL DEFAULT 'gfs'
-    CHECK (via IN ('gfs', 'internal'));
+    CHECK (via IN ('gfs', 'internal', 'gfs_legacy'));
 UPDATE spaces
    SET private_gfs = 1
  WHERE space_type = 'private'
    AND (
-        EXISTS (
+        gfs_channel_id IS NOT NULL
+        OR EXISTS (
             SELECT 1
               FROM space_instances si
               JOIN remote_instances ri ON ri.id = si.instance_id
              WHERE si.space_id = spaces.id
                AND ri.source = 'space_session'
         )
-        OR EXISTS (
-            SELECT 1
-              FROM space_invite_tokens t
-             WHERE t.space_id = spaces.id
-               AND t.uses_remaining > 0
-               AND (
-                    t.expires_at IS NULL
-                    OR datetime(t.expires_at) > datetime('now')
-               )
-        )
    );
+UPDATE space_invite_tokens
+   SET via = 'gfs_legacy'
+ WHERE space_id IN (
+        SELECT id FROM spaces WHERE space_type = 'private' AND private_gfs = 0
+       );

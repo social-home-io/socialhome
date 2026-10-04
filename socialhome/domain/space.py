@@ -338,8 +338,14 @@ def restricted_access_changes(
 #: ``SpaceFeatures.private_gfs`` ON. ``internal``: paired / mesh households
 #: only — the code carries no key-wrap key and the issuer refuses a redeem of
 #: it that arrives over the relay, so it never touches a connection server.
+#: ``gfs_legacy``: never minted — a live link of a private space that
+#: migration 0079 left OFF (every pre-0079 link was relay-redeemable). It
+#: stays redeemable over the relay until used up or expired, and the first
+#: household that joins through one turns the space's ``private_gfs`` ON.
 INVITE_VIA_GFS = "gfs"
 INVITE_VIA_INTERNAL = "internal"
+INVITE_VIA_GFS_LEGACY = "gfs_legacy"
+#: The types a new link may be minted with.
 INVITE_VIAS: frozenset[str] = frozenset({INVITE_VIA_GFS, INVITE_VIA_INTERNAL})
 
 

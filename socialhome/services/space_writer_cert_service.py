@@ -242,6 +242,17 @@ class SpaceWriterCertService:
             log.exception("channel grant: accepting for %s failed", space_id)
             return False
 
+    async def drop_stale_channel(self, space_id: str) -> bool:
+        """A rekey came without a channel grant: leave a channel an earlier
+        epoch's grant seated us on (v_51). Never raises."""
+        if self._channels is None:
+            return False
+        try:
+            return await self._channels.drop_stale(space_id)
+        except Exception:
+            log.exception("channel grant: dropping a stale seat in %s failed", space_id)
+            return False
+
     def attach_federation(self, federation_service: "FederationService") -> None:
         """Wire the federation service (peer versions + pinned peer keys)."""
         self._federation = federation_service

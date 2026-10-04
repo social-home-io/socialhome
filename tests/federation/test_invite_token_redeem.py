@@ -2331,6 +2331,7 @@ class _RecordingSpaceService:
         self.joined: list[dict] = []
         self.elevations: list[dict] = []
         self.revoked: list[tuple[str, bool]] = []
+        self.unlocked: list[str] = []
 
     async def broadcast_remote_member_joined(self, space_id, **kwargs):
         self.joined.append({"space_id": space_id, **kwargs})
@@ -2340,6 +2341,10 @@ class _RecordingSpaceService:
 
     async def revoke_space_session_if_orphaned(self, instance_id, *, notify=True):
         self.revoked.append((instance_id, notify))
+        return True
+
+    async def enable_private_gfs_for_legacy_link(self, space_id):
+        self.unlocked.append(space_id)
         return True
 
 
@@ -2925,7 +2930,9 @@ async def test_bootstrap_into_a_public_space_is_unchanged():
     assert result["space_id"] == "space-1"
 
 
-def _internal_pair(*, sender_source: InstanceSource, private_gfs: bool = True):
+def _internal_pair(
+    *, sender_source: InstanceSource, private_gfs: bool = True, space_service=None
+):
     sender, issuer, _sf, _if, issuer_repo, issuer_members = _wire_pair(
         {
             "space_id": "sp-1",
@@ -2941,6 +2948,8 @@ def _internal_pair(*, sender_source: InstanceSource, private_gfs: bool = True):
         _a_space("sp-1"),
         features=replace(_a_space("sp-1").features, private_gfs=private_gfs),
     )
+    if space_service is not None:
+        issuer.attach_space_service(space_service)
     return sender, issuer_repo, issuer_members
 
 
@@ -2982,3 +2991,46 @@ async def test_a_relayed_redeem_into_an_off_private_space_is_refused():
             "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
         )
     assert issuer_members.added == []
+
+
+# ── Grandfathered (pre-0079) links of a private space left OFF ─────────
+
+
+@pytest.mark.security
+async def test_a_grandfathered_link_still_redeems_over_the_relay_and_turns_it_on():
+    """Owner decision 2026-10-04: a live pre-0079 link of a private space
+    the migration left OFF stays redeemable over the relay; the first
+    household that joins through it turns ``private_gfs`` ON on the host."""
+    env = _bootstrap_pair()
+    _set_space(env, private_gfs=False)
+    env.issuer_spaces.tokens["tok-1"]["via"] = "gfs_legacy"
+    recorder = _RecordingSpaceService()
+    env.issuer.attach_space_service(recorder)
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["space_id"] == "space-1"
+    assert recorder.unlocked == ["space-1"]
+    # Unlocked only once the joiner is a fan-out target (its grants follow).
+    assert ("space-1", env.redeemer_party.instance_id) in (
+        env.issuer_spaces.space_instances
+    )
+
+
+async def test_a_grandfathered_link_redeemed_directly_does_not_turn_it_on():
+    """A paired household needs no connection server: its direct redeem of
+    a grandfathered link seats it and leaves the option OFF."""
+    recorder = _RecordingSpaceService()
+    sender, issuer_repo, issuer_members = _internal_pair(
+        sender_source=InstanceSource.MANUAL, private_gfs=False, space_service=recorder
+    )
+    issuer_repo.tokens["good-token"]["via"] = "gfs_legacy"
+    result = await sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    assert result["space_id"] == "sp-1"
+    assert len(issuer_members.added) == 1
+    assert recorder.unlocked == []

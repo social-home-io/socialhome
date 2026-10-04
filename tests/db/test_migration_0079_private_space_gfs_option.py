@@ -1,10 +1,11 @@
 """Migration 0079 — ``spaces.private_gfs`` and ``space_invite_tokens.via``.
 
 A new private space is OFF; the backfill turns the option ON only for the
-existing PRIVATE spaces that already use the connection-server relay (a
-``space_session`` household in ``space_instances``, or a live invite link —
-every link minted before 0079 is relay-redeemable). Every existing link keeps
-today's type (``gfs``).
+existing PRIVATE spaces that already have a link-joined household (a
+``space_session`` household in ``space_instances``, or a stored v_51 channel —
+the member-side mirror). A private space with only live invite links starts
+OFF and its links are grandfathered as ``gfs_legacy``; public links keep
+``gfs``.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ def conn(tmp_path):
         "spent_link": "private",
         "public_link": "public",
         "plain": "private",
+        "member_stub_channel": "private",
     }
     for sid, kind in spaces.items():
         c.execute(
@@ -67,6 +69,7 @@ def conn(tmp_path):
             " identity_public_key, space_type) VALUES(?,'S','host','anna','ab',?)",
             (sid, kind),
         )
+    c.execute("UPDATE spaces SET gfs_channel_id='ch1' WHERE id='member_stub_channel'")
     _instance(c, "link-hh", "space_session")
     _instance(c, "paired-hh", "manual")
     c.execute(
@@ -94,11 +97,12 @@ def _flags(conn) -> dict[str, int]:
     return {r[0]: r[1] for r in conn.execute("SELECT id, private_gfs FROM spaces")}
 
 
-def test_backfill_turns_on_only_private_spaces_already_using_the_relay(conn):
+def test_backfill_turns_on_only_private_spaces_with_a_link_joined_household(conn):
     _apply_through(conn, _VERSION)
     assert _flags(conn) == {
         "link_member": 1,
-        "live_link": 1,
+        "member_stub_channel": 1,
+        "live_link": 0,
         "paired_only": 0,
         "expired_link": 0,
         "spent_link": 0,
@@ -107,15 +111,24 @@ def test_backfill_turns_on_only_private_spaces_already_using_the_relay(conn):
     }
 
 
-def test_a_new_space_is_off_and_existing_links_keep_the_gfs_type(conn):
+def test_links_of_spaces_left_off_are_grandfathered(conn):
+    _apply_through(conn, _VERSION)
+    vias = dict(conn.execute("SELECT token, via FROM space_invite_tokens"))
+    assert vias == {
+        "t1": "gfs_legacy",
+        "t2": "gfs_legacy",
+        "t3": "gfs_legacy",
+        "t4": "gfs",
+    }
+
+
+def test_a_new_space_is_off(conn):
     _apply_through(conn, _VERSION)
     conn.execute(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
         " identity_public_key, space_type) VALUES('new','S','host','anna','ab','private')"
     )
     assert _flags(conn)["new"] == 0
-    vias = {r[0] for r in conn.execute("SELECT via FROM space_invite_tokens")}
-    assert vias == {"gfs"}
 
 
 def test_checks_refuse_unknown_values(conn):

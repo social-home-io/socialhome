@@ -357,3 +357,63 @@ async def test_a_link_member_seated_during_the_switch_is_logged(
         await _set(stack, "anna", on=False)
     assert any("late-hh" in r.getMessage() for r in caplog.records)
     assert stack.rotations == [stack.space.id]
+
+
+# ── Grandfathered (pre-0079) links ────────────────────────────────────────
+
+
+async def _legacy_link(stack) -> str:
+    """A live link of a private space that migration 0079 left OFF."""
+    token = await stack.spaces.create_invite_token(stack.space.id, "u-anna")
+    await stack.db.enqueue(
+        "UPDATE space_invite_tokens SET via='gfs_legacy' WHERE token=?", (token,)
+    )
+    return token
+
+
+async def test_grandfathered_links_are_listed_and_keep_their_relay_code(stack):
+    token = await _legacy_link(stack)
+    (link,) = await stack.svc.list_invite_links(stack.space.id, actor_username="anna")
+    assert link["token"] == token and link["via"] == "gfs_legacy"
+    assert "issuer_keywrap_pk" in _decode(link["code"])
+
+
+async def test_no_new_gfs_or_grandfathered_link_while_off(stack):
+    await _legacy_link(stack)
+    with pytest.raises(PrivateGfsOffError):
+        await stack.svc.create_invite_link(
+            stack.space.id, actor_username="anna", via=INVITE_VIA_GFS
+        )
+    with pytest.raises(ValueError):
+        await stack.svc.create_invite_link(
+            stack.space.id, actor_username="anna", via="gfs_legacy"
+        )
+
+
+async def test_a_grandfathered_join_turns_the_option_on_through_the_owner_path(stack):
+    assert await stack.svc.enable_private_gfs_for_legacy_link(stack.space.id)
+    space = await stack.spaces.get(stack.space.id)
+    assert space.features.private_gfs is True
+    # The normal ON path: config bumped (federated), channel started.
+    assert space.config_sequence > stack.space.config_sequence
+    assert stack.member_gfs.calls == [("enable", stack.space.id)]
+    # Already on: nothing more.
+    assert not await stack.svc.enable_private_gfs_for_legacy_link(stack.space.id)
+
+
+async def test_a_grandfathered_join_never_touches_a_public_space(stack):
+    public = await stack.svc.create_space(
+        owner_username="anna", name="Pub", space_type=SpaceType.PUBLIC
+    )
+    assert not await stack.svc.enable_private_gfs_for_legacy_link(public.id)
+    assert stack.member_gfs.calls == []
+
+
+async def test_turning_it_off_also_drops_grandfathered_links(stack):
+    legacy = await _legacy_link(stack)
+    await _set(stack, "anna", on=True)
+    await _set(stack, "anna", on=False)
+    live = [
+        r["token"] for r in await stack.spaces.list_live_invite_tokens(stack.space.id)
+    ]
+    assert legacy not in live

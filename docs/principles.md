@@ -420,12 +420,27 @@ and pinned on every household to the owner's own word.
   id, its name, its key, its owner id or any content (everything in the
   previous sign-off holds). Members not connected to that server keep the
   federation path and catch up from the host when it returns.
-- **Existing spaces:** migration 0079 turned the option ON only for the
-  private spaces that already used the relay (a link-joined household, or
-  a live invite link — every link minted before it was relay-redeemable),
-  so nothing that worked stopped; for those spaces the server now also
-  learns their paired members (those connected to it), which it did not
-  before. Every other existing private space is OFF.
+- **Existing spaces (owner decision 2026-10-04):** migration 0079 turned
+  the option ON only for the private spaces that already have a link-joined
+  household (or, on a member household, already hold a v_51 channel — the
+  mirror of the same fact); for those spaces the server now also learns
+  their paired members connected to it, which it did not before. Every
+  other existing private space is OFF — including one that only has live
+  invite links. Those links (minted before 0079, when every link was
+  relay-redeemable) are **grandfathered** (`via = 'gfs_legacy'`): they stay
+  redeemable over the relay until used up or expired, and **the first
+  household that joins through one over the relay turns the option ON** on
+  the host, through the owner's normal ON path (config federation, channel,
+  grants) — so the space reaches the server only because a link its owner
+  shared was used, never by the upgrade itself. No new grandfathered link
+  can be minted; while OFF, a new `gfs` link is refused. Turning the option
+  OFF deletes grandfathered links too.
+- **Members follow the owner's word, defensively.** A member household
+  never takes a seat on, or publishes into, the channel of a private space
+  whose stored option is OFF, whatever grant it holds; when the owner's
+  config turns it OFF, or a new epoch arrives without a grant while an
+  earlier one seated it, the member unsubscribes at the server and forgets
+  the channel.
 
 **Why this is accepted (pending sign-off):** it is the owner's explicit choice
 per space, off by default, and it buys what the owner asked for — members

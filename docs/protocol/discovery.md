@@ -1487,10 +1487,13 @@ owner-only (a host-local admin, a remote admin's forwarded edit and a
 delegated admin's authority-signed config all leave it alone — pinned on
 host inbound and taken only from the owner household everywhere else,
 exactly like `gfs_publish_mode`), federated in `SPACE_CONFIG_CHANGED`, and
-OFF for every new private space. Migration 0079 turned it ON for the
-existing private spaces that already used the relay (a link-joined
-household, or a live invite link). Older peers that omit the field read
-OFF.
+OFF for every new private space. Migration 0079 turned it ON only for the
+existing private spaces that already have a link-joined household (or, on
+a member, a stored channel); a space with only live invite links starts OFF
+and its links are grandfathered — the first household that joins through
+one over the relay turns the option ON (see
+[`invites.md`](./invites.md#the-link-type-gfs-or-internal)). Older peers
+that omit the field read OFF.
 
 - **OFF:** the space never touches a GFS — no channel, no grant, no seat, no
   publish, and no invite link that redeems through the relay (an invite
@@ -1670,6 +1673,17 @@ channel's server** — the owner's opt-in — and a household removed at a
 rotation (no new pass) drops out after the grace even though its row
 remains. They re-subscribe when a new grant arrives and on every GFS
 (re)connect. The server needs no change for this: a pass is a pass.
+
+**Members follow the owner's option, defensively.** A member never takes a
+seat on, or publishes into, the channel of a private space whose stored
+`private_gfs` is OFF, whatever grant it holds (a grant that arrives before
+the owner's config is kept, and the seat is taken once the config says ON).
+When the owner's `SPACE_CONFIG_CHANGED` turns it OFF, or a rekey arrives
+without a grant while an earlier epoch's grant seated it, the member
+unsubscribes at the servers the last grant named and forgets the channel
+(`GfsChannelService.drop_stale`; a second `SPACE_CONFIG_CHANGED` handler
+that runs after the inbound one and reads only the stored, already-pinned
+config).
 
 **Members without a usable seat catch up from the host.** A member household
 that holds no seat on a server it is connected to — it is not connected to

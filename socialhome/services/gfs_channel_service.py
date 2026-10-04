@@ -91,7 +91,7 @@ from ..domain.events import (
     PeerTransportChanged,
     SpaceRemoteSeatLive,
 )
-from ..domain.federation import GfsConnection, InstanceSource
+from ..domain.federation import FederationEventType, GfsConnection, InstanceSource
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import (
     CHANNEL_EPOCH_ROUTE,
@@ -294,8 +294,17 @@ class GfsChannelService:
     # ── Wiring + lifecycle ───────────────────────────────────────────────
 
     def attach_federation(self, federation: "FederationService") -> None:
-        """Peer versions (the v_51 gate on every grant)."""
+        """Peer versions (the v_51 gate on every grant), and a second
+        ``SPACE_CONFIG_CHANGED`` handler — registered after the inbound
+        service's, so it reads the config that handler just applied (never
+        the event itself): a member drops its seat when the owner turned
+        ``private_gfs`` off, and takes it when the owner turned it on."""
         self._federation = federation
+        registry = getattr(federation, "_event_registry", None)
+        if registry is not None:
+            registry.register(
+                FederationEventType.SPACE_CONFIG_CHANGED, self._on_config_event
+            )
 
     def attach_space_service(self, space_service: object) -> None:
         """The roster-snapshot sender that distributes a new channel's
@@ -602,6 +611,71 @@ class GfsChannelService:
             except Exception:
                 log.exception("gfs.channel: snapshot to %s failed", inst)
         return done
+
+    async def _on_config_event(self, event: object) -> None:
+        """After an inbound ``SPACE_CONFIG_CHANGED`` was applied: re-read the
+        STORED space (the inbound service already validated and pinned it)
+        and follow the owner's ``private_gfs`` on a space we are a member
+        of."""
+        payload = getattr(event, "payload", None)
+        space_id = payload.get("space_id") if isinstance(payload, dict) else None
+        if not isinstance(space_id, str) or not space_id:
+            return
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or space.owner_instance_id == self._own_instance_id
+        ):
+            return
+        if space.features.private_gfs:
+            self._spawn(self.subscribe(space_id), "subscribe")
+        else:
+            await self.drop_stale(space_id)
+
+    async def drop_stale(self, space_id: str) -> bool:
+        """Member side: leave a channel we may no longer use — the owner
+        turned ``private_gfs`` off, or the current epoch came without a grant
+        though an earlier one carried one (the owner retired the channel or
+        removed us from it). Unsubscribes at the servers the last grant
+        named and forgets the channel. ``True`` when a seat was dropped."""
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or space.owner_instance_id == self._own_instance_id
+        ):
+            return False
+        stored = await self._spaces.get_gfs_channel(space_id)
+        if stored is None:
+            return False
+        grant = await self.current_grant(space_id)
+        if grant is not None and space.features.private_gfs:
+            return False  # still ours to use
+        if grant is None:
+            grant = await self._previous_grant(space_id)
+        gfs_ids = grant.gfs_ids if grant is not None else ()
+        await self._spaces.set_gfs_channel(space_id, None, None)
+        if gfs_ids:
+            await self._unsubscribe_all(stored[0], gfs_ids)
+        log.info(
+            "gfs.channel: left channel %s of private space %s (no grant for "
+            "the current epoch, or the owner turned the connection server off)",
+            stored[0],
+            space_id,
+        )
+        return True
+
+    async def _previous_grant(self, space_id: str) -> GfsChannelGrant | None:
+        """The newest stored grant below the current epoch that still names
+        the stored channel."""
+        epoch = await self._crypto.get_current_epoch(space_id)
+        if epoch is None:
+            return None
+        found = await self._keys.latest_gfs_channel_before(space_id, epoch)
+        if found is None:
+            return None
+        return await self.own_grant(space_id, found[0])
 
     async def _on_seat_live(self, event: SpaceRemoteSeatLive) -> None:
         self._spawn(self._after_seat(event.space_id, event.instance_id), "seat")
@@ -1184,9 +1258,14 @@ class GfsChannelService:
     async def subscribe(self, space_id: str, *, only: str | None = None) -> int:
         """Take our fan-out seat on the channel's servers with the current
         grant's pass. Fail-soft per server. Returns how many accepted."""
+        space = await self._spaces.get(space_id)
+        if space is None or not space.features.private_gfs:
+            # Defence in depth: never a seat for a space whose stored option
+            # is OFF, whatever grant we hold.
+            return 0
         grant = await self.current_grant(space_id)
         if grant is None or grant.channel_pass is None:
-            # A publish-only (paired) member never takes a seat.
+            # A publish-only member never takes a seat.
             return 0
         done = 0
         for conn in await self._capable_in(grant.gfs_ids):
@@ -1237,7 +1316,11 @@ class GfsChannelService:
         writer key (never identified there); or a trusted grant without a
         channel cert (a reader seat). ``[]`` means the host path."""
         space = await self._spaces.get(space_id)
-        if space is None or space.space_type is not SpaceType.PRIVATE:
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or not space.features.private_gfs
+        ):
             return []
         grant = await self.current_grant(space_id)
         if grant is None:
@@ -1263,7 +1346,7 @@ class GfsChannelService:
         space. Returns the servers that accepted on the first attempt."""
         grant = await self.own_grant(space_id, epoch)
         space = await self._spaces.get(space_id)
-        if grant is None or space is None:
+        if grant is None or space is None or not space.features.private_gfs:
             return []
         if grant.writer_key is not None:
             kind = _KIND_ANON
@@ -1295,7 +1378,7 @@ class GfsChannelService:
         epoch = int(data["epoch"])
         grant = await self.own_grant(space_id, epoch)
         space = await self._spaces.get(space_id)
-        if grant is None or space is None:
+        if grant is None or space is None or not space.features.private_gfs:
             return PublishOutcome.permanent()
         if anon:
             client = self._gfs.publish_client()

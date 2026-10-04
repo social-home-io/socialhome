@@ -195,6 +195,13 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # authorized (``_require_space`` + the caller's membership read).
         # Returns a boolean about a space the caller may already see.
         "uses_gfs_private_channel",
+        # Redeem-coordinator hook (owner decision 2026-10-04): a grandfathered
+        # pre-0079 invite link just seated a household over the relay, which
+        # opts the private space into ``private_gfs``. Self-gates on hosting
+        # the space and on it being private and still OFF; it then runs the
+        # owner's own ``update_config`` as the owner. No actor to authorize —
+        # the token (minted by an admin before 0079) is the authorization.
+        "enable_private_gfs_for_legacy_link",
         # Owner-side seed share (v_22, public since v_44 so the rotation
         # service re-shares after a rotation). Self-gates on owning the
         # space, the delegation flag's caller and the peer's version; no

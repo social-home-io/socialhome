@@ -21,9 +21,14 @@ from socialhome.domain.events import (
     PeerTransportChanged,
     SpaceRemoteSeatLive,
 )
-from socialhome.domain.federation import GfsConnection, InstanceSource
+from socialhome.domain.federation import (
+    FederationEventType,
+    GfsConnection,
+    InstanceSource,
+)
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.writer_cert import WriterEntitlement
+from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_envelope_queue_repo_key,
@@ -111,6 +116,12 @@ class _Keys:
 
     async def get_gfs_channel(self, space_id, epoch):
         return self.grants.get((space_id, epoch))
+
+    async def latest_gfs_channel_before(self, space_id, epoch):
+        older = [e for (sid, e) in self.grants if sid == space_id and e < epoch]
+        if not older:
+            return None
+        return max(older), self.grants[(space_id, max(older))]
 
 
 class _Crypto:
@@ -1056,3 +1067,85 @@ async def test_a_seated_paired_member_needs_no_catch_up(env, monkeypatch):
     await env.other.svc.wait_idle()
     assert sched.asked == []
     await env.other.svc.stop()
+
+
+# ── Members drop stale seats; defence in depth on the stored option ──────
+
+
+async def test_a_member_drops_its_seat_when_the_new_epoch_has_no_grant(env):
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    repo = env.app[gfs_channel_repo_key]
+    assert await repo.has_subscription(channel_id, env.member.h.instance_id)
+    # Still current and ON: kept.
+    assert not await env.member.svc.drop_stale(SPACE_ID)
+    # The next epoch arrives without a grant (removed from the channel).
+    env.member.keys.epoch = 4
+    assert await env.member.svc.drop_stale(SPACE_ID)
+    await env.member.svc.wait_idle()
+    assert not await repo.has_subscription(channel_id, env.member.h.instance_id)
+    assert SPACE_ID not in env.member.spaces.channels
+    assert not await env.member.svc.drop_stale(SPACE_ID)  # nothing left
+
+
+async def test_a_member_follows_the_owners_option_from_config(env):
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    repo = env.app[gfs_channel_repo_key]
+    # The owner's config turned private_gfs OFF (applied by the inbound
+    # service before this second handler runs).
+    env.member.spaces.spaces[SPACE_ID] = replace(env.space, features=SpaceFeatures())
+    await env.member.svc._on_config_event(
+        SimpleNamespace(payload={"space_id": SPACE_ID})
+    )
+    assert not await repo.has_subscription(channel_id, env.member.h.instance_id)
+    assert SPACE_ID not in env.member.spaces.channels
+
+
+async def test_the_config_handler_takes_the_seat_when_the_option_goes_on(env):
+    channel_id = await _channel_ready(env)
+    env.member.spaces.spaces[SPACE_ID] = replace(env.space, features=SpaceFeatures())
+    await _hand_grants(env, env.member)
+    repo = env.app[gfs_channel_repo_key]
+    # The grant arrived before the config: no seat while the stored option is OFF.
+    assert not await repo.has_subscription(channel_id, env.member.h.instance_id)
+    env.member.spaces.spaces[SPACE_ID] = env.space
+    await env.member.svc._on_config_event(
+        SimpleNamespace(payload={"space_id": SPACE_ID})
+    )
+    await env.member.svc.wait_idle()
+    assert await repo.has_subscription(channel_id, env.member.h.instance_id)
+    # The owner itself and unknown payloads are ignored.
+    await env.owner.svc._on_config_event(
+        SimpleNamespace(payload={"space_id": SPACE_ID})
+    )
+    await env.owner.svc._on_config_event(SimpleNamespace(payload=None))
+
+
+def test_the_config_handler_registers_after_the_inbound_one():
+    registry = EventDispatchRegistry()
+    fed = SimpleNamespace(_event_registry=registry)
+    svc = GfsChannelService.__new__(GfsChannelService)
+    GfsChannelService.attach_federation(svc, fed)  # type: ignore[arg-type]
+    assert registry._handlers[FederationEventType.SPACE_CONFIG_CHANGED] == [
+        svc._on_config_event
+    ]
+
+
+@pytest.mark.security
+async def test_a_member_never_uses_the_channel_while_the_stored_option_is_off(env):
+    """Defence in depth: whatever grant a member holds, a private space whose
+    stored ``private_gfs`` is OFF gets no seat and no publish."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    off = replace(env.space, features=SpaceFeatures())
+    env.other.spaces.spaces[SPACE_ID] = off
+    assert await env.other.svc.plan(SPACE_ID) == []
+    assert await env.other.svc.subscribe(SPACE_ID) == 0
+    conn = (await env.other.svc._capable())[0]
+    assert await env.other.svc.publish_sealed(SPACE_ID, 3, "eA", [conn]) == []
+    outcome = await env.other.svc._post_item(
+        conn, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=False
+    )
+    assert outcome.kind == "permanent"
+    assert await _queued(env, env.member) == []

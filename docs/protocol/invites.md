@@ -1129,6 +1129,7 @@ Every link has a type, chosen by the issuer at mint time
 |---|---|---|
 | `gfs` | anyone — a household that never met the issuer redeems it through the relay (§D2b), paired / mesh households directly | yes: the relay (and, for a public / global space, the bulletin board when published) |
 | `internal` | only households paired with the issuer or reachable over the mesh (§D2 direct / routed redeem) | **never** — no listing, no parking, no relay |
+| `gfs_legacy` | never minted — a live link of a private space migration 0079 left OFF; redeems like `gfs` (grandfathered) | yes, and the first relay join turns the space's `private_gfs` ON |
 
 - **Default when omitted:** `internal` on a PRIVATE space whose owner has
   `private_gfs` OFF; `gfs` otherwise (a private space with the option ON,
@@ -1152,9 +1153,24 @@ Every link has a type, chosen by the issuer at mint time
   route is the relay) when the consumed token is `internal`, or when the
   token's space is PRIVATE with `private_gfs` OFF
   (`SpaceInviteTokenRedeemCoordinator._relay_redeem_allowed`).
-- **Turning `private_gfs` OFF deletes every `gfs` link** of the space (and
-  takes a parked blob down); `internal` links keep working. Links minted
-  before migration 0079 are `gfs`.
+- **Turning `private_gfs` OFF deletes every `gfs` and `gfs_legacy` link**
+  of the space (and takes a parked blob down); `internal` links keep
+  working.
+- **Grandfathered links (owner decision 2026-10-04).** Migration 0079 turned
+  `private_gfs` ON only for private spaces that already have a link-joined
+  household. A private space that only had live invite links starts OFF,
+  and those links — minted when every link was relay-redeemable — become
+  `gfs_legacy`: listed with that `via`, still redeemable over the relay
+  until used up or expired, their code unchanged. The issuer accepts a
+  relayed redeem of one into the OFF space, and once the seat is committed
+  (the joiner already in `space_instances`) it turns the option ON through
+  the owner's own config path (`SpaceService.enable_private_gfs_for_legacy_link`
+  → `update_config`: config federation, channel, grants to every member,
+  the joiner included). A paired household redeeming one directly needs no
+  connection server and leaves the option OFF. No link can be minted as
+  `gfs_legacy` (`422`), and while the option is OFF a new `gfs` link is
+  still `409 PRIVATE_GFS_OFF`. Links of public / global spaces stayed
+  `gfs`.
 
 ## Flow — private invite (paired peers)
 

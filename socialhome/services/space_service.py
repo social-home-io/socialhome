@@ -133,6 +133,7 @@ from ..domain.presence import truncate_coord
 from ..domain.space import (
     ACCESS_FEATURES,
     INVITE_VIA_GFS,
+    INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
     INVITE_VIAS,
     AccessDecision,
@@ -2501,6 +2502,35 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             except Exception:
                 log.exception("gfs publish mode: GFS notice failed for %s", space.id)
 
+    async def enable_private_gfs_for_legacy_link(self, space_id: str) -> bool:
+        """A grandfathered (``gfs_legacy``, pre-migration-0079) invite link
+        just seated a household through the connection-server relay into a
+        PRIVATE space we host whose ``private_gfs`` is OFF: turn the option
+        ON through the owner's own config path — exactly what the owner
+        clicking it does (config federation, channel, grants). Owner
+        decision 2026-10-04: the first such join opts the space in. Called
+        only by the redeem coordinator after the relay redeem committed.
+        ``True`` when it switched."""
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or space.features.private_gfs
+            or space.owner_instance_id != self._own_instance_id
+        ):
+            return False
+        log.info(
+            "private gfs: space %s turned on — a household joined through a "
+            "grandfathered invite link",
+            space_id,
+        )
+        await self.update_config(
+            space_id,
+            actor_username=space.owner_username,
+            features=replace(space.features, private_gfs=True),
+        )
+        return True
+
     async def _link_joined_households(self, space_id: str) -> list[dict]:
         """The member households of ``space_id`` seated through an invite
         link (``InstanceSource.SPACE_SESSION``, a live seat here) — they
@@ -2555,9 +2585,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 except Exception:
                     log.exception("private gfs: starting the channel failed")
             return
-        for row in await self._spaces.delete_invite_tokens_via(
-            space.id, INVITE_VIA_GFS
-        ):
+        gfs_links = [
+            row
+            for via in (INVITE_VIA_GFS, INVITE_VIA_GFS_LEGACY)
+            for row in await self._spaces.delete_invite_tokens_via(space.id, via)
+        ]
+        for row in gfs_links:
             gfs_id, gfs_token = row.get("gfs_id"), row.get("gfs_token")
             if not gfs_id or not gfs_token or self._gfs is None:
                 continue

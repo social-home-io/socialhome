@@ -2053,6 +2053,29 @@ async def test_rekey_hands_the_channel_grant_to_the_holder_after_the_key():
     assert order == ["key", "grant"]
 
 
+async def test_rekey_without_a_channel_grant_drops_a_stale_seat():
+    """The new epoch came without a grant: the member leaves a channel an
+    earlier epoch's grant seated it on."""
+    h, certs, _crypto = _cert_handler()
+    certs.accept_channel_grant = AsyncMock(return_value=True)
+    certs.drop_stale_channel = AsyncMock(return_value=True)
+    await h._on_key_exchange_rekey(
+        _event(
+            "SPACE_KEY_EXCHANGE_REKEY",
+            {
+                "space_id": "sp-c",
+                "space_content_key": {
+                    "epoch": 4,
+                    "key_suite": "aesgcm-256",
+                    "key_base64": base64.b64encode(bytes(32)).decode("ascii"),
+                },
+            },
+        )
+    )
+    certs.drop_stale_channel.assert_awaited_once_with("sp-c")
+    certs.accept_channel_grant.assert_not_awaited()
+
+
 async def test_roster_snapshot_with_only_a_channel_grant_still_stores_it():
     """A reader household gets a grant but no writer cert."""
     h, certs, _crypto = _cert_handler()
