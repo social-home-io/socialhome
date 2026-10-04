@@ -16,6 +16,7 @@ messages that means:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -52,6 +53,19 @@ RAW_LON = 4.895167912345
 RAW_ACCURACY = 3.71
 RAW_STRINGS = ("52.370216", "4.895167", "3.71")
 SESSION_KEY = b"\x07" * 32
+
+#: ISO-8601 timestamps (``2026-10-04T09:33:13.714350+00:00``). Their
+#: seconds can contain a short needle such as "3.71", so the leak scan
+#: blanks them; a coordinate never travels as a timestamp.
+_ISO_TS = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?([+-]\d{2}:\d{2}|Z)?"
+)
+
+
+def _scannable(value: object) -> str:
+    """JSON text of ``value`` with timestamps blanked, for leak scans."""
+    text = value if isinstance(value, str) else json.dumps(value)
+    return _ISO_TS.sub("<ts>", text)
 
 
 class _CapturingClient:
@@ -143,7 +157,7 @@ def _decrypted_dm_payloads(capture: _CapturingClient) -> list[dict]:
         # ciphertext matches a short string like "3.71" by chance. The
         # decrypted payload is checked by the callers.
         routing = {k: v for k, v in body.items() if k != "encrypted_payload"}
-        raw = json.dumps(routing)
+        raw = _scannable(routing)
         for leak in RAW_STRINGS + ("52.3702", "4.8952"):
             assert leak not in raw, f"coordinate {leak} visible on the envelope"
         out.append(
@@ -171,11 +185,11 @@ async def test_outbound_location_is_rounded_in_db_and_encrypted_payload(sender):
         "accuracy_m": 25,
     }
     for leak in RAW_STRINGS:
-        assert leak not in stored.content
+        assert leak not in _scannable(stored.content)
 
     payloads = _decrypted_dm_payloads(capture)
     assert len(payloads) == 1
-    plaintext = json.dumps(payloads[0])
+    plaintext = _scannable(payloads[0])
     for leak in RAW_STRINGS:
         assert leak not in plaintext
     assert payloads[0]["type"] == "location"
@@ -197,7 +211,7 @@ async def test_outbound_location_edit_is_rounded(sender):
     edits = _decrypted_dm_payloads(capture)
     assert len(edits) == 2
     for leak in RAW_STRINGS:
-        assert leak not in json.dumps(edits[1])
+        assert leak not in _scannable(edits[1])
 
 
 # ── Inbound ───────────────────────────────────────────────────────────────
@@ -303,3 +317,14 @@ async def test_inbound_malformed_location_is_refused(receiver, content):
     assert await repo.get_message("m-bad") is None
     # Nothing was set up for it either.
     assert await repo.get("conv-loc") is None
+
+
+def test_leak_scan_ignores_timestamps_that_contain_a_needle():
+    """Regression: a payload timestamp like ``…T09:33:13.714350+00:00``
+    contains the short needle "3.71" and made the leak scan fail at
+    random. Timestamps can never carry a coordinate, so the scan blanks
+    them first — while a real coordinate leak still trips it."""
+    clean = {"created_at": "2026-10-04T09:33:13.714350+00:00", "type": "location"}
+    assert all(leak not in _scannable(clean) for leak in RAW_STRINGS)
+    leaky = {"created_at": "2026-10-04T09:33:13.714350+00:00", "accuracy_m": 3.71}
+    assert any(leak in _scannable(leaky) for leak in RAW_STRINGS)
