@@ -81,9 +81,9 @@ describe('SpaceSettingsPage live config', () => {
     expect(view.queryByText('Space not found')).toBeNull()
   })
 
-  it('shows the connection server publish mode to the owner only', async () => {
+  it('shows the GFS publish mode to the owner only', async () => {
     // Public space whose posts followers may read — where members publish
-    // over a connection server at all.
+    // over the GFS at all.
     detail = {
       ...detail, space_type: 'public', join_mode: 'open',
       features: { allow_subscribers: true },
@@ -93,11 +93,11 @@ describe('SpaceSettingsPage live config', () => {
     const view = render(<Page />)
     fireEvent.click(await view.findByRole('tab', { name: 'General' }))
     await view.findByRole('heading', { name: 'Space Settings' })
-    expect(view.queryByRole('radiogroup', { name: /connection server/ })).toBeNull()
+    expect(view.queryByRole('radiogroup', { name: /Posting through the GFS/ })).toBeNull()
 
     role = 'owner'
     emit('space.config.changed', { space_id: 'sp-1', event_type: 'owner_transferred' })
-    const group = await view.findByRole('radiogroup', { name: /connection server/ })
+    const group = await view.findByRole('radiogroup', { name: /Posting through the GFS/ })
     expect(group.querySelector('[aria-checked="true"]')?.textContent).toBe('Trusted')
   })
 })

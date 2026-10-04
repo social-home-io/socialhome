@@ -89,7 +89,7 @@ describe('spaceInviteCode', () => {
 })
 
 describe('bootstrap block (§D2b)', () => {
-  it('round-trips the issuer key material and the connection server', () => {
+  it('round-trips the issuer key material and the GFS', () => {
     const payload = {
       token: 'a1b2c3d4e5f60718',
       space_id: 'sp-1',

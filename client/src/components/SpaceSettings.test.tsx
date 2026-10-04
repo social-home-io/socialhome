@@ -1108,7 +1108,7 @@ describe('SpaceSettings — an edit forwarded to the host', () => {
   })
 })
 
-describe('SpaceSettings — connection server publish mode (owner-only)', () => {
+describe('SpaceSettings — GFS publish mode (owner-only)', () => {
   beforeEach(() => {
     apiMock.get.mockResolvedValue([])
     apiMock.patch.mockReset()
@@ -1155,7 +1155,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(container)).toBeNull()
   })
 
-  it('is hidden where members never publish over a connection server', () => {
+  it('is hidden where members never publish over the GFS', () => {
     // Private space; and a public one with followers off.
     const priv = render(
       <SpaceSettings space={publicSpace({}, 'private')} onUpdate={() => {}} isOwner />,
@@ -1175,7 +1175,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(noFollow.container)).toBeTruthy()
   })
 
-  it('renders for the owner of a private space that uses the connection server', () => {
+  it('renders for the owner of a private space that uses the GFS', () => {
     // A private space whose owner turned ``private_gfs`` on: member
     // households reach each other over an opaque channel, so the same
     // choice applies, with copy that says what the server learns there.
@@ -1193,7 +1193,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(admin.container)).toBeNull()
   })
 
-  it('is hidden on a private space with the connection server off', () => {
+  it('is hidden on a private space with the GFS off', () => {
     // Off is what matters: not a stale channel flag, and not a strict
     // mode left over from before (it means nothing while off).
     const space = {
@@ -1208,7 +1208,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(container)).toBeNull()
   })
 
-  it('follows the live connection-server switch on a private space', () => {
+  it('follows the live GFS switch on a private space', () => {
     const { container, getByTestId } = render(
       <SpaceSettings
         space={publicSpace({ private_gfs: false }, 'private')}
@@ -1309,7 +1309,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
   })
 })
 
-describe('SpaceSettings — private space connection server (owner-only)', () => {
+describe('SpaceSettings — private space GFS (owner-only)', () => {
   beforeEach(() => {
     apiMock.get.mockResolvedValue([])
     apiMock.patch.mockReset()
@@ -1335,7 +1335,7 @@ describe('SpaceSettings — private space connection server (owner-only)', () =>
   /** An ``ApiError``-shaped rejection: the dialog reads ``code`` + ``extra``. */
   function linkMembersError(households: unknown[]) {
     return Object.assign(
-      new Error('Remove the households that joined through an invite link before turning the connection server off for this space.'),
+      new Error('Remove the households that joined with a GFS link before turning the GFS off for this space.'),
       { status: 409, code: 'PRIVATE_GFS_LINK_MEMBERS', extra: { households } },
     )
   }

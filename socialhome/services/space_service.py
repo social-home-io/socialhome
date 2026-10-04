@@ -4644,9 +4644,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             await self._require_owner(space, actor_username)
         link_via = self._resolve_invite_via(space, via)
         if link_via == INVITE_VIA_INTERNAL and publish_to_gfs:
-            raise ValueError(
-                "an internal invite link is never published to a connection server"
-            )
+            raise ValueError("a local invite link is never published to a GFS")
         actor = await self._users.get(actor_username)
         assert actor is not None
         expires_at: str | None = None
@@ -4724,9 +4722,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if via not in INVITE_VIAS:
             raise ValueError("via must be 'gfs' or 'internal'")
         if via == INVITE_VIA_GFS and not gfs_allowed:
-            raise PrivateGfsOffError(
-                "this private space does not use a connection server"
-            )
+            raise PrivateGfsOffError("this private space does not use the GFS")
         return via
 
     async def invite_code_for_token(self, token: str) -> str | None:
@@ -4901,11 +4897,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         paired with, BEFORE anything is published or persisted.
         """
         if self._gfs is None:
-            raise ValueError("no connection server is paired with this household")
+            raise ValueError("no GFS is paired with this household")
         for conn in await self._gfs.list_connections():
             if conn.id == gfs_id:
                 return str(conn.inbox_url)
-        raise ValueError(f"connection server {gfs_id!r} is not paired")
+        raise ValueError(f"GFS {gfs_id!r} is not paired")
 
     def _invite_link_dict(
         self,

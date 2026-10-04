@@ -1380,11 +1380,11 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH,
-        "Anonymous posting over the connection server",
+        "Anonymous posting through the GFS",
     ),
     (
         FederationCapability.MIN_FOR_PRIVATE_CHANNELS,
-        "Private spaces over the connection server",
+        "Private spaces through the GFS",
     ),
 ]
 

@@ -217,7 +217,7 @@ async def test_refuses_a_server_without_the_capability(gfs, http_session):
             envelope=ENVELOPE,
             gfs_url=conn.inbox_url,
         )
-    assert "can't relay invites yet" in str(exc.value)
+    assert "can't pass on invites yet" in str(exc.value)
     assert gfs.received == []
 
 
@@ -270,7 +270,7 @@ async def test_refuses_with_no_connections_at_all(http_session):
     sender = GfsEnvelopeSender(gfs_service=service, gfs_repo=repo)
     with pytest.raises(EnvelopeRelayUnavailable) as exc:
         await sender.send_sealed_envelope(to_instance_id="b" * 32, envelope=ENVELOPE)
-    assert "connection server" in str(exc.value)
+    assert "GFS" in str(exc.value)
 
 
 async def test_skips_a_suspended_connection(gfs, http_session):

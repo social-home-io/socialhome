@@ -1152,7 +1152,7 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
         if not await self.invite_links_supported(conn):
             raise GfsConnectionError(
-                "this connection server can't host invite links yet",
+                "this GFS can't host invite links yet",
             )
 
         ts = datetime.now(timezone.utc).isoformat()

@@ -376,7 +376,7 @@ export function SpaceInviteDialog() {
         publishBlocked.value = {
           ...publishBlocked.value,
           [publishedTo]: e.detail
-            || "This connection server can't host invite links yet.",
+            || "This GFS can't host invite links yet.",
         }
       }
       showToast(
@@ -568,7 +568,7 @@ export function SpaceInviteDialog() {
                     Also publish to{' '}
                     {servers.value.length === 1
                       ? servers.value[0].display_name
-                      : 'a connection server'}
+                      : 'a GFS'}
                   </span>
                 </label>
                 {publish.value && servers.value.length > 1 && (
@@ -641,10 +641,10 @@ export function SpaceInviteDialog() {
               <p class="sh-muted"
                  style={{ marginTop: 0, fontSize: 'var(--sh-font-size-xs)' }}
                  data-testid="invite-published-never-hint">
-                The web link is the exception: the connection server only
-                holds a published invite for {PUBLISHED_LINK_MAX_DAYS} days,
-                after which that URL stops opening. The code below keeps
-                working until its uses run out or you revoke it.
+                The web link is the exception: it stops opening after{' '}
+                {PUBLISHED_LINK_MAX_DAYS} days, because the GFS only keeps it
+                that long. The code below keeps working until its uses run
+                out or you revoke it.
               </p>
             )}
 

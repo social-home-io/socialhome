@@ -7016,9 +7016,7 @@ async def test_a_server_without_invite_links_creates_no_local_row(stack):
     from socialhome.services.gfs_connection_service import GfsConnectionError
 
     gfs = _FakeGfs(
-        publish_error=GfsConnectionError(
-            "this connection server can't host invite links yet"
-        )
+        publish_error=GfsConnectionError("this GFS can't host invite links yet")
     )
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)

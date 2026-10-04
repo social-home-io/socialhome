@@ -31,15 +31,15 @@ def test_space_authority_rotation_capability_threshold():
         "Role changes from member households",
         "Host-sequenced shared pages",
         "Space writer certificates",
-        "Anonymous posting over the connection server",
-        "Private spaces over the connection server",
+        "Anonymous posting through the GFS",
+        "Private spaces through the GFS",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
         "Host-sequenced shared pages",
         "Space writer certificates",
-        "Anonymous posting over the connection server",
-        "Private spaces over the connection server",
+        "Anonymous posting through the GFS",
+        "Private spaces through the GFS",
     ]
 
 
@@ -61,8 +61,8 @@ def test_authority_epoch_echo_capability_threshold():
         "Role changes from member households",
         "Host-sequenced shared pages",
         "Space writer certificates",
-        "Anonymous posting over the connection server",
-        "Private spaces over the connection server",
+        "Anonymous posting through the GFS",
+        "Private spaces through the GFS",
     ]
 
 
@@ -510,8 +510,8 @@ def test_forwarded_role_change_capability_threshold():
     assert fc.features_missing_below(47) == [
         "Host-sequenced shared pages",
         "Space writer certificates",
-        "Anonymous posting over the connection server",
-        "Private spaces over the connection server",
+        "Anonymous posting through the GFS",
+        "Private spaces through the GFS",
     ]
 
 
@@ -526,8 +526,8 @@ def test_host_sequenced_pages_capability_threshold():
     assert fc.space_features_missing_below(47) == ["Host-sequenced shared pages"]
     assert fc.features_missing_below(48) == [
         "Space writer certificates",
-        "Anonymous posting over the connection server",
-        "Private spaces over the connection server",
+        "Anonymous posting through the GFS",
+        "Private spaces through the GFS",
     ]
 
 
@@ -540,8 +540,8 @@ def test_member_gfs_publish_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(49) == [
-        "Anonymous posting over the connection server",
-        "Private spaces over the connection server",
+        "Anonymous posting through the GFS",
+        "Private spaces through the GFS",
     ]
 
 
@@ -553,9 +553,7 @@ def test_strict_member_publish_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(50) == [
-        "Private spaces over the connection server"
-    ]
+    assert fc.features_missing_below(50) == ["Private spaces through the GFS"]
 
 
 def test_private_channels_capability_threshold():

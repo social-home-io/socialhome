@@ -1891,7 +1891,7 @@ async def test_bootstrap_relay_failure_surfaces_as_permission_error():
             issuer_instance_id=env.issuer_party.instance_id,
             bootstrap=env.hint,
         )
-    assert "connection server" in str(exc.value)
+    assert "GFS" in str(exc.value)
 
 
 async def test_bootstrap_not_offered_without_a_hint():

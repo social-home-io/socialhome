@@ -1361,7 +1361,7 @@ class SpaceInviteTokenView(BaseView):
             return error_response(
                 422,
                 "UNPROCESSABLE",
-                "An internal link is never published to a connection server.",
+                "A local link is never published to a GFS.",
             )
         try:
             link = await svc.create_invite_link(
@@ -1689,15 +1689,15 @@ def _gfs_publish_failure_message(status: int | None) -> str:
     """
     if status == 403:
         return (
-            "The connection server didn't accept this space's owner key "
+            "The GFS didn't accept this space's owner key "
             "— re-publish the space and try again"
         )
     if status == 429:
         return (
-            "The connection server is rate-limiting this household — "
-            "try again in a minute"
+            "The GFS is getting too many requests from this household "
+            "— try again in a minute"
         )
-    return "The connection server couldn't publish the link right now"
+    return "The GFS couldn't publish the link right now"
 
 
 #: Per-IP budget for ``GET /api/invite-links/{token}/code``. The token is
