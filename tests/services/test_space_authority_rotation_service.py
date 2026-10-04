@@ -1142,6 +1142,11 @@ async def test_the_channel_is_reconciled_before_bundles_carry_its_grant(env):
     order: list[str] = []
 
     class _Member:
+        async def retire_channel(self, space_id):
+            # Still signed by the OLD seed: before the swap.
+            space = await env.svc._spaces.get(space_id)
+            order.append(f"retire:{space.authority_key_epoch}")
+
         async def reconcile_channel(self, space_id):
             order.append("reconcile")
 
@@ -1159,7 +1164,7 @@ async def test_the_channel_is_reconciled_before_bundles_carry_its_grant(env):
     bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
     epoch = bundle["space_content_key"]["epoch"]
     assert bundle["gfs_channel"] == {"grant_for": "v44", "epoch": epoch}
-    assert order[0] == "reconcile"
+    assert order[0] == "retire:0" and order[1] == "reconcile"
 
 
 async def test_member_takes_the_channel_grant_from_the_owner_bundle_only(env):

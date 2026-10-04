@@ -631,8 +631,10 @@ for a PUBLIC space at the same epoch. HKDF is one-way: a server that holds
 `channel_pk` — even one that also knows the space public key (a space that
 was public before) — cannot link the two without the seed. A v_44 authority
 rotation changes the seed, and the owner then starts a FRESH channel (a new
-id) instead of re-pinning: the revoked seed holder still derives the old
-channel key and could race any re-pin chained to it.
+id) — there is no re-pin at all: the revoked seed holder still derives the
+old channel key and could race any re-pin chained to it, and a future suite
+migration also starts a fresh channel. The owner unregisters the old channel
+before the seed is swapped.
 
 Every channel statement is Ed25519 over `prefix + canonical JSON` of the
 statement minus its signature, one prefix per statement so no signature can
@@ -640,13 +642,12 @@ be lifted onto another, and carries a suite tag:
 
 | Statement | Signed by | Prefix |
 |---|---|---|
-| registration `{channel_suite, channel_id, channel_pk, gfs_instance_id, ts, nonce, repin_cert?}` | the key being registered (proof of possession) | `gfs-channel-register:v1:` |
+| registration `{channel_suite, channel_id, channel_pk, gfs_instance_id, ts, nonce}` | the key being registered (proof of possession) | `gfs-channel-register:v1:` |
 | epoch notice `{channel_suite, channel_id, gfs_instance_id, ts, nonce, epoch, publish_mode, writer_key_cert?}` | channel key | `gfs-channel-epoch:v1:` |
 | unregister `{channel_suite, channel_id, gfs_instance_id, ts, nonce}` | channel key | `gfs-channel-unregister:v1:` |
 | `ChannelCert {channel_suite, channel_id, epoch, instance_pk, scope, issued_at}` | channel key | `gfs-channel-cert:v1:` |
 | `ChannelPass {channel_suite, channel_id, epoch, instance_pk, issued_at}` (scope-free) | channel key | `gfs-channel-pass:v1:` |
 | `ChannelWriterKeyCert {writer_key_suite, channel_suite, channel_id, epoch, writer_pk}` | channel key (suite `channel_suite`) | `gfs-channel-writer-key-cert:v1:` |
-| `ChannelRepinCert {channel_suite, channel_id, channel_pk, key_epoch}` | the PINNED key (verified under the suite it was pinned with) | `gfs-channel-repin:v1:` |
 | anonymous publish `{gfs_instance_id, channel_id, ts, nonce, event_type, epoch, payload, writer_sig_suite}` | channel writer key | `gfs-channel-publish-anon:v1:` |
 | grant binding `{channel_suite, space_id, channel_id, channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite}` | space AUTHORITY key | `gfs-channel-binding:v1:` |
 
@@ -662,7 +663,7 @@ with an `action` domain separator (`gfs-channel-subscribe:v1`,
 
 **Delivery: the grant** (`gfs_channel`) — `{channel_suite, space_id,
 channel_id, channel_pk, epoch, gfs_ids, binding_sig_suite, binding_sig,
-channel_pass, channel_cert?, writer_key?}`, issued per member household per
+channel_pass?, channel_cert?, writer_key?}` (`channel_pass` only for a link-joined household — a paired member's grant is publish-only), issued per member household per
 epoch by a seed holder whose seed matches the pin, riding only inside the
 per-peer encrypted payloads of the four writer-cert channels, only to v_51
 households. The member verifies the binding against the space key it

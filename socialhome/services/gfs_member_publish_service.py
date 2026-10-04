@@ -284,6 +284,12 @@ class GfsMemberPublishService:
             and await self._channels.has_channel(space_id)
         )
 
+    async def retire_channel(self, space_id: str) -> None:
+        """Before an authority rotation swaps the seed: unregister a private
+        space's channel while its key can still be signed for."""
+        if self._channels is not None and await self._private(space_id):
+            await self._channels.retire(space_id)
+
     async def reconcile_channel(self, space_id: str) -> None:
         """Before an authority-rotation bundle goes out: let the channel
         service start a fresh channel for the new seed (and announce it), so

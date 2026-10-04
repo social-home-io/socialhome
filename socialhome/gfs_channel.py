@@ -35,7 +35,6 @@ with one prefix per statement, so no signature can be lifted onto another:
 ``gfs-channel-cert:v1:``           :class:`ChannelCert`
 ``gfs-channel-pass:v1:``           :class:`ChannelPass`
 ``gfs-channel-writer-key-cert:v1:`` :class:`ChannelWriterKeyCert`
-``gfs-channel-repin:v1:``          :class:`ChannelRepinCert` (by the PINNED key)
 ``gfs-channel-publish-anon:v1:``   strict publish (by the channel writer key)
 ``gfs-channel-binding:v1:``        grant binding (by the SPACE authority key)
 =================================  ===========================================
@@ -67,7 +66,6 @@ from .domain.gfs_channel import (
     ChannelPass,
     ChannelPublishAnonRequest,
     ChannelRegisterRequest,
-    ChannelRepinCert,
     ChannelUnregisterRequest,
     ChannelWriterKeyCert,
     ChannelWriterKeyGrant,
@@ -92,7 +90,6 @@ UNREGISTER_PREFIX: bytes = b"gfs-channel-unregister:v1:"
 CERT_PREFIX: bytes = b"gfs-channel-cert:v1:"
 PASS_PREFIX: bytes = b"gfs-channel-pass:v1:"
 WRITER_KEY_CERT_PREFIX: bytes = b"gfs-channel-writer-key-cert:v1:"
-REPIN_PREFIX: bytes = b"gfs-channel-repin:v1:"
 ANON_PREFIX: bytes = b"gfs-channel-publish-anon:v1:"
 BINDING_PREFIX: bytes = b"gfs-channel-binding:v1:"
 
@@ -386,50 +383,6 @@ def verify_channel_writer_key_grant(
     return seed
 
 
-# ─── Repin ───────────────────────────────────────────────────────────────
-
-
-def issue_repin_cert(
-    *, pinned_seed: bytes, channel_id: str, new_channel_pk: str, key_epoch: int
-) -> ChannelRepinCert:
-    unsigned = ChannelRepinCert(
-        channel_suite=CHANNEL_SUITE_ED25519,
-        channel_id=channel_id,
-        channel_pk=new_channel_pk,
-        key_epoch=int(key_epoch),
-        cert_sig="",
-    )
-    return replace(
-        unsigned, cert_sig=_sign(pinned_seed, REPIN_PREFIX, unsigned.signing_body())
-    )
-
-
-def verify_repin_cert(
-    cert: ChannelRepinCert,
-    *,
-    pinned_pk: bytes,
-    pinned_suite: str,
-    channel_id: str,
-    new_channel_pk: str,
-) -> None:
-    """``cert`` was signed by the PINNED key and names exactly the key being
-    registered. Its ``channel_suite`` is the NEW key's; the signature is
-    verified under ``pinned_suite``, the suite the old key was pinned with
-    (both rejected when unknown)."""
-    _check_suite(cert.channel_suite)
-    verify_signature(
-        prefix=REPIN_PREFIX,
-        body=cert.signing_body(),
-        signature=cert.cert_sig,
-        public_key=pinned_pk,
-        suite=pinned_suite,
-    )
-    if cert.channel_id != channel_id:
-        raise InvalidChannelSignature("repin cert is for another channel")
-    if cert.channel_pk != new_channel_pk:
-        raise InvalidChannelSignature("repin cert names another key")
-
-
 # ─── Requests ────────────────────────────────────────────────────────────
 
 
@@ -439,7 +392,6 @@ def sign_register(
     channel_id: str,
     gfs_instance_id: str,
     ts: str,
-    repin_cert: ChannelRepinCert | None = None,
 ) -> ChannelRegisterRequest:
     unsigned = ChannelRegisterRequest(
         channel_suite=CHANNEL_SUITE_ED25519,
@@ -449,7 +401,6 @@ def sign_register(
         ts=ts,
         nonce=b64url_encode(secrets.token_bytes(16)),
         channel_sig="",
-        repin_cert=repin_cert,
     )
     return replace(
         unsigned,
@@ -592,7 +543,7 @@ def verify_grant(
     own_pk: bytes,
 ) -> bytes | None:
     """Everything a member household checks on a delivered grant: the space
-    binding, a supported channel suite, the pass (and cert) naming
+    binding, a supported channel suite, the pass (if any) and cert naming
     ``own_pk`` for this channel and epoch under ``channel_pk``, and a writer
     key that matches its pin. Returns the writer seed (or ``None``)."""
     _check_suite(grant.channel_suite)
@@ -601,14 +552,21 @@ def verify_grant(
     verify_grant_binding(grant, space_pubkey=space_pubkey)
     channel_pk = _pk_bytes(grant.channel_pk)
     wire_epoch = grant.channel_epoch
-    if grant.channel_pass.epoch != wire_epoch:
-        raise InvalidChannelSignature("pass is for another epoch")
-    verify_channel_pass(
-        grant.channel_pass,
-        channel_pk=channel_pk,
-        channel_id=grant.channel_id,
-        instance_pk=own_pk,
-    )
+    if (
+        grant.channel_pass is None
+        and grant.channel_cert is None
+        and (grant.writer_key is None)
+    ):
+        raise InvalidChannelSignature("grant grants nothing")
+    if grant.channel_pass is not None:
+        if grant.channel_pass.epoch != wire_epoch:
+            raise InvalidChannelSignature("pass is for another epoch")
+        verify_channel_pass(
+            grant.channel_pass,
+            channel_pk=channel_pk,
+            channel_id=grant.channel_id,
+            instance_pk=own_pk,
+        )
     if grant.channel_cert is not None:
         verify_channel_cert(
             grant.channel_cert,

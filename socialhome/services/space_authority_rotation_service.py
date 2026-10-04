@@ -462,6 +462,17 @@ class SpaceAuthorityRotationService:
             # taken before a rotation must still issue a HIGHER epoch than
             # the one its members already hold (they refuse anything else).
             epoch = max(space.authority_key_epoch + 1, int(time.time()), min_epoch or 0)
+            # v_51 — a private space's channel key derives from the seed
+            # being retired: unregister the channel while we can still sign
+            # for it (a fresh one is started before the bundles go out).
+            if self._member_gfs is not None:
+                try:
+                    await self._member_gfs.retire_channel(space_id)
+                except Exception:
+                    log.exception(
+                        "authority rotation: retiring the channel failed for %s",
+                        space_id,
+                    )
             if not await self._spaces.rotate_authority_key(
                 space_id,
                 public_key_hex=kp.public_key.hex(),

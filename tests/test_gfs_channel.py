@@ -26,7 +26,6 @@ from socialhome.gfs_channel import (
     issue_channel_cert,
     issue_channel_pass,
     issue_channel_writer_key,
-    issue_repin_cert,
     new_channel_id,
     sign_notice,
     sign_publish_anon,
@@ -39,7 +38,6 @@ from socialhome.gfs_channel import (
     verify_notice,
     verify_publish_anon,
     verify_register,
-    verify_repin_cert,
     verify_unregister,
 )
 from socialhome.writer_key import derive_writer_seed
@@ -213,41 +211,6 @@ def test_register_notice_unregister_signatures() -> None:
         )
 
 
-def test_repin_cert_chains_to_the_pinned_key() -> None:
-    new_seed = os.urandom(32)
-    new_pk = channel_pk_of(new_seed)
-    cert = issue_repin_cert(
-        pinned_seed=CH_SEED, channel_id=CHANNEL_ID, new_channel_pk=new_pk, key_epoch=1
-    )
-    verify_repin_cert(
-        cert,
-        pinned_pk=CH_PK,
-        pinned_suite="ed25519",
-        channel_id=CHANNEL_ID,
-        new_channel_pk=new_pk,
-    )
-    # Signed by the NEW key instead → refused.
-    self_signed = issue_repin_cert(
-        pinned_seed=new_seed, channel_id=CHANNEL_ID, new_channel_pk=new_pk, key_epoch=1
-    )
-    with pytest.raises(InvalidChannelSignature):
-        verify_repin_cert(
-            self_signed,
-            pinned_pk=CH_PK,
-            pinned_suite="ed25519",
-            channel_id=CHANNEL_ID,
-            new_channel_pk=new_pk,
-        )
-    with pytest.raises(InvalidChannelSignature):
-        verify_repin_cert(
-            cert,
-            pinned_pk=CH_PK,
-            pinned_suite="ed25519",
-            channel_id=CHANNEL_ID,
-            new_channel_pk=channel_pk_of(os.urandom(32)),
-        )
-
-
 def test_anon_publish_signature() -> None:
     writer = derive_channel_writer_seed(SPACE_SEED, SPACE_ID, CHANNEL_ID, 1)
     req = sign_publish_anon(
@@ -358,3 +321,20 @@ def test_epoch_offset_is_secret_per_channel_and_40_bits() -> None:
     assert 0 <= a < 2**40
     assert a != derive_channel_epoch_offset(SPACE_SEED, SPACE_ID, new_channel_id())
     assert a != derive_channel_epoch_offset(os.urandom(32), SPACE_ID, CHANNEL_ID)
+
+
+def test_a_paired_members_grant_is_publish_only() -> None:
+    """No pass: a paired member never takes a seat — only link-joined
+    households do. A grant that grants nothing is refused."""
+    publish_only = _grant(channel_pass=None, writer_key=None)
+    assert "channel_pass" not in publish_only.to_wire()
+    assert GfsChannelGrant.from_wire(publish_only.to_wire()) == publish_only
+    assert (
+        verify_grant(
+            publish_only, space_pubkey=SPACE_PK, space_id=SPACE_ID, own_pk=OWN_PK
+        )
+        is None
+    )
+    empty = _grant(channel_pass=None, channel_cert=None, writer_key=None)
+    with pytest.raises(InvalidChannelSignature):
+        verify_grant(empty, space_pubkey=SPACE_PK, space_id=SPACE_ID, own_pk=OWN_PK)

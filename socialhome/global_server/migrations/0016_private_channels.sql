@@ -44,19 +44,19 @@
 -- households subscribe (the accepted residual, signed off in
 -- docs/principles.md). Nothing names a space, a space key or an owner:
 -- registration and notices are anonymous (channel-key-signed), and no
--- column holds a household id except the subscriber seats. Channels idle for
--- ``CHANNEL_IDLE_TTL_SECONDS`` are swept by the maintenance loop.
+-- column holds a household id except the subscriber seats. The maintenance
+-- loop sweeps channels idle for 30 days, and within a day those that never
+-- got a notice or a seat; registration stops at a server-wide row cap.
 
 CREATE TABLE IF NOT EXISTS gfs_channels (
     channel_id              TEXT PRIMARY KEY
                             CHECK (length(channel_id) = 32
                                    AND channel_id NOT GLOB '*[^0-9a-f]*'),
-    -- The pinned channel key (b64url) and its suite. No CHECK on the suite:
+    -- The pinned channel key (b64url) and its suite — immutable: there is
+    -- no re-pin (a household starts a fresh channel instead). No CHECK on the suite:
     -- a Phase-2 PQ suite must land without a migration; the code validates.
     channel_suite           TEXT NOT NULL,
     channel_pk              TEXT NOT NULL,
-    -- Bumped by every chained re-pin (``repin_cert.key_epoch``).
-    key_epoch               INTEGER NOT NULL DEFAULT 0,
     registered_at           INTEGER NOT NULL,
     -- Last registration / notice / publish (unix seconds) — the idle sweep.
     last_active_at          INTEGER NOT NULL,

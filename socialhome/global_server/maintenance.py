@@ -20,7 +20,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from .domain import CHANNEL_IDLE_TTL_SECONDS
+from .domain import CHANNEL_IDLE_TTL_SECONDS, CHANNEL_UNUSED_TTL_SECONDS
 from .repositories import PAIR_TOKEN_RETENTION_SECONDS
 
 if TYPE_CHECKING:
@@ -144,6 +144,9 @@ class GfsMaintenanceScheduler:
             try:
                 channels = await self._channel_repo.prune_idle(
                     older_than=now - CHANNEL_IDLE_TTL_SECONDS
+                )
+                channels += await self._channel_repo.prune_unused(
+                    older_than=now - CHANNEL_UNUSED_TTL_SECONDS
                 )
             except Exception as exc:
                 log.warning("gfs maintenance: prune_idle channels failed: %s", exc)

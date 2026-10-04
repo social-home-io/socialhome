@@ -2,7 +2,7 @@
 ``space_keys.gfs_channel`` (v_51 private-space channels).
 
 Additive: an existing space has no channel and an existing key row holds no
-grant; two spaces can never claim one channel id.
+grant; several spaces may name one channel id (no first-come claim).
 """
 
 from __future__ import annotations
@@ -62,10 +62,12 @@ def test_existing_rows_hold_no_channel(conn):
     assert conn.execute("SELECT gfs_channel FROM space_keys").fetchone()[0] is None
 
 
-def test_two_spaces_cannot_claim_one_channel(conn):
+def test_several_spaces_may_name_one_channel(conn):
+    """Deliberately not unique: another space's owner must not be able to
+    claim this space's channel id first (inbound frames try each candidate
+    and the content key decides)."""
     _apply_through(conn, _VERSION)
     conn.execute("UPDATE spaces SET gfs_channel_id='c' WHERE id='sp1'")
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE spaces SET gfs_channel_id='c' WHERE id='sp2'")
-    # Many spaces without a channel are fine (partial index).
-    conn.execute("UPDATE spaces SET gfs_channel_id=NULL WHERE id='sp1'")
+    conn.execute("UPDATE spaces SET gfs_channel_id='c' WHERE id='sp2'")
+    rows = conn.execute("SELECT id FROM spaces WHERE gfs_channel_id='c'").fetchall()
+    assert len(rows) == 2

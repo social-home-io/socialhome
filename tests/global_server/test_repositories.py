@@ -1214,29 +1214,17 @@ async def test_channel_repo_pin_epoch_writer_key_and_idle_sweep(gfs_db):
     assert await repo.pin_writer_key(cid, 7, "w7")
     row = await repo.get(cid)
     assert (row.writer_pk_for(6), row.writer_pk_for(7)) == ("w6", "w7")
-    # Repin only from the expected key, at a newer key epoch; clears state.
-    assert not await repo.repin(
-        cid,
-        expected_pk="nope",
-        channel_suite="ed25519",
-        channel_pk="pk2",
-        key_epoch=1,
-        now=120,
-    )
-    assert await repo.repin(
-        cid,
-        expected_pk="pk",
-        channel_suite="ed25519",
-        channel_pk="pk2",
-        key_epoch=1,
-        now=120,
-    )
-    row = await repo.get(cid)
-    assert row.channel_pk == "pk2" and row.epoch is None and row.writer_key_pk is None
+    # Count, and the unused-row sweep (no notice, no seat) spares used rows.
+    assert await repo.count() == 1
+    unused = "1" * 32
+    assert await repo.register(unused, channel_suite="ed25519", channel_pk="u", now=50)
+    assert await repo.prune_unused(older_than=60) == 1
+    assert await repo.get(unused) is None
+    assert await repo.get(cid) is not None
     # The id column only takes a channel id shape (CHECK; OR IGNORE drops it).
     assert not await repo.register(
         "space-id-like", channel_suite="ed25519", channel_pk="p", now=1
     )
     assert await repo.get("space-id-like") is None
-    assert await repo.prune_idle(older_than=121) == 1
+    assert await repo.prune_idle(older_than=200) == 1
     assert await repo.get(cid) is None

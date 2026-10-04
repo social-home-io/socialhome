@@ -16,7 +16,11 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.crypto import derive_instance_id, ed25519_public_key
-from socialhome.domain.events import SpaceRemoteSeatLive
+from socialhome.domain.events import (
+    PeerCapabilitiesAdvertised,
+    PeerTransportChanged,
+    SpaceRemoteSeatLive,
+)
 from socialhome.domain.federation import GfsConnection, InstanceSource
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.writer_cert import WriterEntitlement
@@ -36,6 +40,7 @@ from socialhome.gfs_channel import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.services import gfs_channel_service as chan_mod
 from socialhome.services.gfs_channel_service import GfsChannelService
 
 GFS_ID = "gfs-node-a"
@@ -76,13 +81,11 @@ class _Spaces:
         if channel_id is None:
             self.channels.pop(space_id, None)
             return True
-        if any(c[0] == channel_id and s != space_id for s, c in self.channels.items()):
-            return False
         self.channels[space_id] = (channel_id, channel_pk)
         return True
 
-    async def space_for_gfs_channel(self, channel_id):
-        return next((s for s, c in self.channels.items() if c[0] == channel_id), None)
+    async def spaces_for_gfs_channel(self, channel_id):
+        return sorted(s for s, c in self.channels.items() if c[0] == channel_id)
 
 
 class _Keys:
@@ -456,30 +459,37 @@ async def test_a_member_refuses_a_grant_not_bound_by_the_space_key(env):
     assert SPACE_ID not in env.other.spaces.channels
 
 
-@pytest.mark.security
-async def test_a_grant_naming_another_spaces_channel_is_refused(env):
-    channel_id = await _channel_ready(env)
-    env.member.spaces.channels["sp-elsewhere"] = (channel_id, "pk")
-    grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
-    assert not await env.member.svc.accept_grant(SPACE_ID, grant)
-
-
 # ── Subscribe + publish ──────────────────────────────────────────────────
 
 
-async def test_trusted_member_publish_reaches_another_member(env):
+async def test_only_link_joined_households_take_a_seat(env):
+    """The GFS must see as little as possible: the link-joined member gets a
+    pass and a seat; the paired member a publish-only grant and no seat."""
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member, env.other)
     repo = env.app[gfs_channel_repo_key]
-    for node in (env.member, env.other):
-        assert await repo.has_subscription(channel_id, node.h.instance_id)
+    assert await repo.has_subscription(channel_id, env.member.h.instance_id)
+    assert not await repo.has_subscription(channel_id, env.other.h.instance_id)
+    paired = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
+    assert "channel_pass" not in paired and "channel_cert" in paired
+    linked = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert "channel_pass" in linked
+    assert await env.other.svc.subscribe(SPACE_ID) == 0
+    # A paired reader (no writer scope) gets no grant at all.
+    env.owner.certs.scopes[env.other.h.instance_id] = None
+    assert await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id) is None
+
+
+async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
+    channel_id = await _channel_ready(env)
+    await _hand_grants(env, env.member, env.other)
     # The owner holds no grant: it never publishes to (or reads) the channel.
     assert await env.owner.svc.plan(SPACE_ID) == []
-    targets = await env.member.svc.plan(SPACE_ID)
+    targets = await env.other.svc.plan(SPACE_ID)
     assert [t.id for t in targets] == ["conn-1"]
-    accepted = await env.member.svc.publish_sealed(SPACE_ID, 3, "Y2lwaGVy", targets)
+    accepted = await env.other.svc.publish_sealed(SPACE_ID, 3, "Y2lwaGVy", targets)
     assert len(accepted) == 1
-    queued = await _queued(env, env.other)
+    queued = await _queued(env, env.member)
     assert len(queued) == 1
     frame = queued[0].sealed
     assert frame == {
@@ -488,11 +498,16 @@ async def test_trusted_member_publish_reaches_another_member(env):
         "epoch": _wire(env, channel_id),
         "payload": "Y2lwaGVy",
     }
-    # The publisher gets no echo of a trusted publish.
-    assert await _queued(env, env.member) == []
+    # The publisher (no seat) gets nothing back.
+    assert await _queued(env, env.other) == []
     # The receiving household routes it to its space locally.
-    await env.other.svc.handle_frame({"type": "relay", **frame})
-    assert env.other.inbound.items == [(SPACE_ID, 3, "Y2lwaGVy")]
+    await env.member.svc.handle_frame({"type": "relay", **frame})
+    assert env.member.inbound.items == [(SPACE_ID, 3, "Y2lwaGVy")]
+    # The link-joined member's own item reaches no paired seat (there is
+    # none): the paired member gets it from the host when it is back.
+    targets = await env.member.svc.plan(SPACE_ID)
+    assert await env.member.svc.publish_sealed(SPACE_ID, 3, "b3RoZXI", targets)
+    assert await _queued(env, env.other) == []
 
 
 async def test_strict_member_publish_is_anonymous(env):
@@ -503,11 +518,12 @@ async def test_strict_member_publish_is_anonymous(env):
     await _hand_grants(env, env.member, env.other)
     row = await env.app[gfs_channel_repo_key].get(channel_id)
     assert row.strict and row.writer_pk_for(_wire(env, channel_id)) is not None
-    targets = await env.member.svc.plan(SPACE_ID)
-    accepted = await env.member.svc.publish_sealed(SPACE_ID, 3, "YW5vbg", targets)
+    grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
+    # Strict: the writer key, no identified channel cert.
+    assert "writer_key" in grant and "channel_cert" not in grant
+    targets = await env.other.svc.plan(SPACE_ID)
+    accepted = await env.other.svc.publish_sealed(SPACE_ID, 3, "YW5vbg", targets)
     assert len(accepted) == 1
-    # Anonymous: the server can't exclude the publisher, so both seats get it.
-    assert len(await _queued(env, env.other)) == 1
     assert len(await _queued(env, env.member)) == 1
 
 
@@ -523,6 +539,30 @@ async def test_strict_space_without_a_writer_key_sends_nothing(env):
     assert await env.member.svc.publish_sealed(SPACE_ID, 3, "eA", [conn]) == []
     assert await _queued(env, env.other) == []
     assert channel_id
+
+
+@pytest.mark.security
+async def test_another_spaces_owner_cannot_block_our_channel_by_its_id(env):
+    """Cross-space claim: the owner of another space we belong to binds a
+    grant for ITS space to OUR space's channel id. Our real grant still
+    lands, and a frame on that id reaches our space (the content key and the
+    signed space id decide)."""
+    channel_id = await _channel_ready(env)
+    env.member.spaces.channels["sp-other"] = (channel_id, "attacker-pk")
+    grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert await env.member.svc.accept_grant(SPACE_ID, grant)
+    assert env.member.spaces.channels[SPACE_ID][0] == channel_id
+    await env.member.svc.wait_idle()
+    frame = {
+        "type": "relay",
+        "channel_id": channel_id,
+        "event_type": "space_item",
+        "epoch": _wire(env, channel_id),
+        "payload": "eA",
+    }
+    await env.member.svc.handle_frame(frame)
+    # Only the candidate whose current grant names the channel is tried.
+    assert env.member.inbound.items == [(SPACE_ID, 3, "eA")]
 
 
 async def test_unknown_channel_frames_are_dropped(env):
@@ -641,3 +681,114 @@ async def test_a_squatted_channel_id_is_replaced_by_a_fresh_one(env):
     await repo.register(first, channel_suite="ed25519", channel_pk="squatter", now=1)
     assert await env.owner.svc.reconcile(SPACE_ID) == "created"
     assert env.owner.spaces.channels[SPACE_ID][0] != first
+
+
+@pytest.mark.security
+async def test_owner_replaces_a_channel_another_key_holder_moved_past_it(env):
+    """C1: a seed holder (a delegated admin) steps the channel epoch past the
+    owner's, locking the members' certs out. The owner's next notice sees
+    it and starts a fresh channel, re-granting its members."""
+    first = await _channel_ready(env)
+    await _hand_grants(env, env.member)
+    repo = env.app[gfs_channel_repo_key]
+    # The other key holder's step lands directly in the server state.
+    row = await repo.get(first)
+    await repo.set_epoch(
+        first, row.epoch + 2, expected=row.epoch, now=row.epoch_raised_at
+    )
+    env.owner.space_service.snapshots.clear()
+    await env.owner.svc.announce_epoch(SPACE_ID)
+    await env.owner.svc.wait_idle()
+    second = env.owner.spaces.channels[SPACE_ID][0]
+    assert second != first
+    assert (await repo.get(second)).epoch == _wire(env, second)
+    assert (SPACE_ID, env.member.h.instance_id) in env.owner.space_service.snapshots
+    await _hand_grants(env, env.member)
+    assert await repo.has_subscription(second, env.member.h.instance_id)
+
+
+@pytest.mark.security
+async def test_owner_replaces_a_channel_whose_writer_key_pin_is_not_its_own(env):
+    strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
+    env.owner.spaces.spaces[SPACE_ID] = strict
+    assert await env.owner.svc.reconcile(SPACE_ID) == "created"
+    first = env.owner.spaces.channels[SPACE_ID][0]
+    repo = env.app[gfs_channel_repo_key]
+    # Another key holder pinned a bogus writer key for the epoch first.
+    await repo.set_epoch(first, _wire(env, first), expected=None, now=1)
+    await repo.pin_writer_key(first, _wire(env, first), "bogus-writer-pk")
+    await env.owner.svc.announce_epoch(SPACE_ID)
+    await env.owner.svc.wait_idle()
+    assert env.owner.spaces.channels[SPACE_ID][0] != first
+
+
+async def test_retire_unregisters_before_a_seed_swap(env):
+    channel_id = await _channel_ready(env)
+    assert await env.owner.svc.retire(SPACE_ID)
+    assert SPACE_ID not in env.owner.spaces.channels
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+    assert not await env.owner.svc.retire(SPACE_ID)
+
+
+class _Sched:
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, str]] = []
+
+    async def enqueue_sync_for_space(self, *, space_id, peer_instance_id):
+        self.asked.append((space_id, peer_instance_id))
+
+
+async def test_a_paired_member_catches_up_from_the_host_when_it_returns(
+    env, monkeypatch
+):
+    """The link-joined members' items reach a paired member (no seat) from
+    the host: when the host's DataChannel opens again, it asks for a
+    catch-up sync."""
+    monkeypatch.setattr(chan_mod, "HOST_RETURN_SYNC_DELAY_S", 0.0)
+    await _channel_ready(env)
+    await _hand_grants(env, env.member, env.other)
+    for node in (env.other, env.member):
+        node.spaces.spaces[SPACE_ID] = env.space
+    sched_other, sched_member = _Sched(), _Sched()
+    env.other.svc.attach_sync_scheduler(sched_other)
+    env.member.svc.attach_sync_scheduler(sched_member)
+    await env.other.svc.start()
+    await env.member.svc.start()
+    host = env.owner.h.instance_id
+    for node in (env.other, env.member):
+        await node.svc._on_peer_transport(
+            PeerTransportChanged(instance_id=host, transport="rtc")
+        )
+        await node.svc._on_peer_transport(
+            PeerTransportChanged(instance_id=host, transport="https")
+        )
+        await node.svc.wait_idle()
+    assert sched_other.asked == [(SPACE_ID, host)]
+    # The link-joined member holds a seat: it gets items live, no catch-up.
+    assert sched_member.asked == []
+    await env.other.svc.stop()
+    await env.member.svc.stop()
+
+
+async def test_a_host_restart_triggers_the_catch_up_once(env, monkeypatch):
+    """A host that restarts re-advertises its capabilities to every peer —
+    the reliable "it is back" edge (a DataChannel reopen is not always
+    reported). Two signals in a row still ask once."""
+    monkeypatch.setattr(chan_mod, "HOST_RETURN_SYNC_DELAY_S", 0.05)
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    sched = _Sched()
+    env.other.svc.attach_sync_scheduler(sched)
+    await env.other.svc.start()
+    bus = EventBus()
+    env.other.svc.wire(bus)
+    host = env.owner.h.instance_id
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id=host))
+    await bus.publish(PeerTransportChanged(instance_id=host, transport="rtc"))
+    await env.other.svc.wait_idle()
+    assert sched.asked == [(SPACE_ID, host)]
+    # Another household coming back asks nothing.
+    await bus.publish(PeerCapabilitiesAdvertised(instance_id="someone-else"))
+    await env.other.svc.wait_idle()
+    assert sched.asked == [(SPACE_ID, host)]
+    await env.other.svc.stop()

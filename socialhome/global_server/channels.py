@@ -15,13 +15,16 @@ the reason at DEBUG, never logged with anything but the channel id:
 * **register** (anonymous, ``POST /gfs/channels/register``) — addressed to
   this server, ``ts`` ±300 s, per-address limit, then proof of possession
   (``channel_sig`` under the key being registered). A new id pins the key
-  (trust on first use — the id is random and handed out only after it is
-  registered, so nobody can squat it); the same key refreshes; another key is
-  a ``409`` unless a ``repin_cert`` signed by the PINNED key names it at a
-  higher ``key_epoch`` (that clears the epoch and the writer key pins).
+  (trust on first use); the same key refreshes; another key is a ``409``
+  — there is no re-pin (a household starts a fresh channel instead). New
+  registrations stop at :data:`MAX_CHANNELS` live rows (``503``); a channel
+  that never got a notice or a seat is swept after
+  :data:`~.domain.CHANNEL_UNUSED_TTL_SECONDS`, a used one after 30 idle
+  days. ``nonce`` only makes each signature unique: replays inside the
+  ``ts`` window are harmless no-ops, so it is not cached.
 * **epoch notice** (anonymous, channel-key-signed) — ONE tier, because
   telling an owner from a delegated admin would mean learning who owns the
-  channel: the first notice after a (re)pin sets any epoch up to
+  channel: the first notice after registration sets any epoch up to
   :data:`MAX_FIRST_CHANNEL_EPOCH`; later the epoch rises by at most one per
   :data:`~.domain.CHANNEL_EPOCH_STEP_INTERVAL_S` since the last raise (a
   faster rotation gets ``429`` + ``Retry-After`` and lands on the retry).
@@ -33,7 +36,8 @@ the reason at DEBUG, never logged with anything but the channel id:
 * **subscribe** (household-signed, identified like a follower's subscribe)
   — must present a :class:`~socialhome.domain.gfs_channel.ChannelPass` the
   channel key issued to THIS household (its registered identity key) for an
-  open epoch; the seat remembers that epoch, and a seat whose pass epoch is
+  open epoch — households issue passes only to link-joined members, so only
+  they take seats; the seat remembers that epoch, and a seat whose pass epoch is
   no longer open receives nothing. So the seats are exactly the member
   households, and a household removed at a rotation drops out after the
   grace.
@@ -80,7 +84,6 @@ from ..gfs_channel import (
     verify_notice,
     verify_publish_anon,
     verify_register,
-    verify_repin_cert,
     verify_unregister,
 )
 from .domain import CHANNEL_EPOCH_GRACE_S, GfsChannel
@@ -124,9 +127,13 @@ MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE: int = MAX_SUBSCRIPTIONS_PER_INSTANCE
 MAX_FIRST_CHANNEL_EPOCH: int = 2**62
 
 
+#: Live channel rows this server keeps at most — anonymous registration's
+#: server-wide bound (with the per-address limit and the unused-row TTL).
+MAX_CHANNELS: int = 100_000
+
+
 class ChannelPinned(Exception):
-    """The channel id is pinned to another key and no valid chained re-pin
-    came with the request — ``409``."""
+    """The channel id is pinned to another key — ``409``. There is no re-pin."""
 
 
 class ChannelEpochTooSoon(Exception):
@@ -163,6 +170,7 @@ class GfsChannelService:
         "_federation",
         "_gfs_instance_id",
         "_limiter",
+        "_max_channels",
         "_member_publish",
         "_register_limiter",
         "_seen",
@@ -178,12 +186,14 @@ class GfsChannelService:
         gfs_instance_id: str,
         clock: Callable[[], float] = time.time,
         register_limiter: SlidingWindowCounter | None = None,
+        max_channels: int = MAX_CHANNELS,
     ) -> None:
         self._federation = federation
         self._channels = channel_repo
         self._member_publish = member_publish
         self._gfs_instance_id = gfs_instance_id
         self._clock = clock
+        self._max_channels = max_channels
         self._register_limiter = register_limiter or SlidingWindowCounter(
             CHANNEL_REGISTER_MAX_PER_MINUTE_PER_IP
         )
@@ -237,10 +247,10 @@ class GfsChannelService:
     # ── Registration ─────────────────────────────────────────────────────
 
     async def register(self, req: ChannelRegisterRequest, *, client_ip: str) -> str:
-        """Register / refresh / re-pin (module docstring). Returns
-        ``"registered"``, ``"refreshed"`` or ``"repinned"``. Raises
-        :class:`PermissionError`, :class:`ChannelPinned` or
-        :class:`MemberPublishRateLimited`."""
+        """Register / refresh (module docstring). Returns ``"registered"`` or
+        ``"refreshed"``. Raises :class:`PermissionError`,
+        :class:`ChannelPinned`, :class:`MemberPublishRateLimited` or
+        :class:`MemberPublishBusy` (the server-wide cap)."""
         self._addressed(req.gfs_instance_id)
         self._fresh(req.ts)
         if not self._register_limiter.allow(client_ip):
@@ -252,8 +262,12 @@ class GfsChannelService:
         now = self._now()
         existing = await self._channels.get(req.channel_id)
         if existing is None:
-            if req.repin_cert is not None:
-                raise PermissionError("nothing pinned to re-pin")
+            if await self._channels.count() >= self._max_channels:
+                log.warning(
+                    "gfs.channel: %d channels live — refusing new registrations",
+                    self._max_channels,
+                )
+                raise MemberPublishBusy()
             if await self._channels.register(
                 req.channel_id,
                 channel_suite=req.channel_suite,
@@ -266,30 +280,8 @@ class GfsChannelService:
         if existing.channel_pk == req.channel_pk:
             await self._channels.touch(req.channel_id, now=now)
             return "refreshed"
-        cert = req.repin_cert
-        if cert is None:
-            raise ChannelPinned()
-        try:
-            verify_repin_cert(
-                cert,
-                pinned_pk=self._pinned(existing),
-                pinned_suite=existing.channel_suite,
-                channel_id=req.channel_id,
-                new_channel_pk=req.channel_pk,
-            )
-        except (InvalidChannelSignature, UnsupportedChannelSuite) as exc:
-            raise PermissionError(f"re-pin refused: {exc}") from exc
-        if cert.key_epoch <= existing.key_epoch or not await self._channels.repin(
-            req.channel_id,
-            expected_pk=existing.channel_pk,
-            channel_suite=req.channel_suite,
-            channel_pk=req.channel_pk,
-            key_epoch=cert.key_epoch,
-            now=now,
-        ):
-            raise PermissionError("stale or racing re-pin")
-        log.info("gfs.channel: re-pinned channel=%s", req.channel_id)
-        return "repinned"
+        # No re-pin, ever: the household starts a fresh channel instead.
+        raise ChannelPinned()
 
     async def unregister(self, req: ChannelUnregisterRequest) -> None:
         """Drop the channel (and its seats) on a channel-key-signed request.
@@ -308,8 +300,11 @@ class GfsChannelService:
 
     # ── Epoch notice ─────────────────────────────────────────────────────
 
-    async def note_epoch(self, notice: ChannelEpochNotice) -> None:
-        """Apply a channel-key-signed epoch notice (module docstring). Raises
+    async def note_epoch(self, notice: ChannelEpochNotice) -> dict:
+        """Apply a channel-key-signed epoch notice (module docstring). Returns
+        what this server now holds — ``{"epoch", "writer_pk"}`` (the pin for
+        the notice's epoch) — so the channel key holder can tell when
+        another key holder moved the channel past it. Raises
         :class:`PermissionError` or :class:`ChannelEpochTooSoon`."""
         self._addressed(notice.gfs_instance_id)
         at = self._fresh(notice.ts)
@@ -345,26 +340,28 @@ class GfsChannelService:
             await self._channels.set_epoch(
                 notice.channel_id, notice.epoch, expected=ch.epoch, now=now
             )
-        state = await self._channels.get(notice.channel_id)
-        # The mode follows the newest EPOCH first, then ``ts``: a notice for
-        # an older epoch (a replay, a lagging seed holder that missed the
-        # rotation a mode switch rides on) never moves it.
-        if (
-            state is not None
-            and state.epoch is not None
-            and notice.epoch >= state.epoch
-        ):
+            # The mode moves only WITH a raise (a mode switch rotates): a
+            # notice at the current epoch — a replay, a reconnect, a lagging
+            # seed holder — never flips it.
             await self._channels.set_publish_mode(
                 notice.channel_id, notice.publish_mode, at=at
             )
-        if writer_pk is not None and notice.writer_key_cert is not None:
-            if state is not None and state.epoch == notice.epoch:
-                await self._channels.pin_writer_key(
-                    notice.channel_id,
-                    notice.epoch,
-                    notice.writer_key_cert.writer_pk,
-                )
+        state = await self._channels.get(notice.channel_id)
+        if (
+            writer_pk is not None
+            and notice.writer_key_cert is not None
+            and state is not None
+            and state.epoch == notice.epoch
+        ):
+            await self._channels.pin_writer_key(
+                notice.channel_id, notice.epoch, notice.writer_key_cert.writer_pk
+            )
+            state = await self._channels.get(notice.channel_id)
         await self._channels.touch(notice.channel_id, now=now)
+        return {
+            "epoch": state.epoch if state is not None else None,
+            "writer_pk": state.writer_pk_for(notice.epoch) if state else None,
+        }
 
     # ── Seats ────────────────────────────────────────────────────────────
 

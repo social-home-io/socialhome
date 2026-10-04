@@ -46,13 +46,16 @@
 --       (``space_keys`` by ON DELETE CASCADE).
 --   (3) Smallest possible change: three additive, NULL-defaulted
 --       ``ADD COLUMN``s (NULL = no channel — every existing space reads
---       today's behaviour, nothing is rewritten) and one partial UNIQUE
---       index, so two spaces can never claim one channel id (a grant naming
---       another space's channel is refused). ``space_keys.gfs_channel`` is
+--       today's behaviour, nothing is rewritten) and one partial index for
+--       the inbound lookup. Deliberately NOT unique: a unique id would let
+--       the owner of another space we belong to claim this space's channel
+--       id with a validly bound grant and block the real one; several
+--       candidate spaces are tried instead and the content key (AEAD bound
+--       to the space) decides. ``space_keys.gfs_channel`` is
 --       cleared with ``writer_cert`` / ``writer_key`` on a v_44 baseline
 --       reset.
 ALTER TABLE spaces ADD COLUMN gfs_channel_id TEXT;
 ALTER TABLE spaces ADD COLUMN gfs_channel_pk TEXT;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_gfs_channel_id
+CREATE INDEX IF NOT EXISTS idx_spaces_gfs_channel_id
     ON spaces(gfs_channel_id) WHERE gfs_channel_id IS NOT NULL;
 ALTER TABLE space_keys ADD COLUMN gfs_channel TEXT;

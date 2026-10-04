@@ -9748,7 +9748,10 @@ async def test_switching_back_to_trusted_tells_the_gfs_without_rotating(
     space, _fed, _remote, _pks = await _cert_space(stack, version=50)
     await _strict(stack, space.id)
     rekeys = await _rekeys(stack, monkeypatch)
-    member_gfs = SimpleNamespace(announce_epoch=AsyncMock(return_value=1))
+    member_gfs = SimpleNamespace(
+        announce_epoch=AsyncMock(return_value=1),
+        channel_space=AsyncMock(return_value=False),
+    )
     stack.space_svc.attach_member_gfs(member_gfs)
     await stack.space_svc.update_config(
         space.id,
@@ -9757,6 +9760,27 @@ async def test_switching_back_to_trusted_tells_the_gfs_without_rotating(
     )
     assert rekeys == []
     member_gfs.announce_epoch.assert_awaited_once_with(space.id)
+
+
+async def test_switching_back_to_trusted_rotates_a_private_channel_space(
+    stack, monkeypatch
+):
+    """v_51: a private space's channel takes a mode change only with an
+    epoch raise, so the switch back to trusted rotates there too."""
+    space, _fed, _remote, _pks = await _cert_space(stack, version=51)
+    await _strict(stack, space.id)
+    rekeys = await _rekeys(stack, monkeypatch)
+    member_gfs = SimpleNamespace(
+        announce_epoch=AsyncMock(return_value=1),
+        channel_space=AsyncMock(return_value=True),
+    )
+    stack.space_svc.attach_member_gfs(member_gfs)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(gfs_publish_mode="trusted"),
+    )
+    assert rekeys == [space.id]
 
 
 async def test_an_unchanged_mode_does_nothing(stack, monkeypatch):

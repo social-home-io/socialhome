@@ -4130,6 +4130,11 @@ def _check_private_channel(state: dict, failures: list[str], cap) -> None:
         failures.append("e: the stored channel grant is plaintext (not KEK-wrapped)")
     if not _gfs_rows("SELECT 1 FROM gfs_channels WHERE channel_id = ?", (channel_id,)):
         failures.append(f"GFS: no row for channel {channel_id}")
+    b_id = state["instances"]["b"]["instance_id"]
+    if _gfs_rows(
+        "SELECT 1 FROM gfs_channel_subscribers WHERE instance_id = ?", (b_id,)
+    ):
+        failures.append("GFS: the paired member b holds a channel seat")
     if _gfs_rows(
         "SELECT 1 FROM gfs_channels WHERE channel_id = ? OR channel_pk LIKE ?",
         (space_id, f"%{space_id}%"),
@@ -4226,15 +4231,16 @@ def cmd_gfs_private_channel() -> None:
        (the direct path).
     3. a — the owner — creates the space's channel on e's seat: a random
        ``channel_id`` and a channel key registered anonymously at the GFS.
-       e and b get their grants (roster snapshot / ACK) and subscribe with
-       their passes; the GFS seats exactly them (never a).
-    4. Stop **a**. e posts; b receives it decrypted over the channel while
-       the host is offline.
+       e (link-joined) gets a grant with a pass and takes the ONLY seat; b
+       (paired) gets a publish-only grant and never subscribes.
+    4. Stop **a**. b posts over the channel; e receives it decrypted while
+       the host is offline. Then e posts (its envelope to a waits at the GFS).
     5. The GFS log and its whole database never contain the private space's
        id, its name or its authority public key (hex or base64url) — only
-       the channel id.
-    6. Restart a (bookmark first); a catches e's post up over the member
-       path (the relay queue).
+       the channel id — and b never holds a seat.
+    6. Restart a (bookmark first); a catches both posts up over the member
+       path, and b gets e's post from a (a catch-up sync triggered by a's
+       capabilities re-advertisement on startup).
 
     Polls every 3 s and backs off on 429.
     """
@@ -4297,19 +4303,46 @@ def cmd_gfs_private_channel() -> None:
     seats = _poll_gfs_rows(
         "SELECT instance_id FROM gfs_channel_subscribers WHERE channel_id = ?",
         (channel_id,),
-        lambda r: {e["instance_id"], b["instance_id"]} <= {x[0] for x in r},
-        what="e and b never took their seats on the channel",
+        lambda r: e["instance_id"] in {x[0] for x in r},
+        what="e never took its seat on the channel",
     )
-    if a["instance_id"] in {x[0] for x in seats}:
+    held = {x[0] for x in seats}
+    if held != {e["instance_id"]}:
         raise SystemExit(
-            "gfs-private-channel: the owner holds a seat on its own channel — "
-            "channel traffic would name it."
+            f"gfs-private-channel: the channel's seats are {sorted(held)} — only "
+            "the link-joined household e may take one (never the owner, never "
+            "the paired member b)."
         )
-    print("  the GFS seats exactly the member households e and b ✓")
+    print("  the GFS seats only the link-joined household e (not a, not b) ✓")
 
-    # 4. Host offline; e posts; b receives it over the channel.
-    b_off = _log_size("b")
+    # 4. Host offline; b (paired, publish-only) posts; e gets it live.
+    e_off = _log_size("e")
     _kill_household("a", a)
+    b_content = f"Paired member posts with the host offline — {time.time_ns()}"
+    st, b_post = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": b_content},
+    )
+    b_post = _must("b posts with the host offline", st, b_post, ok=(201,))
+    b_post_id = b_post["id"]
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (b_post_id,),
+        lambda r: bool(r) and r[0][0] == b_content,
+        what=f"e never received b's post {b_post_id} while a was down",
+    )
+    if not _log_lines_matching(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    ):
+        raise SystemExit(
+            "gfs-private-channel: e logged no channel frame — b's post reached "
+            "it some other way."
+        )
+    print("  e received b's post over the channel with the host offline ✓")
+    # e posts too: its envelope to a waits at the GFS; b has no seat.
     content = f"Posted into a private space with the host offline — {time.time_ns()}"
     st, post = _e_request(
         state,
@@ -4319,22 +4352,6 @@ def cmd_gfs_private_channel() -> None:
     )
     post = _must("e posts with the host offline", st, post, ok=(201,))
     post_id = post["id"]
-    _poll_rows(
-        "b",
-        "SELECT content FROM space_posts WHERE id = ?",
-        (post_id,),
-        lambda r: bool(r) and r[0][0] == content,
-        what=f"b never received e's post {post_id} while a was down",
-    )
-    print("  b received e's post over the channel with the host offline ✓")
-    relayed = _log_lines_matching(
-        "b", f"gfs.relay.received: channel={channel_id}", offset=b_off
-    )
-    if not relayed:
-        raise SystemExit(
-            "gfs-private-channel: b logged no channel frame — the post reached "
-            "it some other way."
-        )
 
     # 5. What the GFS knows.
     leaks = (space_id, space_name, space_pk_hex, space_pk_b64)
@@ -4351,8 +4368,14 @@ def cmd_gfs_private_channel() -> None:
                 f"gfs-private-channel: the GFS database holds the private space "
                 f"({needle[:24]!r}…)."
             )
-    if content in log_text or content.encode() in db_bytes:
-        raise SystemExit("gfs-private-channel: the GFS saw the post text")
+    for text in (content, b_content):
+        if text in log_text or text.encode() in db_bytes:
+            raise SystemExit("gfs-private-channel: the GFS saw a post's text")
+    if _gfs_rows(
+        "SELECT 1 FROM gfs_channel_subscribers WHERE instance_id = ?",
+        (b["instance_id"],),
+    ):
+        raise SystemExit("gfs-private-channel: the paired member b holds a seat")
     if channel_id not in "\n".join(
         _gfs_log_lines_matching("gfs.channel", offset=gfs_off)
     ):
@@ -4370,14 +4393,24 @@ def cmd_gfs_private_channel() -> None:
     state["instances"]["a"]["pid"] = new_pid
     _save(state)
     _wait_ready(a["port"])
+    for pid, text, who in ((post_id, content, "e"), (b_post_id, b_content, "b")):
+        _poll_rows(
+            "a",
+            "SELECT content FROM space_posts WHERE id = ?",
+            (pid,),
+            lambda r, text=text: bool(r) and r[0][0] == text,
+            what=f"a (host) never caught {who}'s post {pid} up after restarting",
+        )
+    print("  a caught e's and b's posts up over the member path ✓")
     _poll_rows(
-        "a",
+        "b",
         "SELECT content FROM space_posts WHERE id = ?",
         (post_id,),
         lambda r: bool(r) and r[0][0] == content,
-        what=f"a (host) never caught e's post {post_id} up after restarting",
+        what=f"b never got e's post {post_id} from a after a came back",
+        timeout=120.0,
     )
-    print("  a caught e's post up over the member path after restarting ✓")
+    print("  b got e's post from a (catch-up sync on a's return) ✓")
     state["gfs_private_channel_space_id"] = space_id
     state["gfs_private_channel_id"] = channel_id
     _save(state)

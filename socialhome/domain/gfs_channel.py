@@ -37,20 +37,14 @@ domain-separation prefix (see :mod:`socialhome.gfs_channel`):
 
       {writer_key_suite, channel_suite, channel_id, epoch, writer_pk, cert_sig}
 
-* :class:`ChannelRepinCert` — the pinned channel key's statement that
-  ``channel_pk`` replaces it (a suite migration; never used across an
-  authority rotation, which starts a fresh channel instead)::
-
-      {channel_suite, channel_id, channel_pk, key_epoch, cert_sig}
-
 What a member household is handed (SECRET — it rides only inside a per-peer
 encrypted payload, and is stored KEK-wrapped), :class:`GfsChannelGrant`::
 
     {channel_suite, space_id, channel_id, channel_pk, epoch, epoch_offset,
      gfs_ids: [...],
      binding_sig_suite, binding_sig,            # the SPACE authority key
-     channel_pass: {...},
-     channel_cert?: {...},                      # households with a scope
+     channel_pass?: {...},                      # link-joined households only
+     channel_cert?: {...},                      # writers, trusted spaces
      writer_key?: {writer_key_suite, channel_id, epoch, writer_seed,
                    writer_key_cert}}            # strict spaces, writers only
 
@@ -108,7 +102,7 @@ from .writer_cert import MAX_WRITER_CERT_EPOCH, WRITER_SCOPES
 
 #: Suite of the channel key — of ``channel_pk`` and of every statement it
 #: signs (registration, notice, unregister, cert, pass, writer key cert,
-#: repin cert). Phase-2 of ``docs/crypto.md`` adds ``"ed25519+mldsa65"``.
+#: ). Phase-2 of ``docs/crypto.md`` adds ``"ed25519+mldsa65"``.
 CHANNEL_SUITE_ED25519: str = "ed25519"
 SUPPORTED_CHANNEL_SUITES: frozenset[str] = frozenset({CHANNEL_SUITE_ED25519})
 
@@ -435,48 +429,6 @@ class ChannelWriterKeyGrant:
         )
 
 
-CHANNEL_REPIN_CERT_KEYS: frozenset[str] = frozenset(
-    {"channel_suite", "channel_id", "channel_pk", "key_epoch", "cert_sig"}
-)
-
-
-@dataclass(slots=True, frozen=True)
-class ChannelRepinCert:
-    """The PINNED channel key's statement that ``channel_pk`` (suite
-    ``channel_suite``) replaces it from ``key_epoch`` on."""
-
-    channel_suite: str
-    channel_id: str
-    channel_pk: str
-    key_epoch: int
-    cert_sig: str
-
-    def signing_body(self) -> dict:
-        return {
-            "channel_suite": self.channel_suite,
-            "channel_id": self.channel_id,
-            "channel_pk": self.channel_pk,
-            "key_epoch": self.key_epoch,
-        }
-
-    def to_wire(self) -> dict:
-        return {**self.signing_body(), "cert_sig": self.cert_sig}
-
-    @classmethod
-    def from_wire(cls, raw: object) -> "ChannelRepinCert":
-        body = _exact(raw, CHANNEL_REPIN_CERT_KEYS, "channel repin cert")
-        key_epoch = _epoch(body, "key_epoch")
-        if key_epoch < 1:
-            raise InvalidChannelWire("channel repin cert: bad key_epoch")
-        return cls(
-            channel_suite=_str(body, "channel_suite", _MAX_ID_CHARS),
-            channel_id=valid_channel_id(body.get("channel_id")),
-            channel_pk=_b64(body, "channel_pk"),
-            key_epoch=key_epoch,
-            cert_sig=_b64(body, "cert_sig"),
-        )
-
-
 # ─── The grant a member household holds ──────────────────────────────────
 
 GRANT_REQUIRED_KEYS: frozenset[str] = frozenset(
@@ -490,14 +442,15 @@ GRANT_REQUIRED_KEYS: frozenset[str] = frozenset(
         "gfs_ids",
         "binding_sig_suite",
         "binding_sig",
-        "channel_pass",
     }
 )
 
 #: Largest per-channel epoch offset (40 bits): wire epochs stay far below
 #: the signed 64-bit ceiling.
 MAX_CHANNEL_EPOCH_OFFSET: int = 2**40
-GRANT_OPTIONAL_KEYS: frozenset[str] = frozenset({"channel_cert", "writer_key"})
+GRANT_OPTIONAL_KEYS: frozenset[str] = frozenset(
+    {"channel_pass", "channel_cert", "writer_key"}
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -514,7 +467,9 @@ class GfsChannelGrant:
     gfs_ids: tuple[str, ...]
     binding_sig_suite: str
     binding_sig: str
-    channel_pass: ChannelPass
+    #: Only for a link-joined (``space_session``) household: the seats are
+    #: exactly those. A paired member's grant is publish-only.
+    channel_pass: ChannelPass | None = None
     channel_cert: ChannelCert | None = None
     writer_key: ChannelWriterKeyGrant | None = field(default=None)
 
@@ -539,11 +494,9 @@ class GfsChannelGrant:
         }
 
     def to_wire(self) -> dict:
-        wire: dict = {
-            **self.binding_body(),
-            "binding_sig": self.binding_sig,
-            "channel_pass": self.channel_pass.to_wire(),
-        }
+        wire: dict = {**self.binding_body(), "binding_sig": self.binding_sig}
+        if self.channel_pass is not None:
+            wire["channel_pass"] = self.channel_pass.to_wire()
         if self.channel_cert is not None:
             wire["channel_cert"] = self.channel_cert.to_wire()
         if self.writer_key is not None:
@@ -564,6 +517,7 @@ class GfsChannelGrant:
             raise InvalidChannelWire("grant: bad gfs_ids")
         cert = body.get("channel_cert")
         key = body.get("writer_key")
+        passport = body.get("channel_pass")
         offset = body.get("epoch_offset")
         if not _is_int(offset) or not 0 <= offset <= MAX_CHANNEL_EPOCH_OFFSET:  # type: ignore[operator]
             raise InvalidChannelWire("grant: bad epoch_offset")
@@ -577,7 +531,9 @@ class GfsChannelGrant:
             gfs_ids=tuple(sorted(set(gfs_ids))),
             binding_sig_suite=_str(body, "binding_sig_suite", _MAX_ID_CHARS),
             binding_sig=_b64(body, "binding_sig"),
-            channel_pass=ChannelPass.from_wire(body.get("channel_pass")),
+            channel_pass=(
+                ChannelPass.from_wire(passport) if passport is not None else None
+            ),
             channel_cert=ChannelCert.from_wire(cert) if cert is not None else None,
             writer_key=(
                 ChannelWriterKeyGrant.from_wire(key) if key is not None else None
@@ -604,7 +560,9 @@ REGISTER_REQUIRED_KEYS: frozenset[str] = frozenset(
 class ChannelRegisterRequest:
     """``POST /gfs/channels/register`` — pins ``channel_pk`` for a NEW
     ``channel_id`` (trust on first use), refreshes an existing one with the
-    same key, or re-pins with a ``repin_cert`` chained to the pinned key.
+    same key. There is no re-pin: another key for a pinned id is refused
+    (a household starts a fresh channel instead), and a body carrying a
+    ``repin_cert`` is malformed.
     ``channel_sig`` is made with the key being registered (proof of
     possession)."""
 
@@ -615,10 +573,9 @@ class ChannelRegisterRequest:
     ts: str
     nonce: str
     channel_sig: str
-    repin_cert: ChannelRepinCert | None = None
 
     def signing_body(self) -> dict:
-        body: dict = {
+        return {
             "channel_suite": self.channel_suite,
             "channel_id": self.channel_id,
             "channel_pk": self.channel_pk,
@@ -626,19 +583,13 @@ class ChannelRegisterRequest:
             "ts": self.ts,
             "nonce": self.nonce,
         }
-        if self.repin_cert is not None:
-            body["repin_cert"] = self.repin_cert.to_wire()
-        return body
 
     def to_wire(self) -> dict:
         return {**self.signing_body(), "channel_sig": self.channel_sig}
 
     @classmethod
     def from_wire(cls, raw: object) -> "ChannelRegisterRequest":
-        body = _exact_optional(
-            raw, REGISTER_REQUIRED_KEYS, frozenset({"repin_cert"}), "register"
-        )
-        repin = body.get("repin_cert")
+        body = _exact(raw, REGISTER_REQUIRED_KEYS, "register")
         return cls(
             channel_suite=_str(body, "channel_suite", _MAX_ID_CHARS),
             channel_id=valid_channel_id(body.get("channel_id")),
@@ -647,7 +598,6 @@ class ChannelRegisterRequest:
             ts=_str(body, "ts"),
             nonce=_nonce(body),
             channel_sig=_b64(body, "channel_sig"),
-            repin_cert=ChannelRepinCert.from_wire(repin) if repin is not None else None,
         )
 
 

@@ -27,26 +27,36 @@ channel material.
 HKDF-derived from the space seed with its own domain separation, registered
 ANONYMOUSLY over the cookie-less publish session (channel-key-signed — no
 household identity). When the seed changes (a v_44 authority rotation) the
-owner starts a FRESH channel instead of re-pinning: a revoked seed holder
-still holds the old channel key and could race any re-pin chained to it.
+owner unregisters the old channel before the seed swap and starts a FRESH
+one — there is no re-pin: a revoked seed holder still holds the old channel
+key and could race any re-pin chained to it.
 
 **Grants.** Every seed holder derives the channel key and issues, per member
 household and epoch, a :class:`~socialhome.domain.gfs_channel.GfsChannelGrant`
-(pass for everyone with a live seat, channel cert for households with a
-writer scope, channel writer key in a strict space), bound to the space by
-the space authority key. It rides INSIDE the per-peer encrypted payloads of
+(channel cert for a writer in a trusted space, channel writer key in a
+strict space, and a pass ONLY for a link-joined household — the only seats;
+a paired member's grant is publish-only), bound to the space by the space
+authority key. It rides INSIDE the per-peer encrypted payloads of
 the four channels that already carry writer certs — never to a household
 below v_51 (:data:`FederationCapability.MIN_FOR_PRIVATE_CHANNELS`), never to
 ourselves. The owner itself holds no grant and never subscribes: it receives
 everything over federation.
 
 **Members** verify a grant against the pinned space key, keep it
-KEK-wrapped on that epoch's key row, subscribe with its pass (identified,
-like a follower — the accepted residual: the server learns the channel's
-member households), and publish items to it: trusted with the channel cert
-(identified), strict with the channel writer key (anonymous). Without a
-grant for the current epoch, nothing goes to any server — the host path
+KEK-wrapped on that epoch's key row, subscribe with its pass when they have
+one (identified, like a follower — the accepted residual: the server learns
+the link-joined households), and publish items to it: trusted with the
+channel cert (identified), strict with the channel writer key (anonymous).
+A paired member never subscribes; it catches the link-joined members' items
+up from the host by §25.6 sync when the host is back (it re-advertises its
+capabilities on startup). Without
+a grant for the current epoch, nothing goes to any server — the host path
 always carries the item.
+
+**Self-heal.** The server answers the owner's notice with what it holds;
+when another channel-key holder moved the channel past the owner's epoch
+(or pinned another writer key), the owner starts a fresh channel and
+re-grants its members.
 
 **Epoch notices.** Every seed holder announces the content epoch to the
 channel's servers at each rotation, before the member rekey (channel-key
@@ -64,12 +74,16 @@ import secrets
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
 
 from ..crypto import b64url_decode, b64url_encode, ed25519_public_key, sign_ed25519
-from ..domain.events import SpaceRemoteSeatLive
+from ..domain.events import (
+    PeerCapabilitiesAdvertised,
+    PeerTransportChanged,
+    SpaceRemoteSeatLive,
+)
 from ..domain.federation import GfsConnection, InstanceSource
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import (
@@ -132,6 +146,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+class _SyncScheduler(Protocol):
+    async def enqueue_sync_for_space(
+        self, *, space_id: str, peer_instance_id: str
+    ) -> None: ...
+
+
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 #: Queue-item kinds of the channel retry queue.
@@ -143,6 +164,10 @@ _KIND_NOTICE = "channel_epoch_notice"
 #: same as strict member publish: whole seconds, so a sub-second clock offset
 #: can't link a household's anonymous requests.
 ANON_TS_JITTER_S: int = 60
+
+#: How long a publish-only member waits after its host came back before it
+#: asks for the catch-up sync (the host drains its relay queue first).
+HOST_RETURN_SYNC_DELAY_S: float = 15.0
 
 #: Background tasks (subscribe / unsubscribe / channel creation) in flight.
 MAX_PENDING_TASKS: int = 64
@@ -162,11 +187,13 @@ class GfsChannelService:
     """Create, announce and use opaque private-space channels."""
 
     __slots__ = (
+        "_catching_up",
         "_conn_repo",
         "_crypto",
         "_federation",
         "_federation_repo",
         "_gfs",
+        "_healed",
         "_inbound",
         "_kek",
         "_keys",
@@ -177,7 +204,9 @@ class GfsChannelService:
         "_remote_members",
         "_retry",
         "_space_service",
+        "_sync",
         "_spaces",
+        "_stop",
         "_stopping",
         "_tasks",
         "_writer_certs",
@@ -213,12 +242,18 @@ class GfsChannelService:
         self._federation: "FederationService | None" = None
         self._space_service: object | None = None
         self._inbound: "SpacePublicInbound | None" = None
+        self._sync: "_SyncScheduler | None" = None
         self._retry = GfsPublishRetryQueue(self._retry_send)
         #: channel id → ``gfs_instance_id``s that confirmed our registration
         #: in this process (the owner's grants name only these).
         self._registered: dict[str, set[str]] = {}
+        #: Channel ids this process already replaced after a take-over.
+        self._healed: set[str] = set()
+        #: Spaces with a host-return catch-up sync pending.
+        self._catching_up: set[str] = set()
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
+        self._stop = asyncio.Event()
 
     # ── Wiring + lifecycle ───────────────────────────────────────────────
 
@@ -236,15 +271,24 @@ class GfsChannelService:
         public ``space_item``)."""
         self._inbound = inbound
 
+    def attach_sync_scheduler(self, scheduler: "_SyncScheduler") -> None:
+        """The §25.6 scheduler a publish-only member asks for a catch-up
+        from the host when the host comes back."""
+        self._sync = scheduler
+
     def wire(self, bus: "EventBus") -> None:
         bus.subscribe(SpaceRemoteSeatLive, self._on_seat_live)
+        bus.subscribe(PeerTransportChanged, self._on_peer_transport)
+        bus.subscribe(PeerCapabilitiesAdvertised, self._on_peer_advertised)
 
     async def start(self) -> None:
         self._stopping = False
+        self._stop.clear()
         await self._retry.start()
 
     async def stop(self) -> None:
         self._stopping = True
+        self._stop.set()
         await self.wait_idle()
         await self._retry.stop()
 
@@ -336,7 +380,9 @@ class GfsChannelService:
                 return True
         return False
 
-    async def reconcile(self, space_id: str, *, joining: str | None = None) -> str:
+    async def reconcile(
+        self, space_id: str, *, joining: str | None = None, fresh: bool = False
+    ) -> str:
         """Create, keep or retire this space's channel (owner only). Returns
         ``"created"``, ``"kept"``, ``"retired"`` or ``"none"``."""
         space = await self._spaces.get(space_id)
@@ -352,7 +398,7 @@ class GfsChannelService:
         if not conns:
             return "none"
         current = await self._channel_seed(space)
-        if current is not None:
+        if current is not None and not fresh:
             _done, squatted = await self._register_all(current[0], current[1], conns)
             if not squatted:
                 return "kept"
@@ -444,6 +490,19 @@ class GfsChannelService:
             )
             return None
 
+    async def retire(self, space_id: str) -> bool:
+        """Unregister and forget this space's channel now (owner, seed still
+        matching) — before an authority rotation swaps the seed. ``True``
+        when there was one."""
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id != self._own_instance_id:
+            return False
+        stored = await self._spaces.get_gfs_channel(space_id)
+        if stored is None:
+            return False
+        await self._retire(space, stored[0])
+        return True
+
     async def _retire(self, space: "Space", channel_id: str) -> None:
         """Unregister the channel everywhere we can sign for it, and forget
         it. Members get no grant for the next epoch."""
@@ -493,6 +552,60 @@ class GfsChannelService:
 
     async def _on_seat_live(self, event: SpaceRemoteSeatLive) -> None:
         self._spawn(self._after_seat(event.space_id, event.instance_id), "seat")
+
+    async def _on_peer_transport(self, event: PeerTransportChanged) -> None:
+        """A peer's DataChannel just opened (a reconnect after a blip)."""
+        if event.transport == "rtc":
+            await self._host_back(event.instance_id)
+
+    async def _on_peer_advertised(self, event: PeerCapabilitiesAdvertised) -> None:
+        """A peer re-advertised its capabilities — it does on every startup:
+        a host that was down is back."""
+        await self._host_back(event.instance_id)
+
+    async def _host_back(self, host: str) -> None:
+        """When ``host`` is the host of a private space where we hold a
+        publish-only grant (a paired member: no seat on the channel), ask it
+        for a catch-up sync shortly — that is how the link-joined members'
+        items, which only reached the host while it was away, reach us. One
+        pending catch-up per space."""
+        if self._sync is None:
+            return
+        for space in await self._spaces.list_all():
+            if (
+                space.space_type is not SpaceType.PRIVATE
+                or space.owner_instance_id != host
+                or space.id in self._catching_up
+            ):
+                continue
+            grant = await self.current_grant(space.id)
+            if grant is None or grant.channel_pass is not None:
+                continue
+            log.info(
+                "gfs.channel: host of %s is back — catch-up sync in %.0f s",
+                space.id,
+                HOST_RETURN_SYNC_DELAY_S,
+            )
+            self._catching_up.add(space.id)
+            self._spawn(self._catch_up_later(space.id, host), "catch-up")
+
+    async def _catch_up_later(self, space_id: str, host: str) -> None:
+        # Let the host drain its relay queue (the link-joined members' items)
+        # before it serves the sync.
+        try:
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=HOST_RETURN_SYNC_DELAY_S
+                )
+                return  # stopping
+            except TimeoutError:
+                pass
+            if self._sync is not None:
+                await self._sync.enqueue_sync_for_space(
+                    space_id=space_id, peer_instance_id=host
+                )
+        finally:
+            self._catching_up.discard(space_id)
 
     async def _after_seat(self, space_id: str, instance_id: str) -> None:
         """A remote seat went live: create the channel if this made the space
@@ -629,9 +742,90 @@ class GfsChannelService:
             publish_mode=space.features.gfs_publish_mode,
             writer_key_cert=wkc,
         ).to_wire()
-        return await self._post(
+        outcome, held = await self._post_reading(
             client, f"{conn.inbox_url}{CHANNEL_EPOCH_ROUTE}", body, conn
         )
+        if (
+            held is not None
+            and space.owner_instance_id == self._own_instance_id
+            and self._channel_taken_over(
+                held, epoch=epoch, writer_pk=wkc.writer_pk if wkc else None
+            )
+        ):
+            # Another channel-key holder (a seed holder) moved the channel
+            # past us — stepping its epoch, or pinning another writer key —
+            # which locks our members out. Never fight: a fresh channel.
+            log.warning(
+                "gfs.channel: channel %s was moved past this owner's epoch on "
+                "GFS %s — starting a fresh one",
+                channel_id,
+                conn.id,
+            )
+            self._spawn(self._self_heal(space_id, channel_id), "self-heal")
+        return outcome
+
+    @staticmethod
+    def _channel_taken_over(held: dict, *, epoch: int, writer_pk: str | None) -> bool:
+        """Whether the server's answer to our own notice shows another key
+        holder got there first: an epoch above ours, or (strict) a writer key
+        pin for our epoch that is not ours."""
+        server_epoch = held.get("epoch")
+        if isinstance(server_epoch, int) and server_epoch > epoch:
+            return True
+        return writer_pk is not None and held.get("writer_pk") != writer_pk
+
+    async def _self_heal(self, space_id: str, channel_id: str) -> None:
+        """Replace a channel another key holder took over (once per id)."""
+        if channel_id in self._healed:
+            return
+        self._healed.add(channel_id)
+        try:
+            stored = await self._spaces.get_gfs_channel(space_id)
+            if stored is None or stored[0] != channel_id:
+                return
+            if await self.reconcile(space_id, fresh=True) == "created":
+                await self.announce_epoch(space_id)
+                await self.distribute(space_id)
+        except Exception:
+            log.exception("gfs.channel: self-heal failed")
+
+    async def _post_reading(
+        self,
+        client: aiohttp.ClientSession,
+        url: str,
+        body: dict,
+        conn: GfsConnection,
+    ) -> tuple[PublishOutcome, dict | None]:
+        """:meth:`_post`, also returning a 200's JSON body."""
+        try:
+            async with client.post(
+                url, json=body, allow_redirects=False, timeout=_HTTP_TIMEOUT
+            ) as resp:
+                outcome = classify_publish_status(
+                    resp.status, resp.headers.get("Retry-After")
+                )
+                held: dict | None = None
+                if resp.status == 200:
+                    try:
+                        parsed = await resp.json()
+                    except aiohttp.ContentTypeError, ValueError:
+                        parsed = None
+                    held = parsed if isinstance(parsed, dict) else None
+                if outcome.kind != "delivered":
+                    log.warning(
+                        "gfs.channel: GFS %s answered HTTP %d (%s) on epoch",
+                        conn.id,
+                        resp.status,
+                        outcome.kind,
+                    )
+                return outcome, held
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning(
+                "gfs.channel: GFS %s unreachable: %s",
+                conn.id,
+                exc or type(exc).__name__,
+            )
+            return PublishOutcome.transient(), None
 
     # ── Grants (any seed holder) ─────────────────────────────────────────
 
@@ -703,6 +897,13 @@ class GfsChannelService:
             if scope is not None and strict
             else None
         )
+        # Only a link-joined household takes a seat (the GFS must see as
+        # little as possible: the seats are exactly the households it
+        # already relays envelopes for). A paired member's grant is
+        # publish-only; it gets the others' items from the host.
+        link_joined = await self._is_link_joined(space_id, instance_id)
+        if not link_joined and cert is None and writer_key is None:
+            return None
         grant = GfsChannelGrant(
             channel_suite="ed25519",
             space_id=space_id,
@@ -713,11 +914,15 @@ class GfsChannelService:
             gfs_ids=tuple(gfs_ids),
             binding_sig_suite="ed25519",
             binding_sig="",
-            channel_pass=issue_channel_pass(
-                channel_seed=channel_seed,
-                channel_id=channel_id,
-                epoch=wire_epoch,
-                instance_pk=pk,
+            channel_pass=(
+                issue_channel_pass(
+                    channel_seed=channel_seed,
+                    channel_id=channel_id,
+                    epoch=wire_epoch,
+                    instance_pk=pk,
+                )
+                if link_joined
+                else None
             ),
             channel_cert=cert,
             writer_key=writer_key,
@@ -752,14 +957,10 @@ class GfsChannelService:
         except ValueError as exc:
             log.warning("gfs.channel: grant for space %s refused: %s", space_id, exc)
             return False
-        claimed = await self._spaces.space_for_gfs_channel(grant.channel_id)
-        if claimed is not None and claimed != space_id:
-            log.warning(
-                "gfs.channel: grant for space %s names a channel another space "
-                "uses — refused",
-                space_id,
-            )
-            return False
+        # No first-come claim on the id: another space's owner could bind a
+        # grant to our space's channel id and block the real one. Several
+        # spaces may name an id; inbound frames try each (the content key
+        # decides).
         # Store first, switch second: a grant that can't be kept (no key for
         # its epoch yet) must not move us off the channel we use.
         wrapped = self._kek.encrypt(
@@ -798,7 +999,7 @@ class GfsChannelService:
             self._spawn(
                 self._unsubscribe_all(previous[0], grant.gfs_ids), "unsubscribe"
             )
-        if grant.epoch == current_epoch:
+        if grant.epoch == current_epoch and grant.channel_pass is not None:
             self._spawn(self.subscribe(space_id), "subscribe")
         return True
 
@@ -851,7 +1052,8 @@ class GfsChannelService:
         """Take our fan-out seat on the channel's servers with the current
         grant's pass. Fail-soft per server. Returns how many accepted."""
         grant = await self.current_grant(space_id)
-        if grant is None:
+        if grant is None or grant.channel_pass is None:
+            # A publish-only (paired) member never takes a seat.
             return 0
         done = 0
         for conn in await self._capable_in(grant.gfs_ids):
@@ -1022,27 +1224,31 @@ class GfsChannelService:
         except InvalidChannelWire:
             log.warning("gfs.channel: malformed channel frame — dropped")
             return
-        space_id = await self._spaces.space_for_gfs_channel(item.channel_id)
-        if space_id is None:
-            log.debug("gfs.channel: frame for an unknown channel — dropped")
-            return
-        space = await self._spaces.get(space_id)
-        if space is None or space.space_type is not SpaceType.PRIVATE:
-            return
         if self._inbound is None:
             return
-        # The frame carries the channel epoch: shift it back by the
-        # channel's offset (from our current grant) to the content epoch.
-        grant = await self.current_grant(space_id)
-        if grant is None or grant.channel_id != item.channel_id:
-            log.debug("gfs.channel: frame without a current grant — dropped")
+        candidates = await self._spaces.spaces_for_gfs_channel(item.channel_id)
+        if not candidates:
+            log.debug("gfs.channel: frame for an unknown channel — dropped")
             return
-        content_epoch = item.epoch - grant.epoch_offset
-        if content_epoch < 0:
-            return
-        await self._inbound.handle_channel_item(
-            space_id, epoch=content_epoch, payload=item.payload
-        )
+        # Normally exactly one. Should another space's owner have bound a
+        # grant to this id, each candidate is tried: the item decrypts only
+        # under the space it was sealed for, and its signed ``space_id``
+        # must match — so it can never land in the wrong space.
+        for space_id in candidates:
+            space = await self._spaces.get(space_id)
+            if space is None or space.space_type is not SpaceType.PRIVATE:
+                continue
+            # The frame carries the channel epoch: shift it back by this
+            # space's channel offset (from our current grant).
+            grant = await self.current_grant(space_id)
+            if grant is None or grant.channel_id != item.channel_id:
+                continue
+            content_epoch = item.epoch - grant.epoch_offset
+            if content_epoch < 0:
+                continue
+            await self._inbound.handle_channel_item(
+                space_id, epoch=content_epoch, payload=item.payload
+            )
 
     # ── Transport + retries ──────────────────────────────────────────────
 

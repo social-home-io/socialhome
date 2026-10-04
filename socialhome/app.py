@@ -3151,6 +3151,7 @@ def create_app(config: Config | None = None) -> web.Application:
         writer_certs.attach_federation(federation_service)
         if gfs_channels is not None:
             gfs_channels.attach_federation(federation_service)
+            gfs_channels.attach_sync_scheduler(app[K.space_sync_scheduler_key])
         app[K.private_invite_handler_key].attach_writer_certs(writer_certs)
         # A space-session seat is dropped through the same purge as an
         # unpair, so its queued envelopes and mesh hints go with it.

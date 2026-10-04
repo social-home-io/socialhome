@@ -467,6 +467,10 @@ CHANNEL_EPOCH_STEP_INTERVAL_S: int = 60
 #: next connect if they still use it).
 CHANNEL_IDLE_TTL_SECONDS: int = 30 * 24 * 60 * 60
 
+#: A channel that never received an epoch notice or a seat is dropped after
+#: this long (a registration nobody uses costs a row for a day at most).
+CHANNEL_UNUSED_TTL_SECONDS: int = 24 * 60 * 60
+
 
 @dataclass(slots=True, frozen=True)
 class GfsChannel:
@@ -482,7 +486,6 @@ class GfsChannel:
     channel_id: str
     channel_suite: str
     channel_pk: str
-    key_epoch: int
     registered_at: int
     last_active_at: int
     epoch: int | None = None
@@ -518,7 +521,7 @@ class GfsChannel:
 
     def step_allowance(self, epoch: int, *, now: int) -> int:
         """Seconds until a notice for ``epoch`` may land: ``0`` = now. The
-        first notice after a registration or re-pin sets any epoch (bounded
+        first notice after a registration sets any epoch (bounded
         by the caller); after that the epoch
         rises by at most one per :data:`CHANNEL_EPOCH_STEP_INTERVAL_S` since
         the last raise. ``-1`` = never (not ahead of the current epoch)."""

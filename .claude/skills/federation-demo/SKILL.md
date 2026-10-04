@@ -791,16 +791,20 @@ never listed, so its link is never parked on the GFS — e takes the §D2b
 bootstrap through ``/gfs/envelope``) and b redeems another directly. a —
 the owner — starts the space's opaque channel on e's seat (a random
 ``channel_id``, a channel key derived from the space seed, registered
-anonymously); e and b get their grants and subscribe with their passes, and
-the GFS seats exactly them (never a). Then **a** is stopped and e posts: b
-receives the post decrypted over the channel (its log shows
-``gfs.relay.received: channel=…``). Asserts the WHOLE GFS log and its
-database files (``gfs.db*``) never contain the private space's id, its
-name or its authority public key (hex or base64url), nor the post text —
-only the channel id. a restarts (bookmarked first) and catches the post up
-over the member path. ``verify`` then checks a, b and e agree on the channel,
-e's grant is stored KEK-wrapped and the GFS row names no space (the v_51
-tripwire). Polls every 3 s, backs off on 429.
+anonymously). e (link-joined) gets a grant with a pass and takes the ONLY
+seat; b (paired) gets a publish-only grant — the step asserts the GFS seats
+e alone (never a, never b). Then **a** is stopped: b posts over the channel
+and e receives it decrypted (its log shows ``gfs.relay.received:
+channel=…``); e posts too (its envelope to a waits at the GFS). Asserts the
+WHOLE GFS log and its database files (``gfs.db*``) never contain the private
+space's id, its name or its authority public key (hex or base64url), nor
+either post's text — only the channel id. a restarts (bookmarked first),
+catches both posts up over the member path, and b gets e's post from a (a
+catch-up sync once a re-advertises its capabilities on startup, up to
+120 s). ``verify`` then
+checks a, b and e agree on the channel, e's grant is stored KEK-wrapped, the
+GFS row names no space and b holds no seat (the v_51 tripwire). Polls every
+3 s, backs off on 429.
 
 ### ``gfs-cluster`` — a multi-process GFS on one shared DB
 

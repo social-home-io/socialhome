@@ -16,7 +16,6 @@ from socialhome.domain.gfs_channel import (
     ChannelPublishAnonRequest,
     ChannelPublishRequest,
     ChannelRegisterRequest,
-    ChannelRepinCert,
     ChannelSubscribeRequest,
     ChannelUnregisterRequest,
     ChannelUnsubscribeRequest,
@@ -31,7 +30,6 @@ from socialhome.gfs_channel import (
     issue_channel_cert,
     issue_channel_pass,
     issue_channel_writer_key,
-    issue_repin_cert,
     new_channel_id,
     sign_notice,
     sign_register,
@@ -63,10 +61,6 @@ def test_statement_round_trips() -> None:
         space_seed=os.urandom(32), space_id="s", channel_id=CID, epoch=1
     )
     assert ChannelWriterKeyGrant.from_wire(wk.to_wire()) == wk
-    repin = issue_repin_cert(
-        pinned_seed=SEED, channel_id=CID, new_channel_pk="x" * 43, key_epoch=2
-    )
-    assert ChannelRepinCert.from_wire(repin.to_wire()) == repin
 
 
 def test_statements_refuse_extra_or_missing_keys() -> None:
@@ -81,16 +75,14 @@ def test_statements_refuse_extra_or_missing_keys() -> None:
         ChannelCert.from_wire({**cert, "scope": "admin"})
     with pytest.raises(InvalidChannelWire):
         ChannelCert.from_wire({**cert, "epoch": True})
-    repin = issue_repin_cert(
-        pinned_seed=SEED, channel_id=CID, new_channel_pk="x" * 43, key_epoch=1
-    ).to_wire()
-    with pytest.raises(InvalidChannelWire):
-        ChannelRepinCert.from_wire({**repin, "key_epoch": 0})
 
 
 def test_requests_round_trip() -> None:
     reg = sign_register(channel_seed=SEED, channel_id=CID, gfs_instance_id="g", ts=TS)
     assert ChannelRegisterRequest.from_wire(reg.to_wire()) == reg
+    # There is no re-pin: the field is malformed.
+    with pytest.raises(InvalidChannelWire):
+        ChannelRegisterRequest.from_wire({**reg.to_wire(), "repin_cert": {}})
     notice = sign_notice(
         channel_seed=SEED,
         channel_id=CID,

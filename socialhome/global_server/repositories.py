@@ -2371,17 +2371,6 @@ class AbstractGfsChannelRepo(Protocol):
 
     async def touch(self, channel_id: str, *, now: int) -> None: ...
 
-    async def repin(
-        self,
-        channel_id: str,
-        *,
-        expected_pk: str,
-        channel_suite: str,
-        channel_pk: str,
-        key_epoch: int,
-        now: int,
-    ) -> bool: ...
-
     async def set_epoch(
         self, channel_id: str, epoch: int, *, expected: int | None, now: int
     ) -> bool: ...
@@ -2414,6 +2403,10 @@ class AbstractGfsChannelRepo(Protocol):
 
     async def prune_idle(self, *, older_than: int) -> int: ...
 
+    async def prune_unused(self, *, older_than: int) -> int: ...
+
+    async def count(self) -> int: ...
+
 
 class SqliteGfsChannelRepo:
     """SQLite-backed :class:`AbstractGfsChannelRepo`. Every state change is
@@ -2442,7 +2435,6 @@ class SqliteGfsChannelRepo:
             channel_id=str(row["channel_id"]),
             channel_suite=str(row["channel_suite"]),
             channel_pk=str(row["channel_pk"]),
-            key_epoch=int(row.get("key_epoch") or 0),
             registered_at=int(row.get("registered_at") or 0),
             last_active_at=int(row.get("last_active_at") or 0),
             epoch=_int("content_epoch"),
@@ -2475,40 +2467,6 @@ class SqliteGfsChannelRepo:
             " AND last_active_at < ?",
             (now, channel_id, now),
         )
-
-    async def repin(
-        self,
-        channel_id: str,
-        *,
-        expected_pk: str,
-        channel_suite: str,
-        channel_pk: str,
-        key_epoch: int,
-        now: int,
-    ) -> bool:
-        """Replace the pinned key iff it is still ``expected_pk`` (the key the
-        caller verified the chained cert against) and ``key_epoch`` is newer.
-        Clears the epoch and the writer key pins — statements of the old key
-        stop meaning anything. Subscriptions stay (members re-subscribe with
-        new passes as epochs move)."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE gfs_channels SET channel_suite=?, channel_pk=?, key_epoch=?,"
-            " last_active_at=?, content_epoch=NULL, content_epoch_prev=NULL,"
-            " content_epoch_raised_at=NULL, writer_key_epoch=NULL,"
-            " writer_key_pk=NULL, writer_key_prev_epoch=NULL,"
-            " writer_key_prev_pk=NULL"
-            " WHERE channel_id=? AND channel_pk=? AND key_epoch < ?",
-            (
-                channel_suite,
-                channel_pk,
-                key_epoch,
-                now,
-                channel_id,
-                expected_pk,
-                key_epoch,
-            ),
-        )
-        return changed > 0
 
     async def set_epoch(
         self, channel_id: str, epoch: int, *, expected: int | None, now: int
@@ -2636,6 +2594,24 @@ class SqliteGfsChannelRepo:
         return await self._db.enqueue_rowcount(
             "DELETE FROM gfs_channels WHERE last_active_at < ?", (older_than,)
         )
+
+    async def prune_unused(self, *, older_than: int) -> int:
+        """Drop channels registered before ``older_than`` that never got an
+        epoch notice or a seat — anonymous registrations nobody uses."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_channels WHERE registered_at < ?"
+            " AND content_epoch IS NULL AND NOT EXISTS ("
+            " SELECT 1 FROM gfs_channel_subscribers cs"
+            " WHERE cs.channel_id = gfs_channels.channel_id)",
+            (older_than,),
+        )
+
+    async def count(self) -> int:
+        """Live channel rows (the server-wide registration cap)."""
+        row = _as_dict(
+            await self._db.fetchone("SELECT COUNT(*) AS n FROM gfs_channels")
+        )
+        return int(row.get("n") or 0)
 
 
 # ─── Invite tokens ───────────────────────────────────────────────────────

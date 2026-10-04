@@ -1207,6 +1207,10 @@ class _Channels:
     async def has_channel(self, space_id):
         return self.channel
 
+    async def retire(self, space_id):
+        self.rotations.append(f"retire:{space_id}")
+        return True
+
 
 def _private(world) -> _Channels:
     world["spaces"].spaces[SPACE_ID] = _space(
@@ -1259,6 +1263,8 @@ async def test_private_epoch_notices_and_heal_go_to_the_channel(world):
     assert channels.rotations == [SPACE_ID, SPACE_ID]
     await svc.announce_held_epochs("conn-1")
     assert channels.healed == ["conn-1"]
+    await svc.retire_channel(SPACE_ID)
+    assert channels.rotations[-1] == f"retire:{SPACE_ID}"
 
 
 async def test_a_public_space_never_touches_the_channel(world):

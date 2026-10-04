@@ -1474,6 +1474,18 @@ class PeerProtoVersionRaised(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class PeerCapabilitiesAdvertised(DomainEvent):
+    """A paired household (re-)advertised its capabilities
+    (``INSTANCE_CAPABILITIES_UPDATED``) — which it does on every startup, so
+    this is the "that household is back" signal. A private-space member that
+    gets the link-joined members' items from the host only by catch-up sync
+    (v_51) asks for one when its host is back."""
+
+    instance_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceRemoteSeatLive(DomainEvent):
     """A remote member's seat just became live in this household's roster
     mirror (``space_remote_members``) — seated by an accept / redeem, or

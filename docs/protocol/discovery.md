@@ -1409,23 +1409,24 @@ use the connection-server relay ever gets channel material.
   What a rotation must cut off is cut off without it: the removed writer's
   cert dies at the GFS epoch tiers, and its seat dies with its pass epoch
   (below). The id **is** replaced when the seed changes (a v_44 authority
-  rotation): the owner starts a fresh channel rather than re-pinning, because
-  the revoked seed holder still derives the old channel key and could race
-  any re-pin chained to it.
+  rotation): the owner unregisters the old channel while it can still sign
+  for it, right before the seed is swapped, and starts a fresh one — there
+  is no re-pin (the revoked seed holder still derives the old channel key
+  and could race any re-pin chained to it; a future suite migration also
+  starts a fresh channel).
 
 **Registration and pins** — `POST /gfs/channels/register`, anonymous over
 the cookie-less publish session, signed by the channel key itself (proof of
 possession): `{channel_suite, channel_id, channel_pk, gfs_instance_id, ts,
-nonce, channel_sig, repin_cert?}`. A new id pins `channel_pk` (trust on first
-use — safe because the id is random and handed to members only after it is
-registered, so nobody can squat it); the same key refreshes; another key is a
-`409` unless `repin_cert` — signed by the PINNED key over `{channel_suite,
-channel_id, channel_pk, key_epoch}` — names it at a higher `key_epoch`
-(clearing the epoch and writer key pins). Households use the chained re-pin
-only for a future suite migration of the same channel (Phase 2), never across
-an authority rotation (see above). **No household identity** is needed or
-sent: a per-address limit (10 / min) and a 30-day idle sweep bound what
-anonymous registrations can cost.
+nonce, channel_sig}`. A new id pins `channel_pk` (trust on first use); the
+same key refreshes; another key is a `409`, always — there is no re-pin
+(a body carrying a `repin_cert` is a `400`). **No household identity** is
+needed or sent. What anonymous registrations can cost is bounded by a
+per-address limit (10 / min), a server-wide cap on live channel rows
+(`MAX_CHANNELS`, `503` past it), a 24 h sweep of channels that never got a
+notice or a seat, and a 30-day idle sweep of used ones. The `nonce` only
+makes each signature unique: a replay inside the ±300 s `ts` window is a
+harmless no-op, so it is not cached.
 
 **Epoch notices — one tier, channel-key-signed, time-bounded.** The public
 path tells the owner's household-signed notice apart from a delegated
@@ -1434,7 +1435,7 @@ it. So channel notices (`POST /gfs/channels/epoch`, `{channel_suite,
 channel_id, gfs_instance_id, ts, nonce, epoch, publish_mode,
 writer_key_cert?, channel_sig}`) are all channel-key-signed and equal, and
 inflation is bounded by **time** instead of identity: the first notice after
-a (re)pin sets any epoch up to 2^62 (channel epochs carry a secret offset,
+registration sets any epoch up to 2^62 (channel epochs carry a secret offset,
 see below); after that the epoch
 rises by at most one per 60 s since the last raise (a notice ahead of that
 allowance gets `429` + `Retry-After`, and the household's retry queue lands
@@ -1444,8 +1445,10 @@ starts a fresh channel; anything it gains it already had (it can derive
 every writer key). Certs, passes and anonymous publishes are admitted at the
 current epoch, the next one (a rotation whose notice is still on its retry),
 or the previous one for 600 s after the raise. `publish_mode` moves only
-with a notice at or above the current epoch, then forward in its (exact,
-unjittered) `ts`; `writer_key_cert` (`{writer_key_suite, channel_suite, channel_id, epoch,
+with a notice that RAISES the epoch (every mode switch rotates the content
+key in a channel space, both directions), then forward in its exact `ts`;
+a replay or a lagging seed holder at the current epoch never flips it.
+`writer_key_cert` (`{writer_key_suite, channel_suite, channel_id, epoch,
 writer_pk, cert_sig}`, channel-key-signed) pins the channel writer key of the
 current epoch, first pin per epoch wins (the key is deterministic, so an
 honest retry repeats it). Notices are still sent at **every rotation, before
@@ -1459,14 +1462,30 @@ elsewhere — the space was public once, or a post-restore epoch in unix
 seconds — cannot match them to the channel; members shift a frame's epoch
 back before decrypting.
 
+**Self-heal against a take-over.** The server answers a notice with what
+it holds (`{epoch, writer_pk}`) — only a channel-key holder ever sees that.
+Every seed holder holds the channel key, so one of them (a delegated admin,
+or a revoked one before its rotation landed) can step the epoch +1 a minute
+past the members' real epoch, or pin a bogus writer key first, and lock the
+members out. When the owner's own notice finds the server's epoch above its
+own, or the writer key pinned for its epoch is not the one it derives, the
+owner starts a fresh channel automatically and re-grants its members by
+roster snapshot (once per id). **Residual:** the lock-out lasts until the
+owner's next notice (every rotation and every GFS reconnect), and a
+seed holder that keeps holding the seed can repeat it on the fresh channel
+— the remedy is revoking that admin (an authority rotation retires its
+seed). An owner that reconnects before it received a delegated admin's
+legitimate rekey heals needlessly — churn, never a leak.
+
 **Grants — what a member household is handed.** Per member household and
 epoch, a seed holder whose seed matches the pin issues `gfs_channel:
 {channel_suite, space_id, channel_id, channel_pk, epoch, gfs_ids,
-epoch_offset, binding_sig_suite, binding_sig, channel_pass, channel_cert?,
-writer_key?}` —
-a pass for every live seat (readers too: they subscribe), a channel cert for
-a household with a writer scope in a trusted space, the channel writer key
-(and no cert) in a strict space.
+epoch_offset, binding_sig_suite, binding_sig, channel_pass?, channel_cert?,
+writer_key?}` — a channel cert for a household with a writer scope in a
+trusted space, the channel writer key (and no cert) in a strict space, and
+a `channel_pass` **only for a link-joined (`space_session`) household**. A
+paired member's grant is **publish-only**: it publishes to the channel but
+never takes a seat (a paired reader gets no grant at all).
 `binding_sig` is the space AUTHORITY key over the routing fields, so a member
 verifies the grant against the space key it already pins and no other member
 can hand it a channel of its choosing. It rides inside the per-peer payloads
@@ -1489,10 +1508,22 @@ channel, which the next grants carry.
 **Subscription** — `POST /gfs/channels/subscribe`, household-signed like a
 follower's subscribe, with the household's `channel_pass` for an open epoch.
 The seat remembers the pass epoch; a seat whose epoch is no longer open gets
-nothing. So the seats are **exactly the member households** (there are no
-followers in a private space), and a household removed at a rotation — no
-new pass — drops out after the grace even though its row remains. Members
-re-subscribe when a new grant arrives and on every GFS (re)connect.
+nothing. Only link-joined households hold a pass, so the seats are
+**exactly the link-joined member households** — the ones the server already
+relays envelopes for — and a household removed at a rotation (no new pass)
+drops out after the grace even though its row remains. They re-subscribe
+when a new grant arrives and on every GFS (re)connect. (Seats for paired
+members — live delivery while the host is away — would be a possible future
+owner opt-in; not built.)
+
+**How a paired member gets the link-joined members' items.** Not from the
+channel: their envelopes reach the host (queued at the server while it is
+away), and the paired member catches up from the host by §25.6 sync. When
+the host is back — it re-advertises its capabilities to every peer on
+startup (`PeerCapabilitiesAdvertised`), or its DataChannel reopens after a
+blip — a paired member holding a publish-only grant asks it for a catch-up
+sync 15 s later (`HOST_RETURN_SYNC_DELAY_S`, time for the host to drain its
+relay queue); the periodic sync (30 min) is the backstop.
 
 **Publishing** — a member household with a grant for the current epoch
 whose space writer cert lets this author publish this item type:
@@ -1502,7 +1533,9 @@ whose space writer cert lets this author publish this item type:
   issued_at, cert_sig}`, which names no space. The server verifies it
   against the pinned channel key for this channel, the epoch and the
   publisher's registered key (scope `comment` at least), refuses it in a
-  strict channel, and fans out to every open seat except the publisher;
+  strict channel, and fans out to every open seat except the publisher —
+  so a paired member's trusted publish names it to the server as a
+  publisher, never as a subscriber;
 - **strict** (`POST /gfs/channels/publish-anon`): no identity, `writer_sig`
   under the channel writer key pinned for that epoch; fanned out to every
   open seat (the publisher drops its own echo). A strict space without the
@@ -1516,8 +1549,12 @@ epoch, payload}` — and offline seats are queued 24 h on the member-publish
 queue. The member broadcast to the host still runs first, always.
 
 **Receiving.** The household maps `channel_id` to its local space
-(`spaces.gfs_channel_id`), drops a frame for an unknown channel or a
-non-private space, and runs exactly the strict-frame checks
+(`spaces.gfs_channel_id`) — several spaces may name one id (no first-come
+claim: the owner of another space we belong to must not be able to block
+this space's grant by binding its own to our id), so each candidate whose
+current grant names the channel is tried, and the item decrypts and matches
+its signed `space_id` only in its own space. It drops a frame for an unknown
+channel or a non-private space, and runs exactly the strict-frame checks
 (`SpacePublicInbound.handle_channel_item`): decrypt, the real type, the
 author signature, the space writer cert from inside the ciphertext against
 the pinned space key, the inner's signed `space_id` equal to the mapped
@@ -1538,23 +1575,25 @@ sequenceDiagram
     participant O as Owner (host, seed)
     participant G as GFS
     participant E as Link-joined member
-    participant D as Other member
+    participant D as Paired member
     Note over O: first link-joined seat goes live
     O->>G: POST /gfs/channels/register {channel_id, channel_pk, channel_sig}
     O->>G: POST /gfs/channels/epoch {channel_id, epoch, publish_mode, channel_sig}
-    O-->>E: roster snapshot / rekey (sealed): gfs_channel grant
-    O-->>D: roster snapshot / rekey (sealed): gfs_channel grant
+    O-->>E: roster snapshot / rekey (sealed): grant with channel_pass
+    O-->>D: roster snapshot / rekey (sealed): publish-only grant (no pass)
     E->>G: POST /gfs/channels/subscribe {instance_id, channel_pass, signature}
-    D->>G: POST /gfs/channels/subscribe {instance_id, channel_pass, signature}
     Note over O: host goes offline
-    E->>E: seal {real type, author-signed inner + space writer cert}
+    D->>D: seal {real type, author-signed inner + space writer cert}
     alt trusted
-        E->>G: POST /gfs/channels/publish {instance_id, channel_cert, payload, signature}
+        D->>G: POST /gfs/channels/publish {instance_id, channel_cert, payload, signature}
     else strict
-        E->>G: POST /gfs/channels/publish-anon {channel_id, payload, writer_sig}
+        D->>G: POST /gfs/channels/publish-anon {channel_id, payload, writer_sig}
     end
-    G-->>D: WS {type:relay, channel_id, space_item, epoch, payload}
-    D->>D: channel_id → local space; strict-frame checks; apply
+    G-->>E: WS {type:relay, channel_id, space_item, epoch, payload}
+    E->>E: channel_id → local space; strict-frame checks; apply
+    E->>G: POST /gfs/envelope {to_instance: O, sealed post} (queued for O)
+    Note over O: host back online
+    D->>O: §25.6 catch-up sync (host re-advertised on startup) — E's post
     Note over G: never sees space id, name, space key or owner id
 ```
 
@@ -1562,10 +1601,11 @@ sequenceDiagram
 in [`principles.md`](../principles.md)):
 
 - that a channel exists, its key, when its epoch moves and its mode;
-- **its member households** (every subscribed v_51 member household —
-  paired members included, not only link-joined ones), the set's size and
-  changes, and the timing and size bucket of every item;
-- in trusted mode, which member household published each item; in strict
+- **its link-joined member households** (the only seats — the households
+  whose envelopes it already relays), the set's size and changes, and the
+  timing and size bucket of every item;
+- in trusted mode, which member household published each item (a paired
+  member appears only as a publisher, never as a subscriber); in strict
   mode, only that some publisher did;
 - **never** the space id, its name, its authority key or its content.
 
@@ -1575,30 +1615,28 @@ member's `/gfs/envelope`, it registers and announces from the IP of its own
 authenticated WebSocket, and a member's channel publish leaves at the same
 moment as its envelope to the host — IP and timing correlation can tie the
 owner to the channel (the accepted limit of every anonymous GFS path). A
-member's subscribe and its WS share an IP, like everywhere else.
-After an authority rotation the owner can no longer sign for the old
-channel, so it is not unregistered: it idles out after 30 days (the revoked
-seed holder could keep it alive, but no member uses it). The mode at one
-epoch is ordered by the notice `ts`, so a delegated admin whose copy of the
-mode lags can flip it until the owner's next notice; a member whose own
-copy lags may send one identified request the server then refuses (but
-sees). A member of two spaces whose other owner hands it a validly bound
-grant naming this space's channel id can block this space's grant on that
-household (denial of service only — content is bound to its space).
+member's subscribe and its WS share an IP, like everywhere else. A member
+whose own copy of the mode lags a switch to strict may send one identified
+request the server then refuses (but sees). The take-over lock-out above
+lasts until the owner's next notice.
 
 **Hard requirements on households** (as for public spaces, adapted):
 
 1. **A channel notice at every rotation, before the member rekey**, to every
    server the channel lives on, through the retry queue (`429` → retried).
-2. **A fresh channel after every authority rotation**, announced before the
-   bundles that carry its grants go out (`SpaceAuthorityRotationService
+2. **A fresh channel after every authority rotation**: the old one is
+   unregistered before the seed is swapped, and the new one announced before
+   the bundles that carry its grants go out (`SpaceAuthorityRotationService
    ._distribute` reconciles first).
 3. **`gfs_instance_id` in every signed request**, the id pinned from that
    server's `/gfs/info`.
 4. **No space id in any channel request** — the space writer cert stays
    inside the ciphertext in both modes, and every request has an exact key
    set (a `space_id` field is a 400).
-5. **The owner never subscribes to or publishes into its own channel.**
+5. **The owner never subscribes to or publishes into its own channel**, and
+   only link-joined households take a seat.
+6. **The owner replaces a channel another key holder moved past it**
+   (self-heal above).
 
 ## Flow — publish + browse + join
 

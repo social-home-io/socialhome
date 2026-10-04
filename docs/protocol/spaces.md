@@ -1119,7 +1119,8 @@ link-joined member household, the same four channels also carry
 connection-server channel (`{channel_suite, space_id, channel_id,
 channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite, binding_sig, channel_pass,
 channel_cert?, writer_key?}`), to every v_51 member household with a live
-seat (a reader gets a pass but no cert). It is bound to the space by the
+seat — a pass only for a link-joined household (the only seats), a cert or
+writer key for writers (a paired reader gets none). It is bound to the space by the
 authority key, verified against the pinned space key and kept KEK-wrapped on
 `space_keys.gfs_channel`; a snapshot's grant is taken only from the host.
 See [`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).

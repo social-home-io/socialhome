@@ -2458,7 +2458,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
           the owner's notice right away (members holding a key for the current
           epoch keep publishing anonymously, which the server accepts in
           either mode, until the next rotation hands out no key)."""
-        if space.features.gfs_publish_mode == "strict":
+        # A private space's channel (v_51) takes a mode change only with an
+        # epoch raise, so either direction rotates there.
+        channel_space = self._member_gfs is not None and (
+            await self._member_gfs.channel_space(space.id)
+        )
+        if space.features.gfs_publish_mode == "strict" or channel_space:
             await self._rotate_and_distribute_space_key(space.id)
             return
         if self._member_gfs is not None:

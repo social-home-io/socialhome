@@ -3,8 +3,9 @@ connection server nothing about the space.
 
 Drives a real GFS app end to end with the households' real services: the
 owner's :class:`GfsChannelService` registers the channel and announces its
-epoch; two member households accept their grants, subscribe and publish
-through the real :class:`GfsMemberPublishService` (trusted, then strict).
+epoch; a link-joined member takes a seat, and a paired member (publish-only,
+never a seat) publishes through the real :class:`GfsMemberPublishService`
+(trusted, then strict).
 Every place the server could see or keep anything is checked — every request
 it receives over every session (URL and body), its log records, its database
 file and the fan-out frames. None may carry the private space's id, its name
@@ -366,10 +367,12 @@ async def test_the_gfs_never_learns_the_private_space(world):
     await _grant(world, world.b)
 
     # Trusted: a publishes a post; b's seat gets it.
-    targets = await world.a.member.plan_item(SPACE_ID, AUTHOR, "post")
+    # Trusted: paired b (publish-only, no seat) publishes; link-joined a's
+    # seat gets it.
+    targets = await world.b.member.plan_item(SPACE_ID, AUTHOR, "post")
     assert targets
     inner = {"post_id": "p-1", "space_id": SPACE_ID, "content": "secret recipe"}
-    assert await world.a.member.publish_item(SPACE_ID, "post", inner, targets)
+    assert await world.b.member.publish_item(SPACE_ID, "post", inner, targets)
 
     # Strict: the owner switches; new grants carry the channel writer key.
     for node in (world.owner, world.a, world.b):
@@ -377,16 +380,21 @@ async def test_the_gfs_never_learns_the_private_space(world):
     await world.owner.channels.announce_epoch(SPACE_ID)
     await _grant(world, world.a)
     await _grant(world, world.b)
-    targets = await world.a.member.plan_item(SPACE_ID, AUTHOR, "comment")
+    targets = await world.b.member.plan_item(SPACE_ID, AUTHOR, "comment")
     assert targets
     inner2 = {"post_id": "p-1", "space_id": SPACE_ID, "content": "anon comment"}
-    assert await world.a.member.publish_item(SPACE_ID, "comment", inner2, targets)
+    assert await world.b.member.publish_item(SPACE_ID, "comment", inner2, targets)
 
     await world.app[gfs_member_publish_key].wait_idle()
     queued = await world.app[gfs_envelope_queue_repo_key].list_for(
-        world.b.h.instance_id, now=0
+        world.a.h.instance_id, now=0
     )
     assert len(queued) == 2
+    # Only the link-joined household holds a seat: the server learns the
+    # paired member b only as a (trusted) publisher, never as a subscriber.
+    seats = [b for _m, u, b in world.requests if u.endswith("/gfs/channels/subscribe")]
+    assert [b["instance_id"] for b in seats] == [world.a.h.instance_id] * len(seats)
+    assert seats
     for row in queued:
         assert set(row.sealed) == CHANNEL_FRAME_KEYS
         assert row.sealed["channel_id"] == channel_id

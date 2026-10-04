@@ -105,7 +105,7 @@ class AbstractSpaceRepo(Protocol):
     async def set_gfs_channel(
         self, space_id: str, channel_id: str | None, channel_pk: str | None
     ) -> bool: ...
-    async def space_for_gfs_channel(self, channel_id: str) -> str | None: ...
+    async def spaces_for_gfs_channel(self, channel_id: str) -> list[str]: ...
     async def get_owner_user_id(self, space_id: str) -> str | None: ...
     async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
@@ -1025,33 +1025,22 @@ class SqliteSpaceRepo:
     async def set_gfs_channel(
         self, space_id: str, channel_id: str | None, channel_pk: str | None
     ) -> bool:
-        """Point the space at a channel (``None`` forgets it). ``False`` when
-        another space already claims ``channel_id`` (the partial UNIQUE index
-        — a grant naming someone else's channel is refused) or the space is
-        unknown."""
-
-        def _run(conn) -> bool:
-            if channel_id is not None:
-                taken = conn.execute(
-                    "SELECT 1 FROM spaces WHERE gfs_channel_id=? AND id<>?",
-                    (channel_id, space_id),
-                ).fetchone()
-                if taken is not None:
-                    return False
-            cur = conn.execute(
-                "UPDATE spaces SET gfs_channel_id=?, gfs_channel_pk=? WHERE id=?",
-                (channel_id, channel_pk if channel_id is not None else None, space_id),
-            )
-            return bool(cur.rowcount)
-
-        return bool(await self._db.transact(_run))
-
-    async def space_for_gfs_channel(self, channel_id: str) -> str | None:
-        """The space an inbound channel frame belongs to, or ``None``."""
-        row = await self._db.fetchone(
-            "SELECT id FROM spaces WHERE gfs_channel_id=?", (channel_id,)
+        """Point the space at a channel (``None`` forgets it). ``False`` for
+        an unknown space. Several spaces may name one id (no first-come
+        claim another space's owner could take): inbound frames try each
+        and the content key decides."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET gfs_channel_id=?, gfs_channel_pk=? WHERE id=?",
+            (channel_id, channel_pk if channel_id is not None else None, space_id),
         )
-        return str(row["id"]) if row is not None else None
+        return changed > 0
+
+    async def spaces_for_gfs_channel(self, channel_id: str) -> list[str]:
+        """Every space that names ``channel_id`` (normally exactly one)."""
+        rows = await self._db.fetchall(
+            "SELECT id FROM spaces WHERE gfs_channel_id=? ORDER BY id", (channel_id,)
+        )
+        return [str(r["id"]) for r in rows]
 
     async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None:
         """Record the owner's ``user_id`` on a stub (migration 0070); ``None``

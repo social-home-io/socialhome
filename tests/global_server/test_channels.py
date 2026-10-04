@@ -53,7 +53,6 @@ from socialhome.gfs_channel import (
     issue_channel_cert,
     issue_channel_pass,
     issue_channel_writer_key,
-    issue_repin_cert,
     new_channel_id,
     sign_notice,
     sign_publish_anon,
@@ -288,7 +287,7 @@ async def test_register_pins_on_first_use_and_refreshes(gfs) -> None:
 
 
 @pytest.mark.security
-async def test_repin_without_a_chained_cert_is_refused(gfs) -> None:
+async def test_another_key_for_a_pinned_id_is_refused_there_is_no_repin(gfs) -> None:
     await _ready(gfs)
     squatter = os.urandom(32)
     body = sign_register(
@@ -298,56 +297,31 @@ async def test_repin_without_a_chained_cert_is_refused(gfs) -> None:
     assert resp.status == 409
     row = await gfs.app_[gfs_channel_repo_key].get(gfs.ch.id)
     assert row.channel_pk == gfs.ch.pk
-    assert row.epoch == 3
+    # A re-pin field is not a feature: the body is malformed.
+    body = {**gfs.ch.register(), "repin_cert": {"anything": 1}}
+    resp = await gfs.post("/gfs/channels/register", json=body)
+    assert resp.status == 400
 
 
-@pytest.mark.security
-async def test_repin_with_a_cert_from_the_wrong_key_is_refused(gfs) -> None:
-    await _ready(gfs)
-    new_seed = os.urandom(32)
-    cert = issue_repin_cert(
-        pinned_seed=new_seed,  # self-signed, not the pinned key
-        channel_id=gfs.ch.id,
-        new_channel_pk=channel_pk_of(new_seed),
-        key_epoch=1,
-    )
-    body = sign_register(
-        channel_seed=new_seed,
-        channel_id=gfs.ch.id,
-        gfs_instance_id=GFS_ID,
-        ts=_now(),
-        repin_cert=cert,
-    ).to_wire()
-    await _refused(await gfs.post("/gfs/channels/register", json=body))
-
-
-async def test_a_chained_repin_moves_the_pin_and_clears_the_epoch(gfs) -> None:
-    await _ready(gfs)
-    new_seed = os.urandom(32)
-
-    def _repin(key_epoch: int) -> dict:
-        cert = issue_repin_cert(
-            pinned_seed=gfs.ch.seed,
-            channel_id=gfs.ch.id,
-            new_channel_pk=channel_pk_of(new_seed),
-            key_epoch=key_epoch,
-        )
-        return sign_register(
-            channel_seed=new_seed,
-            channel_id=gfs.ch.id,
-            gfs_instance_id=GFS_ID,
-            ts=_now(),
-            repin_cert=cert,
-        ).to_wire()
-
-    resp = await gfs.post("/gfs/channels/register", json=_repin(1))
-    assert resp.status == 200
-    assert await resp.json() == {"status": "repinned"}
-    row = await gfs.app_[gfs_channel_repo_key].get(gfs.ch.id)
-    assert row.channel_pk == channel_pk_of(new_seed)
-    assert row.epoch is None and row.key_epoch == 1
-    # The old key's notices no longer count.
-    await _refused(await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(4)))
+async def test_registration_stops_at_the_server_wide_cap(gfs) -> None:
+    """C2: a per-address budget alone lets many addresses grow the table
+    without bound — a server-wide cap answers 503."""
+    svc = gfs.app_[gfs_channel_service_key]
+    svc._max_channels = 3
+    for _ in range(3):
+        resp = await gfs.post("/gfs/channels/register", json=_Channel().register())
+        assert resp.status == 201
+    resp = await gfs.post("/gfs/channels/register", json=_Channel().register())
+    assert resp.status == 503
+    # Refreshing a channel that exists still works at the cap.
+    first = _Channel()
+    svc._max_channels = 4
+    assert (
+        await gfs.post("/gfs/channels/register", json=first.register())
+    ).status == 201
+    assert (
+        await gfs.post("/gfs/channels/register", json=first.register())
+    ).status == 200
 
 
 @pytest.mark.security
@@ -435,17 +409,51 @@ async def test_first_notice_is_bounded_by_the_ceiling(gfs) -> None:
     await _refused(await gfs.post("/gfs/channels/epoch", json=other.notice(2**62 + 1)))
 
 
-async def test_mode_moves_forward_only(gfs) -> None:
+async def test_mode_moves_only_with_a_higher_epoch(gfs) -> None:
+    """A mode switch rotates: only a notice that raises the epoch moves the
+    mode — a replay or a lagging seed holder at the current epoch never
+    flips it."""
     await _ready(gfs)
     repo = gfs.app_[gfs_channel_repo_key]
     resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3, "strict"))
     assert resp.status == 200
-    assert (await repo.get(gfs.ch.id)).strict
+    assert not (await repo.get(gfs.ch.id)).strict
+    _advance(gfs, 61)
     resp = await gfs.post(
-        "/gfs/channels/epoch", json=gfs.ch.notice(3, "trusted", ts=_now(-200))
+        "/gfs/channels/epoch", json=gfs.ch.notice(4, "strict", ts=_now(61))
     )
     assert resp.status == 200
     assert (await repo.get(gfs.ch.id)).strict
+    resp = await gfs.post(
+        "/gfs/channels/epoch", json=gfs.ch.notice(4, "trusted", ts=_now(61))
+    )
+    assert (await repo.get(gfs.ch.id)).strict
+
+
+@pytest.mark.security
+async def test_a_notice_reports_what_the_server_holds(gfs) -> None:
+    """C1: another key holder stepping the epoch locks writers out; the
+    answer to the owner's next notice shows it the server is past it."""
+    await _ready(gfs, epoch=3)
+    _advance(gfs, 61)
+    assert (
+        await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(4, ts=_now(61)))
+    ).status == 200
+    _advance(gfs, 122)
+    assert (
+        await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(5, ts=_now(122)))
+    ).status == 200
+    # The owner, still at 3, announces: told the server holds 5.
+    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3, ts=_now(122)))
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["epoch"] == 5 and body["writer_pk"] is None
+    # Members' certs at 3 are refused now — the lock-out the owner heals.
+    await _refused(
+        await gfs.post(
+            "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 3)
+        )
+    )
 
 
 async def test_writer_key_is_pinned_only_at_the_current_epoch(gfs) -> None:
