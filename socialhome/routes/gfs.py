@@ -56,6 +56,11 @@ _SIGNUP_ERRORS: dict[str, tuple[int, str, str]] = {
         "GFS_UNREACHABLE",
         "Couldn't reach the GFS. Try again later.",
     ),
+    "identity_mismatch": (
+        422,
+        "GFS_IDENTITY_MISMATCH",
+        "This doesn't look like the Social Home GFS. Check the address in settings.",
+    ),
     "closed": (
         409,
         "GFS_SIGNUP_CLOSED",
@@ -176,7 +181,9 @@ class GfsDefaultConnectionView(BaseView):
     code the SPA turns into plain words: ``GFS_DEFAULT_DISABLED`` (404),
     ``NOT_CONFIGURED`` (422), ``ALREADY_CONNECTED`` (409),
     ``GFS_SIGNUP_CLOSED`` (409), ``GFS_UNREACHABLE`` (502), ``GFS_BUSY``
-    (503) or ``GFS_PAIRING_FAILED`` (422).
+    (503), ``GFS_IDENTITY_MISMATCH`` (422 — ``/gfs/info`` doesn't match the
+    pinned ``[gfs] default_instance_id`` / ``default_public_key``) or
+    ``GFS_PAIRING_FAILED`` (422).
     """
 
     async def _existing(self, url: str):
@@ -218,7 +225,8 @@ class GfsDefaultConnectionView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "Authentication required.")
         if not ctx.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
-        url = str(self.request.app[K.config_key].gfs_default_url or "")
+        config = self.request.app[K.config_key]
+        url = str(config.gfs_default_url or "")
         if not url:
             return error_response(
                 404,
@@ -230,7 +238,10 @@ class GfsDefaultConnectionView(BaseView):
             return _not_configured()
         svc = self.svc(K.gfs_connection_service_key)
         try:
-            conn = await svc.pair_open_signup(url, **own)
+            pin_id, pin_key = config.gfs_default_pin()
+            conn = await svc.pair_open_signup(
+                url, **own, expect_instance_id=pin_id, expect_public_key=pin_key
+            )
         except GfsSignupError as exc:
             status, code, message = _SIGNUP_ERRORS.get(
                 exc.reason, _SIGNUP_ERRORS["refused"]

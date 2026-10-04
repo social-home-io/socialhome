@@ -58,6 +58,7 @@ async def _household(
     *,
     default_url: str,
     external_url: str | None = "https://home.example",
+    **cfg_extra,
 ):
     home = tmp_dir / "home"
     home.mkdir(exist_ok=True)
@@ -79,6 +80,7 @@ async def _household(
         instance_name="Alpha House",
         gfs_default_url=default_url,
         platform_options=options,
+        **cfg_extra,
     )
     tc = await aiohttp_client(create_app(cfg))
     db = tc.app[db_key]
@@ -265,3 +267,31 @@ async def test_post_is_admin_only(aiohttp_client, tmp_dir, headers):
     r = await home.post(PATH, headers=headers)
     assert r.status in (401, 403)
     assert await gfs.server.app[gfs_fed_repo_key].list_instances() == []
+
+
+async def test_post_refuses_a_gfs_that_is_not_the_pinned_one(aiohttp_client, tmp_dir):
+    gfs = await _gfs(aiohttp_client, tmp_dir)
+    home = await _household(
+        aiohttp_client,
+        tmp_dir,
+        default_url=_url(gfs),
+        gfs_default_instance_id="gfs-real",
+    )
+    r = await home.post(PATH, headers=ADMIN)
+    assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "GFS_IDENTITY_MISMATCH"
+    assert "doesn't look like the Social Home GFS" in body["error"]["detail"]
+    assert await gfs.server.app[gfs_fed_repo_key].list_instances() == []
+
+
+async def test_post_accepts_the_pinned_gfs(aiohttp_client, tmp_dir):
+    gfs = await _gfs(aiohttp_client, tmp_dir)
+    home = await _household(
+        aiohttp_client,
+        tmp_dir,
+        default_url=_url(gfs),
+        gfs_default_instance_id="gfs-default",
+    )
+    r = await home.post(PATH, headers=ADMIN)
+    assert r.status == 201

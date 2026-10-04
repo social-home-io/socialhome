@@ -1497,5 +1497,6 @@
   "onboarding.gfs.illus_links": "Liens GFS",
   "onboarding.gfs.illus_public": "Espaces publics",
   "onboarding.gfs.illus_offline": "Pendant que vous êtes hors ligne",
-  "onboarding.gfs.illus_meta": "Voit qui participe, jamais ce qui est publié"
+  "onboarding.gfs.illus_meta": "Voit qui participe, jamais ce qui est publié",
+  "onboarding.gfs.error_identity": "Ce n'est apparemment pas le GFS de Social Home. Vérifiez l'adresse dans les paramètres."
 }

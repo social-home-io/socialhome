@@ -356,9 +356,10 @@ fraud_threshold     = 5
 # Open sign-up: hand out pairing codes automatically over
 # POST /gfs/signup-token, so a household can connect from its onboarding
 # with one click instead of scanning the QR code. Off by default. Rate
-# limited per address and globally, but anyone can still sign up: on a
-# public server keep auto_accept_clients = false above and approve
-# households in the admin console. Env override: GFS_OPEN_SIGNUP=true.
+# limited per address and globally (still ~43k registrations a day at the
+# global limit), so anyone can sign up: with open_signup on, set
+# auto_accept_clients = false above and approve households in the admin
+# console. Env override: GFS_OPEN_SIGNUP=true.
 open_signup = false
 
 [admin]

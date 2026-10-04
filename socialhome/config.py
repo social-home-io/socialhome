@@ -103,6 +103,17 @@ _CORE_SECTIONS: frozenset[str] = frozenset(
 )
 
 
+#: The project's GFS — the shipped ``[gfs] default_url``.
+PROJECT_GFS_URL = "https://gfs.social-home.io"
+
+#: The project GFS's identity, pinned before an open sign-up when the
+#: household uses the shipped :data:`PROJECT_GFS_URL`. Deliberately EMPTY
+#: until the project publishes the real values — an invented id would refuse
+#: the genuine server. Empty means "no pin" (TOFU only, like a QR scan).
+PROJECT_GFS_INSTANCE_ID = ""
+PROJECT_GFS_PUBLIC_KEY = ""
+
+
 @dataclass(slots=True, frozen=True)
 class Config:
     """Top-level runtime configuration."""
@@ -200,7 +211,15 @@ class Config:
     #: yes. The empty string hides the step; operators may point it at their
     #: own GFS. The GFS must advertise ``open_signup`` in its signed
     #: ``/gfs/info`` capability block for the one-click path to work.
-    gfs_default_url: str = "https://gfs.social-home.io"
+    gfs_default_url: str = PROJECT_GFS_URL
+
+    #: Optional identity pin for the default GFS (``[gfs] default_instance_id``
+    #: / ``SH_GFS_DEFAULT_INSTANCE_ID``, ``[gfs] default_public_key`` /
+    #: ``SH_GFS_DEFAULT_PUBLIC_KEY``, hex Ed25519). When set, the one-click
+    #: connect refuses a GFS whose ``/gfs/info`` names a different id / key.
+    #: See :meth:`gfs_default_pin` for how the shipped pin applies.
+    gfs_default_instance_id: str = ""
+    gfs_default_public_key: str = ""
 
     #: Set ``True`` in TLS (HTTPS) deployments to mark session cookies
     #: and the app-bundle path-scoped cookie as ``Secure`` so they are
@@ -216,6 +235,21 @@ class Config:
     platform_options: Mapping[str, Mapping[str, Any]] = field(
         default_factory=lambda: MappingProxyType({}),
     )
+
+    def gfs_default_pin(self) -> tuple[str, str]:
+        """``(instance_id, public_key)`` the default GFS must present, ``""``
+        meaning "not pinned".
+
+        An operator-set pin always applies. Otherwise the project's shipped
+        pin applies only while ``default_url`` is the shipped
+        :data:`PROJECT_GFS_URL` — an operator who points the default at
+        their own GFS without setting an id gets no pin, never the project's.
+        """
+        if self.gfs_default_instance_id or self.gfs_default_public_key:
+            return self.gfs_default_instance_id, self.gfs_default_public_key
+        if self.gfs_default_url.rstrip("/") == PROJECT_GFS_URL:
+            return PROJECT_GFS_INSTANCE_ID, PROJECT_GFS_PUBLIC_KEY
+        return "", ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -420,8 +454,20 @@ class Config:
             gfs_default_url=_str_opt(
                 "gfs_default_url",
                 "SH_GFS_DEFAULT_URL",
-                "https://gfs.social-home.io",
+                PROJECT_GFS_URL,
             ).strip(),
+            gfs_default_instance_id=_str_opt(
+                "gfs_default_instance_id",
+                "SH_GFS_DEFAULT_INSTANCE_ID",
+                "",
+            ).strip(),
+            gfs_default_public_key=_str_opt(
+                "gfs_default_public_key",
+                "SH_GFS_DEFAULT_PUBLIC_KEY",
+                "",
+            )
+            .strip()
+            .lower(),
             db_write_batch_max=_int_opt(
                 "db_write_batch_max",
                 "SH_DB_WRITE_BATCH_MAX",

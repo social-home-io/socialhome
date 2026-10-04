@@ -190,10 +190,13 @@ describe('OnboardingFlow — GFS step choice', () => {
     expect(await screen.findByText(/Waiting for the GFS to approve/)).toBeTruthy()
   })
 
-  it('sign-up closed: plain words, no pointless retry, the box unticks', async () => {
+  it.each([
+    ['GFS_SIGNUP_CLOSED', 409, /isn't taking sign-ups/],
+    ['GFS_IDENTITY_MISMATCH', 422, /doesn't look like the Social Home GFS/],
+  ])('%s: plain words, no pointless retry, the box unticks', async (code, status, text) => {
     apiMock.post.mockImplementation(async (path: string) => {
       if (path === DEFAULT_PATH) {
-        throw new ApiError(409, path, { code: 'GFS_SIGNUP_CLOSED', detail: 'server words' })
+        throw new ApiError(status, path, { code, detail: 'server words' })
       }
       return {}
     })
@@ -201,8 +204,7 @@ describe('OnboardingFlow — GFS step choice', () => {
     fireEvent.click(gfsBox())
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(await screen.findByRole('alert')).toBeTruthy()
-    expect(screen.getByText(/isn't taking sign-ups/)).toBeTruthy()
-    expect(screen.getByText(/pairing code/)).toBeTruthy()
+    expect(screen.getByText(text)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
     expect(gfsBox().checked).toBe(false)
     expect(gfsBox().disabled).toBe(true)

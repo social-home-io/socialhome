@@ -408,3 +408,45 @@ async def test_register_answer_that_is_not_an_object_counts_as_registered(repo):
     )
     conn = await _svc(repo, stub).pair_open_signup(GFS_URL, **OWN)
     assert conn.status == "active"
+
+
+# ─── Identity pin for the default GFS ────────────────────────────────────
+
+
+def _open_stub() -> _Stub:
+    return _Stub(
+        {
+            "/gfs/info": _Resp(200, _info({"open_signup": True})),
+            "/gfs/signup-token": _Resp(200, {"token": "t"}),
+            "/gfs/register": _Resp(200, {"status": "registered"}),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "pin",
+    [
+        {"expect_instance_id": "gfs-somebody-else"},
+        {"expect_public_key": "ee" * 32},
+        {"expect_instance_id": "gfs-x", "expect_public_key": "ee" * 32},
+    ],
+)
+async def test_pinned_identity_mismatch_stops_before_any_signup(repo, pin):
+    stub = _open_stub()
+    with pytest.raises(GfsSignupError) as exc:
+        await _svc(repo, stub).pair_open_signup(GFS_URL, **OWN, **pin)
+    assert exc.value.reason == "identity_mismatch"
+    assert [m for m, _u, _b in stub.calls] == ["GET"]
+    assert await repo.list_all() == []
+
+
+async def test_pinned_identity_match_pairs(repo):
+    stub = _open_stub()
+    conn = await _svc(repo, stub).pair_open_signup(
+        GFS_URL,
+        **OWN,
+        expect_instance_id="gfs-x",
+        expect_public_key=_KP.public_key.hex().upper(),
+    )
+    assert conn.gfs_instance_id == "gfs-x"
+    assert conn.public_key == _KP.public_key.hex()

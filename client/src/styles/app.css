@@ -9139,16 +9139,19 @@ button.sh-shopping-item__text:focus-visible {
   position: relative;
   flex-shrink: 0;
 }
+/* A real checkmark: the right + bottom border of a small box, rotated —
+   the old two-gradient drawing rendered as a down-chevron. The stroke takes
+   the on-success ink so it holds contrast on the light (dark-theme) moss. */
 .sh-onboard-tick::after {
   content: "";
   position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(45deg, transparent 38%, #fff 38% 50%, transparent 50%),
-    linear-gradient(-45deg, transparent 38%, #fff 38% 50%, transparent 50%);
-  background-size: 7px 2px;
-  background-repeat: no-repeat;
-  background-position: 3px 7px, 7px 7px;
+  left: 5px;
+  top: 2.5px;
+  width: 3px;
+  height: 6.5px;
+  border: solid var(--sh-on-success-fill, #fff);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
 }
 .sh-onboard-tick--empty {
   background: transparent;

@@ -178,6 +178,8 @@ class GfsSignupError(GfsConnectionError):
     * ``invalid_url`` — the GFS or own inbox URL fails the transport rules;
     * ``already_connected`` — this household already has that GFS;
     * ``unreachable`` — no answer, or a 5xx;
+    * ``identity_mismatch`` — ``/gfs/info`` names another id / key than the
+      pinned default GFS;
     * ``closed`` — no verified ``open_signup`` capability, or the token
       endpoint said no (403/404);
     * ``busy`` — the GFS rate-limited the token request (429);
@@ -472,6 +474,8 @@ class GfsConnectionService:
         own_display_name: str = "",
         own_keywrap_public_key_hex: str = "",
         own_keywrap_sig: str = "",
+        expect_instance_id: str = "",
+        expect_public_key: str = "",
     ) -> GfsConnection:
         """Pair with *gfs_url* through its open sign-up — no QR code.
 
@@ -488,9 +492,14 @@ class GfsConnectionService:
            pairing sends; the key pinned is the one verified in step 1 — no
            second descriptor fetch an on-path attacker could swap.
 
+        *expect_instance_id* / *expect_public_key* pin the server's identity
+        (the configured default GFS): a descriptor naming another id or key
+        is refused before anything else is sent. Empty means no pin.
+
         Raises :class:`GfsSignupError` whose ``reason`` the route maps to a
         plain message: ``invalid_url``, ``already_connected``,
-        ``unreachable``, ``closed``, ``busy`` or ``refused``. Nothing leaves
+        ``unreachable``, ``identity_mismatch``, ``closed``, ``busy`` or
+        ``refused``. Nothing leaves
         this household before the URL checks pass.
         """
         gfs_url = str(gfs_url or "").rstrip("/")
@@ -516,6 +525,23 @@ class GfsConnectionService:
             info = await self._fetch_descriptor(gfs_url)
         except GfsConnectionError as exc:
             raise GfsSignupError(str(exc), reason="unreachable") from exc
+        if (
+            expect_instance_id
+            and str(info.get("gfs_instance_id")) != expect_instance_id
+        ) or (
+            expect_public_key
+            and str(info.get("public_key")).lower() != expect_public_key.lower()
+        ):
+            log.warning(
+                "GFS %s does not match the pinned default GFS identity "
+                "(instance id %r) — open sign-up refused",
+                gfs_url,
+                info.get("gfs_instance_id"),
+            )
+            raise GfsSignupError(
+                "The GFS at that address is not the configured default GFS",
+                reason="identity_mismatch",
+            )
         if not _descriptor_offers_open_signup(info):
             raise GfsSignupError(
                 "The GFS does not offer open sign-up (no verified open_signup"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from socialhome import config as config_mod
 from socialhome.config import Config, _split_toml
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 
@@ -249,3 +250,40 @@ def test_gfs_default_url_env_overrides_toml(tmp_path, monkeypatch):
     monkeypatch.setenv("SH_CONFIG", str(toml_file))
     monkeypatch.setenv("SH_GFS_DEFAULT_URL", "")
     assert Config.from_env().gfs_default_url == ""
+
+
+def test_gfs_default_pin_is_empty_until_the_project_publishes_one():
+    """No invented identity: the shipped pin is empty, so nothing is pinned."""
+    cfg = Config()
+    assert cfg.gfs_default_instance_id == ""
+    assert cfg.gfs_default_public_key == ""
+    assert cfg.gfs_default_pin() == ("", "")
+
+
+def test_gfs_default_pin_from_toml_and_env(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text(
+        '[gfs]\ndefault_url = "https://gfs.example.org"\n'
+        'default_instance_id = "gfs-node-0"\n'
+        'default_public_key = "ab"\n'
+    )
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    cfg = Config.from_env()
+    assert cfg.gfs_default_pin() == ("gfs-node-0", "ab")
+    monkeypatch.setenv("SH_GFS_DEFAULT_INSTANCE_ID", "other")
+    monkeypatch.setenv("SH_GFS_DEFAULT_PUBLIC_KEY", "")
+    assert Config.from_env().gfs_default_pin() == ("other", "")
+
+
+def test_shipped_pin_applies_only_to_the_shipped_url(monkeypatch):
+    """The project's own identity (once shipped) pins the project URL only —
+    an operator who points default_url elsewhere without an id gets no pin."""
+    monkeypatch.setattr(config_mod, "PROJECT_GFS_INSTANCE_ID", "gfs-project")
+    monkeypatch.setattr(config_mod, "PROJECT_GFS_PUBLIC_KEY", "cafe")
+    assert Config().gfs_default_pin() == ("gfs-project", "cafe")
+    other = Config(gfs_default_url="https://gfs.example.org")
+    assert other.gfs_default_pin() == ("", "")
+    pinned = Config(
+        gfs_default_url="https://gfs.example.org", gfs_default_instance_id="mine"
+    )
+    assert pinned.gfs_default_pin() == ("mine", "")

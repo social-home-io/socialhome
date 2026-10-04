@@ -136,6 +136,9 @@ interface GfsOffer {
 
 type GfsState = 'idle' | 'connecting' | 'active' | 'pending' | 'error'
 
+/** Errors a retry can't fix: no Try again, the box unticks. */
+const FINAL_GFS_ERRORS = new Set(['GFS_SIGNUP_CLOSED', 'GFS_IDENTITY_MISMATCH'])
+
 /** Error code from ``POST /api/gfs/connections/default`` → our own words
  *  (never the server's detail, which may quote the GFS). */
 function gfsErrorText(code: string | null): string {
@@ -143,6 +146,7 @@ function gfsErrorText(code: string | null): string {
     case 'GFS_UNREACHABLE': return t('onboarding.gfs.error_unreachable')
     case 'GFS_SIGNUP_CLOSED': return t('onboarding.gfs.error_closed')
     case 'GFS_BUSY': return t('onboarding.gfs.error_busy')
+    case 'GFS_IDENTITY_MISMATCH': return t('onboarding.gfs.error_identity')
     case 'NOT_CONFIGURED': return noExternalUrlText()
     default: return t('onboarding.gfs.error_refused')
   }
@@ -193,7 +197,7 @@ interface GfsStepProps {
 function GfsStepBody({ offer, wanted, state, errorCode, onWantedChange }: GfsStepProps) {
   const canPair = offer.available
   const done = state === 'active' || state === 'pending'
-  const closed = state === 'error' && errorCode === 'GFS_SIGNUP_CLOSED'
+  const closed = state === 'error' && errorCode !== null && FINAL_GFS_ERRORS.has(errorCode)
   return (
     <div class="sh-onboarding-gfs">
       <p class="sh-onboarding-body">{t('onboarding.gfs.intro')}</p>
@@ -300,9 +304,9 @@ export function OnboardingFlow({ onComplete }: { onComplete: () => void }) {
         setGfsState('active')
         return
       }
-      // A closed sign-up won't open on a retry: untick, so the primary
-      // button just finishes and the message points at the pairing code.
-      if (code === 'GFS_SIGNUP_CLOSED') setGfsWanted(false)
+      // A closed sign-up or the wrong server won't change on a retry:
+      // untick, so the primary button just finishes.
+      if (code !== null && FINAL_GFS_ERRORS.has(code)) setGfsWanted(false)
       setGfsError(code)
       setGfsState('error')
     }

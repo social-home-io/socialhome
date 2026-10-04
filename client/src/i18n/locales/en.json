@@ -1814,5 +1814,6 @@
   "onboarding.gfs.illus_links": "GFS links",
   "onboarding.gfs.illus_public": "Public spaces",
   "onboarding.gfs.illus_offline": "While you're offline",
-  "onboarding.gfs.illus_meta": "Sees who takes part, never what's posted"
+  "onboarding.gfs.illus_meta": "Sees who takes part, never what's posted",
+  "onboarding.gfs.error_identity": "This doesn't look like the Social Home GFS. Check the address in settings."
 }

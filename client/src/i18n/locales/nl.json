@@ -1497,5 +1497,6 @@
   "onboarding.gfs.illus_links": "GFS-links",
   "onboarding.gfs.illus_public": "Openbare ruimtes",
   "onboarding.gfs.illus_offline": "Terwijl je offline bent",
-  "onboarding.gfs.illus_meta": "Ziet wie meedoet, nooit wat er wordt geplaatst"
+  "onboarding.gfs.illus_meta": "Ziet wie meedoet, nooit wat er wordt geplaatst",
+  "onboarding.gfs.error_identity": "Dit lijkt niet de GFS van Social Home. Controleer het adres in de instellingen."
 }

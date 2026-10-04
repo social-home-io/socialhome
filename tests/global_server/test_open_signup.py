@@ -9,6 +9,7 @@ token is the same short-lived, single-use one the landing-page QR carries.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import replace
 
@@ -203,3 +204,44 @@ def test_open_signup_loads_from_toml_and_env(tmp_path, monkeypatch):
 
 def test_example_toml_documents_open_signup():
     assert "open_signup = false" in EXAMPLE_TOML
+
+
+async def test_one_signup_token_registers_exactly_one_household(open_client):
+    """Regression (review R1): consuming a token was a SELECT then a separate
+    UPDATE, so 20 concurrent registers on ONE token all succeeded — one
+    sign-up token could mint unboundedly many households. Each request comes
+    from its own address so the register rate limit doesn't mask the race."""
+    resp = await open_client.post("/gfs/signup-token", headers=_ip(9))
+    token = (await resp.json())["token"]
+    resps = await asyncio.gather(
+        *[
+            open_client.post(
+                "/gfs/register",
+                json=_register_body(token, f"sybil-{i}"),
+                headers=_ip(100 + i),
+            )
+            for i in range(20)
+        ]
+    )
+    statuses = sorted(r.status for r in resps)
+    assert statuses.count(200) == 1
+    assert statuses.count(401) == 19
+
+
+async def test_register_is_rate_limited_per_ip(open_client):
+    """``/gfs/register`` sheds a per-address flood before any token lookup."""
+    statuses = [
+        (
+            await open_client.post(
+                "/gfs/register", json=_register_body("never-minted"), headers=_ip(60)
+            )
+        ).status
+        for _ in range(public.REGISTER_MAX_PER_MINUTE + 1)
+    ]
+    assert statuses[:-1] == [401] * public.REGISTER_MAX_PER_MINUTE
+    assert statuses[-1] == 429
+    # Another address is unaffected.
+    other = await open_client.post(
+        "/gfs/register", json=_register_body("never-minted"), headers=_ip(61)
+    )
+    assert other.status == 401

@@ -366,6 +366,15 @@ sequenceDiagram
 
 What the household checks and sends:
 
+- **Identity pin for the default GFS.** `[gfs] default_instance_id` /
+  `default_public_key` (`SH_GFS_DEFAULT_INSTANCE_ID` /
+  `SH_GFS_DEFAULT_PUBLIC_KEY`) make the household refuse a server whose
+  `/gfs/info` names another id or key ("This doesn't look like the Social
+  Home GFS"), before anything else is sent. An operator-set pin always
+  applies; the project's own pin (shipped empty until the project publishes
+  it) applies only while `default_url` is the shipped
+  `https://gfs.social-home.io` — pointing the default at your own GFS
+  without an id means no pin.
 - **Same trust as a QR scan.** `/gfs/info` is fetched **once**; the signed
   capability block is verified against the `public_key` in that same
   response — the key the household then pins (TOFU, https unless loopback /
@@ -1080,20 +1089,25 @@ POST /gfs/member-publish
 - **Open sign-up (`[policy] open_signup`) makes registration self-service.**
   Off by default. When on, anyone can ask `POST /gfs/signup-token` for a
   pairing token — no QR code, no landing-page visit — so households can
-  connect from their onboarding in one click. The token endpoint is
-  rate-limited (5 / min per address, 30 / min server-wide, one token per
-  address per 30 s), but that only slows a sybil flood down: a determined
-  operator of many addresses can still register many households. With open
-  sign-up on, **approval is your lever** — keep `auto_accept_clients = false`
-  on a public server and approve households in the admin console; onboarding
-  tells the household it is waiting for approval. Turn `auto_accept_clients`
-  on only for a GFS whose audience you already trust. The server-wide
-  window is shared, so a flood can use it up and make real households wait
-  a minute ("the GFS is busy"); it bounds the damage, it does not prevent
-  it. Turning open sign-up off again stops new tokens at once (one uniform
-  `404`); tokens already handed out still work for their 10 minutes. The capability is
-  advertised (signed) as `open_signup` on `/gfs/info`, so a household only
-  offers the one-click path when it is proven.
+  connect from their onboarding in one click. **With `open_signup` on, set
+  `auto_accept_clients = false`** and approve households in the admin
+  console; onboarding tells the household it is waiting for approval. The
+  token endpoint is rate-limited (5 / min per address, 30 / min
+  server-wide, one token per address per 30 s), but at the global limit that
+  is still about 43 000 registrations a day, and a determined operator of
+  many addresses can register many households — approval is your lever.
+  Turn `auto_accept_clients` on only for a GFS whose audience you already
+  trust. The server-wide window is shared: about six addresses at the
+  per-address limit use it up, and real households then see "the GFS is
+  busy" for a minute. That is acceptable — onboarding falls back to the QR
+  code / pairing code in Settings → Connections, which does not use this
+  window. Each token registers **exactly one** household (consumed with one
+  atomic database update), and `POST /gfs/register` itself is limited to
+  10 / min per address. Turning open sign-up off again stops new tokens at
+  once (one uniform `404`); tokens already handed out still work for their
+  10 minutes. The capability is advertised (signed) as `open_signup` on
+  `/gfs/info`, so a household only offers the one-click path when it is
+  proven.
 - **Offline delivery is best effort.** Queued member items are shared
   fairly — the largest holder's oldest item makes room at the server-wide
   cap — but a crowd of registered, connected households that subscribe to

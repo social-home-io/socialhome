@@ -59,6 +59,7 @@ from .public import (
     build_listing_rate_limit,
     build_public_rtc_rate_limit,
     build_publish_rate_limit,
+    build_register_rate_limit,
     build_signup_rate_limit,
 )
 from .repositories import (
@@ -420,6 +421,7 @@ class GfsApp:
             build_public_rtc_rate_limit(self.client_ip),
             build_publish_rate_limit(self.client_ip),
             build_signup_rate_limit(self.client_ip),
+            build_register_rate_limit(self.client_ip),
             build_envelope_rate_limit(self.client_ip),
             build_member_publish_rate_limit(self.client_ip),
             build_channel_rate_limit(self.client_ip),

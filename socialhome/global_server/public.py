@@ -34,6 +34,7 @@ from . import app_keys as K
 from .config import DEFAULT_TRUSTED_PROXIES
 from .invites import build_invite_code
 from .markdown_lite import render_markdown
+from .repositories import PAIR_TOKEN_TTL_SECONDS as REPO_PAIR_TOKEN_TTL_SECONDS
 
 if TYPE_CHECKING:
     from .repositories import AbstractGfsAdminRepo
@@ -42,8 +43,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-#: Pairing-token TTL (spec §24.7.4).
-PAIR_TOKEN_TTL_SECONDS: int = 600
+#: Pairing-token TTL (spec §24.7.4). The repository enforces it on consume.
+PAIR_TOKEN_TTL_SECONDS: int = REPO_PAIR_TOKEN_TTL_SECONDS
 #: Minimum seconds between new-token requests per IP.
 PAIR_TOKEN_MIN_INTERVAL: int = 30
 #: Public-listing rate limit per IP (spec §24.7.3).
@@ -79,6 +80,11 @@ SIGNUP_MAX_PER_MINUTE: int = 5
 #: on believing a client address. 30/min is far above a project GFS's real
 #: onboarding rate. Read when the app is built.
 SIGNUP_MAX_PER_MINUTE_GLOBAL: int = 30
+
+#: Per-IP/minute cap on ``POST /gfs/register``. A household registers once
+#: per pairing; this sheds token-guessing and replay floods before the token
+#: lookup touches the database.
+REGISTER_MAX_PER_MINUTE: int = 10
 
 #: Hard cap on how many client IPs a rate-limit window tracks at once. The key
 #: is attacker-influenced (one bucket per source address, and a botnet or an
@@ -419,6 +425,16 @@ def build_publish_rate_limit(resolver: ClientIpResolver):
 
 
 SIGNUP_TOKEN_PATH = "/gfs/signup-token"
+
+
+def build_register_rate_limit(resolver: ClientIpResolver):
+    """Per-IP rate limiter for ``POST /gfs/register``
+    (:data:`REGISTER_MAX_PER_MINUTE`)."""
+    return build_window_limiter(
+        resolver,
+        REGISTER_MAX_PER_MINUTE,
+        lambda path: path == "/gfs/register",
+    )
 
 
 def build_signup_rate_limit(resolver: ClientIpResolver):

@@ -1502,5 +1502,6 @@
   "onboarding.gfs.illus_links": "GFS-Links",
   "onboarding.gfs.illus_public": "Öffentliche Räume",
   "onboarding.gfs.illus_offline": "Während du offline bist",
-  "onboarding.gfs.illus_meta": "Sieht, wer dabei ist, nie, was gepostet wird"
+  "onboarding.gfs.illus_meta": "Sieht, wer dabei ist, nie, was gepostet wird",
+  "onboarding.gfs.error_identity": "Das sieht nicht nach dem Social-Home-GFS aus. Prüf die Adresse in den Einstellungen."
 }
