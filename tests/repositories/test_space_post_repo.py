@@ -563,3 +563,68 @@ async def test_malformed_stored_link_preview_reads_as_none(env):
     )
     _, fetched = await env.repo.get("lp-2")
     assert fetched.link_preview is None
+
+
+# ─── v_49: last-writer-wins stamps for member-published edits ──────────
+
+
+async def _edited_at(env, table: str, row_id: str) -> str | None:
+    row = await env.db.fetchone(f"SELECT edited_at FROM {table} WHERE id=?", (row_id,))
+    return row["edited_at"]
+
+
+async def test_a_stamped_post_edit_applies_only_over_an_older_stamp(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    s1, s2 = "2026-10-03 12:00:01.000000", "2026-10-03 12:00:02.000000"
+    assert await env.repo.edit("p1", "second", space_id=env.space_id, edited_at=s2)
+    # An older edit arriving late never wins over the newer one.
+    assert not await env.repo.edit("p1", "first", space_id=env.space_id, edited_at=s1)
+    # Neither does a replay of the same stamp.
+    assert not await env.repo.edit("p1", "again", space_id=env.space_id, edited_at=s2)
+    _sid, post = await env.repo.get("p1")
+    assert post.content == "second"
+    assert await _edited_at(env, "space_posts", "p1") == s2
+
+
+async def test_a_stamped_post_edit_never_touches_a_deleted_post(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    await env.repo.soft_delete("p1", space_id=env.space_id)
+    assert not await env.repo.edit(
+        "p1", "back", space_id=env.space_id, edited_at="2026-10-03 12:00:00.000000"
+    )
+    _sid, post = await env.repo.get("p1")
+    assert post.deleted and post.content is None
+
+
+async def test_an_unstamped_post_edit_keeps_todays_behaviour(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    assert await env.repo.edit("p1", "local", space_id=env.space_id)
+    assert await _edited_at(env, "space_posts", "p1") is not None
+
+
+async def test_a_stamped_comment_edit_applies_only_over_an_older_stamp(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    await env.repo.add_comment(_comment("c1", "p1"), space_id=env.space_id)
+    s1, s2 = "2026-10-03 12:00:01.000000", "2026-10-03 12:00:02.000000"
+    assert await env.repo.edit_comment(
+        "c1", "second", space_id=env.space_id, edited_at=s2
+    )
+    assert not await env.repo.edit_comment(
+        "c1", "first", space_id=env.space_id, edited_at=s1
+    )
+    assert (await env.repo.get_comment("c1")).content == "second"
+
+
+async def test_add_comment_keeps_the_rows_edited_at(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    stamped = Comment(
+        id="c1",
+        post_id="p1",
+        author="uid-alice",
+        type=CommentType.TEXT,
+        created_at=datetime.now(timezone.utc),
+        content="edited before it arrived",
+        edited_at=datetime(2026, 10, 3, 12, tzinfo=timezone.utc),
+    )
+    assert await env.repo.add_comment(stamped, space_id=env.space_id)
+    assert (await _edited_at(env, "space_post_comments", "c1")).startswith("2026-10-03")

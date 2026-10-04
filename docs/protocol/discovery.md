@@ -974,18 +974,20 @@ POST /gfs/member-publish
   publishes, and on every GFS (re)connect — so other members' items arrive
   live.
 - **Receiving** a `space_item` (`SpacePublicInbound`): decrypt; read the
-  real type (only `post` in this release — anything else is dropped); drop
-  our own echo; verify the author signature, self-cert and owner-bound post
-  id; require the author-bound `item_type` / `item_target` to match; require
+  real type (one of the item types below — anything else is dropped); drop
+  our own echo; verify the author signature and self-cert (the post inner
+  of a `post` / `post_edit` also its owner-bound post id; the generic inner
+  of every other type its own domain and suite); require the author-bound
+  `item_type` (and `item_target`) to match; require
   `origin_instance_id == derive_instance_id(author_pk)` (also on the host
   relay path); require the inner cert's v1 fields to equal the frame cert, and run
   `SpaceWriterCertService.check_item` — signature against the pinned space
   key, this space, the frame's epoch, the inner's `author_pk`, the scope the
-  REAL type needs (`write` for a post) and epoch freshness; require the v2
+  REAL type needs (table below) and epoch freshness; require the v2
   user binding (on the inner copy) to name the author; on a MEMBER household (it holds the
-  roster and the access levels) also require the author's own seat to let
-  them post (`SpaceAuthorship.item_access_admits`); then dedupe by post id
-  against the federated / host-relayed copy.
+  roster and the access levels) also run the roster check of the table;
+  then apply by type — a post dedupes by post id against the federated /
+  host-relayed copy.
 - **Epoch notices** (`announce_epoch`): sent before the subscriber
   re-seal at every content-key rotation (`SpaceService
   ._rotate_and_distribute_space_key` — kick, ban, leave, scope drop), right
@@ -1034,11 +1036,98 @@ these; adversarial review of PR 2):
    names the household) must not stay visible. Strict mode must also not
    auto-subscribe with identified requests — a signed subscribe names the
    household, which is exactly what strict mode withholds.
-5. **Edit and delete over this relay (PR 3) must not depend on arrival
+5. **Edit and delete over this relay must not depend on arrival
    order.** The GFS delivers one space's items in publish order, but the
    host path, the queue and space sync interleave with it, so a receiver
    must tolerate a delete (or an edit) that arrives before its create —
-   e.g. a tombstone that a later create honours.
+   met by the tombstone and last-writer-wins rules of
+   [Comments, reactions and own edits / deletes](#comments-reactions-and-own-edits--deletes-v_49)
+   below.
+
+### Comments, reactions and own edits / deletes (v_49)
+
+The member relay carries more than posts. Every item rides the same generic
+`space_item` (the GFS sees no difference), with the real type and the id it
+acts on bound inside the author signature:
+
+| Item type | Inner | Cert scope | Who may | Member household also checks |
+|---|---|---|---|---|
+| `post` | post (`space_public_author`) | `write` | the author | `posts` access level (`item_access_admits`) |
+| `post_edit` | post — full snapshot + signed `edited_at` | `write` | the post's author only | `posts` access level |
+| `post_delete` | generic (`space_item_author`) | `write` | the post's author only | `posts` access level |
+| `comment` | generic | `comment` (`write` implies it) | anyone whose cert binds them; id owner-bound to them | live writer seat on the origin, or a follower seat while `allow_subscriber_comment` is on |
+| `comment_edit` | generic — full snapshot | `comment` | the comment's author only | any live seat on the origin (own row) |
+| `comment_delete` | generic | `comment` | the comment's author only | any live seat on the origin (own row) |
+| `reaction_add` / `reaction_remove` | generic | `comment` — at a follower `write`, unless the space lets followers react | the reactor | live writer seat, or a follower seat while `allow_subscriber_react` is on |
+
+- **Never more permissive than the host path.** The rules mirror the
+  federated `SPACE_COMMENT_*`, `SPACE_POST_UPDATED` / `DELETED` handlers and
+  the local service. A post edit or delete needs the post's own right
+  (`write`), so a comment-only household — a follower, or a plain member
+  under a `MODERATED` / `ADMIN_ONLY` posts level — edits or deletes its post
+  on the host path. Moderators and admins acting on someone else's item
+  stay on the host path too (`SPACE_*` events); the relay carries only an
+  author's own changes. Comments have no access level of their own (they
+  follow the seat and `allow_subscriber_comment`), so the cert entitlement
+  is unchanged: the `write`-scope binding names the users who may post, and
+  a comment-only user of a `write` household is not bound — their comment
+  takes the host path.
+- **Author-only, target in this space.** For an edit or delete, the stored
+  row's author must be the signed author and the row must live in this
+  space. For a row not held yet, the id must be owner-bound (v_36) to the
+  signed author — else a household could pre-empt someone else's row.
+  New comment ids must be owner-bound to their author.
+- **Followers rely on the cert.** They hold no roster: the scope plus the v2
+  user binding is the whole check — except a reaction, where a follower
+  cannot tell a comment-only member from a follower, so it accepts a
+  `comment`-scope reaction only while its copy of the space lets followers
+  react.
+
+**Ordering independence.**
+
+- **Delete before create → tombstone.** A delete for a row not held yet
+  leaves a soft-deleted row under the id — the same `deleted=1` row a normal
+  delete leaves, no new state or table. The later create is a duplicate on
+  every path: this relay and the host relay dedupe by id, the federated post
+  create keeps a deleted row deleted, the federated comment create refuses
+  an id it holds, and space sync now skips a post deleted here (before, a
+  sync from a provider that missed a delete resurrected it).
+- **Edits → last writer wins.** An edit is the author's full signed snapshot
+  plus its signed time stamp (`edited_at` for a post, `ts` for a comment,
+  at most 5 minutes ahead of the receiver's clock). It lands only over an
+  older stored `edited_at` (stored as naive UTC with microseconds, the
+  column's shape), never on a deleted row. An edit that overtakes its create
+  IS the create, at its newest content, under the create's own rules; the
+  later create is a duplicate. Member households also apply the federated
+  `SPACE_*_UPDATED` copy, which stamps its own clock and applies in arrival
+  order — each path is ordered on its own, so both converge on the author's
+  last edit.
+- **Reactions** are ordered per `(post, user, emoji)` by their signed `ts`
+  in a bounded in-memory clock, so a duplicate `reaction_add` from a second
+  connection server cannot undo a later remove.
+- A comment, reaction or edit whose post is not held here yet is dropped;
+  the federated copy (members) or a later sync carries it.
+
+**Outbound.** The member publisher (`plan_item` / `schedule_item`) runs
+for a local user's comment, comment edit / delete, own post edit / delete
+and reaction in a PUBLIC/GLOBAL space with `allow_subscribers`, when the
+household's cert for the current epoch grants the type's scope and binds
+the user. Unlike posts, seed holders publish these too: the host relays
+posts with the authority signature, but nothing else reached followers.
+Otherwise the write takes the host path silently.
+
+**Followers before this release** received only posts (`space_post_public`);
+comments, reactions, edits and deletes never reached a GFS follower. The
+member relay is the only path that carries them, so followers on an older
+build simply don't see them (a v_49 receiver from before this release drops
+the unknown item types — logged, never misapplied). No protocol bump:
+nothing an older receiver could silently mishandle reaches it, and members
+keep the federated copy.
+
+**Residual, stated plainly.** In trusted mode the plaintext cert names its
+scope. A `comment`-scope publisher can't post, so the connection server can
+tell its items are comments, reactions or comment edits / deletes — not
+which. Strict mode (the cert moves inside the ciphertext) removes this.
 
 ```mermaid
 sequenceDiagram
@@ -1132,6 +1221,11 @@ contest a ban.
   subscriber content-key handoff (seal + relay / unseal + import).
 - `socialhome/domain/gfs_member_publish.py` — v_49 trusted-mode
   member-publish wire codec (request, signing bytes, `space_item` frame).
+- `socialhome/domain/space_item.py` — member item types, the scope each
+  needs, signed stamps; `socialhome/services/space_item_author.py` — the
+  generic author-signed inner; `socialhome/services/space_item_inbound.py`
+  — applying comments, deletes and reactions (authorship, tombstones,
+  last writer wins).
 - `socialhome/global_server/member_publish.py`,
   `socialhome/global_server/routes/member_publish.py` — GFS side of
   `/gfs/member-publish` and the epoch notice; queued delivery via

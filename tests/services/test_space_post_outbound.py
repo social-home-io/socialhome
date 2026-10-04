@@ -1158,3 +1158,192 @@ async def test_a_private_space_post_schedules_nothing():
         )
     )
     assert member.scheduled == []
+
+
+# ─── v_49 PR 3: comments, reactions and own edits / deletes ─────────────
+
+
+class _ItemGfs(_MemberGfs):
+    def schedule_item(self, space_id, author_user_id, item_type, inner):
+        self.scheduled.append((space_id, author_user_id, item_type, dict(inner)))
+        return True
+
+
+def _items_setup(*, space_type=SpaceType.PUBLIC, readable=True):
+    member = _ItemGfs()
+    bus = EventBus()
+    federation = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+    outbound = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo(
+            {
+                "sp-1": _FakeSpace(
+                    space_type=space_type,
+                    features=_FakeFeatures(allow_subscribers=readable),
+                )
+            }
+        ),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    outbound.attach_member_gfs(member)
+    return bus, member, uid
+
+
+def _comment_obj(uid, cid="c-1", content="nice"):
+    from socialhome.domain.post import Comment, CommentType
+
+    return Comment(
+        id=cid,
+        post_id="post-1",
+        author=uid,
+        type=CommentType.TEXT,
+        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+        content=content,
+    )
+
+
+def _post_obj(uid, content="edited"):
+    return Post(
+        id="post-1",
+        author=uid,
+        type=PostType.TEXT,
+        content=content,
+        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+
+
+async def test_a_local_comment_is_scheduled_as_a_signed_comment_item():
+    from socialhome.domain.events import CommentAdded
+    from socialhome.services.space_item_author import verify_signed_item_inner
+
+    bus, member, uid = _items_setup()
+    await bus.publish(
+        CommentAdded(post_id="post-1", comment=_comment_obj(uid), space_id="sp-1")
+    )
+    space_id, author, item_type, inner = member.scheduled[0]
+    assert (space_id, author, item_type) == ("sp-1", uid, "comment")
+    assert (inner["item_target"], inner["post_id"], inner["content"]) == (
+        "c-1",
+        "post-1",
+        "nice",
+    )
+    assert verify_signed_item_inner(inner)
+
+
+async def test_own_comment_edits_and_deletes_are_scheduled_others_are_not():
+    from socialhome.domain.events import CommentDeleted, CommentUpdated
+
+    bus, member, uid = _items_setup()
+    comment = _comment_obj(uid, content="changed")
+    await bus.publish(
+        CommentUpdated(
+            post_id="post-1", comment=comment, space_id="sp-1", actor_user_id=uid
+        )
+    )
+    await bus.publish(
+        CommentDeleted(
+            post_id="post-1",
+            comment_id="c-1",
+            space_id="sp-1",
+            actor_user_id=uid,
+            author_user_id=uid,
+        )
+    )
+    # A moderator's edit / delete of someone else's comment stays on the
+    # host path.
+    await bus.publish(
+        CommentUpdated(
+            post_id="post-1", comment=comment, space_id="sp-1", actor_user_id="mod"
+        )
+    )
+    await bus.publish(
+        CommentDeleted(
+            post_id="post-1",
+            comment_id="c-1",
+            space_id="sp-1",
+            actor_user_id="mod",
+            author_user_id=uid,
+        )
+    )
+    assert [s[2] for s in member.scheduled] == ["comment_edit", "comment_delete"]
+    edit = member.scheduled[0][3]
+    assert (edit["content"], edit["comment_type"]) == ("changed", "text")
+
+
+async def test_own_post_edits_and_deletes_are_scheduled():
+    bus, member, uid = _items_setup()
+    await bus.publish(
+        PostEdited(post=_post_obj(uid), space_id="sp-1", actor_user_id=uid)
+    )
+    await bus.publish(
+        PostDeleted(
+            post_id="post-1", space_id="sp-1", actor_user_id=uid, author_user_id=uid
+        )
+    )
+    await bus.publish(
+        PostEdited(post=_post_obj(uid), space_id="sp-1", actor_user_id="mod")
+    )
+    await bus.publish(
+        PostDeleted(
+            post_id="post-1", space_id="sp-1", actor_user_id="mod", author_user_id=uid
+        )
+    )
+    assert [s[2] for s in member.scheduled] == ["post_edit", "post_delete"]
+    edit = member.scheduled[0][3]
+    assert edit["item_type"] == "post_edit" and edit["edited_at"]
+    assert verify_signed_author_inner(edit)
+
+
+async def test_a_local_space_reaction_is_scheduled():
+    from socialhome.domain.events import PostReactionChanged
+
+    bus, member, uid = _items_setup()
+    await bus.publish(
+        PostReactionChanged(
+            post=_post_obj(uid),
+            space_id="sp-1",
+            reactor_user_id=uid,
+            emoji="👍",
+            added=False,
+        )
+    )
+    space_id, author, item_type, inner = member.scheduled[0]
+    assert (item_type, inner["emoji"], inner["item_target"]) == (
+        "reaction_remove",
+        "👍",
+        "post-1",
+    )
+
+
+@pytest.mark.parametrize("setup", ["private", "unreadable", "inbound", "household"])
+async def test_items_are_not_scheduled_where_they_must_not_be(setup):
+    from socialhome.domain.events import CommentAdded, PostReactionChanged
+
+    bus, member, uid = _items_setup(
+        space_type=SpaceType.PRIVATE if setup == "private" else SpaceType.PUBLIC,
+        readable=setup != "unreadable",
+    )
+    origin = "peer.home" if setup == "inbound" else None
+    space_id = None if setup == "household" else "sp-1"
+    await bus.publish(
+        CommentAdded(
+            post_id="post-1",
+            comment=_comment_obj(uid),
+            space_id=space_id,
+            origin_instance_id=origin,
+        )
+    )
+    await bus.publish(
+        PostReactionChanged(
+            post=_post_obj(uid),
+            space_id=space_id,
+            origin_instance_id=origin,
+            reactor_user_id=uid,
+            emoji="👍",
+        )
+    )
+    assert member.scheduled == []

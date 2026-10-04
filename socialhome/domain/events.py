@@ -90,14 +90,23 @@ class PostDeleted(DomainEvent):
     #: post deletes — same gate as :class:`PostEdited`.
     space_id: str | None = None
     origin_instance_id: str | None = None
+    #: The deleted post's author (space posts) — the member-publish bridge
+    #: relays only an author's own delete (v_49). Empty when not known.
+    author_user_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
 class PostReactionChanged(DomainEvent):
     post: "Post"
     occurred_at: datetime = field(default_factory=_now)
+    #: ``None`` for a household-feed post; the space for a space post (v_49:
+    #: the member-publish bridge relays a local user's space reaction).
     space_id: str | None = None
     origin_instance_id: str | None = None
+    #: Space posts: who reacted, with which emoji, added or removed.
+    reactor_user_id: str = ""
+    emoji: str = ""
+    added: bool = True
 
 
 @dataclass(slots=True, frozen=True)
@@ -127,6 +136,9 @@ class CommentUpdated(DomainEvent):
     #: Space comments only: the @-mentions this edit newly adds (see
     #: :attr:`PostEdited.new_mentions`).
     new_mentions: tuple["Mention", ...] = ()
+    #: The user who made the edit (the author, or a moderator). Empty for an
+    #: edit applied from a peer.
+    actor_user_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -138,6 +150,11 @@ class CommentDeleted(DomainEvent):
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
     origin_instance_id: str | None = None
+    #: The user who deleted it, and the comment's author (v_49: the
+    #: member-publish bridge relays only an author's own delete). Empty for
+    #: a delete applied from a peer.
+    actor_user_id: str = ""
+    author_user_id: str = ""
 
 
 # ─── Spaces ───────────────────────────────────────────────────────────────

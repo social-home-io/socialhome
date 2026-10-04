@@ -298,7 +298,7 @@ def test_item_plaintext_round_trips_and_refuses_the_rest():
     for bad in (
         b"x",
         b"[]",
-        build_item_plaintext("comment", {}),
+        build_item_plaintext("poll", {}),
         b'{"item_type":"post"}',
     ):
         assert parse_item_plaintext(bad) is None
@@ -657,10 +657,10 @@ async def test_schedule_post_refuses_while_stopping_or_saturated(world, monkeypa
 async def test_a_failing_background_publish_is_logged(world, monkeypatch, caplog):
     svc = world["svc"]
 
-    async def _boom(self, space_id, author_user_id):
+    async def _boom(self, space_id, author_user_id, item_type):
         raise RuntimeError("down")
 
-    monkeypatch.setattr(GfsMemberPublishService, "plan_post", _boom)
+    monkeypatch.setattr(GfsMemberPublishService, "plan_item", _boom)
     with caplog.at_level("ERROR"):
         svc.schedule_post(SPACE_ID, AUTHOR, _inner())
         await svc.wait_idle()
@@ -687,3 +687,99 @@ async def test_listing_reads_the_whole_directory_never_a_space_probe(
 async def test_listing_without_a_publish_session_lists_nothing(world, monkeypatch):
     monkeypatch.setattr(world["gfs"], "publish_client", lambda: None)
     assert not await world["svc"]._listed(world["conn"], SPACE_ID)
+
+
+# ── v_49 PR 3: comments, reactions, own edits / deletes ──────────────────
+
+
+def test_every_member_item_type_round_trips_the_plaintext_codec():
+    for item_type in (
+        "post_edit",
+        "post_delete",
+        "comment",
+        "comment_edit",
+        "comment_delete",
+        "reaction_add",
+        "reaction_remove",
+    ):
+        assert parse_item_plaintext(build_item_plaintext(item_type, {"a": 1})) == (
+            item_type,
+            {"a": 1},
+        )
+
+
+@pytest.mark.parametrize(
+    ("item_type", "scope", "planned"),
+    [
+        ("comment", "comment", True),
+        ("comment", "write", True),
+        ("reaction_add", "comment", True),
+        ("comment_delete", "comment", True),
+        # A post edit or delete needs the post's own right.
+        ("post_edit", "comment", False),
+        ("post_delete", "comment", False),
+        ("post_delete", "write", True),
+    ],
+)
+async def test_plan_item_follows_the_scope_the_type_needs(
+    world, item_type, scope, planned
+):
+    svc = world["svc"]
+    svc._writer_certs.scope = scope
+    targets = await svc.plan_item(SPACE_ID, AUTHOR, item_type)
+    assert bool(targets) is planned
+
+
+async def test_plan_item_needs_the_author_in_the_binding(world):
+    svc = world["svc"]
+    svc._writer_certs.users = ["someone-else"]
+    assert await svc.plan_item(SPACE_ID, AUTHOR, "comment") == []
+
+
+async def test_a_seed_holder_publishes_items_but_not_posts(world):
+    """The host relays posts with the authority signature, but nothing else
+    reaches followers: its comments, reactions and own edits / deletes go
+    over the member relay like any member's."""
+    svc = _owner_svc(world)
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
+    assert [c.id for c in await svc.plan_item(SPACE_ID, AUTHOR, "comment")] == [
+        "conn-1"
+    ]
+    # A seed holder never auto-subscribes: it receives over federation.
+    assert world["gfs"].subscribed == []
+
+
+@pytest.mark.security
+async def test_a_published_comment_carries_only_ciphertext_and_its_real_type(world):
+    """(With a ``write`` cert: a ``comment``-scope cert names its scope in
+    plaintext, which the GFS is meant to see — never the item type.)"""
+    svc = world["svc"]
+    targets = await svc.plan_item(SPACE_ID, AUTHOR, "comment")
+    accepted = await svc.publish_item(
+        SPACE_ID, "comment", {"item_target": "c-1", "content": "hello"}, targets
+    )
+    assert [c.id for c in accepted] == ["conn-1"]
+    frame = (await _queued(world))[0].sealed
+    assert frame["event_type"] == "space_item"
+    assert "comment" not in json.dumps(frame)
+    assert "hello" not in json.dumps(frame)
+    item_type, got = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
+    assert (item_type, got["content"]) == ("comment", "hello")
+
+
+async def test_publish_item_refuses_a_type_our_cert_cannot_carry(world):
+    svc = world["svc"]
+    svc._writer_certs.scope = "comment"
+    assert (
+        await svc.publish_item(SPACE_ID, "post_delete", {"x": 1}, [world["conn"]]) == []
+    )
+    assert await _queued(world) == []
+
+
+async def test_schedule_item_publishes_in_the_background(world):
+    svc = world["svc"]
+    assert svc.schedule_item(SPACE_ID, AUTHOR, "reaction_add", {"emoji": "x"})
+    await svc.wait_idle()
+    frame = (await _queued(world))[0].sealed
+    item_type, _inner = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
+    assert item_type == "reaction_add"

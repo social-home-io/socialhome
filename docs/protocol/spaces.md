@@ -1001,6 +1001,14 @@ once, so the new user can publish without waiting for a rotation. The
 binding is kept out of every plaintext copy of the cert: what reaches a
 connection server is the v1 fields only.
 
+**Comments and reactions use the same cert.** Comments have no access level
+of their own, so no entitlement change: a `comment` cert lets its bound
+users comment and react over the member relay, `write` adds posts and an
+author's own post edits / deletes (per-type table in
+[`discovery.md`](discovery.md#comments-reactions-and-own-edits--deletes-v_49)).
+A comment-only user of a household holding a `write` cert is not in its
+binding and comments on the host path.
+
 **When.** On seating (the invite-link redeem ACK, and the roster snapshot a
 paired joiner receives), on a role change that alters the household's write /
 comment rights, on every content-key rotation (`SPACE_KEY_EXCHANGE_REKEY`)

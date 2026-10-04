@@ -641,3 +641,41 @@ def test_unknown_link_preview_suite_is_rejected():
     }
     with pytest.raises(UnsupportedLinkPreviewSigSuite):
         verified_link_preview(missing)
+
+
+# ─── v_49: a post edit's signed ``edited_at`` ────────────────────────────
+
+
+def test_edited_at_is_absent_by_default_so_host_relay_bytes_are_unchanged():
+    kp = generate_identity_keypair()
+    inner = build_signed_author_inner(
+        post=_post(),
+        space_id="sp",
+        author_username="bob",
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+    )
+    assert "edited_at" not in inner
+    assert b"edited_at" not in author_signing_bytes(inner)
+
+
+def test_edited_at_is_signed_when_present():
+    kp = generate_identity_keypair()
+    inner = build_signed_author_inner(
+        post=_post(),
+        space_id="sp",
+        author_username="bob",
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        item_type="post_edit",
+        edited_at="2026-10-03T12:00:00+00:00",
+    )
+    assert inner["edited_at"] == "2026-10-03T12:00:00+00:00"
+    sig = b64url_decode(inner["author_sig"])
+    assert verify_ed25519(kp.public_key, author_signing_bytes(inner), sig)
+    moved = dict(inner, edited_at="2099-01-01T00:00:00+00:00")
+    assert not verify_ed25519(kp.public_key, author_signing_bytes(moved), sig)
+    stripped = {k: v for k, v in inner.items() if k != "edited_at"}
+    assert not verify_ed25519(kp.public_key, author_signing_bytes(stripped), sig)

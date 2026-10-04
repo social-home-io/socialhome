@@ -226,6 +226,7 @@ async def test_space_comment_added_missing_fields(svc):
 
 
 async def test_space_comment_added_bad_type_falls_back(svc):
+    svc.sp_post.get_comment.return_value = None  # not held yet
     await svc.svc._on_space_comment_added(
         _evt(
             "SPACE_COMMENT_CREATED",

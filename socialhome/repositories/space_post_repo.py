@@ -27,6 +27,7 @@ from ..domain.post import (
     Post,
     PostType,
 )
+from ..domain.space_item import stamp_to_db
 from ..utils.datetime import parse_iso8601_optional
 from .base import bool_col, row_to_dict, rows_to_dicts
 from .post_repo import (  # reuse the household post helpers verbatim
@@ -98,6 +99,7 @@ class AbstractSpacePostRepo(Protocol):
         *,
         space_id: str,
         clear_link_preview: bool = False,
+        edited_at: str | None = None,
     ) -> bool: ...
 
     async def add_reaction(
@@ -153,6 +155,7 @@ class AbstractSpacePostRepo(Protocol):
         new_content: str,
         *,
         space_id: str,
+        edited_at: str | None = None,
     ) -> bool: ...
 
 
@@ -361,16 +364,42 @@ class SqliteSpacePostRepo:
         *,
         space_id: str,
         clear_link_preview: bool = False,
+        edited_at: str | None = None,
     ) -> bool:
         """Replace a post's body. ``False`` = not in ``space_id``.
         ``clear_link_preview`` drops the link card (the edit changed or
-        removed the link it was built for)."""
+        removed the link it was built for).
+
+        ``edited_at`` (v_49, a member-published edit) is the author's signed
+        edit time in the column's naive-UTC shape: the edit lands only on a
+        live post whose stored ``edited_at`` is older (last writer wins), so
+        ``False`` also means "a newer edit — or a delete — is already held".
+        Without it the edit is stamped ``datetime('now')`` as before."""
+        if edited_at is None:
+            return (
+                await self._db.enqueue_rowcount(
+                    "UPDATE space_posts SET content=?, edited_at=datetime('now'), "
+                    "link_preview_json=CASE WHEN ? THEN NULL "
+                    "ELSE link_preview_json END "
+                    "WHERE id=? AND space_id=?",
+                    (new_content, int(clear_link_preview), post_id, space_id),
+                )
+                > 0
+            )
         return (
             await self._db.enqueue_rowcount(
-                "UPDATE space_posts SET content=?, edited_at=datetime('now'), "
+                "UPDATE space_posts SET content=?, edited_at=?, "
                 "link_preview_json=CASE WHEN ? THEN NULL ELSE link_preview_json END "
-                "WHERE id=? AND space_id=?",
-                (new_content, int(clear_link_preview), post_id, space_id),
+                "WHERE id=? AND space_id=? AND deleted=0 "
+                "AND (edited_at IS NULL OR edited_at < ?)",
+                (
+                    new_content,
+                    edited_at,
+                    int(clear_link_preview),
+                    post_id,
+                    space_id,
+                    edited_at,
+                ),
             )
             > 0
         )
@@ -541,9 +570,9 @@ class SqliteSpacePostRepo:
                 """
                 INSERT INTO space_post_comments(
                     id, post_id, parent_id, author, type, content, media_url,
-                    deleted, created_at
+                    deleted, edited_at, created_at
                 )
-                SELECT ?,?,?,?,?,?,?,?, COALESCE(?, datetime('now'))
+                SELECT ?,?,?,?,?,?,?,?,?, COALESCE(?, datetime('now'))
                  WHERE EXISTS (
                      SELECT 1 FROM space_posts WHERE id=? AND space_id=?
                  )
@@ -563,6 +592,11 @@ class SqliteSpacePostRepo:
                     comment.content,
                     comment.media_url,
                     int(comment.deleted),
+                    (
+                        stamp_to_db(comment.edited_at)
+                        if comment.edited_at is not None
+                        else None
+                    ),
                     _iso_or_none(comment.created_at),
                     comment.post_id,
                     space_id,
@@ -645,19 +679,24 @@ class SqliteSpacePostRepo:
         new_content: str,
         *,
         space_id: str,
+        edited_at: str | None = None,
     ) -> bool:
-        """Edit a comment whose parent post is in ``space_id``."""
+        """Edit a comment whose parent post is in ``space_id``.
+
+        ``edited_at`` — see :meth:`edit`: with it, the edit lands only over
+        an older stored stamp (last writer wins)."""
         return (
             await self._db.enqueue_rowcount(
                 """
                 UPDATE space_post_comments
-                   SET content=?, edited_at=datetime('now')
+                   SET content=?, edited_at=COALESCE(?, datetime('now'))
                  WHERE id=? AND deleted=0 AND EXISTS (
                      SELECT 1 FROM space_posts
                       WHERE id = space_post_comments.post_id AND space_id=?
                  )
+                   AND (? IS NULL OR edited_at IS NULL OR edited_at < ?)
                 """,
-                (new_content, comment_id, space_id),
+                (new_content, edited_at, comment_id, space_id, edited_at, edited_at),
             )
             > 0
         )

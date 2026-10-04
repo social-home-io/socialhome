@@ -1172,3 +1172,32 @@ async def test_item_access_for_an_unknown_space_is_refused():
         feature="posts",
         author_user_id="u-author",
     )
+
+
+# ─── item_seat_admits: comments / reactions / own edits (v_49) ─────────
+
+
+async def _seat_ok(auth, sender, author, *, subscriber_ok=False):
+    return await auth.item_seat_admits(
+        origin_instance_id=sender,
+        space_id=SPACE,
+        author_user_id=author,
+        subscriber_ok=subscriber_ok,
+    )
+
+
+async def test_item_seat_needs_a_writer_seat_on_the_origin():
+    auth = _access_authorship()
+    assert await _seat_ok(auth, AUTHOR_HOUSE, "u-author")
+    assert await _seat_ok(auth, MOD_HOUSE, "u-mod")
+    # A seat on another household, nobody, a blank origin.
+    assert not await _seat_ok(auth, AUTHOR_HOUSE, "u-admin")
+    assert not await _seat_ok(auth, AUTHOR_HOUSE, "u-unknown")
+    assert not await _seat_ok(auth, "", "u-author")
+    assert not await _seat_ok(auth, AUTHOR_HOUSE, "")
+
+
+async def test_item_seat_admits_a_follower_only_when_asked():
+    auth = _access_authorship()
+    assert not await _seat_ok(auth, AUTHOR_HOUSE, "u-sub")
+    assert await _seat_ok(auth, AUTHOR_HOUSE, "u-sub", subscriber_ok=True)

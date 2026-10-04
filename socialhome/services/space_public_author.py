@@ -101,6 +101,7 @@ _SIGNED_FIELDS: tuple[str, ...] = (
     "hidden_from_feed",
     "item_type",
     "item_target",
+    "edited_at",
 )
 
 
@@ -128,8 +129,13 @@ _SIGNED_FIELDS: tuple[str, ...] = (
 #: member publish signs both, so the real item type (and the id it acts on)
 #: is bound to the author and nobody holding the content key can re-wrap a
 #: signed post as another kind of item.
+#:
+#: ``edited_at`` (v_49 ``post_edit``) is present-or-absent too: only the
+#: author's signed snapshot of an edited post carries it — the time stamp
+#: receivers order edits by (last writer wins) — so every other inner keeps
+#: its bytes.
 _OPTIONAL_OMITTED_WHEN_ABSENT: frozenset[str] = frozenset(
-    {"identity_anchor", "item_type", "item_target"}
+    {"identity_anchor", "item_type", "item_target", "edited_at"}
 )
 
 
@@ -170,6 +176,7 @@ def build_signed_author_inner(
     author_identity_anchor: str | None = None,
     item_type: str | None = None,
     item_target: str | None = None,
+    edited_at: str | None = None,
 ) -> dict:
     """Build the per-author-signed inner payload for a public/global space
     post (the object the GFS relay encrypts + a subscriber verifies).
@@ -240,6 +247,9 @@ def build_signed_author_inner(
     if item_type is not None:
         inner["item_type"] = item_type
         inner["item_target"] = item_target if item_target is not None else post.id
+    # v_49 post_edit: the author's edit time, signed (tz-aware ISO 8601).
+    if edited_at is not None:
+        inner["edited_at"] = edited_at
     inner["author_sig"] = b64url_encode(
         sign_ed25519(author_identity_seed, author_signing_bytes(inner))
     )

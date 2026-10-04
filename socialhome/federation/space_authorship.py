@@ -268,6 +268,37 @@ class SpaceAuthorship:
             return await self.admin_as(event, space_id, author_user_id)
         return await self.moderates_as(event, space_id, author_user_id)
 
+    async def item_seat_admits(
+        self,
+        *,
+        origin_instance_id: str,
+        space_id: str,
+        author_user_id: str,
+        subscriber_ok: bool,
+    ) -> bool:
+        """Does ``author_user_id`` hold the seat a member-published comment,
+        reaction or own edit / delete (v_49 ``space_item``) needs, on
+        household ``origin_instance_id``, by THIS household's roster?
+
+        A live writer seat (``member`` / ``moderator`` / ``admin``) — the
+        :meth:`acts_for` rule of every federated create — or, with
+        ``subscriber_ok``, a live ``subscriber`` seat: a follower's comment
+        while ``allow_subscriber_comment`` is on, a follower's reaction while
+        ``allow_subscriber_react`` is on, a change to the follower's own
+        row. Banned users, removed seats and unknown users hold nothing.
+        Never the host leniency of :meth:`may_author`: a member-published
+        item is the author's own, never relayed for someone else."""
+        if not author_user_id or not origin_instance_id or not space_id:
+            return False
+        if await self._spaces.is_banned(space_id, author_user_id):
+            return False
+        seat = await self._seats.get(space_id, origin_instance_id, author_user_id)
+        if seat is None:
+            return False
+        if seat.role in _WRITER_ROLES:
+            return True
+        return subscriber_ok and seat.role == SpaceRole.SUBSCRIBER.value
+
     async def is_host(self, event: "FederationEvent", space_id: str) -> bool:
         """The sender is the household hosting ``space_id``."""
         sender = str(event.from_instance or "")

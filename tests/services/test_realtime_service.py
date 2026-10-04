@@ -449,6 +449,16 @@ async def test_post_reaction_changed_fans(env):
     assert any("post.reaction_changed" in m for m in sock.sent)
 
 
+async def test_a_space_reaction_is_never_framed_to_the_whole_household(env):
+    """Space reactions (v_49 publishes them for the member relay) must not
+    reach every local socket — non-members included — as a household frame."""
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(PostReactionChanged(post=_post(), space_id="sp-1"))
+    assert not any("post.reaction_changed" in m for m in sock.sent)
+
+
 async def test_comment_added_fans(env):
     svc, bus, ws = env
     sock = _FakeWS()

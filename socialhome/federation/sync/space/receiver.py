@@ -506,9 +506,17 @@ class SpaceSyncReceiver:
         elif resource == "posts":
             for r in records:
                 post = _post_from_record(r)
-                if post is not None and (
-                    await self._space_post_repo.save(space_id, post) is None
-                ):
+                if post is None:
+                    continue
+                # A post deleted here stays deleted: the provider may have
+                # missed the delete, or the delete overtook the create (a
+                # v_49 member-published delete leaves a soft-deleted row
+                # under the id). ``save`` would upsert it live again.
+                held_post = await self._space_post_repo.get(post.id)
+                if held_post is not None and held_post[1].deleted:
+                    log.debug("sync: post %s was deleted here — skipped", post.id)
+                    continue
+                if await self._space_post_repo.save(space_id, post) is None:
                     log.warning(
                         "space sync: post %s already exists in another space "
                         "— refusing the write for %s",

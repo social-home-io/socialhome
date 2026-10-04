@@ -55,6 +55,8 @@ class _FakeRepos:
         self.members = []
         self.bans = []
         self.posts = []
+        #: post id → Post held here before the sync (for the tombstone skip).
+        self.held_posts = {}
         self.comments = []
         self.tasks = []
         self.task_lists = []
@@ -120,6 +122,10 @@ class _PostRepoStub:
     async def save(self, space_id, post):
         self._c.posts.append((space_id, post))
         return post
+
+    async def get(self, post_id):
+        held = self._c.held_posts.get(post_id)
+        return ("sp-1", held) if held is not None else None
 
     async def add_comment(self, comment, *, space_id):
         self._c.comments.append(comment)
@@ -360,6 +366,32 @@ async def test_posts(setup):
     space_id, post = c.posts[0]
     assert space_id == "sp-1"
     assert post.id == "p-1"
+
+
+async def test_a_post_deleted_here_is_never_resurrected_by_a_sync(setup):
+    """v_49: a delete can overtake its create (a member-published delete
+    leaves a soft-deleted row); a provider that missed the delete must not
+    bring the post back."""
+    from datetime import datetime, timezone
+
+    from socialhome.domain.post import Post, PostType
+
+    r, c, kp = setup
+    c.held_posts["p-gone"] = Post(
+        id="p-gone",
+        author="u-1",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 18, tzinfo=timezone.utc),
+        deleted=True,
+    )
+    record = {
+        "author": "u-1",
+        "type": "text",
+        "content": "hi",
+        "created_at": "2026-04-18T00:00:00+00:00",
+    }
+    await _send(r, kp, "posts", [{"id": "p-gone", **record}, {"id": "p-2", **record}])
+    assert [post.id for _sid, post in c.posts] == ["p-2"]
 
 
 async def test_posts_keep_their_image_urls(setup):

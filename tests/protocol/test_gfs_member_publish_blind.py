@@ -280,3 +280,96 @@ class _FixedCert:
 
     async def own_cert(self, space_id, epoch):
         return self.cert
+
+
+ITEM_TYPES = (
+    "post",
+    "post_edit",
+    "post_delete",
+    "comment",
+    "comment_edit",
+    "comment_delete",
+    "reaction_add",
+    "reaction_remove",
+)
+
+
+@pytest.mark.parametrize("item_type", ITEM_TYPES)
+async def test_no_member_item_type_ever_reaches_the_gfs_in_plaintext(
+    gfs, caplog, item_type
+):
+    """PR 3: every item type rides the same generic ``space_item`` — the
+    request, the fan-out frame, the queued row and the GFS logs carry
+    neither the real type nor any of the item's fields (target ids, emoji,
+    content, the signed stamps)."""
+    publisher = gfs.publisher
+    cert = bind_writer_users(
+        sign_writer_cert(
+            space_seed=SPACE_SEED,
+            space_id=SPACE_ID,
+            epoch=1,
+            instance_pk=publisher.pk,
+            scope="write",
+        ),
+        space_seed=SPACE_SEED,
+        user_ids=["alice-user-id"],
+    )
+    svc = GfsMemberPublishService(
+        gfs=_HouseholdGfs(gfs.session),  # type: ignore[arg-type]
+        conn_repo=None,  # type: ignore[arg-type]
+        space_repo=None,  # type: ignore[arg-type]
+        space_crypto=_OneKey(),  # type: ignore[arg-type]
+        writer_certs=_FixedCert(cert),  # type: ignore[arg-type]
+        own_instance_id=publisher.instance_id,
+        own_identity_seed=publisher.seed,
+    )
+    secrets = {
+        "item_target": "target-id-1f3a",
+        "post_id": "post-id-9b2c",
+        "content": SECRET_CONTENT,
+        "emoji": "🦄",
+        "ts": "2026-10-03T12:34:56.789012+00:00",
+        "edited_at": "2026-10-03T12:34:57.123456+00:00",
+        "parent_id": "parent-id-77aa",
+    }
+    sent: list[dict] = []
+    real_post = gfs.session.post
+
+    def _spy(url, *a, json=None, **kw):
+        sent.append(json)
+        return real_post(url, *a, json=json, **kw)
+
+    gfs.session.post = _spy  # type: ignore[method-assign]
+    conn = GfsConnection(
+        id="c",
+        gfs_instance_id="gfs-node-a",
+        display_name="g",
+        public_key="00" * 32,
+        inbox_url=str(gfs.make_url("")).rstrip("/"),
+        status="active",
+        paired_at="",
+    )
+    with caplog.at_level(logging.DEBUG):
+        accepted = await svc.publish_item(
+            SPACE_ID, item_type, {"item_type": item_type, **secrets}, [conn]
+        )
+        await gfs.app_[gfs_member_publish_key].wait_idle()
+    assert [c.id for c in accepted] == ["c"]
+    queued = await gfs.app_[gfs_envelope_queue_repo_key].list_for(
+        gfs.subscriber.instance_id, now=0
+    )
+    assert len(queued) == 1
+    assert set(queued[0].sealed) == MEMBER_PUBLISH_FRAME_KEYS
+    assert queued[0].sealed["event_type"] == SPACE_ITEM_EVENT_TYPE
+    for where, blob in (
+        ("the request", json.dumps(sent, ensure_ascii=False)),
+        (
+            "the fan-out frame / queued row",
+            json.dumps([q.sealed for q in queued], ensure_ascii=False),
+        ),
+        ("the GFS logs", caplog.text),
+    ):
+        assert f'"{item_type}"' not in blob, f"{where} carries the item type"
+        assert "item_type" not in blob, f"{where} carries an item_type field"
+        for leak in secrets.values():
+            assert leak not in blob, f"{where} carries {leak!r}"

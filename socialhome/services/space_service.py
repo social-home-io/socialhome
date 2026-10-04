@@ -81,6 +81,7 @@ from ..domain.events import (
     LocalSpaceInviteCreated,
     PostDeleted,
     PostEdited,
+    PostReactionChanged,
     RemoteJoinRequestApproved,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
@@ -6125,7 +6126,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # hook regardless of who deleted the row. ``space_id`` gates the
         # outbound broadcast so household-feed deletes stay local.
         await self._bus.publish(
-            PostDeleted(post_id=post_id, space_id=space_id, actor_user_id=actor_user_id)
+            PostDeleted(
+                post_id=post_id,
+                space_id=space_id,
+                actor_user_id=actor_user_id,
+                author_user_id=post.author,
+            )
         )
         # The names came with the post — possibly from another household —
         # so a file goes only when no other row (any space, feed, DM,
@@ -6148,9 +6154,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         space_id, _post = got
         await self._require_writable_space(space_id)
         await self._reject_subscriber(space_id, user_id, action="react")
-        return await self._posts.add_reaction(
+        post = await self._posts.add_reaction(
             post_id, emoji, user_id, space_id=space_id
         )
+        # v_49: the member-publish bridge relays it (space reactions are no
+        # federated event; realtime does not frame space reactions).
+        await self._bus.publish(
+            PostReactionChanged(
+                post=post,
+                space_id=space_id,
+                reactor_user_id=user_id,
+                emoji=emoji,
+                added=True,
+            )
+        )
+        return post
 
     async def remove_reaction(
         self,
@@ -6165,9 +6183,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise KeyError(f"space post {post_id!r} not found")
         space_id, _post = got
         await self._reject_subscriber(space_id, user_id, action="react")
-        return await self._posts.remove_reaction(
+        post = await self._posts.remove_reaction(
             post_id, emoji, user_id, space_id=space_id
         )
+        await self._bus.publish(
+            PostReactionChanged(
+                post=post,
+                space_id=space_id,
+                reactor_user_id=user_id,
+                emoji=emoji,
+                added=False,
+            )
+        )
+        return post
 
     async def add_comment(
         self,
@@ -6289,6 +6317,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     author_id=comment.author,
                     editor_user_id=editor_user_id,
                 ),
+                actor_user_id=editor_user_id,
             ),
         )
         return updated
@@ -6321,6 +6350,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 post_id=comment.post_id,
                 comment_id=comment_id,
                 space_id=space_id,
+                actor_user_id=actor_user_id,
+                author_user_id=comment.author,
             ),
         )
 

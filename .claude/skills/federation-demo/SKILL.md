@@ -750,6 +750,14 @@ member path and relays it to the GFS as before (older followers read only
 the host's copy); d receives it twice and holds exactly ONE copy (receiver
 dedupe by post id). Polls every 3 s.
 
+Also, with a still down (PR 3): e comments on its post and reacts to it, then
+posts a second post, edits it and deletes it. d (a follower, which no other
+path ever carried these to) reflects the comment, the reaction, the edit and
+the delete from the member relay alone; the GFS log carries none of the text.
+After a restarts and catches up, a holds the second post deleted, and a's
+relayed copy of its create never resurrects it on d (receiver dedupe against
+the soft-deleted row). Reads d's / a's DB for these checks (no REST bucket).
+
 ### ``gfs-cluster`` — a multi-process GFS on one shared DB
 
 Standalone (needs only ``up`` for ROOT; runs its OWN two GFS nodes on
