@@ -18,21 +18,33 @@ third field on the relay body.
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime, timedelta, timezone
 
 import orjson
 import pytest
 
-from socialhome.crypto import generate_x25519_keypair
+from socialhome.crypto import (
+    derive_user_id,
+    generate_identity_keypair,
+    generate_x25519_keypair,
+)
 from socialhome.domain.federation import (
+    FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.post import Post, PostType
+from socialhome.domain.space_item import PAD_FIELD
+from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.gfs_relay_transport import (
     RELAY_KIND_ENVELOPE,
     RELAY_MAX_BODY_BYTES,
+    RELAY_SIZE_BUCKETS,
     GfsRelayTransport,
 )
+from socialhome.services.space_public_author import build_signed_author_inner
 from socialhome.federation.keywrap_seal import open_keywrap
 from socialhome.global_server.envelope_relay import (
     ENVELOPE_MAX_BODY_BYTES,
@@ -136,7 +148,12 @@ async def test_only_the_addressed_household_can_open_the_relay_body():
     plain = orjson.loads(
         open_keywrap(sealed=sealed, recipient_keywrap_priv=kp.private_key),
     )
-    assert plain == {"kind": RELAY_KIND_ENVELOPE, "envelope": SPACE_ENVELOPE}
+    # The size pad is the wrapper's only other key — never inside the
+    # envelope the §24.11 pipeline verifies.
+    assert set(plain) == {"kind", "envelope", PAD_FIELD}
+    assert set(plain[PAD_FIELD]) <= {"0"}
+    assert plain["kind"] == RELAY_KIND_ENVELOPE
+    assert plain["envelope"] == SPACE_ENVELOPE
 
 
 async def test_the_sealed_body_fits_the_connection_server_contract():
@@ -172,3 +189,114 @@ async def test_every_seal_is_fresh_so_two_identical_events_do_not_match():
     first, second = relay.bodies
     assert first["sealed"]["ciphertext"] != second["sealed"]["ciphertext"]
     assert first["sealed"]["eph_pk"] != second["sealed"]["eph_pk"]
+
+
+# ─── Size: the relay learns a bucket, not what kind of write it was ──────
+
+
+def _signed_envelope(
+    encoder: FederationEncoder,
+    event_type: FederationEventType,
+    payload: dict,
+) -> dict:
+    """A real §24.11 envelope: AES-GCM payload under a pair key, Ed25519
+    signature over the canonical bytes — the shape the transport is
+    handed."""
+    envelope = {
+        "msg_id": "m" * 36,
+        "event_type": event_type.value,
+        "from_instance": SPACE_ENVELOPE["from_instance"],
+        "to_instance": SPACE_ENVELOPE["to_instance"],
+        "timestamp": "2026-09-18T10:00:00+00:00",
+        "encrypted_payload": encoder.encrypt_payload(
+            orjson.dumps(payload).decode(),
+            os.urandom(32),
+        ),
+        "space_id": "s" * 32,
+        "proto_version": 51,
+        "sig_suite": "ed25519",
+    }
+    envelope["signatures"] = encoder.sign_envelope_all(
+        orjson.dumps(envelope),
+        suite="ed25519",
+    )
+    return envelope
+
+
+async def test_a_moderation_submission_and_a_plain_write_look_the_same():
+    """A moderation submission carries the item, its snapshot AND the
+    author's signed inner (``public_relay``) — about twice a plain post
+    write. Unpadded, the relay could tell "a member's post went to the
+    moderators" from "a post was made" by length alone. Padded, both
+    land in one bucket and the relay bodies are the same length."""
+    identity = generate_identity_keypair()
+    encoder = FederationEncoder(identity.private_key)
+    author = derive_user_id(identity.public_key, "anna")
+    created = datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc)
+    post = Post(
+        id="p" * 32,
+        author=author,
+        type=PostType.TEXT,
+        created_at=created,
+        content="Bring a cake to the book club on Thursday?",
+    )
+    write_payload = {
+        "id": post.id,
+        "space_id": "s" * 32,
+        "author": author,
+        "actor_user_id": author,
+        "type": post.type.value,
+        "content": post.content,
+        "media_url": None,
+        "image_urls": [],
+        "occurred_at": created.isoformat(),
+        "hidden_from_feed": False,
+    }
+    item_payload = {
+        "entity": "post",
+        "target_id": post.id,
+        "type": post.type.value,
+        "content": post.content,
+    }
+    submission_payload = {
+        "space_id": "s" * 32,
+        "item_id": "i" * 32,
+        "feature": "posts",
+        "action": "create",
+        "target_id": post.id,
+        "submitted_by": author,
+        "payload": item_payload,
+        "snapshot": None,
+        "submitted_at": created.isoformat(),
+        "expires_at": (created + timedelta(days=7)).isoformat(),
+        "public_relay": build_signed_author_inner(
+            post=post,
+            space_id="s" * 32,
+            author_username="anna",
+            author_pk=identity.public_key,
+            author_identity_seed=identity.private_key,
+            origin_instance_id=SPACE_ENVELOPE["from_instance"],
+        ),
+    }
+    write = _signed_envelope(
+        encoder, FederationEventType.SPACE_POST_CREATED, write_payload
+    )
+    submission = _signed_envelope(
+        encoder, FederationEventType.SPACE_MODERATION_SUBMITTED, submission_payload
+    )
+    # Not vacuous: the two envelopes really are different sizes.
+    assert len(orjson.dumps(submission)) > len(orjson.dumps(write)) + 500
+
+    kp = generate_x25519_keypair()
+    relay = _RecordingRelay()
+    transport = GfsRelayTransport(relay_sender=relay)
+    await transport.send(instance=_instance(kp.public_key), envelope_dict=write)
+    await transport.send(instance=_instance(kp.public_key), envelope_dict=submission)
+
+    write_body, submission_body = relay.bodies
+    assert len(orjson.dumps(write_body)) == len(orjson.dumps(submission_body))
+    for body in relay.bodies:
+        plain = open_keywrap(
+            sealed=body["sealed"], recipient_keywrap_priv=kp.private_key
+        )
+        assert len(plain) in RELAY_SIZE_BUCKETS

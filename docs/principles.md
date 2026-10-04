@@ -172,8 +172,11 @@ server that introduced them (`POST {gfs}/gfs/envelope`,
 path of ordinary space traffic for the first time. **What it concedes,
 exactly:**
 
-- **The GFS sees, per envelope: `to_instance`, a timestamp and a byte
-  size.** Nothing else is on the wire. The whole §24.11 envelope —
+- **The GFS sees, per envelope: `to_instance`, a timestamp and a size
+  bucket.** Nothing else is on the wire. The sealed plaintext is padded to
+  one of 1 / 4 / 16 / 64 / 128 / 191 KiB before sealing, so the blob
+  length names a bucket, not the envelope's size — a moderation submission
+  and a plain write look alike. The whole §24.11 envelope —
   including the routing fields that are plaintext on every other
   transport (`from_instance`, `event_type`, `space_id`, `msg_id`,
   `timestamp`) — is sealed to the recipient's static X25519 key-wrap key
@@ -187,7 +190,7 @@ exactly:**
   household's address, and the server's access log records it the way it
   records the `/gfs/ws` session the same paragraph already concedes. An
   operator willing to read their own access log can therefore correlate
-  *sender IP → recipient instance id → time → size* for every relayed
+  *sender IP → recipient instance id → time → size bucket* for every relayed
   envelope, which is the pairwise graph the sealed body withholds. This
   is the same residual `/gfs/publish` carries and has the same answer:
   closing it needs a mix/onion egress and is out of scope. `to_instance`

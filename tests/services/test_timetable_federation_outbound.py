@@ -22,7 +22,11 @@ from socialhome.domain.timetable import (
     validate,
 )
 from socialhome.federation.encoder import FederationEncoder
-from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
+from socialhome.federation.gfs_relay_transport import (
+    RELAY_MAX_ENVELOPE_BYTES,
+    RELAY_SIZE_BUCKETS,
+    build_relay_plaintext,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.timetable_federation_outbound import (
     TimetableFederationOutbound,
@@ -170,3 +174,5 @@ def test_a_max_size_timetable_fits_the_relay_envelope_cap():
         "signatures": {"ed25519": "x" * 88, "mldsa65": "y" * 4412},
     }
     assert len(orjson.dumps(envelope)) < RELAY_MAX_ENVELOPE_BYTES
+    # And it pads into a relay size bucket, i.e. a seal every receiver opens.
+    assert len(build_relay_plaintext(envelope)) in RELAY_SIZE_BUCKETS

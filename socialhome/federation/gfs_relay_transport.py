@@ -27,10 +27,33 @@ JSON is sealed a second time to the peer's static key-wrap public key
 primitive the bootstrap redeem used, ``kem_suite`` tag included) and the
 relay is handed the identity-free ``{to_instance, sealed}`` body.
 
-What the GFS can infer is therefore ``(to_instance, time, size)`` per
-envelope, and nothing else. That concession — including the fact that a
-space fan-out to N link-joined members shows the relay N recipients at
+What the GFS can infer is therefore ``(to_instance, time, size bucket)``
+per envelope, and nothing else. That concession — including the fact that
+a space fan-out to N link-joined members shows the relay N recipients at
 once — is written up in ``docs/principles.md``.
+
+## Size padding
+
+The sealed plaintext is padded to exactly one of
+:data:`RELAY_SIZE_BUCKETS` before sealing, so the ciphertext length — the
+one thing about the payload the GFS still sees — names a bucket, not a
+size: a reaction and a short post look alike, and so do a plain write and
+a moderation submission carrying the author's signed inner. The pad is a
+:data:`~socialhome.domain.space_item.PAD_FIELD` key on the *wrapper*, a
+sibling of ``envelope``:
+
+* it sits inside the seal, so it is authenticated with everything else;
+* the receiver only ever reads ``kind`` and ``envelope`` and hands the
+  pipeline ``orjson.dumps(body["envelope"])`` — so the envelope bytes the
+  §24.11 signature step sees are identical with or without the pad, and a
+  receiver from before padding (which ignores unknown wrapper keys) opens
+  a padded blob unchanged. No seal-format change, no new ``kem_suite``, no
+  protocol-version gate.
+
+An envelope that does not fit the top bucket is refused with
+:data:`RELAY_STATUS_TOO_LARGE`: the top bucket is the largest sealed
+plaintext a receiver opens at all (its ``MAX_SEALED_BLOB_BYTES`` check on
+the ciphertext string), so there is no unpadded "too big to hide" class.
 
 ## Wire shape
 
@@ -42,7 +65,8 @@ Outer (what the relay sees, built by
 
 Inner (the sealed plaintext)::
 
-    {"kind": "space_relay_envelope", "envelope": {…the §24.11 envelope…}}
+    {"kind": "space_relay_envelope", "envelope": {…the §24.11 envelope…},
+     "_pad": "000…"}      # to exactly one RELAY_SIZE_BUCKETS size
 
 ``kind`` is the marker that tells the receiver which family this blob
 belongs to. The relay leg carries two unrelated things through one
@@ -59,10 +83,11 @@ Nothing about riding the relay skips a step.
 ## What does not fit
 
 The relay body is capped at :data:`RELAY_MAX_BODY_BYTES` (the GFS's
-``ENVELOPE_MAX_BODY_BYTES``). Media chunks are 512 KiB — 1 MiB before
-base64, so a chunk envelope is several times the cap and is refused
-here, loudly, rather than shipped to a 413. See the media note in
-``docs/protocol/invites.md``.
+``ENVELOPE_MAX_BODY_BYTES``), and the receiver opens a sealed plaintext of
+at most the top of :data:`RELAY_SIZE_BUCKETS` (~191 KiB). Media chunks
+are 512 KiB — 1 MiB before base64, so a chunk envelope is several times
+the cap and is refused here, loudly, rather than shipped to a 413. See
+the media note in ``docs/protocol/invites.md``.
 """
 
 from __future__ import annotations
@@ -73,6 +98,7 @@ from typing import Any
 import orjson
 
 from ..domain.federation import RemoteInstance
+from ..domain.space_item import ITEM_SIZE_BUCKETS, pad_json_object
 from .invite_bootstrap import EnvelopeRelayThrottled, RelayEnvelopeSender
 from .keywrap_seal import seal_to_keywrap
 
@@ -92,13 +118,28 @@ RELAY_KIND_ENVELOPE: str = "space_relay_envelope"
 #: ``tests/federation/test_gfs_relay_transport.py``.
 RELAY_MAX_BODY_BYTES: int = 320 * 1024
 
+#: Sealed-plaintext sizes a relayed envelope is padded up to, so the GFS
+#: learns the bucket and not the size. The item ladder
+#: (:data:`~socialhome.domain.space_item.ITEM_SIZE_BUCKETS`, 1 / 4 / 16 /
+#: 64 / 128 KiB) plus one rung at 191 KiB: the largest round size whose
+#: seal every receiver opens — ``unseal_envelope_body`` refuses a
+#: ciphertext string over ``MAX_SEALED_BLOB_BYTES`` (256 KiB of base64,
+#: i.e. ~192 KiB of plaintext) before the AEAD. Pinned by
+#: ``tests/federation/test_gfs_relay_transport.py``.
+#:
+#: Queue cost on the GFS: padding at most quadruples a small envelope
+#: (a ~1.1 KiB frame ships at 4 KiB), so a recipient's full
+#: ``ENVELOPE_QUEUE_MAX_PER_RECIPIENT`` (2000 rows) of 4 KiB-bucket
+#: envelopes is ~11 MiB — well under the 64 MiB
+#: ``ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT``; the byte cap still binds only
+#: for top-bucket frames, exactly as it did for large frames before.
+RELAY_SIZE_BUCKETS: tuple[int, ...] = (*ITEM_SIZE_BUCKETS, 191 * 1024)
+
 #: Cheap pre-seal bound on the envelope JSON, so an oversize frame costs a
-#: length compare instead of an AES-GCM pass over a megabyte. Base64
-#: inflates the ciphertext by 4/3 and the outer JSON adds ~150 bytes of
-#: framing, so 3/4 of the body cap with 8 KiB of headroom is conservative
-#: — anything that passes here is re-checked exactly against
-#: :data:`RELAY_MAX_BODY_BYTES` once sealed.
-RELAY_MAX_ENVELOPE_BYTES: int = (RELAY_MAX_BODY_BYTES * 3) // 4 - 8 * 1024
+#: length compare instead of a JSON pad + AES-GCM pass over a megabyte. A
+#: frame over the top bucket can never be padded into one; anything that
+#: passes is re-checked exactly once padded (:func:`build_relay_plaintext`).
+RELAY_MAX_ENVELOPE_BYTES: int = RELAY_SIZE_BUCKETS[-1]
 
 #: Status this transport reports for a frame it refuses BEFORE the wire,
 #: because it cannot fit :data:`RELAY_MAX_BODY_BYTES`. It is the status the
@@ -115,21 +156,39 @@ RELAY_STATUS_TOO_LARGE: int = 413
 RELAY_STATUS_THROTTLED: int = 429
 
 
+def build_relay_plaintext(envelope_dict: dict) -> bytes:
+    """The sealed plaintext for one envelope: the ``kind`` wrapper, padded
+    to exactly one of :data:`RELAY_SIZE_BUCKETS` (see "Size padding"
+    above). Larger than the top bucket comes back unpadded and over it —
+    callers refuse that (:func:`seal_relay_envelope` raises,
+    :meth:`GfsRelayTransport.send` answers ``413``)."""
+    return pad_json_object(
+        {"kind": RELAY_KIND_ENVELOPE, "envelope": envelope_dict},
+        buckets=RELAY_SIZE_BUCKETS,
+    )
+
+
 def seal_relay_envelope(
     *,
     envelope_dict: dict,
     peer_keywrap_pub: bytes,
 ) -> dict[str, str]:
-    """Seal one §24.11 envelope to a peer's static key-wrap public key.
+    """Pad and seal one §24.11 envelope to a peer's static key-wrap key.
 
     Returns the ``{kem_suite, eph_pk, ciphertext}`` dict — the outer
     ``to_instance`` wrapper is built by the relay sender, which rebuilds
     it from the recipient id rather than forwarding a caller's dict (so
     no caller can grow a third, identifying field).
+
+    Raises :class:`ValueError` when the envelope does not fit the top size
+    bucket — a receiver could not open the seal.
     """
-    plaintext = orjson.dumps(
-        {"kind": RELAY_KIND_ENVELOPE, "envelope": envelope_dict},
-    )
+    plaintext = build_relay_plaintext(envelope_dict)
+    if len(plaintext) > RELAY_SIZE_BUCKETS[-1]:
+        raise ValueError(
+            f"relay envelope is {len(plaintext)} bytes once wrapped, over "
+            f"the top size bucket ({RELAY_SIZE_BUCKETS[-1]})",
+        )
     return seal_to_keywrap(
         recipient_keywrap_pub=peer_keywrap_pub,
         plaintext=plaintext,
@@ -217,10 +276,24 @@ class GfsRelayTransport:
             )
             return False, RELAY_STATUS_TOO_LARGE
 
+        plaintext = build_relay_plaintext(envelope_dict)
+        if len(plaintext) > RELAY_SIZE_BUCKETS[-1]:
+            # Within the cheap bound but not once wrapped: a seal no
+            # receiver would open. Same permanent status, same reason.
+            log.warning(
+                "gfs relay: refusing a %d-byte %r envelope for %s — over "
+                "the relay body cap once wrapped (largest size bucket %d)",
+                raw_len,
+                envelope_dict.get("event_type"),
+                instance.id,
+                RELAY_SIZE_BUCKETS[-1],
+            )
+            return False, RELAY_STATUS_TOO_LARGE
+
         try:
-            sealed = seal_relay_envelope(
-                envelope_dict=envelope_dict,
-                peer_keywrap_pub=peer_keywrap_pub,
+            sealed = seal_to_keywrap(
+                recipient_keywrap_pub=peer_keywrap_pub,
+                plaintext=plaintext,
             )
         except Exception as exc:
             log.warning(
@@ -282,9 +355,11 @@ __all__ = [
     "RELAY_KIND_ENVELOPE",
     "RELAY_MAX_BODY_BYTES",
     "RELAY_MAX_ENVELOPE_BYTES",
+    "RELAY_SIZE_BUCKETS",
     "RELAY_STATUS_THROTTLED",
     "RELAY_STATUS_TOO_LARGE",
     "GfsRelayTransport",
+    "build_relay_plaintext",
     "is_relay_envelope_body",
     "seal_relay_envelope",
 ]

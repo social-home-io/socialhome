@@ -123,6 +123,17 @@ def test_padding_moves_up_a_bucket_and_leaves_huge_bodies_alone():
     assert len(huge) > ITEM_SIZE_BUCKETS[-1]
 
 
+def test_padding_takes_a_caller_bucket_ladder():
+    """The GFS envelope relay pads to its own ladder (one rung above the
+    item ladder) with the same helper."""
+    ladder = (100, 300)
+    assert len(pad_json_object({"a": 1}, buckets=ladder)) == 100
+    assert len(pad_json_object({"a": "x" * 150}, buckets=ladder)) == 300
+    over = pad_json_object({"a": "x" * 400}, buckets=ladder)
+    assert len(over) > 300
+    assert json.loads(over) == {"a": "x" * 400, PAD_FIELD: ""}
+
+
 def test_removal_round_trips_through_its_inner():
     removal = AuthorityRemoval(
         space_id="sp", target=REMOVAL_TARGET_COMMENT, item_id="c1", post_id="p1"

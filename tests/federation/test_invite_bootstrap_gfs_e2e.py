@@ -30,6 +30,7 @@ from aiohttp.test_utils import TestServer
 
 from socialhome.capabilities_sig import sign_capabilities
 from socialhome.crypto import (
+    b64url_decode,
     b64url_encode,
     derive_instance_id,
     generate_identity_keypair,
@@ -62,6 +63,7 @@ from socialhome.federation.invite_bootstrap import (
 from socialhome.global_server.envelope_relay import ENVELOPE_MAX_BODY_BYTES
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.federation.gfs_relay_transport import (
+    RELAY_SIZE_BUCKETS,
     GfsRelayTransport,
     seal_relay_envelope,
 )
@@ -956,6 +958,35 @@ async def test_every_relayed_body_is_a_recipient_and_ciphertext(households, gfs)
     # Each leg names only its recipient — never its sender.
     assert gfs.mailbox[0][0] == a.instance_id
     assert a.instance_id not in json.dumps(gfs.mailbox[1][1])
+
+
+async def test_a_relayed_envelope_is_bucket_sized_and_still_verifies(households, gfs):
+    """The relay sees the blob's length, so the sealed plaintext is padded
+    to a size bucket — beside the envelope, never in it: the receiver's
+    unchanged §24.11 pipeline still verifies the pair signature and
+    dispatches the event."""
+    a, b = households
+    space = await _join(a, b, gfs)
+
+    # Different lengths, one bucket (4 KiB).
+    markers = ("a" * 400, "b" * 1500)
+    for marker in markers:
+        result = await b.federation.broadcast_to_space_members(
+            space.id,
+            FederationEventType.SPACE_POST_CREATED,
+            _post_payload(marker),
+        )
+        assert result.succeeded == 1
+    await gfs.drain()
+
+    assert len(gfs.mailbox) == 2
+    for _to_instance, body in gfs.mailbox:
+        _nonce, ct = body["sealed"]["ciphertext"].split(":")
+        plaintext_len = len(b64url_decode(ct)) - 16  # AES-GCM tag
+        assert plaintext_len in RELAY_SIZE_BUCKETS
+    # One bucket for both, so the relay cannot tell them apart by size.
+    assert len(json.dumps(gfs.mailbox[0][1])) == len(json.dumps(gfs.mailbox[1][1]))
+    assert [e.payload["content"] for e in a.received] == list(markers)
 
 
 async def test_a_tampered_blob_is_dropped_at_the_receiver(households, gfs):
