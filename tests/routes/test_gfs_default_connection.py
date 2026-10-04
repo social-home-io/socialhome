@@ -15,7 +15,8 @@ from types import MappingProxyType
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key
+from socialhome import config as config_mod
+from socialhome.app_keys import config_key, db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
@@ -293,5 +294,47 @@ async def test_post_accepts_the_pinned_gfs(aiohttp_client, tmp_dir):
         default_url=_url(gfs),
         gfs_default_instance_id="gfs-default",
     )
+    r = await home.post(PATH, headers=ADMIN)
+    assert r.status == 201
+
+
+# ─── The shipped project-GFS key pin ─────────────────────────────────────
+
+
+async def test_shipped_key_pin_refuses_an_impostor(
+    aiohttp_client, tmp_dir, monkeypatch
+):
+    """Treat the test GFS as if it sat at the shipped URL: its (random) key is
+    not the project key, so the connect is refused and nothing registers."""
+    gfs = await _gfs(aiohttp_client, tmp_dir)
+    monkeypatch.setattr(config_mod, "PROJECT_GFS_URL", _url(gfs))
+    home = await _household(aiohttp_client, tmp_dir, default_url=_url(gfs))
+    r = await home.post(PATH, headers=ADMIN)
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "GFS_IDENTITY_MISMATCH"
+    assert await gfs.server.app[gfs_fed_repo_key].list_instances() == []
+
+
+async def test_shipped_key_pin_accepts_the_matching_key(
+    aiohttp_client, tmp_dir, monkeypatch
+):
+    gfs = await _gfs(aiohttp_client, tmp_dir)
+    info = await (await gfs.get("/gfs/info")).json()
+    monkeypatch.setattr(config_mod, "PROJECT_GFS_URL", _url(gfs))
+    monkeypatch.setattr(
+        config_mod, "PROJECT_GFS_PUBLIC_KEY", info["public_key"].upper()
+    )
+    home = await _household(aiohttp_client, tmp_dir, default_url=_url(gfs))
+    r = await home.post(PATH, headers=ADMIN)
+    assert r.status == 201
+    assert len(await gfs.server.app[gfs_fed_repo_key].list_instances()) == 1
+
+
+async def test_overridden_url_without_a_key_is_tofu(aiohttp_client, tmp_dir):
+    """An operator's own default URL with no key set: no pin (TOFU, like a QR
+    scan) — the shipped project key never applies to someone else's GFS."""
+    gfs = await _gfs(aiohttp_client, tmp_dir)
+    home = await _household(aiohttp_client, tmp_dir, default_url=_url(gfs))
+    assert home.app[config_key].gfs_default_pin() == ("", "")
     r = await home.post(PATH, headers=ADMIN)
     assert r.status == 201

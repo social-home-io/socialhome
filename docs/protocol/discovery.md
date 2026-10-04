@@ -366,15 +366,19 @@ sequenceDiagram
 
 What the household checks and sends:
 
-- **Identity pin for the default GFS.** `[gfs] default_instance_id` /
-  `default_public_key` (`SH_GFS_DEFAULT_INSTANCE_ID` /
-  `SH_GFS_DEFAULT_PUBLIC_KEY`) make the household refuse a server whose
-  `/gfs/info` names another id or key ("This doesn't look like the Social
-  Home GFS"), before anything else is sent. An operator-set pin always
-  applies; the project's own pin (shipped empty until the project publishes
-  it) applies only while `default_url` is the shipped
-  `https://gfs.social-home.io` — pointing the default at your own GFS
-  without an id means no pin.
+- **Identity pin for the default GFS.** The household refuses a server
+  whose `/gfs/info` presents another public key ("This doesn't look like the
+  Social Home GFS. Check the address in settings.", `422
+  GFS_IDENTITY_MISMATCH`) before anything else is sent; the key is compared
+  in constant time, hex, lowercase-normalized. With the shipped
+  `default_url` (`https://gfs.social-home.io`) the project GFS's key
+  `33cf798c8c8a7ae04d06a5978242b189c421fb66b2faf61749154070aa12ab0e` is
+  pinned — it changes only with an app update or an operator override. The
+  instance id is not pinned by default (on the project GFS it is a label,
+  `gfs-2`, not derived from the key). An operator who overrides
+  `default_url` gets no pin unless they set their own `[gfs]
+  default_public_key` (`SH_GFS_DEFAULT_PUBLIC_KEY`; optionally
+  `default_instance_id`).
 - **Same trust as a QR scan.** `/gfs/info` is fetched **once**; the signed
   capability block is verified against the `public_key` in that same
   response — the key the household then pins (TOFU, https unless loopback /

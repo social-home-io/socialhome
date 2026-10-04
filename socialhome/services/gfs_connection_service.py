@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import json
 import logging
 import time
@@ -530,7 +531,10 @@ class GfsConnectionService:
             and str(info.get("gfs_instance_id")) != expect_instance_id
         ) or (
             expect_public_key
-            and str(info.get("public_key")).lower() != expect_public_key.lower()
+            and not hmac.compare_digest(
+                str(info.get("public_key") or "").strip().lower().encode(),
+                expect_public_key.strip().lower().encode(),
+            )
         ):
             log.warning(
                 "GFS %s does not match the pinned default GFS identity "

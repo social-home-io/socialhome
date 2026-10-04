@@ -106,12 +106,15 @@ _CORE_SECTIONS: frozenset[str] = frozenset(
 #: The project's GFS — the shipped ``[gfs] default_url``.
 PROJECT_GFS_URL = "https://gfs.social-home.io"
 
-#: The project GFS's identity, pinned before an open sign-up when the
-#: household uses the shipped :data:`PROJECT_GFS_URL`. Deliberately EMPTY
-#: until the project publishes the real values — an invented id would refuse
-#: the genuine server. Empty means "no pin" (TOFU only, like a QR scan).
+#: The project GFS's identity, pinned before an open sign-up while the
+#: household uses the shipped :data:`PROJECT_GFS_URL`. The PUBLIC KEY is the
+#: pin (owner-confirmed, 2026-10-04): it changes only with an app update or
+#: an operator override. The instance id is not pinned — on the project GFS
+#: it is a label (``gfs-2``), not derived from the key. Empty means no pin.
 PROJECT_GFS_INSTANCE_ID = ""
-PROJECT_GFS_PUBLIC_KEY = ""
+PROJECT_GFS_PUBLIC_KEY = (
+    "33cf798c8c8a7ae04d06a5978242b189c421fb66b2faf61749154070aa12ab0e"
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -240,16 +243,19 @@ class Config:
         """``(instance_id, public_key)`` the default GFS must present, ``""``
         meaning "not pinned".
 
-        An operator-set pin always applies. Otherwise the project's shipped
-        pin applies only while ``default_url`` is the shipped
+        An operator-set value always applies. Otherwise the project's shipped
+        values apply only while ``default_url`` is the shipped
         :data:`PROJECT_GFS_URL` — an operator who points the default at
-        their own GFS without setting an id gets no pin, never the project's.
+        their own GFS without setting a key gets no pin, never the project's.
         """
-        if self.gfs_default_instance_id or self.gfs_default_public_key:
-            return self.gfs_default_instance_id, self.gfs_default_public_key
-        if self.gfs_default_url.rstrip("/") == PROJECT_GFS_URL:
-            return PROJECT_GFS_INSTANCE_ID, PROJECT_GFS_PUBLIC_KEY
-        return "", ""
+        shipped = self.gfs_default_url.rstrip("/") == PROJECT_GFS_URL
+        instance_id = self.gfs_default_instance_id or (
+            PROJECT_GFS_INSTANCE_ID if shipped else ""
+        )
+        public_key = self.gfs_default_public_key or (
+            PROJECT_GFS_PUBLIC_KEY if shipped else ""
+        )
+        return instance_id, public_key.lower()
 
     @classmethod
     def from_env(cls) -> "Config":

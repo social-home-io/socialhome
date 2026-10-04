@@ -34,12 +34,17 @@
 # The GFS must have open sign-up turned on ([policy] open_signup).
 # Env: SH_GFS_DEFAULT_URL.
 # default_url = "https://gfs.social-home.io"
-# Optional identity pin: refuse a server at default_url whose /gfs/info
-# names another instance id / Ed25519 public key (hex). Set these when you
-# point default_url at your own GFS. Env: SH_GFS_DEFAULT_INSTANCE_ID,
-# SH_GFS_DEFAULT_PUBLIC_KEY.
-# default_instance_id = ""
+# Identity pin: the one-click connect refuses a server at default_url whose
+# /gfs/info presents another Ed25519 public key (hex). With the shipped
+# default_url the project GFS's key is pinned for you — it changes only with
+# an app update or your override:
+#   33cf798c8c8a7ae04d06a5978242b189c421fb66b2faf61749154070aa12ab0e
+# If you point default_url at your own GFS, the shipped key no longer
+# applies; set your server's key here to pin it (no key = trust on first
+# use, like a QR scan). default_instance_id pins the id as well (optional).
+# Env: SH_GFS_DEFAULT_PUBLIC_KEY, SH_GFS_DEFAULT_INSTANCE_ID.
 # default_public_key = ""
+# default_instance_id = ""
 
 [webrtc]
 # stun_url = "stun:stun.l.google.com:19302"

@@ -252,12 +252,23 @@ def test_gfs_default_url_env_overrides_toml(tmp_path, monkeypatch):
     assert Config.from_env().gfs_default_url == ""
 
 
-def test_gfs_default_pin_is_empty_until_the_project_publishes_one():
-    """No invented identity: the shipped pin is empty, so nothing is pinned."""
+PROJECT_KEY = "33cf798c8c8a7ae04d06a5978242b189c421fb66b2faf61749154070aa12ab0e"
+
+
+def test_shipped_default_pins_the_project_gfs_public_key():
+    """The shipped default pins the project GFS's public key (not its id,
+    which is a label), and only for the shipped URL."""
     cfg = Config()
+    assert cfg.gfs_default_url == "https://gfs.social-home.io"
     assert cfg.gfs_default_instance_id == ""
     assert cfg.gfs_default_public_key == ""
-    assert cfg.gfs_default_pin() == ("", "")
+    assert cfg.gfs_default_pin() == ("", PROJECT_KEY)
+    assert Config.from_env().gfs_default_pin() == ("", PROJECT_KEY)
+
+
+def test_overridden_default_url_without_a_key_is_not_pinned(monkeypatch):
+    monkeypatch.setenv("SH_GFS_DEFAULT_URL", "https://gfs.example.org")
+    assert Config.from_env().gfs_default_pin() == ("", "")
 
 
 def test_gfs_default_pin_from_toml_and_env(tmp_path, monkeypatch):
@@ -287,3 +298,8 @@ def test_shipped_pin_applies_only_to_the_shipped_url(monkeypatch):
         gfs_default_url="https://gfs.example.org", gfs_default_instance_id="mine"
     )
     assert pinned.gfs_default_pin() == ("mine", "")
+
+
+def test_operator_id_with_shipped_url_keeps_the_shipped_key():
+    cfg = Config(gfs_default_instance_id="gfs-2")
+    assert cfg.gfs_default_pin() == ("gfs-2", PROJECT_KEY)
