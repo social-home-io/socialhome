@@ -1,33 +1,37 @@
-"""Forwarded invite-link mint (v_52): an admin on a member household mints a
-link for a space hosted elsewhere.
+"""Forwarded invite links (v_52): an admin on a member household mints,
+lists and revokes the links of a space hosted elsewhere.
 
 An invite link is a row in the **host's** ``space_invite_tokens`` table and
-every redeem path consumes it there, so a member household cannot mint one
-locally. Instead its admin's request is forwarded to the host, which checks
-the actor's live seat, mints the token in its own table (publishing its blob
-to the host's own connection server when asked) and hands the link back:
+every redeem path consumes it there, so a member household holds none of a
+remote space's links. Its admin's request is forwarded to the host instead,
+which checks the actor's live seat, acts on its own table (a mint publishes
+to the host's own connection server when asked; a revoke takes a parked blob
+down there) and answers:
 
 1. **Member household → host:** the existing
    :data:`~socialhome.domain.federation.FederationEventType
-   .SPACE_REMOTE_ADMIN_ACTION` with ``action = "create_invite_link"`` and
-   ``params = {mint_nonce, role, uses, ttl_seconds, via, publish_gfs_url}``.
-   The §24.11 pipeline authenticates the household; the actor is bound to
-   the signed envelope's ``from_instance`` (never a payload field), exactly
-   as for every other forwarded admin action.
-2. **Host:** :meth:`SpaceService.handle_forwarded_invite_mint` re-decides
+   .SPACE_REMOTE_ADMIN_ACTION` with ``action`` one of
+   :data:`FORWARDED_INVITE_LINK_ACTIONS` and ``params`` carrying
+   ``request_nonce`` plus the action's own fields — ``create_invite_link``:
+   ``{role, uses, ttl_seconds, via, publish_gfs_url}``;
+   ``list_invite_links``: nothing; ``revoke_invite_link``: ``{token}``. The
+   §24.11 pipeline authenticates the household; the actor is bound to the
+   signed envelope's ``from_instance`` (never a payload field), exactly as
+   for every other forwarded admin action.
+2. **Host:** :meth:`SpaceService.handle_forwarded_invite_action` re-decides
    everything with its own data and answers with
    :data:`~socialhome.domain.federation.FederationEventType
-   .SPACE_INVITE_LINK_FORWARD_RESULT` ``{space_id, mint_nonce, link}`` or
-   ``{space_id, mint_nonce, error[, gfs_status]}``.
+   .SPACE_INVITE_LINK_FORWARD_RESULT` ``{space_id, request_nonce}`` plus
+   ``link`` / ``links`` / ``revoked``, or ``error[, gfs_status]``.
 3. **Member household:** the waiting request resolves; a reply from any
    household other than the one addressed is ignored. No reply within
-   :data:`MINT_TIMEOUT_SECONDS` is ``HostUnreachableError`` (503) — the
+   :data:`REQUEST_TIMEOUT_SECONDS` is ``HostUnreachableError`` (503) — the
    host is offline.
 
-Unlike a role change, a mint is never held for owner approval: any admin may
-mint a member / subscriber / moderator link on the host, so a forwarded one
-needs no more than the same seat. This module is transport only; the
-authorization and the error vocabulary live in ``SpaceService``.
+Unlike a role change, none of these is held for owner approval: any admin
+may mint, list and revoke links on the host, so a forwarded request needs no
+more than the same seat. This module is transport only; the authorization
+and the error vocabulary live in ``SpaceService``.
 """
 
 from __future__ import annotations
@@ -51,13 +55,22 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: The ``SPACE_REMOTE_ADMIN_ACTION`` action a forwarded mint rides as.
+#: The ``SPACE_REMOTE_ADMIN_ACTION`` actions of this module.
 FORWARDED_INVITE_LINK_ACTION: str = "create_invite_link"
+LIST_INVITE_LINKS_ACTION: str = "list_invite_links"
+REVOKE_INVITE_LINK_ACTION: str = "revoke_invite_link"
+FORWARDED_INVITE_LINK_ACTIONS: frozenset[str] = frozenset(
+    {
+        FORWARDED_INVITE_LINK_ACTION,
+        LIST_INVITE_LINKS_ACTION,
+        REVOKE_INVITE_LINK_ACTION,
+    }
+)
 
-#: How long the member household waits for the host's answer. A mint on the
-#: host may publish to a connection server first, so this is longer than a
-#: redeem's single hop.
-MINT_TIMEOUT_SECONDS: float = 20.0
+#: How long the member household waits for the host's answer. A mint or a
+#: revoke on the host may talk to a connection server first, so this is
+#: longer than a redeem's single hop.
+REQUEST_TIMEOUT_SECONDS: float = 20.0
 
 #: Delivery errors that still arrive (a durable outbox / a parked relay):
 #: the request is on its way, so keep waiting for the reply.
@@ -67,8 +80,8 @@ _STILL_ARRIVING: frozenset[str] = frozenset(
 
 
 class InviteLinkForwardCoordinator:
-    """Both halves of a forwarded mint: the member household's waiting
-    request and the host's reply."""
+    """Both halves of a forwarded invite-link request: the member
+    household's waiting request and the host's reply."""
 
     __slots__ = (
         "_federation",
@@ -82,27 +95,27 @@ class InviteLinkForwardCoordinator:
         self,
         *,
         federation_service: "FederationService",
-        timeout: float = MINT_TIMEOUT_SECONDS,
+        timeout: float = REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         self._federation = federation_service
         self._space_service = None
         self._timeout = timeout
-        #: ``mint_nonce -> Future`` of a request in flight.
+        #: ``request_nonce -> Future`` of a request in flight.
         self._pending: dict[str, asyncio.Future[dict]] = {}
-        #: ``mint_nonce -> host instance id`` it was sent to.
+        #: ``request_nonce -> host instance id`` it was sent to.
         self._pending_host: dict[str, str] = {}
 
     def attach_space_service(self, space_service) -> None:
-        """The host-side decision (``handle_forwarded_invite_mint``)."""
+        """The host-side decision (``handle_forwarded_invite_action``)."""
         self._space_service = space_service
 
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry  # noqa: SLF001
         # Every handler bound to a type runs; the private-invite handler's
-        # SPACE_REMOTE_ADMIN_ACTION handler leaves this action to us.
+        # SPACE_REMOTE_ADMIN_ACTION handler leaves these actions to us.
         registry.register(
             FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
-            self._on_forwarded_mint,
+            self._on_forwarded_request,
         )
         registry.register(
             FederationEventType.SPACE_INVITE_LINK_FORWARD_RESULT,
@@ -111,8 +124,9 @@ class InviteLinkForwardCoordinator:
 
     # ── Member household ───────────────────────────────────────────────
 
-    async def request_mint(
+    async def request(
         self,
+        action: str,
         *,
         space_id: str,
         host_instance_id: str,
@@ -120,10 +134,12 @@ class InviteLinkForwardCoordinator:
         own_instance_id: str,
         params: dict,
     ) -> dict:
-        """Forward one mint to ``host_instance_id`` and wait for its answer:
-        the host's result payload (``link`` or ``error``). Raises
-        :class:`HostUnreachableError` when the request went nowhere or no
-        answer came in time."""
+        """Forward one ``action`` to ``host_instance_id`` and wait for its
+        answer: the host's result payload. Raises :class:`HostUnreachableError`
+        when the request went nowhere or no answer came in time, and
+        ``ValueError`` for an action this module does not forward."""
+        if action not in FORWARDED_INVITE_LINK_ACTIONS:
+            raise ValueError(f"not a forwarded invite-link action: {action!r}")
         nonce = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict] = loop.create_future()
@@ -137,8 +153,8 @@ class InviteLinkForwardCoordinator:
                     "space_id": space_id,
                     "actor_user_id": actor_user_id,
                     "actor_instance_id": own_instance_id,
-                    "action": FORWARDED_INVITE_LINK_ACTION,
-                    "params": {**params, "mint_nonce": nonce},
+                    "action": action,
+                    "params": {**params, "request_nonce": nonce},
                 },
                 space_id=space_id,
             )
@@ -148,7 +164,8 @@ class InviteLinkForwardCoordinator:
                 and result.error not in _STILL_ARRIVING
             ):
                 log.warning(
-                    "forwarded invite-link mint for space=%s did not reach host %s: %s",
+                    "forwarded %s for space=%s did not reach host %s: %s",
+                    action,
                     space_id,
                     host_instance_id,
                     result.error,
@@ -158,8 +175,8 @@ class InviteLinkForwardCoordinator:
                 return await asyncio.wait_for(fut, timeout=self._timeout)
             except TimeoutError:
                 log.warning(
-                    "forwarded invite-link mint for space=%s: no answer from "
-                    "host %s within %.0f s",
+                    "forwarded %s for space=%s: no answer from host %s within %.0f s",
+                    action,
                     space_id,
                     host_instance_id,
                     self._timeout,
@@ -171,14 +188,14 @@ class InviteLinkForwardCoordinator:
 
     async def _on_result(self, event: "FederationEvent") -> None:
         p = event.payload if isinstance(event.payload, dict) else {}
-        nonce = str(p.get("mint_nonce") or "")
+        nonce = str(p.get("request_nonce") or "")
         fut = self._pending.get(nonce)
         if fut is None or fut.done():
             return
         expected = self._pending_host.get(nonce, "")
         if event.from_instance != expected:
             log.warning(
-                "forwarded invite-link mint: %s answered a request addressed to "
+                "forwarded invite-link request: %s answered one addressed to "
                 "%s — ignoring",
                 event.from_instance,
                 expected,
@@ -188,29 +205,36 @@ class InviteLinkForwardCoordinator:
 
     # ── Host ───────────────────────────────────────────────────────────
 
-    async def _on_forwarded_mint(self, event: "FederationEvent") -> None:
+    async def _on_forwarded_request(self, event: "FederationEvent") -> None:
         p = event.payload if isinstance(event.payload, dict) else {}
-        if p.get("action") != FORWARDED_INVITE_LINK_ACTION:
+        action = p.get("action")
+        if action not in FORWARDED_INVITE_LINK_ACTIONS:
             return
         raw = p.get("params")
-        params = raw if isinstance(raw, dict) else {}
-        nonce = str(params.get("mint_nonce") or "")
+        params = {
+            k: v
+            for k, v in (raw if isinstance(raw, dict) else {}).items()
+            if k != "request_nonce"
+        }
+        nonce = str((raw if isinstance(raw, dict) else {}).get("request_nonce") or "")
         space_id = str(p.get("space_id") or "") or (event.space_id or "")
         actor_user_id = str(p.get("actor_user_id") or "")
         if not nonce or not space_id or not actor_user_id:
             log.debug(
-                "forwarded invite-link mint from %s missing fields — dropping",
+                "forwarded %s from %s missing fields — dropping",
+                action,
                 event.from_instance,
             )
             return
         if self._space_service is None:
-            log.warning("forwarded invite-link mint: no space service — dropping")
+            log.warning("forwarded %s: no space service — dropping", action)
             return
         # SECURITY: the actor's household is the SIGNED sender, never the
         # payload's ``actor_instance_id`` — a household acts only for its
         # own users.
-        answer = await self._space_service.handle_forwarded_invite_mint(
+        answer = await self._space_service.handle_forwarded_invite_action(
             space_id,
+            action=str(action),
             actor_instance_id=event.from_instance,
             actor_user_id=actor_user_id,
             params=params,
@@ -218,7 +242,7 @@ class InviteLinkForwardCoordinator:
         result = await self._federation.send_with_mesh_fallback(
             to_instance_id=event.from_instance,
             event_type=FederationEventType.SPACE_INVITE_LINK_FORWARD_RESULT,
-            payload={"space_id": space_id, "mint_nonce": nonce, **answer},
+            payload={"space_id": space_id, "request_nonce": nonce, **answer},
             space_id=space_id,
         )
         if (
@@ -226,11 +250,11 @@ class InviteLinkForwardCoordinator:
             and not result.ok
             and result.error not in _STILL_ARRIVING
         ):
-            # The link exists here but its minter never learns it: it is
-            # listed on the host and expires like any other.
+            # The change (if any) stands here; the asker just never learns
+            # it. A minted link is listed on the host and expires as usual.
             log.warning(
-                "forwarded invite-link mint for space=%s: the answer to %s was "
-                "not delivered (%s)",
+                "forwarded %s for space=%s: the answer to %s was not delivered (%s)",
+                action,
                 space_id,
                 event.from_instance,
                 result.error,

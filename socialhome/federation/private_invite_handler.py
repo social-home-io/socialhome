@@ -24,7 +24,7 @@ import base64
 import logging
 from typing import TYPE_CHECKING
 
-from .invite_link_forward import FORWARDED_INVITE_LINK_ACTION
+from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
 from ..domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceRemoteSeatLive,
@@ -1107,9 +1107,9 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        if action == FORWARDED_INVITE_LINK_ACTION:
+        if action in FORWARDED_INVITE_LINK_ACTIONS:
             # v_52 — answered by ``InviteLinkForwardCoordinator``, bound to
-            # this same event type: a mint is never held for owner approval.
+            # this same event type: never held for owner approval.
             return
         # Quorum-approval verbs route to the approval service; everything
         # else is a direct admin mutation on SpaceService.

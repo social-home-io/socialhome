@@ -948,7 +948,7 @@ async def test_a_forwarded_invite_mint_is_left_to_its_coordinator():
             "space_id": "sp",
             "actor_user_id": "u",
             "action": "create_invite_link",
-            "params": {"mint_nonce": "n"},
+            "params": {"request_nonce": "n"},
         },
     )
     await h._on_remote_admin_action(ev)

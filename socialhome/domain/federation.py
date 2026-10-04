@@ -106,9 +106,11 @@ class FederationEventType(str, enum.Enum):
     #: outbounds. Payload carries actor identity + ``action`` + ``params``.
     #: Generalises ``SPACE_REMOTE_ADMIN_KICK`` (kept for back-compat).
     SPACE_REMOTE_ADMIN_ACTION = "space_remote_admin_action"
-    #: Host → member household: the answer to a forwarded invite-link mint
-    #: (``SPACE_REMOTE_ADMIN_ACTION`` ``create_invite_link``, v_52) —
-    #: ``{space_id, mint_nonce, link}`` or ``{space_id, mint_nonce, error}``.
+    #: Host → member household: the answer to a forwarded invite-link
+    #: request (``SPACE_REMOTE_ADMIN_ACTION`` ``create_invite_link`` /
+    #: ``list_invite_links`` / ``revoke_invite_link``, v_52) —
+    #: ``{space_id, request_nonce}`` plus ``link`` / ``links`` / ``revoked``,
+    #: or ``error``.
     #: See :mod:`socialhome.federation.invite_link_forward`.
     SPACE_INVITE_LINK_FORWARD_RESULT = "space_invite_link_forward_result"
     #: Host → admin households: mirror of an open / resolved critical-action

@@ -795,16 +795,16 @@ from __future__ import annotations
 #:   **Gated, degraded fallback**: a household below v_51 is sent no grant,
 #:   so it neither subscribes nor publishes to the channel — its items keep
 #:   the host path, and it receives other members' items from the host.
-#: * **v_52** (2026-10-04) — forwarded invite-link mint. An admin on a member
-#:   household mints an invite link for a space hosted elsewhere: the request
-#:   rides ``SPACE_REMOTE_ADMIN_ACTION`` (``action: "create_invite_link"``,
-#:   ``params: {mint_nonce, role, uses, ttl_seconds, via, publish_gfs_url}``)
-#:   and the host answers with the new
+#: * **v_52** (2026-10-04) — forwarded invite links. An admin on a member
+#:   household mints, lists and revokes the invite links of a space hosted
+#:   elsewhere: each request rides ``SPACE_REMOTE_ADMIN_ACTION`` (``action``
+#:   ``create_invite_link`` / ``list_invite_links`` / ``revoke_invite_link``,
+#:   ``params`` with a ``request_nonce``) and the host answers with the new
 #:   :attr:`~socialhome.domain.federation.FederationEventType
-#:   .SPACE_INVITE_LINK_FORWARD_RESULT` carrying the link it minted in its own
-#:   table (or an error code). **Gated, no fallback**: a host below v_52
-#:   would drop the unknown action in silence, so the member household
-#:   refuses up front with 409 ``HOST_TOO_OLD`` (``feature:
+#:   .SPACE_INVITE_LINK_FORWARD_RESULT` (the link it minted in its own table,
+#:   its live links, ``revoked``, or an error code). **Gated, no fallback**:
+#:   a host below v_52 would drop the unknown action in silence, so the
+#:   member household refuses up front with 409 ``HOST_TOO_OLD`` (``feature:
 #:   "invite_link"``) instead of waiting out a timeout.
 OURS: int = 52
 
@@ -1237,10 +1237,11 @@ class FederationCapability:
     #: path.
     MIN_FOR_PRIVATE_CHANNELS = 51
 
-    #: v_52 — a member household's admin mints invite links for a space
-    #: hosted elsewhere: forwarded to the host (``SPACE_REMOTE_ADMIN_ACTION``
-    #: ``create_invite_link``), answered with
-    #: ``SPACE_INVITE_LINK_FORWARD_RESULT``. Below it the forward is refused
+    #: v_52 — a member household's admin mints, lists and revokes the invite
+    #: links of a space hosted elsewhere: forwarded to the host
+    #: (``SPACE_REMOTE_ADMIN_ACTION`` ``create_invite_link`` /
+    #: ``list_invite_links`` / ``revoke_invite_link``), answered with
+    #: ``SPACE_INVITE_LINK_FORWARD_RESULT``. Below it every forward is refused
     #: up front (409 ``HOST_TOO_OLD``).
     MIN_FOR_FORWARDED_INVITE_LINK = 52
 

@@ -159,10 +159,11 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # ``space_remote_members.role`` before running the real (already
         # gated) host method; no actor-username to thread through.
         "apply_remote_admin_action",
-        # Federation inbound hook (v_52) — a forwarded invite-link mint. The
+        # Federation inbound hook (v_52) — a forwarded invite-link mint /
+        # list / revoke. The
         # actor's live admin seat is checked inside via
         # ``space_remote_members`` on the signed sender household.
-        "handle_forwarded_invite_mint",
+        "handle_forwarded_invite_action",
         # Owner-approval execution hook (Phase 6a) — called by the approval
         # service AFTER the owner approves a held SPACE_REMOTE_ADMIN_ACTION.
         # Self-gates on the space still being hosted here; the actor-role and

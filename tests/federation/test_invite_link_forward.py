@@ -16,6 +16,9 @@ from socialhome.domain.federation import (
 from socialhome.domain.space import HostUnreachableError
 from socialhome.federation.invite_link_forward import (
     FORWARDED_INVITE_LINK_ACTION,
+    FORWARDED_INVITE_LINK_ACTIONS,
+    LIST_INVITE_LINKS_ACTION,
+    REVOKE_INVITE_LINK_ACTION,
     InviteLinkForwardCoordinator,
 )
 
@@ -69,7 +72,7 @@ class _HostSpaces:
         self.answer = answer
         self.calls: list[dict] = []
 
-    async def handle_forwarded_invite_mint(self, space_id, **kwargs):
+    async def handle_forwarded_invite_action(self, space_id, **kwargs):
         self.calls.append({"space_id": space_id, **kwargs})
         return self.answer
 
@@ -94,8 +97,9 @@ def _pair(answer=None, *, timeout=1.0):
     )
 
 
-async def _mint(env, **params):
-    return await env.member.request_mint(
+async def _mint(env, action=FORWARDED_INVITE_LINK_ACTION, **params):
+    return await env.member.request(
+        action,
         space_id="sp-1",
         host_instance_id="host-1",
         actor_user_id="u-olga",
@@ -115,6 +119,7 @@ async def test_the_host_answers_with_the_link_it_minted():
     # Bound to the signed sender, never to the payload's actor_instance_id.
     assert call["actor_instance_id"] == "member-1"
     assert call["params"]["uses"] == 3
+    assert call["action"] == FORWARDED_INVITE_LINK_ACTION
     (req,) = env.member_fed.sent
     assert req["event_type"] is FederationEventType.SPACE_REMOTE_ADMIN_ACTION
     assert req["payload"]["action"] == FORWARDED_INVITE_LINK_ACTION
@@ -183,7 +188,7 @@ async def test_the_host_ignores_other_admin_actions_and_bad_requests():
             "params": {},
         },
     ):
-        await env.host._on_forwarded_mint(FederationEvent(payload=payload, **base))
+        await env.host._on_forwarded_request(FederationEvent(payload=payload, **base))
     assert env.spaces.calls == []
     assert env.host_fed.sent == []
 
@@ -196,6 +201,35 @@ async def test_a_late_answer_is_a_no_op():
         from_instance="host-1",
         to_instance="member-1",
         timestamp="2026-10-04T00:00:00Z",
-        payload={"mint_nonce": "gone", "link": {}},
+        payload={"request_nonce": "gone", "link": {}},
     )
     await env.member._on_result(ev)  # no pending request: nothing happens
+
+
+@pytest.mark.parametrize(
+    ("action", "answer"),
+    [
+        (LIST_INVITE_LINKS_ACTION, {"links": [{"token": "t1"}]}),
+        (REVOKE_INVITE_LINK_ACTION, {"revoked": True}),
+    ],
+)
+async def test_list_and_revoke_ride_the_same_round_trip(action, answer):
+    env = _pair(answer)
+    got = await _mint(env, action=action, token="t1")
+    assert {k: got[k] for k in answer} == answer
+    (call,) = env.spaces.calls
+    assert call["action"] == action
+    assert call["actor_instance_id"] == "member-1"
+    assert call["params"]["token"] == "t1"
+
+
+async def test_an_unknown_action_is_never_sent_or_answered():
+    env = _pair()
+    with pytest.raises(ValueError):
+        await _mint(env, action="dissolve")
+    assert env.member_fed.sent == []
+    assert {
+        FORWARDED_INVITE_LINK_ACTION,
+        LIST_INVITE_LINKS_ACTION,
+        REVOKE_INVITE_LINK_ACTION,
+    } == FORWARDED_INVITE_LINK_ACTIONS

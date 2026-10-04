@@ -1236,7 +1236,10 @@ never executes outside its unit tests.
    to a (v_52, ``SPACE_REMOTE_ADMIN_ACTION`` ``create_invite_link`` →
    ``SPACE_INVITE_LINK_FORWARD_RESULT``), a mints it in its own table (the
    code names a as issuer; e holds no row) and **b** redeems it into a
-   moderator seat. e's attempt at an ``admin`` link is refused (403).
+   moderator seat. e then mints a second link, sees it in its forwarded
+   ``GET`` of the host's list, revokes it with a forwarded ``DELETE`` and
+   a's table no longer holds it. e's attempt at an ``admin`` link is
+   refused (403).
 10. **A ``subscriber`` (Follower) link**, minted on a THIRD space and
    redeemed by e into a read-only seat (v_30). Asserted on both sides:
    ``space_remote_members.role='subscriber'`` on the host — the row

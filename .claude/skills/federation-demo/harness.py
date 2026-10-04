@@ -2662,8 +2662,9 @@ def cmd_gfs_invite_link() -> None:
        connection server pins a space's identity key TOFU-immutably, so
        that credential could never be taken back). e, now an admin on a
        member household, mints a moderator link there: forwarded to a (v_52),
-       minted in a's table, redeemed by b into a moderator seat; e's admin
-       link is refused (owner-only).
+       minted in a's table, redeemed by b into a moderator seat; e lists the
+       host's links and revokes a second one (gone from a's table); e's
+       admin link is refused (owner-only).
     10. Followers (v_30): a mints a ``subscriber`` link on a THIRD space
        and e redeems it into a read-only seat. Assert the seat on BOTH
        sides (``space_remote_members.role='subscriber'`` on the host —
@@ -3231,6 +3232,44 @@ def cmd_gfs_invite_link() -> None:
             f"{b_fwd_joined!r}, expected role 'moderator'",
         )
     _assert_moderator_seat("b", b_fwd, admin_space_id)
+    # …and e sees and revokes the host's links from its own household.
+    # A second (unused) forwarded link, so the revoke takes down a live one.
+    s, fwd_link2 = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=e["token"],
+        method="POST",
+        body={"role": "member", "uses": 1},
+        timeout=40.0,
+    )
+    fwd_link2 = _must("e mints a second forwarded link", s, fwd_link2, ok=(201,))
+    s, listed = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=e["token"],
+        timeout=40.0,
+    )
+    listed = _must("e lists the host's links", s, listed, ok=(200,))
+    listed_tokens = {t.get("token") for t in listed.get("tokens", [])}
+    if fwd_link2["token"] not in listed_tokens:
+        raise SystemExit(
+            f"gfs-invite-link: e's forwarded list {sorted(listed_tokens)!r} "
+            f"lacks the link it minted ({fwd_link2['token']!r})",
+        )
+    s, revoked = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens/{fwd_link2['token']}",
+        token=e["token"],
+        method="DELETE",
+        timeout=40.0,
+    )
+    _must("e revokes its forwarded link", s, revoked, ok=(204,))
+    if _rows(
+        "a",
+        "SELECT 1 FROM space_invite_tokens WHERE token = ?",
+        (fwd_link2["token"],),
+    ):
+        raise SystemExit(
+            "gfs-invite-link: a still holds the link e revoked through it",
+        )
+    print("  e listed the host's links and revoked one — gone from a's table ✓")
     s, refused_admin = _request(
         f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
         token=e["token"],

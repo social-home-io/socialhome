@@ -1500,6 +1500,21 @@ async def test_a_member_household_mint_forwards_to_the_host(client):
         "SELECT token FROM space_invite_tokens WHERE space_id=?", (sid,)
     )
     assert len(after) == len(before)
+    # List and revoke forward the same way — and are refused the same way.
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens", headers=_auth(client._admin_token)
+    )
+    assert listed.status == 409, await listed.text()
+    assert (await listed.json())["error"]["feature"] == "invite_link"
+    revoked = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{before[0]['token']}",
+        headers=_auth(client._admin_token),
+    )
+    assert revoked.status == 409, await revoked.text()
+    still = await db.fetchall(
+        "SELECT token FROM space_invite_tokens WHERE space_id=?", (sid,)
+    )
+    assert len(still) == len(before)
 
 
 @pytest.mark.parametrize("role", ["overlord", "owner", ["admin"], 1])
