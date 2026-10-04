@@ -40,11 +40,12 @@ import { addBase } from '@/baseUrl'
 /** Roles an invite link can seat someone as. ``owner`` is deliberately
  *  absent — ownership transfers are a separate, deliberate gesture, and
  *  the backend answers 422 for it. */
-export type InviteRole = 'member' | 'subscriber' | 'admin'
+export type InviteRole = 'member' | 'subscriber' | 'moderator' | 'admin'
 
 /** Viewer's own role in the space — decides which roles they may hand
- *  out. Only the owner can mint an admin link; a moderator mints none
- *  (invites are settings authority). Nobody mints a moderator link. */
+ *  out. Owners and admins mint member, follower and moderator links;
+ *  only the owner mints an admin link. A moderator mints none (invites
+ *  are settings authority). */
 type ViewerRole = SpaceRole | undefined
 
 interface InviteGfsRef {
@@ -98,11 +99,38 @@ type ExpiryId = typeof EXPIRY_CHOICES[number]['id']
 
 const MAX_USES = 100
 
-const ROLE_CHOICES: { id: InviteRole; label: string; hint: string }[] = [
-  { id: 'member', label: 'Member', hint: 'can post and take part' },
-  { id: 'subscriber', label: 'Follower', hint: 'reads only' },
-  { id: 'admin', label: 'Admin', hint: 'manages members and settings' },
+/** Role choices in display order. Labels reuse the ``space.role.*`` names
+ *  the members list shows, so a role reads the same everywhere. Keys are
+ *  spelled out (not built from the id) so ``i18n-check`` sees them. */
+const ROLE_CHOICES: { id: InviteRole; labelKey: string; hintKey: string }[] = [
+  { id: 'member', labelKey: 'space.role.member', hintKey: 'invite.role.member_hint' },
+  { id: 'subscriber', labelKey: 'space.role.subscriber', hintKey: 'invite.role.subscriber_hint' },
+  { id: 'moderator', labelKey: 'space.role.moderator', hintKey: 'invite.role.moderator_hint' },
+  { id: 'admin', labelKey: 'space.role.admin', hintKey: 'invite.role.admin_hint' },
 ]
+
+/** Translated label for a link's role; an unknown role shows as sent. */
+function roleLabel(r: string): string {
+  const c = ROLE_CHOICES.find(x => x.id === r)
+  return c ? t(c.labelKey) : r
+}
+
+/** Message for a failure on a member household, where the dialog's calls
+ *  are forwarded to the space's home household: it didn't answer, or it
+ *  runs a Social Home too old for the request. ``null`` for anything
+ *  else, so the caller keeps its own message. */
+function hostErrorMessage(e: unknown): string | null {
+  if (!(e instanceof ApiError)) return null
+  if (e.code === 'HOST_UNREACHABLE') {
+    // ``unknown_host``: this household has no address for the host yet —
+    // retrying later won't help, so don't say it will.
+    return e.extra?.reason === 'unknown_host'
+      ? t('space.host.unknown')
+      : t('invite.error.host_unreachable')
+  }
+  if (e.code === 'HOST_TOO_OLD') return t('invite.error.host_too_old')
+  return null
+}
 
 
 /** The connection server drops a parked invite blob after this long, so a
@@ -138,6 +166,9 @@ const loading = signal(false)
 const links = signal<InviteTokenRow[]>([])
 const linksLoading = signal(false)
 const linksError = signal(false)
+/** Why the list failed, when the reason is worth naming (the home
+ *  household is offline or too old); ``null`` shows the generic text. */
+const linksErrorReason = signal<string | null>(null)
 /** ``user_id`` → display name for the space's members, so a row can say
  *  "by Maximiliana" instead of the 32-character opaque id the API
  *  stores. A minter who has since left the space is not in the map and
@@ -148,8 +179,8 @@ const memberNames = signal<Record<string, string>>({})
  * Open the invite dialog for ``sid``. ``hint`` is the space's display
  * name — pass it when the caller already has it (avoids an extra
  * fetch). ``actorRole`` is the opener's own role in the space; it gates
- * the Admin option. Omitted (or anything but ``owner``), the dialog
- * plays safe and offers Member / Follower only.
+ * the Moderator option (owner or admin) and the Admin option (owner
+ * only). Omitted, the dialog plays safe and offers Member / Follower.
  */
 export function openSpaceInvite(
   sid: string,
@@ -168,6 +199,7 @@ export function openSpaceInvite(
   publishBlocked.value = {}
   links.value = []
   linksError.value = false
+  linksErrorReason.value = null
   memberNames.value = {}
   spaceType.value = null
   privateGfs.value = false
@@ -239,15 +271,17 @@ async function loadLinks() {
   if (!sid) return
   linksLoading.value = true
   linksError.value = false
+  linksErrorReason.value = null
   try {
     const r = await api.get(`/api/spaces/${sid}/invite-tokens`) as {
       tokens?: InviteTokenRow[]
     }
     if (spaceId.value !== sid) return
     links.value = r.tokens ?? []
-  } catch {
+  } catch (e: unknown) {
     if (spaceId.value !== sid) return
     linksError.value = true
+    linksErrorReason.value = hostErrorMessage(e)
   } finally {
     linksLoading.value = false
   }
@@ -327,9 +361,13 @@ export function SpaceInviteDialog() {
 
   const row = created.value
   const code = row ? codeFor(row) : ''
-  const roleChoices = ROLE_CHOICES.filter(
-    c => c.id !== 'admin' || viewerRole.value === 'owner',
-  )
+  const roleChoices = ROLE_CHOICES.filter(c => {
+    if (c.id === 'admin') return viewerRole.value === 'owner'
+    if (c.id === 'moderator') {
+      return viewerRole.value === 'owner' || viewerRole.value === 'admin'
+    }
+    return true
+  })
   const blockedReason = publishTo.value
     ? publishBlocked.value[publishTo.value]
     : undefined
@@ -380,7 +418,7 @@ export function SpaceInviteDialog() {
         }
       }
       showToast(
-        (e as Error)?.message ?? 'Failed to create invite',
+        hostErrorMessage(e) ?? (e as Error)?.message ?? 'Failed to create invite',
         'error',
       )
     } finally {
@@ -412,7 +450,7 @@ export function SpaceInviteDialog() {
       // that did, or the owner walks away believing a live link is dead.
       links.value = before
       showToast(
-        (e as Error)?.message ?? 'Could not revoke that link.',
+        hostErrorMessage(e) ?? (e as Error)?.message ?? 'Could not revoke that link.',
         'error',
       )
     }
@@ -445,8 +483,8 @@ export function SpaceInviteDialog() {
                       onChange={() => { role.value = c.id }}
                       data-testid={`invite-role-${c.id}`}
                     />
-                    <span class="sh-invite-role__label">{c.label}</span>
-                    <span class="sh-invite-role__hint">{c.hint}</span>
+                    <span class="sh-invite-role__label">{t(c.labelKey)}</span>
+                    <span class="sh-invite-role__hint">{t(c.hintKey)}</span>
                   </label>
                 ))}
               </div>
@@ -625,8 +663,7 @@ export function SpaceInviteDialog() {
                 ? `, lapses ${relativeFutureTime(row.expires_at)}`
                 : ', never lapses'}
               . They join as{' '}
-              {ROLE_CHOICES.find(c => c.id === row.role)?.label.toLowerCase()
-                ?? row.role}.
+              {roleLabel(row.role).toLowerCase()}.
             </p>
 
             {row.via === 'internal' && (
@@ -702,8 +739,10 @@ export function SpaceInviteDialog() {
             <p class="sh-muted">Loading links…</p>
           ) : linksError.value ? (
             <div class="sh-invite-links__error" data-testid="invite-links-error">
-              <p class="sh-muted" style={{ margin: 0 }}>
-                Couldn't load the links for this space.
+              <p class="sh-muted" style={{ margin: 0 }}
+                 data-testid="invite-links-error-text">
+                {linksErrorReason.value
+                  ?? "Couldn't load the links for this space."}
               </p>
               <Button variant="secondary" onClick={() => void loadLinks()}>
                 Try again
@@ -718,8 +757,9 @@ export function SpaceInviteDialog() {
               <div key={l.token} class="sh-invite-link-row-item"
                    data-testid={`invite-link-row-${l.token}`}>
                 <div class="sh-invite-link-row-item__main">
-                  <span class={l.role === 'admin' ? 'sh-chip sh-chip--honey' : 'sh-chip'}>
-                    {ROLE_CHOICES.find(c => c.id === l.role)?.label ?? l.role}
+                  <span class={l.role === 'admin' ? 'sh-chip sh-chip--honey' : 'sh-chip'}
+                        data-testid={`invite-role-badge-${l.token}`}>
+                    {roleLabel(l.role)}
                   </span>
                   {l.via && (
                     <span class="sh-chip sh-invite-via-badge"

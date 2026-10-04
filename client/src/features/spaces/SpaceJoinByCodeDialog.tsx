@@ -122,6 +122,7 @@ export function SpaceJoinByCodeDialog() {
       }
       const r = await api.post('/api/spaces/join', body) as {
         space_id: string
+        role?: string | null
         pending_role?: string | null
       }
       open.value = false
@@ -142,6 +143,11 @@ export function SpaceJoinByCodeDialog() {
           'admin role.',
           'success',
         )
+      } else if (r.role === 'moderator') {
+        // A moderator link seats a moderator outright. (On a household too
+        // old for the role the host seats a plain member, and the generic
+        // toast below is the honest one.)
+        showToast(t('space.join.joined_moderator'), 'success')
       } else {
         showToast("You're in! 🎉", 'success')
       }

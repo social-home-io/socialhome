@@ -132,6 +132,40 @@ describe('SpaceJoinByCodeDialog', () => {
     })
   })
 
+  async function joinWith(response: Record<string, unknown>) {
+    api.post.mockResolvedValueOnce(response)
+    const code = buildInviteCode({
+      token: 'a1b2c3d4e5f60718',
+      space_id: 'space-uuid-xyz',
+      issuer_instance_id: OUR_INSTANCE_ID,
+    })
+    const { container, getByText } = await renderAndOpen()
+    const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.input(input, { target: { value: code } })
+    })
+    await act(async () => { fireEvent.click(getByText('Join')) })
+  }
+
+  it('names the moderator role when a moderator link seats one', async () => {
+    await joinWith({ space_id: 'space-uuid-xyz', role: 'moderator' })
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith(
+        "You're in as a moderator! 🎉", 'success',
+      )
+    })
+  })
+
+  it('says nothing special when a moderator link seats a member (older household)', async () => {
+    await joinWith({ space_id: 'space-uuid-xyz', role: 'member' })
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith("You're in! 🎉", 'success')
+    })
+    expect(showToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('moderator'), expect.anything(),
+    )
+  })
+
   it('forwards issuer_instance_id when the code was minted on another instance', async () => {
     api.post.mockResolvedValueOnce({ space_id: 'space-uuid-fed' })
     // Different instance id — the backend has to route the redeem
