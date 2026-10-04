@@ -12,10 +12,13 @@ import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { ConfirmDialog } from './ConfirmDialog'
 import { EmojiField } from './EmojiField'
 import { RadioCardGroup } from './RadioCardGroup'
+import { ChipRadioGroup } from './ChipRadioGroup'
 import { joinOptionsForVisibility } from './spaceModeOptions'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
-import type { Space, GfsConnection, GfsSpacePublication, SpaceAccessLevel } from '@/types'
+import type {
+  Space, GfsConnection, GfsPublishMode, GfsSpacePublication, SpaceAccessLevel,
+} from '@/types'
 import {
   ACCESS_FEATURES,
   accessLevel,
@@ -182,6 +185,7 @@ export function SpaceSettings({
   space,
   onUpdate,
   isRemoteSpace = false,
+  isOwner = false,
 }: {
   space: Space
   onUpdate: () => void
@@ -189,6 +193,10 @@ export function SpaceSettings({
    *  General config, archive, dissolve + tier proposals all forward to the
    *  host, but GFS publication is the host's own concern — hide it. */
   isRemoteSpace?: boolean
+  /** The caller is the space owner. Owner-only settings (the connection
+   *  server publish mode) render only then — the server answers anyone
+   *  else with 403. */
+  isOwner?: boolean
 }) {
   // ``useSignal`` (not ``signal()``) so the underlying signal instance
   // is stable across renders. Plain ``signal(initial)`` inside a
@@ -227,6 +235,23 @@ export function SpaceSettings({
   // broadcast space).
   const allowSubscribers = useSignal(
     Boolean(space.features?.allow_subscribers),
+  )
+  // Owner-only (v_50): how members publish over a connection server.
+  // Absent → ``trusted``, the server default.
+  const gfsPublishMode = useSignal<GfsPublishMode>(
+    space.features?.gfs_publish_mode ?? 'trusted',
+  )
+  // Shown only where members actually publish over a connection server:
+  // a public / global space whose posts followers may read (the backend's
+  // ``_publicly_readable``). The live followers switch counts, so turning
+  // it on reveals the choice; a space already strict keeps it visible so
+  // the owner can always switch back.
+  const showGfsPublishMode = isOwner && (
+    (
+      (space.space_type === 'public' || space.space_type === 'global')
+      && allowSubscribers.value
+    )
+    || (space.features?.gfs_publish_mode ?? 'trusted') !== 'trusted'
   )
   // Subscriber-engagement opt-ins (§23.49) — admins flip these when
   // they want followers to be able to react / comment without being
@@ -385,6 +410,11 @@ export function SpaceSettings({
         'delegated_admin_authority',
         delegatedAdminAuthority.value,
         Boolean(f?.delegated_admin_authority),
+      ],
+      [
+        'gfs_publish_mode',
+        gfsPublishMode.value,
+        f?.gfs_publish_mode ?? 'trusted',
       ],
     ]
     for (const feature of ACCESS_FEATURES) {
@@ -863,6 +893,40 @@ export function SpaceSettings({
               : 'Turn on following above to let followers react or comment.'}
           </p>
         </fieldset>
+
+        {/* Connection server publish mode (v_50) — owner-only, and only
+         *  where members publish over a connection server at all. */}
+        {showGfsPublishMode && (
+          <fieldset class="sh-form-fieldset sh-gfs-publish-mode">
+            <legend id="space-settings-gfs-publish-legend">
+              📡 {t('space.gfs_publish.legend')}
+            </legend>
+            <p class="sh-muted" style={{ marginTop: 0 }}>
+              {t('space.gfs_publish.intro')}
+            </p>
+            <ChipRadioGroup<GfsPublishMode>
+              labelledBy="space-settings-gfs-publish-legend"
+              value={gfsPublishMode.value}
+              onChange={(v) => { gfsPublishMode.value = v }}
+              options={[
+                { value: 'trusted', label: t('space.gfs_publish.trusted') },
+                { value: 'strict', label: t('space.gfs_publish.strict') },
+              ]}
+            />
+            <dl class="sh-gfs-publish-mode__help">
+              <dt>{t('space.gfs_publish.trusted')}</dt>
+              <dd>{t('space.gfs_publish.trusted_help')}</dd>
+              <dt>{t('space.gfs_publish.strict')}</dt>
+              <dd>{t('space.gfs_publish.strict_help')}</dd>
+            </dl>
+            {gfsPublishMode.value === 'strict'
+              && (space.features?.gfs_publish_mode ?? 'trusted') !== 'strict' && (
+              <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
+                {t('space.gfs_publish.strict_switch_note')}
+              </p>
+            )}
+          </fieldset>
+        )}
 
         {/* @here (§23.42). Admin config like the rest; federates to every
          *  member household, each of which re-checks the author's role. */}

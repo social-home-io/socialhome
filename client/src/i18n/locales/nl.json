@@ -1418,5 +1418,12 @@
   "stickies.report_label": "Notitie melden: {text}",
   "stickies.report_title": "Deze notitie melden bij de moderators van de space",
   "stickies.read_only_archived": "Deze space is gearchiveerd — de plakbriefjes zijn alleen-lezen.",
-  "stickies.read_only_viewer": "Je kunt deze notities lezen, maar niet toevoegen of wijzigen."
+  "stickies.read_only_viewer": "Je kunt deze notities lezen, maar niet toevoegen of wijzigen.",
+  "space.gfs_publish.legend": "Publiceren via de verbindingsserver",
+  "space.gfs_publish.intro": "Hoe berichten, reacties en emoji-reacties van leden via je verbindingsserver bij volgers komen. Alleen jij, de eigenaar, kunt dit wijzigen.",
+  "space.gfs_publish.trusted": "Vertrouwd",
+  "space.gfs_publish.strict": "Strikt",
+  "space.gfs_publish.trusted_help": "De standaard. Leden kunnen via je verbindingsserver posten, ook als dit huishouden offline is. De server weet welk huishouden iets plaatste, nooit wat er geplaatst werd.",
+  "space.gfs_publish.strict_help": "Leden posten anoniem — de server kan niet zien welk huishouden iets plaatste. De verbindingsserver en de huishoudens van de leden moeten dit ondersteunen; wie dat niet kan, post via dit huishouden en die berichten wachten tot het online is.",
+  "space.gfs_publish.strict_switch_note": "Bij opslaan worden de sleutels van deze space vernieuwd. Leden hoeven niets te doen."
 }
