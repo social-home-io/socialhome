@@ -29,7 +29,7 @@ vi.mock('@/store/federationCompat', () => ({
   resyncPeerCapabilities: (...a: unknown[]) => resyncPeerCapabilities(...a),
   loadFederationCompat: (...a: unknown[]) => loadFederationCompat(...a),
   peerSupportsResync: (p: { capabilities_known: boolean; lacking_features: string[] }) =>
-    p.capabilities_known && !p.lacking_features.includes('Instance resync request'),
+    p.capabilities_known && !p.lacking_features.includes('Asking a household to send updates again'),
 }))
 
 vi.mock('./ShareHomeToggle', () => ({
@@ -234,7 +234,7 @@ describe('Federation compatibility row + re-check', () => {
     status: 'confirmed',
     last_reachable_at: null,
     capabilities_known: true,
-    lacking_features: ['Bazaar bids', 'Calendar overrides'],
+    lacking_features: ['Bids and offers in the bazaar', 'Calendar overrides'],
     ...over,
   })
 
@@ -254,7 +254,7 @@ describe('Federation compatibility row + re-check', () => {
       />,
     )
     expect(await screen.findByText('Missing features')).toBeTruthy()
-    expect(screen.getByText('Bazaar bids, Calendar overrides')).toBeTruthy()
+    expect(screen.getByText('Bids and offers in the bazaar, Calendar overrides')).toBeTruthy()
   })
 
   it('shows "up to date ✓" when caps known and nothing lacking', async () => {
@@ -292,7 +292,7 @@ describe('Federation compatibility row + re-check', () => {
     render(
       <ConnectionDetail
         conn={_conn() as any}
-        compat={_compat({ lacking_features: ['Instance resync request'] }) as any}
+        compat={_compat({ lacking_features: ['Asking a household to send updates again'] }) as any}
         onClose={() => {}}
         onRevoke={() => {}}
       />,

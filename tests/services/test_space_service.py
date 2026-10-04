@@ -3835,18 +3835,18 @@ async def test_space_version_compat_flags_behind_member(stack):
     assert c.ours == OURS
     assert c.min_member_proto_version == 13
     assert c.lagging_features == (
-        "Media DataChannel",
-        "Remote admin actions",
-        "Multi-admin approvals",
-        "Authenticated mesh route discovery",
-        "Space delegated admin authority",
-        "Space roster gossip",
-        "Admin authoritative config offline",
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Faster photo and video transfer",
+        "Admin actions from other households",
+        "Changes that need several admins to agree",
+        "Finding a safe path through other households",
+        "Admins running a space without the owner",
+        "Member lists shared between households",
+        "Admins changing settings while the owner is away",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Complete, up-to-date member lists",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -3854,7 +3854,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -3867,18 +3867,18 @@ async def test_space_version_compat_flags_behind_member(stack):
     assert bm.display_name == "Brother's house"
     assert bm.proto_version == 13
     assert bm.lacking_features == (
-        "Media DataChannel",
-        "Remote admin actions",
-        "Multi-admin approvals",
-        "Authenticated mesh route discovery",
-        "Space delegated admin authority",
-        "Space roster gossip",
-        "Admin authoritative config offline",
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Faster photo and video transfer",
+        "Admin actions from other households",
+        "Changes that need several admins to agree",
+        "Finding a safe path through other households",
+        "Admins running a space without the owner",
+        "Member lists shared between households",
+        "Admins changing settings while the owner is away",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Complete, up-to-date member lists",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -3886,7 +3886,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -3914,15 +3914,15 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
     # space feature, so it surfaces in behind_members.
     assert c.min_member_proto_version == 18
     assert c.lagging_features == (
-        "Authenticated mesh route discovery",
-        "Space delegated admin authority",
-        "Space roster gossip",
-        "Admin authoritative config offline",
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Finding a safe path through other households",
+        "Admins running a space without the owner",
+        "Member lists shared between households",
+        "Admins changing settings while the owner is away",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Complete, up-to-date member lists",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -3930,7 +3930,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -3973,15 +3973,15 @@ async def test_space_version_compat_omits_nonspace_features(stack):
     # Only the space-scoped gaps surface; non-space gaps (v17/v18/v19/v20)
     # do not.
     assert c.lagging_features == (
-        "Authenticated mesh route discovery",
-        "Space delegated admin authority",
-        "Space roster gossip",
-        "Admin authoritative config offline",
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Finding a safe path through other households",
+        "Admins running a space without the owner",
+        "Member lists shared between households",
+        "Admins changing settings while the owner is away",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Complete, up-to-date member lists",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -3989,17 +3989,17 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
     )
-    assert "App federation channel" not in c.lagging_features
-    assert "App user routing" not in c.lagging_features
-    assert "Instance resync request" not in c.lagging_features
-    assert "Space sync reject reconcile" not in c.lagging_features
+    assert "Apps that work across households" not in c.lagging_features
+    assert "Apps that reach the right person" not in c.lagging_features
+    assert "Asking a household to send updates again" not in c.lagging_features
+    assert "Fixing spaces that got out of step" not in c.lagging_features
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-16"
 

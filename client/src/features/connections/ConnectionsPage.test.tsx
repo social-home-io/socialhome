@@ -500,7 +500,7 @@ describe('ConnectionsPage', () => {
     it('shows "N behind" for a peer lacking features', async () => {
       compatSignals.compatOurs.value = 19
       compatSignals.compatPeers.value = [
-        makeCompat({ proto_version: 15, lacking_features: ['Bazaar bids', 'Calendar overrides'] }),
+        makeCompat({ proto_version: 15, lacking_features: ['Bids and offers in the bazaar', 'Calendar overrides'] }),
       ]
       apiMock.get.mockImplementation((url: string) => {
         if (url === '/api/connections') return Promise.resolve([makeConnection()])
@@ -514,7 +514,7 @@ describe('ConnectionsPage', () => {
         expect(card!.textContent).toContain('2 behind')
       })
       const chip = container.querySelector('.sh-connection-card .sh-chip--update')
-      expect(chip!.getAttribute('title')).toBe('Bazaar bids, Calendar overrides')
+      expect(chip!.getAttribute('title')).toBe('Bids and offers in the bazaar, Calendar overrides')
     })
 
     it('shows "version unknown" for a caps-unknown peer', async () => {
@@ -536,7 +536,7 @@ describe('ConnectionsPage', () => {
     it('shows the "N behind" summary chip and "Your protocol version: vN" in the households header', async () => {
       compatSignals.compatOurs.value = 19
       compatSignals.compatPeers.value = [
-        makeCompat({ proto_version: 15, lacking_features: ['Bazaar bids'] }),
+        makeCompat({ proto_version: 15, lacking_features: ['Bids and offers in the bazaar'] }),
       ]
       apiMock.get.mockImplementation((url: string) => {
         if (url === '/api/connections') return Promise.resolve([makeConnection()])

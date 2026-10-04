@@ -104,14 +104,14 @@ def test_federated_moderation_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.space_features_missing_below(42) == [
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
     ]
-    assert "Reviewed across households" not in fc.features_missing_below(43)
+    assert "Reviewing posts from other households" not in fc.features_missing_below(43)
 
 
 def test_content_access_enforcement_capability_threshold():
@@ -125,7 +125,7 @@ def test_content_access_enforcement_capability_threshold():
     )
     assert fc.space_features_missing_below(41) == [
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -147,7 +147,7 @@ def test_space_moderator_role_capability_threshold():
     assert fc.space_features_missing_below(40) == [
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -170,7 +170,7 @@ def test_task_priority_labels_capability_threshold():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -233,7 +233,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -258,7 +258,7 @@ def test_moment_origin_signature_capability_threshold():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -276,14 +276,14 @@ def test_remote_subscriber_role_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE == 30
     assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE <= fc.OURS
     labels = dict(fc.CAPABILITY_FEATURES).values()
-    assert "Cross-household Follower seats" in labels
-    assert "Cross-household Follower seats" in fc.features_missing_below(29)
-    assert "Cross-household Follower seats" not in fc.features_missing_below(30)
+    assert "Followers from other households" in labels
+    assert "Followers from other households" in fc.features_missing_below(29)
+    assert "Followers from other households" not in fc.features_missing_below(30)
     assert fc.FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Cross-household Follower seats" in fc.space_features_missing_below(29)
-    assert "Cross-household Follower seats" not in fc.space_features_missing_below(30)
+    assert "Followers from other households" in fc.space_features_missing_below(29)
+    assert "Followers from other households" not in fc.space_features_missing_below(30)
 
 
 def test_routed_origin_signature_capability_threshold():
@@ -296,14 +296,19 @@ def test_routed_origin_signature_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE == 31
     assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE <= fc.OURS
     labels = dict(fc.CAPABILITY_FEATURES).values()
-    assert "Authenticated mesh-routed origin" in labels
-    assert "Authenticated mesh-routed origin" in fc.features_missing_below(30)
-    assert "Authenticated mesh-routed origin" not in fc.features_missing_below(31)
+    assert "Checking who sent a passed-on message" in labels
+    assert "Checking who sent a passed-on message" in fc.features_missing_below(30)
+    assert "Checking who sent a passed-on message" not in fc.features_missing_below(31)
     assert fc.FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Authenticated mesh-routed origin" in fc.space_features_missing_below(30)
-    assert "Authenticated mesh-routed origin" not in fc.space_features_missing_below(31)
+    assert "Checking who sent a passed-on message" in fc.space_features_missing_below(
+        30
+    )
+    assert (
+        "Checking who sent a passed-on message"
+        not in fc.space_features_missing_below(31)
+    )
 
 
 def test_route_stale_nack_capability_threshold():
@@ -315,17 +320,29 @@ def test_route_stale_nack_capability_threshold():
 
 def test_route_stale_nack_feature_label():
     labels = dict(fc.CAPABILITY_FEATURES).values()
-    assert "Mesh route-stale nack" in labels
-    assert "Mesh route-stale nack" in fc.features_missing_below(27)
-    assert "Mesh route-stale nack" not in fc.features_missing_below(28)
+    assert "Noticing when a path through other households breaks" in labels
+    assert (
+        "Noticing when a path through other households breaks"
+        in fc.features_missing_below(27)
+    )
+    assert (
+        "Noticing when a path through other households breaks"
+        not in fc.features_missing_below(28)
+    )
     # Space-scoped: a behind hop stalls space content for the whole space
     # (same class as authenticated route discovery), so the per-space
     # compatibility banner warns about it.
     assert fc.FederationCapability.MIN_FOR_ROUTE_STALE_NACK in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Mesh route-stale nack" in fc.space_features_missing_below(27)
-    assert "Mesh route-stale nack" not in fc.space_features_missing_below(28)
+    assert (
+        "Noticing when a path through other households breaks"
+        in fc.space_features_missing_below(27)
+    )
+    assert (
+        "Noticing when a path through other households breaks"
+        not in fc.space_features_missing_below(28)
+    )
 
 
 def test_ours_is_at_least_27_and_identity_anchor_capability():
@@ -345,12 +362,12 @@ def test_user_identity_key_capability_threshold():
 
 def test_user_identity_key_feature_label():
     labels = dict(fc.CAPABILITY_FEATURES).values()
-    assert "Per-user identity binding" in labels
-    assert "Per-user identity binding" in fc.features_missing_below(24)
-    assert "Per-user identity binding" not in fc.features_missing_below(25)
+    assert "Checking each person's identity" in labels
+    assert "Checking each person's identity" in fc.features_missing_below(24)
+    assert "Checking each person's identity" not in fc.features_missing_below(25)
     # Per-user surface, not space-scoped — its lag affects only the two
     # parties, so it is NOT in the per-space compatibility banner.
-    assert "Per-user identity binding" not in fc.space_features_missing_below(24)
+    assert "Checking each person's identity" not in fc.space_features_missing_below(24)
 
 
 def test_admin_authoritative_ops_capability_threshold():
@@ -360,12 +377,21 @@ def test_admin_authoritative_ops_capability_threshold():
 
 def test_admin_authoritative_ops_feature_label():
     labels = dict(fc.CAPABILITY_FEATURES).values()
-    assert "Admin authoritative config offline" in labels
-    assert "Admin authoritative config offline" in fc.features_missing_below(23)
-    assert "Admin authoritative config offline" not in fc.features_missing_below(24)
+    assert "Admins changing settings while the owner is away" in labels
+    assert (
+        "Admins changing settings while the owner is away"
+        in fc.features_missing_below(23)
+    )
+    assert (
+        "Admins changing settings while the owner is away"
+        not in fc.features_missing_below(24)
+    )
     # Space-scoped: a behind member household won't accept a delegated
     # admin's offline config edit.
-    assert "Admin authoritative config offline" in fc.space_features_missing_below(23)
+    assert (
+        "Admins changing settings while the owner is away"
+        in fc.space_features_missing_below(23)
+    )
 
 
 def test_space_roster_gossip_capability_threshold():
@@ -375,11 +401,13 @@ def test_space_roster_gossip_capability_threshold():
 
 def test_space_roster_gossip_feature_label():
     labels = dict(fc.CAPABILITY_FEATURES).values()
-    assert "Space roster gossip" in labels
-    assert "Space roster gossip" in fc.features_missing_below(22)
-    assert "Space roster gossip" not in fc.features_missing_below(23)
+    assert "Member lists shared between households" in labels
+    assert "Member lists shared between households" in fc.features_missing_below(22)
+    assert "Member lists shared between households" not in fc.features_missing_below(23)
     # Space-scoped: a behind member household won't converge its roster.
-    assert "Space roster gossip" in fc.space_features_missing_below(22)
+    assert "Member lists shared between households" in fc.space_features_missing_below(
+        22
+    )
 
 
 def test_space_admin_key_share_capability_threshold():
@@ -389,11 +417,16 @@ def test_space_admin_key_share_capability_threshold():
 
 def test_space_admin_key_share_feature_label():
     labels = dict(fc.CAPABILITY_FEATURES).values()
-    assert "Space delegated admin authority" in labels
-    assert "Space delegated admin authority" in fc.features_missing_below(21)
-    assert "Space delegated admin authority" not in fc.features_missing_below(22)
+    assert "Admins running a space without the owner" in labels
+    assert "Admins running a space without the owner" in fc.features_missing_below(21)
+    assert "Admins running a space without the owner" not in fc.features_missing_below(
+        22
+    )
     # Space-scoped: a behind admin household can't receive the signing seed.
-    assert "Space delegated admin authority" in fc.space_features_missing_below(21)
+    assert (
+        "Admins running a space without the owner"
+        in fc.space_features_missing_below(21)
+    )
 
 
 def test_authenticated_route_discovery_capability_threshold():
@@ -403,11 +436,19 @@ def test_authenticated_route_discovery_capability_threshold():
 
 def test_authenticated_route_discovery_feature_label():
     labels = dict(fc.CAPABILITY_FEATURES).values()
-    assert "Authenticated mesh route discovery" in labels
-    assert "Authenticated mesh route discovery" in fc.features_missing_below(20)
-    assert "Authenticated mesh route discovery" not in fc.features_missing_below(21)
+    assert "Finding a safe path through other households" in labels
+    assert "Finding a safe path through other households" in fc.features_missing_below(
+        20
+    )
+    assert (
+        "Finding a safe path through other households"
+        not in fc.features_missing_below(21)
+    )
     # Space-scoped: a behind member household is mesh-unreachable.
-    assert "Authenticated mesh route discovery" in fc.space_features_missing_below(20)
+    assert (
+        "Finding a safe path through other households"
+        in fc.space_features_missing_below(20)
+    )
 
 
 def test_space_sync_rejected_capability_threshold():
@@ -416,9 +457,9 @@ def test_space_sync_rejected_capability_threshold():
 
 
 def test_space_sync_rejected_feature_label():
-    assert "Space sync reject reconcile" in dict(fc.CAPABILITY_FEATURES).values()
-    assert "Space sync reject reconcile" in fc.features_missing_below(19)
-    assert "Space sync reject reconcile" not in fc.features_missing_below(20)
+    assert "Fixing spaces that got out of step" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Fixing spaces that got out of step" in fc.features_missing_below(19)
+    assert "Fixing spaces that got out of step" not in fc.features_missing_below(20)
 
 
 def test_instance_resync_capability_threshold():
@@ -475,8 +516,8 @@ def test_roster_snapshot_capability_threshold():
     content wrongly for the whole space."""
     assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT == 32
     assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT <= fc.OURS
-    assert "Space roster snapshot" in fc.features_missing_below(31)
-    assert "Space roster snapshot" not in fc.features_missing_below(32)
+    assert "Complete, up-to-date member lists" in fc.features_missing_below(31)
+    assert "Complete, up-to-date member lists" not in fc.features_missing_below(32)
     assert fc.FederationCapability.MIN_FOR_ROSTER_SNAPSHOT in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )

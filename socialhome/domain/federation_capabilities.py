@@ -1256,78 +1256,111 @@ class FederationCapability:
 
 
 #: Single source of truth mapping each ``MIN_FOR_*`` threshold to a short
-#: human-readable feature label, for the admin federation-compatibility
-#: panel. Built FROM the :class:`FederationCapability` constants so the
+#: plain-language feature label (what the user gets, not the mechanism),
+#: for the admin compatibility panel. The labels reach the SPA as English
+#: text. Built FROM the :class:`FederationCapability` constants so the
 #: version numbers live in exactly one place — adding a feature means
 #: appending one ``(FederationCapability.MIN_FOR_X, "Label")`` tuple here.
 #: v_4 (pairing-via-inbox) has no entry for the same reason it has no
 #: named constant: it's a pre-capability-exchange bump with no gated field.
 CAPABILITY_FEATURES: list[tuple[int, str]] = [
-    (FederationCapability.MIN_FOR_CALENDAR_TZ, "Calendar timezones"),
-    (FederationCapability.MIN_FOR_DM_MEDIA_SYNC, "DM media"),
-    (FederationCapability.MIN_FOR_HOME_LOCATION_BROADCAST, "Home-location sharing"),
-    (FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM, "Cross-household invite links"),
-    (FederationCapability.MIN_FOR_SPACE_KEY_REKEY, "Space key rotation"),
-    (FederationCapability.MIN_FOR_REMOTE_MEMBER_ROLE, "Remote member roles"),
-    (FederationCapability.MIN_FOR_REMOTE_ADMIN_KICK, "Remote admin kick"),
+    (FederationCapability.MIN_FOR_CALENDAR_TZ, "Event times in the right time zone"),
+    (FederationCapability.MIN_FOR_DM_MEDIA_SYNC, "Photos and files in direct messages"),
+    (
+        FederationCapability.MIN_FOR_HOME_LOCATION_BROADCAST,
+        "Sharing your home location",
+    ),
+    (
+        FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,
+        "Invite links for other households",
+    ),
+    (
+        FederationCapability.MIN_FOR_SPACE_KEY_REKEY,
+        "New space keys when someone leaves",
+    ),
+    (
+        FederationCapability.MIN_FOR_REMOTE_MEMBER_ROLE,
+        "Roles for members from other households",
+    ),
+    (
+        FederationCapability.MIN_FOR_REMOTE_ADMIN_KICK,
+        "Removing members from other households",
+    ),
     (FederationCapability.MIN_FOR_BAZAAR_LISTING, "Bazaar listings"),
-    (FederationCapability.MIN_FOR_BAZAAR_STATUS, "Bazaar status"),
-    (FederationCapability.MIN_FOR_BAZAAR_BIDS, "Bazaar bids"),
-    (FederationCapability.MIN_FOR_SYNC_HTTPS_FALLBACK, "Sync HTTPS fallback"),
-    (FederationCapability.MIN_FOR_MEDIA_CHANNEL, "Media DataChannel"),
-    (FederationCapability.MIN_FOR_REMOTE_ADMIN_ACTION, "Remote admin actions"),
-    (FederationCapability.MIN_FOR_ADMIN_PROPOSALS, "Multi-admin approvals"),
-    (FederationCapability.MIN_FOR_APP_CHANNEL, "App federation channel"),
-    (FederationCapability.MIN_FOR_APP_USER_ROUTING, "App user routing"),
-    (FederationCapability.MIN_FOR_INSTANCE_RESYNC, "Instance resync request"),
-    (FederationCapability.MIN_FOR_SPACE_SYNC_REJECTED, "Space sync reject reconcile"),
+    (FederationCapability.MIN_FOR_BAZAAR_STATUS, "Marking bazaar items as sold"),
+    (FederationCapability.MIN_FOR_BAZAAR_BIDS, "Bids and offers in the bazaar"),
+    (
+        FederationCapability.MIN_FOR_SYNC_HTTPS_FALLBACK,
+        "Syncing when a direct link fails",
+    ),
+    (FederationCapability.MIN_FOR_MEDIA_CHANNEL, "Faster photo and video transfer"),
+    (
+        FederationCapability.MIN_FOR_REMOTE_ADMIN_ACTION,
+        "Admin actions from other households",
+    ),
+    (
+        FederationCapability.MIN_FOR_ADMIN_PROPOSALS,
+        "Changes that need several admins to agree",
+    ),
+    (FederationCapability.MIN_FOR_APP_CHANNEL, "Apps that work across households"),
+    (FederationCapability.MIN_FOR_APP_USER_ROUTING, "Apps that reach the right person"),
+    # The SPA matches this label (``RESYNC_FEATURE`` in
+    # client/src/store/federationCompat.ts) — rename both together.
+    (
+        FederationCapability.MIN_FOR_INSTANCE_RESYNC,
+        "Asking a household to send updates again",
+    ),
+    (
+        FederationCapability.MIN_FOR_SPACE_SYNC_REJECTED,
+        "Fixing spaces that got out of step",
+    ),
     (
         FederationCapability.MIN_FOR_AUTHENTICATED_ROUTE_DISCOVERY,
-        "Authenticated mesh route discovery",
+        "Finding a safe path through other households",
     ),
     (
         FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE,
-        "Space delegated admin authority",
+        "Admins running a space without the owner",
     ),
     (
         FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP,
-        "Space roster gossip",
+        "Member lists shared between households",
     ),
     (
         FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS,
-        "Admin authoritative config offline",
+        "Admins changing settings while the owner is away",
     ),
     (
         FederationCapability.MIN_FOR_USER_IDENTITY_KEY,
-        "Per-user identity binding",
+        "Checking each person's identity",
     ),
     (
         FederationCapability.MIN_FOR_IDENTITY_ANCHOR,
-        "UUID identity anchor",
+        "Stable identity when a username changes",
     ),
     (
         FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM,
-        "Invite-link bootstrap redeem",
+        "Joining by link without being connected",
     ),
     (
         FederationCapability.MIN_FOR_USER_MOVE,
-        "User move-out link",
+        "Moving to another household",
     ),
     (
         FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
-        "Mesh route-stale nack",
+        "Noticing when a path through other households breaks",
     ),
     (
         FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
-        "Cross-household Follower seats",
+        "Followers from other households",
     ),
     (
         FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE,
-        "Authenticated mesh-routed origin",
+        "Checking who sent a passed-on message",
     ),
     (
         FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
-        "Space roster snapshot",
+        "Complete, up-to-date member lists",
     ),
     (
         FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC,
@@ -1371,7 +1404,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_FEDERATED_MODERATION,
-        "Reviewed across households",
+        "Reviewing posts from other households",
     ),
     (
         FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
