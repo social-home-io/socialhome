@@ -725,8 +725,32 @@ the identity-free `{to_instance, sealed}` body:
  "sealed": {"kem_suite": "x25519", "eph_pk": "…", "ciphertext": "…"}}
 
 // the sealed plaintext, readable only by the addressed household
-{"kind": "space_relay_envelope", "envelope": { …the §24.11 envelope… }}
+{"kind": "space_relay_envelope", "envelope": { …the §24.11 envelope… },
+ "_pad": "000…"}
 ```
+
+**The sealed plaintext is padded to a size bucket.** Before sealing, the
+wrapper gets a `_pad` key of ASCII `0`s so the plaintext is exactly one of
+`RELAY_SIZE_BUCKETS` — 1, 4, 16, 64, 128 or 191 KiB (the item ladder of
+the member-publish relay plus one rung). The ciphertext length is the one
+property of the payload the relay still observes, and unpadded it was
+telling: a moderation submission (item + snapshot + the author's signed
+inner) is about twice a plain write, a reaction a fraction of a post.
+Padded, the relay learns per envelope only **the recipient, the timing and
+the size bucket**. The pad sits inside the seal (authenticated with the
+rest) and beside `envelope`, never in it: the receiver reads `kind` and
+`envelope` only and hands the pipeline `orjson.dumps(envelope)`, so the
+bytes the signature step verifies are identical with or without the pad,
+and a receiver from before padding — which ignores wrapper keys it does
+not know — opens a padded blob unchanged. No seal-format change, no new
+`kem_suite`, no `proto_version` gate. 191 KiB is the largest plaintext
+whose seal every receiver opens (`unseal_envelope_body` refuses a
+ciphertext string over `MAX_SEALED_BLOB_BYTES`, 256 KiB of base64), so an
+envelope that does not fit the top bucket is refused by the sender with a
+permanent 413 — there is no unpadded "too big to hide" class. Queue cost:
+padding at most quadruples a small frame, so a recipient's full 2000-row
+queue of 4 KiB-bucket envelopes is ~11 MiB, inside the 64 MiB
+per-recipient byte cap.
 
 The `kind` marker is what lets one socket carry two families — bootstrap
 redeem bodies and full federation envelopes — without either side

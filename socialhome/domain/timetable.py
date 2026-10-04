@@ -103,12 +103,12 @@ MAX_VERSION = 2**31 - 1
 #: moderator can't jump a timetable out of every later editor's reach.
 MAX_REMOTE_VERSION_JUMP = 10_000
 #: Wire-JSON cap. Sized so a space timetable fits every transport it rides:
-#: a live upsert through the connection-server relay (~232 KiB envelope,
-#: one base64 layer) AND a §25.6 sync chunk over HTTPS through that relay
-#: (the chunk is sealed twice — space key, then the per-peer session key —
-#: so ~1.78× plus signatures) and over the sync DataChannel (256 KiB
-#: SCTP max message size). 128 KiB did not fit the double-sealed relay
-#: path; 96 KiB leaves ~50 KiB head-room there.
+#: a live upsert through the connection-server relay (~191 KiB envelope —
+#: its top padding bucket — one base64 layer) AND a §25.6 sync chunk over
+#: HTTPS through that relay (the chunk is sealed twice — space key, then the
+#: per-peer session key — so ~1.78× plus signatures, ~181 KiB) and over the
+#: sync DataChannel (256 KiB SCTP max message size). 128 KiB did not fit
+#: the double-sealed relay path; 96 KiB leaves ~10 KiB head-room there.
 MAX_WIRE_BYTES = 96 * 1024
 #: Timestamps a timetable may carry (``created_at`` / ``updated_at``):
 #: normalised to UTC; outside this range they would overflow or be noise.

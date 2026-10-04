@@ -2244,7 +2244,7 @@ class FederationService:
         ``relay_payload``, when given, is sent INSTEAD of ``payload`` to a
         member seated from an invite link (``InstanceSource.SPACE_SESSION``):
         that household is reached only through the connection-server relay,
-        whose envelope cap (``RELAY_MAX_ENVELOPE_BYTES``, ~232 KiB) is far
+        whose envelope cap (``RELAY_MAX_ENVELOPE_BYTES``, ~191 KiB) is far
         tighter than a paired peer's ~1 MiB. A caller shipping bulky bytes
         (a space cover) hands a smaller variant for exactly those members.
 

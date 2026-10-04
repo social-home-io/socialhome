@@ -21,7 +21,11 @@ from socialhome.domain.timetable import (
     validate,
 )
 from socialhome.federation.encoder import FederationEncoder
-from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
+from socialhome.federation.gfs_relay_transport import (
+    RELAY_MAX_ENVELOPE_BYTES,
+    RELAY_SIZE_BUCKETS,
+    build_relay_plaintext,
+)
 from socialhome.federation.sync.space.exporter import ChunkBuilder, serialise_chunk
 from socialhome.federation.sync.space.exporters import TimetablesExporter
 
@@ -150,3 +154,5 @@ async def test_a_max_size_timetable_sync_chunk_fits_every_transport():
         "signatures": _SIGS,
     }
     assert len(orjson.dumps(envelope)) < RELAY_MAX_ENVELOPE_BYTES
+    # And it pads into a relay size bucket, i.e. a seal every receiver opens.
+    assert len(build_relay_plaintext(envelope)) in RELAY_SIZE_BUCKETS

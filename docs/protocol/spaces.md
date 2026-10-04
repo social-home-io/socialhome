@@ -45,7 +45,7 @@ transport through `embed_space_images` / `ImageProcessor.fit_within`. A paired
 or mesh-routed member gets the image under `SPACE_*_SNAPSHOT_MAX_BYTES`
 (256 KiB cover / 64 KiB icon, ~1 MiB envelope). A member seated from an
 invite link (`space_session`) sits behind the connection-server relay
-(~232 KiB envelope), so `broadcast_to_space_members(..., relay_payload=…)`
+(~191 KiB envelope), so `broadcast_to_space_members(..., relay_payload=…)`
 sends it a separately signed variant under `SPACE_*_BOOTSTRAP_MAX_BYTES`
 (64 / 16 KiB). The member applies the image only after the change passes
 the owner / authority and last-writer-wins gates, so an out-of-order older

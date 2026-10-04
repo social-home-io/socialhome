@@ -158,15 +158,21 @@ ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 4096, 16384, 65536, 131072)
 PAD_FIELD: str = "_pad"
 
 
-def pad_json_object(body: dict) -> bytes:
+def pad_json_object(
+    body: dict,
+    *,
+    buckets: tuple[int, ...] = ITEM_SIZE_BUCKETS,
+) -> bytes:
     """``body`` as JSON, padded with ASCII ``0`` in :data:`PAD_FIELD` to
-    exactly the smallest :data:`ITEM_SIZE_BUCKETS` size that fits. A pad the
-    body already carries is replaced. A body larger than the largest bucket
-    is left unpadded (its size is then its own). ``body`` is not mutated."""
+    exactly the smallest of ``buckets`` (ascending; default
+    :data:`ITEM_SIZE_BUCKETS`) that fits. A pad the body already carries is
+    replaced. A body larger than the largest bucket is left with an empty
+    pad (its size is then its own — callers with a hard cap refuse it).
+    ``body`` is not mutated."""
     out = {k: v for k, v in body.items() if k != PAD_FIELD}
     out[PAD_FIELD] = ""
     base = json.dumps(out).encode("utf-8")
-    bucket = next((b for b in ITEM_SIZE_BUCKETS if b >= len(base)), None)
+    bucket = next((b for b in buckets if b >= len(base)), None)
     if bucket is None:
         return base
     out[PAD_FIELD] = "0" * (bucket - len(base))

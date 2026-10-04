@@ -40,7 +40,7 @@ member household receives them). The domain `validate` caps a timetable at
 96 KiB of wire JSON. That is what fits the tightest path: a §25.6 sync chunk
 shipped over HTTPS to a link-joined member is sealed twice (space content
 key, then the per-peer session key, ~1.78× plus signatures) and must pass
-the connection-server relay's ~232 KiB envelope cap; the same chunk over the
+the connection-server relay's ~191 KiB envelope cap; the same chunk over the
 sync DataChannel must stay under libdatachannel's 256 KiB SCTP max message
 size. (128 KiB did not fit the relay path.)
 

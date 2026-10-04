@@ -19,17 +19,26 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.space_item import ITEM_SIZE_BUCKETS, PAD_FIELD
 from socialhome.federation.gfs_relay_transport import (
     RELAY_KIND_ENVELOPE,
+    RELAY_SIZE_BUCKETS,
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
     RELAY_MAX_BODY_BYTES,
     RELAY_MAX_ENVELOPE_BYTES,
     GfsRelayTransport,
+    build_relay_plaintext,
     is_relay_envelope_body,
     seal_relay_envelope,
 )
-from socialhome.federation.invite_bootstrap import EnvelopeRelayThrottled
+from socialhome.federation.invite_bootstrap import (
+    MAX_INNER_BYTES,
+    MAX_SEALED_BLOB_BYTES,
+    EnvelopeRelayThrottled,
+    unseal_envelope_body,
+)
+from socialhome.federation.keywrap_seal import seal_to_keywrap
 from socialhome.federation.keywrap_seal import open_keywrap
 from socialhome.global_server.envelope_relay import ENVELOPE_MAX_BODY_BYTES
 
@@ -107,6 +116,7 @@ def test_the_sealed_plaintext_carries_the_kind_marker_and_the_envelope():
     )
     assert body["kind"] == RELAY_KIND_ENVELOPE
     assert body["envelope"] == ENVELOPE
+    assert set(body) == {"kind", "envelope", PAD_FIELD}
     assert is_relay_envelope_body(body) is True
     assert is_relay_envelope_body({"kind": "space_invite_bootstrap_redeem"}) is False
     assert is_relay_envelope_body("not a dict") is False
@@ -207,6 +217,8 @@ def test_the_body_cap_matches_the_connection_server_contract():
     assert RELAY_MAX_BODY_BYTES == ENVELOPE_MAX_BODY_BYTES
     # The pre-seal bound must leave room for base64 (4/3) plus framing.
     assert RELAY_MAX_ENVELOPE_BYTES * 4 // 3 < RELAY_MAX_BODY_BYTES
+    # Nothing larger than the top padding bucket can be relayed at all.
+    assert RELAY_MAX_ENVELOPE_BYTES == RELAY_SIZE_BUCKETS[-1]
 
 
 async def test_an_oversize_envelope_is_refused_here_not_at_the_relay(caplog):
@@ -261,3 +273,117 @@ async def test_a_configuration_refusal_is_still_a_plain_failure():
     )
 
     assert (ok, status) == (False, None)
+
+
+# ─── Size padding (the GFS sees a bucket, not a size) ────────────────────
+
+
+def _sized_envelope(n: int) -> dict:
+    """An envelope whose JSON is roughly ``n`` bytes."""
+    return {**ENVELOPE, "encrypted_payload": "x" * max(0, n - 300)}
+
+
+def test_the_bucket_ladder_extends_the_item_ladder_and_fits_every_cap():
+    """The top rung is the largest sealed plaintext EVERY receiver opens:
+    ``unseal_envelope_body`` (unchanged since before padding) refuses a
+    ciphertext string over ``MAX_SEALED_BLOB_BYTES`` before the AEAD."""
+    assert RELAY_SIZE_BUCKETS[: len(ITEM_SIZE_BUCKETS)] == ITEM_SIZE_BUCKETS
+    assert list(RELAY_SIZE_BUCKETS) == sorted(set(RELAY_SIZE_BUCKETS))
+    kp = generate_x25519_keypair()
+    top = RELAY_SIZE_BUCKETS[-1]
+    sealed = seal_to_keywrap(recipient_keywrap_pub=kp.public_key, plaintext=b"0" * top)
+    assert top <= MAX_INNER_BYTES
+    assert len(sealed["ciphertext"]) <= MAX_SEALED_BLOB_BYTES
+    body = {"to_instance": "b" * 32, "sealed": sealed}
+    assert len(orjson.dumps(body)) <= RELAY_MAX_BODY_BYTES
+
+
+@pytest.mark.parametrize(
+    "size",
+    [10, 900, 1500, 5000, 20_000, 70_000, 140_000, 180_000],
+)
+def test_the_sealed_plaintext_is_always_exactly_a_bucket(size):
+    plaintext = build_relay_plaintext(_sized_envelope(size))
+    assert len(plaintext) in RELAY_SIZE_BUCKETS
+    assert len(plaintext) >= size - 300
+
+
+async def test_two_envelopes_in_one_bucket_look_identical_to_the_relay():
+    """The relay body's length is a function of the bucket alone, so a
+    short write and a longer one in the same bucket cannot be told apart
+    by size."""
+    kp = generate_x25519_keypair()
+    relay = _FakeRelay()
+    transport = GfsRelayTransport(relay_sender=relay)
+
+    for size in (1100, 2500, 4000):
+        ok, _ = await transport.send(
+            instance=_instance(kp),
+            envelope_dict=_sized_envelope(size),
+        )
+        assert ok is True
+
+    lengths = {len(orjson.dumps(c["envelope"])) for c in relay.calls}
+    assert len(lengths) == 1
+    for call in relay.calls:
+        plain = open_keywrap(
+            sealed=call["envelope"]["sealed"],
+            recipient_keywrap_priv=kp.private_key,
+        )
+        assert len(plain) == RELAY_SIZE_BUCKETS[1]
+
+
+async def test_a_receiver_from_before_padding_still_reads_the_envelope():
+    """The pad is a sibling of ``envelope`` in the sealed wrapper. A
+    receiver from before padding runs ``unseal_envelope_body`` (its caps,
+    unseal, JSON parse), checks ``kind`` and re-serialises
+    ``body["envelope"]`` for the §24.11 pipeline — the bytes it hands the
+    signature step are exactly the unpadded envelope's."""
+    kp = generate_x25519_keypair()
+    relay = _FakeRelay()
+    signed_bytes = orjson.dumps(ENVELOPE)
+
+    await GfsRelayTransport(relay_sender=relay).send(
+        instance=_instance(kp),
+        envelope_dict=ENVELOPE,
+    )
+
+    body = unseal_envelope_body(
+        envelope={"sealed": relay.calls[0]["envelope"]["sealed"]},
+        keywrap_private_key=kp.private_key,
+    )
+    assert is_relay_envelope_body(body)
+    inner = body.get("envelope")
+    assert PAD_FIELD not in inner
+    assert orjson.dumps(inner) == signed_bytes
+
+
+async def test_an_envelope_that_only_overflows_once_wrapped_is_refused():
+    """Past the cheap pre-seal bound by a few bytes of wrapper: it would
+    seal past what any receiver opens, so it is refused with the same
+    permanent status — never shipped to be dropped silently over there."""
+    kp = generate_x25519_keypair()
+    relay = _FakeRelay()
+    base = len(orjson.dumps({**ENVELOPE, "encrypted_payload": ""}))
+    envelope = {
+        **ENVELOPE,
+        "encrypted_payload": "x" * (RELAY_MAX_ENVELOPE_BYTES - base),
+    }
+    assert len(orjson.dumps(envelope)) == RELAY_MAX_ENVELOPE_BYTES
+
+    ok, status = await GfsRelayTransport(relay_sender=relay).send(
+        instance=_instance(kp),
+        envelope_dict=envelope,
+    )
+
+    assert (ok, status) == (False, RELAY_STATUS_TOO_LARGE)
+    assert relay.calls == []
+
+
+def test_sealing_an_envelope_too_big_for_any_bucket_raises():
+    kp = generate_x25519_keypair()
+    with pytest.raises(ValueError, match="bucket"):
+        seal_relay_envelope(
+            envelope_dict=_sized_envelope(RELAY_MAX_ENVELOPE_BYTES + 1000),
+            peer_keywrap_pub=kp.public_key,
+        )
