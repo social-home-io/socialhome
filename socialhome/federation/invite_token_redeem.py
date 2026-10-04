@@ -100,7 +100,7 @@ from .invite_bootstrap import (
     validate_bootstrap_body,
     verify_peer_keywrap,
 )
-from .mesh_member_claim import mesh_member_claim
+from .mesh_member_claim import mesh_member_claim, parse_mesh_member_claim
 
 if TYPE_CHECKING:
     from ..infrastructure.key_manager import KeyManager
@@ -123,27 +123,39 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 #: The seats a redeem may install on a **remote** household, i.e. the
-#: intersection of the ``space_invite_tokens.role`` CHECK (migration 0053)
-#: and the ``space_remote_members.role`` CHECK (0054). ``owner`` is in
-#: neither: ownership moves only through ``transfer_ownership`` and is a
-#: local-only privilege. A ``subscriber`` seat joined this set in v_30 —
-#: before that a Follower link was refused across households outright,
-#: because there was no on-disk row shape for a remote reader.
+#: intersection of the ``space_invite_tokens.role`` CHECK (migrations 0053 +
+#: 0080) and the ``space_remote_members.role`` CHECK (0054 + 0065).
+#: ``owner`` is in neither: ownership moves only through
+#: ``transfer_ownership`` and is a local-only privilege. A ``subscriber``
+#: seat joined this set in v_30 — before that a Follower link was refused
+#: across households outright, because there was no on-disk row shape for a
+#: remote reader. A ``moderator`` seat (v_41) joined it with migration 0080;
+#: a redeemer below v_41 is seated as ``member`` instead (see
+#: :meth:`SpaceInviteTokenRedeemCoordinator._consume_seat_and_build_ack`).
 SEATABLE_REMOTE_ROLES: frozenset[str] = frozenset(
     {
         SpaceRole.MEMBER.value,
         SpaceRole.ADMIN.value,
+        SpaceRole.MODERATOR.value,
         SpaceRole.SUBSCRIBER.value,
     }
 )
 
 #: Seats an already-seated redeemer may be RE-ACKed with (a retry after a
-#: lost ACK): every seatable role plus ``moderator`` (v_41) — a seat that
-#: is only ever reached by promotion after joining, so it is never handed
-#: out by a new redeem, but its holder re-redeeming keeps it.
-REACKABLE_REMOTE_ROLES: frozenset[str] = SEATABLE_REMOTE_ROLES | {
-    SpaceRole.MODERATOR.value
-}
+#: lost ACK): exactly the seatable roles — a ``moderator`` seat reached by a
+#: link or by a later promotion is kept on a re-redeem either way.
+REACKABLE_REMOTE_ROLES: frozenset[str] = SEATABLE_REMOTE_ROLES
+
+
+def _int_or_one(raw: object) -> int:
+    """A claimed ``proto_version`` as an int — ``1`` (the most conservative
+    wire) when absent or malformed, so a gate on it fails closed."""
+    if isinstance(raw, bool):
+        return 1
+    try:
+        return int(raw or 1)  # type: ignore[call-overload]
+    except TypeError, ValueError:
+        return 1
 
 
 #: How long the receiver waits for an ACK / DENY before giving up.
@@ -958,6 +970,7 @@ class SpaceInviteTokenRedeemCoordinator:
         # redeem rode the relay — exactly like a §D2b bootstrap redeem.
         sender = await self._federation_repo.get_instance(event.from_instance)
         over_gfs = sender is not None and sender.source is InstanceSource.SPACE_SESSION
+        may_moderate = await self._redeemer_may_moderate(event, sender)
         async with self._redeem_lock(event.from_instance):
             (
                 ack_payload,
@@ -970,6 +983,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 redeemer_pk=redeemer_pk,
                 redeemer_display=redeemer_display,
                 over_gfs=over_gfs,
+                redeemer_may_moderate=may_moderate,
             )
             if ack_payload is None:
                 await self._send_deny(
@@ -1021,6 +1035,31 @@ class SpaceInviteTokenRedeemCoordinator:
             # ``record_mesh_member_claim`` owns every check.
             await self._federation.record_mesh_member_claim(event)
 
+    async def _redeemer_may_moderate(
+        self,
+        event: "FederationEvent",
+        sender: RemoteInstance | None,
+    ) -> bool:
+        """Whether the household behind a §D2 REDEEM can store a
+        ``moderator`` seat (v_41). A household we hold a ``remote_instances``
+        row for — paired, or link-joined (``space_session``) — by that row's
+        advertised version (``peer_supports``). A mesh-only one (no row) by
+        the version claim sealed inside its routed, origin-authenticated
+        REDEEM (:mod:`~socialhome.federation.mesh_member_claim`) — recorded
+        only after the seat commits, so it is read here off the event.
+        Anything else is unknown → ``False`` (the seat falls back to
+        ``member``)."""
+        min_version = FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE
+        if sender is None and event.routed_path is not None:
+            claim = parse_mesh_member_claim(
+                event.payload, instance_id=event.from_instance
+            )
+            if claim is not None:
+                return claim.proto_version >= min_version
+        return await self._federation.peer_supports(
+            event.from_instance, min_version=min_version
+        )
+
     async def _consume_seat_and_build_ack(
         self,
         *,
@@ -1031,8 +1070,16 @@ class SpaceInviteTokenRedeemCoordinator:
         redeemer_display: str | None,
         bootstrap: bool = False,
         over_gfs: bool = False,
+        redeemer_may_moderate: bool = False,
     ) -> tuple[dict | None, str | None, _SeatReservation | None]:
         """Issuer-side authorization + seating for one redeem.
+
+        ``redeemer_may_moderate`` is whether the redeeming household runs
+        v_41+ and can store a ``moderator`` seat; the caller decides it (a
+        §D2 redeem from the peer row or mesh claim, a §D2b one from the
+        version in its signed request). A ``moderator`` link redeemed by an
+        older household seats ``member`` — the link is honoured, never
+        refused — and is logged.
 
         ``bootstrap`` marks the §D2b invite-link leg, whose ACK rides the
         connection server's size-capped relay: the snapshot's cover and
@@ -1125,14 +1172,14 @@ class SpaceInviteTokenRedeemCoordinator:
         # nowhere else.
         seat = str(row.get("role") or SpaceRole.MEMBER.value)
         if seat not in SEATABLE_REMOTE_ROLES:
-            # The ``space_invite_tokens.role`` CHECK (migration 0053) and the
-            # ``space_remote_members.role`` CHECK (0054) agree on exactly
-            # these three values, so this is unreachable on a healthy row —
-            # it is the tripwire for a fourth seat being minted before this
-            # side knows how to sit in it. Refuse rather than seat a role we
-            # cannot gate: an unrecognised seat that fell through to
-            # ``set_role`` would hit the CHECK anyway, but only AFTER the
-            # use was spent and the instance registered.
+            # The ``space_invite_tokens.role`` CHECK (migrations 0053 + 0080)
+            # and the ``space_remote_members.role`` CHECK (0054 + 0065) agree
+            # on exactly these four values, so this is unreachable on a
+            # healthy row — it is the tripwire for a new seat being minted
+            # before this side knows how to sit in it. Refuse rather than
+            # seat a role we cannot gate: an unrecognised seat that fell
+            # through to ``set_role`` would hit the CHECK anyway, but only
+            # AFTER the use was spent and the instance registered.
             log.warning(
                 "invite redeem: token for space carries unseatable role %r "
                 "— refusing (a use was spent)",
@@ -1149,6 +1196,23 @@ class SpaceInviteTokenRedeemCoordinator:
         # admin link is therefore at worst a member on the host.
         pending_admin = seat == SpaceRole.ADMIN.value
         if pending_admin:
+            seat = SpaceRole.MEMBER.value
+        # A moderator link seats a moderator straight through — on the
+        # paired, mesh AND link-joined paths alike: a moderator holds no
+        # settings authority and never the seed (``list_admin_instances`` is
+        # role-exact ``admin``), a link-joined moderator acts through the
+        # host like any link-joined seat, and promoting such a household to
+        # moderator is equally unrestricted. Only the v_41 floor applies,
+        # as on a promotion — but a link degrades to ``member`` rather than
+        # failing the redeem (the promotion path raises instead).
+        if seat == SpaceRole.MODERATOR.value and not redeemer_may_moderate:
+            log.info(
+                "invite redeem: %s runs below v_%d and cannot hold a moderator "
+                "seat — seated as a member in space %s",
+                redeemer_instance_id,
+                FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+                space_id,
+            )
             seat = SpaceRole.MEMBER.value
 
         # §13.7 needs no separate check here: the ban is folded into the
@@ -1949,6 +2013,13 @@ class SpaceInviteTokenRedeemCoordinator:
                 else None
             ),
             bootstrap=True,
+            # No peer row exists yet on this leg: the version the redeemer
+            # put in its sealed, identity-signed request — the same value
+            # its space-session row is seated with just below.
+            redeemer_may_moderate=(
+                _int_or_one(body.get("proto_version"))
+                >= FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE
+            ),
         )
         if ack_body is None:
             await self._send_bootstrap_deny(

@@ -35,6 +35,12 @@ the token IS the approval)
 `SPACE_INVITE_TOKEN_REDEEM`, `SPACE_INVITE_TOKEN_REDEEM_ACK`,
 `SPACE_INVITE_TOKEN_REDEEM_DENY`.
 
+**Forwarded invite-link mint** (an admin on a member household, v_52; see
+["Links minted on a member household"](#links-minted-on-a-member-household-v_52))
+
+`SPACE_REMOTE_ADMIN_ACTION` (`action: "create_invite_link"`),
+`SPACE_INVITE_LINK_FORWARD_RESULT`.
+
 **Bootstrap invite redeem** (no pre-existing relationship at all — §D2b,
 v_29; see ["Bootstrap redeem"](#bootstrap-redeem--an-invite-link-from-a-stranger-d2b-v_29))
 
@@ -947,8 +953,9 @@ failure unreachable, at a cost no one can perceive.
 
 ### The role a link grants
 
-A link carries the seat the redeemer lands in — `member`, `subscriber` or
-`admin` — stored on the `space_invite_tokens` row (migration 0053) and
+A link carries the seat the redeemer lands in — `member`, `subscriber`,
+`moderator` or `admin` — stored on the `space_invite_tokens` row (migration
+0053; `moderator` since 0080) and
 read back out of the atomic `consume_invite_token`. **The issuer's row
 decides.** The redeem request never names a role: the token is a bearer
 credential the redeemer holds and replays, so a role encoded in the token
@@ -962,16 +969,108 @@ grant admin on redeem — see "An `admin`/mod link is approved" below.
 
 Who may mint what:
 
-| Actor | `member` | `subscriber` | `admin` | `owner` |
-|---|---|---|---|---|
-| Owner | yes | yes | yes | never |
-| Admin | yes | yes | **no** (403) | never |
-| Member / subscriber | no | no | no | never |
+| Actor | `member` | `subscriber` | `moderator` | `admin` | `owner` |
+|---|---|---|---|---|---|
+| Owner | yes | yes | yes | yes | never |
+| Admin | yes | yes | yes | **no** (403) | never |
+| Moderator / member / subscriber | no | no | no | no | never |
 
 An admin minting an `admin` link would be self-service promotion by
-proxy, so that case re-checks with `_require_owner`. `owner` is never
+proxy, so that case re-checks with `_require_owner`. A `moderator` link
+mirrors who may **promote** to moderator — the same `role_change_allowed`
+matrix (`_check_role_change(actor, member → moderator)`), so a link never
+grants a seat its minter could not have granted by hand; a moderator holds
+no settings authority and may not mint any link. `owner` is never
 mintable at all (422) — ownership moves only through
 `transfer_ownership`.
+
+#### Links minted on a member household (v_52)
+
+A link is a row in the issuer's `space_invite_tokens` table and every
+redeem path consumes it there, so the **host** (`owner_instance_id`)
+always holds it. Any admin may still mint, list and revoke a space's links —
+an admin on a member household's stub included: each request is
+**forwarded to the host**, which acts on its own table and answers, so a
+forwarded link's redeems are those of any host link.
+
+```mermaid
+sequenceDiagram
+    participant A as Admin (member household)
+    participant M as Member household
+    participant H as Host
+    A->>M: POST / GET / DELETE /api/spaces/{id}/invite-tokens[/{token}]
+    Note over M: same local checks (admin seat;<br/>mint: moderator matrix, admin = owner only)
+    M->>H: SPACE_REMOTE_ADMIN_ACTION<br/>{action: create_invite_link | list_invite_links |<br/>revoke_invite_link, params: {request_nonce, …}}
+    Note over H: actor = signed sender + actor_user_id:<br/>live owner/admin seat? then the action's own rules
+    H->>H: mint into / read / delete from space_invite_tokens
+    H-->>M: SPACE_INVITE_LINK_FORWARD_RESULT<br/>{space_id, request_nonce, link | links | revoked | error}
+    M-->>A: 201 link / 200 {tokens} / 204
+```
+
+Params per action: `create_invite_link` — `{role, uses, ttl_seconds, via,
+publish_gfs_url}`; `list_invite_links` — none; `revoke_invite_link` —
+`{token}`.
+
+* **The host decides**, with its own data: the actor is the
+  §24.11-authenticated sender household plus `actor_user_id`, and must hold
+  a **live** `admin` seat there — the same seat that may mint, list and
+  revoke on the host (a member, a moderator, a removed admin or a forged
+  actor gets `error: "forbidden"`).
+* **Mint:** the moderator matrix runs under that seat's role, an `admin`
+  link stays owner-only (the owner is never a remote seat, so no forwarded
+  mint grants it), and `via` is resolved on the host — including the
+  private-space connection-server option (`error: "private_gfs_off"`). The
+  member household names its chosen connection server by URL
+  (`publish_gfs_url`); the host publishes through ITS own connection to
+  that server, or answers `error: "gfs_not_paired"`. The member household
+  never parks a blob.
+* **List:** the host answers with the space's live links — exactly what its
+  own (non-owner) admins see: every link except `admin` links, which are
+  the owner's alone (a remote seat is never the owner). Same shape, `via`
+  included. The member household's own table holds none of them.
+* **Revoke:** the host deletes the row and takes a parked blob down on its
+  connection server, fail-soft, exactly like a local revoke; idempotent. An
+  `admin` link is refused (`forbidden` → 403).
+* **Never held for owner approval.** Unlike a forwarded config edit or
+  role change, these need no more than the seat that acts on the host.
+* **Synchronous.** The API waits up to 20 s for the host's answer; no
+  answer (the host is offline) or a request that went nowhere is
+  `503 HOST_UNREACHABLE`. Error codes map to the same responses as a local
+  request: `forbidden` → 403, `private_gfs_off` → 409 `PRIVATE_GFS_OFF`,
+  `gfs_publish_failed` → 422 `GFS_PUBLISH_FAILED`, anything else → 422.
+* **Older hosts.** A host below v_52 would drop the unknown action in
+  silence, so the member household refuses up front with
+  `409 HOST_TOO_OLD` (`feature: "invite_link"`).
+
+#### A `moderator` link seats a moderator
+
+Unlike an `admin` link, a `moderator` link seats **straight through** on
+every redeem path — the local `accept_invite_token`, a paired or mesh §D2
+redeem, and a link-joined §D2b one — with no pending elevation. A
+moderator holds content authority only: no settings authority, never the
+signing seed (`list_admin_instances` is role-exact `admin`), so there is no
+seed or config power for a leaked link to hand out, and a link-joined
+moderator acts through the host like any link-joined seat (it decides
+moderation items over `SPACE_MODERATION_DECIDED`, which is in
+`SPACE_SESSION_ALLOWED_EVENT_TYPES`). Promoting a link-joined household to
+moderator is likewise unrestricted, so the link mirrors that.
+
+The seat federates exactly like a promoted moderator: the redeem's roster
+gossip is an authority-signed JOINED with `role: "moderator"` on the v_30
+floor (every v_30+ receiver coerces an unknown role down to `member`), and
+the household's writer certificate is computed from the seat — `write`
+under `MODERATED` posting, where a plain member gets `comment`.
+
+**Older redeemers.** A household below v_41 cannot store a moderator
+seat. Where a promotion refuses such a household
+(`HouseholdUpgradeRequiredError`), a link is honoured as a **member** seat
+instead — never a DENY — and the issuer logs it at INFO. The issuer judges
+the version by the redeemer's `remote_instances` row (paired or
+link-joined), by the mesh version claim sealed inside a routed REDEEM (a
+mesh-only household — see `mesh_member_claim`), or, on the §D2b leg where
+no row exists yet, by the `proto_version` in the redeemer's sealed,
+identity-signed request (the value its space-session row is then seated
+with). No version or claim → `member` (fail closed).
 
 A `subscriber` link works regardless of any "strangers may subscribe"
 space setting: that setting governs people who walked up on their own,
@@ -985,8 +1084,8 @@ leaked — anyone who saw the URL could redeem it — and admin carries
 kick / ban / config, so redeeming an `admin` link seats the household as
 a **member** now and files a pending **elevation** the owner approves
 with a click. A leaked admin link is therefore at worst a revocable
-member. Member and subscriber links are unchanged: the token is the
-authorization and they seat straight through.
+member. Member, subscriber and moderator links are unchanged: the token is
+the authorization and they seat straight through.
 
 The elevation is a `space_join_requests` row with `requested_role =
 'admin'` (migration 0055) — the same table, review flow, expiry, REST
@@ -1100,8 +1199,8 @@ every v_30 member household, refuses them throughout.
 
 | Endpoint | Who | Notes |
 |---|---|---|
-| `GET /api/spaces/{id}/invite-tokens` | admin or owner | Live links only — expired and exhausted rows are excluded because they grant nothing. |
-| `DELETE /api/spaces/{id}/invite-tokens/{token}` | admin or owner | `204`, idempotent. Any admin may revoke any of the space's links: a link belongs to the space, not to its minter. |
+| `GET /api/spaces/{id}/invite-tokens` | admin or owner | Live links only — expired and exhausted rows are excluded because they grant nothing. `admin` links are listed to the **owner only**: they are the owner's to mint, so a plain admin never sees their tokens or codes. |
+| `DELETE /api/spaces/{id}/invite-tokens/{token}` | admin or owner | `204`, idempotent. Any admin may revoke any of the space's links — a link belongs to the space, not to its minter — except an `admin` link, which only the owner revokes (`403` for anyone else). |
 
 Revoke is total: the local row goes AND the blob comes down on the
 connection server the link was published to (the `gfs_id` / `gfs_token` /

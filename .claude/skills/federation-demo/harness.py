@@ -2660,7 +2660,11 @@ def cmd_gfs_invite_link() -> None:
        only then is e's household an admin on the host — still with no
        signing seed, which a link-joined admin must never hold (the
        connection server pins a space's identity key TOFU-immutably, so
-       that credential could never be taken back).
+       that credential could never be taken back). e, now an admin on a
+       member household, mints a moderator link there: forwarded to a (v_52),
+       minted in a's table, redeemed by b into a moderator seat; e lists the
+       host's links and revokes a second one (gone from a's table); e's
+       admin link is refused (owner-only).
     10. Followers (v_30): a mints a ``subscriber`` link on a THIRD space
        and e redeems it into a read-only seat. Assert the seat on BOTH
        sides (``space_remote_members.role='subscriber'`` on the host —
@@ -2669,6 +2673,11 @@ def cmd_gfs_invite_link() -> None:
        then that it READS (a's post arrives over the relay, decrypted with
        the content key the ACK carried) and cannot WRITE (403). A Follower
        link handed to another household used to be refused outright.
+    11. Moderators (migration 0080): a mints a ``moderator`` link on a
+       FOURTH space. e redeems the published one over the relay and b
+       (paired) an ``internal`` one directly; both land in a ``moderator``
+       seat straight through (no pending elevation) — asserted on their own
+       ``space_members`` and on a's ``space_remote_members``.
     """
     state = _load()
     if not state or not _gfs_alive(state):
@@ -3157,6 +3166,126 @@ def cmd_gfs_invite_link() -> None:
         )
     print("  e is admin on the second space and holds NO signing seed ✓")
 
+    # 9b. A member household's admin mints links too (v_52): e — link-joined,
+    #     reaching a only over the relay — asks for a moderator link on a's
+    #     space; the mint is forwarded to a, which mints it in ITS table and
+    #     hands it back. b (paired with a) redeems it straight into a
+    #     moderator seat. An admin link stays the owner's: e is refused.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        e_role = _rows(
+            "e",
+            "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+            (admin_space_id, e["user_id"]),
+        )
+        if e_role and e_role[0][0] == "admin":
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"gfs-invite-link: e's own seat on the admin space is {e_role!r}, "
+            "expected 'admin' after the approval",
+        )
+    s, fwd_link = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=e["token"],
+        method="POST",
+        body={"role": "moderator", "uses": 1},
+        timeout=40.0,
+    )
+    fwd_link = _must("e mints a forwarded moderator link", s, fwd_link, ok=(201,))
+    fwd_payload = _decode_invite_blob(fwd_link["code"])
+    if fwd_payload.get("issuer_instance_id") != a["instance_id"]:
+        raise SystemExit(
+            "gfs-invite-link: e's forwarded link names issuer "
+            f"{fwd_payload.get('issuer_instance_id')!r}, expected a — the "
+            "host mints it",
+        )
+    if not _rows(
+        "a",
+        "SELECT 1 FROM space_invite_tokens WHERE token = ? AND role = 'moderator'",
+        (fwd_link["token"],),
+    ):
+        raise SystemExit(
+            "gfs-invite-link: a holds no token row for e's forwarded link",
+        )
+    if _rows(
+        "e",
+        "SELECT 1 FROM space_invite_tokens WHERE token = ?",
+        (fwd_link["token"],),
+    ):
+        raise SystemExit(
+            "gfs-invite-link: e wrote the forwarded link into its OWN table",
+        )
+    b_fwd = state["instances"]["b"]
+    s, b_fwd_joined = _request(
+        f"http://127.0.0.1:{b_fwd['port']}/api/spaces/join",
+        token=b_fwd["token"],
+        method="POST",
+        body=_join_body_from_blob(fwd_payload),
+        timeout=40.0,
+    )
+    b_fwd_joined = _must("b redeems e's forwarded link", s, b_fwd_joined)
+    if b_fwd_joined.get("role") != "moderator":
+        raise SystemExit(
+            f"gfs-invite-link: b's redeem of e's forwarded link returned "
+            f"{b_fwd_joined!r}, expected role 'moderator'",
+        )
+    _assert_moderator_seat("b", b_fwd, admin_space_id)
+    # …and e sees and revokes the host's links from its own household.
+    # A second (unused) forwarded link, so the revoke takes down a live one.
+    s, fwd_link2 = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=e["token"],
+        method="POST",
+        body={"role": "member", "uses": 1},
+        timeout=40.0,
+    )
+    fwd_link2 = _must("e mints a second forwarded link", s, fwd_link2, ok=(201,))
+    s, listed = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=e["token"],
+        timeout=40.0,
+    )
+    listed = _must("e lists the host's links", s, listed, ok=(200,))
+    listed_tokens = {t.get("token") for t in listed.get("tokens", [])}
+    if fwd_link2["token"] not in listed_tokens:
+        raise SystemExit(
+            f"gfs-invite-link: e's forwarded list {sorted(listed_tokens)!r} "
+            f"lacks the link it minted ({fwd_link2['token']!r})",
+        )
+    s, revoked = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens/{fwd_link2['token']}",
+        token=e["token"],
+        method="DELETE",
+        timeout=40.0,
+    )
+    _must("e revokes its forwarded link", s, revoked, ok=(204,))
+    if _rows(
+        "a",
+        "SELECT 1 FROM space_invite_tokens WHERE token = ?",
+        (fwd_link2["token"],),
+    ):
+        raise SystemExit(
+            "gfs-invite-link: a still holds the link e revoked through it",
+        )
+    print("  e listed the host's links and revoked one — gone from a's table ✓")
+    s, refused_admin = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=e["token"],
+        method="POST",
+        body={"role": "admin", "uses": 1},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"gfs-invite-link: e's admin-link mint answered HTTP {s} "
+            f"(expected 403 — admin links are the owner's): {refused_admin!r}",
+        )
+    print(
+        "  e (link-joined admin) minted a moderator link through a; b redeemed "
+        "it as a moderator; e's admin link refused ✓"
+    )
+
     # 10. A ``subscriber`` (Follower) link, on a THIRD space, into a
     #     read-only seat: e receives the space's content over the relay and
     #     is refused every write. This is the flagship case for a published
@@ -3273,15 +3402,129 @@ def cmd_gfs_invite_link() -> None:
         )
     print("  the follower is refused a post (403) ✓")
 
+    # 11. Moderators (migration 0080): a mints a ``moderator`` link on a
+    #     FOURTH space. Unlike an admin link it seats straight through — a
+    #     moderator holds no settings authority and never the seed — on the
+    #     link-joined path (e, published link over the relay) and on the
+    #     paired path (b, an ``internal`` link redeemed directly).
+    mod_space_name = f"Link-moderator space {time.time_ns()}"
+    s, mod_space = _request(
+        f"{a_base}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": mod_space_name,
+            "description": "fourth space — the moderator-link seats",
+            "space_type": "global",
+            "join_mode": "invite_only",
+        },
+    )
+    mod_space = _must("a creates the moderator-link space", s, mod_space, ok=(201,))
+    mod_space_id = mod_space["id"]
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        s, payload = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/spaces")
+        rows = payload.get("spaces", []) if isinstance(payload, dict) else []
+        if any(sp.get("space_id") == mod_space_id for sp in rows):
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"gfs-invite-link: the moderator-link space {mod_space_id} never "
+            "appeared in the GFS directory — a link cannot be published for "
+            "an unlisted space.",
+        )
+    s, mod_link = _request(
+        f"{a_base}/api/spaces/{mod_space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "moderator", "uses": 1, "publish_to_gfs": gfs_conn_id},
+    )
+    mod_link = _must("a mints a moderator link", s, mod_link, ok=(201,))
+    if mod_link.get("role") != "moderator":
+        raise SystemExit(
+            f"gfs-invite-link: a minted a {mod_link.get('role')!r} link, "
+            "expected 'moderator'",
+        )
+    s, mod_joined = _request(
+        f"{e_base}/api/spaces/join",
+        token=e["token"],
+        method="POST",
+        body=_join_body_from_blob(_decode_invite_blob(mod_link["code"])),
+        timeout=40.0,
+    )
+    mod_joined = _must("e redeems the moderator link", s, mod_joined, ok=(200, 201))
+    if mod_joined.get("role") != "moderator" or mod_joined.get("pending_role"):
+        raise SystemExit(
+            f"gfs-invite-link: e's moderator redeem returned {mod_joined!r}, "
+            "expected role 'moderator' with nothing pending — a moderator link "
+            "seats straight through.",
+        )
+    _assert_moderator_seat("e", e, mod_space_id)
+    print("  e redeemed a published moderator link into a MODERATOR seat ✓")
+
+    b = state["instances"]["b"]
+    s, b_link = _request(
+        f"{a_base}/api/spaces/{mod_space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "moderator", "uses": 1, "via": "internal"},
+    )
+    b_link = _must("a mints an internal moderator link", s, b_link, ok=(201,))
+    s, b_joined = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/join",
+        token=b["token"],
+        method="POST",
+        body=_join_body_from_blob(_decode_invite_blob(b_link["code"])),
+        timeout=40.0,
+    )
+    b_joined = _must("b redeems the internal moderator link", s, b_joined)
+    if b_joined.get("role") != "moderator":
+        raise SystemExit(
+            f"gfs-invite-link: b's internal moderator redeem returned "
+            f"{b_joined!r}, expected role 'moderator'",
+        )
+    _assert_moderator_seat("b", b, mod_space_id)
+    print("  b (paired) redeemed an internal moderator link into a MODERATOR seat ✓")
+
     state["gfs_invite_admin_space_id"] = admin_space_id
     state["gfs_invite_follower_space_id"] = fan_space_id
+    state["gfs_invite_moderator_space_id"] = mod_space_id
     _save(state)
     print(
         "gfs-invite-link: ok (published link → stranger joins over the relay → "
         "revoke → admin link seats a member + pending elevation → owner "
         "approves → admin without the seed → follower seat that reads but "
-        "cannot write)"
+        "cannot write → moderator links seat moderators, link-joined and "
+        "paired)"
     )
+
+
+def _assert_moderator_seat(label: str, inst: dict, space_id: str) -> None:
+    """``label`` holds a ``moderator`` seat in a's ``space_id``: its own
+    ``space_members`` row, and a's ``space_remote_members`` row — the seat
+    every content-authority check on the host reads."""
+    own = _rows(
+        label,
+        "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+        (space_id, inst["user_id"]),
+    )
+    if not own or own[0][0] != "moderator":
+        raise SystemExit(
+            f"gfs-invite-link: {label}'s space_members row for the moderator "
+            f"space is {own!r}, expected role 'moderator'",
+        )
+    host = _rows(
+        "a",
+        "SELECT role FROM space_remote_members WHERE space_id = ? "
+        "AND instance_id = ? AND user_id = ? AND tombstoned = 0",
+        (space_id, inst["instance_id"], inst["user_id"]),
+    )
+    if not host or host[0][0] != "moderator":
+        raise SystemExit(
+            f"gfs-invite-link: a's space_remote_members seat for {label} is "
+            f"{host!r}, expected role 'moderator'",
+        )
 
 
 # ─── Step: gfs-invite-link-content ─────────────────────────────────────────

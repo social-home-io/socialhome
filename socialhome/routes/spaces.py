@@ -61,6 +61,8 @@ from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_service import (
     DEFAULT_INVITE_TOKEN_TTL_SECONDS,
+    INVITE_LINK_ROLES,
+    INVITE_ROLE_ERROR,
     _UNSET_MEMBER_PROFILE,
     normalize_category,
 )
@@ -1283,9 +1285,10 @@ class SpaceInviteTokenView(BaseView):
     POST body: ``{role?, uses?, ttl_seconds?: int | null, publish_to_gfs?,
     via?: "gfs" | "internal"}``.
     ``role`` is the seat the redeemer lands in (``member`` — the default
-    — / ``subscriber`` / ``admin``) and is the ISSUER's decision: it is
-    stored on the token row and the redeemer never gets to ask for it.
-    Minting ``admin`` is owner-only, ``owner`` is never mintable.
+    — / ``subscriber`` / ``moderator`` / ``admin``) and is the ISSUER's
+    decision: it is stored on the token row and the redeemer never gets to
+    ask for it. Minting ``moderator`` takes the owner or an admin (who may
+    promote to it), ``admin`` is owner-only, ``owner`` is never mintable.
     ``publish_to_gfs`` is a paired connection server's id — the link's
     blob is parked there and the response carries the shareable URL.
 
@@ -1351,6 +1354,9 @@ class SpaceInviteTokenView(BaseView):
                 # the same thing ``None``. Normalised here so one
                 # boundary owns the two spellings.
                 ttl_seconds = None
+        role_raw = body.get("role") or SpaceRole.MEMBER.value
+        if not isinstance(role_raw, str) or role_raw not in INVITE_LINK_ROLES:
+            return error_response(422, "UNPROCESSABLE", INVITE_ROLE_ERROR)
         publish_raw = body.get("publish_to_gfs")
         via_raw = body.get("via")
         if via_raw is not None and via_raw not in INVITE_VIAS:
@@ -1367,7 +1373,7 @@ class SpaceInviteTokenView(BaseView):
             link = await svc.create_invite_link(
                 space_id,
                 actor_username=ctx.username,
-                role=str(body.get("role") or SpaceRole.MEMBER.value),
+                role=str(role_raw),
                 uses=body.get("uses", 1),
                 ttl_seconds=ttl_seconds,
                 publish_to_gfs=str(publish_raw) if publish_raw else None,

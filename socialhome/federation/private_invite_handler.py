@@ -24,6 +24,7 @@ import base64
 import logging
 from typing import TYPE_CHECKING
 
+from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
 from ..domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceRemoteSeatLive,
@@ -1105,6 +1106,10 @@ class PrivateSpaceInviteHandler:
                 "SPACE_REMOTE_ADMIN_ACTION from %s missing required fields",
                 event.from_instance,
             )
+            return
+        if action in FORWARDED_INVITE_LINK_ACTIONS:
+            # v_52 — answered by ``InviteLinkForwardCoordinator``, bound to
+            # this same event type: never held for owner approval.
             return
         # Quorum-approval verbs route to the approval service; everything
         # else is a direct admin mutation on SpaceService.

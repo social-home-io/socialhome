@@ -1408,10 +1408,14 @@ album on the settings tier.
 `admin` / `moderator` / `member` on any non-owner seat; an admin moves a
 seat only between `member` and `moderator`; nobody else changes roles.
 On a member stub the change is forwarded to the host (v_47, see
-[Forwarded role changes](#forwarded-role-changes-v_47)). Nobody *joins* as a moderator: an invite link refuses
-the role and `SEATABLE_REMOTE_ROLES` omits it — though a household already
-seated as a moderator that re-redeems its link (a lost ACK) is re-ACKed with
-the seat it holds (`REACKABLE_REMOTE_ROLES`).
+[Forwarded role changes](#forwarded-role-changes-v_47)). An invite link
+may also seat a moderator (migration 0080): the owner or an admin — the
+people who may promote to it — mints one, and every redeem path (local,
+paired, mesh, link-joined) seats a moderator straight through, or a
+`member` for a redeemer below v_41. See
+[The role a link grants](./invites.md#the-role-a-link-grants). A household
+already seated as a moderator that re-redeems its link (a lost ACK) is
+re-ACKed with the seat it holds (`REACKABLE_REMOTE_ROLES`).
 
 **Older peers.** The roster gossip and snapshot are authority-signed, so
 a JOINED carries `role: "moderator"` to everyone; every v_30+ receiver

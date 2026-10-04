@@ -1231,6 +1231,15 @@ never executes outside its unit tests.
    key TOFU-immutably, so that credential could never be taken back from a
    household whose only introduction was a public string.
 
+   Then e — an admin on a MEMBER household, reaching a only over the
+   relay — mints a ``moderator`` link on that space: the mint is forwarded
+   to a (v_52, ``SPACE_REMOTE_ADMIN_ACTION`` ``create_invite_link`` →
+   ``SPACE_INVITE_LINK_FORWARD_RESULT``), a mints it in its own table (the
+   code names a as issuer; e holds no row) and **b** redeems it into a
+   moderator seat. e then mints a second link, sees it in its forwarded
+   ``GET`` of the host's list, revokes it with a forwarded ``DELETE`` and
+   a's table no longer holds it. e's attempt at an ``admin`` link is
+   refused (403).
 10. **A ``subscriber`` (Follower) link**, minted on a THIRD space and
    redeemed by e into a read-only seat (v_30). Asserted on both sides:
    ``space_remote_members.role='subscriber'`` on the host — the row
@@ -1241,15 +1250,23 @@ never executes outside its unit tests.
    ``space_meta`` carried) and it cannot WRITE (403). A Follower link
    handed to another household used to be refused outright, because
    ``space_remote_members.role`` had no value for a remote reader.
+11. **A ``moderator`` link** (migration 0080), minted on a FOURTH space.
+   e redeems the published link over the relay and **b** (paired with a)
+   redeems an ``internal`` one on the direct path. Both return
+   ``role='moderator'`` with nothing pending — unlike an admin link, a
+   moderator seat (content authority only, never the seed) seats straight
+   through — and both are asserted on the redeemer's ``space_members``
+   and on a's ``space_remote_members``. Costs three requests on a's bucket.
 
 Failure modes this catches: a blob that grows an address field; a
 ``/join`` page that stops handing over a code; a relay that starts
 logging the pair; a redeem that seats a full social peer instead of a
 space-scoped one (which would then join every DM / presence / moment
 fan-out); a revoked link that still resolves; a link-joined admin
-handed the space authority seed; and a Follower seat that quietly
+handed the space authority seed; a Follower seat that quietly
 lands as a full member (or that never receives the content key it is
-seated to read).
+seated to read); and a moderator link that degrades or stalls in a
+pending elevation.
 
 ### ``gfs-invite-link-content`` — the relay carries ordinary space traffic
 

@@ -106,6 +106,26 @@ describe('SpaceJoinLanding', () => {
   })
 })
 
+describe('SpaceJoinLanding — joined', () => {
+  it('tells a new moderator they are one', async () => {
+    api.post.mockResolvedValueOnce({ space_id: 'sp-1', role: 'moderator' })
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="join-landing-welcome"]')?.textContent)
+        .toBe("Welcome to the space. You're a moderator here.")
+    })
+  })
+
+  it('keeps the plain welcome for a member', async () => {
+    api.post.mockResolvedValueOnce({ space_id: 'sp-1', role: 'member' })
+    const { container } = await renderLanding()
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="join-landing-welcome"]')?.textContent)
+        .toBe('Welcome to the space.')
+    })
+  })
+})
+
 describe('SpaceJoinLanding — the fallback code is redeemable', () => {
   it('stamps our own instance id as the issuer so the paste can route', async () => {
     // Without it the receiver's Social Home can only try the LOCAL

@@ -1166,6 +1166,8 @@ class HostTooOldError(Exception):
       moderation items for other households (v_43).
     * ``"role_change"`` — a role change made on a member household is
       forwarded to the host, which must apply ``set_member_role`` (v_47).
+    * ``"invite_link"`` — an invite link minted on a member household is
+      forwarded to the host, which must mint it and answer (v_52).
     """
 
     def __init__(self, host_instance_id: str, *, feature: str = "moderation") -> None:
@@ -1173,6 +1175,9 @@ class HostTooOldError(Exception):
             "the space's host household must be updated before members of "
             "other households can submit for review"
             if feature == "moderation"
+            else "the space's home household needs an update before its "
+            "invite links can be managed from another household"
+            if feature == "invite_link"
             else "the space's host household must be updated before roles "
             "can be changed from another household"
         )

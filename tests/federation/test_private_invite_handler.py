@@ -929,6 +929,33 @@ async def test_remote_admin_action_missing_action_skipped():
     space_service.apply_remote_admin_action.assert_not_awaited()
 
 
+async def test_a_forwarded_invite_mint_is_left_to_its_coordinator():
+    """v_52 — ``create_invite_link`` is answered by
+    ``InviteLinkForwardCoordinator`` (bound to the same event type) and must
+    never reach the admin-action path, which would hold it for the owner."""
+    space_service = AsyncMock()
+    approvals = AsyncMock()
+    h = PrivateSpaceInviteHandler(
+        bus=_RecordingBus(),  # type: ignore[arg-type]
+        space_repo=AsyncMock(),
+        remote_member_repo=AsyncMock(),
+        space_service=space_service,
+    )
+    h.attach_approval_service(approvals)
+    ev = _event(
+        "SPACE_REMOTE_ADMIN_ACTION",
+        {
+            "space_id": "sp",
+            "actor_user_id": "u",
+            "action": "create_invite_link",
+            "params": {"request_nonce": "n"},
+        },
+    )
+    await h._on_remote_admin_action(ev)
+    space_service.apply_remote_admin_action.assert_not_awaited()
+    approvals.enqueue_owner_approval.assert_not_awaited()
+
+
 async def test_remote_admin_action_without_space_service_drops():
     h = PrivateSpaceInviteHandler(
         bus=_RecordingBus(),  # type: ignore[arg-type]

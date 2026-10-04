@@ -25,12 +25,13 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { QrCodeImg } from '@/components/QrCodeImg'
 import { showToast } from '@/components/Toast'
+import { t } from '@/i18n/i18n'
 
 type Status = 'loading' | 'joined' | 'wrong-instance' | 'error'
 
 const status  = signal<Status>('loading')
 const message = signal<string>('')
-const joined  = signal<{ space_id: string } | null>(null)
+const joined  = signal<{ space_id: string; role?: string } | null>(null)
 const pasteCode = signal<string>('')
 
 async function consumeToken(token: string, spaceId: string | null) {
@@ -130,7 +131,11 @@ export default function SpaceJoinLanding() {
     return (
       <div class="sh-join-landing sh-card">
         <h2>You're in! 🎉</h2>
-        <p>Welcome to the space.</p>
+        <p data-testid="join-landing-welcome">
+          {joined.value.role === 'moderator'
+            ? t('space.join.welcome_moderator')
+            : 'Welcome to the space.'}
+        </p>
         <Button onClick={() => loc.route(addBase(`/spaces/${joined.value!.space_id}`))}>
           Open space
         </Button>

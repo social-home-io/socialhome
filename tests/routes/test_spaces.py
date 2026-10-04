@@ -1435,6 +1435,105 @@ async def test_join_via_invite_token(client):
     assert (await resp.json())["role"] == "member"
 
 
+async def test_a_moderator_invite_link_mints_and_seats_a_moderator(client):
+    """``role: "moderator"`` mints a link (owner or admin) whose redeem
+    seats a moderator — no pending elevation."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "ModLinks"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r2 = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"role": "moderator"},
+        headers=_auth(client._admin_token),
+    )
+    assert r2.status == 201, await r2.text()
+    link = await r2.json()
+    assert link["role"] == "moderator"
+    resp = await client.post(
+        "/api/spaces/join",
+        json={"token": link["token"]},
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 200, await resp.text()
+    body = await resp.json()
+    assert body["role"] == "moderator"
+    assert "pending_role" not in body
+
+
+async def test_a_member_household_mint_forwards_to_the_host(client):
+    """On a stub the mint is forwarded to the host (v_52). A host this
+    household cannot gate as v_52 is a 409 ``HOST_TOO_OLD`` naming the
+    feature — never a link minted into our own table."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "ForwardedLinks"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    ok = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"role": "moderator"},
+        headers=_auth(client._admin_token),
+    )
+    assert ok.status == 201, await ok.text()
+    db = client.app[_db_key]
+    await db.enqueue(
+        "UPDATE spaces SET owner_instance_id='some-other-household' WHERE id=?",
+        (sid,),
+    )
+    before = await db.fetchall(
+        "SELECT token FROM space_invite_tokens WHERE space_id=?", (sid,)
+    )
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"role": "moderator"},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 409, await resp.text()
+    err = (await resp.json())["error"]
+    assert err["code"] == "HOST_TOO_OLD"
+    assert err["feature"] == "invite_link"
+    after = await db.fetchall(
+        "SELECT token FROM space_invite_tokens WHERE space_id=?", (sid,)
+    )
+    assert len(after) == len(before)
+    # List and revoke forward the same way — and are refused the same way.
+    listed = await client.get(
+        f"/api/spaces/{sid}/invite-tokens", headers=_auth(client._admin_token)
+    )
+    assert listed.status == 409, await listed.text()
+    assert (await listed.json())["error"]["feature"] == "invite_link"
+    revoked = await client.delete(
+        f"/api/spaces/{sid}/invite-tokens/{before[0]['token']}",
+        headers=_auth(client._admin_token),
+    )
+    assert revoked.status == 409, await revoked.text()
+    still = await db.fetchall(
+        "SELECT token FROM space_invite_tokens WHERE space_id=?", (sid,)
+    )
+    assert len(still) == len(before)
+
+
+@pytest.mark.parametrize("role", ["overlord", "owner", ["admin"], 1])
+async def test_an_unknown_invite_role_is_a_422_naming_the_seats(client, role):
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "BadRole"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    resp = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"role": role},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 422
+    assert "moderator" in (await resp.json())["error"]["detail"]
+
+
 async def test_join_forwards_issuer_instance_id_to_service(client, monkeypatch):
     """POST /api/spaces/join with a foreign ``issuer_instance_id`` forwards
     the field to ``space_service.redeem_invite_token`` and surfaces the

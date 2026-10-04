@@ -264,6 +264,14 @@ class BaseView(web.View):
                 extra={"reason": exc.reason},
             )
         except HostTooOldError as exc:
+            if exc.feature == "invite_link":
+                return error_response(
+                    409,
+                    "HOST_TOO_OLD",
+                    "The space's home household needs an update before you "
+                    "can manage its invite links from here.",
+                    extra={"feature": exc.feature},
+                )
             if exc.feature == "role_change":
                 return error_response(
                     409,

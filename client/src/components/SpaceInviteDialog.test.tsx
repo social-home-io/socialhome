@@ -58,6 +58,7 @@ const { showToast } = await import('./Toast') as unknown as {
   showToast: ReturnType<typeof vi.fn>
 }
 const { openSpaceInvite, SpaceInviteDialog } = await import('./SpaceInviteDialog')
+const { setLocale } = await import('@/i18n/i18n')
 
 type Row = Record<string, unknown>
 
@@ -112,7 +113,7 @@ afterEach(() => {
 
 async function openDialog(
   { hint = 'Pascal\'s family', role }:
-  { hint?: string | null; role?: 'owner' | 'admin' | 'member' } = {},
+  { hint?: string | null; role?: 'owner' | 'admin' | 'moderator' | 'member' } = {},
 ) {
   const result = render(<SpaceInviteDialog />)
   await act(async () => {
@@ -843,5 +844,203 @@ describe('SpaceInviteDialog — grandfathered links', () => {
     const badge = result.getByTestId('invite-via-badge-tok-legacy')
     expect(badge.textContent).toBe('Earlier link')
     expect(badge.getAttribute('title')).toMatch(/turns the GFS on/i)
+  })
+})
+
+describe('SpaceInviteDialog — moderator links', () => {
+  afterEach(async () => { await setLocale('en') })
+
+  /** The role radios' visible labels, in display order. */
+  function roleLabels(container: Element): string[] {
+    return Array.from(container.querySelectorAll('.sh-invite-role__label'))
+      .slice(0, 4)
+      .map(el => el.textContent ?? '')
+  }
+
+  it('offers the owner Member, Follower, Moderator and Admin, in that order', async () => {
+    const { container } = await openDialog({ role: 'owner' })
+    const ids = Array.from(
+      container.querySelectorAll('input[name="sh-invite-role"]'),
+    ).map(el => (el as HTMLInputElement).value)
+    expect(ids).toEqual(['member', 'subscriber', 'moderator', 'admin'])
+    expect(roleLabels(container))
+      .toEqual(['Member', 'Follower', 'Moderator', 'Admin'])
+  })
+
+  it('offers an admin Moderator with its hint, but not Admin', async () => {
+    const { container } = await openDialog({ role: 'admin' })
+    const radio = container.querySelector('[data-testid="invite-role-moderator"]')
+    expect(radio).not.toBeNull()
+    expect(radio!.closest('label')!.textContent).toContain(
+      "reviews and removes posts, can't change settings",
+    )
+    expect(container.querySelector('[data-testid="invite-role-admin"]'))
+      .toBeNull()
+  })
+
+  it('offers neither Moderator nor Admin when the opener\'s role is unknown', async () => {
+    const { container } = await openDialog({ role: undefined })
+    expect(container.querySelector('[data-testid="invite-role-moderator"]'))
+      .toBeNull()
+    expect(container.querySelector('[data-testid="invite-role-admin"]'))
+      .toBeNull()
+  })
+
+  it('offers a moderator no Moderator or Admin choice', async () => {
+    const { container } = await openDialog({ role: 'moderator' })
+    expect(container.querySelector('[data-testid="invite-role-moderator"]'))
+      .toBeNull()
+    expect(container.querySelector('[data-testid="invite-role-admin"]'))
+      .toBeNull()
+  })
+
+  it('sends role "moderator" when Moderator is picked', async () => {
+    const result = await openDialog({ role: 'admin' })
+    await act(async () => {
+      fireEvent.click(result.container
+        .querySelector('[data-testid="invite-role-moderator"]')!)
+    })
+    await generate(result, makeRow({ role: 'moderator' }))
+    expect(api.post).toHaveBeenCalledWith(
+      expect.stringContaining('/invite-tokens'),
+      expect.objectContaining({ role: 'moderator' }),
+    )
+    expect(result.container.textContent).toContain('They join as moderator.')
+  })
+
+  it('uses the translated role labels and hints', async () => {
+    await setLocale('de')
+    const { container } = await openDialog({ role: 'owner' })
+    expect(roleLabels(container))
+      .toEqual(['Mitglied', 'Follower', 'Moderator', 'Admin'])
+    expect(container.querySelector('[data-testid="invite-role-member"]')!
+      .closest('label')!.textContent).toContain('kann posten und mitmachen')
+  })
+
+  it('shows a Moderator badge on a moderator link in the list', async () => {
+    mockReads({ tokens: [makeRow({ token: 'tm', role: 'moderator' })] })
+    const { container } = await openDialog({ role: 'owner' })
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-role-badge-tm"]'))
+        .not.toBeNull()
+    })
+    expect(container.querySelector('[data-testid="invite-role-badge-tm"]')!
+      .textContent).toBe('Moderator')
+  })
+})
+
+describe('SpaceInviteDialog — the space\'s home household', () => {
+  const OFFLINE = "The space's home household is offline right now. Try again later."
+  const TOO_OLD = "The space's home household needs to update Social Home first."
+
+  it('says the home household is offline when a create times out', async () => {
+    const result = await openDialog({ role: 'admin' })
+    api.post.mockRejectedValueOnce(
+      new ApiError(503, 'host did not answer', 'HOST_UNREACHABLE'),
+    )
+    await act(async () => {
+      fireEvent.click(result.getByText('Create invite link'))
+    })
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith(OFFLINE, 'error')
+    })
+  })
+
+  it('says the home household must update when it is too old to create', async () => {
+    const result = await openDialog({ role: 'admin' })
+    api.post.mockRejectedValueOnce(
+      new ApiError(409, 'host too old', 'HOST_TOO_OLD'),
+    )
+    await act(async () => {
+      fireEvent.click(result.getByText('Create invite link'))
+    })
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith(TOO_OLD, 'error')
+    })
+  })
+
+  it('names the reason when the links list fails on the home household', async () => {
+    api.get.mockImplementation((url: string) => {
+      if (url.endsWith('/invite-tokens')) {
+        return Promise.reject(
+          new ApiError(503, 'host did not answer', 'HOST_UNREACHABLE'),
+        )
+      }
+      if (url === '/api/gfs/connections') return Promise.resolve([])
+      if (url.endsWith('/members')) return Promise.resolve([])
+      return Promise.resolve({ name: 'Space' })
+    })
+    const { container } = await openDialog({ role: 'admin' })
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-links-error-text"]')
+        ?.textContent).toBe(OFFLINE)
+    })
+  })
+
+  it('says the home household is unknown when there is no route to it yet', async () => {
+    const result = await openDialog({ role: 'admin' })
+    const err = new ApiError(503, 'unknown host', 'HOST_UNREACHABLE')
+    Object.assign(err, { extra: { reason: 'unknown_host' } })
+    api.post.mockRejectedValueOnce(err)
+    await act(async () => {
+      fireEvent.click(result.getByText('Create invite link'))
+    })
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith(
+        "This space's host household isn't known here yet.", 'error',
+      )
+    })
+  })
+
+  it('keeps the generic list error for any other failure', async () => {
+    mockReads({ linksFail: true })
+    const { container } = await openDialog({ role: 'admin' })
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-links-error-text"]')
+        ?.textContent).toBe("Couldn't load the links for this space.")
+    })
+  })
+
+  it('says the home household must update when a revoke is refused', async () => {
+    mockReads({ tokens: [makeRow({ token: 't1' })] })
+    confirmDialog.mockResolvedValueOnce(true)
+    api.delete.mockRejectedValueOnce(
+      new ApiError(409, 'host too old', 'HOST_TOO_OLD'),
+    )
+    const { container } = await openDialog({ role: 'admin' })
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-revoke-t1"]'))
+        .not.toBeNull()
+    })
+    await act(async () => {
+      fireEvent.click(container
+        .querySelector('[data-testid="invite-revoke-t1"]')!)
+    })
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith(TOO_OLD, 'error')
+    })
+    // The row comes back: the revoke didn't land.
+    expect(container.querySelector('[data-testid="invite-link-row-t1"]'))
+      .not.toBeNull()
+  })
+
+  it('says the home household is offline when a revoke times out', async () => {
+    mockReads({ tokens: [makeRow({ token: 't1' })] })
+    confirmDialog.mockResolvedValueOnce(true)
+    api.delete.mockRejectedValueOnce(
+      new ApiError(503, 'host did not answer', 'HOST_UNREACHABLE'),
+    )
+    const { container } = await openDialog({ role: 'admin' })
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-revoke-t1"]'))
+        .not.toBeNull()
+    })
+    await act(async () => {
+      fireEvent.click(container
+        .querySelector('[data-testid="invite-revoke-t1"]')!)
+    })
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith(OFFLINE, 'error')
+    })
   })
 })

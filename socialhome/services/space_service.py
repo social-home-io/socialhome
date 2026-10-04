@@ -182,6 +182,12 @@ from ..domain.media_constraints import (
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
+from .gfs_connection_service import GfsConnectionError
+from ..federation.invite_link_forward import (
+    FORWARDED_INVITE_LINK_ACTION,
+    LIST_INVITE_LINKS_ACTION,
+    REVOKE_INVITE_LINK_ACTION,
+)
 from .space_crypto_service import (
     KEY_SUITE_AESGCM_256,
     SUPPORTED_KEY_SUITES,
@@ -204,6 +210,20 @@ log = logging.getLogger(__name__)
 _REMOTE_ASSIGNABLE_ROLES: frozenset[SpaceRole] = frozenset(
     {SpaceRole.ADMIN, SpaceRole.MODERATOR, SpaceRole.MEMBER}
 )
+
+#: The seats an invite link can grant — the ``space_invite_tokens.role``
+#: CHECK (migrations 0053 + 0080), in code. ``owner`` is never mintable.
+INVITE_LINK_ROLES: frozenset[str] = frozenset(
+    {
+        SpaceRole.MEMBER.value,
+        SpaceRole.SUBSCRIBER.value,
+        SpaceRole.MODERATOR.value,
+        SpaceRole.ADMIN.value,
+    }
+)
+
+#: The 422 text for a role an invite link cannot carry (shown in the SPA).
+INVITE_ROLE_ERROR: str = "role must be 'member', 'subscriber', 'moderator' or 'admin'"
 
 #: The ``SPACE_REMOTE_ADMIN_ACTION`` action a member household forwards a
 #: role change as (v_47). Params: ``{instance_id, user_id, from_role, role}`` — the
@@ -322,6 +342,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_federation",
         "_remote_members",
         "_redeem_coordinator",
+        "_invite_forwarder",
         "_space_crypto",
         "_gfs_mirror",
         "_subscriber_keys",
@@ -377,6 +398,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._federation = None
         self._remote_members = None
         self._redeem_coordinator = None
+        self._invite_forwarder = None
         self._space_crypto = None
         # Optional: lets ``dissolve_space`` unlink native gallery uploads
         # for the space. When unset, gallery media files are skipped
@@ -563,6 +585,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         (:meth:`PeerUnpairService.purge`) the space-session cleanup drops a
         seat through. Unwired, no seat is ever dropped."""
         self._instance_purger = purger
+
+    def attach_invite_forwarder(self, forwarder) -> None:
+        """Wire the v_52 forwarded invite-link mint
+        (:class:`~socialhome.federation.invite_link_forward
+        .InviteLinkForwardCoordinator`). Without it a member household's
+        admin cannot mint links for a space hosted elsewhere."""
+        self._invite_forwarder = forwarder
 
     def attach_redeem_coordinator(self, coordinator) -> None:
         """Wire the §D2 cross-instance invite-token redeem driver.
@@ -4586,12 +4615,20 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         by the issuer, and stored on the row. The redeemer never gets to
         ask for it (see the 0053 migration header). Who may mint what:
 
-        * admin **or** owner → ``member`` / ``subscriber``;
+        * admin **or** owner → ``member`` / ``subscriber`` / ``moderator``
+          (the moderator seat mirrors who may promote to it,
+          :func:`role_change_allowed`);
         * **owner only** → ``admin``. An admin must not be able to clone
           their own privilege, so this re-checks with
           :meth:`_require_owner`.
         * ``owner`` is never mintable — ownership moves only through
           :meth:`transfer_ownership`.
+        * on a member household's stub the same local checks run, then the
+          mint is **forwarded to the host** (v_52,
+          :mod:`~socialhome.federation.invite_link_forward`), which re-decides
+          it against its own roster, mints the token in ITS table (every
+          redeem consumes it there), publishes to its own connection server
+          and hands the link back — see :meth:`handle_forwarded_invite_action`.
 
         A ``subscriber`` link works regardless of any
         "strangers may subscribe" space flag: that flag governs people
@@ -4626,27 +4663,305 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         :class:`PrivateGfsOffError`; an internal link is never published.
         """
         space = await self._require_space(space_id)
-        try:
-            seat = SpaceRole(role)
-        except ValueError:
-            raise ValueError(f"unknown invite role {role!r}") from None
-        if seat is SpaceRole.OWNER:
-            raise ValueError("owner cannot be granted by an invite link")
-        if seat is SpaceRole.MODERATOR:
-            # Nobody joins as a moderator: it is granted by promotion, and
-            # neither the ``space_invite_tokens.role`` CHECK nor a remote
-            # redeem (``SEATABLE_REMOTE_ROLES``) admits it.
-            raise ValueError("moderator is granted by promotion, not an invite link")
-        await self._require_admin_or_owner(space, actor_username)
-        if seat is SpaceRole.ADMIN:
-            # An admin minting an admin link would be self-service
-            # promotion by proxy. Only the owner delegates admin.
-            await self._require_owner(space, actor_username)
-        link_via = self._resolve_invite_via(space, via)
-        if link_via == INVITE_VIA_INTERNAL and publish_to_gfs:
+        seat = self._parse_invite_seat(role)
+        issuer = await self._require_admin_or_owner(space, actor_username)
+        self._check_invite_seat(issuer.role, seat)
+        if via is not None and via not in INVITE_VIAS:
+            raise ValueError("via must be 'gfs' or 'internal'")
+        if via == INVITE_VIA_INTERNAL and publish_to_gfs:
             raise ValueError("a local invite link is never published to a GFS")
         actor = await self._users.get(actor_username)
         assert actor is not None
+        if self._hosted_elsewhere(space):
+            return await self._forward_invite_link(
+                space,
+                actor_user_id=actor.user_id,
+                seat=seat,
+                uses=uses,
+                ttl_seconds=ttl_seconds,
+                via=via,
+                publish_to_gfs=publish_to_gfs,
+            )
+        link_via = self._resolve_invite_via(space, via)
+        return await self._mint_invite_link(
+            space,
+            created_by=actor.user_id,
+            seat=seat,
+            uses=uses,
+            ttl_seconds=ttl_seconds,
+            link_via=link_via,
+            publish_to_gfs=publish_to_gfs,
+        )
+
+    @staticmethod
+    def _parse_invite_seat(role: str) -> SpaceRole:
+        """The seat ``role`` names, if an invite link may grant it
+        (``INVITE_LINK_ROLES``); ``ValueError`` (422) otherwise."""
+        try:
+            seat = SpaceRole(role)
+        except ValueError:
+            raise ValueError(
+                f"unknown invite role {role!r}: {INVITE_ROLE_ERROR}"
+            ) from None
+        if seat.value not in INVITE_LINK_ROLES:
+            # ``owner`` — ownership moves only through transfer_ownership.
+            raise ValueError(f"{seat.value} cannot be granted by an invite link")
+        return seat
+
+    def _check_invite_seat(self, issuer_role: str, seat: SpaceRole) -> None:
+        """May a seat holding ``issuer_role`` (already owner / admin) mint a
+        link for ``seat``? Run by the minting household and again by the
+        host on a forwarded mint."""
+        if seat is SpaceRole.MODERATOR:
+            # Mirrors who may PROMOTE to moderator (the owner, an admin —
+            # ``role_change_allowed``), so a link can never grant a seat
+            # its minter could not have granted by hand.
+            self._check_role_change(issuer_role, SpaceRole.MEMBER, seat)
+        if seat is SpaceRole.ADMIN and issuer_role != SpaceRole.OWNER:
+            # An admin minting an admin link would be self-service
+            # promotion by proxy. Only the owner delegates admin — and the
+            # owner is never a remote seat, so no forwarded mint grants it.
+            raise SpacePermissionError("owner required")
+
+    async def _forward_invite_link(
+        self,
+        space: Space,
+        *,
+        actor_user_id: str,
+        seat: SpaceRole,
+        uses: int,
+        ttl_seconds: int | None,
+        via: str | None,
+        publish_to_gfs: str | None,
+    ) -> dict:
+        """Mint on the host for a member household's admin (v_52) and return
+        the host's link. The host re-decides every check with its own data;
+        ``publish_to_gfs`` (one of OUR connection servers) travels as that
+        server's URL and the host publishes to its own connection to it."""
+        publish_gfs_url = (
+            await self._gfs_base_url(publish_to_gfs) if publish_to_gfs else None
+        )
+        answer = await self._forward_invite_request(
+            space,
+            FORWARDED_INVITE_LINK_ACTION,
+            actor_user_id=actor_user_id,
+            params={
+                "role": seat.value,
+                "uses": max(1, int(uses)),
+                "ttl_seconds": ttl_seconds,
+                "via": via,
+                "publish_gfs_url": publish_gfs_url,
+            },
+        )
+        link = answer.get("link")
+        if isinstance(link, dict) and link.get("token"):
+            return link
+        raise ValueError("the space's home household could not create this invite link")
+
+    async def _forward_invite_request(
+        self,
+        space: Space,
+        action: str,
+        *,
+        actor_user_id: str,
+        params: dict,
+    ) -> dict:
+        """Send one forwarded invite-link ``action`` (v_52) to the space's host
+        and return its answer, raising the local error for a refusal: the
+        same responses a local mint / list / revoke gives."""
+        host = space.owner_instance_id
+        if not host:
+            raise HostUnreachableError("", reason="unknown_host")
+        if self._federation is None or self._invite_forwarder is None:
+            raise RuntimeError("a forwarded invite link requires federation")
+        if not await self._federation.peer_supports(
+            host,
+            min_version=FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK,
+        ):
+            raise HostTooOldError(host, feature="invite_link")
+        answer = await self._invite_forwarder.request(
+            action,
+            space_id=space.id,
+            host_instance_id=host,
+            actor_user_id=actor_user_id,
+            own_instance_id=self._own_instance_id or "",
+            params=params,
+        )
+        match answer.get("error"):
+            case None:
+                return answer
+            case "forbidden":
+                raise SpacePermissionError(
+                    "The space's home household said no. Only the space's "
+                    "admins can manage its invite links."
+                )
+            case "private_gfs_off":
+                raise PrivateGfsOffError("this private space does not use the GFS")
+            case "gfs_publish_failed":
+                status = answer.get("gfs_status")
+                raise GfsConnectionError(
+                    "the space's home household could not publish the link to the GFS",
+                    status=status
+                    if isinstance(status, int) and not isinstance(status, bool)
+                    else None,
+                )
+            case "gfs_not_paired":
+                raise ValueError(
+                    "the space's home household is not connected to that GFS"
+                )
+            case _:
+                raise ValueError(
+                    "the space's home household could not do this invite-link request"
+                )
+
+    async def handle_forwarded_invite_action(
+        self,
+        space_id: str,
+        *,
+        action: str,
+        actor_instance_id: str,
+        actor_user_id: str,
+        params: dict,
+    ) -> dict:
+        """Host side of a forwarded invite-link request (v_52) — never raises.
+
+        Answers ``{"link": …}`` (mint), ``{"links": […]}`` (list),
+        ``{"revoked": True}`` (revoke), or ``{"error": code[, "gfs_status":
+        n]}``. ``actor_instance_id`` is the §24.11-authenticated sender. The
+        actor must hold a LIVE ``owner`` / ``admin`` seat from that household
+        on our roster — exactly who may mint, list and revoke here — and every
+        other rule runs here with our data. Never held for owner approval."""
+        try:
+            space = await self._spaces.get(space_id)
+            if (
+                space is None
+                or self._own_instance_id is None
+                or space.owner_instance_id != self._own_instance_id
+                or self._remote_members is None
+            ):
+                return {"error": "forbidden"}
+            actor = await self._remote_members.get(
+                space_id, actor_instance_id, actor_user_id
+            )
+            if actor is None or actor.role not in SETTINGS_AUTHORITY_ROLES:
+                log.info(
+                    "forwarded %s: %s@%s holds no admin seat in space %s — refused",
+                    action,
+                    actor_user_id,
+                    actor_instance_id,
+                    space_id,
+                )
+                return {"error": "forbidden"}
+            match action:
+                case "create_invite_link":
+                    answer = await self._forwarded_mint(
+                        space, str(actor.role), actor_user_id, params
+                    )
+                case "list_invite_links":
+                    # A remote seat is never the owner: no admin links.
+                    answer = {
+                        "links": await self._invite_link_rows(
+                            space, include_admin=False
+                        )
+                    }
+                case "revoke_invite_link":
+                    token = params.get("token")
+                    if not isinstance(token, str) or not token:
+                        raise ValueError("token must be a non-empty string")
+                    await self._revoke_invite_row(space, token, may_revoke_admin=False)
+                    answer = {"revoked": True}
+                case _:
+                    raise ValueError(f"unknown action {action!r}")
+        except SpacePermissionError:
+            return {"error": "forbidden"}
+        except PrivateGfsOffError:
+            return {"error": "private_gfs_off"}
+        except GfsConnectionError as exc:
+            log.warning(
+                "forwarded %s for space %s: publish failed: %s", action, space_id, exc
+            )
+            return {"error": "gfs_publish_failed", "gfs_status": exc.status}
+        except (ValueError, KeyError) as exc:
+            log.info("forwarded %s for space %s refused: %s", action, space_id, exc)
+            return {"error": "invalid"}
+        log.info(
+            "forwarded %s: done in space %s for %s@%s",
+            action,
+            space_id,
+            actor_user_id,
+            actor_instance_id,
+        )
+        return answer
+
+    async def _forwarded_mint(
+        self,
+        space: Space,
+        actor_role: str,
+        actor_user_id: str,
+        params: dict,
+    ) -> dict:
+        """The mint half of :meth:`handle_forwarded_invite_action`: the seat
+        matrix, the owner-only ``admin`` link, the ``via`` / private-space
+        rules and the publish (through OUR connection to the server named by
+        ``publish_gfs_url``, refused when we have none). Minted in OUR table,
+        so its redeems work like any link of ours."""
+        seat = self._parse_invite_seat(str(params.get("role") or "member"))
+        self._check_invite_seat(actor_role, seat)
+        via = params.get("via")
+        if via is not None and via not in INVITE_VIAS:
+            raise ValueError("via must be 'gfs' or 'internal'")
+        link_via = self._resolve_invite_via(space, via)
+        uses = params.get("uses", 1)
+        if isinstance(uses, bool) or not isinstance(uses, int):
+            raise ValueError("uses must be an integer")
+        ttl = params.get("ttl_seconds", DEFAULT_INVITE_TOKEN_TTL_SECONDS)
+        if ttl is not None and (
+            isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 0
+        ):
+            raise ValueError("ttl_seconds must be a non-negative integer")
+        gfs_id: str | None = None
+        publish_url = params.get("publish_gfs_url")
+        if publish_url:
+            if link_via == INVITE_VIA_INTERNAL:
+                raise ValueError("a local invite link is never published to a GFS")
+            gfs_id = await self._gfs_id_for_url(str(publish_url))
+            if gfs_id is None:
+                return {"error": "gfs_not_paired"}
+        link = await self._mint_invite_link(
+            space,
+            created_by=actor_user_id,
+            seat=seat,
+            uses=uses,
+            ttl_seconds=ttl or None,
+            link_via=link_via,
+            publish_to_gfs=gfs_id,
+        )
+        return {"link": link}
+
+    async def _gfs_id_for_url(self, url: str) -> str | None:
+        """Our connection to the server at ``url`` (its id), or ``None``."""
+        if self._gfs is None:
+            return None
+        want = url.rstrip("/")
+        for conn in await self._gfs.list_connections():
+            if str(conn.inbox_url).rstrip("/") == want:
+                return str(conn.id)
+        return None
+
+    async def _mint_invite_link(
+        self,
+        space: Space,
+        *,
+        created_by: str,
+        seat: SpaceRole,
+        uses: int,
+        ttl_seconds: int | None,
+        link_via: str,
+        publish_to_gfs: str | None,
+    ) -> dict:
+        """Write one link into OUR token table (publish-first when
+        ``publish_to_gfs``). Every authorization check already passed."""
+        space_id = space.id
         expires_at: str | None = None
         if ttl_seconds is not None:
             ttl = max(1, int(ttl_seconds))
@@ -4678,7 +4993,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
         await self._spaces.create_invite_token(
             space_id,
-            created_by=actor.user_id,
+            created_by=created_by,
             uses=max(1, int(uses)),
             expires_at=expires_at,
             token=token,
@@ -4700,7 +5015,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 "uses_remaining": max(1, int(uses)),
                 "uses_total": max(1, int(uses)),
                 "expires_at": expires_at,
-                "created_by": actor.user_id,
+                "created_by": created_by,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "gfs_id": publish_to_gfs or None,
                 "gfs_token": gfs_token,
@@ -4786,11 +5101,44 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         Admin or owner only — the token strings ARE the credentials.
         Expired and exhausted rows are excluded by the repo: they grant
         nothing, so listing them would only invite an owner to "revoke"
-        something that is already spent.
+        something that is already spent. An ``admin`` link is the owner's
+        alone to see (as to mint and revoke): a plain admin's list leaves it
+        out.
         """
         space = await self._require_space(space_id)
-        await self._require_admin_or_owner(space, actor_username)
-        rows = await self._spaces.list_live_invite_tokens(space_id)
+        issuer = await self._require_admin_or_owner(space, actor_username)
+        if self._hosted_elsewhere(space):
+            # The links live on the host (v_52): show its list.
+            actor = await self._users.get(actor_username)
+            assert actor is not None
+            answer = await self._forward_invite_request(
+                space,
+                LIST_INVITE_LINKS_ACTION,
+                actor_user_id=actor.user_id,
+                params={},
+            )
+            links = answer.get("links")
+            return (
+                [x for x in links if isinstance(x, dict)]
+                if isinstance(links, list)
+                else []
+            )
+        return await self._invite_link_rows(
+            space, include_admin=issuer.role == SpaceRole.OWNER
+        )
+
+    async def _invite_link_rows(
+        self, space: Space, *, include_admin: bool
+    ) -> list[dict]:
+        """Every live link of ``space`` in OUR table, API shape. ``admin``
+        links only when ``include_admin`` — the viewer is the owner, who
+        alone mints them; never for a remote seat (never the owner)."""
+        space_id = space.id
+        rows = [
+            r
+            for r in await self._spaces.list_live_invite_tokens(space_id)
+            if include_admin or r.get("role") != SpaceRole.ADMIN.value
+        ]
         # One lookup for the whole page: a published row's ``code`` has
         # to name the connection server's BASE url (the relay a stranger
         # hands its sealed redeem to), and the row only stores the
@@ -4835,7 +5183,36 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         minted — a link is the space's, not its minter's.
         """
         space = await self._require_space(space_id)
-        await self._require_admin_or_owner(space, actor_username)
+        issuer = await self._require_admin_or_owner(space, actor_username)
+        if self._hosted_elsewhere(space):
+            # The row (and any parked blob) is the host's (v_52).
+            actor = await self._users.get(actor_username)
+            assert actor is not None
+            await self._forward_invite_request(
+                space,
+                REVOKE_INVITE_LINK_ACTION,
+                actor_user_id=actor.user_id,
+                params={"token": token},
+            )
+            return
+        await self._revoke_invite_row(
+            space, token, may_revoke_admin=issuer.role == SpaceRole.OWNER
+        )
+
+    async def _revoke_invite_row(
+        self, space: Space, token: str, *, may_revoke_admin: bool
+    ) -> None:
+        """Delete one link from OUR table and take its blob down on its
+        connection server (fail-soft). Idempotent. An ``admin`` link is the
+        owner's alone (``may_revoke_admin``): anyone else is refused (403)
+        before anything is deleted. A token's role never changes, so the
+        read-then-delete cannot race into the wrong answer."""
+        space_id = space.id
+        if not may_revoke_admin and (
+            await self._spaces.get_invite_token_role(space_id, token)
+            == SpaceRole.ADMIN.value
+        ):
+            raise SpacePermissionError("Only the space owner can revoke an admin link.")
         row = await self._spaces.delete_invite_token(space_id, token)
         if row is None:
             return
@@ -5553,11 +5930,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     ) -> SpaceMember:
         """Consume an invite token and seat ``user_id`` in the role it grants.
 
-        The seat comes off the stored row — ``member``, ``subscriber`` or
-        ``admin``, decided by whoever minted the link. A ``subscriber``
-        link seats a subscriber whatever the space's "strangers may
-        subscribe" setting says: that setting governs people who walked
-        up on their own; this one was invited by name.
+        The seat comes off the stored row — ``member``, ``subscriber``,
+        ``moderator`` or ``admin`` (the last seated as ``member`` plus a
+        pending elevation), decided by whoever minted the link. A
+        ``subscriber`` link seats a subscriber whatever the space's
+        "strangers may subscribe" setting says: that setting governs people
+        who walked up on their own; this one was invited by name.
         """
         # §13.7 rides INSIDE the atomic UPDATE (``redeemer_user_id``), the
         # same way the cross-household redeem does it. Consuming first and
@@ -5618,6 +5996,22 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 role=seat,
             )
         )
+        # v_23 — peer-replicate the seat to every member household, exactly
+        # like :meth:`add_member` and a promotion do: a ``moderator`` link's
+        # seat federates like a promoted moderator (the gossip floors it at
+        # v_30 like a subscriber). Skipped gracefully when we hold no seed.
+        space = await self._spaces.get(space_id)
+        if space is not None:
+            joined = await self._users.list_by_ids({user_id})
+            await self._emit_member_roster_gossip(
+                space,
+                user_id=user_id,
+                instance_id=self._own_instance_id or "",
+                display_name=joined[0].display_name if joined else None,
+                user_pk=joined[0].public_key if joined else None,
+                role=seat,
+                tombstoned=False,
+            )
         if pending_role is not None:
             await self._file_admin_elevation(space_id, user_id)
         return member

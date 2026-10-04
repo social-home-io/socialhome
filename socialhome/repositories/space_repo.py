@@ -275,6 +275,7 @@ class AbstractSpaceRepo(Protocol):
     async def release_invite_token_use(self, token: str) -> None: ...
     async def get_invite_token_space_id(self, token: str) -> str | None: ...
     async def list_live_invite_tokens(self, space_id: str) -> list[dict]: ...
+    async def get_invite_token_role(self, space_id: str, token: str) -> str | None: ...
     async def delete_invite_token(self, space_id: str, token: str) -> dict | None: ...
     async def delete_invite_tokens_via(self, space_id: str, via: str) -> list[dict]: ...
 
@@ -2155,6 +2156,18 @@ class SqliteSpaceRepo:
             (space_id,),
         )
         return rows_to_dicts(rows)
+
+    async def get_invite_token_role(self, space_id: str, token: str) -> str | None:
+        """The seat ``token`` grants in ``space_id`` — any row, live or not
+        (a revoke works on spent links too) — or ``None``. Scoped to the
+        space like :meth:`delete_invite_token`."""
+        row = await self._db.fetchone(
+            "SELECT role FROM space_invite_tokens WHERE space_id=? AND token=?",
+            (space_id, token),
+        )
+        if row is None:
+            return None
+        return str(row[0] or SpaceRole.MEMBER.value)
 
     async def delete_invite_token(self, space_id: str, token: str) -> dict | None:
         """Delete one invite token and return the row it deleted.

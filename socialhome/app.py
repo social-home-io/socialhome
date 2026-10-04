@@ -238,6 +238,7 @@ from .services.app_update_scheduler import AppUpdateScheduler
 from .services.schedule_federation_outbound import ScheduleFederationOutbound
 from .services.corner_service import CornerService
 from .federation.peer_directory_handler import PeerDirectoryHandler
+from .federation.invite_link_forward import InviteLinkForwardCoordinator
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
 from .federation.route_discovery import RouteDiscoveryService
 from .federation.gfs_relay_transport import GfsRelayTransport
@@ -3328,6 +3329,13 @@ def create_app(config: Config | None = None) -> web.Application:
         invite_redeem_coordinator.attach_to(federation_service)
         invite_redeem_coordinator.attach_writer_certs(writer_certs)
         real_space_service.attach_redeem_coordinator(invite_redeem_coordinator)
+        # v_52 — a member household's admin mints invite links on the host.
+        invite_forwarder = InviteLinkForwardCoordinator(
+            federation_service=federation_service,
+        )
+        invite_forwarder.attach_space_service(real_space_service)
+        invite_forwarder.attach_to(federation_service)
+        real_space_service.attach_invite_forwarder(invite_forwarder)
         # §D2b — redeeming an invite link from a household we have never
         # met. The sealed blob goes out through a connection server
         # addressed by instance id only; the key-wrap triple is this
