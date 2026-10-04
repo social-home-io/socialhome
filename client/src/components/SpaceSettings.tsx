@@ -907,12 +907,9 @@ export function SpaceSettings({
          *  below loosen what an existing follower may do. Posting
          *  top-level content stays member-only either way. */}
         <fieldset class="sh-form-fieldset">
-          <legend>🔔 Followers</legend>
+          <legend>🔔 {t('space.followers.legend')}</legend>
           <p class="sh-muted" style={{ marginTop: 0 }}>
-            When off — the default — this space is listed in the directory,
-            but nothing posted here is published and nobody outside can
-            follow it. Turning it on lets anyone follow along read-only —
-            separate from who may join and post.
+            {t('space.followers.intro')}
           </p>
           <label>
             <input
@@ -923,7 +920,7 @@ export function SpaceSettings({
                   (e.target as HTMLInputElement).checked
               }}
             />
-            Let anyone follow this space (makes its posts public)
+            {t('space.followers.allow')}
           </label>
           <label>
             <input
@@ -935,7 +932,7 @@ export function SpaceSettings({
                   (e.target as HTMLInputElement).checked
               }}
             />
-            Let followers leave reactions
+            {t('space.followers.react')}
           </label>
           <label>
             <input
@@ -947,12 +944,12 @@ export function SpaceSettings({
                   (e.target as HTMLInputElement).checked
               }}
             />
-            Let followers comment on posts
+            {t('space.followers.comment')}
           </label>
           <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
             {allowSubscribers.value
-              ? 'Posting (text, images, polls, etc.) always stays member-only.'
-              : 'Turn on following above to let followers react or comment.'}
+              ? t('space.followers.members_only_note')
+              : t('space.followers.off_note')}
           </p>
         </fieldset>
 
@@ -961,6 +958,9 @@ export function SpaceSettings({
         {showPrivateGfs && (
           <fieldset class="sh-form-fieldset sh-private-gfs" data-testid="private-gfs">
             <legend>🛰️ {t('space.private_gfs.legend')}</legend>
+            <p class="sh-muted" style={{ marginTop: 0 }} data-testid="private-gfs-intro">
+              {t('space.private_gfs.intro')}
+            </p>
             <label class="sh-toggle-row">
               <input
                 type="checkbox"

@@ -2643,7 +2643,7 @@ async def test_join_relay_unavailable_maps_to_422(client, monkeypatch):
         self, token, *, user_id, issuer_instance_id=None, bootstrap=None
     ):
         raise EnvelopeRelayUnavailable(
-            "this connection server can't relay invites yet",
+            "this GFS can't pass on invites yet",
         )
 
     monkeypatch.setattr(SpaceService, "redeem_invite_token", _fake_redeem)
@@ -2655,7 +2655,7 @@ async def test_join_relay_unavailable_maps_to_422(client, monkeypatch):
     assert resp.status == 422
     body = await resp.json()
     assert body["error"]["code"] == "REDEEM_DENIED"
-    assert "can't relay invites yet" in body["error"]["detail"]
+    assert "can't pass on invites yet" in body["error"]["detail"]
 
 
 # ── Invite links: role, list, revoke ──────────────────────────────────
@@ -2980,7 +2980,7 @@ async def test_invite_link_code_is_rate_limited_per_ip(client):
     "status,expected",
     [
         (403, "owner key"),
-        (429, "rate-limiting"),
+        (429, "too many requests"),
         (500, "couldn't publish the link right now"),
         (None, "couldn't publish the link right now"),
     ],

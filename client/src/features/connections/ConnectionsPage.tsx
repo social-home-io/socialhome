@@ -161,8 +161,8 @@ function transportIcon(t: Connection['transport']) {
     return (
       <span
         class="sh-transport-icon sh-transport-icon--gfs-relay"
-        title="Via connection server relay"
-        aria-label="Via connection server relay"
+        title="Through the GFS"
+        aria-label="Through the GFS"
       >
         <svg width="14" height="14" viewBox="0 0 24 24"
              fill="currentColor" aria-hidden="true">

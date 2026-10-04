@@ -167,7 +167,7 @@ class GfsEnvelopeSender:
                     # (three of them in) abandoned a space-sync catch-up
                     # over a few seconds of throttling.
                     raise EnvelopeRelayThrottled(
-                        "the connection server is busy — try again in a moment",
+                        "the GFS is busy — try again in a moment",
                     )
                 # Never log the body or the blob — a relay's rejection is
                 # about shape and budget, and the payload is somebody's
@@ -201,21 +201,20 @@ class GfsEnvelopeSender:
             conns = [c for c in conns if _normalize_base(c.inbox_url) == want]
             if not conns:
                 raise EnvelopeRelayUnavailable(
-                    "this invite travels through a connection server your "
-                    "home isn't connected to — add it under Settings → "
+                    "this invite goes through a GFS your home isn't "
+                    "connected to — add it under Settings → "
                     "Connections, then try the link again",
                 )
         if not conns:
             raise EnvelopeRelayUnavailable(
-                "joining a space from a link needs a connection server — "
+                "joining a space from a link needs a GFS — "
                 "your home isn't connected to one",
             )
         for conn in conns:
             if await self._gfs.envelope_relay_supported(conn):
                 return conn
         raise EnvelopeRelayUnavailable(
-            "this connection server can't relay invites yet — ask whoever "
-            "runs it to update it",
+            "this GFS can't pass on invites yet — ask whoever runs it to update it",
         )
 
 

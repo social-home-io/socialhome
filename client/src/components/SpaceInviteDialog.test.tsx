@@ -243,8 +243,8 @@ describe('SpaceInviteDialog — the create button stays reachable', () => {
   })
 })
 
-describe('SpaceInviteDialog — publishing to a connection server', () => {
-  it('hides the publish toggle when the household has no connection server', async () => {
+describe('SpaceInviteDialog — publishing to a GFS', () => {
+  it('hides the publish toggle when the household has no GFS', async () => {
     const { container } = await openDialog()
     expect(container.querySelector('[data-testid="invite-publish-toggle"]'))
       .toBeNull()
@@ -329,7 +329,7 @@ describe('SpaceInviteDialog — publishing to a connection server', () => {
         .querySelector('[data-testid="invite-publish-toggle"]')!)
     })
     api.post.mockRejectedValueOnce(
-      new ApiError(422, "This connection server can't relay invites yet."),
+      new ApiError(422, "This GFS can't pass on invites yet."),
     )
     await act(async () => {
       fireEvent.click(result.getByText('Create invite link'))
@@ -340,7 +340,7 @@ describe('SpaceInviteDialog — publishing to a connection server', () => {
     })
     expect(result.container
       .querySelector('[data-testid="invite-publish-blocked"]')!.textContent)
-      .toContain("can't relay invites yet")
+      .toContain("can't pass on invites yet")
     // …and the option itself is disabled so a second attempt can't
     // repeat the same failure.
     const picker = result.container
@@ -371,7 +371,7 @@ describe('SpaceInviteDialog — the code artifact', () => {
     expect(decoded.issuer_instance_id).toBe(OUR_INSTANCE_ID)
   })
 
-  it('populates via_gfs with the connection server BASE url when published', async () => {
+  it('populates via_gfs with the GFS BASE url when published', async () => {
     const result = await openDialog()
     await generate(result, makeRow({
       gfs: {
@@ -712,7 +712,7 @@ describe('SpaceInviteDialog — link type on a private space', () => {
     expect(api.post.mock.calls[0][1]).not.toHaveProperty('via')
   })
 
-  it('defaults to internal and disables the connection server link when off', async () => {
+  it('defaults to internal and disables the GFS link when off', async () => {
     mockReads({ space: privateSpace(false) })
     const result = await openDialog({ role: 'owner' })
     await waitFor(() => expect(radio(result.container, 'internal')).not.toBeNull())
@@ -724,7 +724,7 @@ describe('SpaceInviteDialog — link type on a private space', () => {
     // The owner gets the way to turn it on, anchored on the app base.
     const hint = result.getByTestId('invite-via-gfs-off')
     expect(hint.textContent).toContain(
-      "This space doesn't use the connection server.",
+      "This space doesn't use the GFS.",
     )
     expect(hint.querySelector('a')!.getAttribute('href'))
       .toMatch(/^\/spaces\/space-[a-z0-9]+\/settings$/)
@@ -735,12 +735,12 @@ describe('SpaceInviteDialog — link type on a private space', () => {
     const result = await openDialog({ role: 'admin' })
     const hint = await waitFor(() => result.getByTestId('invite-via-gfs-off'))
     expect(hint.textContent).toBe(
-      "This space doesn't use the connection server. Only its owner can turn it on.",
+      "This space doesn't use the GFS. Only its owner can turn it on.",
     )
     expect(hint.querySelector('a')).toBeNull()
   })
 
-  it('defaults to a connection server link when on, with both enabled', async () => {
+  it('defaults to a GFS link when on, with both enabled', async () => {
     mockReads({ space: privateSpace(true) })
     const result = await openDialog({ role: 'owner' })
     await waitFor(() => expect(radio(result.container, 'gfs')?.checked).toBe(true))
@@ -759,7 +759,7 @@ describe('SpaceInviteDialog — link type on a private space', () => {
       { role: 'member', uses: 1, ttl_seconds: 604_800, via: 'internal' },
     ])
     expect(result.getByTestId('invite-created-internal').textContent)
-      .toContain('Internal link')
+      .toContain('Local link')
   })
 
   it('sends the picked via when on', async () => {
@@ -791,11 +791,11 @@ describe('SpaceInviteDialog — link type on a private space', () => {
     expect(api.post.mock.calls[0][1]).toMatchObject({ via: 'internal' })
   })
 
-  it('toasts a 409 PRIVATE_GFS_OFF and falls back to an internal link', async () => {
+  it('toasts a 409 PRIVATE_GFS_OFF and falls back to a local link', async () => {
     mockReads({ space: privateSpace(true) })
     const result = await openDialog({ role: 'owner' })
     await waitFor(() => expect(radio(result.container, 'gfs')?.checked).toBe(true))
-    const detail = "This private space doesn't use a connection server. Turn it on in the space settings, or create an internal link."
+    const detail = "This private space doesn't use the GFS. Turn it on in the space settings, or create a local link."
     api.post.mockRejectedValueOnce(new ApiError(409, detail, 'PRIVATE_GFS_OFF'))
     await act(async () => { fireEvent.click(result.getByText('Create invite link')) })
     await waitFor(() => expect(showToast).toHaveBeenCalledWith(detail, 'error'))
@@ -828,20 +828,20 @@ describe('SpaceInviteDialog — link type badge in the list', () => {
     const result = await openDialog()
     await waitFor(() => result.getByTestId('invite-link-row-tok-g'))
     expect(result.getByTestId('invite-via-badge-tok-g').textContent)
-      .toBe('Connection server')
+      .toBe('GFS')
     expect(result.getByTestId('invite-via-badge-tok-i').textContent)
-      .toBe('Internal')
+      .toBe('Local')
     expect(result.queryByTestId('invite-via-badge-tok-old')).toBeNull()
   })
 })
 
 describe('SpaceInviteDialog — grandfathered links', () => {
-  it('marks an earlier link and says it turns the connection server on when used', async () => {
+  it('marks an earlier link and says it turns the GFS on when used', async () => {
     mockReads({ tokens: [makeRow({ token: 'tok-legacy', via: 'gfs_legacy' })] })
     const result = await openDialog()
     await waitFor(() => result.getByTestId('invite-link-row-tok-legacy'))
     const badge = result.getByTestId('invite-via-badge-tok-legacy')
     expect(badge.textContent).toBe('Earlier link')
-    expect(badge.getAttribute('title')).toMatch(/turns the connection server on/i)
+    expect(badge.getAttribute('title')).toMatch(/turns the GFS on/i)
   })
 })

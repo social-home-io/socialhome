@@ -1316,15 +1316,15 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID,
-        "Creator-bound album ids",
+        "Albums tied to their creator",
     ),
     (
         FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE,
-        "Signed relayed moments",
+        "Checked moments from other households",
     ),
     (
         FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID,
-        "Creator-bound content ids",
+        "Posts tied to their creator",
     ),
     (
         FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM,
@@ -1332,7 +1332,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_MOMENT_NO_RELAY,
-        "Direct-only moments",
+        "Moments that are never passed on",
     ),
     (
         FederationCapability.MIN_FOR_SPACE_TIMETABLE,
@@ -1356,7 +1356,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
-        "Space key rotation on revoke",
+        "Locking out removed admins",
     ),
     (
         FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE,
@@ -1364,7 +1364,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO,
-        "Space key epoch echo",
+        "Catching up on missed security updates",
     ),
     (
         FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE,
@@ -1372,19 +1372,19 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ),
     (
         FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH,
-        "Space writer certificates",
+        "Members can post without the host",
     ),
     (
         FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH,
-        "Anonymous posting over the connection server",
+        "Anonymous posting through the GFS",
     ),
     (
         FederationCapability.MIN_FOR_PRIVATE_CHANNELS,
-        "Private spaces over the connection server",
+        "Private spaces through the GFS",
     ),
 ]
 

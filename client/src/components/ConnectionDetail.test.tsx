@@ -635,7 +635,7 @@ describe('Undelivered — dropped envelope count', () => {
   })
 })
 
-describe('Connection server row — relay acceptance is not delivery', () => {
+describe('GFS row — relay acceptance is not delivery', () => {
   it('shows relay-only and the last acceptance time for a relay-only peer', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
@@ -649,8 +649,8 @@ describe('Connection server row — relay acceptance is not delivery', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.getByText('Connection server')).toBeTruthy()
-    expect(screen.getByText('Relay only')).toBeTruthy()
+    expect(screen.getByText('GFS')).toBeTruthy()
+    expect(screen.getByText('GFS only')).toBeTruthy()
     const stamp = new Date('2026-09-20T10:00:00Z').toLocaleString()
     expect(screen.getByText(`Last accepted ${stamp}`, { exact: false })).toBeTruthy()
     expect(screen.getByText(/not confirmed as delivered/i)).toBeTruthy()
@@ -669,8 +669,8 @@ describe('Connection server row — relay acceptance is not delivery', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.getByText('Connection server')).toBeTruthy()
-    expect(screen.queryByText('Relay only')).toBeNull()
+    expect(screen.getByText('GFS')).toBeTruthy()
+    expect(screen.queryByText('GFS only')).toBeNull()
   })
 
   it('is absent when the relay never accepted anything (or older API)', async () => {
@@ -678,7 +678,7 @@ describe('Connection server row — relay acceptance is not delivery', () => {
     render(
       <ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />,
     )
-    expect(screen.queryByText('Connection server')).toBeNull()
+    expect(screen.queryByText('GFS')).toBeNull()
   })
 })
 

@@ -3846,18 +3846,18 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
-        "Creator-bound album ids",
-        "Creator-bound content ids",
+        "Albums tied to their creator",
+        "Posts tied to their creator",
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3878,18 +3878,18 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
-        "Creator-bound album ids",
-        "Creator-bound content ids",
+        "Albums tied to their creator",
+        "Posts tied to their creator",
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     )
 
 
@@ -3922,18 +3922,18 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
-        "Creator-bound album ids",
-        "Creator-bound content ids",
+        "Albums tied to their creator",
+        "Posts tied to their creator",
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -3981,18 +3981,18 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Authenticated mesh-routed origin",
         "Space roster snapshot",
         "Shared gallery albums",
-        "Creator-bound album ids",
-        "Creator-bound content ids",
+        "Albums tied to their creator",
+        "Posts tied to their creator",
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     )
     assert "App federation channel" not in c.lagging_features
     assert "App user routing" not in c.lagging_features
@@ -7016,9 +7016,7 @@ async def test_a_server_without_invite_links_creates_no_local_row(stack):
     from socialhome.services.gfs_connection_service import GfsConnectionError
 
     gfs = _FakeGfs(
-        publish_error=GfsConnectionError(
-            "this connection server can't host invite links yet"
-        )
+        publish_error=GfsConnectionError("this GFS can't host invite links yet")
     )
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)

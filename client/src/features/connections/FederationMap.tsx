@@ -49,7 +49,7 @@ function _peerPinHtml(name: string | undefined, transport: TransportState | unde
 function _transportLabel(transport: TransportState | undefined): string {
   if (transport === 'rtc') return '⚡ Direct (WebRTC)'
   if (transport === 'https') return '☁ HTTPS (fallback)'
-  if (transport === 'gfs_relay') return '🔁 Via connection server relay'
+  if (transport === 'gfs_relay') return '🔁 Through the GFS'
   return 'Transport unknown'
 }
 

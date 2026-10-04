@@ -118,13 +118,13 @@ describe('SpaceSettings', () => {
     const { getByLabelText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
-    const follow = getByLabelText(/Let anyone follow this space/) as HTMLInputElement
+    const follow = getByLabelText('space.followers.allow') as HTMLInputElement
     expect(follow.checked).toBe(false)
     expect(
-      (getByLabelText(/Let followers leave reactions/) as HTMLInputElement).disabled,
+      (getByLabelText('space.followers.react') as HTMLInputElement).disabled,
     ).toBe(true)
     expect(
-      (getByLabelText(/Let followers comment on posts/) as HTMLInputElement).disabled,
+      (getByLabelText('space.followers.comment') as HTMLInputElement).disabled,
     ).toBe(true)
   })
 
@@ -134,11 +134,11 @@ describe('SpaceSettings', () => {
     const { getByLabelText, getByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
-    const follow = getByLabelText(/Let anyone follow this space/) as HTMLInputElement
+    const follow = getByLabelText('space.followers.allow') as HTMLInputElement
     fireEvent.click(follow)
     // The engagement boxes come alive once followers may exist.
     expect(
-      (getByLabelText(/Let followers leave reactions/) as HTMLInputElement).disabled,
+      (getByLabelText('space.followers.react') as HTMLInputElement).disabled,
     ).toBe(false)
     fireEvent.click(getByText('Save changes'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
@@ -163,10 +163,10 @@ describe('SpaceSettings', () => {
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
     expect(
-      (getByLabelText(/Let anyone follow this space/) as HTMLInputElement).checked,
+      (getByLabelText('space.followers.allow') as HTMLInputElement).checked,
     ).toBe(true)
     expect(
-      (getByLabelText(/Let followers comment on posts/) as HTMLInputElement).disabled,
+      (getByLabelText('space.followers.comment') as HTMLInputElement).disabled,
     ).toBe(false)
   })
 
@@ -1108,7 +1108,7 @@ describe('SpaceSettings — an edit forwarded to the host', () => {
   })
 })
 
-describe('SpaceSettings — connection server publish mode (owner-only)', () => {
+describe('SpaceSettings — GFS publish mode (owner-only)', () => {
   beforeEach(() => {
     apiMock.get.mockResolvedValue([])
     apiMock.patch.mockReset()
@@ -1155,7 +1155,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(container)).toBeNull()
   })
 
-  it('is hidden where members never publish over a connection server', () => {
+  it('is hidden where members never publish over the GFS', () => {
     // Private space; and a public one with followers off.
     const priv = render(
       <SpaceSettings space={publicSpace({}, 'private')} onUpdate={() => {}} isOwner />,
@@ -1171,11 +1171,11 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     )
     expect(group(noFollow.container)).toBeNull()
     // Turning followers on reveals it.
-    fireEvent.click(noFollow.getByLabelText(/Let anyone follow this space/))
+    fireEvent.click(noFollow.getByLabelText('space.followers.allow'))
     expect(group(noFollow.container)).toBeTruthy()
   })
 
-  it('renders for the owner of a private space that uses the connection server', () => {
+  it('renders for the owner of a private space that uses the GFS', () => {
     // A private space whose owner turned ``private_gfs`` on: member
     // households reach each other over an opaque channel, so the same
     // choice applies, with copy that says what the server learns there.
@@ -1193,7 +1193,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(admin.container)).toBeNull()
   })
 
-  it('is hidden on a private space with the connection server off', () => {
+  it('is hidden on a private space with the GFS off', () => {
     // Off is what matters: not a stale channel flag, and not a strict
     // mode left over from before (it means nothing while off).
     const space = {
@@ -1208,7 +1208,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(container)).toBeNull()
   })
 
-  it('follows the live connection-server switch on a private space', () => {
+  it('follows the live GFS switch on a private space', () => {
     const { container, getByTestId } = render(
       <SpaceSettings
         space={publicSpace({ private_gfs: false }, 'private')}
@@ -1309,7 +1309,7 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
   })
 })
 
-describe('SpaceSettings — private space connection server (owner-only)', () => {
+describe('SpaceSettings — private space GFS (owner-only)', () => {
   beforeEach(() => {
     apiMock.get.mockResolvedValue([])
     apiMock.patch.mockReset()
@@ -1335,7 +1335,7 @@ describe('SpaceSettings — private space connection server (owner-only)', () =>
   /** An ``ApiError``-shaped rejection: the dialog reads ``code`` + ``extra``. */
   function linkMembersError(households: unknown[]) {
     return Object.assign(
-      new Error('Remove the households that joined through an invite link before turning the connection server off for this space.'),
+      new Error('Remove the households that joined with a GFS link before turning the GFS off for this space.'),
       { status: 409, code: 'PRIVATE_GFS_LINK_MEMBERS', extra: { households } },
     )
   }
@@ -1361,6 +1361,15 @@ describe('SpaceSettings — private space connection server (owner-only)', () =>
       expect(r.queryByTestId('private-gfs')).toBeNull()
       r.unmount()
     }
+  })
+
+  it('introduces the GFS in one sentence above the switch', () => {
+    const r = render(<SpaceSettings space={space()} onUpdate={() => {}} isOwner />)
+    const intro = r.getByTestId('private-gfs-intro')
+    expect(intro.textContent?.trim()).toBe('space.private_gfs.intro')
+    const toggleRow = r.getByTestId('private-gfs-toggle').closest('label')!
+    expect(intro.compareDocumentPosition(toggleRow) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
   })
 
   it('reflects the stored value (absent → off)', () => {

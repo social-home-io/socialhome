@@ -306,10 +306,10 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
               connection server answers the same 202 whether or not the
               household is online, so it must never read as delivery. */}
           {conn.last_relay_accepted_at && (
-            <><dt>Connection server</dt><dd>
+            <><dt>GFS</dt><dd>
               {conn.relay_only && (
                 <span class="sh-chip sh-chip--honey" style={{ marginRight: 'var(--sh-space-xs)' }}>
-                  Relay only
+                  GFS only
                 </span>
               )}
               Last accepted {new Date(normaliseTimestamp(conn.last_relay_accepted_at)).toLocaleString()}
@@ -318,7 +318,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
               </span>
               {conn.relay_only && (
                 <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                  The connection server accepted these messages, but they are not confirmed as delivered
+                  The GFS accepted these messages, but they are not confirmed as delivered
                   yet. It holds them for up to 24 hours until this household connects.
                 </span>
               )}
@@ -371,10 +371,10 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
           )}
           {conn.transport === 'gfs_relay' && (
             <><dt>Transport</dt><dd>
-              Via connection server relay
+              Through the GFS
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                This household was seated from an invite link, so everything
-                reaches it through the connection server.
+                This household joined with an invite link, so everything
+                reaches it through the GFS (Global Federation Server).
               </span>
             </dd></>
           )}

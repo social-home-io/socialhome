@@ -1680,7 +1680,7 @@ class SpaceInviteTokenRedeemCoordinator:
             if not delivered:
                 raise SpacePermissionError(
                     "couldn't reach the issuing household through the "
-                    "connection server — try again later",
+                    "GFS — try again later",
                 )
             try:
                 return await asyncio.wait_for(fut, timeout=self._timeout)

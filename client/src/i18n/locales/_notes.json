@@ -97,13 +97,15 @@
   "space.proposal.requester_unknown": "Fallback for {name} in space.proposal.requested_by when the requester's name isn't known.",
   "space.proposal.role.moderator": "Fills {action} in space.proposal.owner_body. {name} = a member's display name, or space.proposal.someone.",
   "space.proposal.fwd.ban": "Fills {action} in space.proposal.owner_body — like the other space.proposal.fwd.* / action.* phrases.",
-  "space.private_gfs.toggle": "Owner-only switch on a private space. 'Connection server' = the Global Federation Server (GFS); use the same term as the other connection-server strings.",
+  "space.private_gfs.intro": "One sentence above the private-space GFS switch introducing the term. Keep 'GFS' untranslated; the '(Global Federation Server)' expansion may stay in English.",
+  "space.followers.allow": "Checkbox on a public space: lets anyone follow (read) it. 'Followers' read along but cannot post.",
+  "space.private_gfs.toggle": "Owner-only switch on a private space. 'GFS' = the Global Federation Server; keep 'GFS' untranslated as a product name. The expansion is spelled out once in space.private_gfs.intro just above.",
   "space.private_gfs.on": "Heading over the explanation of the switch's ON state. Very short.",
   "space.private_gfs.off": "Heading over the explanation of the switch's OFF state. Very short.",
-  "invite.via.gfs": "Invite link type: redeemed through the connection server, so households that never paired can join.",
-  "invite.via.internal": "Invite link type: only households already paired (directly or over the mesh) can use it.",
+  "invite.via.gfs": "Invite link type: redeemed through the GFS (Global Federation Server), so households that never paired can join. Keep 'GFS' untranslated.",
+  "invite.via.internal": "Invite link type shown to users as 'Local link': only households already connected (directly or through other households) can use it. Translate 'local' naturally; the API value stays 'internal'.",
   "invite.via.badge_gfs": "Small badge on an invite link row. Keep short.",
-  "invite.via.badge_internal": "Small badge on an invite link row. Keep short.",
+  "invite.via.badge_internal": "Small badge on an invite link row ('Local'). Keep short.",
   "invite.via.badge_legacy": "Small badge on a pre-existing invite link row. Keep short.",
-  "invite.via.badge_legacy_hint": "Tooltip on the earlier-link badge: explains it still works and that using it turns the connection server on."
+  "invite.via.badge_legacy_hint": "Tooltip on the earlier-link badge: explains it still works and that using it turns the GFS on."
 }

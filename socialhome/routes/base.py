@@ -461,16 +461,16 @@ class BaseView(web.View):
             return error_response(
                 409,
                 "PRIVATE_GFS_LINK_MEMBERS",
-                "Remove the households that joined through an invite link "
-                "before turning the connection server off for this space.",
+                "Remove the households that joined with a GFS link before "
+                "turning the GFS off for this space.",
                 extra={"households": exc.households},
             )
         except PrivateGfsOffError:
             return error_response(
                 409,
                 "PRIVATE_GFS_OFF",
-                "This private space doesn't use a connection server. Turn it "
-                "on in the space settings, or create an internal link.",
+                "This private space doesn't use the GFS. Turn it on in the "
+                "space settings, or create a local link.",
             )
         except HouseholdUpgradeRequiredError as exc:
             # A SpacePermissionError subclass — must precede it. A stable
