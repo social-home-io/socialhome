@@ -1107,14 +1107,21 @@ acts on bound inside the author signature:
   (`space_posts.reaction_stamps_json`, migration `0075`; local writes stamp
   now). A duplicate `reaction_add` from a second connection server, a
   queued copy drained later, or one arriving after a restart cannot undo a
-  later remove. (Space reactions are no federated event — the relay is
-  their only cross-household path, apart from the reactions a §25.6 sync
-  snapshot carries with each post.)
+  later remove. A removal's tombstone is kept 48 h — past the GFS's 24 h
+  queue plus retries — then dropped; a per-user cap keeps one user from
+  pushing out another's. (Space reactions are no federated event — the
+  relay is their only cross-household path. A §25.6 sync carries each
+  post's reactions to a joiner, but never overwrites the reactions of a
+  post already held, which the stamps order.) **Clock edge:** stamps come
+  from the reactor's clock; if it steps backwards (an NTP correction), that
+  user's next change to the same reaction looks stale and is dropped until
+  a later change passes the old stamp.
 - **Size padding.** The item plaintext is padded to 1 / 4 / 16 / 64 /
   128 KiB (`ITEM_SIZE_BUCKETS`) before encryption, in a `_pad` JSON field —
   inside the AEAD, ignored by every receiver, including those from before
-  padding (they read `item_type` / `inner` and skip other keys). Larger
-  items go unpadded.
+  padding (they read `item_type` / `inner` and skip other keys). Items
+  above 128 KiB go unpadded, so their size is their own — a residual for
+  the rare very large post.
 - A comment, reaction or edit whose post is not held here yet is dropped;
   the federated copy (members) or a later sync carries it.
 

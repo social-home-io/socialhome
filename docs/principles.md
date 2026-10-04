@@ -252,7 +252,8 @@ carries its writer cert in plaintext. **What it concedes, exactly:**
     follower comments on), or a plain member under a restricted posts
     level (`MODERATED` / `ADMIN_ONLY`);
   - the **size bucket** still separates a long post or comment (4 KiB and
-    up) from everything short.
+    up) from everything short, and an item above 128 KiB is not padded at
+    all (its exact size shows).
 - **Subscribers learn nothing new from the frame.** The fan-out frame names
   no publisher id; it carries the writer cert (the author's household key,
   which every receiver needs anyway to verify the author signature inside).

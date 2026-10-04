@@ -1571,3 +1571,84 @@ async def test_a_held_comment_mid_chunk_never_stops_the_rest(setup, tmp_dir):
         assert (await repo.get_comment("c-new")).content == "later record"
     finally:
         await db.shutdown()
+
+
+async def test_a_sync_keeps_a_held_posts_reactions_and_comment_count(setup):
+    """Review repro S1: re-sending a held post must not wipe the reactions
+    (or comment count) held here — the stamps would then refuse the copy
+    that could restore them."""
+    from datetime import datetime, timezone
+
+    from socialhome.domain.post import Post, PostType
+
+    r, c, kp = setup
+    c.held_posts["p-1"] = Post(
+        id="p-1",
+        author="u-1",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 18, tzinfo=timezone.utc),
+        content="hi",
+        reactions={"👍": frozenset({"u-2"})},
+        comment_count=3,
+    )
+    record = {"id": "p-1", "author": "u-1", "type": "text", "content": "hi"}
+    await _send(r, kp, "posts", [record])
+    _sid, saved = c.posts[0]
+    assert saved.reactions == {"👍": frozenset({"u-2"})}
+    assert saved.comment_count == 3
+
+
+async def test_a_new_post_from_a_sync_carries_its_reactions(setup):
+    r, c, kp = setup
+    record = {
+        "id": "p-new",
+        "author": "u-1",
+        "type": "text",
+        "reactions": {"👍": ["u-2", "u-3"], "bad": "x", "🎉": [4]},
+    }
+    await _send(r, kp, "posts", [record])
+    _sid, saved = c.posts[0]
+    assert saved.reactions == {"👍": frozenset({"u-2", "u-3"})}
+
+
+async def test_relayed_reactions_survive_a_sync_end_to_end(setup, tmp_dir):
+    """S1 on real SQLite: a relayed reaction, a sync re-sending the post, a
+    duplicate copy of the add — the reaction is still there."""
+    from datetime import datetime, timezone
+
+    from socialhome.db.database import AsyncDatabase
+    from socialhome.domain.post import Post, PostType
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+
+    r, _c, kp = setup
+    db = AsyncDatabase(tmp_dir / "sync.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES('sp-1','S','peer-a','o','ab')"
+        )
+        repo = SqliteSpacePostRepo(db)
+        await repo.save(
+            "sp-1",
+            Post(
+                id="p-1",
+                author="u-1",
+                type=PostType.TEXT,
+                created_at=datetime.now(timezone.utc),
+                content="hi",
+            ),
+        )
+        await repo.add_reaction(
+            "p-1", "👍", "u-2", space_id="sp-1", stamp="2026-10-03 12:00:00"
+        )
+        r._space_post_repo = repo
+        await _send(
+            r,
+            kp,
+            "posts",
+            [{"id": "p-1", "author": "u-1", "type": "text", "content": "hi"}],
+        )
+        assert "u-2" in (await repo.get("p-1"))[1].reactions["👍"]
+    finally:
+        await db.shutdown()

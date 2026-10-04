@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -783,10 +783,18 @@ def _row_to_space_comment(row: dict | None) -> Comment | None:
     )
 
 
-#: Bound on ``reaction_stamps_json`` entries per post. Oldest removals (the
-#: tombstones) go first, then the oldest entries — the 20-emoji cap bounds
-#: live reactions per user, this bounds the rest.
-MAX_REACTION_STAMPS_PER_POST: int = 1024
+#: How long a reaction removal's tombstone is kept: longer than any
+#: duplicate of the add can still arrive — the GFS holds queued items for
+#: 24 h, the publisher's retry queue adds its backoff on top. Past it the
+#: tombstone is dropped.
+REACTION_TOMBSTONE_HORIZON_S: int = 48 * 3600
+
+#: Entries one user may hold per post. Over it, that user's OWN oldest
+#: tombstones go first, so nobody can push out someone else's.
+MAX_REACTION_STAMPS_PER_USER: int = 64
+
+#: Last-resort bound per post (oldest tombstones first, then oldest).
+MAX_REACTION_STAMPS_PER_POST: int = 4096
 
 
 def _decode_stamps(raw: object) -> dict[str, list]:
@@ -807,9 +815,24 @@ def _decode_stamps(raw: object) -> dict[str, list]:
 
 
 def _encode_stamps(stamps: dict[str, list]) -> str:
-    if len(stamps) > MAX_REACTION_STAMPS_PER_POST:
-        # Drop removals first (oldest first), then the oldest live entries.
-        order = sorted(stamps, key=lambda k: (bool(stamps[k][1]), stamps[k][0]))
-        for k in order[: len(stamps) - MAX_REACTION_STAMPS_PER_POST]:
+    """Bound the map by AGE first — a tombstone lives
+    :data:`REACTION_TOMBSTONE_HORIZON_S` — then per user, then per post;
+    each cap evicts tombstones before live entries, oldest first."""
+    cutoff = stamp_to_db(
+        datetime.now(timezone.utc) - timedelta(seconds=REACTION_TOMBSTONE_HORIZON_S)
+    )
+    for k in [k for k, (at, added) in stamps.items() if not added and at < cutoff]:
+        del stamps[k]
+
+    def _evict(keys: list[str], cap: int) -> None:
+        order = sorted(keys, key=lambda k: (bool(stamps[k][1]), stamps[k][0]))
+        for k in order[: max(0, len(keys) - cap)]:
             del stamps[k]
+
+    by_user: dict[str, list[str]] = {}
+    for k in stamps:
+        by_user.setdefault(k.split("\x00", 1)[0], []).append(k)
+    for keys in by_user.values():
+        _evict(keys, MAX_REACTION_STAMPS_PER_USER)
+    _evict(list(stamps), MAX_REACTION_STAMPS_PER_POST)
     return json.dumps(stamps, ensure_ascii=False, sort_keys=True)

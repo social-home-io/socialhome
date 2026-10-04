@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
@@ -32,6 +33,7 @@ from ....domain.page import Page
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
+    MAX_DISTINCT_REACTIONS_PER_POST,
     BazaarListing,
     BazaarMode,
     BazaarStatus,
@@ -516,6 +518,17 @@ class SpaceSyncReceiver:
                 if held_post is not None and held_post[1].deleted:
                     log.debug("sync: post %s was deleted here — skipped", post.id)
                     continue
+                if held_post is not None:
+                    # Keep what this household holds of the row's shared
+                    # state: its reactions (ordered by the stamps written
+                    # with them — a provider's snapshot would wipe relayed
+                    # ones and the stamps would then refuse the copy that
+                    # could restore them) and its comment count.
+                    post = replace(
+                        post,
+                        reactions=held_post[1].reactions,
+                        comment_count=held_post[1].comment_count,
+                    )
                 if await self._space_post_repo.save(space_id, post) is None:
                     log.warning(
                         "space sync: post %s already exists in another space "
@@ -1721,7 +1734,27 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         image_urls=local_media_refs(r.get("image_urls"), limit=FEED_POST_MAX_IMAGES),
         # The author-built link card (never re-fetched here), re-validated.
         link_preview=wire_link_preview(r.get("link_preview")),
+        # A joiner sees the reactions the provider holds (a held post keeps
+        # its own — see the ``posts`` branch).
+        reactions=_reactions_from_record(r.get("reactions")),
     )
+
+
+def _reactions_from_record(raw: object) -> dict[str, frozenset[str]]:
+    """The exporter's ``{emoji: [user_id, …]}``, malformed entries dropped,
+    capped at the per-post distinct-emoji maximum."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, frozenset[str]] = {}
+    for emoji, users in raw.items():
+        if len(out) >= MAX_DISTINCT_REACTIONS_PER_POST:
+            break
+        if not isinstance(emoji, str) or not emoji or not isinstance(users, list):
+            continue
+        ids = frozenset(u for u in users if isinstance(u, str) and u)
+        if ids:
+            out[emoji] = ids
+    return out
 
 
 def _comment_from_record(r: dict[str, Any]) -> Comment | None:

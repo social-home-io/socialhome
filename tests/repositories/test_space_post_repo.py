@@ -664,23 +664,55 @@ async def test_an_unstamped_reaction_is_stamped_with_now(env):
         )
 
 
-async def test_the_stamp_map_is_bounded(env, monkeypatch):
-    import socialhome.repositories.space_post_repo as mod
-
-    monkeypatch.setattr(mod, "MAX_REACTION_STAMPS_PER_POST", 3)
-    await env.repo.save(env.space_id, _post("p1"))
-    for n in range(5):
-        await env.repo.add_reaction(
-            "p1", "👍", f"u-{n}", space_id=env.space_id, stamp=f"2026-10-03 12:00:0{n}"
-        )
-    row = await env.db.fetchone(
-        "SELECT reaction_stamps_json FROM space_posts WHERE id='p1'"
-    )
+async def _stamps(env, post_id="p1") -> dict:
     import json
 
-    stamps = json.loads(row["reaction_stamps_json"])
-    assert len(stamps) == 3
-    assert "u-4\x00👍" in stamps and "u-0\x00👍" not in stamps
+    row = await env.db.fetchone(
+        "SELECT reaction_stamps_json FROM space_posts WHERE id=?", (post_id,)
+    )
+    return json.loads(row["reaction_stamps_json"] or "{}")
+
+
+def _ago(hours: float) -> str:
+    from datetime import timedelta
+
+    from socialhome.domain.space_item import stamp_to_db
+
+    return stamp_to_db(datetime.now(timezone.utc) - timedelta(hours=hours))
+
+
+async def test_a_removal_tombstone_outlives_the_duplicate_horizon_only(env):
+    """A removal is remembered for longer than any duplicate can arrive
+    (the GFS queue's 24 h plus retries); past that it is dropped."""
+    await env.repo.save(env.space_id, _post("p1"))
+    for user, hours in (("u-old", 72), ("u-recent", 30)):
+        await env.repo.add_reaction(
+            "p1", "👍", user, space_id=env.space_id, stamp=_ago(hours + 1)
+        )
+        await env.repo.remove_reaction(
+            "p1", "👍", user, space_id=env.space_id, stamp=_ago(hours)
+        )
+    stamps = await _stamps(env)
+    assert "u-recent\x00👍" in stamps
+    assert "u-old\x00👍" not in stamps
+
+
+async def test_one_user_cannot_push_out_anothers_tombstones(env, monkeypatch):
+    import socialhome.repositories.space_post_repo as mod
+
+    monkeypatch.setattr(mod, "MAX_REACTION_STAMPS_PER_USER", 3)
+    await env.repo.save(env.space_id, _post("p1"))
+    await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id)
+    await env.repo.remove_reaction("p1", "👍", "u-bob", space_id=env.space_id)
+    for n in range(6):
+        emoji = f"e{n}"
+        await env.repo.add_reaction("p1", emoji, "u-eve", space_id=env.space_id)
+        await env.repo.remove_reaction("p1", emoji, "u-eve", space_id=env.space_id)
+    stamps = await _stamps(env)
+    assert "u-bob\x00👍" in stamps
+    eve = [k for k in stamps if k.startswith("u-eve\x00")]
+    assert len(eve) == 3
+    assert "u-eve\x00e5" in stamps and "u-eve\x00e0" not in stamps
 
 
 async def test_add_comment_of_a_held_id_is_a_no_op_not_an_error(env):
