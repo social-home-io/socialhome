@@ -16,6 +16,7 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { recent, unreadCount } from '@/store/notifications'
 import type { Notification } from '@/types'
+import { appHref } from '@/baseUrl'
 
 const panelOpen = signal(false)
 /** Full notifications list — populated when the panel opens.
@@ -188,7 +189,7 @@ export function NotificationBell() {
                 return (
                   <a
                     key={n.id}
-                    href={n.link_url}
+                    href={appHref(n.link_url)}
                     class={cls}
                     onClick={() => void handleItemClick(n)}
                   >

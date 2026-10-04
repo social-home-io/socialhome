@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 import { LocationProvider } from 'preact-iso'
 
@@ -433,5 +433,43 @@ describe('SideNav', () => {
     expect(queryByText('Highlights')).toBeTruthy()
     expect(queryByText('Momentum')).toBeTruthy()
     expect(queryByText('Bazaar')).toBeTruthy()
+  })
+})
+
+describe('SideNav — links under the HA ingress prefix', () => {
+  // ``baseUrl.ts`` reads ``document.baseURI`` once at module load, so
+  // set the ingress ``<base href>`` first and re-import the modules.
+  let baseEl: HTMLBaseElement
+  beforeEach(() => {
+    baseEl = document.createElement('base')
+    baseEl.href = '/api/hassio_ingress/tok/'
+    document.head.prepend(baseEl)
+    vi.resetModules()
+  })
+  afterEach(() => {
+    baseEl.remove()
+    vi.resetModules()
+    window.history.pushState(null, '', '/')
+  })
+
+  it('every nav link carries the ingress prefix (/api/hassio_ingress/<token>/)', async () => {
+    const toggleMod = await import('@/components/HouseholdToggles')
+    toggleMod.toggles.value = { ...ALL_FEATURES_ON }
+    const auth = await import('@/store/auth')
+    auth.currentUser.value = {
+      user_id: 'u-1', username: 'pascal', display_name: 'Pascal', is_admin: true,
+      picture_url: null, picture_hash: null, bio: null, is_new_member: false,
+    }
+    const { SideNav: PrefixedSideNav } = await import('./SideNav')
+    const iso = await import('preact-iso')
+    window.history.pushState(null, '', '/api/hassio_ingress/tok/')
+    const { container } = render(
+      <iso.LocationProvider><PrefixedSideNav /></iso.LocationProvider>,
+    )
+    const hrefs = [...container.querySelectorAll('a[href]')].map(a => a.getAttribute('href')!)
+    expect(hrefs).toContain('/api/hassio_ingress/tok/feed')
+    expect(hrefs).toContain('/api/hassio_ingress/tok/dms')
+    expect(hrefs).toContain('/api/hassio_ingress/tok/settings')
+    expect(hrefs.filter(h => !h.startsWith('/api/hassio_ingress/tok/'))).toEqual([])
   })
 })

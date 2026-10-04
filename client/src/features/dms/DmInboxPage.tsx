@@ -26,6 +26,7 @@ import { relativeChatTime } from '@/utils/relativeTime'
 import { isMuteActive, mutedLabel } from '@/utils/mute'
 import { t } from '@/i18n/i18n'
 import CallsTab from './CallsTab'
+import { addBase } from '@/baseUrl'
 
 type ChatsTab = 'dms' | 'groups' | 'calls'
 
@@ -157,7 +158,7 @@ export default function DmInboxPage() {
           const overflow = peers.length - visiblePeers.length
           const muted = isMuteActive(c.muted_until)
           return (
-            <a key={c.id} href={`/dms/${c.id}`} class="sh-dm-row">
+            <a key={c.id} href={addBase(`/dms/${c.id}`)} class="sh-dm-row">
               <div class="sh-dm-avatars">
                 {peers.length === 0 ? (
                   <Avatar name={displayName} size={40} />

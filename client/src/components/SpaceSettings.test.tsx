@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 
 vi.mock('@/i18n/i18n', () => ({
@@ -1483,5 +1483,31 @@ describe('SpaceSettings — private space GFS (owner-only)', () => {
       expect(showToast).toHaveBeenCalledWith('owner required', 'error'),
     )
     expect(queryByTestId('private-gfs-link-members')).toBeNull()
+  })
+})
+
+describe('SpaceSettings — links under the HA ingress prefix', () => {
+  // ``baseUrl.ts`` reads ``document.baseURI`` once at module load, so
+  // set the ingress ``<base href>`` first and re-import the component.
+  let baseEl: HTMLBaseElement
+  beforeEach(() => {
+    baseEl = document.createElement('base')
+    baseEl.href = '/api/hassio_ingress/tok/'
+    document.head.prepend(baseEl)
+    vi.resetModules()
+  })
+  afterEach(() => {
+    baseEl.remove()
+    vi.resetModules()
+  })
+
+  it('the Manage zones link keeps the ingress prefix (/api/hassio_ingress/<token>/)', async () => {
+    const mod = await import('./SpaceSettings')
+    const { container } = render(
+      <mod.SpaceSettings space={makeSpace({ features: { location: true } })} onUpdate={() => {}} />,
+    )
+    const link = [...container.querySelectorAll('a')]
+      .find(a => a.textContent?.includes('space.location.manage_zones'))
+    expect(link?.getAttribute('href')).toBe('/api/hassio_ingress/tok/spaces/s-1/zones')
   })
 })

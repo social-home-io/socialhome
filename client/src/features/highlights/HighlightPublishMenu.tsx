@@ -20,6 +20,7 @@ import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { showToast } from '@/components/Toast'
+import { addBase } from '@/baseUrl'
 
 interface GfsConnection {
   id: string
@@ -125,7 +126,7 @@ export function HighlightPublishMenu() {
       {!isRestricted('public_links') && connections.value.length === 0 && (
         <p class="sh-muted">
           You're not connected to any Global Federation Server yet.
-          Connect one in <a href="/settings/connections">Settings → Connections</a>.
+          Connect one in <a href={addBase('/settings/connections')}>Settings → Connections</a>.
         </p>
       )}
 

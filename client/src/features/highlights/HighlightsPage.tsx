@@ -15,6 +15,7 @@ import { TabHeader } from '@/components/TabHeader'
 import { useTitle } from '@/store/pageTitle'
 import HighlightsInboxTab from './HighlightsInboxTab'
 import HighlightArchiveTab from './HighlightArchiveTab'
+import { addBase } from '@/baseUrl'
 
 type HighlightsTab = 'inbox' | 'archive'
 
@@ -65,7 +66,7 @@ export default function HighlightsPage() {
         ariaLabel="Highlights sections"
         onSelectTab={onSelectTab}
         actions={
-          <a href="/settings#highlights" class="sh-link">Settings</a>
+          <a href={addBase('/settings#highlights')} class="sh-link">Settings</a>
         }
       />
       {activeTab.value === 'archive' ? <HighlightArchiveTab /> : <HighlightsInboxTab />}

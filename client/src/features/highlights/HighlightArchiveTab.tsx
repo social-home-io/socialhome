@@ -26,6 +26,7 @@ import { resolveDisplayName } from '@/utils/avatar'
 import { currentWeekStart, weekdayOrder, type WeekStart } from '@/utils/week'
 import { ws } from '@/ws'
 import type { HighlightInboxItem } from '@/types'
+import { addBase } from '@/baseUrl'
 
 
 type DayKey = string  // 'YYYY-MM-DD'
@@ -254,7 +255,7 @@ export default function HighlightArchiveTab() {
               return (
                 <li key={s.highlight.id}>
                   <a
-                    href={`/highlights/${s.highlight.id}`}
+                    href={addBase(`/highlights/${s.highlight.id}`)}
                     class="sh-highlight-archive-tile"
                     onClick={() => loc.route(`/highlights/${s.highlight.id}`)}
                   >

@@ -2,6 +2,7 @@
  * QuickSwitcher — Cmd+K navigation (§23.69).
  */
 import { signal } from '@preact/signals'
+import { addBase } from '@/baseUrl'
 
 const open = signal(false)
 const query = signal('')
@@ -52,7 +53,7 @@ export function QuickSwitcher() {
           onInput={(e) => query.value = (e.target as HTMLInputElement).value} />
         <div class="sh-switcher-results">
           {filtered.map(item => (
-            <a key={item.href} class="sh-switcher-item" href={item.href}
+            <a key={item.href} class="sh-switcher-item" href={addBase(item.href)}
               onClick={() => open.value = false}>
               {item.label}
             </a>

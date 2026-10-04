@@ -4,7 +4,7 @@ import { IngressLocationProvider as LocationProvider } from '@/router/IngressLoc
 import { useComputed, signal } from '@preact/signals'
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
-import { basePath } from '@/baseUrl'
+import { basePath, addBase } from '@/baseUrl'
 import { isAuthed, currentUser, loadCurrentUser, setToken, token } from '@/store/auth'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
 import { usesIngressAuth } from '@/platform'
@@ -155,7 +155,7 @@ function LoginPage() {
         </Button>
       </form>
       <p class="sh-muted" style={{ textAlign: 'center', marginTop: 'var(--sh-space-md)' }}>
-        <a class="sh-link" href="/forgot-password">Forgot password?</a>
+        <a class="sh-link" href={addBase('/forgot-password')}>Forgot password?</a>
       </p>
     </div>
   )

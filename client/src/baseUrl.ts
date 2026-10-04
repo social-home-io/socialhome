@@ -71,3 +71,12 @@ export function addBase(path: string): string {
   const normalised = pathOnly.startsWith('/') ? pathOnly : '/' + pathOnly
   return prefix + normalised + suffix
 }
+
+/** ``addBase`` for an ``<a href>`` whose value may or may not be an
+ *  in-app path (a server-sent ``link_url``, a caller-supplied ``href``).
+ *  Root-relative paths (``/spaces/x``) get the ingress prefix; anything
+ *  else (``https://…``, ``//host``, ``#frag``, ``api/…``) is returned
+ *  as-is. */
+export function appHref(url: string): string {
+  return url.startsWith('/') && !url.startsWith('//') ? addBase(url) : url
+}

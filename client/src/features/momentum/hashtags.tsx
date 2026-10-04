@@ -10,6 +10,7 @@
  * are the same.
  */
 import type { ComponentChildren, JSX } from 'preact'
+import { addBase } from '@/baseUrl'
 
 const HASHTAG_RE = /(?<!\w)#([A-Za-z0-9_]{1,32})/g
 
@@ -34,7 +35,7 @@ export function renderHashtagged(
     out.push(
       <a
         key={`${match.index}-${tag}`}
-        href={`/momentum?tab=archive&tag=${encodeURIComponent(tag)}`}
+        href={addBase(`/momentum?tab=archive&tag=${encodeURIComponent(tag)}`)}
         class="sh-hashtag"
         onClick={onClickHandler}
       >#{raw}</a>,

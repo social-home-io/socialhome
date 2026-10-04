@@ -25,6 +25,7 @@ import { useLocation } from 'preact-iso'
 import { SideNav } from '@/components/SideNav'
 import { dmUnreadTotal } from '@/store/dms'
 import { shortcutsHelpOpen } from '@/lib/shortcuts'
+import { addBase } from '@/baseUrl'
 
 interface Tab {
   href:   string
@@ -135,7 +136,7 @@ export function MobileNav() {
           return (
             <a
               key={t.href}
-              href={t.href}
+              href={addBase(t.href)}
               class={`sh-mobile-tab${active ? ' sh-active' : ''}`}
               aria-current={active ? 'page' : undefined}
             >

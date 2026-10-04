@@ -29,6 +29,7 @@ import {
   calendarInvitees,
   loadCalendarInvitees,
 } from '@/store/calendarInvitees'
+import { addBase } from '@/baseUrl'
 
 interface DialogCalendarSummary {
   id: string
@@ -788,7 +789,7 @@ export function CalendarEventDialog({ onCreated }: {
               {instances.length === 0 ? (
                 <p class="sh-form-help">
                   No paired households yet. Pair a household from{' '}
-                  <a href="/settings/connections">Settings → Connections</a>{' '}
+                  <a href={addBase('/settings/connections')}>Settings → Connections</a>{' '}
                   to invite friends from another home. (Household members
                   don't need invites — drop the event on their calendar
                   via the picker above.)

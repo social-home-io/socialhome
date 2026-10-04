@@ -17,6 +17,7 @@ import { Button } from './Button'
 import { showToast } from './Toast'
 import { currentUser } from '@/store/auth'
 import type { HighlightInboxItem } from '@/types'
+import { addBase } from '@/baseUrl'
 
 const open = signal(false)
 const scope = signal<'household' | 'space'>('household')
@@ -100,7 +101,7 @@ export function HighlightPickerDialog() {
         {!loading.value && items.value.length === 0 && (
           <p class="sh-muted">
             You don't have any active highlights yet. Post one from{' '}
-            <a href="/highlights/new" class="sh-link">Highlights → New</a> first.
+            <a href={addBase('/highlights/new')} class="sh-link">Highlights → New</a> first.
           </p>
         )}
         {!loading.value && items.value.length > 0 && (

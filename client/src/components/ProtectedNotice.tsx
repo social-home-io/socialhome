@@ -13,6 +13,7 @@
  */
 import { currentUser } from '@/store/auth'
 import { t } from '@/i18n/i18n'
+import { addBase } from '@/baseUrl'
 
 /** Wire ids from ``/api/me.restrictions`` (``ProtectedCapability``). */
 export type ProtectedCapability =
@@ -51,7 +52,7 @@ export function ProtectedNotice({ capability, hideLink = false }: Props) {
           {restrictionCopy(capability)} {t('protected.ask_guardian')}
         </p>
         {!hideLink && (
-          <a class="sh-link" href="/settings#protection">
+          <a class="sh-link" href={addBase('/settings#protection')}>
             {t('protected.see_what')}
           </a>
         )}

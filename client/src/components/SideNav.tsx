@@ -30,6 +30,7 @@ import { Wordmark } from '@/components/Wordmark'
 import { SideNavIcon, type SideNavIconName } from '@/components/SideNavIcon'
 import { openShortcutsHelp } from '@/lib/shortcuts'
 import { t } from '@/i18n/i18n'
+import { addBase } from '@/baseUrl'
 
 interface SideNavItem {
   key: string
@@ -289,7 +290,7 @@ export function SideNav() {
             <>
               <a
                 key={i.key}
-                href={i.href}
+                href={addBase(i.href)}
                 aria-current={ariaCurrent}
               >
                 <SideNavIcon name={i.icon} />
@@ -308,7 +309,7 @@ export function SideNav() {
               {i.key === 'spaces' && activeSpace && (
                 <a
                   key={`spaces-active-${activeSpace.id}`}
-                  href={`/spaces/${activeSpace.id}`}
+                  href={addBase(`/spaces/${activeSpace.id}`)}
                   class="sh-sidenav-subitem sh-sidenav-subitem--active"
                   aria-current="page"
                 >
@@ -330,7 +331,7 @@ export function SideNav() {
 
   return (
     <aside class="sh-sidenav" aria-label="Sidebar">
-      <Wordmark as="a" href="/" size={28} className="sh-sidenav-brand" />
+      <Wordmark as="a" href={addBase('/')} size={28} className="sh-sidenav-brand" />
       {main.map(({ group, items }) => renderGroup(group, items))}
       {local.items.length > 0 && (
         <>
@@ -354,7 +355,7 @@ export function SideNav() {
       )}
       {user && !isHaos && (
         <a
-          href="/settings"
+          href={addBase('/settings')}
           class="sh-sidenav-identity"
           aria-label={`Signed in as ${user.display_name} — open settings`}
           aria-current={currentPath === '/settings' ? 'page' : undefined}

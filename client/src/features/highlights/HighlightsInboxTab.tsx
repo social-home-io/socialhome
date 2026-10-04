@@ -31,6 +31,7 @@ import {
 } from '@/store/householdUsers'
 import { ws } from '@/ws'
 import type { HighlightInboxItem } from '@/types'
+import { addBase } from '@/baseUrl'
 
 const inbox = signal<HighlightInboxItem[]>([])
 const loading = signal<boolean>(true)
@@ -183,7 +184,7 @@ export default function HighlightsInboxTab() {
             return (
               <a
                 key={item.highlight.id}
-                href={`/highlights/${item.highlight.id}`}
+                href={addBase(`/highlights/${item.highlight.id}`)}
                 class="sh-highlight-row"
               >
                 {first && first.frame_type === 'image' && (

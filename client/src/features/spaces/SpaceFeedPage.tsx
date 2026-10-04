@@ -542,7 +542,7 @@ export default function SpaceFeedPage() {
              *  forwarding-capable tabs, a local admin sees the full hub.
              *  Subscribers (read-only) don't. */}
             {isWriterRole(viewerRole.value) && (
-              <a href={`/spaces/${spaceId}/settings`}
+              <a href={addBase(`/spaces/${spaceId}/settings`)}
                  class="sh-space-settings-btn"
                  aria-label="Space settings">
                 ⚙ Settings

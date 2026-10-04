@@ -43,6 +43,7 @@ import {
 } from '../welcome/cards'
 import { TodayScheduleCard } from '../welcome/TodayScheduleCard'
 import { activeTimetables, lessonCount } from '../welcome/schedule'
+import { addBase } from '@/baseUrl'
 
 interface CornerPresence {
   user_id: string
@@ -259,7 +260,7 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
     (p) => typeof p.latitude === 'number' && typeof p.longitude === 'number',
   )
   return (
-    <a class="sh-welcome-card" href="/presence">
+    <a class="sh-welcome-card" href={addBase('/presence')}>
       <h2 class="sh-welcome-card__title">
         <span aria-hidden="true">🏠</span> Who's home
       </h2>
@@ -298,7 +299,7 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
  *  warning chip when applicable. */
 function BazaarCard({ bazaar }: { bazaar: BazaarCornerSummary }) {
   return (
-    <a class="sh-welcome-card" href="/bazaar">
+    <a class="sh-welcome-card" href={addBase('/bazaar')}>
       <h2 class="sh-welcome-card__title">
         <span aria-hidden="true">🛍</span> Bazaar
       </h2>
@@ -362,7 +363,7 @@ function SpacesCard({
         <ul class="sh-welcome-card__list">
           {posts.map(p => (
             <li key={p.post_id}>
-              <a class="sh-welcome-catchup-row" href={`/spaces/${p.space_id}`}>
+              <a class="sh-welcome-catchup-row" href={addBase(`/spaces/${p.space_id}`)}>
                 <span class="sh-welcome-catchup-emoji" aria-hidden="true">
                   {p.space_emoji || '🪐'}
                 </span>
@@ -401,12 +402,12 @@ function QuickActionsCard() {
         <span aria-hidden="true">⚡</span> Quick actions
       </h2>
       <div class="sh-quick-actions">
-        <a href="/feed" class="sh-btn sh-btn--secondary">Feed</a>
-        <a href="/dms" class="sh-btn sh-btn--secondary">Messages</a>
-        <a href="/calendar" class="sh-btn sh-btn--secondary">Calendar</a>
-        <a href="/organize" class="sh-btn sh-btn--secondary">Tasks</a>
-        <a href="/organize?tab=shopping" class="sh-btn sh-btn--secondary">Shopping</a>
-        <a href="/bazaar" class="sh-btn sh-btn--secondary">Bazaar</a>
+        <a href={addBase('/feed')} class="sh-btn sh-btn--secondary">Feed</a>
+        <a href={addBase('/dms')} class="sh-btn sh-btn--secondary">Messages</a>
+        <a href={addBase('/calendar')} class="sh-btn sh-btn--secondary">Calendar</a>
+        <a href={addBase('/organize')} class="sh-btn sh-btn--secondary">Tasks</a>
+        <a href={addBase('/organize?tab=shopping')} class="sh-btn sh-btn--secondary">Shopping</a>
+        <a href={addBase('/bazaar')} class="sh-btn sh-btn--secondary">Bazaar</a>
       </div>
     </section>
   )
@@ -431,7 +432,7 @@ function AppsCard() {
   const apps = installedApps.value.filter(a => a.enabled).slice(0, 4)
   if (apps.length === 0) return null
   return (
-    <a class="sh-welcome-card" href="/apps">
+    <a class="sh-welcome-card" href={addBase('/apps')}>
       <h2 class="sh-welcome-card__title">
         <span aria-hidden="true">📦</span> Apps
       </h2>
