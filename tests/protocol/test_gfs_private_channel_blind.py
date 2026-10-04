@@ -216,6 +216,9 @@ class _Federation:
     async def peer_supports(self, instance_id, *, min_version):
         return True
 
+    async def space_member_supports(self, instance_id, *, min_version):
+        return True
+
 
 class _Conns:
     def __init__(self, conn) -> None:
@@ -443,6 +446,9 @@ async def test_a_v50_member_household_gets_no_grant_and_falls_back(world):
 
     class _Old:
         async def peer_supports(self, instance_id, *, min_version):
+            return min_version <= 50
+
+        async def space_member_supports(self, instance_id, *, min_version):
             return min_version <= 50
 
     assert await world.owner.channels.reconcile(SPACE_ID) == "created"

@@ -138,15 +138,35 @@ class _Keys:
 
 
 class _Fed:
-    def __init__(self, versions: dict[str, int], pks: dict[str, bytes]):
+    def __init__(
+        self,
+        versions: dict[str, int],
+        pks: dict[str, bytes],
+        *,
+        mesh: dict[str, tuple[int, bytes]] | None = None,
+    ):
         self.versions = versions
         self.pks = pks
+        #: Mesh-only members: no row (absent from ``versions`` / ``pks``),
+        #: only a recorded mesh claim ``(version, identity_pk)``.
+        self.mesh = mesh or {}
 
     async def peer_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 0) >= min_version
 
+    async def space_member_supports(self, instance_id, *, min_version):
+        if instance_id in self.versions:
+            return self.versions[instance_id] >= min_version
+        return self.mesh.get(instance_id, (0, b""))[0] >= min_version
+
     async def peer_identity_public_key(self, instance_id):
         return self.pks.get(instance_id)
+
+    async def mesh_member_identity_pk(self, instance_id):
+        if instance_id in self.pks:
+            return None
+        found = self.mesh.get(instance_id)
+        return found[1] if found else None
 
 
 def _remote(
@@ -170,6 +190,7 @@ def _svc(
     keys: _Keys | None = None,
     versions=None,
     kek: KeyManager | None = None,
+    mesh: dict[str, tuple[int, bytes]] | None = None,
 ) -> tuple[SpaceWriterCertService, _Keys]:
     keys = keys or _Keys()
     svc = SpaceWriterCertService(
@@ -190,6 +211,7 @@ def _svc(
                 "old": FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH - 1,
             },
             {"peer": PEER_PK, "fol": FOLLOWER_PK, "old": PEER_PK},
+            mesh=mesh,
         )
     )
     return svc, keys
@@ -891,3 +913,79 @@ async def test_a_seed_holder_derives_its_own_writer_key_only_when_strict():
     svc, _ = _strict_svc(space=_space())
     assert await svc.own_writer_key("sp-1", 5) is None
     assert await svc.own_writer_key("other", 5) is None
+
+
+# ── Mesh-only member households (no ``remote_instances`` row) ─────────────
+
+MESH_PK = ed25519_public_key(os.urandom(32))
+
+
+async def test_mesh_only_member_at_v51_gets_its_cert_under_its_own_key():
+    """A member the host reaches only over the mesh holds no row, so its
+    version and key come from its origin-authenticated mesh claim."""
+    svc, _ = _svc(
+        remote_rows=[_remote("mesh", "member")],
+        mesh={"mesh": (FederationCapability.MIN_FOR_PRIVATE_CHANNELS, MESH_PK)},
+    )
+    wire = await svc.cert_for_peer("sp-1", "mesh")
+    assert wire is not None
+    cert = WriterCert.from_wire(wire)
+    assert cert.instance_pk == b64url_encode(MESH_PK)
+    _check(cert, MESH_PK, WRITER_SCOPE_WRITE)
+    # …and the per-peer fan-out hook (rekey) decorates its copy too.
+    out = await svc.peer_payload_hook("sp-1")("mesh", {"space_id": "sp-1"})
+    assert WriterCert.from_wire(out["writer_cert"]).instance_pk == b64url_encode(
+        MESH_PK
+    )
+
+
+async def test_mesh_only_member_of_unknown_version_gets_nothing():
+    svc, _ = _svc(remote_rows=[_remote("mesh", "member")])
+    assert await svc.cert_for_peer("sp-1", "mesh") is None
+    assert "writer_cert" not in await svc.peer_payload_hook("sp-1")("mesh", {})
+
+
+async def test_mesh_only_member_below_v49_gets_nothing():
+    svc, _ = _svc(
+        remote_rows=[_remote("mesh", "member")],
+        mesh={"mesh": (FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH - 1, MESH_PK)},
+    )
+    assert await svc.cert_for_peer("sp-1", "mesh") is None
+
+
+async def test_mesh_claim_without_a_seat_gets_nothing():
+    svc, _ = _svc(
+        remote_rows=[_remote("mesh", "member", tombstoned=True)],
+        mesh={"mesh": (FederationCapability.MIN_FOR_PRIVATE_CHANNELS, MESH_PK)},
+    )
+    assert await svc.cert_for_peer("sp-1", "mesh") is None
+
+
+async def test_mesh_only_member_in_strict_space_gets_the_writer_key():
+    svc, _ = _svc(
+        space=_space(gfs_publish_mode="strict"),
+        remote_rows=[_remote("mesh", "member")],
+        mesh={"mesh": (FederationCapability.MIN_FOR_PRIVATE_CHANNELS, MESH_PK)},
+    )
+    out = await svc.peer_payload_hook("sp-1")("mesh", {})
+    assert "writer_cert" in out
+    grant = WriterKeyGrant.from_wire(out["writer_key"])
+    verify_writer_key_grant(grant, space_pubkey=SPACE_PK, space_id="sp-1")
+    assert grant.epoch == 2
+
+
+async def test_mesh_only_member_at_v49_in_strict_space_gets_no_writer_key():
+    svc, _ = _svc(
+        space=_space(gfs_publish_mode="strict"),
+        remote_rows=[_remote("mesh", "member")],
+        mesh={"mesh": (FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH, MESH_PK)},
+    )
+    out = await svc.peer_payload_hook("sp-1")("mesh", {})
+    assert "writer_cert" in out and "writer_key" not in out
+
+
+async def test_pinned_key_wins_over_a_mesh_claim():
+    """A household we hold a row for is never re-keyed by a mesh claim."""
+    svc, _ = _svc(remote_rows=[_remote("peer", "member")])
+    svc._federation.mesh["peer"] = (99, MESH_PK)  # type: ignore[union-attr]
+    assert await svc.verified_instance_pk("peer") == PEER_PK

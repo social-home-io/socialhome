@@ -8764,6 +8764,120 @@ def cmd_space_post_routed() -> None:
     print("space-post-routed: ok")
 
 
+def _mesh_member_cert_failures(member: str, host: str, space_id: str) -> list[str]:
+    """Why household ``member`` (mesh-only toward ``host``) does NOT hold a
+    verifying writer cert for ``space_id`` — empty when it does.
+
+    Checks both ends: the host recorded the member's mesh claim (migration
+    0078: ``space_instances.proto_version`` / ``identity_pk``, the member's
+    own identity key) and still holds no ``remote_instances`` row for it,
+    and the member stored a cert for the epoch that verifies against the
+    pinned space key under its OWN identity key.
+    """
+    import json as _json
+
+    from socialhome.crypto import b64url_decode
+    from socialhome.domain.writer_cert import WriterCert
+    from socialhome.writer_cert import verify_writer_cert
+
+    own = _rows(member, "SELECT instance_id, identity_public_key FROM instance_identity")
+    if not own:
+        return [f"{member}: no instance_identity row"]
+    member_id, member_pk = own[0]
+    if _rows(host, "SELECT 1 FROM remote_instances WHERE id=?", (member_id,)):
+        return [
+            f"{host} holds a remote_instances row for {member} — not a "
+            "mesh-only membership any more"
+        ]
+    claim = _rows(
+        host,
+        "SELECT proto_version, identity_pk FROM space_instances "
+        "WHERE space_id=? AND instance_id=?",
+        (space_id, member_id),
+    )
+    if not claim or claim[0][0] is None:
+        return [f"{host} recorded no mesh claim for {member} in {space_id}: {claim!r}"]
+    if claim[0][1] != member_pk:
+        return [f"{host} recorded {member}'s identity_pk={claim[0][1]!r}, expected its own key"]
+    pin = _rows(member, "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,))
+    certs = _rows(
+        member,
+        "SELECT epoch, writer_cert FROM space_keys "
+        "WHERE space_id=? AND writer_cert IS NOT NULL ORDER BY epoch DESC",
+        (space_id,),
+    )
+    if not pin:
+        return [f"{member}: no stub row for {space_id}"]
+    if not certs:
+        return [f"{member} holds no writer cert for {space_id} yet"]
+    epoch, raw = certs[0]
+    try:
+        cert = WriterCert.from_wire(_json.loads(raw))
+        verify_writer_cert(
+            cert,
+            space_pubkey=bytes.fromhex(pin[0][0]),
+            space_id=space_id,
+            epoch=int(epoch),
+            author_pk=bytes.fromhex(member_pk),
+            required_scope="write",
+        )
+    except Exception as exc:
+        return [f"{member}'s writer cert for {space_id} does not verify: {exc!r}"]
+    if b64url_decode(cert.instance_pk) != bytes.fromhex(member_pk):
+        return [f"{member}'s writer cert names another household's key"]
+    print(
+        f"  {member} (mesh-only toward host {host}) holds a verifying writer "
+        f"cert for epoch {epoch} (scope={cert.scope}); {host} recorded its "
+        f"mesh claim v_{claim[0][0]} ✓"
+    )
+    return []
+
+
+def cmd_mesh_member_cert() -> None:
+    """Mesh-only member households get their writer certs (migration 0078).
+
+    Two spaces whose member reaches the host only over the mesh (b relays):
+
+    * c's mesh-private space with dave on **d** (``remote-invite-routed`` —
+      the accept carries d's version claim, recorded before the seat's
+      roster snapshot, which then carries d's cert);
+    * d's space that **c** joined by token (``invite-redeem-routed`` — the
+      mesh redeem carries c's claim; the host records it once the seat is
+      committed and the raise sends c a snapshot with its cert).
+
+    For each: the host recorded the member's claim on ``space_instances``
+    (and still has no ``remote_instances`` row for it), and the member holds
+    a cert that verifies against the pinned space key under its OWN identity
+    key. Polls (the snapshot rides SPACE_ROUTED); read-only DB checks, no
+    REST calls (the 60/min bucket is untouched).
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    cases = []
+    if state.get("remote_invite_routed_space_id"):
+        cases.append(("d", "c", state["remote_invite_routed_space_id"]))
+    if state.get("invite_redeem_routed_space_id"):
+        cases.append(("c", "d", state["invite_redeem_routed_space_id"]))
+    if not cases:
+        raise SystemExit(
+            "mesh-member-cert: run 'remote-invite-routed' / 'invite-redeem-routed' first"
+        )
+    for member, host, space_id in cases:
+        deadline = time.monotonic() + 90
+        failures: list[str] = []
+        while time.monotonic() < deadline:
+            failures = _mesh_member_cert_failures(member, host, space_id)
+            if not failures:
+                break
+            time.sleep(3)
+        if failures:
+            raise SystemExit("mesh-member-cert: " + "; ".join(failures))
+    state["mesh_member_cert_ran"] = True
+    _save(state)
+    print("mesh-member-cert: ok")
+
+
 def cmd_space_media_blob() -> None:
     """Cross-household media bytes federation (PR #4xx, ``SPACE_MEDIA_BLOB``).
 
@@ -12625,6 +12739,11 @@ def main() -> None:
         # encrypted. Asserts d.space_posts contains the post AND
         # b's log never decrypted the inner event.
         cmd_space_post_routed()
+        # ``mesh-member-cert`` (migration 0078): the members those two
+        # mesh joins seated (d in c's space, c in d's) told their host their
+        # version over the mesh, and each now holds a verifying writer cert
+        # under its own identity key — delivered sealed over SPACE_ROUTED.
+        cmd_mesh_member_cert()
         # ``space-media-blob`` validates that picture/video bytes
         # posted in a space ACTUALLY reach remote member households —
         # SPACE_POST_CREATED only carries the URL string, so without

@@ -41,6 +41,11 @@ class _FakeRegistry:
 class _FakeFederationService:
     def __init__(self) -> None:
         self._event_registry = _FakeRegistry()
+        self.mesh_claims: list[FederationEvent] = []
+
+    async def record_mesh_member_claim(self, event, *, notify=True):
+        self.mesh_claims.append(event)
+        return True
 
 
 class _FakeFederationRepo:
@@ -572,6 +577,41 @@ async def test_capabilities_updated_unknown_instance_is_noop(repo, handlers):
         )
     )
     assert "ghost-peer" not in repo.instances
+
+
+async def test_routed_capabilities_from_a_mesh_member_go_to_the_mesh_claim(
+    bus, repo, peer_unpair
+):
+    """A member household we hold no row for (reached only over the mesh)
+    announces its version inside a SPACE_ROUTED inner event: handed to
+    ``record_mesh_member_claim`` (which owns every check), never a row."""
+    h = PairingInboundHandlers(bus=bus, federation_repo=repo, peer_unpair=peer_unpair)
+    fed = _FakeFederationService()
+    h.attach_to(fed)
+    event = replace(
+        _event(
+            FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+            {"proto_version": 51},
+            from_instance="mesh-d",
+        ),
+        routed_path=["mesh-d", "relay", "self"],
+    )
+    await h._on_capabilities_updated(event)
+    assert fed.mesh_claims == [event]
+    assert "mesh-d" not in repo.instances
+
+
+async def test_direct_capabilities_from_a_paired_peer_skip_the_mesh_claim(
+    bus, repo, peer_unpair
+):
+    h = PairingInboundHandlers(bus=bus, federation_repo=repo, peer_unpair=peer_unpair)
+    fed = _FakeFederationService()
+    h.attach_to(fed)
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    await h._on_capabilities_updated(
+        _event(FederationEventType.INSTANCE_CAPABILITIES_UPDATED, {"proto_version": 2})
+    )
+    assert fed.mesh_claims == []
 
 
 async def test_capabilities_updated_invalid_payload_keeps_existing(repo, handlers):

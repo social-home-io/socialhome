@@ -233,3 +233,48 @@ async def test_resend_to_skips_self():
 
     assert ok is False
     fed.send_event.assert_not_awaited()
+
+
+# ── Mesh-only space hosts (migration 0078) ────────────────────────────────
+
+
+def _mesh_out(*, row=None, ok=True):
+    repo = SimpleNamespace(get_instance=AsyncMock(return_value=row))
+    fed = SimpleNamespace(
+        _own_instance_id="inst-self",
+        own_identity_pk=b"\x07" * 32,
+        send_with_mesh_fallback=AsyncMock(return_value=SimpleNamespace(ok=ok)),
+    )
+    return CapabilitiesOutbound(federation_service=fed, federation_repo=repo), fed
+
+
+@pytest.mark.asyncio
+async def test_mesh_host_gets_our_version_claim_over_the_mesh():
+    """A space host we are not paired with holds no row for us: it learns
+    our version + identity key from this announcement, which rides
+    ``send_with_mesh_fallback`` (SPACE_ROUTED, sealed end to end)."""
+    out, fed = _mesh_out()
+    assert await out.announce_to_mesh_host("host-c") is True
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "host-c"
+    assert kw["event_type"] is FederationEventType.INSTANCE_CAPABILITIES_UPDATED
+    assert kw["payload"] == {
+        "proto_version": OUR_PROTO_VERSION,
+        "member_proto_version": OUR_PROTO_VERSION,
+        "member_identity_pk": ("07" * 32),
+    }
+
+
+@pytest.mark.asyncio
+async def test_mesh_announce_failure_is_reported_for_a_retry():
+    out, _fed = _mesh_out(ok=False)
+    assert await out.announce_to_mesh_host("host-c") is False
+
+
+@pytest.mark.asyncio
+async def test_paired_host_needs_no_mesh_announcement():
+    out, fed = _mesh_out(row=_peer("host-c"))
+    assert await out.announce_to_mesh_host("host-c") is True
+    fed.send_with_mesh_fallback.assert_not_awaited()
+    assert await out.announce_to_mesh_host("inst-self") is True
+    fed.send_with_mesh_fallback.assert_not_awaited()

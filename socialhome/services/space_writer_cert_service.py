@@ -302,8 +302,9 @@ class SpaceWriterCertService:
 
         Ours for ourselves; else the key we pin for it (``remote_instances``,
         the key §24.11 verifies its envelopes against); else — for a
-        mesh-only household we hold no row for — a ``claimed`` key that
-        derives to its instance id. An instance id IS the fingerprint of its
+        mesh-only household we hold no row for — the key it claimed over
+        the mesh (``FederationService.mesh_member_identity_pk``), else a
+        ``claimed`` key that derives to its instance id. An instance id IS the fingerprint of its
         identity key (§4.1.2), which is how the v_31 routed-origin check
         verified that household's envelope in the first place."""
         if instance_id == self._own_instance_id:
@@ -312,6 +313,12 @@ class SpaceWriterCertService:
             pinned = await self._federation.peer_identity_public_key(instance_id)
             if pinned is not None:
                 return pinned
+            # A mesh-only member's key from its origin-authenticated mesh
+            # claim (migration 0078) — derivation-checked on the way in and
+            # again on read, so it can only be the key its id commits to.
+            mesh = await self._federation.mesh_member_identity_pk(instance_id)
+            if mesh is not None:
+                return mesh
         if claimed is None or len(claimed) != 32:
             return None
         try:
@@ -401,10 +408,13 @@ class SpaceWriterCertService:
         epoch: int | None = None,
     ) -> dict | None:
         """The wire cert to deliver to peer ``instance_id`` — gated on the
-        peer advertising v_49 — or ``None``."""
+        household running v_49 — or ``None``. A mesh-only member (no
+        ``remote_instances`` row) is judged by the version it claimed over
+        the mesh; an unknown one gets nothing
+        (``FederationService.space_member_supports``)."""
         if self._federation is None or instance_id == self._own_instance_id:
             return None
-        if not await self._federation.peer_supports(
+        if not await self._federation.space_member_supports(
             instance_id,
             min_version=FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH,
         ):
@@ -486,7 +496,7 @@ class SpaceWriterCertService:
         household (it gets no key and keeps the host path)."""
         if self._federation is None or instance_id == self._own_instance_id:
             return None
-        if not await self._federation.peer_supports(
+        if not await self._federation.space_member_supports(
             instance_id,
             min_version=FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH,
         ):

@@ -25,6 +25,10 @@ Triggers:
    the ``authority_epoch_echo`` the attached builder returns
    (:meth:`attach_authority_echo`), and :class:`SpaceAuthorityEchoDue`
    sends one to the owner right away.
+7. **Mesh-only host announcement** — the same mesh sweep hands each host
+   we reach only over the mesh to the attached announcer
+   (:meth:`attach_mesh_announce`) once per process, so it learns our
+   version + identity key and can deliver our writer cert (migration 0078).
 
 Follows the `_stop: asyncio.Event` lifecycle (CLAUDE.md "Schedulers").
 """
@@ -45,7 +49,7 @@ from ....domain.events import (
     SpaceSyncDeferred,
 )
 from ....domain.federation import FederationEventType, PairingStatus
-from ....domain.space import Space, SpaceType
+from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
 
@@ -128,6 +132,8 @@ class SpaceSyncScheduler:
         "_authority_echo",
         "_deferred_attempts",
         "_deferred_tasks",
+        "_mesh_announce",
+        "_mesh_announced",
     )
 
     def __init__(
@@ -169,6 +175,10 @@ class SpaceSyncScheduler:
         self._deferred_attempts: dict[tuple[str, str], int] = {}
         #: Pending deferred-retry waits (they end on ``_stop``).
         self._deferred_tasks: set[asyncio.Task] = set()
+        #: Mesh-only host version announcer (see :meth:`attach_mesh_announce`).
+        self._mesh_announce: Callable[[str], Awaitable[bool]] | None = None
+        #: Mesh-only hosts our version reached this process.
+        self._mesh_announced: set[str] = set()
 
     def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
         """Run ``refresh`` on every periodic tick — the host re-sending each
@@ -185,6 +195,15 @@ class SpaceSyncScheduler:
         a BEGIN to that household carries, or ``None``
         (``SpaceAuthorityRotationService.authority_epoch_echo``, v_46)."""
         self._authority_echo = echo
+
+    def attach_mesh_announce(self, announce: Callable[[str], Awaitable[bool]]) -> None:
+        """``announce(host_instance_id)`` → ``True`` once nothing more is
+        needed (``CapabilitiesOutbound.announce_to_mesh_host``). Run by the
+        mesh sweep for every host we reach only over the mesh: such a host
+        holds no ``remote_instances`` row for us, so without it it could
+        gate nothing on our version — no writer cert, writer key or channel
+        grant for us (migration 0078)."""
+        self._mesh_announce = announce
 
     def wire(self) -> None:
         """Subscribe to the bus events we act on. Idempotent."""
@@ -416,6 +435,7 @@ class SpaceSyncScheduler:
             await self._tick_mesh_catchup()
         except Exception:
             log.exception("space-sync-scheduler: mesh catch-up failed")
+        await self._tick_mesh_announce()
 
         if self._roster_refresh is not None:
             try:
@@ -464,6 +484,7 @@ class SpaceSyncScheduler:
             except Exception:  # pragma: no cover
                 log.exception("startup mesh catch-up sweep failed")
                 return
+            pending += await self._tick_mesh_announce()
             if not pending:
                 # Every mesh-only host either got its BEGIN, is already
                 # complete, or hit the attempt cap. Nothing left to retry —
@@ -475,7 +496,9 @@ class SpaceSyncScheduler:
 
         ``Space.owner_instance_id`` is the host, so the predicate is exact
         rather than a heuristic: a space we don't own whose owner is not a
-        confirmed peer is reachable only over the mesh. Deliberately calls
+        confirmed peer is reachable only over the mesh. Only spaces we hold
+        a non-follower seat in (:meth:`_list_joined_remote_spaces`) — a
+        space we only follow over a GFS never reveals us to its host. Deliberately calls
         ``begin_mesh_catchup_sync`` and NOT ``enqueue_sync_for_space`` —
         the latter ships a bare ``send_event`` with no requester-side
         receive session, which cannot serve a mesh host at all.
@@ -493,10 +516,8 @@ class SpaceSyncScheduler:
         30-minute tick (#648).
         """
         pending = 0
-        for space in await self._list_local_spaces():
+        for space in await self._list_joined_remote_spaces():
             host = space.owner_instance_id
-            if not host or host == self._own_instance_id:
-                continue
             key = (space.id, host)
             if key in self._mesh_catchup_done:
                 # Sentinel observed — this pair is genuinely caught up.
@@ -530,6 +551,55 @@ class SpaceSyncScheduler:
                 # touched the host's 5/h budget either.
                 self._mesh_catchup_attempts[key] = attempts + 1
         return pending
+
+    async def _tick_mesh_announce(self) -> int:
+        """Announce our version to each mesh-only space host not yet reached
+        this process. Returns how many are still pending. Never raises."""
+        if self._mesh_announce is None:
+            return 0
+        pending = 0
+        try:
+            hosts = sorted(
+                {s.owner_instance_id for s in await self._list_joined_remote_spaces()}
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception("space-sync-scheduler: listing mesh hosts failed")
+            return 0
+        for host in hosts:
+            if host in self._mesh_announced:
+                continue
+            try:
+                if await self._federation.is_confirmed_peer(host):
+                    continue
+                done = await self._mesh_announce(host)
+            except Exception:
+                log.exception("mesh version announcement to %s failed", host)
+                done = False
+            if done:
+                self._mesh_announced.add(host)
+            else:
+                pending += 1
+        return pending
+
+    async def _list_joined_remote_spaces(self) -> list[Space]:
+        """Spaces hosted elsewhere in which this household holds a local
+        seat other than a follower (``subscriber``) one.
+
+        The mesh sweeps (catch-up BEGIN, version announcement) contact the
+        host directly, which tells it we exist and care about the space. A
+        PUBLIC space we only follow — or merely mirror from a GFS listing,
+        with no seat at all — must stay invisible to its host: the GFS
+        shields followers from hosts. Only real membership justifies it.
+        """
+        out: list[Space] = []
+        for space in await self._list_local_spaces():
+            host = space.owner_instance_id
+            if not host or host == self._own_instance_id:
+                continue
+            members = await self._space_repo.list_members(space.id)
+            if any(str(m.role) != SpaceRole.SUBSCRIBER.value for m in members):
+                out.append(space)
+        return out
 
     async def _list_local_spaces(self) -> list[Space]:
         spaces = (

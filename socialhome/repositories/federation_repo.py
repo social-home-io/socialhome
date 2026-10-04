@@ -60,6 +60,15 @@ class AbstractFederationRepo(Protocol):
     async def list_social_instances(self) -> list[RemoteInstance]: ...
     async def list_instances_in_space(self, space_id: str) -> list[RemoteInstance]: ...
     async def list_member_instance_ids(self, space_id: str) -> list[str]: ...
+    async def record_space_member_version(
+        self,
+        instance_id: str,
+        proto_version: int,
+        identity_pk_hex: str,
+    ) -> int | None: ...
+    async def get_space_member_version(
+        self, instance_id: str
+    ) -> tuple[int, str | None] | None: ...
     async def delete_instance(self, instance_id: str) -> None: ...
     async def mark_unpairing(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
@@ -333,6 +342,54 @@ class SqliteFederationRepo:
             (space_id,),
         )
         return [str(r[0]) for r in rows]
+
+    async def record_space_member_version(
+        self,
+        instance_id: str,
+        proto_version: int,
+        identity_pk_hex: str,
+    ) -> int | None:
+        """Record a mesh-only member household's version claim (migration
+        0078) on every ``space_instances`` row it already holds.
+
+        UPDATE-only — a claim never creates membership. The version is a
+        high-water mark (``MAX(old, new)``, like ``set_proto_version``). The
+        caller has already checked that ``identity_pk_hex`` derives to
+        ``instance_id``. Returns the household's previous version (``0`` when
+        none was recorded), or ``None`` when it holds no row at all."""
+        before = await self.get_space_member_version(instance_id)
+        if before is None:
+            return None
+        await self._db.enqueue(
+            """
+            UPDATE space_instances
+               SET proto_version = MAX(COALESCE(proto_version, 0), ?),
+                   identity_pk = ?
+             WHERE instance_id = ?
+            """,
+            (int(proto_version), identity_pk_hex, instance_id),
+        )
+        return before[0]
+
+    async def get_space_member_version(
+        self, instance_id: str
+    ) -> tuple[int, str | None] | None:
+        """``(version, identity_pk_hex)`` a member household claimed (``0`` /
+        ``None`` when it never did), or ``None`` when it holds no
+        ``space_instances`` row."""
+        row = await self._db.fetchone(
+            """
+            SELECT COUNT(*) AS n,
+                   MAX(proto_version) AS v,
+                   MAX(identity_pk) AS pk
+              FROM space_instances
+             WHERE instance_id = ?
+            """,
+            (instance_id,),
+        )
+        if row is None or not int(row["n"] or 0):
+            return None
+        return int(row["v"] or 0), (str(row["pk"]) if row["pk"] else None)
 
     async def delete_instance(self, instance_id: str) -> None:
         await self._db.enqueue(

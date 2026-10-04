@@ -5091,6 +5091,7 @@ def _invite_fed():
     )
     fed.broadcast_to_space_members = AsyncMock()
     fed.peer_supports = AsyncMock(return_value=True)
+    fed.space_member_supports = AsyncMock(return_value=True)
     return fed, MagicMock()
 
 
@@ -5862,8 +5863,11 @@ async def test_accept_remote_invite_kicks_mesh_catchup_sync(stack):
         return_value=MagicMock(ok=True, error=None),
     )
     fed.begin_mesh_catchup_sync = AsyncMock()
+    fed.own_identity_pk = b"\x01" * 32
     stack.space_svc._federation = fed
     stack.space_svc._federation_repo = MagicMock()
+    # Mesh-only host: we hold no ``remote_instances`` row for it.
+    stack.space_svc._federation_repo.get_instance = AsyncMock(return_value=None)
 
     await stack.space_svc.accept_remote_invite(
         token="tok-mesh-catchup",
@@ -7487,6 +7491,7 @@ async def test_no_roster_snapshot_to_a_household_below_v32(stack):
         return min_version < 32
 
     fed.peer_supports = _supports
+    fed.space_member_supports = _supports
     await stack.space_svc.broadcast_remote_member_joined(
         space.id, instance_id="peer-old", user_id="u", user_pk=None, display_name="U"
     )
@@ -8810,6 +8815,7 @@ async def _rotation_fed(stack, *, version: int = 44):
         own_identity_seed=kp.private_key,
         own_identity_pk=kp.public_key,
         peer_supports=_supports,
+        space_member_supports=_supports,
         send_with_mesh_fallback=AsyncMock(
             return_value=DeliveryResult(instance_id="x", ok=True)
         ),
@@ -9008,8 +9014,13 @@ async def _cert_space(stack, *, version: int = 49):
     async def _pk(iid):
         return peer_pks.get(iid)
 
+    async def _no_mesh_pk(_iid):
+        return None
+
     fed.peer_supports = _supports
+    fed.space_member_supports = _supports
     fed.peer_identity_public_key = _pk
+    fed.mesh_member_identity_pk = _no_mesh_pk
     certs = SpaceWriterCertService(
         space_repo=stack.space_repo,
         remote_member_repo=remote,
@@ -9045,6 +9056,44 @@ async def test_roster_snapshot_has_no_cert_below_v49(stack):
     await _seat(remote, space.id, "peer-a", "u-a")
     assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
     assert "writer_cert" not in fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+
+
+async def test_mesh_only_member_gets_its_snapshot_and_cert_by_its_mesh_claim(stack):
+    """A member household reached only over the mesh holds no
+    ``remote_instances`` row (``peer_supports`` knows nothing). Judged by its
+    recorded mesh claim it gets the roster snapshot and, in it, its OWN cert
+    under the identity key it claimed; the snapshot travels through
+    ``send_with_mesh_fallback``, i.e. sealed end to end over SPACE_ROUTED."""
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    space, fed, remote, _pks = await _cert_space(stack, version=0)
+    mesh_pk = ed25519_public_key(os.urandom(32))
+
+    async def _mesh_supports(iid, *, min_version):
+        return iid == "mesh-d" and min_version <= (
+            FederationCapability.MIN_FOR_PRIVATE_CHANNELS
+        )
+
+    async def _mesh_pk(iid):
+        return mesh_pk if iid == "mesh-d" else None
+
+    fed.space_member_supports = _mesh_supports
+    fed.mesh_member_identity_pk = _mesh_pk
+    await _seat(remote, space.id, "mesh-d", "u-d")
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="mesh-d")
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "mesh-d"
+    cert = _cert_of(kw["payload"])
+    assert cert.instance_pk == b64url_encode(mesh_pk)
+
+
+async def test_mesh_only_member_of_unknown_version_gets_no_snapshot(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=0)
+    await _seat(remote, space.id, "mesh-d", "u-d")
+    assert not await stack.space_svc.send_roster_snapshot(
+        space.id, to_instance_id="mesh-d"
+    )
+    fed.send_with_mesh_fallback.assert_not_awaited()
 
 
 async def test_seating_a_household_delivers_its_cert_with_the_snapshot(stack):

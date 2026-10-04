@@ -14,6 +14,10 @@ outbound fields on the version we actually run. Three trigger points:
    would skip optional fields forever.
 3. **Manually** — call :meth:`publish` after the operator changes the
    advertised set mid-run (rare; usually only on restart).
+4. **Mesh-only space hosts** — :meth:`announce_to_mesh_host`, driven by
+   the space sync scheduler's mesh sweep at startup and on its periodic
+   tick: a host we reach only over the mesh holds no row for us and gets
+   our version (plus identity key) as a claim over ``SPACE_ROUTED``.
 
 A failed send to a single peer lands in the outbox retry queue; we
 never raise.
@@ -33,6 +37,7 @@ from typing import TYPE_CHECKING
 from ..domain.events import PairingConfirmed
 from ..domain.federation import FederationEventType, PairingStatus
 from ..domain.federation_capabilities import OURS as OUR_PROTO_VERSION
+from ..federation.mesh_member_claim import mesh_member_claim
 from .peer_outbound import ConfirmedPeerBroadcaster
 
 if TYPE_CHECKING:
@@ -161,6 +166,43 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
             instance_id,
         )
         return True
+
+    async def announce_to_mesh_host(self, host_instance_id: str) -> bool:
+        """Tell a space host we reach only over the mesh our version.
+
+        Such a host holds no ``remote_instances`` row for us, so it never
+        sees the confirmed-peer fan-out and could not deliver our writer
+        cert / key / channel grant. The announcement carries the mesh
+        claim (:mod:`~socialhome.federation.mesh_member_claim`) and rides
+        :meth:`FederationService.send_with_mesh_fallback` — SPACE_ROUTED,
+        sealed end to end to the host and origin-signed, so no relay reads
+        or alters it. The host keeps it on our ``space_instances`` rows.
+
+        Returns ``True`` when nothing more is needed (sent, or the host is
+        a household we hold a row for — the ordinary path covers it) and
+        ``False`` when the send failed and a later attempt should retry.
+        """
+        own = getattr(self._federation, "_own_instance_id", "")
+        if not host_instance_id or host_instance_id == own:
+            return True
+        if await self._federation_repo.get_instance(host_instance_id) is not None:
+            return True
+        payload: dict = {
+            "proto_version": OUR_PROTO_VERSION,
+            **mesh_member_claim(self._federation.own_identity_pk),
+        }
+        result = await self._federation.send_with_mesh_fallback(
+            to_instance_id=host_instance_id,
+            event_type=FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+            payload=payload,
+        )
+        ok = bool(getattr(result, "ok", False))
+        log.info(
+            "capabilities-outbound: mesh announcement to host %s %s",
+            host_instance_id,
+            "sent" if ok else "failed (will retry)",
+        )
+        return ok
 
     async def publish(self) -> int:
         """Tell every confirmed peer our current ``proto_version``.

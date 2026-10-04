@@ -1020,3 +1020,51 @@ async def test_failed_tombstone_replacement_keeps_its_side_rows(env):
         await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-taken"))
 
     assert await _side_row_counts(env.db, "peer-t") == (1, 1, 1, 1)
+
+
+# ── Mesh-only member version claims (migration 0078) ──────────────────────
+
+
+async def _seat(env, space_id: str, instance_id: str) -> None:
+    await env.db.enqueue(
+        "INSERT INTO space_instances(space_id, instance_id) VALUES(?, ?)",
+        (space_id, instance_id),
+    )
+
+
+async def test_member_version_unknown_household_records_nothing(env):
+    """A claim never creates membership: no ``space_instances`` row → None."""
+    assert await env.fed_repo.record_space_member_version("d", 51, "ab" * 32) is None
+    assert await env.fed_repo.get_space_member_version("d") is None
+    rows = await env.db.fetchall("SELECT * FROM space_instances")
+    assert rows == []
+
+
+async def test_member_version_recorded_on_every_seat_of_the_household(env):
+    await _seat(env, "sp1", "d")
+    await _seat(env, "sp2", "d")
+    await _seat(env, "sp1", "other")
+    assert await env.fed_repo.record_space_member_version("d", 51, "ab" * 32) == 0
+    assert await env.fed_repo.get_space_member_version("d") == (51, "ab" * 32)
+    assert await env.fed_repo.get_space_member_version("other") == (0, None)
+    rows = await env.db.fetchall(
+        "SELECT space_id, proto_version FROM space_instances WHERE instance_id='d'"
+    )
+    assert sorted((r[0], r[1]) for r in rows) == [("sp1", 51), ("sp2", 51)]
+
+
+async def test_member_version_is_a_high_water_mark(env):
+    await _seat(env, "sp1", "d")
+    await env.fed_repo.record_space_member_version("d", 51, "ab" * 32)
+    assert await env.fed_repo.record_space_member_version("d", 40, "ab" * 32) == 51
+    assert await env.fed_repo.get_space_member_version("d") == (51, "ab" * 32)
+    assert await env.fed_repo.record_space_member_version("d", 52, "ab" * 32) == 51
+    assert await env.fed_repo.get_space_member_version("d") == (52, "ab" * 32)
+
+
+async def test_member_version_survives_a_new_seat(env):
+    """A later seat (NULL columns) doesn't hide the household's claim."""
+    await _seat(env, "sp1", "d")
+    await env.fed_repo.record_space_member_version("d", 51, "ab" * 32)
+    await _seat(env, "sp2", "d")
+    assert await env.fed_repo.get_space_member_version("d") == (51, "ab" * 32)

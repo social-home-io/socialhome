@@ -16,6 +16,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEventType, PairingStatus
 from socialhome.domain.space import (
+    SpaceRole,
     JoinMode,
     Space,
     SpaceFeatures,
@@ -94,15 +95,25 @@ class _FakeFedRepo:
 
 
 class _FakeSpaceRepo:
-    def __init__(self, *, spaces_by_type, members_by_space):
+    def __init__(self, *, spaces_by_type, members_by_space, local_roles=None):
         self._spaces = spaces_by_type
         self._members = members_by_space
+        #: ``space_id -> [role, …]`` of OUR local seats. A space not listed
+        #: has one local ``member`` seat (the ordinary joined space).
+        self.local_roles: dict[str, list[str]] = dict(local_roles or {})
 
     async def list_by_type(self, space_type):
         return self._spaces.get(space_type, [])
 
     async def list_member_instances(self, space_id):
         return self._members.get(space_id, [])
+
+    async def list_members(self, space_id):
+        roles = self.local_roles.get(space_id, [SpaceRole.MEMBER.value])
+        return [
+            SimpleNamespace(space_id=space_id, user_id=f"u{i}", role=r)
+            for i, r in enumerate(roles)
+        ]
 
 
 def _space(space_id: str, *, owner_instance_id: str = "self") -> Space:
@@ -847,3 +858,156 @@ async def test_a_deferred_sync_waits_on_stop(bus, queue, sync_manager, monkeypat
     await bus.publish(SpaceSyncDeferred(space_id="sp", provider_instance_id="host"))
     await asyncio.wait_for(sched.stop(), timeout=2.0)
     assert fed.sent == []
+
+
+# ── Mesh-only host version announcement (migration 0078) ──────────────────
+
+
+async def test_tick_announces_our_version_once_to_each_mesh_only_host(
+    bus, queue, sync_manager
+):
+    """A host we reach only over the mesh holds no row for us, so it can
+    gate nothing on our version. The sweep hands each such host (once per
+    process, retried until delivered) to the attached announcer; confirmed
+    hosts and our own spaces are skipped."""
+    fed = _FakeFederation(confirmed={"host-paired"})
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [
+            _space("sp-1", owner_instance_id="host-x"),
+            _space("sp-2", owner_instance_id="host-x"),
+            _space("sp-3", owner_instance_id="host-paired"),
+            _space("sp-4", owner_instance_id="self"),
+        ],
+    )
+    announced: list[str] = []
+    outcome = {"ok": False}
+
+    async def _announce(host: str) -> bool:
+        announced.append(host)
+        return outcome["ok"]
+
+    sched.attach_mesh_announce(_announce)
+    assert await sched._tick_mesh_announce() == 1
+    assert announced == ["host-x"]
+    # Not delivered → retried on the next tick; delivered → never again.
+    outcome["ok"] = True
+    await sched._tick_once()
+    assert announced == ["host-x", "host-x"]
+    await sched._tick_once()
+    assert await sched._tick_mesh_announce() == 0
+    assert announced == ["host-x", "host-x"]
+
+
+async def test_mesh_announce_failure_does_not_kill_the_tick(bus, queue, sync_manager):
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus, queue, sync_manager, fed, [_space("sp-1", owner_instance_id="host-x")]
+    )
+
+    async def _boom(host: str) -> bool:
+        raise RuntimeError("mesh down")
+
+    sched.attach_mesh_announce(_boom)
+    assert await sched._tick_mesh_announce() == 1
+    await sched._tick_once()
+    sync_manager.reap_stale.assert_called_once_with(STALE_SESSION_TTL_SECONDS)
+
+
+async def test_startup_sweep_retries_an_undelivered_announcement(
+    bus, queue, sync_manager
+):
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus, queue, sync_manager, fed, [_space("sp-1", owner_instance_id="host-x")]
+    )
+    sched.wire()
+    # Catch-up already complete: only the announcement keeps the sweep alive.
+    await bus.publish(SpaceSyncComplete(space_id="sp-1", from_instance="host-x"))
+    calls: list[str] = []
+
+    async def _announce(host: str) -> bool:
+        calls.append(host)
+        return len(calls) >= 2
+
+    sched.attach_mesh_announce(_announce)
+    with (
+        patch.object(scheduler_mod, "STARTUP_MESH_CATCHUP_DELAY_SECONDS", 0.01),
+        patch.object(
+            scheduler_mod, "STARTUP_MESH_CATCHUP_RETRY_DELAYS_S", (0.01, 0.01, 0.01)
+        ),
+    ):
+        await sched._startup_mesh_catchup()
+    assert calls == ["host-x", "host-x"]
+
+
+# ── Followed-only spaces stay invisible to their host ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        [SpaceRole.SUBSCRIBER.value],  # we only follow it (GFS subscriber seat)
+        [],  # a bare GFS mirror / directory stub, no seat at all
+    ],
+)
+async def test_a_followed_only_space_host_gets_no_announce_and_no_catchup(
+    bus, queue, sync_manager, roles
+):
+    """The GFS shields followers from hosts: a PUBLIC space we only follow
+    (or merely mirror) must never make us route-discover its host, announce
+    our version to it or ask it for a catch-up — that would tell the host
+    we exist and are interested."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [_space("sp-followed", owner_instance_id="host-f")],
+    )
+    sched._space_repo.local_roles["sp-followed"] = roles
+    announced: list[str] = []
+
+    async def _announce(host: str) -> bool:
+        announced.append(host)
+        return True
+
+    sched.attach_mesh_announce(_announce)
+    await sched._tick_once()
+    assert await sched._tick_mesh_catchup() == 0
+    assert await sched._tick_mesh_announce() == 0
+    assert announced == []
+    assert fed.mesh_catchups == []
+
+
+async def test_a_member_space_host_still_gets_announce_and_catchup(
+    bus, queue, sync_manager
+):
+    """A household holding a real seat (here alongside a follower seat of
+    another local user) keeps both sweeps."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [_space("sp-member", owner_instance_id="host-m")],
+    )
+    sched._space_repo.local_roles["sp-member"] = [
+        SpaceRole.SUBSCRIBER.value,
+        SpaceRole.MEMBER.value,
+    ]
+    announced: list[str] = []
+
+    async def _announce(host: str) -> bool:
+        announced.append(host)
+        return True
+
+    sched.attach_mesh_announce(_announce)
+    await sched._tick_once()
+    assert announced == ["host-m"]
+    assert fed.mesh_catchups == [("sp-member", "host-m")]

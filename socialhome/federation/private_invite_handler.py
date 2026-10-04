@@ -171,6 +171,7 @@ class PrivateSpaceInviteHandler:
         "_remote_locations",
         "_own_instance_id",
         "_writer_certs",
+        "_federation",
     )
 
     def __init__(
@@ -221,6 +222,9 @@ class PrivateSpaceInviteHandler:
         #: v_49 — stores the writer cert a seed holder delivered to us on a
         #: rekey / roster snapshot. ``None`` → certs are ignored.
         self._writer_certs: "SpaceWriterCertService | None" = None
+        #: Set by :meth:`attach_to` — records a mesh-only accepting
+        #: household's version + identity-key claim (migration 0078).
+        self._federation: "FederationService | None" = None
 
     def attach_space_service(self, space_service) -> None:
         """Wire :class:`SpaceService` post-construction (#114 phase 2).
@@ -246,6 +250,7 @@ class PrivateSpaceInviteHandler:
         self._own_instance_id = str(
             getattr(federation_service, "own_instance_id", "") or ""
         )
+        self._federation = federation_service
         registry = federation_service._event_registry  # noqa: SLF001
         registry.register(
             FederationEventType.SPACE_PRIVATE_INVITE,
@@ -724,6 +729,14 @@ class PrivateSpaceInviteHandler:
             invite["space_id"],
             event.from_instance,
         )
+        # A household that reached us over the mesh (no ``remote_instances``
+        # row) carries its version + identity-key claim in the accept.
+        # Recorded now that its ``space_instances`` row exists, and before
+        # the seat's roster snapshot below, so that snapshot already carries
+        # its writer cert / key / channel grant. The method owns every check
+        # (routed + origin-authenticated, no row, key derives to the sender).
+        if self._federation is not None:
+            await self._federation.record_mesh_member_claim(event, notify=False)
         await self._space_repo.update_invitation_status(
             invite["id"],
             "accepted",

@@ -1028,13 +1028,69 @@ a cert for another household to store):
 | `SPACE_ROSTER_SNAPSHOT` (owner host) | the one household the snapshot is for | top-level `writer_cert` |
 | `SPACE_AUTHORITY_ROTATED` (owner host) | each member household, per peer | top-level `writer_cert` |
 
-Every channel is gated on `peer_supports(…, MIN_FOR_MEMBER_GFS_PUBLISH)`
-(v_49). The receiver keeps a cert only when it verifies against its pinned
+Every channel is gated on `space_member_supports(…, MIN_FOR_MEMBER_GFS_PUBLISH)`
+(v_49) — `peer_supports` for a household we hold a `remote_instances` row
+for, and the mesh claim below for one we don't. The receiver keeps a cert only when it verifies against its pinned
 space key, names its own identity key and this space, and it holds the
 content key for that epoch — then on that epoch's `space_keys.writer_cert`.
 It takes certs only from the owner (redeem ACK, roster snapshot, rotation
 bundle) or a proven seed holder (an authority-signed rekey), and a stored
 cert is replaced only by a newer one (`issued_at`; `write` wins a tie).
+
+**Mesh-only member households.** A member the host reaches only over the
+mesh (`SPACE_ROUTED` through a relay — in the federation demo, household d
+in a space hosted by c) holds no `remote_instances` row on the host, by
+design: that row is what the §24.11 inbox gates on (see migration 0045). Until
+now the host therefore had no version to gate on and no identity key to put
+in a cert, and such a member got no cert, writer key or channel grant. Now
+the member tells the host both, as a **mesh claim**
+(`socialhome/federation/mesh_member_claim.py`) — `member_proto_version`
+(its `OURS`) and `member_identity_pk` — riding only inside an
+origin-authenticated routed inner payload:
+
+* its `SPACE_PRIVATE_INVITE_ACCEPT` and its mesh `SPACE_INVITE_TOKEN_REDEEM`
+  (so the seat's first credentials can follow at once), and
+* an `INSTANCE_CAPABILITIES_UPDATED` (`proto_version` + the claim) sent with
+  `send_with_mesh_fallback` to every space host it is not paired with and
+  holds a non-follower seat with, by the space sync scheduler's mesh sweep
+  (startup with retries, then each periodic tick, once per host per
+  process). A public space we only follow over a GFS never triggers it —
+  the GFS shields followers from hosts.
+
+The inner payload is sealed end to end to the host and the v_31
+routed-origin signature covers its ciphertext, so the relay can neither read
+nor alter the claim; a relay that re-seals one in the member's name fails
+that signature and is dropped before dispatch. The host
+(`FederationService.record_mesh_member_claim`) takes a claim only from an
+unwrapped routed event, only for a household it holds NO `remote_instances`
+row for (a paired household's version comes from its own advertisement),
+only when the key derives to the sender's instance id (§4.1.2 — nobody can
+vouch for another household), and only onto `space_instances` rows the
+household already holds (migration 0078: `proto_version`, `identity_pk`;
+an UPDATE — a claim never creates membership). The version is a high-water
+mark; lifetime = membership (a leave, kick or ban deletes the row and the
+claim). When the version rises, the existing `PeerProtoVersionRaised`
+catch-up re-sends the household its roster snapshot, which now reaches
+mesh-only members too and carries its cert, writer key and grant — sealed
+to it alone over `SPACE_ROUTED` like every per-peer copy. A mesh-only member
+that never claimed (an older build) or claims below the threshold gets
+nothing: fail closed. The cert's `instance_pk` is the claimed key, which is
+the same key the v_31 routed-origin check verifies the member's envelopes
+with.
+
+```mermaid
+sequenceDiagram
+    participant D as Member d (mesh-only)
+    participant B as Relay b
+    participant C as Host c (seed)
+    D->>B: SPACE_ROUTED {sealed: INSTANCE_CAPABILITIES_UPDATED {proto_version, member_proto_version, member_identity_pk}, origin_sig}
+    B->>C: forwards the sealed blob (reads nothing)
+    C->>C: v_31 origin sig ✓ → no row for d, key derives to d, d holds space_instances → record (high-water)
+    C->>C: PeerProtoVersionRaised(d, 0 → v)
+    C->>B: SPACE_ROUTED {sealed to d: SPACE_ROSTER_SNAPSHOT {entries, writer_cert, writer_key?, gfs_channel?}}
+    B->>D: forwards the sealed blob (reads nothing)
+    D->>D: verify cert vs pinned space key, own pk, epoch → store
+```
 
 **Carried by items.** An author household puts its cert for the current
 epoch in the relayed public-post inner (`public_relay.writer_cert`). It is

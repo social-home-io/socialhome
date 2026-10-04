@@ -199,6 +199,47 @@ async def test_accept_broadcasts_member_joined_gossip(handler):
     assert kw["user_id"] == "u1"
 
 
+async def test_accept_records_the_mesh_claim_before_the_seat_snapshot(handler):
+    """A mesh-only household's accept carries its version + identity-key
+    claim; the host records it once the household's ``space_instances`` row
+    exists and BEFORE the seat's roster snapshot goes out, so that snapshot
+    already carries the household's writer cert (no duplicate snapshot:
+    ``notify=False``)."""
+    order: list[str] = []
+    handler.space_repo.get_invitation_by_token.return_value = _invitation(9)
+    handler.space_repo.add_space_instance = AsyncMock(
+        side_effect=lambda *a, **k: order.append("space_instance")
+    )
+    space_service = AsyncMock()
+    space_service.broadcast_remote_member_joined = AsyncMock(
+        side_effect=lambda *a, **k: order.append("snapshot")
+    )
+    handler.h.attach_space_service(space_service)
+    claims: list[tuple[object, bool]] = []
+
+    class _Fed:
+        own_instance_id = "host"
+
+        class _event_registry:  # noqa: N801 — attribute shape only
+            @staticmethod
+            def register(*_a, **_k):
+                return None
+
+        async def record_mesh_member_claim(self, event, *, notify=True):
+            order.append("claim")
+            claims.append((event, notify))
+            return True
+
+    handler.h.attach_to(_Fed())  # type: ignore[arg-type]
+    ev = _event(
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        {"invite_token": "abc", "invitee_user_id": "u1"},
+    )
+    await handler.h._on_accept(ev)
+    assert order == ["space_instance", "claim", "snapshot"]
+    assert claims == [(ev, False)]
+
+
 async def test_accept_without_space_service_still_seats(handler):
     """No SpaceService wired (early boot / unit stack) → accept still seats
     the member; the gossip is just skipped."""

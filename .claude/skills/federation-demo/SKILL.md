@@ -515,7 +515,7 @@ That single command runs the full sequence:
 The canonical ``all`` sequence runs ``up → pair → traffic →
 calendar → verify → relay-pair → visibility → invite-redeem →
 invite-redeem-routed → remote-invite-routed → space-post-routed →
-space-media-blob → space-gallery-media-blob →
+mesh-member-cert → space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
@@ -536,6 +536,12 @@ Phases added after the initial publish are documented inline in
 * ``space-post-routed`` — mesh-routed SPACE_POST_CREATED via
   SPACE_ROUTED through a relay that never decrypts the inner
   payload.
+* ``mesh-member-cert`` — the mesh-only members of those two spaces
+  (d in c's space, c in d's) hold a verifying writer cert under their
+  own identity key: each told its host its version over the mesh (the
+  claim in its accept / mesh redeem), the host recorded it on
+  ``space_instances`` (migration 0078, still no ``remote_instances``
+  row) and delivered the cert sealed over SPACE_ROUTED. DB reads only.
 * ``space-media-blob`` — bytes for a posted image actually reach
   the remote member's media path (the SpaceMediaSyncService
   outbox + chunked SPACE_MEDIA_BLOB stream).
@@ -610,7 +616,7 @@ To iterate faster you can run the steps individually (``python
 harness.py up`` / ``pair`` / ``traffic`` / ``calendar`` / ``verify``
 / ``relay-pair`` / ``visibility`` / ``invite-redeem`` /
 ``invite-redeem-routed`` / ``remote-invite-routed`` /
-``space-post-routed`` / ``space-media-blob`` /
+``space-post-routed`` / ``mesh-member-cert`` / ``space-media-blob`` /
 ``space-gallery-media-blob`` / ``space-sync-catchup-media`` /
 ``sync-https-fallback`` / ``admin-promote-kick`` / ``app-session`` /
 ``remote-invite-decline`` / ``replay``);

@@ -265,6 +265,12 @@ class _FakeFederationService:
         #: ``instance_id -> Ed25519 identity pk`` this node has pinned,
         #: read by the v_31 routed origin-authentication check.
         self.identity_pks: dict[str, bytes] = {}
+        #: Events handed to ``record_mesh_member_claim`` (migration 0078).
+        self.mesh_claims: list = []
+
+    async def record_mesh_member_claim(self, event, *, notify=True):
+        self.mesh_claims.append((event, notify))
+        return True
 
     @property
     def own_instance_id(self) -> str:
@@ -1294,6 +1300,39 @@ async def test_redeem_round_trip_via_mesh_routing():
     # Issuer seated the redeemer + token consumed.
     assert len(issuer_members.added) == 1
     assert issuer_repo.tokens["good-token"]["uses_remaining"] == 0
+    # The mesh redeem carries the redeemer's version + identity-key claim
+    # INSIDE the seal (no relay reads it), and the issuer hands the
+    # unwrapped, origin-authenticated event to ``record_mesh_member_claim``
+    # once the seat is committed — that raise sends the household its
+    # roster snapshot with the writer cert.
+    # (The identity key itself is no secret — v_31 ships it as
+    # ``origin_identity_pk`` beside the seal — but the claim fields are inside.)
+    assert "member_proto_version" not in wire
+    assert "member_identity_pk" not in wire
+    assert len(issuer_fed.mesh_claims) == 1
+    claimed, notify = issuer_fed.mesh_claims[0]
+    assert notify is True
+    assert claimed.routed_path == ["sender-1", "issuer-1"]
+    assert claimed.payload["member_proto_version"] == OURS
+    assert claimed.payload["member_identity_pk"] == sender_fed.identity.public_key.hex()
+
+
+async def test_a_direct_redeem_carries_no_mesh_claim():
+    """A paired issuer learns our version on the direct path; the claim is
+    only for the mesh."""
+    fed = _FakeFederationService()
+    fed_repo = _FakeFederationRepo(
+        {"issuer-1": _FakeInstance("issuer-1", status=PairingStatus.CONFIRMED)}
+    )
+    users = _FakeUserRepo({"u-local": _make_user()})
+    coord = _make_coordinator(
+        federation=fed, federation_repo=fed_repo, user_repo=users, timeout=0.01
+    )
+    with pytest.raises(TimeoutError):
+        await coord.request_redeem(
+            "tok", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+        )
+    assert "member_proto_version" not in fed.sent[0]["payload"]
 
 
 async def _noop_dispatcher(_ev):
