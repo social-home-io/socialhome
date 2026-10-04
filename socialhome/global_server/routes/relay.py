@@ -107,6 +107,12 @@ class GfsInfoView(GfsBaseView):
         # refuses identified publishes into a strict space. Signed because a
         # household only adds those notice fields for a server that verifies
         # them (an older one would refuse the owner's notice outright).
+        # ``private_channels`` (v_51): this GFS carries the opaque
+        # ``/gfs/channels/*`` routes — anonymous channel-key-signed
+        # registration and epoch notices, pass-gated member seats, trusted
+        # and strict channel publishes. Signed because a household creates a
+        # private space's channel (and its members subscribe, identified)
+        # only against a server that agreed to never learn the space.
         capabilities = {
             "anonymous_publish": True,
             "envelope_relay": True,
@@ -114,6 +120,7 @@ class GfsInfoView(GfsBaseView):
             "authority_rotation": True,
             "member_publish_trusted": True,
             "member_publish_strict": True,
+            "private_channels": True,
         }
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {

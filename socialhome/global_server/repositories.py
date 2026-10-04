@@ -31,6 +31,7 @@ from .domain import (
     ClientInstance,
     ClusterNode,
     GfsAppeal,
+    GfsChannel,
     GfsFraudReport,
     GfsHighlightPublication,
     GfsHighlightToken,
@@ -2352,6 +2353,289 @@ class SqliteGfsSpaceEpochRepo:
             ),
         )
         return changed > 0
+
+
+# ─── Opaque channels for private spaces (v_51) ───────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsChannelRepo(Protocol):
+    """Opaque channels and their fan-out seats (migration 0016). Keyed by
+    the random channel id only — nothing here names a space or an owner."""
+
+    async def get(self, channel_id: str) -> GfsChannel | None: ...
+
+    async def register(
+        self, channel_id: str, *, channel_suite: str, channel_pk: str, now: int
+    ) -> bool: ...
+
+    async def touch(self, channel_id: str, *, now: int) -> None: ...
+
+    async def repin(
+        self,
+        channel_id: str,
+        *,
+        expected_pk: str,
+        channel_suite: str,
+        channel_pk: str,
+        key_epoch: int,
+        now: int,
+    ) -> bool: ...
+
+    async def set_epoch(
+        self, channel_id: str, epoch: int, *, expected: int | None, now: int
+    ) -> bool: ...
+
+    async def set_publish_mode(
+        self, channel_id: str, mode: str, *, at: int
+    ) -> bool: ...
+
+    async def pin_writer_key(
+        self, channel_id: str, epoch: int, writer_pk: str
+    ) -> bool: ...
+
+    async def delete(self, channel_id: str) -> None: ...
+
+    async def add_subscriber(
+        self, channel_id: str, instance_id: str, *, pass_epoch: int, now: int
+    ) -> None: ...
+
+    async def remove_subscriber(self, channel_id: str, instance_id: str) -> None: ...
+
+    async def count_subscriptions(self, instance_id: str) -> int: ...
+
+    async def has_subscription(self, channel_id: str, instance_id: str) -> bool: ...
+
+    async def list_targets(self, channel_id: str, epochs: set[int]) -> list[str]: ...
+
+    async def list_recently_seen(
+        self, channel_id: str, epochs: set[int], *, within_s: int
+    ) -> set[str]: ...
+
+    async def prune_idle(self, *, older_than: int) -> int: ...
+
+
+class SqliteGfsChannelRepo:
+    """SQLite-backed :class:`AbstractGfsChannelRepo`. Every state change is
+    one conditional statement, so concurrent writers (a cluster sharing one
+    DB) can't interleave a pin or an epoch step."""
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def get(self, channel_id: str) -> GfsChannel | None:
+        row = _as_dict(
+            await self._db.fetchone(
+                "SELECT * FROM gfs_channels WHERE channel_id=?", (channel_id,)
+            )
+        )
+        if not row:
+            return None
+
+        def _int(name: str) -> int | None:
+            value = row.get(name)
+            return int(value) if value is not None else None
+
+        return GfsChannel(
+            channel_id=str(row["channel_id"]),
+            channel_suite=str(row["channel_suite"]),
+            channel_pk=str(row["channel_pk"]),
+            key_epoch=int(row.get("key_epoch") or 0),
+            registered_at=int(row.get("registered_at") or 0),
+            last_active_at=int(row.get("last_active_at") or 0),
+            epoch=_int("content_epoch"),
+            epoch_prev=_int("content_epoch_prev"),
+            epoch_raised_at=_int("content_epoch_raised_at"),
+            publish_mode=str(row.get("publish_mode") or "trusted"),
+            publish_mode_at=_int("publish_mode_at"),
+            writer_key_epoch=_int("writer_key_epoch"),
+            writer_key_pk=row.get("writer_key_pk"),
+            writer_key_prev_epoch=_int("writer_key_prev_epoch"),
+            writer_key_prev_pk=row.get("writer_key_prev_pk"),
+        )
+
+    async def register(
+        self, channel_id: str, *, channel_suite: str, channel_pk: str, now: int
+    ) -> bool:
+        """Pin ``channel_pk`` for a NEW channel (trust on first use).
+        ``False`` when the id is already registered (the caller compares
+        keys)."""
+        changed = await self._db.enqueue_rowcount(
+            "INSERT OR IGNORE INTO gfs_channels(channel_id, channel_suite,"
+            " channel_pk, registered_at, last_active_at) VALUES(?, ?, ?, ?, ?)",
+            (channel_id, channel_suite, channel_pk, now, now),
+        )
+        return changed > 0
+
+    async def touch(self, channel_id: str, *, now: int) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_channels SET last_active_at=? WHERE channel_id=?"
+            " AND last_active_at < ?",
+            (now, channel_id, now),
+        )
+
+    async def repin(
+        self,
+        channel_id: str,
+        *,
+        expected_pk: str,
+        channel_suite: str,
+        channel_pk: str,
+        key_epoch: int,
+        now: int,
+    ) -> bool:
+        """Replace the pinned key iff it is still ``expected_pk`` (the key the
+        caller verified the chained cert against) and ``key_epoch`` is newer.
+        Clears the epoch and the writer key pins — statements of the old key
+        stop meaning anything. Subscriptions stay (members re-subscribe with
+        new passes as epochs move)."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_channels SET channel_suite=?, channel_pk=?, key_epoch=?,"
+            " last_active_at=?, content_epoch=NULL, content_epoch_prev=NULL,"
+            " content_epoch_raised_at=NULL, writer_key_epoch=NULL,"
+            " writer_key_pk=NULL, writer_key_prev_epoch=NULL,"
+            " writer_key_prev_pk=NULL"
+            " WHERE channel_id=? AND channel_pk=? AND key_epoch < ?",
+            (
+                channel_suite,
+                channel_pk,
+                key_epoch,
+                now,
+                channel_id,
+                expected_pk,
+                key_epoch,
+            ),
+        )
+        return changed > 0
+
+    async def set_epoch(
+        self, channel_id: str, epoch: int, *, expected: int | None, now: int
+    ) -> bool:
+        """Raise the content epoch to ``epoch`` iff it still is ``expected``
+        (compare-and-set: the caller checked the step against that value).
+        The old epoch becomes ``prev``. Returns whether the row changed."""
+        if expected is None:
+            sql = (
+                "UPDATE gfs_channels SET content_epoch_prev=NULL,"
+                " content_epoch=?, content_epoch_raised_at=?, last_active_at=?"
+                " WHERE channel_id=? AND content_epoch IS NULL"
+            )
+            params: tuple = (epoch, now, now, channel_id)
+        else:
+            sql = (
+                "UPDATE gfs_channels SET content_epoch_prev=content_epoch,"
+                " content_epoch=?, content_epoch_raised_at=?, last_active_at=?"
+                " WHERE channel_id=? AND content_epoch=? AND ? > content_epoch"
+            )
+            params = (epoch, now, now, channel_id, expected, epoch)
+        return await self._db.enqueue_rowcount(sql, params) > 0
+
+    async def set_publish_mode(self, channel_id: str, mode: str, *, at: int) -> bool:
+        """Lands only when no newer statement is stored — a replayed older
+        notice never moves the mode back. The CHECK refuses other values."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_channels SET publish_mode=?, publish_mode_at=?"
+            " WHERE channel_id=? AND (publish_mode_at IS NULL OR publish_mode_at <= ?)",
+            (mode, at, channel_id, at),
+        )
+        return changed > 0
+
+    async def pin_writer_key(self, channel_id: str, epoch: int, writer_pk: str) -> bool:
+        """Pin ``writer_pk`` as the writer key of ``epoch``: the first pin of
+        an epoch wins (a key is deterministic per epoch, so an honest retry
+        repeats it); a newer epoch moves the old pin to ``prev``."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_channels SET"
+            " writer_key_prev_epoch=CASE WHEN writer_key_epoch IS NOT NULL"
+            "  THEN writer_key_epoch ELSE writer_key_prev_epoch END,"
+            " writer_key_prev_pk=CASE WHEN writer_key_epoch IS NOT NULL"
+            "  THEN writer_key_pk ELSE writer_key_prev_pk END,"
+            " writer_key_epoch=?, writer_key_pk=?"
+            " WHERE channel_id=? AND (writer_key_epoch IS NULL OR ? > writer_key_epoch)",
+            (epoch, writer_pk, channel_id, epoch),
+        )
+        return changed > 0
+
+    async def delete(self, channel_id: str) -> None:
+        """Drop the channel; its seats go with it (ON DELETE CASCADE)."""
+        await self._db.enqueue(
+            "DELETE FROM gfs_channels WHERE channel_id=?", (channel_id,)
+        )
+
+    async def add_subscriber(
+        self, channel_id: str, instance_id: str, *, pass_epoch: int, now: int
+    ) -> None:
+        """Take or refresh a seat. A pass never moves a seat's epoch back."""
+        await self._db.enqueue(
+            "INSERT INTO gfs_channel_subscribers(channel_id, instance_id,"
+            " pass_epoch, joined_at) VALUES(?, ?, ?, ?)"
+            " ON CONFLICT(channel_id, instance_id) DO UPDATE SET"
+            " pass_epoch=MAX(pass_epoch, excluded.pass_epoch)",
+            (channel_id, instance_id, pass_epoch, now),
+        )
+
+    async def remove_subscriber(self, channel_id: str, instance_id: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM gfs_channel_subscribers WHERE channel_id=? AND instance_id=?",
+            (channel_id, instance_id),
+        )
+
+    async def count_subscriptions(self, instance_id: str) -> int:
+        row = _as_dict(
+            await self._db.fetchone(
+                "SELECT COUNT(*) AS n FROM gfs_channel_subscribers WHERE instance_id=?",
+                (instance_id,),
+            )
+        )
+        return int(row.get("n") or 0)
+
+    async def has_subscription(self, channel_id: str, instance_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gfs_channel_subscribers WHERE channel_id=? AND instance_id=?",
+            (channel_id, instance_id),
+        )
+        return row is not None
+
+    async def list_targets(self, channel_id: str, epochs: set[int]) -> list[str]:
+        """Active households holding a seat whose pass epoch is in
+        ``epochs`` (the epochs open right now)."""
+        if not epochs:
+            return []
+        marks = ",".join("?" for _ in epochs)
+        rows = await self._db.fetchall(
+            "SELECT cs.instance_id FROM gfs_channel_subscribers cs"
+            " JOIN client_instances ci USING (instance_id)"
+            f" WHERE cs.channel_id=? AND ci.status='active' AND cs.pass_epoch IN ({marks})",
+            (channel_id, *sorted(epochs)),
+        )
+        return [str(_as_dict(r)["instance_id"]) for r in rows]
+
+    async def list_recently_seen(
+        self, channel_id: str, epochs: set[int], *, within_s: int
+    ) -> set[str]:
+        """:meth:`list_targets` narrowed to households that held a WS session
+        long enough within ``within_s`` (``client_instances.relay_seen_at``)
+        — only they get offline copies queued."""
+        if not epochs:
+            return set()
+        marks = ",".join("?" for _ in epochs)
+        rows = await self._db.fetchall(
+            "SELECT cs.instance_id FROM gfs_channel_subscribers cs"
+            " JOIN client_instances ci USING (instance_id)"
+            f" WHERE cs.channel_id=? AND ci.status='active' AND cs.pass_epoch IN ({marks})"
+            " AND ci.relay_seen_at IS NOT NULL AND ci.relay_seen_at >= ?",
+            (channel_id, *sorted(epochs), int(time.time()) - int(within_s)),
+        )
+        return {str(_as_dict(r)["instance_id"]) for r in rows}
+
+    async def prune_idle(self, *, older_than: int) -> int:
+        """Drop channels with no registration, notice or publish since
+        ``older_than`` (unix seconds). Returns how many."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_channels WHERE last_active_at < ?", (older_than,)
+        )
 
 
 # ─── Invite tokens ───────────────────────────────────────────────────────

@@ -322,6 +322,13 @@ class SpaceSyncScheduler:
             # runtime negotiates DataChannel first and falls back via
             # ``trigger_relay_sync`` on the 15 s ICE timeout.
             prefer_direct = os.environ.get("SH_FORCE_SYNC_HTTPS") != "1"
+            # A household seated from an invite link is relay-only: no
+            # address either way, and its direct-sync signalling is refused
+            # by the peer-class step — ask it for relay mode straight away.
+            if prefer_direct and await self._federation.is_space_session_peer(
+                peer_instance_id
+            ):
+                prefer_direct = False
             sync_id = uuid.uuid4().hex
             # Record what we are asking for, so the provider's
             # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An

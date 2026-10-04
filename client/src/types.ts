@@ -357,6 +357,10 @@ export interface Space {
   owner_instance_id?: string  /** ``GET /api/spaces/{id}`` only: at least one OTHER household has a
    *  member here. */
   has_remote_households?: boolean
+  /** ``GET /api/spaces/{id}`` only (v_51): this PRIVATE space reaches
+   *  members who joined through a link over an opaque connection-server
+   *  channel, so the owner's publish-mode choice applies to it. */
+  gfs_private_channel?: boolean
 }
 
 /** A space feature's access level (``SpaceFeatureAccess`` server-side). */

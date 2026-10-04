@@ -1169,3 +1169,101 @@ async def test_the_directory_cache_is_dropped_on_a_key_or_config_change(world):
         SpaceConfigChanged(space_id=SPACE_ID, event_type="x", payload={}, sequence=1)
     )
     assert svc._listing == {}
+
+
+# ── Private spaces: the opaque channel (v_51) ────────────────────────────
+
+
+class _Channels:
+    """Records what the member publisher hands the channel service."""
+
+    def __init__(self, conn) -> None:
+        self.conn = conn
+        self.sealed: list[tuple[str, int, str, list]] = []
+        self.rotations: list[str] = []
+        self.announced: list[tuple[str, str | None]] = []
+        self.healed: list[str] = []
+        self.channel = True
+
+    async def plan(self, space_id):
+        return [self.conn]
+
+    async def publish_sealed(self, space_id, epoch, ciphertext, targets):
+        self.sealed.append((space_id, epoch, ciphertext, targets))
+        return targets
+
+    async def on_rotation(self, space_id):
+        self.rotations.append(space_id)
+        return 1
+
+    async def announce_epoch(self, space_id, *, only=None):
+        self.announced.append((space_id, only))
+        return 1
+
+    async def heal(self, gfs_id):
+        self.healed.append(gfs_id)
+        return 0
+
+    async def has_channel(self, space_id):
+        return self.channel
+
+
+def _private(world) -> _Channels:
+    world["spaces"].spaces[SPACE_ID] = _space(
+        owner=world["owner"].instance_id, public=False, readable=False
+    )
+    channels = _Channels(world["conn"])
+    world["svc"].attach_channels(channels)
+    return channels
+
+
+async def test_a_private_space_publishes_only_through_its_channel(world):
+    channels = _private(world)
+    svc = world["svc"]
+    assert await svc.channel_space(SPACE_ID)
+    targets = await svc.plan_item(SPACE_ID, AUTHOR, "post")
+    assert [t.id for t in targets] == ["conn-1"]
+    # Nothing identified or space-keyed: no subscribe to the space, no
+    # /gfs/member-publish.
+    assert world["gfs"].subscribed == []
+    accepted = await svc.publish_item(SPACE_ID, "post", _inner(), targets)
+    assert accepted == targets
+    (space_id, epoch, ct, _t) = channels.sealed[0]
+    assert (space_id, epoch) == (SPACE_ID, 3)
+    # Sealed under the content key with our space writer cert INSIDE.
+    item_type, inner = parse_item_plaintext(world["crypto"].decrypt(ct))
+    assert item_type == "post" and inner["writer_cert"]["space_id"] == SPACE_ID
+    assert await _queued(world) == []
+
+
+async def test_a_private_item_the_cert_does_not_allow_takes_the_host_path(world):
+    _private(world)
+    world["svc"]._writer_certs.users = ["someone-else"]
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "post") == []
+
+
+async def test_a_private_space_without_a_channel_is_not_offered(world):
+    channels = _private(world)
+    channels.channel = False
+    assert not await world["svc"].channel_space(SPACE_ID)
+
+
+async def test_private_epoch_notices_and_heal_go_to_the_channel(world):
+    channels = _private(world)
+    svc = world["svc"]
+    assert await svc.announce_epoch(SPACE_ID) == 1
+    assert channels.rotations == [SPACE_ID]
+    assert await svc.announce_epoch(SPACE_ID, only="conn-1") == 1
+    assert channels.announced == [(SPACE_ID, "conn-1")]
+    await svc.reconcile_channel(SPACE_ID)
+    assert channels.rotations == [SPACE_ID, SPACE_ID]
+    await svc.announce_held_epochs("conn-1")
+    assert channels.healed == ["conn-1"]
+
+
+async def test_a_public_space_never_touches_the_channel(world):
+    channels = _Channels(world["conn"])
+    world["svc"].attach_channels(channels)
+    assert not await world["svc"].channel_space(SPACE_ID)
+    await world["svc"].reconcile_channel(SPACE_ID)
+    assert channels.rotations == []

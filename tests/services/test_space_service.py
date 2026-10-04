@@ -9858,3 +9858,20 @@ async def test_an_upgrade_to_v50_delivers_the_writer_key(stack):
     kw = fed.send_with_mesh_fallback.await_args.kwargs
     assert kw["to_instance_id"] == "peer-a"
     assert "writer_key" in kw["payload"]
+
+
+# ── v_51: the roster snapshot carries the private-space channel grant ────
+
+
+class _SnapshotChannels:
+    async def grant_for_peer(self, space_id, instance_id, *, epoch=None):
+        return {"grant_for": instance_id}
+
+
+async def test_roster_snapshot_carries_the_recipients_channel_grant(stack):
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a")
+    stack.space_svc._writer_certs.attach_channels(_SnapshotChannels())
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert payload["gfs_channel"] == {"grant_for": "peer-a"}

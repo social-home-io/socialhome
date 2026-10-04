@@ -1025,6 +1025,13 @@ class _Certs:
         self.accepted.append((space_id, raw))
         return True
 
+    async def channel_grant_for_peer(self, space_id, instance_id, *, epoch=None):
+        return None
+
+    async def accept_channel_grant(self, space_id, raw):
+        self.accepted.append((space_id, raw))
+        return True
+
 
 async def test_rotation_bundle_carries_each_households_own_cert(env):
     certs = _Certs()
@@ -1117,9 +1124,64 @@ async def test_a_re_pin_re_announces_the_epoch_before_the_reseal(env):
             calls.append("notice")
             raise RuntimeError("fail-soft")
 
+        async def reconcile_channel(self, space_id):
+            return None
+
     env.svc.attach_gfs(_Gfs())
     env.svc.attach_subscriber_keys(_Keys())
     env.svc.attach_member_gfs(_Member())
     await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
     await env.svc.rotate(SPACE)
     assert calls == ["republish", "notice", "reseal"]
+
+
+# ── v_51: a private space's fresh channel rides the bundle ───────────────
+
+
+async def test_the_channel_is_reconciled_before_bundles_carry_its_grant(env):
+    order: list[str] = []
+
+    class _Member:
+        async def reconcile_channel(self, space_id):
+            order.append("reconcile")
+
+        async def announce_epoch(self, space_id):
+            return 0
+
+    class _GrantCerts(_Certs):
+        async def channel_grant_for_peer(self, space_id, instance_id, *, epoch=None):
+            order.append(f"grant:{instance_id}")
+            return {"grant_for": instance_id, "epoch": epoch}
+
+    env.svc.attach_member_gfs(_Member())
+    env.svc.attach_writer_certs(_GrantCerts())
+    await env.svc.rotate(SPACE)
+    bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+    epoch = bundle["space_content_key"]["epoch"]
+    assert bundle["gfs_channel"] == {"grant_for": "v44", "epoch": epoch}
+    assert order[0] == "reconcile"
+
+
+async def test_member_takes_the_channel_grant_from_the_owner_bundle_only(env):
+    await env.svc.rotate(SPACE)
+    bundle = _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)[0]
+    member, handler = await _member_env(env)
+    certs = _Certs()
+    member.attach_writer_certs(certs)
+    await env.db.enqueue(
+        "UPDATE spaces SET owner_instance_id=? WHERE id=?",
+        (env.fed.own_instance_id, SPACE),
+    )
+    for sender in ("not-the-owner", env.fed.own_instance_id):
+        await handler(
+            FederationEvent(
+                msg_id=str(uuid.uuid4()),
+                event_type=FET.SPACE_AUTHORITY_ROTATED,
+                from_instance=sender,
+                to_instance="member-household",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                payload={**bundle, "gfs_channel": {"grant": sender}},
+                space_id=SPACE,
+            )
+        )
+    assert certs.accepted == [(SPACE, {"grant": env.fed.own_instance_id})]

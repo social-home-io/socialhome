@@ -1426,6 +1426,7 @@
   "stickies.read_only_viewer": "Du kannst diese Notizen lesen, aber keine hinzufügen oder ändern.",
   "space.gfs_publish.legend": "Veröffentlichen über den Verbindungsserver",
   "space.gfs_publish.intro": "Wie Beiträge, Kommentare und Reaktionen der Mitglieder über deinen Verbindungsserver bei den Followern ankommen. Nur du als Eigentümer kannst das ändern.",
+  "space.gfs_publish.private_intro": "Mitglieder, die über einen Link beigetreten sind, erreichen einander über deinen Verbindungsserver, auch wenn dieser Haushalt offline ist. Der Server erfährt nie den Namen dieses Raums – nur, welche Haushalte dabei sind. Nur du als Eigentümer kannst das ändern.",
   "space.gfs_publish.trusted": "Vertraut",
   "space.gfs_publish.strict": "Streng",
   "space.gfs_publish.trusted_help": "Die Voreinstellung. Mitglieder können über deinen Verbindungsserver posten, auch wenn dieser Haushalt offline ist. Der Server erfährt, welcher Haushalt gepostet hat – aber nie, was gepostet wurde.",

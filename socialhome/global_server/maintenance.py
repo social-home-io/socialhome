@@ -20,11 +20,13 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from .domain import CHANNEL_IDLE_TTL_SECONDS
 from .repositories import PAIR_TOKEN_RETENTION_SECONDS
 
 if TYPE_CHECKING:
     from .repositories import (
         AbstractGfsAdminRepo,
+        AbstractGfsChannelRepo,
         AbstractGfsEnvelopeQueueRepo,
         AbstractGfsHighlightPublicationRepo,
         AbstractGfsInviteRepo,
@@ -41,6 +43,7 @@ class GfsMaintenanceScheduler:
         "_highlight_repo",
         "_envelope_queue_repo",
         "_invite_repo",
+        "_channel_repo",
         "_interval",
         "_task",
         "_stop",
@@ -53,6 +56,7 @@ class GfsMaintenanceScheduler:
         highlight_repo: "AbstractGfsHighlightPublicationRepo",
         envelope_queue_repo: "AbstractGfsEnvelopeQueueRepo | None" = None,
         invite_repo: "AbstractGfsInviteRepo | None" = None,
+        channel_repo: "AbstractGfsChannelRepo | None" = None,
         interval_seconds: float = 3600.0,  # once per hour
     ) -> None:
         self._admin_repo = admin_repo
@@ -61,6 +65,7 @@ class GfsMaintenanceScheduler:
         # the two original repos keeps working; production always wires it.
         self._envelope_queue_repo = envelope_queue_repo
         self._invite_repo = invite_repo
+        self._channel_repo = channel_repo
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -134,6 +139,16 @@ class GfsMaintenanceScheduler:
                     "gfs maintenance: prune_expired invites failed: %s",
                     exc,
                 )
+        channels = 0
+        if self._channel_repo is not None:
+            try:
+                channels = await self._channel_repo.prune_idle(
+                    older_than=now - CHANNEL_IDLE_TTL_SECONDS
+                )
+            except Exception as exc:
+                log.warning("gfs maintenance: prune_idle channels failed: %s", exc)
+        if channels:
+            log.debug("gfs maintenance: dropped %d idle channels", channels)
         if highlights or tokens or envelopes or invites:
             log.debug(
                 "gfs maintenance: pruned %d highlight publications, %d pair "

@@ -101,6 +101,11 @@ class AbstractSpaceRepo(Protocol):
     async def get_seed_shared_epoch(self, space_id: str) -> int | None: ...
     async def set_host_identity_pk(self, space_id: str, pk_hex: str) -> None: ...
     async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None: ...
+    async def get_gfs_channel(self, space_id: str) -> tuple[str, str] | None: ...
+    async def set_gfs_channel(
+        self, space_id: str, channel_id: str | None, channel_pk: str | None
+    ) -> bool: ...
+    async def space_for_gfs_channel(self, channel_id: str) -> str | None: ...
     async def get_owner_user_id(self, space_id: str) -> str | None: ...
     async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
@@ -1005,6 +1010,48 @@ class SqliteSpaceRepo:
         if row is None:
             return None
         return row["host_identity_pk"]
+
+    async def get_gfs_channel(self, space_id: str) -> tuple[str, str] | None:
+        """The opaque connection-server channel ``(channel_id, channel_pk)``
+        this private space uses (v_51, migration 0077), or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT gfs_channel_id, gfs_channel_pk FROM spaces WHERE id=?",
+            (space_id,),
+        )
+        if row is None or not row["gfs_channel_id"] or not row["gfs_channel_pk"]:
+            return None
+        return str(row["gfs_channel_id"]), str(row["gfs_channel_pk"])
+
+    async def set_gfs_channel(
+        self, space_id: str, channel_id: str | None, channel_pk: str | None
+    ) -> bool:
+        """Point the space at a channel (``None`` forgets it). ``False`` when
+        another space already claims ``channel_id`` (the partial UNIQUE index
+        — a grant naming someone else's channel is refused) or the space is
+        unknown."""
+
+        def _run(conn) -> bool:
+            if channel_id is not None:
+                taken = conn.execute(
+                    "SELECT 1 FROM spaces WHERE gfs_channel_id=? AND id<>?",
+                    (channel_id, space_id),
+                ).fetchone()
+                if taken is not None:
+                    return False
+            cur = conn.execute(
+                "UPDATE spaces SET gfs_channel_id=?, gfs_channel_pk=? WHERE id=?",
+                (channel_id, channel_pk if channel_id is not None else None, space_id),
+            )
+            return bool(cur.rowcount)
+
+        return bool(await self._db.transact(_run))
+
+    async def space_for_gfs_channel(self, channel_id: str) -> str | None:
+        """The space an inbound channel frame belongs to, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT id FROM spaces WHERE gfs_channel_id=?", (channel_id,)
+        )
+        return str(row["id"]) if row is not None else None
 
     async def set_owner_user_id(self, space_id: str, user_id: str | None) -> None:
         """Record the owner's ``user_id`` on a stub (migration 0070); ``None``

@@ -1113,6 +1113,17 @@ owner-only: a member household takes it only from the owner household's own
 `SPACE_CONFIG_CHANGED` (a delegated admin's signed config can't flip it), and
 the host pins it like `allow_subscribers`.
 
+**Private-space channel grant (v_51).** In a PRIVATE space with at least one
+link-joined member household, the same four channels also carry
+`gfs_channel` — the household's per-epoch grant for the space's opaque
+connection-server channel (`{channel_suite, space_id, channel_id,
+channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite, binding_sig, channel_pass,
+channel_cert?, writer_key?}`), to every v_51 member household with a live
+seat (a reader gets a pass but no cert). It is bound to the space by the
+authority key, verified against the pinned space key and kept KEK-wrapped on
+`space_keys.gfs_channel`; a snapshot's grant is taken only from the host.
+See [`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).
+
 ## Flow — rekey
 
 Triggered on every member-removal path (#121, PR #432): local kick,

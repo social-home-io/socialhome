@@ -100,7 +100,7 @@ from ..domain.gfs_member_publish import (
     owner_epoch_notice_signing_payload,
 )
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, SpaceType
 from ..domain.space_item import ITEM_TYPE_POST, SUPPORTED_ITEM_TYPES, required_scope
 from ..domain.writer_cert import WriterCert, scope_permits
 from .gfs_publish_retry import (
@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .gfs_channel_service import GfsChannelService
     from .gfs_connection_service import GfsConnectionService
     from .space_crypto_service import SpaceContentEncryption
     from .space_writer_cert_service import SpaceWriterCertService
@@ -219,6 +220,7 @@ class GfsMemberPublishService:
     keep member subscriptions."""
 
     __slots__ = (
+        "_channels",
         "_conn_repo",
         "_crypto",
         "_gfs",
@@ -260,6 +262,34 @@ class GfsMemberPublishService:
         #: Background publishes in flight (strong refs) and the stop flag.
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
+        #: v_51 — opaque channels for PRIVATE spaces with link-joined
+        #: members. ``None`` → private spaces always take the host path.
+        self._channels: "GfsChannelService | None" = None
+
+    def attach_channels(self, channels: "GfsChannelService") -> None:
+        """Wire the private-space channel service (v_51)."""
+        self._channels = channels
+
+    async def _private(self, space_id: str) -> bool:
+        space = await self._spaces.get(space_id)
+        return space is not None and space.space_type is SpaceType.PRIVATE
+
+    async def channel_space(self, space_id: str) -> bool:
+        """Whether ``space_id`` is a PRIVATE space using an opaque channel
+        here (v_51) — its local writes are offered to the member publisher,
+        which then decides by our grant and cert."""
+        return (
+            self._channels is not None
+            and await self._private(space_id)
+            and await self._channels.has_channel(space_id)
+        )
+
+    async def reconcile_channel(self, space_id: str) -> None:
+        """Before an authority-rotation bundle goes out: let the channel
+        service start a fresh channel for the new seed (and announce it), so
+        the bundle carries grants for it. No-op for other spaces."""
+        if self._channels is not None and await self._private(space_id):
+            await self._channels.on_rotation(space_id)
 
     def wire(self, bus: "EventBus") -> None:
         """Subscribe a newly seated local writer to the GFS fan-out at once
@@ -422,6 +452,18 @@ class GfsMemberPublishService:
         here); a strict space without the key → ``[]`` — never the identified
         path."""
         space = await self._spaces.get(space_id)
+        if (
+            space is not None
+            and space.space_type is SpaceType.PRIVATE
+            and self._channels is not None
+        ):
+            # v_51 — a private space publishes only through its opaque
+            # channel, and only when our cert lets THIS author post THIS type
+            # (the cert rides inside the ciphertext, as always).
+            cert = await self._writer_certs.current_own_cert_wire(space_id)
+            if cert is None or not _cert_lets(cert, author_user_id, item_type):
+                return []
+            return await self._channels.plan(space_id)
         if not self._publicly_readable(space):
             return []
         assert space is not None
@@ -523,6 +565,10 @@ class GfsMemberPublishService:
         if sealed is None:
             return []
         epoch, cert, ciphertext = sealed
+        if self._channels is not None and await self._private(space_id):
+            return await self._channels.publish_sealed(
+                space_id, epoch, ciphertext, targets
+            )
         item = await self._item_for(space_id, epoch, cert, ciphertext)
         if item is None:
             return []
@@ -678,8 +724,20 @@ class GfsMemberPublishService:
         with its household key (the GFS confirms any jump); a delegated admin
         signs with the space seed (+1 at most). ``only`` limits it to one
         connection. No-op without the seed or for a space that is not
-        publicly readable. Returns how many accepted."""
+        publicly readable. Returns how many accepted.
+
+        v_51 — a PRIVATE space announces to its opaque channel instead (the
+        owner first reconciles the channel, so a space that lost its last
+        link-joined member retires it before this rotation's rekey)."""
         space = await self._spaces.get(space_id)
+        if (
+            space is not None
+            and space.space_type is SpaceType.PRIVATE
+            and self._channels is not None
+        ):
+            if only is not None:
+                return await self._channels.announce_epoch(space_id, only=only)
+            return await self._channels.on_rotation(space_id)
         if not self._publicly_readable(space):
             return 0
         assert space is not None
@@ -934,6 +992,13 @@ class GfsMemberPublishService:
         if conn is None or conn.status != "active":
             return 0
         done = 0
+        if self._channels is not None:
+            # v_51 — private-space channels: the owner re-registers /
+            # creates and re-announces, members re-subscribe.
+            try:
+                done += await self._channels.heal(gfs_id)
+            except Exception:
+                log.exception("gfs.member_publish: channel heal failed")
         for space in await self._spaces.list_all():
             if not self._publicly_readable(space) or not await self._holds_seed(
                 space.id

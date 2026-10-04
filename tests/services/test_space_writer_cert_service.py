@@ -328,6 +328,61 @@ async def test_peer_payload_hook_can_be_limited_to_one_household():
     assert "writer_cert" in await hook("fol", {})
 
 
+class _GrantingChannels:
+    """A v_51 channel service stand-in: one marker grant per household."""
+
+    def __init__(self, *, boom: bool = False) -> None:
+        self.boom = boom
+        self.accepted: list[tuple[str, object]] = []
+
+    async def grant_for_peer(self, space_id, instance_id, *, epoch=None):
+        if self.boom:
+            raise RuntimeError("boom")
+        return {"grant_for": instance_id, "epoch": epoch}
+
+    async def accept_grant(self, space_id, raw):
+        if self.boom:
+            raise RuntimeError("boom")
+        self.accepted.append((space_id, raw))
+        return True
+
+
+async def test_peer_payload_hook_carries_each_households_channel_grant():
+    """v_51: every member household's copy carries ITS channel grant — a
+    reader household (no cert) too, since it subscribes."""
+    svc, _ = _svc(
+        remote_rows=[
+            _remote("peer", "member"),
+            _remote("fol", SpaceRole.SUBSCRIBER.value),
+        ],
+    )
+    svc.attach_channels(_GrantingChannels())  # type: ignore[arg-type]
+    hook = svc.peer_payload_hook("sp-1", epoch=7)
+    for_peer = await hook("peer", {})
+    assert for_peer["gfs_channel"]["grant_for"] == "peer"
+    assert "writer_cert" in for_peer
+    for_reader = await hook("fol", {})
+    assert for_reader["gfs_channel"] == {"grant_for": "fol", "epoch": 7}
+    assert "writer_cert" not in for_reader
+
+
+async def test_channel_grant_failures_never_cost_the_payload():
+    svc, _ = _svc(remote_rows=[_remote("peer", "member")])
+    assert await svc.channel_grant_for_peer("sp-1", "peer") is None
+    assert not await svc.accept_channel_grant("sp-1", {"x": 1})
+    svc.attach_channels(_GrantingChannels(boom=True))  # type: ignore[arg-type]
+    assert await svc.channel_grant_for_peer("sp-1", "peer") is None
+    assert not await svc.accept_channel_grant("sp-1", {"x": 1})
+    hook = svc.peer_payload_hook("sp-1")
+    out = await hook("peer", {})
+    assert "gfs_channel" not in out and "writer_cert" in out
+    ok = _GrantingChannels()
+    svc.attach_channels(ok)  # type: ignore[arg-type]
+    assert await svc.accept_channel_grant("sp-1", {"x": 1})
+    assert not await svc.accept_channel_grant("sp-1", None)
+    assert ok.accepted == [("sp-1", {"x": 1})]
+
+
 # ── Receiving + storing ──────────────────────────────────────────────────
 
 

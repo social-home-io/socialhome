@@ -39,6 +39,7 @@ from ..db import AsyncDatabase
 from . import app_keys as K
 from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
+from .channels import GfsChannelService, build_channel_rate_limit
 from .cluster import ClusterService
 from .envelope_relay import GfsEnvelopeRelay, build_envelope_rate_limit
 from .config import (
@@ -63,6 +64,7 @@ from .repositories import (
     SqliteClusterRepo,
     SqliteGfsAdminRepo,
     SqliteGfsEnvelopeQueueRepo,
+    SqliteGfsChannelRepo,
     SqliteGfsSpaceEpochRepo,
     SqliteGfsInviteRepo,
     SqliteGfsFederationRepo,
@@ -285,6 +287,7 @@ class GfsApp:
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
             space_epochs=SqliteGfsSpaceEpochRepo(db),
+            channels=SqliteGfsChannelRepo(db),
             invites=SqliteGfsInviteRepo(db),
         )
 
@@ -372,6 +375,14 @@ class GfsApp:
             # What households pin from ``/gfs/info`` and sign into each request.
             gfs_instance_id=config.instance_id,
         )
+        # Opaque channels for private spaces (v_51): same fan-out workers and
+        # offline queue as member publish, keyed by a random channel id.
+        channels = GfsChannelService(
+            federation=federation,
+            channel_repo=repos.channels,
+            member_publish=member_publish,
+            gfs_instance_id=config.instance_id,
+        )
         # Periodic retention sweep — purges expired admin sessions, expired
         # highlight publications, aged pair tokens, and envelopes whose TTL
         # ran out (the GFS otherwise has no recurring cleanup loop; these
@@ -381,6 +392,7 @@ class GfsApp:
             highlight_repo=repos.highlight_pubs,
             envelope_queue_repo=repos.envelope_queue,
             invite_repo=repos.invites,
+            channel_repo=repos.channels,
         )
         return SimpleNamespace(
             federation=federation,
@@ -396,6 +408,7 @@ class GfsApp:
             moment_public=moment_public,
             envelope_relay=envelope_relay,
             member_publish=member_publish,
+            channels=channels,
             invites=invites,
         )
 
@@ -407,6 +420,7 @@ class GfsApp:
             build_publish_rate_limit(self.client_ip),
             build_envelope_rate_limit(self.client_ip),
             build_member_publish_rate_limit(self.client_ip),
+            build_channel_rate_limit(self.client_ip),
         ]
         return web.Application(middlewares=middlewares)
 
@@ -438,6 +452,8 @@ class GfsApp:
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
         a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs
         a[K.gfs_member_publish_key] = self.services.member_publish
+        a[K.gfs_channel_repo_key] = self.repos.channels
+        a[K.gfs_channel_service_key] = self.services.channels
         a[K.gfs_invite_repo_key] = self.repos.invites
         a[K.gfs_invite_service_key] = self.services.invites
         # Non-typed helpers the admin module reads directly.

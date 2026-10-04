@@ -452,6 +452,105 @@ class GfsSpaceStrictState:
         return None
 
 
+#: How long a channel's previous content epoch stays open after the newer
+#: one was announced (seconds) — the receivers' and the space path's grace.
+CHANNEL_EPOCH_GRACE_S: int = 600
+
+#: A channel epoch may rise by at most one per this many seconds since the
+#: last raise (a rotation that came faster lands on the retry): nobody can be
+#: told apart from a legitimate seed holder here, so inflation is bounded by
+#: time, not by identity.
+CHANNEL_EPOCH_STEP_INTERVAL_S: int = 60
+
+#: A channel with no registration, notice or publish for this long is
+#: dropped by the maintenance sweep (its households re-register on their
+#: next connect if they still use it).
+CHANNEL_IDLE_TTL_SECONDS: int = 30 * 24 * 60 * 60
+
+
+@dataclass(slots=True, frozen=True)
+class GfsChannel:
+    """One opaque channel (v_51, migration 0016) — a PRIVATE space's member
+    relay, keyed by a random id. Nothing here names a space, a space key or
+    an owner household.
+
+    The content epoch has ONE tier (unlike :class:`GfsSpaceEpoch`): this
+    server cannot tell an owner from a delegated admin without learning who
+    owns the channel, so every channel-key-signed notice is equal and
+    inflation is bounded by time instead — :meth:`step_allowance`."""
+
+    channel_id: str
+    channel_suite: str
+    channel_pk: str
+    key_epoch: int
+    registered_at: int
+    last_active_at: int
+    epoch: int | None = None
+    epoch_prev: int | None = None
+    epoch_raised_at: int | None = None
+    publish_mode: str = "trusted"
+    publish_mode_at: int | None = None
+    writer_key_epoch: int | None = None
+    writer_key_pk: str | None = None
+    writer_key_prev_epoch: int | None = None
+    writer_key_prev_pk: str | None = None
+
+    @property
+    def strict(self) -> bool:
+        return self.publish_mode == "strict"
+
+    def admits(
+        self, epoch: int, *, now: int, grace_s: int = CHANNEL_EPOCH_GRACE_S
+    ) -> bool:
+        """Whether a cert / pass / anonymous publish at ``epoch`` is open
+        here: the current epoch, the next one (a rotation whose notice is
+        still on its retry), or the previous one for ``grace_s`` after the
+        raise. Nothing before the first notice (fail closed)."""
+        if self.epoch is None:
+            return False
+        if epoch in (self.epoch, self.epoch + 1):
+            return True
+        return (
+            self.epoch_prev is not None
+            and epoch == self.epoch_prev
+            and now - (self.epoch_raised_at or 0) <= grace_s
+        )
+
+    def step_allowance(self, epoch: int, *, now: int) -> int:
+        """Seconds until a notice for ``epoch`` may land: ``0`` = now. The
+        first notice after a registration or re-pin sets any epoch (bounded
+        by the caller); after that the epoch
+        rises by at most one per :data:`CHANNEL_EPOCH_STEP_INTERVAL_S` since
+        the last raise. ``-1`` = never (not ahead of the current epoch)."""
+        if self.epoch is None:
+            return 0
+        if epoch <= self.epoch:
+            return -1
+        needed = (epoch - self.epoch) * CHANNEL_EPOCH_STEP_INTERVAL_S
+        elapsed = now - (self.epoch_raised_at or 0)
+        return max(0, needed - elapsed)
+
+    def writer_pk_for(self, epoch: int) -> str | None:
+        """The pinned channel writer public key (b64url) for ``epoch``."""
+        if self.writer_key_epoch is not None and epoch == self.writer_key_epoch:
+            return self.writer_key_pk
+        if (
+            self.writer_key_prev_epoch is not None
+            and epoch == self.writer_key_prev_epoch
+        ):
+            return self.writer_key_prev_pk
+        return None
+
+
+@dataclass(slots=True, frozen=True)
+class GfsChannelSubscriber:
+    """One fan-out seat on a channel and the epoch of the pass behind it."""
+
+    channel_id: str
+    instance_id: str
+    pass_epoch: int
+
+
 @dataclass(slots=True, frozen=True)
 class GfsInviteToken:
     """One owner-minted space invite, parked on this server's bulletin board.

@@ -1065,10 +1065,14 @@ async def test_relay_hint_without_a_cert_has_no_field():
 
 
 class _MemberGfs:
-    def __init__(self, *, raises=False):
+    def __init__(self, *, raises=False, channel=False):
         self.raises = raises
+        self.channel = channel
         self.order: list[str] = []
         self.scheduled: list[tuple] = []
+
+    async def channel_space(self, space_id):
+        return self.channel
 
     def schedule_post(self, space_id, author_user_id, inner):
         self.order.append("schedule")
@@ -1131,8 +1135,11 @@ async def test_a_scheduling_failure_is_swallowed():
     federation.broadcast_to_space_members.assert_awaited_once()
 
 
-async def test_a_private_space_post_schedules_nothing():
-    member = _MemberGfs()
+@pytest.mark.parametrize("channel", [False, True])
+async def test_a_private_space_post_is_scheduled_only_with_a_channel(channel):
+    """v_51: a private space's post goes to the member publisher only when
+    the space uses an opaque channel (which then decides by the grant)."""
+    member = _MemberGfs(channel=channel)
     bus = EventBus()
     federation = AsyncMock()
     keypair = generate_identity_keypair()
@@ -1157,7 +1164,11 @@ async def test_a_private_space_post_schedules_nothing():
             space_id="sp-1",
         )
     )
-    assert member.scheduled == []
+    assert [m[0] for m in member.scheduled] == (["sp-1"] if channel else [])
+    if channel:
+        # Never a public relay hint for a private space.
+        payload = federation.broadcast_to_space_members.call_args.args[2]
+        assert "public_relay" not in payload
 
 
 # ─── v_49 PR 3: comments, reactions and own edits / deletes ─────────────
@@ -1169,8 +1180,8 @@ class _ItemGfs(_MemberGfs):
         return True
 
 
-def _items_setup(*, space_type=SpaceType.PUBLIC, readable=True):
-    member = _ItemGfs()
+def _items_setup(*, space_type=SpaceType.PUBLIC, readable=True, channel=False):
+    member = _ItemGfs(channel=channel)
     bus = EventBus()
     federation = AsyncMock()
     keypair = generate_identity_keypair()
@@ -1347,3 +1358,22 @@ async def test_items_are_not_scheduled_where_they_must_not_be(setup):
         )
     )
     assert member.scheduled == []
+
+
+async def test_items_in_a_private_channel_space_are_scheduled():
+    """v_51: comments and reactions in a private space with an opaque
+    channel go to the member publisher too."""
+    from socialhome.domain.events import CommentAdded, PostReactionChanged
+
+    bus, member, uid = _items_setup(
+        space_type=SpaceType.PRIVATE, readable=False, channel=True
+    )
+    await bus.publish(
+        CommentAdded(post_id="post-1", comment=_comment_obj(uid), space_id="sp-1")
+    )
+    await bus.publish(
+        PostReactionChanged(
+            post=_post_obj(uid), space_id="sp-1", reactor_user_id=uid, emoji="👍"
+        )
+    )
+    assert [m[2] for m in member.scheduled] == ["comment", "reaction_add"]

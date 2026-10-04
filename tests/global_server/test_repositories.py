@@ -16,6 +16,7 @@ from socialhome.global_server.domain import (
 )
 from socialhome.global_server.repositories import (
     SqliteGfsAdminRepo,
+    SqliteGfsChannelRepo,
     SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
     SqliteGfsInviteRepo,
@@ -1187,3 +1188,55 @@ async def test_size_bytes_is_written_for_every_row(gfs_db):
         "SELECT size_bytes, LENGTH(sealed_json) AS n FROM gfs_envelope_queue"
     )
     assert all(r["size_bytes"] == r["n"] for r in rows)
+
+
+# ── Opaque channels (v_51) ───────────────────────────────────────────────
+
+
+async def test_channel_repo_pin_epoch_writer_key_and_idle_sweep(gfs_db):
+    repo = SqliteGfsChannelRepo(gfs_db)
+    cid = "0" * 31 + "a"
+    assert await repo.register(cid, channel_suite="ed25519", channel_pk="pk", now=100)
+    assert not await repo.register(
+        cid, channel_suite="ed25519", channel_pk="x", now=100
+    )
+    assert (await repo.get(cid)).channel_pk == "pk"
+    # CAS epoch steps.
+    assert await repo.set_epoch(cid, 5, expected=None, now=110)
+    assert not await repo.set_epoch(cid, 7, expected=None, now=111)
+    assert not await repo.set_epoch(cid, 4, expected=5, now=112)
+    assert await repo.set_epoch(cid, 6, expected=5, now=113)
+    row = await repo.get(cid)
+    assert (row.epoch, row.epoch_prev, row.epoch_raised_at) == (6, 5, 113)
+    # First pin per epoch wins; a newer epoch moves the old one to prev.
+    assert await repo.pin_writer_key(cid, 6, "w6")
+    assert not await repo.pin_writer_key(cid, 6, "evil")
+    assert await repo.pin_writer_key(cid, 7, "w7")
+    row = await repo.get(cid)
+    assert (row.writer_pk_for(6), row.writer_pk_for(7)) == ("w6", "w7")
+    # Repin only from the expected key, at a newer key epoch; clears state.
+    assert not await repo.repin(
+        cid,
+        expected_pk="nope",
+        channel_suite="ed25519",
+        channel_pk="pk2",
+        key_epoch=1,
+        now=120,
+    )
+    assert await repo.repin(
+        cid,
+        expected_pk="pk",
+        channel_suite="ed25519",
+        channel_pk="pk2",
+        key_epoch=1,
+        now=120,
+    )
+    row = await repo.get(cid)
+    assert row.channel_pk == "pk2" and row.epoch is None and row.writer_key_pk is None
+    # The id column only takes a channel id shape (CHECK; OR IGNORE drops it).
+    assert not await repo.register(
+        "space-id-like", channel_suite="ed25519", channel_pk="p", now=1
+    )
+    assert await repo.get("space-id-like") is None
+    assert await repo.prune_idle(older_than=121) == 1
+    assert await repo.get(cid) is None

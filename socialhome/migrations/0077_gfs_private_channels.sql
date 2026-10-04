@@ -1,0 +1,58 @@
+-- Opaque connection-server channels for PRIVATE spaces (v_51) —
+-- ``spaces.gfs_channel_id`` / ``spaces.gfs_channel_pk`` and
+-- ``space_keys.gfs_channel``.
+--
+-- A private space with members seated through an invite link (they reach
+-- the host only over the connection server's ``/gfs/envelope``) gets member
+-- publishing through an opaque channel: a random 128-bit id plus a channel
+-- key HKDF-derived from the space authority seed, so the connection server
+-- never learns the space (``socialhome/gfs_channel.py``,
+-- ``services/gfs_channel_service.py``).
+--
+-- ``spaces.gfs_channel_id`` / ``gfs_channel_pk``: the channel this space
+-- uses and its public key. The owner mints it (random — it cannot be
+-- derived, or a fresh channel after an authority rotation would be the same
+-- one); a member household learns it from its grant. Needed to route an
+-- inbound channel frame to its space, and for the owner to notice its seed
+-- changed (the derived key no longer matches → start a fresh channel).
+--
+-- ``space_keys.gfs_channel``: the per-epoch grant this member household
+-- holds — the channel id + key, the servers it lives on, its membership pass,
+-- its channel cert and (strict spaces) the channel writer key — KEK-wrapped
+-- like ``writer_key`` (AAD = space id + epoch). Seed holders store nothing:
+-- they derive every channel key.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every path that touches this data. The channel id has to be
+--       found BY ID for every inbound frame and survive restarts; nothing
+--       existing holds it (``remote_instances.relay_via`` is per household,
+--       ``gfs_space_publications`` names GFS-listed spaces — a private space
+--       is never listed, which is the point). The grant arrives with, and is
+--       bound to, one epoch's content key and writer cert, which already live
+--       on that epoch's ``space_keys`` row (0074, 0076); it rides the same
+--       four channels (rekey ``per_peer``, roster snapshot, redeem ACK,
+--       rotation bundle).
+--   (2) Alternatives considered and rejected. Deriving the channel id from
+--       the seed: members can't derive it, and an authority rotation could
+--       not start a FRESH channel (a revoked seed holder keeps the old seed,
+--       so it could race a re-pin of a derived id). Keeping the id only
+--       inside the wrapped grant: routing an inbound frame would decrypt every
+--       space's grants. Storing the grant in the ``writer_key`` column: that
+--       column is verified as a space writer key grant, and a reader
+--       household gets a channel grant without any writer key. A new table:
+--       one id per space and one grant per (space, epoch) — exactly the grain
+--       of the two rows that already exist, and both die with the space
+--       (``space_keys`` by ON DELETE CASCADE).
+--   (3) Smallest possible change: three additive, NULL-defaulted
+--       ``ADD COLUMN``s (NULL = no channel — every existing space reads
+--       today's behaviour, nothing is rewritten) and one partial UNIQUE
+--       index, so two spaces can never claim one channel id (a grant naming
+--       another space's channel is refused). ``space_keys.gfs_channel`` is
+--       cleared with ``writer_cert`` / ``writer_key`` on a v_44 baseline
+--       reset.
+ALTER TABLE spaces ADD COLUMN gfs_channel_id TEXT;
+ALTER TABLE spaces ADD COLUMN gfs_channel_pk TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_gfs_channel_id
+    ON spaces(gfs_channel_id) WHERE gfs_channel_id IS NOT NULL;
+ALTER TABLE space_keys ADD COLUMN gfs_channel TEXT;

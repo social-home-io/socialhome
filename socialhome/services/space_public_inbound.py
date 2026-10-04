@@ -205,6 +205,25 @@ class SpacePublicInbound:
             return
         await self._on_relay(envelope)
 
+    async def handle_channel_item(
+        self, space_id: str, *, epoch: int, payload: str
+    ) -> None:
+        """A member item relayed through a PRIVATE space's opaque channel
+        (v_51). The channel frame names no space — the caller mapped its
+        channel id to ``space_id`` locally — and carries no cert; the item
+        then gets exactly the checks of a strict-mode ``space_item`` (the
+        writer cert from inside the ciphertext against the pinned space key,
+        the inner's signed ``space_id`` equal to this space, epoch
+        freshness, the author signature, the roster)."""
+        await self._on_space_item(
+            {
+                "space_id": space_id,
+                "event_type": SPACE_ITEM_EVENT_TYPE,
+                "epoch": epoch,
+                "payload": payload,
+            }
+        )
+
     async def _on_relay(self, envelope: dict) -> None:
         space_id = str(envelope.get("space_id") or "")
         if not space_id:

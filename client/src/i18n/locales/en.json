@@ -1738,6 +1738,7 @@
   "stickies.read_only_viewer": "You can read these notes but not add or change them.",
   "space.gfs_publish.legend": "Publishing over the connection server",
   "space.gfs_publish.intro": "How members' posts, comments and reactions reach followers through your connection server. Only you, the owner, can change this.",
+  "space.gfs_publish.private_intro": "Members who joined through a link reach each other through your connection server, even when this household is offline. The server never learns this space's name — only which households are in it. Only you, the owner, can change this.",
   "space.gfs_publish.trusted": "Trusted",
   "space.gfs_publish.strict": "Strict",
   "space.gfs_publish.trusted_help": "The default. Members can post through your connection server even when this household is offline. The server learns which household posted, never what was posted.",

@@ -313,6 +313,73 @@ epoch, plus the 600 s grace. A household that cannot publish anonymously
 identified path — its items take the host path. Pinned by
 `tests/protocol/test_gfs_member_publish_strict_blind.py`.
 
+### Sign-off: a private space's opaque channel shows the server its member households (v_51)
+
+**Flagged for owner sign-off.** A PRIVATE space whose members include
+households seated through an invite link used to depend on its host for
+every item: a link-joined member reaches the host only over the connection
+server's `/gfs/envelope`, so nobody else saw its posts while the host was
+offline. Since v_51 such a space gets member publishing through an **opaque
+channel** (`/gfs/channels/*`, see
+[`protocol/discovery.md`](./protocol/discovery.md#private-spaces-opaque-channels-v_51)):
+a random 128-bit id plus a channel key derived from the space seed, created
+automatically by the owner once the first link-joined member is seated and
+retired when the last one leaves. **What it concedes, exactly:**
+
+- **The server never learns the space.** No space id, no name, no space
+  authority key, no owner household id appears in any channel request,
+  frame, log line or stored row (pinned by
+  `tests/protocol/test_gfs_private_channel_blind.py`). The channel key is
+  HKDF-derived with its own domain separation, so even a server that knows
+  the space key (a space that was public once) cannot link the two, and
+  every epoch on the wire is shifted by a secret per-channel offset, so the
+  space's content epochs (unix seconds after a restore) cannot link it
+  either. Content
+  and the real item type stay inside the ciphertext, padded to a size
+  bucket, exactly as for public spaces. Registration and epoch notices are
+  anonymous (channel-key-signed), and every identifier rides in the body,
+  never in a URL.
+- **It learns the channel's member households — this is the residual.** A
+  member subscribes with an identified, household-signed request (a
+  channel-key-signed pass proves it is a member), so the server learns
+  *which registered households share this channel*: every v_51 member
+  household connected to that server — **including paired members whose
+  traffic with the host never touched the server before**, not only the
+  link-joined ones whose envelopes it already relayed. It learns the set's
+  size, when it changes (a removed household's seat dies at the next
+  rotation), and the timing and size bucket of every item.
+- **In trusted mode (the default) it learns which member household
+  published each item into the channel** — the same concession as the
+  trusted public-space sign-off above, keyed by an opaque channel instead of
+  a named space. In strict mode it learns only that some publisher of the
+  channel posted.
+- **The owner is not named, but is inferable.** The owner holds no grant
+  and never subscribes or publishes; its registration and notices are
+  anonymous. But the server already sees the owner's instance id as the
+  recipient of every link-joined member's `/gfs/envelope` (the signed-off
+  link-pair residual above), the owner registers and announces from the
+  same IP as its authenticated WebSocket, and a member's channel publish
+  and its envelope to the host leave at the same moment — so IP and timing
+  correlation can tie the owner to the channel. A household signature on
+  notices would have named it outright; the channel-key signature does not.
+- **It learns when the space content key rotates** (channel epoch notices),
+  and that the owner chose strict or trusted.
+- **It is trusted with metadata, not with authenticity.** It can drop or
+  delay items; it cannot forge one — every member re-verifies the space
+  writer cert inside the ciphertext against its own pinned space key, and
+  the author signature.
+
+**Why this is accepted (pending sign-off):** the alternative is the status
+quo — a link-joined member's posts reach nobody while the host is offline,
+which the owner decided (2026-10-03) is the single point of failure member
+publishing exists to remove. The disclosure is the same *kind* the
+link-pair relay already concedes (recipient households, timing, size),
+widened to the space's other connected member households and, in trusted
+mode, to the publisher. A household that would rather not appear on the
+channel can decline to upgrade (a v_50 member gets no grant and keeps the
+host path); an owner who does not want a channel at all keeps the space
+free of invite-link members, or picks strict mode to hide the publisher.
+
 ### Sign-off: per-user routing on the app channel (§FIX-I2 relaxed, v_18)
 
 `APP_SESSION` and `APP_MESSAGE` events may carry `to_user` (the target user's

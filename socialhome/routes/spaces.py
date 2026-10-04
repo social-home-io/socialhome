@@ -284,6 +284,10 @@ class SpaceDetailView(BaseView):
                 # features other than posts is host-only until federated
                 # moderation: the settings disable it while this is true.
                 "has_remote_households": await self._has_remote_households(space.id),
+                # v_51 — this private space reaches link-joined members over
+                # an opaque connection-server channel, so its owner's
+                # publish-mode choice applies (the SPA shows the toggle).
+                "gfs_private_channel": await svc.uses_gfs_private_channel(space),
             }
         )
         signer = self.request.app.get(media_signer_key)

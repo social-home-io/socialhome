@@ -23,6 +23,16 @@ from pathlib import Path
 
 from aiohttp import web
 
+from ...domain.gfs_channel import (
+    CHANNEL_EPOCH_ROUTE,
+    CHANNEL_PUBLISH_ANON_ROUTE,
+    CHANNEL_PUBLISH_ROUTE,
+    CHANNEL_REGISTER_ROUTE,
+    CHANNEL_SUBSCRIBE_ROUTE,
+    CHANNEL_UNREGISTER_ROUTE,
+    CHANNEL_UNSUBSCRIBE_ROUTE,
+)
+
 from .. import admin as admin_mod
 from ..public import handle_invite_page, handle_landing, handle_space_page
 from .admin import (
@@ -46,6 +56,15 @@ from .admin import (
     AdminUiIndexView,
 )
 from .envelope import EnvelopeRelayView
+from .channels import (
+    ChannelEpochView,
+    ChannelPublishAnonView,
+    ChannelPublishView,
+    ChannelRegisterView,
+    ChannelSubscribeView,
+    ChannelUnregisterView,
+    ChannelUnsubscribeView,
+)
 from .member_publish import (
     MemberPublishAnonView,
     MemberPublishView,
@@ -167,6 +186,14 @@ def register_routes(
     app.router.add_view("/gfs/member-publish", MemberPublishView)
     app.router.add_view("/gfs/member-publish-anon", MemberPublishAnonView)
     app.router.add_view("/gfs/spaces/{space_id}/epoch", SpaceEpochNoticeView)
+    # Opaque channels for private spaces (v_51) — every id in the body.
+    app.router.add_view(CHANNEL_REGISTER_ROUTE, ChannelRegisterView)
+    app.router.add_view(CHANNEL_EPOCH_ROUTE, ChannelEpochView)
+    app.router.add_view(CHANNEL_UNREGISTER_ROUTE, ChannelUnregisterView)
+    app.router.add_view(CHANNEL_SUBSCRIBE_ROUTE, ChannelSubscribeView)
+    app.router.add_view(CHANNEL_UNSUBSCRIBE_ROUTE, ChannelUnsubscribeView)
+    app.router.add_view(CHANNEL_PUBLISH_ROUTE, ChannelPublishView)
+    app.router.add_view(CHANNEL_PUBLISH_ANON_ROUTE, ChannelPublishAnonView)
     app.router.add_view("/gfs/report", ReportView)
     app.router.add_view("/gfs/appeal", AppealView)
     app.router.add_view("/gfs/spaces", SpacesListView)

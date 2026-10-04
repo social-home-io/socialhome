@@ -1175,6 +1175,36 @@ describe('SpaceSettings — connection server publish mode (owner-only)', () => 
     expect(group(noFollow.container)).toBeTruthy()
   })
 
+  it('renders for the owner of a private space that uses a link channel', () => {
+    // v_51 — a private space with link-joined members reaches them over an
+    // opaque connection-server channel: the same choice applies, with copy
+    // that says what the server learns there.
+    const space = {
+      ...(publicSpace({ allow_subscribers: false }, 'private') as object),
+      gfs_private_channel: true,
+    } as never
+    const { container, getByText, queryByText } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} isOwner />,
+    )
+    expect(group(container)).toBeTruthy()
+    expect(getByText('space.gfs_publish.private_intro')).toBeTruthy()
+    expect(queryByText('space.gfs_publish.intro')).toBeNull()
+    // Never for a non-owner, even with the channel.
+    const admin = render(<SpaceSettings space={space} onUpdate={() => {}} />)
+    expect(group(admin.container)).toBeNull()
+  })
+
+  it('a private space without a link channel shows no choice', () => {
+    const space = {
+      ...(publicSpace({}, 'private') as object),
+      gfs_private_channel: false,
+    } as never
+    const { container } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} isOwner />,
+    )
+    expect(group(container)).toBeNull()
+  })
+
   it('stays visible on a strict space so the owner can switch back', () => {
     const { container } = render(
       <SpaceSettings

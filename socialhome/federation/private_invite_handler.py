@@ -1331,6 +1331,15 @@ class PrivateSpaceInviteHandler:
             await self._writer_certs.accept_writer_key(
                 space_id, event.payload.get("writer_key")
             )
+        # v_51 — and, in a private space with link-joined members, our
+        # channel grant for the new epoch (bound to the pinned space key).
+        if (
+            event.payload.get("gfs_channel") is not None
+            and self._writer_certs is not None
+        ):
+            await self._writer_certs.accept_channel_grant(
+                space_id, event.payload.get("gfs_channel")
+            )
 
     async def _on_admin_key_share(self, event: "FederationEvent") -> None:
         """Delegated-admin signing-seed share from the space owner (v_22).
@@ -1741,7 +1750,11 @@ class PrivateSpaceInviteHandler:
             else:
                 continue
             candidates.append((FederationEventType(raw_type), payload, tombstoned))
-        if not candidates and p.get("writer_cert") is None:
+        if (
+            not candidates
+            and p.get("writer_cert") is None
+            and p.get("gfs_channel") is None
+        ):
             return
         space = await self._space_repo.get(space_id)
         if space is None:
@@ -1779,6 +1792,17 @@ class PrivateSpaceInviteHandler:
                 await self._writer_certs.accept_writer_key(
                     space_id, p.get("writer_key")
                 )
+        # v_51 — our private-space channel grant, from the host only (a
+        # reader household gets one without a writer cert).
+        if (
+            p.get("gfs_channel") is not None
+            and self._writer_certs is not None
+            and space.owner_instance_id
+            and event.from_instance == space.owner_instance_id
+        ):
+            await self._writer_certs.accept_channel_grant(
+                space_id, p.get("gfs_channel")
+            )
         if not candidates:
             return
         # Thousands of signature checks are CPU work: batch them off the
