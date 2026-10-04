@@ -1468,14 +1468,31 @@ Every seed holder holds the channel key, so one of them (a delegated admin,
 or a revoked one before its rotation landed) can step the epoch +1 a minute
 past the members' real epoch, or pin a bogus writer key first, and lock the
 members out. When the owner's own notice finds the server's epoch above its
-own, or the writer key pinned for its epoch is not the one it derives, the
-owner starts a fresh channel automatically and re-grants its members by
-roster snapshot (once per id). **Residual:** the lock-out lasts until the
-owner's next notice (every rotation and every GFS reconnect), and a
-seed holder that keeps holding the seed can repeat it on the fresh channel
-— the remedy is revoking that admin (an authority rotation retires its
-seed). An owner that reconnects before it received a delegated admin's
-legitimate rekey heals needlessly — churn, never a leak.
+**current** one (re-read when the answer arrives, so a rotation that landed
+since a notice was queued counts), or the writer key pinned for exactly its
+epoch is not the one it derives, the owner starts a fresh channel
+automatically and re-grants its members by roster snapshot. The answer is
+untrusted server output, so the heal is bounded:
+
+- **No heal while catching up.** An answer counts only once the owner has
+  been running, and connected to that server, for `HEAL_GRACE_S` (5 min):
+  a delegated admin's rotation that happened while the owner was offline
+  lands (rekey, sync) first, after which the server is no longer ahead.
+  The reconnect path itself never heals.
+- **A missing or malformed field is no information** — an epoch that is
+  not an integer in `[0, 2^62]`, or a `writer_pk` that is not a non-empty
+  string, is never evidence of a take-over.
+- **At most one replacement per space per 24 h** (`HEAL_COOLDOWN_S`),
+  shared with the squatted-id (`409`) path and persisted on the space row
+  (`spaces.gfs_channel_healed_at`), so a restart does not reset it. A
+  suppressed heal is logged at WARNING; the channel is kept.
+
+**Residual:** the lock-out lasts until the owner's next notice past the
+grace (every rotation and every GFS reconnect), at most one fresh channel
+a day; a seed holder that keeps holding the seed can repeat it on the fresh
+channel — the remedy is revoking that admin (an authority rotation retires
+its seed). A lying server costs at most one needless fresh channel a day —
+churn, never a leak.
 
 **Grants — what a member household is handed.** Per member household and
 epoch, a seed holder whose seed matches the pin issues `gfs_channel:
@@ -1618,7 +1635,13 @@ owner to the channel (the accepted limit of every anonymous GFS path). A
 member's subscribe and its WS share an IP, like everywhere else. A member
 whose own copy of the mode lags a switch to strict may send one identified
 request the server then refuses (but sees). The take-over lock-out above
-lasts until the owner's next notice.
+lasts until the owner's next notice, and replacements are capped at one per
+space per day. There is no per-address cap on live channel rows: the server
+would have to store the registering address beside each row, which links a
+household's IP to its channels at rest; the per-address registration rate
+(10 / min), the server-wide row cap and the 24 h sweep of unused channels
+bound what one address can hold instead (at most ~14 400 unused rows a day,
+under the server-wide cap).
 
 **Hard requirements on households** (as for public spaces, adapted):
 

@@ -375,9 +375,12 @@ retired when the last one leaves. **What it concedes, exactly:**
   rotation lands) holds the channel key, and the server cannot tell it from
   the owner: it can step the epoch past the members' (+1 a minute) or pin a
   bogus writer key first. The owner's next notice (each rotation, each GFS
-  reconnect) sees the server past it and starts a fresh channel
-  automatically; a seed holder that keeps the seed can repeat it — the
-  remedy is revoking that admin. Items still reach the host either way.
+  reconnect, once the owner has been online and caught up for a few
+  minutes) sees the server past its current epoch and starts a fresh
+  channel automatically — at most one per space per day, persisted, since
+  the server's answer is untrusted and a lying server must not drive a
+  storm; a seed holder that keeps the seed can repeat it — the remedy is
+  revoking that admin. Items still reach the host either way.
 
 **Why this is accepted (pending sign-off):** the alternative is the status
 quo — a link-joined member's posts reach nobody while the host is offline,

@@ -61,6 +61,7 @@ class _Spaces:
     seeds: dict[str, bytes] = field(default_factory=dict)
     channels: dict[str, tuple[str, str]] = field(default_factory=dict)
     instances: dict[str, list[str]] = field(default_factory=dict)
+    healed_at: dict[str, str] = field(default_factory=dict)
 
     async def get(self, space_id):
         return self.spaces.get(space_id)
@@ -86,6 +87,12 @@ class _Spaces:
 
     async def spaces_for_gfs_channel(self, channel_id):
         return sorted(s for s, c in self.channels.items() if c[0] == channel_id)
+
+    async def get_gfs_channel_healed_at(self, space_id):
+        return self.healed_at.get(space_id)
+
+    async def set_gfs_channel_healed_at(self, space_id, at):
+        self.healed_at[space_id] = at
 
 
 class _Keys:
@@ -237,6 +244,7 @@ class _Node:
         self.svc.attach_federation(self.federation)  # type: ignore[arg-type]
         self.svc.attach_inbound(self.inbound)  # type: ignore[arg-type]
         self.svc.attach_space_service(self.space_service)
+        self.svc_conn_id = conn.id
 
 
 @pytest.fixture
@@ -684,10 +692,14 @@ async def test_a_squatted_channel_id_is_replaced_by_a_fresh_one(env):
 
 
 @pytest.mark.security
-async def test_owner_replaces_a_channel_another_key_holder_moved_past_it(env):
+async def test_owner_replaces_a_channel_another_key_holder_moved_past_it(
+    env, monkeypatch
+):
     """C1: a seed holder (a delegated admin) steps the channel epoch past the
-    owner's, locking the members' certs out. The owner's next notice sees
-    it and starts a fresh channel, re-granting its members."""
+    owner's, locking the members' certs out. The owner's next notice (once
+    it has been online past the grace) sees it and starts a fresh channel,
+    re-granting its members."""
+    monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
     first = await _channel_ready(env)
     await _hand_grants(env, env.member)
     repo = env.app[gfs_channel_repo_key]
@@ -708,7 +720,10 @@ async def test_owner_replaces_a_channel_another_key_holder_moved_past_it(env):
 
 
 @pytest.mark.security
-async def test_owner_replaces_a_channel_whose_writer_key_pin_is_not_its_own(env):
+async def test_owner_replaces_a_channel_whose_writer_key_pin_is_not_its_own(
+    env, monkeypatch
+):
+    monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
     strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
     env.owner.spaces.spaces[SPACE_ID] = strict
     assert await env.owner.svc.reconcile(SPACE_ID) == "created"
@@ -720,6 +735,145 @@ async def test_owner_replaces_a_channel_whose_writer_key_pin_is_not_its_own(env)
     await env.owner.svc.announce_epoch(SPACE_ID)
     await env.owner.svc.wait_idle()
     assert env.owner.spaces.channels[SPACE_ID][0] != first
+
+
+def _lying_gfs(monkeypatch, answer) -> None:
+    """Every notice answer replaced by ``answer`` (untrusted server output)."""
+    real = GfsChannelService._post_reading
+
+    async def lying(self, client, url, body, conn):
+        outcome, _held = await real(self, client, url, body, conn)
+        return outcome, answer
+
+    monkeypatch.setattr(GfsChannelService, "_post_reading", lying)
+
+
+@pytest.mark.security
+async def test_a_lying_gfs_starts_at_most_one_fresh_channel_per_day(
+    env, monkeypatch, caplog
+):
+    """H1: a server that always answers "ahead of you" cannot drive a storm
+    of fresh channels — at most one per space per cooldown, persisted, so a
+    restart does not reset it."""
+    monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
+    first = await _channel_ready(env)
+    _lying_gfs(monkeypatch, {"epoch": 2**61})
+    svc = env.owner.svc
+    seen = []
+    for _ in range(6):
+        await svc.announce_epoch(SPACE_ID)
+        await svc.wait_idle()
+        seen.append(env.owner.spaces.channels[SPACE_ID][0])
+    assert len(set(seen) - {first}) == 1
+    assert SPACE_ID in env.owner.spaces.healed_at
+    assert "cooldown" in caplog.text
+    # A restart keeps the cooldown: it lives on the space row.
+    svc._healing.clear()
+    await svc.announce_epoch(SPACE_ID)
+    await svc.wait_idle()
+    assert env.owner.spaces.channels[SPACE_ID][0] == seen[-1]
+    # A day later one more replacement is allowed.
+    later = chan_mod._utcnow() + chan_mod.timedelta(
+        seconds=chan_mod.HEAL_COOLDOWN_S + 1
+    )
+    monkeypatch.setattr(chan_mod, "_utcnow", lambda: later)
+    await svc.announce_epoch(SPACE_ID)
+    await svc.wait_idle()
+    third = env.owner.spaces.channels[SPACE_ID][0]
+    assert third not in (first, seen[-1])
+
+
+@pytest.mark.security
+async def test_a_squat_inside_the_heal_cooldown_keeps_the_channel(env, monkeypatch):
+    """The 409 path shares the per-space cooldown: a lying register answer
+    cannot mint fresh channels either."""
+    monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
+    first = await _channel_ready(env)
+    repo = env.app[gfs_channel_repo_key]
+    await repo.delete(first)
+    await repo.register(first, channel_suite="ed25519", channel_pk="squatter", now=1)
+    assert await env.owner.svc.reconcile(SPACE_ID) == "created"
+    second = env.owner.spaces.channels[SPACE_ID][0]
+    await repo.delete(second)
+    await repo.register(second, channel_suite="ed25519", channel_pk="squatter", now=1)
+    assert await env.owner.svc.reconcile(SPACE_ID) == "kept"
+    assert env.owner.spaces.channels[SPACE_ID][0] == second
+
+
+@pytest.mark.security
+async def test_no_heal_after_a_delegated_rotation_while_the_owner_was_offline(
+    env, monkeypatch
+):
+    """A delegated admin rotated (stepping the channel epoch) while the owner
+    was offline. On reconnect the owner's own epoch is behind the server's
+    until the rekey lands: that is catch-up, not a take-over — neither
+    during the grace nor once it caught up."""
+    clock = [1000.0]
+    monkeypatch.setattr(chan_mod, "_monotonic", lambda: clock[0])
+    first = await _channel_ready(env)
+    await env.owner.svc.start()
+    repo = env.app[gfs_channel_repo_key]
+    row = await repo.get(first)
+    # The delegated admin's notice for epoch 4 landed while we were away.
+    await repo.set_epoch(
+        first, _wire(env, first, 4), expected=row.epoch, now=row.epoch_raised_at
+    )
+    # Reconnect: the heal path re-announces our stale epoch 3.
+    await env.owner.svc.heal(env.owner.svc_conn_id)
+    await env.owner.svc.wait_idle()
+    assert env.owner.spaces.channels[SPACE_ID][0] == first
+    # The rekey lands, the grace passes; a stale queued notice for epoch 3
+    # is still compared against the CURRENT epoch.
+    env.owner.keys.epoch = 4
+    clock[0] += chan_mod.HEAL_GRACE_S + 1
+    conn = await env.owner.svc._conn_repo.get(env.owner.svc_conn_id)
+    await env.owner.svc._post_notice(conn, SPACE_ID, {"epoch": 3})
+    await env.owner.svc.announce_epoch(SPACE_ID)
+    await env.owner.svc.wait_idle()
+    assert env.owner.spaces.channels[SPACE_ID][0] == first
+    assert env.owner.spaces.healed_at == {}
+    await env.owner.svc.stop()
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {},
+        {"status": "ok"},
+        {"epoch": None, "writer_pk": None},
+        {"epoch": True},
+        {"epoch": "9" * 30},
+        {"epoch": 1.5e30},
+        {"writer_pk": 5},
+        {"writer_pk": ""},
+    ],
+)
+async def test_malformed_notice_answers_never_heal(env, monkeypatch, answer):
+    """A missing or malformed epoch / writer key in the server's answer is
+    no information — never evidence of a take-over (strict space, where the
+    writer key pin is compared)."""
+    monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
+    strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
+    env.owner.spaces.spaces[SPACE_ID] = strict
+    first = await _channel_ready(env)
+    _lying_gfs(monkeypatch, answer)
+    await env.owner.svc.announce_epoch(SPACE_ID)
+    await env.owner.svc.wait_idle()
+    assert env.owner.spaces.channels[SPACE_ID][0] == first
+    assert env.owner.spaces.healed_at == {}
+
+
+@pytest.mark.security
+async def test_a_writer_key_pin_for_another_epoch_is_not_a_take_over(env, monkeypatch):
+    monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
+    strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
+    env.owner.spaces.spaces[SPACE_ID] = strict
+    first = await _channel_ready(env)
+    _lying_gfs(monkeypatch, {"epoch": _wire(env, first) - 1, "writer_pk": "x" * 43})
+    await env.owner.svc.announce_epoch(SPACE_ID)
+    await env.owner.svc.wait_idle()
+    assert env.owner.spaces.channels[SPACE_ID][0] == first
 
 
 async def test_retire_unregisters_before_a_seed_swap(env):

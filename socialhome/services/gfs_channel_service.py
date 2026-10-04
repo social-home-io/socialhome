@@ -54,9 +54,13 @@ a grant for the current epoch, nothing goes to any server — the host path
 always carries the item.
 
 **Self-heal.** The server answers the owner's notice with what it holds;
-when another channel-key holder moved the channel past the owner's epoch
-(or pinned another writer key), the owner starts a fresh channel and
-re-grants its members.
+when another channel-key holder moved the channel past the owner's CURRENT
+epoch (or pinned another writer key for it), the owner starts a fresh
+channel and re-grants its members. The answer is untrusted: it counts only
+after the owner has been online and connected to that server for
+:data:`HEAL_GRACE_S` (a rotation missed while offline lands first), a
+missing or malformed field is no information, and replacements are capped
+at one per space per :data:`HEAL_COOLDOWN_S`, persisted.
 
 **Epoch notices.** Every seed holder announces the content epoch to the
 channel's servers at each rotation, before the member rekey (channel-key
@@ -73,7 +77,7 @@ import logging
 import secrets
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
@@ -172,6 +176,28 @@ HOST_RETURN_SYNC_DELAY_S: float = 15.0
 #: Background tasks (subscribe / unsubscribe / channel creation) in flight.
 MAX_PENDING_TASKS: int = 64
 
+#: At most one take-over replacement (self-heal or a squatted id) per space
+#: per this window, persisted on the space row: the evidence is untrusted
+#: server output, so a lying server can cost at most one fresh channel a day.
+HEAL_COOLDOWN_S: int = 24 * 3600
+
+#: How long the owner must have been online (and, per connection server,
+#: connected) before a notice answer can count as a take-over: the rekeys
+#: and the sync it missed while away (a delegated admin's rotation) land
+#: first, so a server ahead of a stale epoch is catch-up, not a take-over.
+HEAL_GRACE_S: float = 300.0
+
+#: The largest epoch a server can hold (the GFS caps notices at 2^62).
+_MAX_WIRE_EPOCH = 2**62
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 def _anon_ts() -> str:
     now = int(time.time())
@@ -193,7 +219,8 @@ class GfsChannelService:
         "_federation",
         "_federation_repo",
         "_gfs",
-        "_healed",
+        "_connected_at",
+        "_healing",
         "_inbound",
         "_kek",
         "_keys",
@@ -206,6 +233,7 @@ class GfsChannelService:
         "_space_service",
         "_sync",
         "_spaces",
+        "_started_at",
         "_stop",
         "_stopping",
         "_tasks",
@@ -247,8 +275,13 @@ class GfsChannelService:
         #: channel id → ``gfs_instance_id``s that confirmed our registration
         #: in this process (the owner's grants name only these).
         self._registered: dict[str, set[str]] = {}
-        #: Channel ids this process already replaced after a take-over.
-        self._healed: set[str] = set()
+        #: Spaces with a take-over replacement in flight (the persisted
+        #: per-space cooldown bounds them across restarts).
+        self._healing: set[str] = set()
+        #: When this process started, and when each connection (by id) last
+        #: (re)connected — the take-over grace runs from the later one.
+        self._started_at = _monotonic()
+        self._connected_at: dict[str, float] = {}
         #: Spaces with a host-return catch-up sync pending.
         self._catching_up: set[str] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -284,6 +317,7 @@ class GfsChannelService:
     async def start(self) -> None:
         self._stopping = False
         self._stop.clear()
+        self._started_at = _monotonic()
         await self._retry.start()
 
     async def stop(self) -> None:
@@ -401,6 +435,8 @@ class GfsChannelService:
         if current is not None and not fresh:
             _done, squatted = await self._register_all(current[0], current[1], conns)
             if not squatted:
+                return "kept"
+            if not await self._claim_heal(space_id, current[0]):
                 return "kept"
             # Another key holds our id on some server (a member pre-registered
             # it where our registration had not landed): never fight over it —
@@ -640,6 +676,9 @@ class GfsChannelService:
         conn = await self._conn_repo.get(gfs_id)
         if conn is None or conn.status != "active":
             return 0
+        # A (re)connect restarts this server's take-over grace: what it
+        # answers before we caught up is never evidence.
+        self._connected_at[conn.id] = _monotonic()
         if not await self._gfs.private_channels_supported(conn):
             return 0
         done = 0
@@ -720,9 +759,8 @@ class GfsChannelService:
             return PublishOutcome.permanent()
         channel_id, channel_seed = found
         # The wire epoch: content epoch + the channel's secret offset.
-        epoch = int(data["epoch"]) + derive_channel_epoch_offset(
-            seed, space_id, channel_id
-        )
+        offset = derive_channel_epoch_offset(seed, space_id, channel_id)
+        epoch = int(data["epoch"]) + offset
         strict = space.features.gfs_publish_mode == GFS_PUBLISH_MODE_STRICT
         wkc = (
             issue_channel_writer_key(
@@ -746,11 +784,28 @@ class GfsChannelService:
             client, f"{conn.inbox_url}{CHANNEL_EPOCH_ROUTE}", body, conn
         )
         if (
-            held is not None
-            and space.owner_instance_id == self._own_instance_id
-            and self._channel_taken_over(
-                held, epoch=epoch, writer_pk=wkc.writer_pk if wkc else None
+            held is None
+            or space.owner_instance_id != self._own_instance_id
+            or not self._caught_up(conn)
+        ):
+            return outcome
+        # Compare against the CURRENT epoch, not the (possibly stale) one
+        # this notice was queued with: a rotation that landed since moved us.
+        current = await self._crypto.get_current_epoch(space_id)
+        if current is not None and current + offset > epoch:
+            epoch = current + offset
+            wkc = (
+                issue_channel_writer_key(
+                    space_seed=seed,
+                    space_id=space_id,
+                    channel_id=channel_id,
+                    epoch=epoch,
+                ).writer_key_cert
+                if strict
+                else None
             )
+        if self._channel_taken_over(
+            held, epoch=epoch, writer_pk=wkc.writer_pk if wkc else None
         ):
             # Another channel-key holder (a seed holder) moved the channel
             # past us — stepping its epoch, or pinning another writer key —
@@ -764,30 +819,79 @@ class GfsChannelService:
             self._spawn(self._self_heal(space_id, channel_id), "self-heal")
         return outcome
 
+    def _caught_up(self, conn: GfsConnection) -> bool:
+        """Whether this process has been running, and connected to ``conn``,
+        for the take-over grace."""
+        since = max(self._started_at, self._connected_at.get(conn.id, 0.0))
+        return _monotonic() - since >= HEAL_GRACE_S
+
     @staticmethod
     def _channel_taken_over(held: dict, *, epoch: int, writer_pk: str | None) -> bool:
         """Whether the server's answer to our own notice shows another key
         holder got there first: an epoch above ours, or (strict) a writer key
-        pin for our epoch that is not ours."""
+        pin for exactly our epoch that is not ours. A missing or malformed
+        field is no information — never a take-over."""
         server_epoch = held.get("epoch")
-        if isinstance(server_epoch, int) and server_epoch > epoch:
+        if (
+            not isinstance(server_epoch, int)
+            or isinstance(server_epoch, bool)
+            or not 0 <= server_epoch <= _MAX_WIRE_EPOCH
+        ):
+            return False
+        if server_epoch > epoch:
             return True
-        return writer_pk is not None and held.get("writer_pk") != writer_pk
+        held_pk = held.get("writer_pk")
+        return (
+            writer_pk is not None
+            and server_epoch == epoch
+            and isinstance(held_pk, str)
+            and held_pk != ""
+            and held_pk != writer_pk
+        )
+
+    async def _claim_heal(self, space_id: str, channel_id: str) -> bool:
+        """Take this space's take-over replacement slot: at most one per
+        :data:`HEAL_COOLDOWN_S`, persisted on the space row so a restart
+        does not reset it. ``False`` (with a WARNING) inside the cooldown."""
+        now = _utcnow()
+        last = await self._spaces.get_gfs_channel_healed_at(space_id)
+        if last is not None:
+            try:
+                since = now - datetime.fromisoformat(last)
+            except TypeError, ValueError:
+                since = timedelta(0)
+            if since < timedelta(seconds=HEAL_COOLDOWN_S):
+                log.warning(
+                    "gfs.channel: channel %s looks taken over or squatted, but "
+                    "this space already replaced its channel %s ago — keeping "
+                    "it (cooldown %d s)",
+                    channel_id,
+                    since,
+                    HEAL_COOLDOWN_S,
+                )
+                return False
+        await self._spaces.set_gfs_channel_healed_at(space_id, now.isoformat())
+        return True
 
     async def _self_heal(self, space_id: str, channel_id: str) -> None:
-        """Replace a channel another key holder took over (once per id)."""
-        if channel_id in self._healed:
+        """Replace a channel another key holder took over (rate-limited per
+        space by :meth:`_claim_heal`)."""
+        if space_id in self._healing:
             return
-        self._healed.add(channel_id)
+        self._healing.add(space_id)
         try:
             stored = await self._spaces.get_gfs_channel(space_id)
             if stored is None or stored[0] != channel_id:
+                return
+            if not await self._claim_heal(space_id, channel_id):
                 return
             if await self.reconcile(space_id, fresh=True) == "created":
                 await self.announce_epoch(space_id)
                 await self.distribute(space_id)
         except Exception:
             log.exception("gfs.channel: self-heal failed")
+        finally:
+            self._healing.discard(space_id)
 
     async def _post_reading(
         self,

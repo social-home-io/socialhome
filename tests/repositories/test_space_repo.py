@@ -1797,3 +1797,16 @@ async def test_gfs_channel_round_trip_and_candidate_lookup(env):
     assert await env.repo.get_gfs_channel("sp-1") is None
     assert await env.repo.spaces_for_gfs_channel("c" * 32) == []
     assert not await env.repo.set_gfs_channel("sp-missing", "d" * 32, "pk")
+
+
+async def test_gfs_channel_healed_at_round_trip(env):
+    await env.repo.save(_space("sp-1"))
+    assert await env.repo.get_gfs_channel_healed_at("sp-1") is None
+    await env.repo.set_gfs_channel_healed_at("sp-1", "2026-10-04T12:00:00+00:00")
+    assert (
+        await env.repo.get_gfs_channel_healed_at("sp-1") == "2026-10-04T12:00:00+00:00"
+    )
+    # A save of the space (config upsert) keeps it.
+    await env.repo.save(_space("sp-1", name="Renamed"))
+    assert await env.repo.get_gfs_channel_healed_at("sp-1") is not None
+    assert await env.repo.get_gfs_channel_healed_at("sp-missing") is None
