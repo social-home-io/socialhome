@@ -93,8 +93,16 @@ class _Fed:
             return True
         return self.versions.get(iid, 0) >= min_version
 
+    async def space_member_supports(self, iid, *, min_version):
+        return await self.peer_supports(iid, min_version=min_version)
+
     async def peer_identity_public_key(self, iid):
         return self.pks.get(iid)
+
+    async def mesh_member_identity_pk(self, iid):
+        # No recorded mesh claim here: mesh-only origins are bound by the
+        # key their item names (the v_31 derivation) instead.
+        return None
 
 
 @pytest.fixture

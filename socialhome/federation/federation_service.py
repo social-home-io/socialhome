@@ -41,6 +41,7 @@ from ..crypto import (
     REPLAY_CACHE_WINDOW,
     ReplayCache,
     b64url_encode,
+    derive_instance_id,
 )
 from ..db import AsyncDatabase
 from ..peer_http import post_to_peer
@@ -50,6 +51,7 @@ from ..domain.events import (
     LocalHomeLocationUpdated,
     PairingIntroRelayReceived,
     PeerHomeChanged,
+    PeerProtoVersionRaised,
     SpaceConfigChanged,
     SpaceRemoteSeatLive,
     SpaceSyncComplete,
@@ -81,6 +83,11 @@ from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
 from .encoder import FederationEncoder
 from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
+from .mesh_member_claim import (
+    MESH_CLAIM_IDENTITY_PK_FIELD,
+    MESH_CLAIM_VERSION_FIELD,
+    parse_mesh_member_claim,
+)
 from .app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
     SUPPORTED_APP_AEAD_SUITES,
@@ -1072,6 +1079,146 @@ class FederationService:
             return bytes.fromhex(peer.remote_identity_pk)
         except ValueError:  # pragma: no cover — pinned key is always valid hex
             return None
+
+    # ── Mesh-only space members (migration 0078) ───────────────────────
+
+    async def space_member_supports(
+        self, instance_id: str, *, min_version: int
+    ) -> bool:
+        """:meth:`peer_supports` for a space member household, which may be
+        mesh-only.
+
+        A household we hold a ``remote_instances`` row for is judged by that
+        row alone (exactly :meth:`peer_supports`). One we hold no row for —
+        a member reached only over the mesh — by the version claim it made
+        over the mesh (:meth:`record_mesh_member_claim`), kept on its
+        ``space_instances`` rows. No row and no claim → ``False`` (fail
+        closed: the per-household credentials gated on this stay withheld).
+
+        Deliberately a separate method: :meth:`peer_supports` keeps meaning
+        "a paired household's advertised version" for every other gate.
+        """
+        if not instance_id or min_version <= 0:
+            return False
+        try:
+            peer = await self._federation_repo.get_instance(instance_id)
+        except Exception:  # pragma: no cover — defensive
+            return False
+        if peer is not None:
+            return peer.proto_version >= min_version
+        try:
+            claim = await self._federation_repo.get_space_member_version(instance_id)
+        except Exception:  # pragma: no cover — defensive
+            return False
+        return claim is not None and claim[0] >= min_version
+
+    async def mesh_member_identity_pk(self, instance_id: str) -> bytes | None:
+        """The identity key a mesh-only member household claimed, or
+        ``None``. Only for a household we hold no ``remote_instances`` row
+        for (a paired one's key is the pinned one —
+        :meth:`peer_identity_public_key`), and re-checked on read: the key
+        must derive to ``instance_id`` (§4.1.2)."""
+        if not instance_id:
+            return None
+        try:
+            if await self._federation_repo.get_instance(instance_id) is not None:
+                return None
+            claim = await self._federation_repo.get_space_member_version(instance_id)
+        except Exception:  # pragma: no cover — defensive
+            return None
+        if claim is None or not claim[1]:
+            return None
+        try:
+            pk = bytes.fromhex(claim[1])
+            if derive_instance_id(pk) != instance_id:
+                return None
+        except ValueError:
+            return None
+        return pk
+
+    async def record_mesh_member_claim(
+        self, event: FederationEvent, *, notify: bool = True
+    ) -> bool:
+        """Record the version + identity-key claim a mesh-only member
+        household made in ``event`` (:mod:`~socialhome.federation
+        .mesh_member_claim`). ``True`` when recorded.
+
+        Accepted only when all of these hold — anything else is ignored:
+
+        * the event was unwrapped from ``SPACE_ROUTED`` (``routed_path``):
+          the routed handler verified the v_31 origin signature over the
+          sealed ciphertext before dispatch, so the payload was written by
+          ``from_instance`` and no relay could read or alter it. (With no
+          row for the origin, the unsigned legacy window never applies.)
+        * we hold NO ``remote_instances`` row for the household — a paired
+          one's version comes from its own direct advertisement;
+        * the claimed key derives to ``from_instance``;
+        * the household already holds a ``space_instances`` row here (a
+          claim never creates membership).
+
+        The version is a high-water mark. When it rises (and ``notify``),
+        the existing :class:`PeerProtoVersionRaised` catch-up runs, so the
+        host re-sends its roster snapshot — carrying the household's writer
+        cert, writer key and channel grant — right away. A caller about to
+        send that snapshot itself (an accept seats and snapshots) passes
+        ``notify=False``.
+        """
+        origin = event.from_instance
+        if event.routed_path is None or not origin or origin == self._own_instance_id:
+            return False
+        try:
+            if await self._federation_repo.get_instance(origin) is not None:
+                return False
+        except Exception:  # pragma: no cover — defensive
+            return False
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        claim = parse_mesh_member_claim(payload, instance_id=origin)
+        if claim is None:
+            if (
+                MESH_CLAIM_VERSION_FIELD in payload
+                or MESH_CLAIM_IDENTITY_PK_FIELD in payload
+            ):
+                log.warning(
+                    "mesh member claim from %s refused: malformed, or its key "
+                    "does not derive to the sender",
+                    origin,
+                )
+            return False
+        previous = await self._federation_repo.record_space_member_version(
+            origin, claim.proto_version, claim.identity_pk.hex()
+        )
+        if previous is None:
+            log.info(
+                "mesh member claim from %s ignored: not a member household of "
+                "any space here",
+                origin,
+            )
+            return False
+        if claim.proto_version > previous:
+            log.info(
+                "mesh member %s: proto_version %d -> %d (mesh claim)",
+                origin,
+                previous,
+                claim.proto_version,
+            )
+            if notify:
+                await self._bus.publish(
+                    PeerProtoVersionRaised(
+                        instance_id=origin,
+                        old_version=previous,
+                        new_version=claim.proto_version,
+                    )
+                )
+        elif claim.proto_version < previous:
+            log.warning(
+                "mesh member %s: claimed proto_version %d below its high-water "
+                "mark %d — kept at %d",
+                origin,
+                claim.proto_version,
+                previous,
+                previous,
+            )
+        return True
 
     async def is_space_session_peer(self, instance_id: str) -> bool:
         """``True`` iff ``instance_id`` is a household seated from an invite

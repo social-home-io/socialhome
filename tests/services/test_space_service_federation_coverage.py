@@ -633,6 +633,39 @@ async def test_accept_remote_invite_uses_mesh_fallback_helper(stack):
     assert call.kwargs["event_type"] == FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT
 
 
+async def _accept_payload(stack, token: str) -> dict:
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    await stack.space_repo.save_remote_invitation(
+        space_id=space.id,
+        invited_by="alicehost-id",
+        remote_instance_id="peer",
+        remote_user_id="bob",
+        invite_token=token,
+        space_display_hint="S",
+    )
+    await stack.svc.accept_remote_invite(token=token, user_id="bob")
+    return stack.fed_svc.send_with_mesh_fallback.call_args.kwargs["payload"]
+
+
+async def test_accept_to_a_mesh_only_host_carries_our_version_claim(stack):
+    """The host reaches us only over the mesh (no ``remote_instances`` row
+    either way), so the accept tells it our version + identity key — it
+    can then deliver our writer cert like a paired member's."""
+    from socialhome.domain.federation_capabilities import OURS
+
+    stack.fed_repo.get_instance = AsyncMock(return_value=None)
+    payload = await _accept_payload(stack, "tok-accept-claim")
+    assert payload["member_proto_version"] == OURS
+    assert payload["member_identity_pk"] == stack.fed_svc.own_identity_pk.hex()
+
+
+async def test_accept_to_a_paired_host_carries_no_claim(stack):
+    payload = await _accept_payload(stack, "tok-accept-paired")
+    assert "member_proto_version" not in payload
+    assert "member_identity_pk" not in payload
+
+
 async def test_decline_remote_invite_uses_mesh_fallback_helper(stack):
     await _user(stack, "alicehost")
     space = await stack.svc.create_space(

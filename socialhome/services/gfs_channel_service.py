@@ -943,7 +943,9 @@ class GfsChannelService:
         hold a grant, or it would subscribe (and publish) and name itself."""
         if self._federation is None or instance_id == self._own_instance_id:
             return None
-        if not await self._federation.peer_supports(
+        # A mesh-only member (no ``remote_instances`` row) is judged by the
+        # version it claimed over the mesh; an unknown one gets nothing.
+        if not await self._federation.space_member_supports(
             instance_id, min_version=FederationCapability.MIN_FOR_PRIVATE_CHANNELS
         ):
             return None

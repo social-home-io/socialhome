@@ -50,6 +50,7 @@ from ..federation.invite_code import (
     build_invite_payload,
     encode_invite_blob,
 )
+from ..federation.mesh_member_claim import mesh_member_claim
 from ..federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -1404,7 +1405,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         own = self._own_instance_id
         if space is None or not own or space.owner_instance_id != own:
             return False
-        if to_instance_id == own or not await self._federation.peer_supports(
+        # ``space_member_supports``: a mesh-only member household (no
+        # ``remote_instances`` row) is judged by the version it claimed over
+        # the mesh, so it gets the snapshot — and the credentials in it —
+        # like a paired member; an unknown one still gets nothing.
+        if to_instance_id == own or not await self._federation.space_member_supports(
             to_instance_id,
             min_version=FederationCapability.MIN_FOR_ROSTER_SNAPSHOT,
         ):
@@ -1538,7 +1543,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     )
                 )
         subscriber_ok = self._federation is not None and (
-            await self._federation.peer_supports(
+            await self._federation.space_member_supports(
                 to_instance_id,
                 min_version=FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE,
             )
@@ -5130,15 +5135,25 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if user is not None:
             display = user.display_name or user.username
             user_pk = getattr(user, "public_key", None)
+        accept_payload: dict = {
+            "invite_token": token,
+            "invitee_user_id": user_id,
+            "invitee_public_key": user_pk,
+            "invitee_display_name": display,
+        }
+        # A host we are not paired with reaches us only over the mesh and
+        # holds no ``remote_instances`` row for us: tell it our version +
+        # identity key (sealed end to end, origin-signed) so it can deliver
+        # our writer cert / key / channel grant (migration 0078).
+        if (
+            self._federation_repo is not None
+            and await self._federation_repo.get_instance(host_instance) is None
+        ):
+            accept_payload.update(mesh_member_claim(self._federation.own_identity_pk))
         await self._send_invite_envelope(
             to_instance_id=host_instance,
             event_type=FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
-            payload={
-                "invite_token": token,
-                "invitee_user_id": user_id,
-                "invitee_public_key": user_pk,
-                "invitee_display_name": display,
-            },
+            payload=accept_payload,
         )
         await self._spaces.update_invitation_status(
             invite["id"],

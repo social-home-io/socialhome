@@ -1296,7 +1296,9 @@ poster from a commenter) and by nobody else. A seed holder delivers it as
 `writer_key` next to each publisher's writer cert, sealed per peer, in the
 four channels that carry the cert — the rekey `per_peer` copy, the roster
 snapshot, the redeem ACK and the v_44 rotation bundle — only to v_50
-households in a strict space; the member verifies it against the pinned
+households in a strict space (a mesh-only member household by the version it
+claimed over the mesh, see [`spaces.md`](spaces.md#writer-certificates-v_49));
+the member verifies it against the pinned
 space key and keeps it KEK-wrapped (`space_keys.writer_key`). Because it is
 per epoch, **every revocation that rotates the content key (kick, ban,
 leave, scope narrowing, user removal, access narrowing) retires it**, and
@@ -1684,9 +1686,14 @@ never land in another space. A late grant for an older epoch never moves a
 member back to a channel the owner has since replaced.
 
 **Fallback.** A member household below v_51 gets no grant, so its items keep
-the host path and it receives the others' items from the host. So does a
-member household the host reaches only over the mesh (no peer row, so no
-known version — the same rule as writer certs). A server
+the host path and it receives the others' items from the host. A member
+household the host reaches only over the mesh (no peer row) is judged by the
+version it claimed over the mesh, exactly like writer certs (see
+[`spaces.md`](spaces.md#writer-certificates-v_49), "Mesh-only member
+households"): at v_51 it gets the paired member's publish-only grant (no
+pass — it is not link-joined), sealed to it end to end over `SPACE_ROUTED`;
+one that never claimed, or claimed below v_51, gets none and keeps the host
+path. A server
 without `private_channels` gets no channel. The SPA shows the owner the
 trusted / strict choice on a private space once it uses a channel
 (`GET /api/spaces/{id}` → `gfs_private_channel`).

@@ -1,0 +1,35 @@
+-- Mesh-only member households: their protocol version and identity key —
+-- ``space_instances.proto_version`` + ``space_instances.identity_pk``.
+--
+-- A household that is a member of a space we host but is NOT paired with us
+-- reaches us only over the mesh (``SPACE_ROUTED`` through a relay). It has
+-- no ``remote_instances`` row here, so ``peer_supports`` had no version to
+-- read and the writer cert (v_49), writer key (v_50) and private-channel
+-- grant (v_51) all failed closed for it: it could not publish over the
+-- connection server and its posts depended on the host.
+--
+-- Such a member now tells the host its version and identity key inside an
+-- origin-authenticated, end-to-end sealed routed payload
+-- (``socialhome/federation/mesh_member_claim.py``). The host keeps the claim
+-- on the household's existing ``space_instances`` rows — written ONLY onto
+-- rows that already exist (an UPDATE; a claim can never create membership),
+-- version kept as a high-water mark, the key accepted only when it derives
+-- to the instance id (§4.1.2). Lifetime = membership: leaving, a kick or a
+-- ban deletes the row and the claim with it; a re-join carries a fresh one.
+--
+-- Audit / alternatives considered:
+--   * a ``remote_instances`` row for mesh peers — rejected: that row's
+--     presence is what the §24.11 inbox gates on (see 0045), and it feeds
+--     pairing, the social peer list and the outbox;
+--   * an in-memory cache — rejected: a host restart forgets it while the
+--     member re-announces only on its own startup or join, so a rotation
+--     after a host restart would leave the member cert-less indefinitely;
+--   * ``space_remote_members`` — rejected: per user, rewritten by roster
+--     gossip / snapshots;
+--   * ``spaces.host_identity_pk`` (0045) is the member-side mirror of the
+--     same idea for the host's key; this is the host-side counterpart.
+--
+-- Additive, NULL default: every existing row holds no claim, which is the
+-- pre-migration state (no credential for an unknown mesh member).
+ALTER TABLE space_instances ADD COLUMN proto_version INTEGER;
+ALTER TABLE space_instances ADD COLUMN identity_pk TEXT;

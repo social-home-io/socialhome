@@ -63,6 +63,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
         "_peer_unpair",
         "_user_repo",
         "_child_protection",
+        "_federation",
     )
 
     def __init__(
@@ -82,9 +83,12 @@ class PairingInboundHandlers(ProtectionGateMixin):
         #: Without it no request is accepted (fail closed).
         self._user_repo = user_repo
         self._child_protection = None
+        #: Set by :meth:`attach_to` — records a mesh-only member's claim.
+        self._federation: "FederationService | None" = None
 
     def attach_to(self, federation_service: "FederationService") -> None:
         """Register every handler on the service's event registry."""
+        self._federation = federation_service
         registry = federation_service._event_registry
         registry.register(FederationEventType.PAIRING_INTRO, self._on_intro)
         registry.register(FederationEventType.PAIRING_ACCEPT, self._on_accept)
@@ -281,6 +285,12 @@ class PairingInboundHandlers(ProtectionGateMixin):
         """
         instance = await self._repo.get_instance(event.from_instance)
         if instance is None:
+            if event.routed_path is not None and self._federation is not None:
+                # A member household of one of our spaces that reaches us
+                # only over the mesh: its origin-authenticated version +
+                # identity-key claim (migration 0078). Never a row.
+                await self._federation.record_mesh_member_claim(event)
+                return
             log.debug(
                 "INSTANCE_CAPABILITIES_UPDATED from unknown instance=%s — drop",
                 event.from_instance,

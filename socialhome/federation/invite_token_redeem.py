@@ -97,6 +97,7 @@ from .invite_bootstrap import (
     validate_bootstrap_body,
     verify_peer_keywrap,
 )
+from .mesh_member_claim import mesh_member_claim
 
 if TYPE_CHECKING:
     from ..infrastructure.key_manager import KeyManager
@@ -635,6 +636,10 @@ class SpaceInviteTokenRedeemCoordinator:
                 assert self._route_service is not None
                 assert route_path is not None
                 assert target_eph_pk is not None
+                # The issuer holds no ``remote_instances`` row for us, so it
+                # learns our version + identity key from this claim (inside
+                # the seal, origin-signed) — and can deliver our writer cert.
+                payload.update(mesh_member_claim(self._federation.own_identity_pk))
                 # Pin the issuer identity pk discovery verified, so the
                 # origin holds a SPACE_ROUTE_STALE nack for this send
                 # against the key WE checked (same shape as
@@ -995,6 +1000,13 @@ class SpaceInviteTokenRedeemCoordinator:
                 return
             if reservation is not None:
                 await self._commit_redeem(reservation)
+            # A mesh redeemer (no ``remote_instances`` row) carried its
+            # version + identity-key claim. Recorded now that its
+            # ``space_instances`` row exists; the raise sends it the roster
+            # snapshot with its writer cert / key / channel grant (the ACK
+            # above could not carry them: its version was unknown then).
+            # ``record_mesh_member_claim`` owns every check.
+            await self._federation.record_mesh_member_claim(event)
 
     async def _consume_seat_and_build_ack(
         self,

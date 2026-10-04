@@ -152,9 +152,17 @@ class _Certs:
 class _Federation:
     def __init__(self) -> None:
         self.versions: dict[str, int] = {}
+        #: Mesh-only members' recorded mesh claims (no ``remote_instances``
+        #: row, so ``peer_supports`` knows nothing about them).
+        self.mesh: dict[str, int] = {}
 
     async def peer_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 51) >= min_version
+
+    async def space_member_supports(self, instance_id, *, min_version):
+        if instance_id in self.mesh:
+            return self.mesh[instance_id] >= min_version
+        return await self.peer_supports(instance_id, min_version=min_version)
 
 
 class _Gfs:
@@ -444,6 +452,32 @@ async def test_no_grant_for_a_v50_peer_or_without_a_seat(env):
     )
     # Never to ourselves.
     assert await env.owner.svc.grant_for_peer(SPACE_ID, env.owner.h.instance_id) is None
+
+
+async def test_a_mesh_only_member_at_v51_gets_its_grant(env):
+    """A member household the owner reaches only over the mesh (no
+    ``remote_instances`` row): judged by its mesh claim, it gets the
+    publish-only grant a paired member gets (no pass: it is not
+    link-joined), under the identity key it claimed."""
+    await _channel_ready(env)
+    other = env.other.h.instance_id
+    env.owner.fed_repo.rows.pop(other)
+    env.owner.federation.versions[other] = 0  # no row → peer_supports says no
+    env.owner.federation.mesh[other] = 51
+    grant = await env.owner.svc.grant_for_peer(SPACE_ID, other)
+    assert grant is not None
+    assert "channel_cert" in grant and "channel_pass" not in grant
+    assert await env.other.svc.accept_grant(SPACE_ID, grant)
+
+
+async def test_a_mesh_only_member_of_unknown_or_old_version_gets_no_grant(env):
+    await _channel_ready(env)
+    other = env.other.h.instance_id
+    env.owner.fed_repo.rows.pop(other)
+    env.owner.federation.versions[other] = 0
+    assert await env.owner.svc.grant_for_peer(SPACE_ID, other) is None
+    env.owner.federation.mesh[other] = 50
+    assert await env.owner.svc.grant_for_peer(SPACE_ID, other) is None
 
 
 async def test_a_reader_gets_a_pass_but_no_cert(env):
