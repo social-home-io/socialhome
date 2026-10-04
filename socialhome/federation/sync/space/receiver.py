@@ -526,9 +526,15 @@ class SpaceSyncReceiver:
         elif resource == "comments":
             for r in records:
                 comment = _comment_from_record(r)
-                if comment is not None and not await self._space_post_repo.add_comment(
+                if comment is None or await self._space_post_repo.add_comment(
                     comment, space_id=space_id
                 ):
+                    continue
+                # Not inserted: an id held here already (a member-relayed
+                # copy, or a delete's tombstone) stays as it is …
+                if await self._space_post_repo.get_comment(comment.id) is not None:
+                    log.debug("sync: comment %s is held here — skipped", comment.id)
+                else:  # … anything else targets a post outside this space.
                     log.warning(
                         "space sync: comment %s targets post %s outside space "
                         "%s — refusing the write",

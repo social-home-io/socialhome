@@ -127,14 +127,36 @@ def _cert_lets(cert: dict, author_user_id: str, item_type: str) -> bool:
     )
 
 
+#: Plaintext sizes a member item is padded up to before encryption, so the
+#: ciphertext length tells a connection server (or anyone on the wire) only
+#: the bucket — a reaction, a comment and a short post all look alike. The
+#: largest stays well under the GFS payload cap once encrypted and base64'd.
+ITEM_SIZE_BUCKETS: tuple[int, ...] = (1024, 4096, 16384, 65536, 131072)
+
+#: The padding field. A JSON key, so the padding sits INSIDE the AEAD
+#: (authenticated with the item) and a receiver from before padding — which
+#: reads ``item_type`` / ``inner`` off the object and ignores other keys —
+#: still parses a padded item.
+_PAD_FIELD: str = "_pad"
+
+
 def build_item_plaintext(item_type: str, inner: dict) -> bytes:
-    """The bytes a member publish encrypts: the real type + the inner."""
-    return json.dumps({"item_type": item_type, "inner": inner}).encode("utf-8")
+    """The bytes a member publish encrypts: the real type + the inner,
+    padded with ASCII ``0`` in :data:`_PAD_FIELD` to exactly the smallest
+    :data:`ITEM_SIZE_BUCKETS` size that fits. An item larger than the
+    largest bucket is left unpadded (its size is then its own)."""
+    body = {"item_type": item_type, "inner": inner, _PAD_FIELD: ""}
+    base = json.dumps(body).encode("utf-8")
+    bucket = next((b for b in ITEM_SIZE_BUCKETS if b >= len(base)), None)
+    if bucket is None:
+        return base
+    body[_PAD_FIELD] = "0" * (bucket - len(base))
+    return json.dumps(body).encode("utf-8")
 
 
 def parse_item_plaintext(plaintext: bytes) -> tuple[str, dict] | None:
     """``(item_type, inner)`` from decrypted bytes, or ``None`` if malformed
-    or of a type this build does not carry."""
+    or of a type this build does not carry. The size padding is ignored."""
     try:
         body = json.loads(plaintext)
     except ValueError:

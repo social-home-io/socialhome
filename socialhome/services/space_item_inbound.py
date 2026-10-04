@@ -40,8 +40,10 @@ federated copy, the retry queues and space sync interleave with it.
   content, under the create's rules; the later create is a duplicate.
   An edit never revives a deleted row.
 * **Reactions** are ordered per ``(post, user, emoji)`` by their signed
-  stamp in a bounded in-memory clock, so a duplicate ``reaction_add`` from
-  a second connection server cannot undo a later remove.
+  stamp, persisted next to the reactions in the same transaction
+  (``space_posts.reaction_stamps_json``; local writes stamp now), so a
+  duplicate ``reaction_add`` from a second connection server, a queued
+  copy, or one arriving after a restart cannot undo a later remove.
 
 A comment, reaction or edit whose post is not held here yet is dropped:
 the federated copy (members) or a later space sync carries it.
@@ -51,7 +53,6 @@ from __future__ import annotations
 
 import logging
 import unicodedata
-from collections import OrderedDict
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -71,6 +72,7 @@ from ..domain.space_item import (
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
     MAX_REACTION_EMOJI_CHARS,
+    StaleItemStamp,
     item_stamp,
     stamp_to_db,
 )
@@ -93,9 +95,6 @@ if TYPE_CHECKING:
     from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
-
-#: Reaction clock entries kept (oldest evicted first).
-MAX_REACTION_CLOCK_ENTRIES: int = 4096
 
 
 class _Item:
@@ -140,7 +139,7 @@ class _Item:
 class SpaceItemInbound:
     """Persist member-published generic items (see the module docstring)."""
 
-    __slots__ = ("_bus", "_spaces", "_posts", "_mentions", "_reaction_clock")
+    __slots__ = ("_bus", "_spaces", "_posts", "_mentions")
 
     def __init__(
         self,
@@ -154,10 +153,6 @@ class SpaceItemInbound:
         self._spaces = space_repo
         self._posts = space_post_repo
         self._mentions = mention_resolver
-        #: (space, post, user, emoji) → newest reaction stamp applied.
-        self._reaction_clock: OrderedDict[tuple[str, str, str, str], datetime] = (
-            OrderedDict()
-        )
 
     async def apply(
         self,
@@ -535,20 +530,26 @@ class SpaceItemInbound:
         if not await self._seat_ok(item, subscriber_ok=features.allow_subscriber_react):
             log.warning("space_item: reactor holds no reacting seat here — dropped")
             return False
-        key = (item.space.id, item.post_id, item.author, emoji)
-        last = self._reaction_clock.get(key)
-        if last is not None and item.stamp <= last:
-            log.debug("space_item: stale reaction on %s — dropped", item.post_id)
-            return False
         try:
             if added:
                 post = await self._posts.add_reaction(
-                    item.post_id, emoji, item.author, space_id=item.space.id
+                    item.post_id,
+                    emoji,
+                    item.author,
+                    space_id=item.space.id,
+                    stamp=stamp_to_db(item.stamp),
                 )
             else:
                 post = await self._posts.remove_reaction(
-                    item.post_id, emoji, item.author, space_id=item.space.id
+                    item.post_id,
+                    emoji,
+                    item.author,
+                    space_id=item.space.id,
+                    stamp=stamp_to_db(item.stamp),
                 )
+        except StaleItemStamp:
+            log.debug("space_item: stale reaction on %s — dropped", item.post_id)
+            return False
         except KeyError, ValueError:
             log.info(
                 "space_item: reaction on post %s not applied (unknown, deleted or "
@@ -556,10 +557,6 @@ class SpaceItemInbound:
                 item.post_id,
             )
             return False
-        self._reaction_clock[key] = item.stamp
-        self._reaction_clock.move_to_end(key)
-        while len(self._reaction_clock) > MAX_REACTION_CLOCK_ENTRIES:
-            self._reaction_clock.popitem(last=False)
         await self._bus.publish(
             PostReactionChanged(
                 post=post,

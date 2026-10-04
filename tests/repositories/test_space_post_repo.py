@@ -628,3 +628,64 @@ async def test_add_comment_keeps_the_rows_edited_at(env):
     )
     assert await env.repo.add_comment(stamped, space_id=env.space_id)
     assert (await _edited_at(env, "space_post_comments", "c1")).startswith("2026-10-03")
+
+
+# ─── v_49: persisted reaction stamps (member relay ordering) ───────────
+
+
+async def test_a_stamped_reaction_lands_only_over_an_older_stamp(env):
+    from socialhome.domain.space_item import StaleItemStamp
+
+    await env.repo.save(env.space_id, _post("p1"))
+    s1, s2 = "2026-10-03 12:00:01.000000", "2026-10-03 12:00:02.000000"
+    await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id, stamp=s1)
+    await env.repo.remove_reaction("p1", "👍", "u-bob", space_id=env.space_id, stamp=s2)
+    # A duplicate of the older add — another server's copy, a queued copy,
+    # after a restart — never brings the reaction back.
+    with pytest.raises(StaleItemStamp):
+        await env.repo.add_reaction(
+            "p1", "👍", "u-bob", space_id=env.space_id, stamp=s1
+        )
+    _sid, post = await env.repo.get("p1")
+    assert "👍" not in post.reactions
+
+
+async def test_an_unstamped_reaction_is_stamped_with_now(env):
+    """A local reaction (or any path without a signed stamp) records the
+    current time, so an older relayed copy can't undo it either."""
+    from socialhome.domain.space_item import StaleItemStamp
+
+    await env.repo.save(env.space_id, _post("p1"))
+    await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id)
+    await env.repo.remove_reaction("p1", "👍", "u-bob", space_id=env.space_id)
+    with pytest.raises(StaleItemStamp):
+        await env.repo.add_reaction(
+            "p1", "👍", "u-bob", space_id=env.space_id, stamp="2000-01-01 00:00:00"
+        )
+
+
+async def test_the_stamp_map_is_bounded(env, monkeypatch):
+    import socialhome.repositories.space_post_repo as mod
+
+    monkeypatch.setattr(mod, "MAX_REACTION_STAMPS_PER_POST", 3)
+    await env.repo.save(env.space_id, _post("p1"))
+    for n in range(5):
+        await env.repo.add_reaction(
+            "p1", "👍", f"u-{n}", space_id=env.space_id, stamp=f"2026-10-03 12:00:0{n}"
+        )
+    row = await env.db.fetchone(
+        "SELECT reaction_stamps_json FROM space_posts WHERE id='p1'"
+    )
+    import json
+
+    stamps = json.loads(row["reaction_stamps_json"])
+    assert len(stamps) == 3
+    assert "u-4\x00👍" in stamps and "u-0\x00👍" not in stamps
+
+
+async def test_add_comment_of_a_held_id_is_a_no_op_not_an_error(env):
+    await env.repo.save(env.space_id, _post("p1"))
+    assert await env.repo.add_comment(_comment("c1", "p1"), space_id=env.space_id)
+    dup = _comment("c1", "p1")
+    assert not await env.repo.add_comment(dup, space_id=env.space_id)
+    assert (await env.repo.get_comment("c1")).content == "Great post!"

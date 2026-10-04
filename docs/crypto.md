@@ -538,7 +538,10 @@ other request, and `gfs_instance_id` (the server id the household pinned from `/
 key with `author_pk` = that same registered key and scope `comment` (the
 item type is hidden in the ciphertext; receivers enforce the real scope).
 `payload` is AES-256-GCM under the existing per-space epoch content key —
-the GFS holds no key. **Content-epoch notice** — `POST
+the GFS holds no key. Its plaintext is padded to a size bucket (1 / 4 / 16 /
+64 / 128 KiB, a `_pad` JSON field) before encryption, so the padding is
+authenticated with the item and the ciphertext length reveals only the
+bucket. **Content-epoch notice** — `POST
 /gfs/spaces/{id}/epoch`, two forms. The OWNER's: its household identity
 signature (Ed25519, the registered key) over canonical JSON of `{action:
 "gfs-owner-epoch-notice:v1", owning_instance, gfs_instance_id, space_id,

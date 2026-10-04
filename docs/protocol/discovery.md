@@ -1102,9 +1102,19 @@ acts on bound inside the author signature:
   `SPACE_*_UPDATED` copy, which stamps its own clock and applies in arrival
   order — each path is ordered on its own, so both converge on the author's
   last edit.
-- **Reactions** are ordered per `(post, user, emoji)` by their signed `ts`
-  in a bounded in-memory clock, so a duplicate `reaction_add` from a second
-  connection server cannot undo a later remove.
+- **Reactions** are ordered per `(post, user, emoji)` by their signed `ts`,
+  persisted next to the reactions in the same transaction
+  (`space_posts.reaction_stamps_json`, migration `0075`; local writes stamp
+  now). A duplicate `reaction_add` from a second connection server, a
+  queued copy drained later, or one arriving after a restart cannot undo a
+  later remove. (Space reactions are no federated event — the relay is
+  their only cross-household path, apart from the reactions a §25.6 sync
+  snapshot carries with each post.)
+- **Size padding.** The item plaintext is padded to 1 / 4 / 16 / 64 /
+  128 KiB (`ITEM_SIZE_BUCKETS`) before encryption, in a `_pad` JSON field —
+  inside the AEAD, ignored by every receiver, including those from before
+  padding (they read `item_type` / `inner` and skip other keys). Larger
+  items go unpadded.
 - A comment, reaction or edit whose post is not held here yet is dropped;
   the federated copy (members) or a later sync carries it.
 
@@ -1124,10 +1134,18 @@ the unknown item types — logged, never misapplied). No protocol bump:
 nothing an older receiver could silently mishandle reaches it, and members
 keep the federated copy.
 
-**Residual, stated plainly.** In trusted mode the plaintext cert names its
-scope. A `comment`-scope publisher can't post, so the connection server can
-tell its items are comments, reactions or comment edits / deletes — not
-which. Strict mode (the cert moves inside the ciphertext) removes this.
+**Residuals, stated plainly** (trusted mode; listed for sign-off in
+[`principles.md`](../principles.md)). The plaintext cert names its scope: a
+`comment`-scope publisher can't post, so the connection server can tell its
+items are comments, reactions or comment edits / deletes (not which), and
+that the household is a follower or a plain member under a restricted posts
+level. The size bucket separates long items from short ones. Strict mode
+(the cert moves inside the ciphertext) removes the scope residuals.
+
+**Follow-up (unchanged by this release).** A moderator's or admin's removal
+of someone else's post or comment is not relayed to followers — it stays on
+the host path (`SPACE_POST_DELETED` / `SPACE_COMMENT_DELETED` to members), as
+it always was; followers keep the item until they re-sync.
 
 ```mermaid
 sequenceDiagram

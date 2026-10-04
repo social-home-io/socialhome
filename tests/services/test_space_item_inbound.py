@@ -604,3 +604,28 @@ async def test_an_item_without_a_target_is_dropped(env):
     inner = _inner("comment_delete", "x", env["post_id"], ts=1)
     inner["item_target"] = ""
     assert not await _apply(env, "comment_delete", inner)
+
+
+# ── Review repros I1 / I2: reaction order survives restarts and other paths
+
+
+async def test_a_restart_does_not_let_a_queued_old_add_resurrect_a_reaction(env):
+    add = _react(env, "reaction_add", "👍", 1)
+    assert await _apply(env, "reaction_add", add)
+    assert await _apply(env, "reaction_remove", _react(env, "reaction_remove", "👍", 2))
+    # A process restart: a fresh applier over the same database.
+    env["applier"] = SpaceItemInbound(
+        bus=EventBus(), space_repo=env["spaces"], space_post_repo=env["posts"]
+    )
+    # Another connection server's (or the offline queue's) copy of the add.
+    assert not await _apply(env, "reaction_add", add)
+    assert "👍" not in await _reactions(env)
+
+
+async def test_a_reaction_changed_on_another_path_is_not_undone_by_a_late_copy(env):
+    """A reaction added and removed on any other path (a local write here)
+    is stamped too: a slower relayed copy of an older add stays out."""
+    await env["posts"].add_reaction(env["post_id"], "👍", AUTHOR, space_id=SPACE)
+    await env["posts"].remove_reaction(env["post_id"], "👍", AUTHOR, space_id=SPACE)
+    assert not await _apply(env, "reaction_add", _react(env, "reaction_add", "👍", 1))
+    assert "👍" not in await _reactions(env)

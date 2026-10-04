@@ -1504,3 +1504,70 @@ async def test_bad_timetable_records_are_skipped_the_rest_apply(bus, peer, caplo
 async def test_timetables_skipped_when_repo_not_wired(bus, peer):
     r = _timetable_receiver(bus, peer, None)
     await _send(r, peer[1], "timetables", [_tt_record()])  # no raise
+
+
+async def test_a_held_comment_mid_chunk_never_stops_the_rest(setup, tmp_dir):
+    """Review repro I3: a comment the member relay already delivered, or a
+    delete-before-create tombstone, used to make the plain INSERT raise and
+    lose the rest of the chunk. Held rows stay as they are; the later
+    records land."""
+    from datetime import datetime, timezone
+
+    from socialhome.db.database import AsyncDatabase
+    from socialhome.domain.post import Comment, CommentType, Post, PostType
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+
+    r, _c, kp = setup
+    db = AsyncDatabase(tmp_dir / "sync.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES('sp-1','S','peer-a','o','ab')"
+        )
+        repo = SqliteSpacePostRepo(db)
+        now = datetime.now(timezone.utc)
+        await repo.save(
+            "sp-1",
+            Post(id="p-1", author="u-1", type=PostType.TEXT, created_at=now),
+        )
+        await repo.add_comment(
+            Comment(
+                id="c-held",
+                post_id="p-1",
+                author="u-1",
+                type=CommentType.TEXT,
+                created_at=now,
+                content="from the relay",
+            ),
+            space_id="sp-1",
+        )
+        await repo.add_comment(
+            Comment(
+                id="c-gone",
+                post_id="p-1",
+                author="u-1",
+                type=CommentType.TEXT,
+                created_at=now,
+                deleted=True,
+            ),
+            space_id="sp-1",
+        )
+        r._space_post_repo = repo
+        rec = {"post_id": "p-1", "author": "u-1", "type": "text"}
+        await _send(
+            r,
+            kp,
+            "comments",
+            [
+                {"id": "c-held", **rec, "content": "from sync"},
+                {"id": "c-gone", **rec, "content": "resurrected"},
+                {"id": "c-new", **rec, "content": "later record"},
+            ],
+        )
+        assert (await repo.get_comment("c-held")).content == "from the relay"
+        gone = await repo.get_comment("c-gone")
+        assert gone.deleted and gone.content is None
+        assert (await repo.get_comment("c-new")).content == "later record"
+    finally:
+        await db.shutdown()

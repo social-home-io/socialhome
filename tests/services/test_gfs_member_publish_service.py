@@ -783,3 +783,37 @@ async def test_schedule_item_publishes_in_the_background(world):
     frame = (await _queued(world))[0].sealed
     item_type, _inner = parse_item_plaintext(world["crypto"].decrypt(frame["payload"]))
     assert item_type == "reaction_add"
+
+
+# ── Review: size-bucket padding (the type hides from the payload size) ────
+
+
+@pytest.mark.parametrize("size", [0, 10, 900, 1100, 5000, 20000, 70000])
+def test_the_item_plaintext_is_padded_to_a_size_bucket(size):
+    from socialhome.services.gfs_member_publish_service import ITEM_SIZE_BUCKETS
+
+    pt = build_item_plaintext("comment", {"content": "x" * size})
+    assert len(pt) in ITEM_SIZE_BUCKETS
+    assert parse_item_plaintext(pt) == ("comment", {"content": "x" * size})
+
+
+def test_a_reaction_and_a_short_post_share_one_bucket():
+    reaction = build_item_plaintext("reaction_add", {"emoji": "👍"})
+    post = build_item_plaintext("post", {"content": "hello there " * 20})
+    assert len(reaction) == len(post)
+
+
+def test_the_padding_rides_a_field_a_pr2_receiver_ignores():
+    """A receiver from before this release reads ``item_type`` / ``inner``
+    off a JSON object and ignores other keys — a padded post still parses."""
+    body = json.loads(build_item_plaintext("post", {"post_id": "p"}))
+    assert set(body) == {"item_type", "inner", "_pad"}
+    assert (body["item_type"], body["inner"]) == ("post", {"post_id": "p"})
+
+
+def test_an_item_past_the_largest_bucket_is_left_unpadded():
+    from socialhome.services.gfs_member_publish_service import ITEM_SIZE_BUCKETS
+
+    pt = build_item_plaintext("post", {"content": "x" * (ITEM_SIZE_BUCKETS[-1] + 1)})
+    assert len(pt) > ITEM_SIZE_BUCKETS[-1]
+    assert parse_item_plaintext(pt) is not None

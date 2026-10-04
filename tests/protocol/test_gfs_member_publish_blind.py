@@ -45,7 +45,10 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
-from socialhome.services.gfs_member_publish_service import GfsMemberPublishService
+from socialhome.services.gfs_member_publish_service import (
+    ITEM_SIZE_BUCKETS,
+    GfsMemberPublishService,
+)
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
 pytestmark = pytest.mark.security
@@ -361,6 +364,12 @@ async def test_no_member_item_type_ever_reaches_the_gfs_in_plaintext(
     assert len(queued) == 1
     assert set(queued[0].sealed) == MEMBER_PUBLISH_FRAME_KEYS
     assert queued[0].sealed["event_type"] == SPACE_ITEM_EVENT_TYPE
+    # Size padding: every small item — a reaction or a post alike — is one
+    # 1 KiB bucket inside the AEAD (12-byte nonce + 16-byte tag around it),
+    # so the ciphertext length doesn't tell the type either.
+    assert len(queued[0].sealed["payload"]) == len(
+        b64url_encode(bytes(12 + ITEM_SIZE_BUCKETS[0] + 16))
+    )
     for where, blob in (
         ("the request", json.dumps(sent, ensure_ascii=False)),
         (

@@ -120,3 +120,8 @@ def stamp_to_db(stamp: datetime) -> str:
         .replace(tzinfo=None)
         .isoformat(sep=" ", timespec="microseconds")
     )
+
+
+class StaleItemStamp(Exception):
+    """A stamped write is not newer than the one already applied for the
+    same row (or reaction) — a late duplicate, never applied."""

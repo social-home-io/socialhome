@@ -1,0 +1,24 @@
+-- Reaction stamps on space posts (v_49 member relay) —
+-- ``space_posts.reaction_stamps_json``.
+--
+-- A reaction published over the connection-server member relay carries the
+-- reactor's signed action time. Receivers apply an add or remove only when
+-- it is newer than the last one they applied for that (post, user, emoji),
+-- so a duplicate add from a second connection server — or a copy queued for
+-- a household that was offline, or restarted — cannot bring back a reaction
+-- that was removed. That ordering must survive a restart, so it lives next
+-- to the reactions it orders and is written in the same transaction.
+--
+-- Shape: JSON ``{"<user_id>\u0000<emoji>": ["<naive-UTC stamp>", <added>]}``.
+-- A removal stays as an entry with ``added = false`` (its tombstone); the
+-- map is bounded per post in ``space_post_repo``.
+--
+-- Not another home: ``reactions`` ({emoji: [user_id]}) is read by every
+-- feed, the sync exporter and the API, so its shape can't change; the other
+-- reaction tables (DM messages, highlight frames, moments) belong to other
+-- rows. Space reactions are no federated event, so no wire field can carry
+-- the order instead.
+--
+-- Additive, NULL default: an existing post holds no stamps, which is exactly
+-- the state before any relayed reaction.
+ALTER TABLE space_posts ADD COLUMN reaction_stamps_json TEXT;
