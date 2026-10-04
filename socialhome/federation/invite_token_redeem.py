@@ -64,9 +64,11 @@ from ..domain.media_constraints import (
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
 from ..domain.space import (
+    INVITE_VIA_INTERNAL,
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
+    SpaceType,
     mirrorable_remote_role,
     owner_seat_from_roster,
 )
@@ -946,6 +948,11 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return
 
+        # A household seated through an invite link (``space_session``) has
+        # no other route to us than the connection-server relay, so its §D2
+        # redeem rode the relay — exactly like a §D2b bootstrap redeem.
+        sender = await self._federation_repo.get_instance(event.from_instance)
+        over_gfs = sender is not None and sender.source is InstanceSource.SPACE_SESSION
         async with self._redeem_lock(event.from_instance):
             (
                 ack_payload,
@@ -957,6 +964,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 redeemer_user_id=redeemer_user_id,
                 redeemer_pk=redeemer_pk,
                 redeemer_display=redeemer_display,
+                over_gfs=over_gfs,
             )
             if ack_payload is None:
                 await self._send_deny(
@@ -1017,6 +1025,7 @@ class SpaceInviteTokenRedeemCoordinator:
         redeemer_pk: str | None,
         redeemer_display: str | None,
         bootstrap: bool = False,
+        over_gfs: bool = False,
     ) -> tuple[dict | None, str | None, _SeatReservation | None]:
         """Issuer-side authorization + seating for one redeem.
 
@@ -1024,6 +1033,14 @@ class SpaceInviteTokenRedeemCoordinator:
         connection server's size-capped relay: the snapshot's cover and
         icon are bounded to ``SPACE_*_BOOTSTRAP_MAX_BYTES`` instead of the
         peer-envelope defaults.
+
+        ``over_gfs`` (implied by ``bootstrap``) marks a redeem that reached
+        us over the connection-server relay. Such a redeem is refused — the
+        use handed back — for an ``internal`` link (migration 0079), and for
+        any link of a PRIVATE space whose owner has ``private_gfs`` OFF: an
+        internal link, or a private space that does not use a connection
+        server, never seats a household through one. Read from the consumed
+        row and the stored space, never from the request.
 
         Returns ``(ack_body, None, reservation)`` on success or
         ``(None, reason, None)`` on every denial. The redeem is NOT
@@ -1082,6 +1099,16 @@ class SpaceInviteTokenRedeemCoordinator:
         space_id = str(row.get("space_id") or "")
         if not space_id:
             log.warning("invite redeem: consumed token row carried no space_id")
+            return None, REDEEM_DENY_REASON, None
+
+        if (bootstrap or over_gfs) and not await self._relay_redeem_allowed(row):
+            log.info(
+                "invite redeem: refused a redeem over the connection-server "
+                "relay for space %s — the link is internal, or the private "
+                "space does not use a connection server",
+                space_id,
+            )
+            await self._release_token_use(token, space_id)
             return None, REDEEM_DENY_REASON, None
 
         # The seat the ISSUER decided at mint time (migration 0053). The
@@ -1432,6 +1459,17 @@ class SpaceInviteTokenRedeemCoordinator:
                     "invite redeem: dropping the space-session seat of %s failed",
                     res.instance_id,
                 )
+
+    async def _relay_redeem_allowed(self, row: dict) -> bool:
+        """Whether the consumed token ``row`` may seat a household through
+        the connection-server relay: never an ``internal`` link, never a
+        link of a PRIVATE space whose owner has ``private_gfs`` OFF."""
+        if str(row.get("via") or "") == INVITE_VIA_INTERNAL:
+            return False
+        space = await self._spaces.get(str(row.get("space_id") or ""))
+        if space is None:
+            return False
+        return space.space_type is not SpaceType.PRIVATE or space.features.private_gfs
 
     async def _release_token_use(self, token: str, space_id: str) -> None:
         try:

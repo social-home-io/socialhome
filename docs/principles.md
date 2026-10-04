@@ -322,9 +322,12 @@ server's `/gfs/envelope`, so nobody else saw its posts while the host was
 offline. Since v_51 such a space gets member publishing through an **opaque
 channel** (`/gfs/channels/*`, see
 [`protocol/discovery.md`](./protocol/discovery.md#private-spaces-opaque-channels-v_51)):
-a random 128-bit id plus a channel key derived from the space seed, created
-automatically by the owner once the first link-joined member is seated and
-retired when the last one leaves. **What it concedes, exactly:**
+a random 128-bit id plus a channel key derived from the space seed. **Since
+the owner decision of 2026-10-04 the channel exists only by the owner's
+explicit, per-space opt-in** (`SpaceFeatures.private_gfs`, "use the
+connection server for this space"; see the next sign-off): created once the
+option is ON and the space has a remote member household, retired when it is
+turned OFF or the last remote member leaves. **What it concedes, exactly:**
 
 - **The server never learns the space.** No space id, no name, no space
   authority key, no owner household id appears in any channel request,
@@ -339,17 +342,14 @@ retired when the last one leaves. **What it concedes, exactly:**
   bucket, exactly as for public spaces. Registration and epoch notices are
   anonymous (channel-key-signed), and every identifier rides in the body,
   never in a URL.
-- **It learns the channel's link-joined households — this is the
-  residual.** Owner rule: the server sees as little as possible. Only a
-  household seated through an invite link takes a seat (an identified,
-  household-signed subscribe with a channel-key-signed pass) — exactly the
-  households whose `/gfs/envelope` traffic it already relays (the link-pair
-  residual above). It learns that set, its size, when it changes (a removed
-  household's seat dies at the next rotation), and the timing and size
-  bucket of every item. **Paired members never take a seat**: their grant
-  is publish-only, and they get the link-joined members' items from the
-  host by catch-up sync once it is back. (Seats for paired members would be
-  a possible future owner opt-in; not built.)
+- **It learns the channel's member households — this is the residual.**
+  Every member household connected to the channel's server takes a seat (an
+  identified, household-signed subscribe with a channel-key-signed pass):
+  the link-joined households — whose `/gfs/envelope` traffic it already
+  relays (the link-pair residual above) — **and, since 2026-10-04, the
+  paired and mesh-only members too** (the next sign-off). It learns that
+  set, its size, when it changes (a removed household's seat dies at the
+  next rotation), and the timing and size bucket of every item.
 - **In trusted mode (the default) it learns which member household
   published each item into the channel** — a paired member included, as a
   publisher only — the same concession as the trusted public-space sign-off
@@ -382,15 +382,56 @@ retired when the last one leaves. **What it concedes, exactly:**
   storm; a seed holder that keeps the seed can repeat it — the remedy is
   revoking that admin. Items still reach the host either way.
 
-**Why this is accepted (pending sign-off):** the alternative is the status
+**Why this is accepted (signed off 2026-10-04):** the alternative is the status
 quo — a link-joined member's posts reach nobody while the host is offline,
 which the owner decided (2026-10-03) is the single point of failure member
 publishing exists to remove. The disclosure is the same *kind* the
 link-pair relay already concedes (recipient households, timing, size),
-for the same households, plus — in trusted mode — the publisher. A household that would rather not appear on the
+plus — in trusted mode — the publisher. A household that would rather not appear on the
 channel can decline to upgrade (a v_50 member gets no grant and keeps the
-host path); an owner who does not want a channel at all keeps the space
-free of invite-link members, or picks strict mode to hide the publisher.
+host path); an owner who does not want a channel at all leaves the
+space's connection-server option OFF (the default for a new private
+space), or picks strict mode to hide the publisher.
+
+### Sign-off: the owner may let a private space use the connection server — then it learns every subscribed member household (2026-10-04)
+
+**Flagged for owner sign-off.** Owner decision 2026-10-04: a PRIVATE space
+carries an explicit, owner-only option `SpaceFeatures.private_gfs` ("use
+the connection server for this space"), federated in `SPACE_CONFIG_CHANGED`
+and pinned on every household to the owner's own word.
+
+- **OFF — the default for every new private space — the space never touches
+  a connection server.** No invite link that redeems through the relay
+  (only *internal* links: paired / mesh households, no key-wrap key in the
+  code, and the host refuses a relayed redeem of them), no channel
+  registration, no notice, no grant, no seat, no publish (pinned by
+  `tests/protocol/test_gfs_private_channel_blind.py::test_an_off_private_space_never_touches_the_gfs`).
+  Turning it OFF is refused while households that joined through an invite
+  link are still members (they have no other route to the host); otherwise
+  it revokes every *gfs*-type link, unregisters the channel on every server
+  and rotates the content key, so the old epoch's channel credentials die.
+- **ON — the owner's opt-in — every member household connected to the
+  channel's server takes a seat, paired and mesh-only members included.**
+  This reverses #815's "only link-joined households take a seat" for such a
+  space: all GFS-connected members receive each other's posts, comments and
+  reactions while the host is offline. **The server then learns every
+  subscribed member household** of the channel (identified subscribes), not
+  only the link-joined ones it already relayed for — still never the space
+  id, its name, its key, its owner id or any content (everything in the
+  previous sign-off holds). Members not connected to that server keep the
+  federation path and catch up from the host when it returns.
+- **Existing spaces:** migration 0079 turned the option ON only for the
+  private spaces that already used the relay (a link-joined household, or
+  a live invite link — every link minted before it was relay-redeemable),
+  so nothing that worked stopped; for those spaces the server now also
+  learns their paired members (those connected to it), which it did not
+  before. Every other existing private space is OFF.
+
+**Why this is accepted (pending sign-off):** it is the owner's explicit choice
+per space, off by default, and it buys what the owner asked for — members
+that reach each other without the host. A household that would rather not
+appear can decline to connect to that server or stay below v_51 (no grant,
+host path).
 
 ### Sign-off: per-user routing on the app channel (§FIX-I2 relaxed, v_18)
 

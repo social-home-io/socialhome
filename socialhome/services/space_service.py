@@ -132,9 +132,14 @@ from ..domain.mention import Mention
 from ..domain.presence import truncate_coord
 from ..domain.space import (
     ACCESS_FEATURES,
+    INVITE_VIA_GFS,
+    INVITE_VIA_INTERNAL,
+    INVITE_VIAS,
     AccessDecision,
     ContentAction,
     PeersTooOldError,
+    PrivateGfsLinkMembersError,
+    PrivateGfsOffError,
     restricted_access_changes,
     PUBLIC_SPACE_TIERS,
     SPACE_CATEGORIES,
@@ -1369,8 +1374,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
 
     async def uses_gfs_private_channel(self, space: Space) -> bool:
         """Whether this PRIVATE space uses an opaque connection-server
-        channel (v_51): created by its owner once a member joined through an
-        invite link. Its owner's ``gfs_publish_mode`` choice then applies."""
+        channel (v_51): created by its owner once it turned ``private_gfs``
+        on and the space has a remote member household. Its owner's
+        ``gfs_publish_mode`` choice then applies."""
         if space.space_type is not SpaceType.PRIVATE:
             return False
         return await self._spaces.get_gfs_channel(space.id) is not None
@@ -2047,6 +2053,22 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and features.gfs_publish_mode != space.features.gfs_publish_mode
         ):
             await self._require_owner(space, actor_username)
+        # SECURITY: and so is whether a PRIVATE space uses a connection server
+        # at all (``private_gfs``): ON tells the server every member household
+        # connected to it (never the space). Turning it OFF while households
+        # that joined through an invite link are members would strand them —
+        # they reach the host only over the server — so it is refused, naming
+        # them; the owner removes them first.
+        private_gfs_changed = (
+            features is not None and features.private_gfs != space.features.private_gfs
+        )
+        if private_gfs_changed:
+            await self._require_owner(space, actor_username)
+            assert features is not None
+            if not features.private_gfs and space.space_type is SpaceType.PRIVATE:
+                stranded = await self._link_joined_households(space_id)
+                if stranded:
+                    raise PrivateGfsLinkMembersError(stranded)
         # §4.3 / v_42: a level an older member household cannot enforce is
         # applied only once the admin has seen which households lag — and a
         # feature newly set to ``MODERATED`` needs every member household to
@@ -2440,6 +2462,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and space.owner_instance_id == self._own_instance_id
         ):
             await self._after_gfs_publish_mode_change(updated)
+        if private_gfs_changed and space.owner_instance_id == self._own_instance_id:
+            await self._after_private_gfs_change(updated)
         # Delegated-admin authority just flipped OFF on the space we host:
         # every seed ever shared is now unauthorized. Rotate the authority
         # key and re-share it with nobody (v_44).
@@ -2476,6 +2500,94 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 await self._member_gfs.announce_epoch(space.id)
             except Exception:
                 log.exception("gfs publish mode: GFS notice failed for %s", space.id)
+
+    async def _link_joined_households(self, space_id: str) -> list[dict]:
+        """The member households of ``space_id`` seated through an invite
+        link (``InstanceSource.SPACE_SESSION``, a live seat here) — they
+        reach the host only over a connection server. API shape of the
+        ``PRIVATE_GFS_LINK_MEMBERS`` refusal: ``[{instance_id, display_name,
+        members: [{user_id, display_name}]}]``."""
+        if self._remote_members is None or self._federation_repo is None:
+            return []
+        by_instance: dict[str, list[SpaceRemoteMember]] = {}
+        for seat in await self._remote_members.list_for_space(space_id):
+            if seat.instance_id and seat.instance_id != self._own_instance_id:
+                by_instance.setdefault(seat.instance_id, []).append(seat)
+        out: list[dict] = []
+        for instance_id in sorted(by_instance):
+            inst = await self._federation_repo.get_instance(instance_id)
+            if inst is None or inst.source is not InstanceSource.SPACE_SESSION:
+                continue
+            out.append(
+                {
+                    "instance_id": instance_id,
+                    "display_name": inst.effective_display_name,
+                    "members": [
+                        {
+                            "user_id": seat.user_id,
+                            "display_name": seat.display_name or seat.user_id,
+                        }
+                        for seat in by_instance[instance_id]
+                    ],
+                }
+            )
+        return out
+
+    async def _after_private_gfs_change(self, space: Space) -> None:
+        """The owner switched ``private_gfs`` on a PRIVATE space we host.
+
+        * ON: start the space's opaque channel now (when it has a remote
+          member household and a capable connection server), announce it and
+          hand every member household its grant — with a seat pass, paired
+          members included.
+        * OFF (only reached with no link-joined member left — refused
+          earlier otherwise): every ``gfs`` invite link stops working (and
+          comes down where it was parked), the channel is unregistered on
+          every server, and the content key rotates — the new epoch carries
+          no grant, so members unsubscribe and every channel credential of
+          the old epoch dies at the server's epoch tiers."""
+        if space.space_type is not SpaceType.PRIVATE:
+            return
+        if space.features.private_gfs:
+            if self._member_gfs is not None:
+                try:
+                    await self._member_gfs.enable_channel(space.id)
+                except Exception:
+                    log.exception("private gfs: starting the channel failed")
+            return
+        for row in await self._spaces.delete_invite_tokens_via(
+            space.id, INVITE_VIA_GFS
+        ):
+            gfs_id, gfs_token = row.get("gfs_id"), row.get("gfs_token")
+            if not gfs_id or not gfs_token or self._gfs is None:
+                continue
+            try:
+                await self._gfs.revoke_invite(space.id, str(gfs_id), str(gfs_token))
+            except Exception as exc:
+                log.warning(
+                    "private gfs off: space=%s link deleted locally but "
+                    "connection server %s did not take its blob down: %s",
+                    space.id,
+                    gfs_id,
+                    exc,
+                )
+        # A relayed redeem that committed between the refusal check and this
+        # write would leave a link-joined member behind: say so, the owner
+        # removes it (the relay redeem itself re-reads the flag).
+        late = await self._link_joined_households(space.id)
+        if late:
+            log.warning(
+                "private gfs off: space=%s still has link-joined households %s "
+                "— they can no longer reach this space; remove them",
+                space.id,
+                ", ".join(str(h["instance_id"]) for h in late),
+            )
+        if self._member_gfs is not None:
+            try:
+                await self._member_gfs.retire_channel(space.id)
+            except Exception:
+                log.exception("private gfs off: retiring the channel failed")
+        await self._rotate_and_distribute_space_key(space.id)
 
     async def _writer_certs_after_posts_access_change(
         self, before: Space, after: Space
@@ -3718,6 +3830,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     # * ``gfs_publish_mode`` (v_50) — whether the connection
                     #   server learns which household posted is the owner's
                     #   privacy decision for the whole space.
+                    #
+                    # * ``private_gfs`` — whether a private space uses a
+                    #   connection server at all, likewise.
                     kwargs["features"] = replace(
                         new_features,
                         delegated_admin_authority=(
@@ -3725,6 +3840,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                         ),
                         allow_subscribers=space.features.allow_subscribers,
                         gfs_publish_mode=space.features.gfs_publish_mode,
+                        private_gfs=space.features.private_gfs,
                     )
                 # The host re-runs the PEERS_TOO_OLD check with its own view
                 # of the member households (the forwarder may not be paired
@@ -4395,6 +4511,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         uses: int = 1,
         ttl_seconds: int | None = DEFAULT_INVITE_TOKEN_TTL_SECONDS,
         role: str = SpaceRole.MEMBER.value,
+        via: str | None = None,
     ) -> str:
         """Mint a shareable invite token for ``space_id``.
 
@@ -4415,6 +4532,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             uses=uses,
             ttl_seconds=ttl_seconds,
             role=role,
+            via=via,
         )
         return str(link["token"])
 
@@ -4427,6 +4545,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         ttl_seconds: int | None = DEFAULT_INVITE_TOKEN_TTL_SECONDS,
         role: str = SpaceRole.MEMBER.value,
         publish_to_gfs: str | None = None,
+        via: str | None = None,
     ) -> dict:
         """Mint an invite link — the token, the seat it grants, the code.
 
@@ -4463,6 +4582,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         (The HTTP layer additionally accepts ``0`` for "never", because
         that is what the SPA's picker sends — see
         ``routes.spaces.SpaceInviteTokenView``.)
+
+        ``via`` is the link's type (migration 0079), stored on the row:
+        ``"gfs"`` — redeemable through the connection-server relay by a
+        household that never met us (the code carries our key-wrap key);
+        ``"internal"`` — paired / mesh households only, never touching a
+        connection server. Omitted: ``"internal"`` on a PRIVATE space whose
+        owner has ``private_gfs`` OFF, ``"gfs"`` otherwise (today's link). A
+        ``"gfs"`` link on a private space with the option OFF raises
+        :class:`PrivateGfsOffError`; an internal link is never published.
         """
         space = await self._require_space(space_id)
         try:
@@ -4481,6 +4609,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             # An admin minting an admin link would be self-service
             # promotion by proxy. Only the owner delegates admin.
             await self._require_owner(space, actor_username)
+        link_via = self._resolve_invite_via(space, via)
+        if link_via == INVITE_VIA_INTERNAL and publish_to_gfs:
+            raise ValueError(
+                "an internal invite link is never published to a connection server"
+            )
         actor = await self._users.get(actor_username)
         assert actor is not None
         expires_at: str | None = None
@@ -4507,6 +4640,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                         token=token,
                         expires_at=expires_at,
                         gfs_url=gfs_base,
+                        via=link_via,
                     )
                 ),
                 _invite_expiry_epoch(expires_at),
@@ -4521,6 +4655,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             gfs_id=publish_to_gfs or None,
             gfs_token=gfs_token,
             gfs_url=gfs_url,
+            via=link_via,
         )
         rows = await self._spaces.list_live_invite_tokens(space_id)
         row = next(
@@ -4539,9 +4674,27 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 "gfs_id": publish_to_gfs or None,
                 "gfs_token": gfs_token,
                 "gfs_url": gfs_url,
+                "via": link_via,
             },
         )
         return self._invite_link_dict(space, row, gfs_base=gfs_base)
+
+    @staticmethod
+    def _resolve_invite_via(space: Space, via: str | None) -> str:
+        """The type a new link of ``space`` gets (see
+        :meth:`create_invite_link`)."""
+        gfs_allowed = (
+            space.space_type is not SpaceType.PRIVATE or space.features.private_gfs
+        )
+        if via is None:
+            return INVITE_VIA_GFS if gfs_allowed else INVITE_VIA_INTERNAL
+        if via not in INVITE_VIAS:
+            raise ValueError("via must be 'gfs' or 'internal'")
+        if via == INVITE_VIA_GFS and not gfs_allowed:
+            raise PrivateGfsOffError(
+                "this private space does not use a connection server"
+            )
+        return via
 
     async def invite_code_for_token(self, token: str) -> str | None:
         """The full ``socialhome://invite#…`` code for one live link.
@@ -4589,6 +4742,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 token=str(row["token"]),
                 expires_at=row.get("expires_at"),
                 gfs_url=gfs_base,
+                via=str(row.get("via") or INVITE_VIA_GFS),
             )
         )
 
@@ -4681,10 +4835,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         token: str,
         expires_at: str | None,
         gfs_url: str | None,
+        via: str = INVITE_VIA_GFS,
     ) -> dict:
         """The decoded invite payload for one link. One builder, two uses:
         the ``code`` the SPA renders and the blob a connection server
         parks, so the paste path and the /join path can never diverge.
+        An ``internal`` link's payload carries no key-wrap key and no relay.
         """
         identity_pk = (
             self._federation.own_identity_pk.hex()
@@ -4702,6 +4858,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             issuer_proto_version=OURS,
             expires_at=expires_at,
             gfs_url=gfs_url,
+            relay=via != INVITE_VIA_INTERNAL,
         )
 
     async def _gfs_base_url(self, gfs_id: str) -> str:
@@ -4727,9 +4884,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """API shape for one invite link row (see ``docs/api.md``)."""
         gfs_id = row.get("gfs_id")
         gfs_token = row.get("gfs_token")
+        via = str(row.get("via") or INVITE_VIA_GFS)
         return {
             "token": row["token"],
             "role": row.get("role") or SpaceRole.MEMBER.value,
+            # The link's type (0079): ``gfs`` (redeemable through the
+            # connection-server relay) or ``internal`` (paired / mesh only).
+            "via": via,
             # What the link was minted with, so the UI can say "3 of 10
             # left". A row from before migration 0053 has no total —
             # falling back to the remaining count is honest ("3 of 3")
@@ -4745,6 +4906,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     token=str(row["token"]),
                     expires_at=row.get("expires_at"),
                     gfs_url=gfs_base,
+                    via=via,
                 )
             ),
             "gfs": (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -1156,6 +1157,52 @@ async def test_invite_token_rejects_an_unknown_role(env):
     for bad in ("owner", "superuser"):
         with pytest.raises(sqlite3.IntegrityError):
             await env.repo.create_invite_token("sp-role-bad", "uid-alice", role=bad)
+
+
+async def test_invite_token_type_round_trips_and_defaults_to_gfs(env):
+    """Migration 0079 — the link's type is stored on the row and comes back
+    out of every read and the atomic consume."""
+    await env.repo.save(_space("sp-via"))
+    plain = await env.repo.create_invite_token("sp-via", "uid-alice")
+    internal = await env.repo.create_invite_token("sp-via", "uid-alice", via="internal")
+    listed = {
+        r["token"]: r["via"] for r in await env.repo.list_live_invite_tokens("sp-via")
+    }
+    assert listed == {plain: "gfs", internal: "internal"}
+    assert (await env.repo.get_live_invite_token(internal))["via"] == "internal"
+    assert (await env.repo.consume_invite_token(internal))["via"] == "internal"
+    assert (await env.repo.consume_invite_token(plain))["via"] == "gfs"
+    with pytest.raises(ValueError):
+        await env.repo.create_invite_token("sp-via", "uid-alice", via="relay")
+
+
+async def test_delete_invite_tokens_via_drops_only_that_type(env):
+    await env.repo.save(_space("sp-via-del"))
+    await env.repo.save(_space("sp-via-other"))
+    gfs = await env.repo.create_invite_token(
+        "sp-via-del", "uid-alice", gfs_id="g1", gfs_token="gt", gfs_url="u"
+    )
+    internal = await env.repo.create_invite_token(
+        "sp-via-del", "uid-alice", via="internal"
+    )
+    other = await env.repo.create_invite_token("sp-via-other", "uid-alice")
+    rows = await env.repo.delete_invite_tokens_via("sp-via-del", "gfs")
+    assert rows == [{"token": gfs, "gfs_id": "g1", "gfs_token": "gt", "gfs_url": "u"}]
+    left = [r["token"] for r in await env.repo.list_live_invite_tokens("sp-via-del")]
+    assert left == [internal]
+    assert await env.repo.get_live_invite_token(other) is not None
+    assert await env.repo.delete_invite_tokens_via("sp-via-del", "gfs") == []
+
+
+async def test_private_gfs_round_trips_through_save(env):
+    space = _space("sp-pgfs")
+    await env.repo.save(
+        replace(space, features=replace(space.features, private_gfs=True))
+    )
+    got = await env.repo.get("sp-pgfs")
+    assert got.features.private_gfs is True
+    await env.repo.save(replace(got, features=replace(got.features, private_gfs=False)))
+    assert (await env.repo.get("sp-pgfs")).features.private_gfs is False
 
 
 async def test_create_invite_token_accepts_a_caller_supplied_token(env):

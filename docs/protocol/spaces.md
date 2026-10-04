@@ -1169,17 +1169,32 @@ owner-only: a member household takes it only from the owner household's own
 `SPACE_CONFIG_CHANGED` (a delegated admin's signed config can't flip it), and
 the host pins it like `allow_subscribers`.
 
-**Private-space channel grant (v_51).** In a PRIVATE space with at least one
-link-joined member household, the same four channels also carry
-`gfs_channel` — the household's per-epoch grant for the space's opaque
-connection-server channel (`{channel_suite, space_id, channel_id,
-channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite, binding_sig, channel_pass,
-channel_cert?, writer_key?}`), to every v_51 member household with a live
-seat — a pass only for a link-joined household (the only seats), a cert or
-writer key for writers (a paired reader gets none). It is bound to the space by the
-authority key, verified against the pinned space key and kept KEK-wrapped on
-`space_keys.gfs_channel`; a snapshot's grant is taken only from the host.
-See [`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).
+**Private spaces and the connection server (`private_gfs`, 2026-10-04).**
+Whether a PRIVATE space touches a connection server at all is an
+**owner-only** feature flag, `SpaceFeatures.private_gfs` — OFF for every new
+private space, federated in `SPACE_CONFIG_CHANGED`, taken by a member
+household only from the owner household's own config and pinned on the host
+(like `gfs_publish_mode`; a forwarded `update_config` is pinned too). OFF:
+no `gfs`-type invite link (only `internal` links — see
+[`invites.md`](./invites.md#the-link-type-gfs-or-internal)), no channel, no
+grant. ON: `gfs` links are allowed and the space gets the channel below,
+with a seat for every member household. Turning it OFF is refused with `409
+PRIVATE_GFS_LINK_MEMBERS` while link-joined (`space_session`) households are
+still members; otherwise the host deletes the `gfs` links, unregisters the
+channel and rotates the content key.
+
+**Private-space channel grant (v_51).** In a PRIVATE space whose owner turned
+`private_gfs` ON and that has a remote member household, the same four
+channels also carry `gfs_channel` — the household's per-epoch grant for the
+space's opaque connection-server channel (`{channel_suite, space_id,
+channel_id, channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite,
+binding_sig, channel_pass, channel_cert?, writer_key?}`), to every v_51
+member household with a live seat — a pass for every member household (a
+reader gets a pass-only grant), a cert or writer key for writers. It is bound
+to the space by the authority key, verified against the pinned space key and
+kept KEK-wrapped on `space_keys.gfs_channel`; a snapshot's grant is taken
+only from the host. See
+[`discovery.md`](./discovery.md#private-spaces-opaque-channels-v_51).
 
 ## Flow — rekey
 

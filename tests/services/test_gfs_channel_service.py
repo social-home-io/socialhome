@@ -218,7 +218,9 @@ def _space(owner: str, *, strict: bool = False, kind=SpaceType.PRIVATE) -> Space
         config_sequence=0,
         join_mode=JoinMode.INVITE_ONLY,
         space_type=kind,
-        features=SpaceFeatures(gfs_publish_mode="strict" if strict else "trusted"),
+        features=SpaceFeatures(
+            gfs_publish_mode="strict" if strict else "trusted", private_gfs=True
+        ),
     )
 
 
@@ -370,15 +372,19 @@ async def test_owner_creates_a_channel_the_gfs_cannot_link_to_the_space(env):
     assert SPACE_ID not in channel_id
 
 
-@pytest.mark.parametrize("case", ["public", "no_link_member", "not_owner", "no_gfs"])
+@pytest.mark.parametrize(
+    "case", ["public", "option_off", "no_remote_member", "not_owner", "no_gfs"]
+)
 async def test_no_channel_unless_eligible(env, case):
     owner = env.owner
     if case == "public":
         owner.spaces.spaces[SPACE_ID] = replace(env.space, space_type=SpaceType.PUBLIC)
-    elif case == "no_link_member":
-        owner.fed_repo.rows[env.member.h.instance_id] = SimpleNamespace(
-            source=InstanceSource.MANUAL
-        )
+    elif case == "option_off":
+        # The owner never turned the connection server on for this private
+        # space — a link-joined member alone no longer creates a channel.
+        owner.spaces.spaces[SPACE_ID] = replace(env.space, features=SpaceFeatures())
+    elif case == "no_remote_member":
+        owner.remote.seats.clear()
     elif case == "not_owner":
         owner.spaces.spaces[SPACE_ID] = replace(env.space, owner_instance_id="other")
     else:
@@ -407,12 +413,23 @@ async def test_a_seat_going_live_creates_and_distributes_the_channel(env):
     }
 
 
-async def test_the_channel_is_kept_then_retired_with_the_last_link_member(env):
+async def test_paired_members_alone_get_a_channel_when_the_option_is_on(env):
+    """With ``private_gfs`` ON the channel is for every member household,
+    not only link-joined ones: a space whose only remote member is paired
+    gets one too."""
+    env.owner.remote.seats.discard((SPACE_ID, env.member.h.instance_id))
+    assert await env.owner.svc.reconcile(SPACE_ID) == "created"
+
+
+async def test_the_channel_is_kept_then_retired_with_the_last_remote_member(env):
     channel_id = await _channel_ready(env)
     assert await env.owner.svc.reconcile(SPACE_ID) == "kept"
     assert env.owner.spaces.channels[SPACE_ID][0] == channel_id
-    # The link-joined member leaves: its seat ends.
+    # The link-joined member leaves: the paired one keeps the channel.
     env.owner.remote.seats.discard((SPACE_ID, env.member.h.instance_id))
+    assert await env.owner.svc.reconcile(SPACE_ID) == "kept"
+    # The last remote member leaves too.
+    env.owner.remote.seats.discard((SPACE_ID, env.other.h.instance_id))
     assert await env.owner.svc.reconcile(SPACE_ID) == "retired"
     assert SPACE_ID not in env.owner.spaces.channels
     assert await env.app[gfs_channel_repo_key].get(channel_id) is None
@@ -429,9 +446,34 @@ async def test_a_new_seed_starts_a_fresh_channel(env):
     assert env.owner.spaces.channels[SPACE_ID][0] != first
 
 
+async def test_turning_the_option_off_retires_the_channel(env):
+    channel_id = await _channel_ready(env)
+    env.owner.spaces.spaces[SPACE_ID] = replace(env.space, features=SpaceFeatures())
+    assert await env.owner.svc.reconcile(SPACE_ID) == "retired"
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+    # And it is not re-created on the next GFS (re)connect.
+    assert await env.owner.svc.heal("conn-1") == 0
+    assert SPACE_ID not in env.owner.spaces.channels
+
+
+async def test_enable_creates_announces_and_distributes(env):
+    env.owner.space_service.snapshots.clear()
+    assert await env.owner.svc.enable(SPACE_ID) == "created"
+    channel_id = env.owner.spaces.channels[SPACE_ID][0]
+    row = await env.app[gfs_channel_repo_key].get(channel_id)
+    assert row is not None and row.epoch == _wire(env, channel_id)
+    assert set(env.owner.space_service.snapshots) == {
+        (SPACE_ID, env.member.h.instance_id),
+        (SPACE_ID, env.other.h.instance_id),
+    }
+    # Off: nothing at all.
+    env.owner.spaces.spaces[SPACE_ID] = replace(env.space, features=SpaceFeatures())
+    assert await env.owner.svc.enable(SPACE_ID) == "retired"
+
+
 async def test_rotation_hook_announces_and_reconciles(env):
     channel_id = await _channel_ready(env)
-    env.owner.remote.seats.discard((SPACE_ID, env.member.h.instance_id))
+    env.owner.remote.seats.clear()
     await env.owner.svc.on_rotation(SPACE_ID)
     assert await env.app[gfs_channel_repo_key].get(channel_id) is None
 
@@ -456,9 +498,9 @@ async def test_no_grant_for_a_v50_peer_or_without_a_seat(env):
 
 async def test_a_mesh_only_member_at_v51_gets_its_grant(env):
     """A member household the owner reaches only over the mesh (no
-    ``remote_instances`` row): judged by its mesh claim, it gets the
-    publish-only grant a paired member gets (no pass: it is not
-    link-joined), under the identity key it claimed."""
+    ``remote_instances`` row): judged by its mesh claim, it gets the full
+    grant every member household gets with the option on (a pass and a
+    cert), under the identity key it claimed."""
     await _channel_ready(env)
     other = env.other.h.instance_id
     env.owner.fed_repo.rows.pop(other)
@@ -466,7 +508,7 @@ async def test_a_mesh_only_member_at_v51_gets_its_grant(env):
     env.owner.federation.mesh[other] = 51
     grant = await env.owner.svc.grant_for_peer(SPACE_ID, other)
     assert grant is not None
-    assert "channel_cert" in grant and "channel_pass" not in grant
+    assert "channel_cert" in grant and "channel_pass" in grant
     assert await env.other.svc.accept_grant(SPACE_ID, grant)
 
 
@@ -504,22 +546,24 @@ async def test_a_member_refuses_a_grant_not_bound_by_the_space_key(env):
 # ── Subscribe + publish ──────────────────────────────────────────────────
 
 
-async def test_only_link_joined_households_take_a_seat(env):
-    """The GFS must see as little as possible: the link-joined member gets a
-    pass and a seat; the paired member a publish-only grant and no seat."""
+async def test_every_member_household_takes_a_seat_with_the_option_on(env):
+    """The owner's opt-in: link-joined AND paired members get a pass and a
+    seat, so every member household receives the others' items while the
+    host is offline (the server learns those households, never the space).
+    A paired reader gets a pass-only grant; the owner never a grant."""
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member, env.other)
     repo = env.app[gfs_channel_repo_key]
     assert await repo.has_subscription(channel_id, env.member.h.instance_id)
-    assert not await repo.has_subscription(channel_id, env.other.h.instance_id)
+    assert await repo.has_subscription(channel_id, env.other.h.instance_id)
+    assert not await repo.has_subscription(channel_id, env.owner.h.instance_id)
     paired = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    assert "channel_pass" not in paired and "channel_cert" in paired
+    assert "channel_pass" in paired and "channel_cert" in paired
     linked = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
     assert "channel_pass" in linked
-    assert await env.other.svc.subscribe(SPACE_ID) == 0
-    # A paired reader (no writer scope) gets no grant at all.
     env.owner.certs.scopes[env.other.h.instance_id] = None
-    assert await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id) is None
+    reader = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
+    assert "channel_pass" in reader and "channel_cert" not in reader
 
 
 async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
@@ -540,20 +584,23 @@ async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
         "epoch": _wire(env, channel_id),
         "payload": "Y2lwaGVy",
     }
-    # The publisher (no seat) gets nothing back.
+    # The publisher gets its own item back from nobody.
     assert await _queued(env, env.other) == []
     # The receiving household routes it to its space locally.
     await env.member.svc.handle_frame({"type": "relay", **frame})
     assert env.member.inbound.items == [(SPACE_ID, 3, "Y2lwaGVy")]
-    # The link-joined member's own item reaches no paired seat (there is
-    # none): the paired member gets it from the host when it is back.
+    # And the other way round: the paired member holds a seat now, so the
+    # link-joined member's item reaches it live while the host is away.
     targets = await env.member.svc.plan(SPACE_ID)
     assert await env.member.svc.publish_sealed(SPACE_ID, 3, "b3RoZXI", targets)
-    assert await _queued(env, env.other) == []
+    back = await _queued(env, env.other)
+    assert len(back) == 1 and back[0].sealed["payload"] == "b3RoZXI"
 
 
 async def test_strict_member_publish_is_anonymous(env):
-    strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
+    strict = replace(
+        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
+    )
     for node in (env.owner, env.member, env.other):
         node.spaces.spaces[SPACE_ID] = strict
     channel_id = await _channel_ready(env)
@@ -574,7 +621,9 @@ async def test_strict_space_without_a_writer_key_sends_nothing(env):
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member)
     # The owner switches to strict; the member's (trusted) grant has no key.
-    strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
+    strict = replace(
+        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
+    )
     env.member.spaces.spaces[SPACE_ID] = strict
     assert await env.member.svc.plan(SPACE_ID) == []
     conn = (await env.member.svc._capable())[0]
@@ -758,7 +807,9 @@ async def test_owner_replaces_a_channel_whose_writer_key_pin_is_not_its_own(
     env, monkeypatch
 ):
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
+    strict = replace(
+        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
+    )
     env.owner.spaces.spaces[SPACE_ID] = strict
     assert await env.owner.svc.reconcile(SPACE_ID) == "created"
     first = env.owner.spaces.channels[SPACE_ID][0]
@@ -888,7 +939,9 @@ async def test_malformed_notice_answers_never_heal(env, monkeypatch, answer):
     no information — never evidence of a take-over (strict space, where the
     writer key pin is compared)."""
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
+    strict = replace(
+        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
+    )
     env.owner.spaces.spaces[SPACE_ID] = strict
     first = await _channel_ready(env)
     _lying_gfs(monkeypatch, answer)
@@ -901,7 +954,9 @@ async def test_malformed_notice_answers_never_heal(env, monkeypatch, answer):
 @pytest.mark.security
 async def test_a_writer_key_pin_for_another_epoch_is_not_a_take_over(env, monkeypatch):
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(env.space, features=SpaceFeatures(gfs_publish_mode="strict"))
+    strict = replace(
+        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
+    )
     env.owner.spaces.spaces[SPACE_ID] = strict
     first = await _channel_ready(env)
     _lying_gfs(monkeypatch, {"epoch": _wire(env, first) - 1, "writer_pk": "x" * 43})
@@ -929,12 +984,15 @@ class _Sched:
 async def test_a_paired_member_catches_up_from_the_host_when_it_returns(
     env, monkeypatch
 ):
-    """The link-joined members' items reach a paired member (no seat) from
-    the host: when the host's DataChannel opens again, it asks for a
-    catch-up sync."""
+    """A member that holds no seat on a server it is connected to (its
+    household is not connected to the channel's server, or an older
+    owner's publish-only grant) gets the others' items from the host: when
+    the host's DataChannel opens again, it asks for a catch-up sync."""
     monkeypatch.setattr(chan_mod, "HOST_RETURN_SYNC_DELAY_S", 0.0)
     await _channel_ready(env)
     await _hand_grants(env, env.member, env.other)
+    # The paired member is not connected to the channel's server.
+    env.other.gfs.capable = False
     for node in (env.other, env.member):
         node.spaces.spaces[SPACE_ID] = env.space
     sched_other, sched_member = _Sched(), _Sched()
@@ -965,6 +1023,7 @@ async def test_a_host_restart_triggers_the_catch_up_once(env, monkeypatch):
     monkeypatch.setattr(chan_mod, "HOST_RETURN_SYNC_DELAY_S", 0.05)
     await _channel_ready(env)
     await _hand_grants(env, env.other)
+    env.other.gfs.capable = False  # no seat it can use: catches up
     sched = _Sched()
     env.other.svc.attach_sync_scheduler(sched)
     await env.other.svc.start()
@@ -979,4 +1038,21 @@ async def test_a_host_restart_triggers_the_catch_up_once(env, monkeypatch):
     await bus.publish(PeerCapabilitiesAdvertised(instance_id="someone-else"))
     await env.other.svc.wait_idle()
     assert sched.asked == [(SPACE_ID, host)]
+    await env.other.svc.stop()
+
+
+async def test_a_seated_paired_member_needs_no_catch_up(env, monkeypatch):
+    """With the option on, a paired member connected to the channel's server
+    holds a seat and got the others' items live — no catch-up sync."""
+    monkeypatch.setattr(chan_mod, "HOST_RETURN_SYNC_DELAY_S", 0.0)
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    sched = _Sched()
+    env.other.svc.attach_sync_scheduler(sched)
+    await env.other.svc.start()
+    await env.other.svc._on_peer_advertised(
+        PeerCapabilitiesAdvertised(instance_id=env.owner.h.instance_id)
+    )
+    await env.other.svc.wait_idle()
+    assert sched.asked == []
     await env.other.svc.stop()

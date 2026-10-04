@@ -3175,6 +3175,69 @@ async def test_config_changed_takes_gfs_publish_mode_from_the_owner(db, bus, inb
     assert space.features.gfs_publish_mode == "strict"
 
 
+@pytest.mark.security
+@pytest.mark.parametrize("we_host", [True, False])
+@pytest.mark.parametrize("stored", [True, False])
+async def test_config_changed_never_takes_private_gfs_from_a_non_owner(
+    db, bus, inbound, we_host, stored
+):
+    """SECURITY: whether a private space uses a connection server at all
+    (``private_gfs``) is the owner's alone on EVERY household — a delegated
+    admin's flip would register (or drop) the opaque channel on the host and
+    reveal the member households to the server."""
+    kp = generate_space_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-pgfs",
+        owner_instance="owner-i",
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    await db.enqueue(
+        "UPDATE spaces SET private_gfs=? WHERE id='sp-pgfs'", (int(stored),)
+    )
+    _own_instance(inbound, "owner-i" if we_host else "own-i")
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-pgfs",
+            from_instance="admin-i",
+            owner_instance="owner-i",
+            sequence=9,
+            name="RenamedByAdmin",
+            seed=kp.private_key,
+            features={**_OWNER_ONLY_FEATURES_ON, "private_gfs": not stored},
+        )
+    )
+    space = await SqliteSpaceRepo(db).get("sp-pgfs")
+    assert space.features.private_gfs is stored
+    assert space.name == "RenamedByAdmin"
+
+
+async def test_config_changed_takes_private_gfs_from_the_owner(db, bus, inbound):
+    kp = generate_space_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-pgfs2",
+        owner_instance="owner-i",
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    _own_instance(inbound, "own-i")
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-pgfs2",
+            from_instance="owner-i",
+            owner_instance="owner-i",
+            sequence=9,
+            name="OwnerTurnedGfsOn",
+            seed=kp.private_key,
+            features={**_OWNER_ONLY_FEATURES_ON, "private_gfs": True},
+        )
+    )
+    space = await SqliteSpaceRepo(db).get("sp-pgfs2")
+    assert space.features.private_gfs is True
+
+
 async def _set_host_local_state(db, space_id):
     """Give a space row the host-only / runtime state a config change must
     never reset (retention, join code, geo-gate, bot toggle). The terminal

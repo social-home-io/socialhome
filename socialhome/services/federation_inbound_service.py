@@ -2841,6 +2841,28 @@ class FederationInboundService(ProtectionGateMixin):
                     gfs_publish_mode=existing.features.gfs_publish_mode,
                 ),
             )
+        # ``private_gfs`` likewise: whether a private space uses a connection
+        # server at all is the OWNER's call on every household. On the host a
+        # delegated admin's flip would register (or drop) the channel and
+        # reveal the member households to the server; elsewhere the mirror
+        # must show the owner's word, not a seed holder's.
+        if (
+            not is_owner
+            and refreshed.features.private_gfs != existing.features.private_gfs
+        ):
+            log.info(
+                "SPACE_CONFIG_CHANGED for %s from %s tried to change the "
+                "owner-only private_gfs — kept the stored value",
+                space_id,
+                event.from_instance,
+            )
+            refreshed = replace(
+                refreshed,
+                features=replace(
+                    refreshed.features,
+                    private_gfs=existing.features.private_gfs,
+                ),
+            )
         refreshed = keep_local_space_state(
             refreshed,
             existing=existing,

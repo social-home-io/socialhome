@@ -1480,20 +1480,51 @@ member publishing through an **opaque channel** that tells the server
 nothing about the space: not its id, not its name, not its authority key,
 not its owner.
 
-**Which spaces get one — automatically, and only these.** A PRIVATE space
-whose owner household holds the seed (matching the pin), that has at least
-one live link-joined member household, while at least one active
-connection server proves `private_channels` in its signed `/gfs/info`
-block. The owner checks this (`GfsChannelService.reconcile`) when a remote
-seat goes live (`SpaceRemoteSeatLive` — the bootstrap redeem's commit), at
-every content-key rotation (before the member rekey, so the rekey carries
-the grants) and on every GFS (re)connect (which also covers an owner that
-upgraded with link-joined members already seated). A space that stops
-qualifying — its last link-joined member left (a leave or kick rotates the
-key, and the rotation reconciles), or it is no longer private — has its
-channel unregistered at every server and forgotten; members get no grant for
-the next epoch, which ends their use of it. No space that does not already
-use the connection-server relay ever gets channel material.
+**The owner's option: "use the connection server for this space"
+(`SpaceFeatures.private_gfs`, owner decision 2026-10-04).** A private space
+touches a connection server only when its owner turned this on. It is
+owner-only (a host-local admin, a remote admin's forwarded edit and a
+delegated admin's authority-signed config all leave it alone — pinned on
+host inbound and taken only from the owner household everywhere else,
+exactly like `gfs_publish_mode`), federated in `SPACE_CONFIG_CHANGED`, and
+OFF for every new private space. Migration 0079 turned it ON for the
+existing private spaces that already used the relay (a link-joined
+household, or a live invite link). Older peers that omit the field read
+OFF.
+
+- **OFF:** the space never touches a GFS — no channel, no grant, no seat, no
+  publish, and no invite link that redeems through the relay (an invite
+  link of type `gfs` is refused with `409 PRIVATE_GFS_OFF`; the default
+  type is `internal`, see [`invites.md`](./invites.md#the-link-type-gfs-or-internal)).
+- **ON:** `gfs`-type invite links are allowed, the owner registers the
+  channel below, and **every member household connected to the channel's
+  server takes a seat — link-joined, paired and mesh-only alike** — so all
+  of them receive each other's posts, comments and reactions while the host
+  is offline. This reverses v_51's "only link-joined households take a
+  seat" for spaces whose owner opted in.
+- **Turning it OFF** is refused (`409 PRIVATE_GFS_LINK_MEMBERS`, naming the
+  households) while households that joined through an invite link are still
+  members — they have no other route to the host; the owner removes them
+  first. Otherwise the host deletes every `gfs`-type link (taking a parked
+  blob down), unregisters the channel at every server (which drops its
+  seats), and rotates the content key: the new epoch carries no grant, so
+  members stop using the channel and every channel credential of the old
+  epoch dies at the server's epoch tiers.
+
+**Which spaces get a channel — automatically, and only these.** A PRIVATE
+space with `private_gfs` ON, whose owner household holds the seed (matching
+the pin), that has at least one live remote member household, while at
+least one active connection server proves `private_channels` in its signed
+`/gfs/info` block. The owner checks this (`GfsChannelService.reconcile`)
+when the owner turns the option on (`GfsChannelService.enable`: reconcile,
+announce, hand every member its grant by roster snapshot), when a remote
+seat goes live (`SpaceRemoteSeatLive`), at every content-key rotation
+(before the member rekey, so the rekey carries the grants) and on every GFS
+(re)connect. A space that stops qualifying — the option turned off, its last
+remote member left (a leave or kick rotates the key, and the rotation
+reconciles), or it is no longer private — has its channel unregistered at
+every server and forgotten; members get no grant for the next epoch, which
+ends their use of it.
 
 **The channel** (keys and statements: [`crypto.md`](../crypto.md)):
 
@@ -1606,9 +1637,11 @@ epoch, a seed holder whose seed matches the pin issues `gfs_channel:
 epoch_offset, binding_sig_suite, binding_sig, channel_pass?, channel_cert?,
 writer_key?}` — a channel cert for a household with a writer scope in a
 trusted space, the channel writer key (and no cert) in a strict space, and
-a `channel_pass` **only for a link-joined (`space_session`) household**. A
-paired member's grant is **publish-only**: it publishes to the channel but
-never takes a seat (a paired reader gets no grant at all).
+a `channel_pass` for **every member household** of a space with
+`private_gfs` ON (a reader gets a pass-only grant). The wire shape is
+unchanged from v_51; only who gets a pass changed. (A v_51 owner — no
+option — still hands a pass only to link-joined households; their paired
+members' grants are publish-only, as before.)
 `binding_sig` is the space AUTHORITY key over the routing fields, so a member
 verifies the grant against the space key it already pins and no other member
 can hand it a channel of its choosing. It rides inside the per-peer payloads
@@ -1629,24 +1662,25 @@ first registration, on a server the owner connects to later, or after the
 channel, which the next grants carry.
 
 **Subscription** — `POST /gfs/channels/subscribe`, household-signed like a
-follower's subscribe, with the household's `channel_pass` for an open epoch.
-The seat remembers the pass epoch; a seat whose epoch is no longer open gets
-nothing. Only link-joined households hold a pass, so the seats are
-**exactly the link-joined member households** — the ones the server already
-relays envelopes for — and a household removed at a rotation (no new pass)
-drops out after the grace even though its row remains. They re-subscribe
-when a new grant arrives and on every GFS (re)connect. (Seats for paired
-members — live delivery while the host is away — would be a possible future
-owner opt-in; not built.)
+follower's subscribe, with the household's `channel_pass` for an open epoch,
+on every server the grant names that the household is connected to. The
+seat remembers the pass epoch; a seat whose epoch is no longer open gets
+nothing. The seats are therefore **the member households connected to the
+channel's server** — the owner's opt-in — and a household removed at a
+rotation (no new pass) drops out after the grace even though its row
+remains. They re-subscribe when a new grant arrives and on every GFS
+(re)connect. The server needs no change for this: a pass is a pass.
 
-**How a paired member gets the link-joined members' items.** Not from the
-channel: their envelopes reach the host (queued at the server while it is
-away), and the paired member catches up from the host by §25.6 sync. When
-the host is back — it re-advertises its capabilities to every peer on
-startup (`PeerCapabilitiesAdvertised`), or its DataChannel reopens after a
-blip — a paired member holding a publish-only grant asks it for a catch-up
-sync 15 s later (`HOST_RETURN_SYNC_DELAY_S`, time for the host to drain its
-relay queue); the periodic sync (30 min) is the backstop.
+**Members without a usable seat catch up from the host.** A member household
+that holds no seat on a server it is connected to — it is not connected to
+the channel's server, or its grant came from a v_51 seed holder and is
+publish-only — gets the others' items from the host: their envelopes reach
+the host (queued at the server while it is away), and the member catches up
+by §25.6 sync. When the host is back — it re-advertises its capabilities to
+every peer on startup (`PeerCapabilitiesAdvertised`), or its DataChannel
+reopens after a blip — such a member asks it for a catch-up sync 15 s later
+(`HOST_RETURN_SYNC_DELAY_S`, time for the host to drain its relay queue);
+the periodic sync (30 min) is the backstop. A seated member skips it.
 
 **Publishing** — a member household with a grant for the current epoch
 whose space writer cert lets this author publish this item type:
@@ -1690,10 +1724,12 @@ the host path and it receives the others' items from the host. A member
 household the host reaches only over the mesh (no peer row) is judged by the
 version it claimed over the mesh, exactly like writer certs (see
 [`spaces.md`](spaces.md#writer-certificates-v_49), "Mesh-only member
-households"): at v_51 it gets the paired member's publish-only grant (no
-pass — it is not link-joined), sealed to it end to end over `SPACE_ROUTED`;
+households"): at v_51 it gets the same grant a paired member gets (with a
+pass, the option being ON), sealed to it end to end over `SPACE_ROUTED`;
 one that never claimed, or claimed below v_51, gets none and keeps the host
-path. A server
+path. A v_51 member handles a pass in a paired grant correctly (it
+subscribes and receives, exactly like a link-joined member), so the
+option needs no protocol version bump. A server
 without `private_channels` gets no channel. The SPA shows the owner the
 trusted / strict choice on a private space once it uses a channel
 (`GET /api/spaces/{id}` → `gfs_private_channel`).
@@ -1704,12 +1740,13 @@ sequenceDiagram
     participant G as GFS
     participant E as Link-joined member
     participant D as Paired member
-    Note over O: first link-joined seat goes live
+    Note over O: owner turns private_gfs ON (space has remote members)
     O->>G: POST /gfs/channels/register {channel_id, channel_pk, channel_sig}
     O->>G: POST /gfs/channels/epoch {channel_id, epoch, publish_mode, channel_sig}
     O-->>E: roster snapshot / rekey (sealed): grant with channel_pass
-    O-->>D: roster snapshot / rekey (sealed): publish-only grant (no pass)
+    O-->>D: roster snapshot / rekey (sealed): grant with channel_pass
     E->>G: POST /gfs/channels/subscribe {instance_id, channel_pass, signature}
+    D->>G: POST /gfs/channels/subscribe {instance_id, channel_pass, signature}
     Note over O: host goes offline
     D->>D: seal {real type, author-signed inner + space writer cert}
     alt trusted
@@ -1719,9 +1756,11 @@ sequenceDiagram
     end
     G-->>E: WS {type:relay, channel_id, space_item, epoch, payload}
     E->>E: channel_id → local space; strict-frame checks; apply
+    E->>G: POST /gfs/channels/publish {…} — E's own post
+    G-->>D: WS {type:relay, channel_id, space_item, epoch, payload}
     E->>G: POST /gfs/envelope {to_instance: O, sealed post} (queued for O)
-    Note over O: host back online
-    D->>O: §25.6 catch-up sync (host re-advertised on startup) — E's post
+    Note over O: host back online — catches both posts up
+    Note over D: a member with no usable seat asks O for a §25.6 catch-up instead
     Note over G: never sees space id, name, space key or owner id
 ```
 
@@ -1729,11 +1768,10 @@ sequenceDiagram
 in [`principles.md`](../principles.md)):
 
 - that a channel exists, its key, when its epoch moves and its mode;
-- **its link-joined member households** (the only seats — the households
-  whose envelopes it already relays), the set's size and changes, and the
-  timing and size bucket of every item;
-- in trusted mode, which member household published each item (a paired
-  member appears only as a publisher, never as a subscriber); in strict
+- **its member households connected to it** — link-joined, paired and
+  mesh-only alike, the owner's `private_gfs` opt-in — the set's size and
+  changes, and the timing and size bucket of every item;
+- in trusted mode, which member household published each item; in strict
   mode, only that some publisher did;
 - **never** the space id, its name, its authority key or its content.
 
@@ -1768,7 +1806,8 @@ under the server-wide cap).
    inside the ciphertext in both modes, and every request has an exact key
    set (a `space_id` field is a 400).
 5. **The owner never subscribes to or publishes into its own channel**, and
-   only link-joined households take a seat.
+   no private space whose owner left `private_gfs` OFF ever gets a channel,
+   a grant, a seat or a `gfs`-type invite link.
 6. **The owner replaces a channel another key holder moved past it**
    (self-heal above).
 
