@@ -12,7 +12,7 @@ from aiohttp import web
 
 from .. import app_keys as K
 from ..security import error_response
-from ..services.gfs_connection_service import GfsConnectionError
+from ..services.gfs_connection_service import GfsConnectionError, GfsSignupError
 from .base import BaseView
 
 
@@ -35,6 +35,75 @@ def _conn_dict(conn, health: dict | None = None) -> dict:
     d["connected"] = bool(h.get("connected", False))
     d["last_error"] = h.get("last_error")
     return d
+
+
+#: ``GfsSignupError.reason`` → ``(HTTP status, error code, plain message)``.
+#: The SPA shows its own translated copy keyed on the code; the message is
+#: the English fallback. Never the GFS's own words (see ``_remote_detail``).
+_SIGNUP_ERRORS: dict[str, tuple[int, str, str]] = {
+    "invalid_url": (
+        422,
+        "GFS_PAIRING_FAILED",
+        "The GFS address can't be used. It needs https://.",
+    ),
+    "already_connected": (
+        409,
+        "ALREADY_CONNECTED",
+        "You're already connected to this GFS.",
+    ),
+    "unreachable": (
+        502,
+        "GFS_UNREACHABLE",
+        "Couldn't reach the GFS. Try again later.",
+    ),
+    "closed": (
+        409,
+        "GFS_SIGNUP_CLOSED",
+        "This GFS doesn't take sign-ups right now. Ask its operator for a "
+        "pairing code instead.",
+    ),
+    "busy": (
+        503,
+        "GFS_BUSY",
+        "The GFS is busy. Try again in a minute.",
+    ),
+    "refused": (
+        422,
+        "GFS_PAIRING_FAILED",
+        "The GFS didn't accept this household.",
+    ),
+}
+
+
+async def _own_registration_identity(view: BaseView) -> dict | None:
+    """What this household tells a GFS when it pairs, or ``None`` when the
+    External URL (the inbox the GFS relays to) isn't configured.
+
+    One source for QR pairing and open sign-up, so the two can never send
+    different things.
+    """
+    own_base = await view.svc(K.platform_adapter_key).get_federation_base()
+    if not own_base:
+        return None
+    app = view.request.app
+    own_pk: bytes = app[K.instance_public_key_key]
+    own_keywrap_pk: bytes = app[K.instance_keywrap_public_key_key]
+    return {
+        "own_instance_id": app[K.instance_id_key],
+        "own_public_key_hex": own_pk.hex(),
+        "own_inbox_url": own_base,
+        "own_display_name": app[K.config_key].instance_name,
+        "own_keywrap_public_key_hex": own_keywrap_pk.hex(),
+        "own_keywrap_sig": app[K.instance_keywrap_sig_key],
+    }
+
+
+def _not_configured() -> web.Response:
+    return error_response(
+        422,
+        "NOT_CONFIGURED",
+        "External URL is not configured — set it before pairing a GFS.",
+    )
 
 
 def _pub_dict(pub) -> dict:
@@ -78,32 +147,95 @@ class GfsConnectionCollectionView(BaseView):
         if not ctx.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
         body = await self.body()
-        adapter = self.svc(K.platform_adapter_key)
-        own_base = await adapter.get_federation_base()
-        if not own_base:
-            return error_response(
-                422,
-                "NOT_CONFIGURED",
-                "External URL is not configured — set it before pairing a GFS.",
-            )
+        own = await _own_registration_identity(self)
+        if own is None:
+            return _not_configured()
         svc = self.svc(K.gfs_connection_service_key)
-        own_instance_id = self.request.app[K.instance_id_key]
-        own_pk: bytes = self.request.app[K.instance_public_key_key]
-        own_keywrap_pk: bytes = self.request.app[K.instance_keywrap_public_key_key]
-        own_keywrap_sig: str = self.request.app[K.instance_keywrap_sig_key]
-        config = self.request.app[K.config_key]
         try:
-            conn = await svc.pair(
-                body,
-                own_instance_id=own_instance_id,
-                own_public_key_hex=own_pk.hex(),
-                own_inbox_url=own_base,
-                own_display_name=config.instance_name,
-                own_keywrap_public_key_hex=own_keywrap_pk.hex(),
-                own_keywrap_sig=own_keywrap_sig,
-            )
+            conn = await svc.pair(body, **own)
         except GfsConnectionError as exc:
             return error_response(422, "GFS_PAIRING_FAILED", str(exc))
+        return web.json_response(_conn_dict(conn), status=201)
+
+
+class GfsDefaultConnectionView(BaseView):
+    """The onboarding "Connect to the GFS" step (admin-only).
+
+    ``GET /api/gfs/connections/default`` — whether to offer the step:
+    ``{url, available, reason, connection}``. Answers from LOCAL facts only
+    and never contacts the GFS: nothing reaches a GFS unless an admin says
+    yes. ``reason`` is ``null`` when ``available``, else ``"disabled"``
+    (``[gfs] default_url`` is empty), ``"no_external_url"`` (pairing needs
+    the External URL, the inbox the GFS relays to) or
+    ``"already_connected"`` (``connection`` then carries that row, so the
+    SPA can say "waiting for approval" for a pending one).
+
+    ``POST /api/gfs/connections/default`` — pair with the default GFS through
+    its open sign-up (:meth:`GfsConnectionService.pair_open_signup`). ``201``
+    with the connection (``status`` ``active`` or ``pending``), or an error
+    code the SPA turns into plain words: ``GFS_DEFAULT_DISABLED`` (404),
+    ``NOT_CONFIGURED`` (422), ``ALREADY_CONNECTED`` (409),
+    ``GFS_SIGNUP_CLOSED`` (409), ``GFS_UNREACHABLE`` (502), ``GFS_BUSY``
+    (503) or ``GFS_PAIRING_FAILED`` (422).
+    """
+
+    async def _existing(self, url: str):
+        if not url:
+            return None
+        svc = self.svc(K.gfs_connection_service_key)
+        for conn in await svc.list_connections():
+            if conn.inbox_url.rstrip("/") == url.rstrip("/"):
+                return conn
+        return None
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        if ctx is None or ctx.user_id is None:
+            return error_response(401, "UNAUTHENTICATED", "Authentication required.")
+        if not ctx.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
+        url = str(self.request.app[K.config_key].gfs_default_url or "")
+        existing = await self._existing(url)
+        reason: str | None = None
+        if not url:
+            reason = "disabled"
+        elif existing is not None:
+            reason = "already_connected"
+        elif not await self.svc(K.platform_adapter_key).get_federation_base():
+            reason = "no_external_url"
+        return web.json_response(
+            {
+                "url": url,
+                "available": reason is None,
+                "reason": reason,
+                "connection": _conn_dict(existing) if existing is not None else None,
+            }
+        )
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        if ctx is None or ctx.user_id is None:
+            return error_response(401, "UNAUTHENTICATED", "Authentication required.")
+        if not ctx.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
+        url = str(self.request.app[K.config_key].gfs_default_url or "")
+        if not url:
+            return error_response(
+                404,
+                "GFS_DEFAULT_DISABLED",
+                "No default GFS is configured for this household.",
+            )
+        own = await _own_registration_identity(self)
+        if own is None:
+            return _not_configured()
+        svc = self.svc(K.gfs_connection_service_key)
+        try:
+            conn = await svc.pair_open_signup(url, **own)
+        except GfsSignupError as exc:
+            status, code, message = _SIGNUP_ERRORS.get(
+                exc.reason, _SIGNUP_ERRORS["refused"]
+            )
+            return error_response(status, code, message)
         return web.json_response(_conn_dict(conn), status=201)
 
 

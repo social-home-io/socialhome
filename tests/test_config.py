@@ -219,3 +219,33 @@ def test_write_batch_window_defaults_to_the_interactive_window(monkeypatch):
     assert Config().db_write_batch_timeout_ms == DEFAULT_WRITE_BATCH_WINDOW_MS
     assert Config.from_env().db_write_batch_timeout_ms == DEFAULT_WRITE_BATCH_WINDOW_MS
     assert DEFAULT_WRITE_BATCH_WINDOW_MS <= 20
+
+
+def test_gfs_default_url_defaults_to_the_project_gfs():
+    """Onboarding offers the project's GFS unless the operator says otherwise."""
+    assert Config().gfs_default_url == "https://gfs.social-home.io"
+    assert Config.from_env().gfs_default_url == "https://gfs.social-home.io"
+
+
+def test_gfs_default_url_from_toml_gfs_section(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text('[gfs]\ndefault_url = "https://gfs.example.org"\n')
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    assert Config.from_env().gfs_default_url == "https://gfs.example.org"
+    # A core section — never handed to the platform adapter.
+    assert "gfs" not in Config.from_env().platform_options
+
+
+def test_gfs_default_url_empty_hides_the_offer(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text('[gfs]\ndefault_url = ""\n')
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    assert Config.from_env().gfs_default_url == ""
+
+
+def test_gfs_default_url_env_overrides_toml(tmp_path, monkeypatch):
+    toml_file = tmp_path / "socialhome.toml"
+    toml_file.write_text('[gfs]\ndefault_url = "https://gfs.example.org"\n')
+    monkeypatch.setenv("SH_CONFIG", str(toml_file))
+    monkeypatch.setenv("SH_GFS_DEFAULT_URL", "")
+    assert Config.from_env().gfs_default_url == ""

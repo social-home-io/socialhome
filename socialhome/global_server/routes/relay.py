@@ -10,7 +10,11 @@ from aiohttp import web
 from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
-from ..public import PUBLISH_MAX_BODY_BYTES, SPACE_PUBLISH_MAX_BODY_BYTES
+from ..public import (
+    PAIR_TOKEN_TTL_SECONDS,
+    PUBLISH_MAX_BODY_BYTES,
+    SPACE_PUBLISH_MAX_BODY_BYTES,
+)
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
@@ -113,6 +117,12 @@ class GfsInfoView(GfsBaseView):
         # and strict channel publishes. Signed because a household creates a
         # private space's channel (and its members subscribe, identified)
         # only against a server that agreed to never learn the space.
+        # ``open_signup``: this GFS hands out pairing tokens over
+        # ``POST /gfs/signup-token`` (operator setting, off by default), so a
+        # household can connect from its onboarding without a QR scan.
+        # Signed because the household offers that one-click path only when
+        # it is proven — a forged flag would only waste one request, but a
+        # bare flag is never what a household trusts.
         capabilities = {
             "anonymous_publish": True,
             "envelope_relay": True,
@@ -121,6 +131,7 @@ class GfsInfoView(GfsBaseView):
             "member_publish_trusted": True,
             "member_publish_strict": True,
             "private_channels": True,
+            "open_signup": bool(cfg.open_signup),
         }
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {
@@ -141,6 +152,39 @@ class GfsInfoView(GfsBaseView):
                 "relay space events to this server until it is signed",
             )
         return web.json_response(body)
+
+
+class SignupTokenView(GfsBaseView):
+    """``POST /gfs/signup-token`` — open sign-up (operator opt-in).
+
+    When the operator turned ``[policy] open_signup`` on, returns
+    ``{token, expires_in}``: a fresh single-use pairing token, minted by the
+    same :class:`~socialhome.global_server.public.PairingTokenService` the
+    landing-page QR uses (10-minute TTL, consumed by ``POST /gfs/register``).
+    The household then registers exactly as after a QR scan, so
+    ``auto_accept_clients`` still decides ``registered`` vs ``pending``.
+
+    The request carries no body and no identity: the GFS learns nothing here
+    it would not learn from a landing-page visit. When open sign-up is off
+    the answer is one uniform ``404 {"error": "not_found"}``. A second token
+    for the same address inside the token service's interval is a ``429``
+    with ``Retry-After``; the per-IP and global floods are shed earlier by
+    :func:`~socialhome.global_server.public.build_signup_rate_limit`.
+    """
+
+    async def post(self) -> web.Response:
+        cfg = self.svc(K.gfs_config_key)
+        if not cfg.open_signup:
+            return web.json_response({"error": "not_found"}, status=404)
+        token_svc = self.request.app["gfs_token_service"]
+        token, wait = await token_svc.generate(self.client_ip())
+        if token is None:
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = str(wait)
+            return resp
+        return web.json_response(
+            {"token": token, "expires_in": PAIR_TOKEN_TTL_SECONDS},
+        )
 
 
 class RegisterView(GfsBaseView):

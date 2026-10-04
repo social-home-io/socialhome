@@ -66,6 +66,20 @@ PUBLIC_RTC_MAX_PER_MINUTE: int = 20
 #: signature-verification + fan-out work one source can force.
 PUBLISH_MAX_PER_MINUTE: int = 120
 
+#: Per-IP/minute cap on ``POST /gfs/signup-token`` (open sign-up). A real
+#: household asks once, during onboarding; the token service's own
+#: :data:`PAIR_TOKEN_MIN_INTERVAL` already allows one token per address per
+#: 30 s. This in-memory window sheds a flood BEFORE it reaches the database.
+SIGNUP_MAX_PER_MINUTE: int = 5
+
+#: Server-wide cap on ``POST /gfs/signup-token`` per minute, across every
+#: address. Per-IP windows do nothing against many source addresses (see
+#: :data:`RATE_LIMIT_MAX_TRACKED_IPS`); this one bounds how fast ANY number
+#: of sources can mint pairing tokens — the sybil brake that doesn't depend
+#: on believing a client address. 30/min is far above a project GFS's real
+#: onboarding rate. Read when the app is built.
+SIGNUP_MAX_PER_MINUTE_GLOBAL: int = 30
+
 #: Hard cap on how many client IPs a rate-limit window tracks at once. The key
 #: is attacker-influenced (one bucket per source address, and a botnet or an
 #: IPv6 /64 supplies effectively unlimited distinct ones), so an unbounded dict
@@ -402,6 +416,34 @@ def build_publish_rate_limit(resolver: ClientIpResolver):
         PUBLISH_MAX_PER_MINUTE,
         lambda path: path == "/gfs/publish",
     )
+
+
+SIGNUP_TOKEN_PATH = "/gfs/signup-token"
+
+
+def build_signup_rate_limit(resolver: ClientIpResolver):
+    """Per-IP AND global rate limiter for ``POST /gfs/signup-token``.
+
+    Two windows: :data:`SIGNUP_MAX_PER_MINUTE` per client address, and
+    :data:`SIGNUP_MAX_PER_MINUTE_GLOBAL` across all of them (a single
+    bucket). Either one sheds with the same ``429`` + ``Retry-After: 60``
+    every other limiter here returns. Applies whether or not open sign-up is
+    on, so the limiter's answer never depends on the setting.
+    """
+    per_ip = SlidingWindowCounter(SIGNUP_MAX_PER_MINUTE)
+    overall = SlidingWindowCounter(SIGNUP_MAX_PER_MINUTE_GLOBAL, max_keys=1)
+
+    @web.middleware
+    async def _signup_rate_limit(request: web.Request, handler):
+        if request.rel_url.path != SIGNUP_TOKEN_PATH:
+            return await handler(request)
+        if not per_ip.allow(resolver(request)) or not overall.allow("*"):
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        return await handler(request)
+
+    return _signup_rate_limit
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────

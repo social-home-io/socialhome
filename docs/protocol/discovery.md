@@ -322,6 +322,70 @@ The Social Home ↔ GFS link is split by direction:
   no socket; the 5b-c reconcile backstops an offline owner, and the
   subscriber's own (re)connect re-triggers the notify (Phase 5b-d).
 
+### Connecting a household: QR code or open sign-up
+
+A household pairs with a GFS by registering with a **single-use pairing
+token** (10-minute TTL). There are two ways to get one:
+
+- **QR code / pairing code** — scanned or pasted from the GFS landing page
+  (`socialhome://gfs-pair/{base_url}?token=…`, see
+  [pairing](./pairing.md)); an admin adds it in Settings → Connections.
+- **Open sign-up** — the GFS operator turns on `[policy] open_signup`
+  (`GFS_OPEN_SIGNUP`, **off by default**) and the GFS hands out tokens over
+  `POST /gfs/signup-token`. This is what the one-click **"Connect to the
+  GFS"** step in household onboarding uses, against the household's
+  `[gfs] default_url` (`SH_GFS_DEFAULT_URL`, default
+  `https://gfs.social-home.io`; empty hides the step).
+
+The onboarding step is **opt-in and unchecked**: nothing is sent to any GFS
+unless an admin ticks it and confirms (`tests/protocol/
+test_gfs_onboarding_opt_in.py`). It needs the External URL (the inbox the GFS
+relays to); without one the step explains that and offers nothing. The
+household learns whether to offer the step from local facts only
+(`GET /api/gfs/connections/default`) — it never probes the GFS to decide.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SPA as Onboarding (admin)
+    participant H as Household
+    participant G as GFS
+    SPA->>H: GET /api/gfs/connections/default
+    Note over H: local facts only — no request to the GFS
+    H-->>SPA: {url, available, reason}
+    Note over SPA: unchecked by default — skip sends nothing
+    SPA->>H: POST /api/gfs/connections/default (admin said yes)
+    H->>G: GET /gfs/info
+    Note over H: verify signed capabilities against the key<br/>in this response (TOFU) — require open_signup
+    H->>G: POST /gfs/signup-token (no body)
+    G-->>H: {token, expires_in}
+    H->>G: POST /gfs/register {token, instance_id, public_key,<br/>inbox_url, display_name, keywrap_*}
+    G-->>H: {status: registered | pending}
+    H-->>SPA: 201 {status: active | pending}
+```
+
+What the household checks and sends:
+
+- **Same trust as a QR scan.** `/gfs/info` is fetched **once**; the signed
+  capability block is verified against the `public_key` in that same
+  response — the key the household then pins (TOFU, https unless loopback /
+  LAN). A bare, unsigned or wrongly-signed `open_signup` counts as "closed",
+  and the household never asks for a token. The pinned key is the verified
+  one: there is no second descriptor fetch to swap.
+- **Nothing new reaches the GFS.** The token request has no body. The
+  registration body is built by the same code as QR pairing: instance id,
+  public key, inbox URL, display name, and the key-wrap public key + its
+  self-signature — what any paired household already sends.
+- **Approval still applies.** With `auto_accept_clients = false` the
+  registration lands `pending` and onboarding says "waiting for the GFS to
+  approve"; the connection turns active once the operator approves.
+- **Plain errors.** Unreachable, sign-up closed, busy (rate-limited) and
+  refused map to fixed household-side sentences; the GFS's own error text
+  never reaches the screen.
+
+The household↔GFS leg has no `proto_version`: `open_signup` is a signed
+capability, not an `OURS` bump.
+
 ### Subscriber-side on-ramp (local space mirror)
 
 Before a household can subscribe to a space it discovered through a GFS, it
@@ -1013,6 +1077,23 @@ POST /gfs/member-publish
   `global_server.toml`) and approve households in the admin console. Every
   registered household can subscribe to listed spaces; registrations are
   the unit every per-household limit counts.
+- **Open sign-up (`[policy] open_signup`) makes registration self-service.**
+  Off by default. When on, anyone can ask `POST /gfs/signup-token` for a
+  pairing token — no QR code, no landing-page visit — so households can
+  connect from their onboarding in one click. The token endpoint is
+  rate-limited (5 / min per address, 30 / min server-wide, one token per
+  address per 30 s), but that only slows a sybil flood down: a determined
+  operator of many addresses can still register many households. With open
+  sign-up on, **approval is your lever** — keep `auto_accept_clients = false`
+  on a public server and approve households in the admin console; onboarding
+  tells the household it is waiting for approval. Turn `auto_accept_clients`
+  on only for a GFS whose audience you already trust. The server-wide
+  window is shared, so a flood can use it up and make real households wait
+  a minute ("the GFS is busy"); it bounds the damage, it does not prevent
+  it. Turning open sign-up off again stops new tokens at once (one uniform
+  `404`); tokens already handed out still work for their 10 minutes. The capability is
+  advertised (signed) as `open_signup` on `/gfs/info`, so a household only
+  offers the one-click path when it is proven.
 - **Offline delivery is best effort.** Queued member items are shared
   fairly — the largest holder's oldest item makes room at the server-wide
   cap — but a crowd of registered, connected households that subscribe to

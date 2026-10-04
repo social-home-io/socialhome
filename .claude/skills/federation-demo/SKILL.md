@@ -521,7 +521,8 @@ app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
 unpair-offline`` in that order.
-The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-traffic``
+The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-open-signup`` /
+``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-authority-rotate`` /
 ``gfs-space-no-subscribers`` / ``gfs-down``)
@@ -533,6 +534,13 @@ surface.
 Phases added after the initial publish are documented inline in
 ``harness.py`` (each ``cmd_*`` has its own docstring):
 
+* ``gfs-open-signup`` — household c connects to the demo GFS from its
+  onboarding step (``POST /api/gfs/connections/default``) through the GFS's
+  open sign-up (``gfs-up`` turns ``[policy] open_signup`` on; every
+  household's ``[gfs] default_url`` points at the demo GFS): the step is
+  offered, ``/gfs/info`` proves ``open_signup`` in its signed block, the
+  connection lands ``active``, a second connect is ``409``, then c
+  disconnects again. Needs a fresh ``up`` (the config key) and ``gfs-up``.
 * ``space-post-routed`` — mesh-routed SPACE_POST_CREATED via
   SPACE_ROUTED through a relay that never decrypts the inner
   payload.

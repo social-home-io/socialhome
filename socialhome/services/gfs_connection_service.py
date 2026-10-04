@@ -169,6 +169,63 @@ def _require_secure_url(url: str, *, field: str) -> None:
         raise GfsConnectionError(str(exc)) from exc
 
 
+class GfsSignupError(GfsConnectionError):
+    """Open sign-up (:meth:`GfsConnectionService.pair_open_signup`) failed.
+
+    ``reason`` is the machine-readable cause the onboarding route maps to a
+    plain message — never the GFS's own words:
+
+    * ``invalid_url`` — the GFS or own inbox URL fails the transport rules;
+    * ``already_connected`` — this household already has that GFS;
+    * ``unreachable`` — no answer, or a 5xx;
+    * ``closed`` — no verified ``open_signup`` capability, or the token
+      endpoint said no (403/404);
+    * ``busy`` — the GFS rate-limited the token request (429);
+    * ``refused`` — the GFS turned the registration down (e.g. an expired
+      token or an inbox URL it can't use).
+    """
+
+    __slots__ = ("reason",)
+
+    def __init__(self, message: str, *, reason: str, status: int | None = None) -> None:
+        super().__init__(message, status=status)
+        self.reason = reason
+
+
+def _descriptor_offers_open_signup(info: dict) -> bool:
+    """Whether a ``/gfs/info`` body proves ``open_signup`` under its OWN key.
+
+    Before pairing there is no pinned key yet, so the block is verified
+    against the ``public_key`` in the same response — the key about to be
+    pinned (TOFU, the trust :meth:`GfsConnectionService.pair` already
+    extends to the key itself). Missing block, bad signature or an unknown
+    suite all answer ``False``; the unsigned top-level flags never count.
+    """
+    caps = info.get("capabilities")
+    sig = info.get("capabilities_sig")
+    suite = info.get("capabilities_sig_suite")
+    if not isinstance(caps, dict) or not isinstance(sig, str) or not sig:
+        return False
+    if not isinstance(suite, str):
+        return False
+    try:
+        ok = verify_capabilities(
+            str(info.get("public_key") or ""),
+            str(info.get("gfs_instance_id") or ""),
+            caps,
+            sig,
+            suite,
+        )
+    except UnsupportedCapsSigSuite:
+        log.warning(
+            "GFS /gfs/info signed its capability block with the unknown suite"
+            " %r — open sign-up not offered",
+            suite,
+        )
+        return False
+    return bool(ok) and caps.get("open_signup") is True
+
+
 class GfsConnectionService:
     """Service for managing GFS connections and space publications."""
 
@@ -392,9 +449,155 @@ class GfsConnectionService:
         _require_secure_url(gfs_url, field="gfs_url")
         _require_secure_url(own_inbox_url, field="own_inbox_url")
 
-        client = self._client()
+        info = await self._fetch_descriptor(gfs_url)
+        return await self._register(
+            gfs_url,
+            info,
+            token,
+            own_instance_id=own_instance_id,
+            own_public_key_hex=own_public_key_hex,
+            own_inbox_url=own_inbox_url,
+            own_display_name=own_display_name,
+            own_keywrap_public_key_hex=own_keywrap_public_key_hex,
+            own_keywrap_sig=own_keywrap_sig,
+        )
 
-        # 1. Fetch the GFS's public-key descriptor so we can pin it.
+    async def pair_open_signup(
+        self,
+        gfs_url: str,
+        *,
+        own_instance_id: str,
+        own_public_key_hex: str,
+        own_inbox_url: str,
+        own_display_name: str = "",
+        own_keywrap_public_key_hex: str = "",
+        own_keywrap_sig: str = "",
+    ) -> GfsConnection:
+        """Pair with *gfs_url* through its open sign-up — no QR code.
+
+        The one-click "Connect to the GFS" onboarding step. Same trust as a
+        QR scan, one step longer:
+
+        1. ``GET /gfs/info`` ONCE. Its signed capability block is verified
+           against the ``public_key`` in that same response — the key about
+           to be pinned (TOFU, exactly what :meth:`pair` trusts). A bare,
+           unsigned or wrongly-signed ``open_signup`` counts as "closed".
+        2. ``POST /gfs/signup-token`` (no body, nothing about this household)
+           for a fresh single-use pairing token.
+        3. ``POST /gfs/register`` with that token and exactly the fields QR
+           pairing sends; the key pinned is the one verified in step 1 — no
+           second descriptor fetch an on-path attacker could swap.
+
+        Raises :class:`GfsSignupError` whose ``reason`` the route maps to a
+        plain message: ``invalid_url``, ``already_connected``,
+        ``unreachable``, ``closed``, ``busy`` or ``refused``. Nothing leaves
+        this household before the URL checks pass.
+        """
+        gfs_url = str(gfs_url or "").rstrip("/")
+        if not own_instance_id or not own_public_key_hex or not own_inbox_url:
+            raise GfsSignupError(
+                "own_instance_id, own_public_key_hex, and own_inbox_url"
+                " are required for GFS registration",
+                reason="refused",
+            )
+        try:
+            _require_secure_url(gfs_url, field="gfs_url")
+            _require_secure_url(own_inbox_url, field="own_inbox_url")
+        except GfsConnectionError as exc:
+            raise GfsSignupError(str(exc), reason="invalid_url") from exc
+        for existing in await self._repo.list_all():
+            if existing.inbox_url.rstrip("/") == gfs_url:
+                raise GfsSignupError(
+                    "This household is already connected to that GFS",
+                    reason="already_connected",
+                )
+
+        try:
+            info = await self._fetch_descriptor(gfs_url)
+        except GfsConnectionError as exc:
+            raise GfsSignupError(str(exc), reason="unreachable") from exc
+        if not _descriptor_offers_open_signup(info):
+            raise GfsSignupError(
+                "The GFS does not offer open sign-up (no verified open_signup"
+                " capability on /gfs/info)",
+                reason="closed",
+            )
+        token = await self._request_signup_token(gfs_url)
+        try:
+            return await self._register(
+                gfs_url,
+                info,
+                token,
+                own_instance_id=own_instance_id,
+                own_public_key_hex=own_public_key_hex,
+                own_inbox_url=own_inbox_url,
+                own_display_name=own_display_name,
+                own_keywrap_public_key_hex=own_keywrap_public_key_hex,
+                own_keywrap_sig=own_keywrap_sig,
+            )
+        except GfsConnectionError as exc:
+            # No status = never answered; a 5xx = the GFS is having trouble.
+            # Anything else is the GFS saying no to this registration.
+            unreachable = exc.status is None or exc.status >= 500
+            raise GfsSignupError(
+                str(exc),
+                reason="unreachable" if unreachable else "refused",
+                status=exc.status,
+            ) from exc
+
+    async def _request_signup_token(self, gfs_url: str) -> str:
+        """``POST {gfs_url}/gfs/signup-token`` → the single-use token.
+
+        Sends no body: the GFS learns nothing here beyond what any visitor
+        to its landing page reveals.
+        """
+        try:
+            async with self._client().post(
+                f"{gfs_url}/gfs/signup-token",
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status in (403, 404):
+                    raise GfsSignupError(
+                        "The GFS has closed open sign-up",
+                        reason="closed",
+                        status=resp.status,
+                    )
+                if resp.status == 429:
+                    raise GfsSignupError(
+                        "The GFS is handing out too many sign-ups right now",
+                        reason="busy",
+                        status=429,
+                    )
+                if resp.status != 200:
+                    detail = await _remote_detail(resp, context="/gfs/signup-token")
+                    raise GfsSignupError(
+                        f"GFS /gfs/signup-token failed (HTTP {resp.status}): {detail}",
+                        reason="unreachable" if resp.status >= 500 else "refused",
+                        status=resp.status,
+                    )
+                body = await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise GfsSignupError(
+                f"GFS unreachable while requesting a sign-up token: {exc}",
+                reason="unreachable",
+            ) from exc
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise GfsSignupError(
+                "GFS /gfs/signup-token returned no token",
+                reason="refused",
+            )
+        return token
+
+    async def _fetch_descriptor(self, gfs_url: str) -> dict:
+        """``GET {gfs_url}/gfs/info`` for pairing — the key to pin + caps.
+
+        Raises :class:`GfsConnectionError` (``status`` set when the GFS
+        answered) on any failure or when the descriptor lacks
+        ``gfs_instance_id`` / ``public_key``.
+        """
+        client = self._client()
         info_url = f"{gfs_url}/gfs/info"
         try:
             async with client.get(
@@ -406,22 +609,49 @@ class GfsConnectionService:
                     detail = await _remote_detail(resp, context="/gfs/info")
                     raise GfsConnectionError(
                         f"GFS /gfs/info failed (HTTP {resp.status}): {detail}",
+                        status=resp.status,
                     )
                 info = await resp.json()
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise GfsConnectionError(
                 f"GFS unreachable while fetching /gfs/info: {exc}",
             ) from exc
-
-        gfs_instance_id = str(info.get("gfs_instance_id") or "")
-        gfs_public_key = str(info.get("public_key") or "")
-        gfs_display_name = str(info.get("server_name") or gfs_url)
-        if not gfs_instance_id or not gfs_public_key:
+        if not isinstance(info, dict):
+            raise GfsConnectionError("GFS /gfs/info did not return an object")
+        if not str(info.get("gfs_instance_id") or "") or not str(
+            info.get("public_key") or ""
+        ):
             raise GfsConnectionError(
                 "GFS /gfs/info did not return gfs_instance_id and public_key",
             )
+        return info
 
-        # 2. Register the HFS instance using the QR token. Publish the local
+    async def _register(
+        self,
+        gfs_url: str,
+        info: dict,
+        token: str,
+        *,
+        own_instance_id: str,
+        own_public_key_hex: str,
+        own_inbox_url: str,
+        own_display_name: str,
+        own_keywrap_public_key_hex: str,
+        own_keywrap_sig: str,
+    ) -> GfsConnection:
+        """Register with *token*, pin the key from *info*, save the row.
+
+        Shared by QR pairing and open sign-up so the two can never send
+        different fields: the register body below is the whole of what a
+        GFS learns about this household at pairing time.
+        """
+        gfs_instance_id = str(info.get("gfs_instance_id") or "")
+        gfs_public_key = str(info.get("public_key") or "")
+        gfs_display_name = str(info.get("server_name") or gfs_url)
+        client = self._client()
+
+        # Register the HFS instance using the pairing token (from the QR
+        #    code, or from open sign-up). Publish the local
         #    X25519 key-wrap pubkey + KEM suite (Phase 5b foundation) plus the
         #    identity's self-signature over that pubkey (``keywrap_sig``) so a
         #    future content-key handoff can seal to this household AND a remote
@@ -456,12 +686,15 @@ class GfsConnectionService:
                     detail = await _remote_detail(resp, context="/gfs/register")
                     raise GfsConnectionError(
                         f"GFS registration failed (HTTP {resp.status}): {detail}",
+                        status=resp.status,
                     )
                 body = await resp.json()
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise GfsConnectionError(
                 f"GFS unreachable: {exc}",
             ) from exc
+        if not isinstance(body, dict):
+            body = {}
 
         # ``status`` is "registered" (auto-accepted) or "pending" (admin
         # review). Pending is still a recorded connection, just inert

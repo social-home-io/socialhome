@@ -119,6 +119,7 @@ from .feed import (
     SavedPostsView,
 )
 from .gfs import (
+    GfsDefaultConnectionView,
     GfsAppealView,
     GfsConnectionCollectionView,
     GfsConnectionDetailView,
@@ -1174,6 +1175,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
     # ── GFS connections ────────────────────────────────────────────────
     app.router.add_view("/api/gfs/connections", GfsConnectionCollectionView)
+    # Before ``/{id}`` so ``default`` is never read as a connection id.
+    app.router.add_view("/api/gfs/connections/default", GfsDefaultConnectionView)
     app.router.add_view("/api/gfs/publications", GfsPublicationsView)
     app.router.add_view("/api/gfs/connections/{id}", GfsConnectionDetailView)
     app.router.add_view(

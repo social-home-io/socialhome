@@ -90,6 +90,7 @@ DEFAULT_TOML_FILE = f"{DEFAULT_CONFIG_DIR}/socialhome.toml"
 # through via Config.platform_options.
 _PREFIXED_SECTIONS: dict[str, str] = {
     "webrtc": "webrtc_",
+    "gfs": "gfs_",
 }
 _CORE_SECTIONS: frozenset[str] = frozenset(
     {
@@ -97,6 +98,7 @@ _CORE_SECTIONS: frozenset[str] = frozenset(
         "storage",
         "federation",
         "webrtc",
+        "gfs",
     }
 )
 
@@ -191,6 +193,14 @@ class Config:
     #: because a browser cannot send one. ``{z}``/``{x}``/``{y}`` are
     #: substituted per request.
     map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+    #: The GFS (Global Federation Server) household onboarding offers as a
+    #: one-click, opt-in "Connect to the GFS" step (``[gfs] default_url`` /
+    #: ``SH_GFS_DEFAULT_URL``). Nothing is sent to it unless an admin says
+    #: yes. The empty string hides the step; operators may point it at their
+    #: own GFS. The GFS must advertise ``open_signup`` in its signed
+    #: ``/gfs/info`` capability block for the one-click path to work.
+    gfs_default_url: str = "https://gfs.social-home.io"
 
     #: Set ``True`` in TLS (HTTPS) deployments to mark session cookies
     #: and the app-bundle path-scoped cookie as ``Secure`` so they are
@@ -407,6 +417,11 @@ class Config:
                 "SH_MAP_TILE_URL",
                 "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
             ),
+            gfs_default_url=_str_opt(
+                "gfs_default_url",
+                "SH_GFS_DEFAULT_URL",
+                "https://gfs.social-home.io",
+            ).strip(),
             db_write_batch_max=_int_opt(
                 "db_write_batch_max",
                 "SH_DB_WRITE_BATCH_MAX",

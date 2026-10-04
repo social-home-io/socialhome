@@ -319,7 +319,11 @@ def _write_config(label: str, port: int, name: str) -> None:
         "[federation]\n"
         f'instance_name = "{name}"\n\n'
         "[standalone]\n"
-        f'external_url = "http://127.0.0.1:{port}"\n'
+        f'external_url = "http://127.0.0.1:{port}"\n\n'
+        # The onboarding "Connect to the GFS" step points at the demo GFS
+        # (never the project's real one) — ``gfs-open-signup`` exercises it.
+        "[gfs]\n"
+        f'default_url = "http://127.0.0.1:{GFS_PORT}"\n'
     )
 
 
@@ -571,6 +575,9 @@ def cmd_gfs_up() -> None:
         'data_dir = "/var/lib/sh-gfs"',
         f'data_dir = "{GFS_DIR}"',
     )
+    # Open sign-up on, so ``gfs-open-signup`` can pair a household from its
+    # onboarding step without a QR scan.
+    text = text.replace("open_signup = false", "open_signup = true")
     config_path.write_text(text, encoding="utf-8")
     set_password_in_toml(config_path, hash_password("gfs-admin-pw"))
 
@@ -1129,6 +1136,83 @@ def cmd_gfs_pair() -> None:
             )
     _save(state)
     print("gfs-pair: ok (a + d + e connected to GFS)")
+
+
+def cmd_gfs_open_signup() -> None:
+    """Household c connects to the demo GFS from its onboarding step.
+
+    The one-click "Connect to the GFS" path (open sign-up), on the real
+    wire: c's ``[gfs] default_url`` is the demo GFS, which runs with
+    ``[policy] open_signup = true``.
+
+    1. ``GET /api/gfs/connections/default`` on c offers the step
+       (``available``) — and that answer came from c alone.
+    2. ``GET /gfs/info`` carries ``open_signup: true`` inside the SIGNED
+       capability block.
+    3. ``POST /api/gfs/connections/default`` on c pairs (``/gfs/info`` →
+       ``/gfs/signup-token`` → ``/gfs/register``) → ``201`` ``active``.
+    4. ``GET`` again reports ``already_connected``; a second ``POST`` is
+       ``409 ALREADY_CONNECTED``.
+
+    c is the household no ``gfs-*`` step pairs with the GFS, so the step
+    disconnects it again at the end to leave the topology as it found it
+    (the GFS keeps the registration row, which no other step counts). Five
+    requests in all — far below c's per-minute API bucket.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' first")
+    c = state["instances"]["c"]
+    base = f"http://127.0.0.1:{c['port']}"
+    gfs_url = f"http://127.0.0.1:{GFS_PORT}"
+
+    s, offer = _request(f"{base}/api/gfs/connections/default", token=c["token"])
+    _must("gfs-open-signup(offer)", s, offer, ok=(200,))
+    if offer.get("url") != gfs_url:
+        raise SystemExit(
+            f"gfs-open-signup: c's default GFS is {offer.get('url')!r}, expected"
+            f" {gfs_url!r} — re-run 'up' so c gets the [gfs] default_url",
+        )
+    if offer.get("reason") == "already_connected":
+        conn_id = (offer.get("connection") or {}).get("id")
+        _request(
+            f"{base}/api/gfs/connections/{conn_id}", token=c["token"], method="DELETE"
+        )
+        # The GFS hands one sign-up token per address per 30 s.
+        time.sleep(31)
+    elif not offer.get("available"):
+        raise SystemExit(f"gfs-open-signup: step not offered: {offer!r}")
+
+    s, info = _request(f"{gfs_url}/gfs/info")
+    _must("gfs-open-signup(info)", s, info, ok=(200,))
+    if (info.get("capabilities") or {}).get("open_signup") is not True or not info.get(
+        "capabilities_sig"
+    ):
+        raise SystemExit(f"gfs-open-signup: GFS does not advertise it: {info!r}")
+
+    s, conn = _request(
+        f"{base}/api/gfs/connections/default", token=c["token"], method="POST"
+    )
+    _must("gfs-open-signup(connect)", s, conn, ok=(201,))
+    if conn.get("status") != "active" or conn.get("inbox_url") != gfs_url:
+        raise SystemExit(f"gfs-open-signup: unexpected connection {conn!r}")
+    print(f"  c: connected via open sign-up — id={conn['id'][:8]} status=active")
+
+    s, again = _request(f"{base}/api/gfs/connections/default", token=c["token"])
+    _must("gfs-open-signup(offer-after)", s, again, ok=(200,))
+    if again.get("reason") != "already_connected":
+        raise SystemExit(f"gfs-open-signup: offer after connect: {again!r}")
+    s, dup = _request(
+        f"{base}/api/gfs/connections/default", token=c["token"], method="POST"
+    )
+    if s != 409 or (dup.get("error") or {}).get("code") != "ALREADY_CONNECTED":
+        raise SystemExit(f"gfs-open-signup: second connect: HTTP {s} {dup!r}")
+
+    s, body = _request(
+        f"{base}/api/gfs/connections/{conn['id']}", token=c["token"], method="DELETE"
+    )
+    _must("gfs-open-signup(disconnect)", s, body, ok=(204,))
+    print("gfs-open-signup: ok (c paired via open sign-up, then disconnected)")
 
 
 def cmd_gfs_traffic() -> None:

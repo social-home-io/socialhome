@@ -301,6 +301,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # ``POST /gfs/member-publish-anon`` and enforces strict mode.
         "member_publish_strict": True,
         "private_channels": True,
+        # Open sign-up is an operator opt-in, off by default.
+        "open_signup": False,
     }
     assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
     assert verify_capabilities(

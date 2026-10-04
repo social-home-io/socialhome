@@ -27,6 +27,14 @@
 [federation]
 # instance_name = "My Home"
 
+[gfs]
+# The GFS (Global Federation Server) the first-run onboarding offers as an
+# opt-in "Connect to the GFS" step. Nothing is sent to it unless an admin
+# says yes. Empty hides the step; point it at your own GFS if you run one.
+# The GFS must have open sign-up turned on ([policy] open_signup).
+# Env: SH_GFS_DEFAULT_URL.
+# default_url = "https://gfs.social-home.io"
+
 [webrtc]
 # stun_url = "stun:stun.l.google.com:19302"
 # turn_url = "turn:turn.example.com:3478"

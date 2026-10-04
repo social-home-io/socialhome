@@ -84,6 +84,7 @@ from .relay import (
     InstanceUpdateView,
     PublishView,
     RegisterView,
+    SignupTokenView,
     ReportView,
     SpaceDetailView,
     SpacePublishView,
@@ -164,6 +165,9 @@ def register_routes(
     # public_key, inbox_url}``.
     app.router.add_view("/gfs/info", GfsInfoView)
     app.router.add_view("/gfs/register", RegisterView)
+    # Open sign-up (operator opt-in): a fresh pairing token over JSON, so
+    # household onboarding can connect without scanning the QR code.
+    app.router.add_view("/gfs/signup-token", SignupTokenView)
     # Signed self-service rename for an already-registered instance — the
     # pairing token is single-use, so re-registering to change the name
     # isn't possible (verify-then-mutate against the registered pubkey).
