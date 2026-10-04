@@ -15,7 +15,7 @@
  * unauthenticated reset link works without the login form intercepting.
  */
 import { useState } from 'preact/hooks'
-import { basePath } from '@/baseUrl'
+import { basePath, addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { showToast } from '@/components/Toast'
@@ -49,7 +49,7 @@ function InstructionsCard() {
               tab; it's valid for an hour.</li>
           <li>Open the link they send you and pick a new password.</li>
         </ol>
-        <a class="sh-link" href="/">← Back to sign-in</a>
+        <a class="sh-link" href={addBase('/')}>← Back to sign-in</a>
       </div>
     </div>
   )

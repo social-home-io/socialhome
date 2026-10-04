@@ -16,6 +16,7 @@
  * the per-space CSS vars set by ``useSpaceTheme``.
  */
 import { MarkdownView } from './MarkdownView'
+import { isOne, t } from '@/i18n/i18n'
 
 interface Props {
   name: string
@@ -60,7 +61,8 @@ export function SpaceHero({
           <h2 class="sh-space-hero-name">{name}</h2>
           {!slim && memberCount != null && (
             <span class="sh-space-hero-members">
-              {memberCount} {memberCount === 1 ? 'member' : 'members'}
+              {t(isOne(memberCount) ? 'space.header.members_one' : 'space.header.members',
+                 { count: String(memberCount) })}
             </span>
           )}
         </div>

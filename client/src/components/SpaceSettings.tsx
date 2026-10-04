@@ -871,7 +871,7 @@ export function SpaceSettings({
                 </label>
               </fieldset>
               <p class="sh-muted">
-                <a href={`/spaces/${space.id}/zones`}>{t('space.location.manage_zones')} →</a>
+                <a href={addBase(`/spaces/${space.id}/zones`)}>{t('space.location.manage_zones')} →</a>
                 {locationMode.value === 'zone_only'
                   && ` ${t('space.location.zones_required')}`}
               </p>

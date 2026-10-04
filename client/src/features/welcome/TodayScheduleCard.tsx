@@ -33,6 +33,7 @@ import {
   activeTimetables, buildAgenda, clock, clockRange, collapsePast, nowIndex, scheduleStatus,
   type AgendaRow, type BreakRow, type EventRow, type LessonRow, type Overlap,
 } from './schedule'
+import { addBase } from '@/baseUrl'
 
 export const FILTER_KEY = 'sh-welcome-schedule:filter'
 /** sessionStorage: the local date on which "Show earlier" was opened. */
@@ -207,7 +208,7 @@ function EventItem({ row, now }: { row: EventRow; now: number }) {
     <li
       class={rowClass(row, now, [row.overlaps.length > 0 ? 'has-overlap' : ''])}
     >
-      <a class="sh-schedule__link" href="/calendar">
+      <a class="sh-schedule__link" href={addBase('/calendar')}>
         <time class="sh-schedule__time" dateTime={row.event.start} aria-hidden="true">
           {day && <span class="sh-schedule__day">{day} </span>}
           {clock(row.start)}
@@ -337,7 +338,7 @@ export function TodayScheduleCard({
           <ul class="sh-schedule__allday-list" aria-labelledby={allDayLabelId}>
             {allDay.map(e => (
               <li key={e.id}>
-                <a class="sh-schedule__allday-item" href="/calendar">
+                <a class="sh-schedule__allday-item" href={addBase('/calendar')}>
                   <span class="sh-schedule__dot" aria-hidden="true" />
                   <span class="sh-schedule__name">{e.summary}</span>
                 </a>
@@ -361,10 +362,10 @@ export function TodayScheduleCard({
       )}
       <ul id={listId} class="sh-schedule__list">{items}</ul>
       <div class="sh-schedule__links">
-        <a class="sh-welcome-card__more" href="/calendar">
+        <a class="sh-welcome-card__more" href={addBase('/calendar')}>
           {t('welcome.schedule.open_calendar')}<span class="sh-schedule__arrow" aria-hidden="true">→</span>
         </a>
-        <a class="sh-welcome-card__more" href={timetableHref}>
+        <a class="sh-welcome-card__more" href={addBase(timetableHref)}>
           {t('welcome.schedule.view_timetable')}<span class="sh-schedule__arrow" aria-hidden="true">→</span>
         </a>
       </div>

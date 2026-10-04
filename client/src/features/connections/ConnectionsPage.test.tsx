@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, fireEvent } from '@testing-library/preact'
 
 // Mock the API module before importing the page
@@ -22,11 +22,24 @@ vi.mock('@/store/auth', () => ({
 }))
 
 // Mock i18n
-vi.mock('@/i18n/i18n', () => ({
-  t: (key: string) => key,
-  locale: { value: 'en' },
-  setLocale: vi.fn(),
-}))
+// Returns the key, with any params appended as ``key(n=2)`` so tests can
+// assert both which string is used and what is filled in. A test that
+// flips ``i18nMode.real`` gets the real catalog instead (German render
+// tests), via the actual module's ``t`` / ``isOne`` / ``setLocale``.
+const { i18nMode } = vi.hoisted(() => ({ i18nMode: { real: false } }))
+vi.mock('@/i18n/i18n', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@/i18n/i18n')>()
+  return {
+    ...real,
+    t: (key: string, params?: Record<string, string>) => {
+      if (i18nMode.real) return real.t(key, params)
+      return params
+        ? `${key}(${Object.entries(params).map(([k, v]) => `${k}=${v}`).join(',')})`
+        : key
+    },
+    isOne: (n: number) => (i18nMode.real ? real.isOne(n) : n === 1),
+  }
+})
 
 // Mock pageTitle
 vi.mock('@/store/pageTitle', () => ({
@@ -109,6 +122,7 @@ vi.mock('@/ws', () => ({ ws: wsMock }))
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
 import ConnectionsPage from './ConnectionsPage'
+import { setLocale } from '@/i18n/i18n'
 
 const apiMock = api as unknown as { get: ReturnType<typeof vi.fn> }
 
@@ -160,8 +174,8 @@ describe('ConnectionsPage', () => {
       })
 
       const icon = container.querySelector('.sh-transport-icon--rtc')!
-      expect(icon.getAttribute('title')).toBe('Direct connection — low latency')
-      expect(icon.getAttribute('aria-label')).toBe('Direct (WebRTC)')
+      expect(icon.getAttribute('title')).toBe('connections.transport.direct_title')
+      expect(icon.getAttribute('aria-label')).toBe('connections.transport.direct')
     })
 
     it('renders the HTTPS cloud glyph for transport=https', async () => {
@@ -178,8 +192,8 @@ describe('ConnectionsPage', () => {
       })
 
       const icon = container.querySelector('.sh-transport-icon--https')!
-      expect(icon.getAttribute('title')).toBe('Via HTTPS — works, but slower than direct')
-      expect(icon.getAttribute('aria-label')).toBe('Via HTTPS (fallback)')
+      expect(icon.getAttribute('title')).toBe('connections.transport.internet_title')
+      expect(icon.getAttribute('aria-label')).toBe('connections.transport.internet')
     })
 
     it('renders the relay glyph labelled "Through the GFS" for transport=gfs_relay', async () => {
@@ -196,8 +210,8 @@ describe('ConnectionsPage', () => {
       })
 
       const icon = container.querySelector('.sh-transport-icon--gfs-relay')!
-      expect(icon.getAttribute('title')).toBe('Through the GFS')
-      expect(icon.getAttribute('aria-label')).toBe('Through the GFS')
+      expect(icon.getAttribute('title')).toBe('connections.transport.gfs')
+      expect(icon.getAttribute('aria-label')).toBe('connections.transport.gfs')
       // Not mislabelled as a plain HTTPS peer.
       expect(container.querySelector('.sh-transport-icon--https')).toBeNull()
     })
@@ -260,15 +274,15 @@ describe('ConnectionsPage', () => {
 
     it('renders both List and Map tab buttons', async () => {
       const { getByRole } = render(<ConnectionsPage />)
-      expect(getByRole('button', { name: 'List' })).toBeDefined()
-      expect(getByRole('button', { name: 'Map' })).toBeDefined()
+      expect(getByRole('button', { name: 'connections.view_list' })).toBeDefined()
+      expect(getByRole('button', { name: 'connections.view_map' })).toBeDefined()
     })
 
     it('shows the lazy map fallback when Map tab is clicked', async () => {
       const { getByRole } = render(<ConnectionsPage />)
 
       // Click the Map tab — lazy Suspense fallback or map container appears
-      getByRole('button', { name: 'Map' }).click()
+      getByRole('button', { name: 'connections.view_map' }).click()
 
       await waitFor(() => {
         // Either the Suspense fallback "Loading map…" or the rendered
@@ -284,19 +298,19 @@ describe('ConnectionsPage', () => {
 
     it('List tab is aria-pressed=true by default', async () => {
       const { getByRole } = render(<ConnectionsPage />)
-      const listBtn = getByRole('button', { name: 'List' })
+      const listBtn = getByRole('button', { name: 'connections.view_list' })
       expect(listBtn.getAttribute('aria-pressed')).toBe('true')
-      const mapBtn = getByRole('button', { name: 'Map' })
+      const mapBtn = getByRole('button', { name: 'connections.view_map' })
       expect(mapBtn.getAttribute('aria-pressed')).toBe('false')
     })
 
     it('Map tab becomes aria-pressed=true after click', async () => {
       const { getByRole } = render(<ConnectionsPage />)
-      const mapBtn = getByRole('button', { name: 'Map' })
+      const mapBtn = getByRole('button', { name: 'connections.view_map' })
       mapBtn.click()
       await waitFor(() => {
         expect(mapBtn.getAttribute('aria-pressed')).toBe('true')
-        expect(getByRole('button', { name: 'List' }).getAttribute('aria-pressed')).toBe('false')
+        expect(getByRole('button', { name: 'connections.view_list' }).getAttribute('aria-pressed')).toBe('false')
       })
     })
   })
@@ -493,7 +507,7 @@ describe('ConnectionsPage', () => {
       await waitFor(() => {
         const card = container.querySelector('.sh-connection-card')
         expect(card).not.toBeNull()
-        expect(card!.textContent).toContain('up to date ✓')
+        expect(card!.textContent).toContain('connections.compat.up_to_date')
       })
     })
 
@@ -511,10 +525,55 @@ describe('ConnectionsPage', () => {
       await waitFor(() => {
         const card = container.querySelector('.sh-connection-card')
         expect(card).not.toBeNull()
-        expect(card!.textContent).toContain('2 behind')
+        expect(card!.textContent).toContain('connections.compat.behind(n=2)')
       })
       const chip = container.querySelector('.sh-connection-card .sh-chip--update')
       expect(chip!.getAttribute('title')).toBe('Bids and offers in the bazaar, Calendar overrides')
+    })
+
+    describe('in German', () => {
+      beforeEach(async () => {
+        i18nMode.real = true
+        await setLocale('de')
+      })
+      afterEach(async () => {
+        await setLocale('en')
+        i18nMode.real = false
+      })
+
+      it('renders the up-to-date, behind and unknown badges in German', async () => {
+        compatSignals.compatOurs.value = 19
+        compatSignals.compatPeers.value = [
+          makeCompat(),
+          makeCompat({ instance_id: 'inst-2', proto_version: 15, lacking_features: ['A', 'B'] }),
+          makeCompat({ instance_id: 'inst-3', capabilities_known: false, proto_version: 1 }),
+        ]
+        apiMock.get.mockImplementation((url: string) => {
+          if (url === '/api/connections') {
+            return Promise.resolve([
+              makeConnection(),
+              makeConnection({ instance_id: 'inst-2', display_name: 'Beta' }),
+              makeConnection({ instance_id: 'inst-3', display_name: 'Gamma' }),
+            ])
+          }
+          return Promise.resolve([])
+        })
+
+        const { container } = render(<ConnectionsPage />)
+        await waitFor(() => {
+          expect(container.querySelectorAll('.sh-connection-card')).toHaveLength(3)
+        })
+        const cards = [...container.querySelectorAll('.sh-connection-card')]
+        expect(cards[0].querySelector('.sh-chip--success')!.textContent).toBe('aktuell ✓')
+        expect(cards[1].querySelector('.sh-chip--update')!.textContent).toBe('2 zurück')
+        expect(cards[2].querySelector('.sh-chip--muted')!.textContent).toBe('Version unbekannt')
+        expect(cards[0].querySelector('.sh-type-badge')!.textContent).toBe('Haushalt')
+        // Households header: one household behind, singular aria label.
+        const summary = container.querySelector('.sh-section-header .sh-chip--update')!
+        expect(summary.textContent).toBe('1 zurück')
+        expect(summary.getAttribute('aria-label')).toBe('1 Haushalt nicht aktuell')
+        expect(container.textContent).toContain('Deine App-Version: v19')
+      })
     })
 
     it('shows "version unknown" for a caps-unknown peer', async () => {
@@ -529,11 +588,11 @@ describe('ConnectionsPage', () => {
       await waitFor(() => {
         const card = container.querySelector('.sh-connection-card')
         expect(card).not.toBeNull()
-        expect(card!.textContent).toContain('version unknown')
+        expect(card!.textContent).toContain('connections.compat.unknown')
       })
     })
 
-    it('shows the "N behind" summary chip and "Your protocol version: vN" in the households header', async () => {
+    it('shows the "N behind" summary chip and "Your app version: vN" in the households header', async () => {
       compatSignals.compatOurs.value = 19
       compatSignals.compatPeers.value = [
         makeCompat({ proto_version: 15, lacking_features: ['Bids and offers in the bazaar'] }),
@@ -552,11 +611,11 @@ describe('ConnectionsPage', () => {
       // one, so a bare first-match selector picks the wrong header.
       const header = [...container.querySelectorAll('.sh-section-header')]
         .find(h => h.textContent?.includes('connections.households'))!
-      expect(header.textContent).toContain('Your protocol version: v19')
+      expect(header.textContent).toContain('connections.your_version(v=19)')
       const summary = header.querySelector('.sh-chip--update')
       expect(summary).not.toBeNull()
-      expect(summary!.textContent).toContain('1 behind')
-      expect(summary!.getAttribute('aria-label')).toBe('1 households behind')
+      expect(summary!.textContent).toContain('connections.compat.behind_one(n=1)')
+      expect(summary!.getAttribute('aria-label')).toBe('connections.compat.households_behind_one(n=1)')
     })
 
     it('omits the protocol-version line when compat has not loaded (ours=0)', async () => {
@@ -571,7 +630,7 @@ describe('ConnectionsPage', () => {
       await waitFor(() => {
         expect(container.querySelector('.sh-connection-card')).not.toBeNull()
       })
-      expect(container.textContent).not.toContain('Your protocol version')
+      expect(container.textContent).not.toContain('connections.your_version')
     })
   })
 
@@ -647,7 +706,7 @@ describe('ConnectionsPage — External URL (admin, non-haos)', () => {
     await waitFor(() => {
       expect(container.querySelector('.sh-external-url-section')).not.toBeNull()
     })
-    expect(container.textContent).toContain('Not configured yet')
+    expect(container.textContent).toContain('connections.ext.not_configured')
   })
 
   it('ha admin sees the field too', async () => {
@@ -774,7 +833,7 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     })
     await waitFor(() => {
       expect(container.querySelector('.sh-ice-panel__badge')?.textContent)
-        .toBe('relay not usable')
+        .toBe('connections.ice.state_broken')
     })
     expect(container.querySelector('.sh-ice-panel__body')).toBeNull()
   })
@@ -801,7 +860,7 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
       container.querySelector('.sh-ice-panel__body')!.id,
     )
     expect(container.textContent).toContain('turn:t.example:3478')
-    expect(container.textContent).toContain('relay ready')
+    expect(container.textContent).toContain('connections.ice.state_ready')
   })
 
   it('flags a relay that has no credentials', async () => {
@@ -812,9 +871,9 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     })
     fireEvent.click(container.querySelector('.sh-ice-panel__toggle')!)
     await waitFor(() => {
-      expect(container.textContent).toContain('no credentials')
+      expect(container.textContent).toContain('connections.ice.kind_backup_no_login')
     })
-    expect(container.textContent).toContain('relay not usable')
+    expect(container.textContent).toContain('connections.ice.state_broken')
   })
 
   it('says so when nothing is configured', async () => {
@@ -825,7 +884,7 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     })
     fireEvent.click(container.querySelector('.sh-ice-panel__toggle')!)
     await waitFor(() => {
-      expect(container.textContent).toContain('No connection servers configured')
+      expect(container.textContent).toContain('connections.ice.none')
     })
   })
 
@@ -837,7 +896,7 @@ describe('ConnectionsPage — connection-servers disclosure', () => {
     })
     fireEvent.click(container.querySelector('.sh-ice-panel__toggle')!)
     await waitFor(() => {
-      expect(container.textContent).toContain('comes from Home Assistant')
+      expect(container.textContent).toContain('connections.ice.from_ha')
     })
   })
 })
@@ -875,8 +934,7 @@ describe('ConnectionsPage — diagnostics download', () => {
   it('says what the file contains, so it is obviously safe to share', async () => {
     const { container } = await renderAdmin()
     const text = container.textContent ?? ''
-    expect(text).toContain('no messages, names, keys or locations')
-    expect(text).toContain('Safe to attach to a bug report')
+    expect(text).toContain('connections.diag.note')
   })
 
   it('fetches through the api client and saves a timestamped file', async () => {
@@ -984,7 +1042,7 @@ describe('ConnectionsPage — admin panels under the Supervisor add-on (haos)', 
     await waitFor(() => {
       expect(container.querySelector('.sh-diagnostics-link')).not.toBeNull()
     })
-    expect(container.textContent).toContain('Download diagnostics')
+    expect(container.textContent).toContain('connections.diag.download')
   })
 
   it('haos still hides the External URL field', async () => {
@@ -1038,7 +1096,7 @@ describe('ConnectionDetail prop plumbing', () => {
       expect(container.querySelector('.sh-connection-card')).not.toBeNull()
     })
     const manage = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.textContent?.trim() === 'Manage',
+      (b) => b.textContent?.trim() === 'connections.manage',
     )!
     expect(manage).toBeTruthy()
     fireEvent.click(manage)
@@ -1090,7 +1148,7 @@ describe('a household seated by an invite link (source = space_session)', () => 
       expect(container.querySelector('.sh-connection-card')).not.toBeNull()
     })
     expect(container.querySelector('.sh-type-badge')!.textContent!.trim())
-      .toBe('Space only')
+      .toBe('connections.type.space_only')
     expect(container.querySelector('[data-testid="space-only-note-inst-1"]'))
       .not.toBeNull()
   })
@@ -1106,9 +1164,9 @@ describe('a household seated by an invite link (source = space_session)', () => 
     await waitFor(() => {
       expect(container.querySelector('.sh-connection-card')).not.toBeNull()
     })
-    expect(queryByText('Manage')).toBeNull()
+    expect(queryByText('connections.manage')).toBeNull()
     // Unpair stays — leaving the arrangement must always be possible.
-    expect(queryByText('Unpair')).not.toBeNull()
+    expect(queryByText('connections.unpair')).not.toBeNull()
   })
 
   it('keeps the normal Household label + Manage for a QR-paired peer', async () => {
@@ -1123,8 +1181,8 @@ describe('a household seated by an invite link (source = space_session)', () => 
       expect(container.querySelector('.sh-connection-card')).not.toBeNull()
     })
     expect(container.querySelector('.sh-type-badge')!.textContent!.trim())
-      .toBe('Household')
-    expect(queryByText('Manage')).not.toBeNull()
+      .toBe('connections.type.household')
+    expect(queryByText('connections.manage')).not.toBeNull()
   })
 
   it('never offers a space-only peer as a pairing voucher', async () => {
@@ -1140,7 +1198,7 @@ describe('a household seated by an invite link (source = space_session)', () => 
     await waitFor(() => {
       expect(container.querySelector('.sh-connection-card')).not.toBeNull()
     })
-    expect(queryByText('Pair via a trusted peer')).toBeNull()
+    expect(queryByText('connections.pair_via_peer')).toBeNull()
   })
 })
 
@@ -1185,7 +1243,7 @@ describe('ConnectionsPage — managing household connections is admin-only', () 
   }
 
   const MANAGE_CONTROLS = [
-    '+ connections.pair', 'Pair via a trusted peer', 'Manage', 'Unpair',
+    '+ connections.pair', 'connections.pair_via_peer', 'connections.manage', 'connections.unpair',
     '+ gfs.add', 'gfs.disconnect',
   ]
 
@@ -1194,7 +1252,7 @@ describe('ConnectionsPage — managing household connections is admin-only', () 
     const texts = buttonTexts(container)
     for (const shown of MANAGE_CONTROLS) expect(texts).toContain(shown)
     expect(container.textContent)
-      .not.toContain('Managing household connections is admin-only')
+      .not.toContain('connections.admin_only')
   })
 
   it('a non-admin sees the households read-only with an admin hint', async () => {
@@ -1202,7 +1260,7 @@ describe('ConnectionsPage — managing household connections is admin-only', () 
     const texts = buttonTexts(container)
     for (const hidden of MANAGE_CONTROLS) expect(texts).not.toContain(hidden)
     expect(container.textContent)
-      .toContain('Managing household connections is admin-only')
+      .toContain('connections.admin_only')
   })
 
   it('a non-admin with no connections gets no start-pairing button', async () => {

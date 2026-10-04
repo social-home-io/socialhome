@@ -20,6 +20,7 @@ import { ws } from '@/ws'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { SPACE_CATEGORIES } from '@/components/spaceModeOptions'
+import { t } from '@/i18n/i18n'
 
 const VALID_MIN_AGES: number[] = [0, 13, 16, 18]
 
@@ -74,9 +75,9 @@ export function SpaceAgeGating({ spaceId }: { spaceId: string }) {
         api.patch(`/api/spaces/${spaceId}`, { category: category.value }),
         api.patch(`/api/cp/spaces/${spaceId}/age-gate`, { min_age: minAge.value }),
       ])
-      showToast('Saved', 'success')
+      showToast(t('space.age.saved'), 'success')
     } catch (e: unknown) {
-      showToast((e as Error).message || 'Save failed', 'error')
+      showToast((e as Error).message || t('space.age.save_failed'), 'error')
     } finally {
       saving.value = false
     }
@@ -86,28 +87,25 @@ export function SpaceAgeGating({ spaceId }: { spaceId: string }) {
 
   return (
     <div class="sh-age-gating sh-card">
-      <h4>Age &amp; safety</h4>
+      <h4>{t('space.settings_page.tab_age')}</h4>
       <p class="sh-muted">
-        Children with child protection enabled are blocked from joining this
-        space when their age is below the minimum you set here. The category is
-        a discovery topic — it groups the space with similar ones in public and
-        global discovery and doesn't block anyone on its own.
+        {t('space.age.intro')}
       </p>
       <div class="sh-form-row">
         <label>
-          Minimum age
+          {t('space.age.min_age')}
           <select
             value={String(minAge.value)}
             onChange={(e) => minAge.value = Number((e.target as HTMLSelectElement).value)}>
             {VALID_MIN_AGES.map(a => (
               <option key={a} value={String(a)}>
-                {a === 0 ? 'No restriction' : `${a}+`}
+                {a === 0 ? t('space.age.no_restriction') : `${a}+`}
               </option>
             ))}
           </select>
         </label>
         <label>
-          Category
+          {t('space.age.category')}
           <select
             value={category.value}
             onChange={(e) => category.value = (e.target as HTMLSelectElement).value}>
@@ -116,7 +114,7 @@ export function SpaceAgeGating({ spaceId }: { spaceId: string }) {
             ))}
           </select>
         </label>
-        <Button onClick={save} loading={saving.value}>Save</Button>
+        <Button onClick={save} loading={saving.value}>{t('common.save')}</Button>
       </div>
     </div>
   )

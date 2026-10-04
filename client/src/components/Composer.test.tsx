@@ -25,7 +25,7 @@ describe('Composer', () => {
     commonMocks()
     const { Composer } = await import('./Composer')
     const { queryByLabelText } = render(<Composer onSubmit={vi.fn()} />)
-    expect(queryByLabelText('Text post')).toBeTruthy()
+    expect(queryByLabelText('Text')).toBeTruthy()
     expect(queryByLabelText('Poll')).toBeTruthy()
     expect(queryByLabelText('Bazaar listing')).toBeNull()
   })
@@ -58,8 +58,8 @@ describe('Composer', () => {
       <Composer onSubmit={vi.fn()} spaceId="space-1"
         allowedTypes={['text', 'image']} />,
     )
-    expect(queryByLabelText('Text post')).toBeTruthy()
-    expect(queryByLabelText('Image post')).toBeTruthy()
+    expect(queryByLabelText('Text')).toBeTruthy()
+    expect(queryByLabelText('Photo')).toBeTruthy()
     // Disabled types disappear from the picker entirely.
     expect(queryByLabelText('Poll')).toBeNull()
     expect(queryByLabelText('Bazaar listing')).toBeNull()
@@ -75,8 +75,8 @@ describe('Composer', () => {
     // ``text`` (the module default) isn't offered, so the picker auto-
     // selects the first type that is, keeping the active button + submit
     // in sync instead of leaving a phantom ``text`` selection.
-    expect(queryByLabelText('Text post')).toBeNull()
-    expect(queryByLabelText('Image post')?.getAttribute('aria-pressed')).toBe('true')
+    expect(queryByLabelText('Text')).toBeNull()
+    expect(queryByLabelText('Photo')?.getAttribute('aria-pressed')).toBe('true')
   })
 
   it('offers every type when allowedTypes is omitted', async () => {
@@ -86,7 +86,7 @@ describe('Composer', () => {
       <Composer onSubmit={vi.fn()} spaceId="space-1" />,
     )
     expect(queryByLabelText('Poll')).toBeTruthy()
-    expect(queryByLabelText('Image post')).toBeTruthy()
+    expect(queryByLabelText('Photo')).toBeTruthy()
   })
 
   it('hides the textarea when poll/schedule is picked (builder modes)', async () => {
@@ -98,9 +98,9 @@ describe('Composer', () => {
     expect(queryByPlaceholderText(/What's on your mind/)).toBeTruthy()
     fireEvent.click(getByLabelText('Poll'))
     expect(queryByPlaceholderText(/What's on your mind/)).toBeNull()
-    fireEvent.click(getByLabelText('Schedule'))
+    fireEvent.click(getByLabelText('Scheduling poll'))
     expect(queryByPlaceholderText(/What's on your mind/)).toBeNull()
-    fireEvent.click(getByLabelText('Text post'))
+    fireEvent.click(getByLabelText('Text'))
     expect(queryByPlaceholderText(/What's on your mind/)).toBeTruthy()
   })
 
@@ -129,7 +129,7 @@ describe('Composer', () => {
     const { getByLabelText, container } = render(
       <Composer onSubmit={vi.fn()} />,
     )
-    fireEvent.click(getByLabelText('Image post'))
+    fireEvent.click(getByLabelText('Photo'))
     // Pre-fix the Post button is disabled because ``images`` is
     // empty + ``mediaUrl`` is null; we'll re-check it post-upload.
     const postButton = (): HTMLButtonElement | null => {

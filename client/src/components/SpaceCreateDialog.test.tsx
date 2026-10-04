@@ -11,7 +11,9 @@ const get = vi.fn(async (u: string) =>
 vi.mock('@/api', () => ({ api: { get: (...a: unknown[]) => get(...a as [string]), post: (...a: unknown[]) => post(...a) } }))
 vi.mock('@/store/spaces', () => ({ loadSpaces: vi.fn() }))
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
-vi.mock('@/i18n/i18n', () => ({ t: (k: string) => k }))
+vi.mock('@/i18n/i18n', () => ({
+  t: (k: string, p?: Record<string, string>) => (p ? `${k}:${JSON.stringify(p)}` : k),
+}))
 // EmojiField pulls in the emoji-picker; not relevant here.
 vi.mock('./EmojiField', () => ({ EmojiField: () => null }))
 
@@ -25,9 +27,9 @@ function setViewer(isAdmin: boolean) {
 }
 
 const nameInput = (c: Element) =>
-  c.querySelector('input[placeholder="e.g. Family, Makers Club"]') as HTMLInputElement
+  c.querySelector('input[placeholder="space.create.name_placeholder"]') as HTMLInputElement
 const createBtn = (c: Element) =>
-  [...c.querySelectorAll('button')].find(b => b.textContent?.trim() === 'Create') as HTMLButtonElement
+  [...c.querySelectorAll('button')].find(b => b.textContent?.trim() === 'space.create.submit') as HTMLButtonElement
 const visibility = (c: Element, v: string) =>
   c.querySelector(`input[name="space-create-visibility"][value="${v}"]`) as HTMLInputElement
 const pickVisibility = (c: Element, v: string) => visibility(c, v)
@@ -126,21 +128,22 @@ describe('SpaceCreateDialog — connect-a-global-server hint is admin-only', () 
     const { container } = await open()
     await waitFor(() => expect(get).toHaveBeenCalledWith('/api/gfs/connections'))
     const link = [...container.querySelectorAll('a')]
-      .find(a => a.textContent === 'Connect a global server')
+      .find(a => a.textContent === 'space.create.gfs_hint_link')
     expect(link).toBeDefined()
     expect(link!.getAttribute('href')).toMatch(/\/connections$/)
-    expect(container.textContent).not.toContain('Ask a household admin')
-    expect(container.textContent).toContain('Connect a global server to publish worldwide.')
+    expect(container.textContent).not.toContain('space.create.gfs_hint_member')
+    expect(container.textContent).toContain('space.create.gfs_hint_before')
+    expect(container.textContent).toContain('space.create.global_needs_gfs_admin')
   })
 
   it('a non-admin gets an "ask a household admin" hint and no Connections link', async () => {
     setViewer(false)
     const { container } = await open()
     await waitFor(() => expect(get).toHaveBeenCalledWith('/api/gfs/connections'))
-    expect(container.textContent)
-      .toContain('Ask a household admin to connect a global server first.')
+    expect(container.textContent).toContain('space.create.gfs_hint_member')
+    expect(container.textContent).toContain('space.create.global_needs_gfs_member')
     expect(container.querySelector('a[href$="/connections"]')).toBeNull()
-    expect(container.textContent).not.toContain('Connect a global server to publish worldwide.')
+    expect(container.textContent).not.toContain('space.create.global_needs_gfs_admin')
     expect(visibility(container, 'global').disabled).toBe(true)
   })
 
@@ -151,7 +154,8 @@ describe('SpaceCreateDialog — connect-a-global-server hint is admin-only', () 
       setViewer(isAdmin)
       const { container } = await open()
       await waitFor(() => expect(visibility(container, 'global').disabled).toBe(false))
-      expect(container.textContent).not.toContain('Want a Global space?')
+      expect(container.textContent).not.toContain('space.create.gfs_hint_before')
+      expect(container.textContent).not.toContain('space.create.gfs_hint_member')
     }
   })
 })
@@ -199,6 +203,38 @@ describe('SpaceCreateDialog — min-age + category', () => {
     await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
     const body = post.mock.calls[0][1] as Record<string, unknown>
     expect(body).toMatchObject({ space_type: 'public', category: 'gaming', min_age: 18 })
+  })
+
+  it('labels categories and ages from the catalog but sends the stored values', async () => {
+    post.mockResolvedValue({ id: 's5' })
+    const { container } = await open()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Neighbourhood' } }) })
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    await waitFor(() => expect(categorySelect(container)).not.toBeNull())
+    const local = categorySelect(container)!.querySelector('option[value="local"]')!
+    expect(local.textContent).toBe('space.category.local')
+    const ages = [...minAgeSelect(container)!.querySelectorAll('option')].map(o => o.textContent)
+    expect(ages).toEqual([
+      'space.create.min_age_none',
+      'space.create.min_age_value:{"age":"13"}',
+      'space.create.min_age_value:{"age":"16"}',
+      'space.create.min_age_value:{"age":"18"}',
+    ])
+    await act(async () => { fireEvent.change(categorySelect(container)!, { target: { value: 'local' } }) })
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect(post.mock.calls[0][1]).toMatchObject({ category: 'local' })
+  })
+
+  it('takes the title, field labels and button from the catalog', async () => {
+    const { container } = await open()
+    const text = document.body.textContent ?? ''
+    for (const key of [
+      'space.create.title', 'space.create.name', 'space.create.description',
+      'space.create.visibility', 'space.create.submit',
+    ]) expect(text, key).toContain(key)
+    expect(container.querySelector('textarea')?.getAttribute('placeholder'))
+      .toBe('space.create.description_placeholder')
   })
 
   it('does not send category/min_age for a private space', async () => {

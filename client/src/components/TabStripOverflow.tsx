@@ -15,6 +15,7 @@
  */
 import type { JSX, RefObject } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 
 /** Width (px) of the edge fade the strip CSS paints on a side that
  *  still has hidden tabs. Kept in sync with the ``mask-image`` stops
@@ -238,8 +239,8 @@ export function TabOverflowMenu<T extends string>({
         class="sh-space-tabs-overflow__trigger"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        aria-label="More sections"
-        title="More sections"
+        aria-label={t('tabs.more_sections')}
+        title={t('tabs.more_sections')}
         onClick={() => setMenuOpen((o) => !o)}
       >
         <span aria-hidden="true">⋯</span>
@@ -249,7 +250,7 @@ export function TabOverflowMenu<T extends string>({
           ref={menuRef}
           class="sh-space-tabs-overflow__panel"
           role="menu"
-          aria-label="All sections"
+          aria-label={t('tabs.all_sections')}
         >
           {visibleTabs.map((tab) => (
             <button

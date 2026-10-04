@@ -25,11 +25,14 @@ import { useLocation } from 'preact-iso'
 import { SideNav } from '@/components/SideNav'
 import { dmUnreadTotal } from '@/store/dms'
 import { shortcutsHelpOpen } from '@/lib/shortcuts'
+import { addBase } from '@/baseUrl'
+import { t } from '@/i18n/i18n'
 
 interface Tab {
   href:   string
   emoji:  string
-  label:  string
+  /** Called at render so the label follows the UI language. */
+  label:  () => string
   /** Match function — handles "is the user on this tab or a descendant?".
    *  Default is exact match against the path. */
   matches?: (path: string) => boolean
@@ -43,14 +46,14 @@ const TABS: readonly Tab[] = [
   // that's the surface a returning user actually opens the app to.
   // Power users who want the household feed instead can pick it from
   // the drawer or change the landing-page preference in Settings.
-  { href: '/',              emoji: '🏠', label: 'Home',
+  { href: '/',              emoji: '🏠', label: () => t('nav.home'),
     matches: (p) => p === '/' },
-  { href: '/spaces',        emoji: '💬', label: 'Spaces',
+  { href: '/spaces',        emoji: '💬', label: () => t('nav.spaces'),
     matches: (p) => p === '/spaces' || p.startsWith('/spaces/') },
-  { href: '/dms',           emoji: '✉️', label: 'DMs',
+  { href: '/dms',           emoji: '✉️', label: () => t('nav.chats'),
     matches: (p) => p === '/dms' || p.startsWith('/dms/'),
     badge: () => dmUnreadTotal.value },
-  { href: '/notifications', emoji: '🔔', label: 'Notifs',
+  { href: '/notifications', emoji: '🔔', label: () => t('nav.notifications_short'),
     matches: (p) => p.startsWith('/notifications') },
 ]
 
@@ -120,27 +123,27 @@ export function MobileNav() {
         }
         role="dialog"
         aria-modal={mobileSidebarOpen.value}
-        aria-label="Navigation"
+        aria-label={t('nav.drawer')}
       >
         <SideNav />
       </div>
       <nav
         class="sh-mobile-nav"
         role="navigation"
-        aria-label="Mobile navigation"
+        aria-label={t('nav.mobile')}
       >
-        {TABS.map((t) => {
-          const active = t.matches ? t.matches(path) : path === t.href
-          const count = t.badge ? t.badge() : 0
+        {TABS.map((tab) => {
+          const active = tab.matches ? tab.matches(path) : path === tab.href
+          const count = tab.badge ? tab.badge() : 0
           return (
             <a
-              key={t.href}
-              href={t.href}
+              key={tab.href}
+              href={addBase(tab.href)}
               class={`sh-mobile-tab${active ? ' sh-active' : ''}`}
               aria-current={active ? 'page' : undefined}
             >
               <span class="sh-mobile-tab__icon" aria-hidden="true">
-                {t.emoji}
+                {tab.emoji}
                 {count > 0 && (
                   <span class="sh-mobile-tab__badge">
                     {count > 99 ? '99+' : count}
@@ -148,9 +151,9 @@ export function MobileNav() {
                 )}
               </span>
               <span class="sh-mobile-tab__label">
-                {t.label}
+                {tab.label()}
                 {count > 0 && (
-                  <span class="sr-only">{` (${count} unread)`}</span>
+                  <span class="sr-only">{` (${t('nav.unread', { count: String(count) })})`}</span>
                 )}
               </span>
             </a>
@@ -166,7 +169,7 @@ export function MobileNav() {
           <span class="sh-mobile-tab__icon" aria-hidden="true">
             {moreActive ? '✕' : '☰'}
           </span>
-          <span class="sh-mobile-tab__label">{moreActive ? 'Close' : 'More'}</span>
+          <span class="sh-mobile-tab__label">{moreActive ? t('common.close') : t('nav.more')}</span>
         </button>
       </nav>
     </>

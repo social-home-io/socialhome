@@ -27,6 +27,7 @@ import { currentUser } from '@/store/auth'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 interface FriendsHouseholdMember {
   user_id: string
@@ -70,19 +71,20 @@ export function openRemoteInviteDialog(spaceId: string) {
   open.value = spaceId
 }
 
-function relativeSince(iso: string | null): string {
-  if (!iso) return 'never seen'
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return 'never seen'
-  const diff = Date.now() - t
-  const min = Math.floor(diff / 60_000)
-  if (min < 1) return 'just now'
-  if (min < 60) return `${min} min ago`
+/** "last seen …" line for a row, or "never seen". */
+function lastSeenLabel(iso: string | null): string {
+  if (!iso) return t('remote_invite.never_seen')
+  const at = Date.parse(iso)
+  if (Number.isNaN(at)) return t('remote_invite.never_seen')
+  const min = Math.floor((Date.now() - at) / 60_000)
   const hr = Math.floor(min / 60)
-  if (hr < 24) return `${hr} h ago`
   const day = Math.floor(hr / 24)
-  if (day < 7) return `${day} d ago`
-  return `${Math.floor(day / 7)} wk ago`
+  const when = min < 1 ? t('remote_invite.just_now')
+    : min < 60 ? t('remote_invite.minutes_ago', { n: String(min) })
+    : hr < 24 ? t('remote_invite.hours_ago', { n: String(hr) })
+    : day < 7 ? t('remote_invite.days_ago', { n: String(day) })
+    : t('remote_invite.weeks_ago', { n: String(Math.floor(day / 7)) })
+  return t('remote_invite.last_seen', { when })
 }
 
 export function RemoteInviteDialog() {
@@ -155,7 +157,7 @@ export function RemoteInviteDialog() {
   const submit = async () => {
     const picked = rows.find((r) => rowKey(r) === pickedId)
     if (!picked) {
-      setError('Pick someone from the list first.')
+      setError(t('remote_invite.pick_first'))
       return
     }
     setSubmitting(true); setError(null)
@@ -164,50 +166,46 @@ export function RemoteInviteDialog() {
         await api.post(`/api/spaces/${spaceId}/members`, {
           user_id: picked.user_id,
         })
-        showToast(`Added ${picked.display_name} to the space`, 'success')
+        showToast(t('remote_invite.added', { name: picked.display_name }), 'success')
       } else {
         await api.post(`/api/spaces/${spaceId}/remote-invites`, {
           invitee_instance_id: picked.instance_id,
           invitee_user_id: picked.user_id,
         })
-        showToast(`Invite sent to ${picked.display_name}`, 'success')
+        showToast(t('remote_invite.sent', { name: picked.display_name }), 'success')
       }
       close()
     } catch (exc) {
-      setError((exc as Error).message || 'Failed to send')
+      setError((exc as Error).message || t('remote_invite.send_failed'))
     } finally {
       setSubmitting(false)
     }
   }
 
   return (
-    <Modal open={true} onClose={close} title="Add someone to this space">
+    <Modal open={true} onClose={close} title={t('remote_invite.title')}>
       {loading ? (
-        <p class="sh-muted">Loading people…</p>
+        <p class="sh-muted">{t('remote_invite.loading')}</p>
       ) : rows.length === 0 ? (
-        <p class="sh-muted">
-          There's nobody else to add yet. Add household members in
-          Settings, or pair with another household to invite their
-          people too.
-        </p>
+        <p class="sh-muted">{t('remote_invite.empty')}</p>
       ) : (
         <>
           <label class="sh-form-field">
-            <span>Find someone</span>
+            <span>{t('remote_invite.find_label')}</span>
             <input
               type="search"
               value={query}
-              placeholder="Type a name or household…"
+              placeholder={t('remote_invite.search_placeholder')}
               onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
               autoFocus
               data-testid="remote-invite-search"
             />
           </label>
           <div class="sh-remote-invite-picker" role="listbox"
-               aria-label="People you can add">
+               aria-label={t('remote_invite.list_aria')}>
             {matches.length === 0 ? (
               <p class="sh-muted sh-remote-invite-picker__empty">
-                No matches. Try a different name.
+                {t('remote_invite.no_matches')}
               </p>
             ) : (
               matches.map((r) => {
@@ -230,9 +228,7 @@ export function RemoteInviteDialog() {
                       {r.display_name}
                     </span>
                     <span class="sh-remote-invite-row__meta">
-                      {r.household_name} · {r.last_seen_at
-                        ? `last seen ${relativeSince(r.last_seen_at)}`
-                        : 'never seen'}
+                      {r.household_name} · {lastSeenLabel(r.last_seen_at)}
                     </span>
                   </button>
                 )
@@ -242,7 +238,7 @@ export function RemoteInviteDialog() {
           {error && <p class="sh-error">{error}</p>}
           <div class="sh-modal-actions">
             <Button variant="secondary" onClick={close} disabled={submitting}>
-              Cancel
+              {t('common.cancel')}
             </Button>
             <Button
               variant="primary"
@@ -252,7 +248,9 @@ export function RemoteInviteDialog() {
             >
               {(() => {
                 const picked = rows.find((r) => rowKey(r) === pickedId)
-                return picked && !picked.is_local ? 'Send invite' : 'Add'
+                return picked && !picked.is_local
+                  ? t('remote_invite.send')
+                  : t('remote_invite.add')
               })()}
             </Button>
           </div>

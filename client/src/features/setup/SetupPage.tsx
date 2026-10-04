@@ -2,7 +2,7 @@ import { type ComponentChildren } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
-import { basePath } from '@/baseUrl'
+import { basePath, addBase } from '@/baseUrl'
 import { loadCurrentUser, setToken } from '@/store/auth'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
 import { Button } from '@/components/Button'
@@ -601,7 +601,7 @@ function HaOwnerForm() {
         </p>
         <a
           class="sh-link"
-          href="/profile/person"
+          href={addBase('/profile/person')}
           target="_blank"
           rel="noopener"
         >Open HA Person settings →</a>

@@ -21,6 +21,7 @@ import { BotAvatar } from '@/components/BotAvatar'
 import { showToast } from '@/components/Toast'
 import type { BotScope, SpaceBot, SpaceBotWithToken } from '@/types'
 import { confirmDialog } from '@/components/confirm'
+import { t } from '@/i18n/i18n'
 
 interface SpaceBotsTabProps {
   spaceId: string
@@ -55,7 +56,7 @@ export function SpaceBotsTab({
       setBots(await api.get(`/api/spaces/${spaceId}/bots`) as SpaceBot[])
     } catch (err: unknown) {
       if (quiet) return
-      showToast(`Failed to load bots: ${(err as Error).message}`, 'error')
+      showToast(t('space.bots.load_failed', { error: (err as Error).message }), 'error')
       setBots([])
     } finally {
       if (!quiet) setLoading(false)
@@ -95,12 +96,9 @@ export function SpaceBotsTab({
           requests for this space return 403 even if bot tokens remain
           valid — so disabling is cheap, reversible, and non-destructive. */}
       <section class="sh-bots-tab__intro">
-        <h2>Bots &amp; automations</h2>
+        <h2>{t('space.settings_page.tab_bots')}</h2>
         <p class="sh-muted">
-          Let Home Assistant automations post into this space. Each bot is
-          a named persona with its own icon, name, and secret token.
-          Posts appear in the feed with the bot's avatar instead of a
-          generic "Home Assistant" label.
+          {t('space.bots.intro')}
         </p>
         {canAdmin ? (
           <label class="sh-bots-toggle">
@@ -112,18 +110,17 @@ export function SpaceBotsTab({
                 try {
                   await api.patch(`/api/spaces/${spaceId}`, { bot_enabled: next })
                   onBotEnabledChange(next)
-                  showToast(next ? 'Bots enabled' : 'Bots disabled', 'success')
+                  showToast(next ? t('space.bots.enabled') : t('space.bots.disabled'), 'success')
                 } catch (err: unknown) {
-                  showToast(`Update failed: ${(err as Error).message}`, 'error')
+                  showToast(t('space.bots.update_failed', { error: (err as Error).message }), 'error')
                 }
               }}
             />
-            <span>Allow bots to post in this space</span>
+            <span>{t('space.bots.allow')}</span>
           </label>
         ) : !botEnabled && (
           <div class="sh-bots-disabled-banner">
-            An admin has disabled bot posting for this space. Registered
-            bots stay but can't post until it's turned back on.
+            {t('space.bots.disabled_banner')}
           </div>
         )}
       </section>
@@ -139,12 +136,12 @@ export function SpaceBotsTab({
       )}
 
       {loading ? (
-        <p class="sh-muted">Loading bots…</p>
+        <p class="sh-muted">{t('space.bots.loading')}</p>
       ) : (
         <>
           <BotSection
-            title="Shared household bots"
-            description="Created by admins. Posts show as “via Home Assistant” — no member attribution."
+            title={t('space.bots.shared_title')}
+            description={t('space.bots.shared_desc')}
             bots={spaceBots}
             canManage={canManage}
             spaceId={spaceId}
@@ -152,19 +149,19 @@ export function SpaceBotsTab({
             onReveal={setRevealed}
             emptyMessage={
               canAdmin
-                ? 'No shared bots yet. Create one below for doorbell, laundry, package alerts, etc.'
-                : 'No shared household bots yet.'
+                ? t('space.bots.shared_empty_admin')
+                : t('space.bots.shared_empty')
             }
           />
           <BotSection
-            title="Personal bots"
-            description="Any member can register their own automations. Posts show “via {member}” so they can't masquerade as household alerts."
+            title={t('space.bots.personal_title')}
+            description={t('space.bots.personal_desc')}
             bots={memberBots}
             canManage={canManage}
             spaceId={spaceId}
             onChanged={reload}
             onReveal={setRevealed}
-            emptyMessage="No personal bots yet."
+            emptyMessage={t('space.bots.personal_empty')}
           />
 
           <div class="sh-bots-create-panel">
@@ -181,12 +178,12 @@ export function SpaceBotsTab({
               />
             ) : (
               <Button onClick={() => setCreating(true)} disabled={!botEnabled}>
-                + Create a bot
+                + {t('space.bots.create')}
               </Button>
             )}
             {!botEnabled && (
               <p class="sh-muted" style={{ marginTop: 'var(--sh-space-xs)' }}>
-                Turn on "Allow bots to post" above to start registering bots.
+                {t('space.bots.turn_on_first')}
               </p>
             )}
           </div>
@@ -258,10 +255,7 @@ function BotRow({
 
   const rotate = async () => {
     if (!await confirmDialog(
-      `Rotate the token for "${bot.name}"?\n\n` +
-      `This invalidates the current token immediately. Any Home Assistant ` +
-      `automation using it will stop working until you paste the new token ` +
-      `into the integration.`, { destructive: true })) return
+      t('space.bots.rotate_confirm', { name: bot.name }), { destructive: true })) return
     setBusy(true)
     try {
       const result = await api.post(
@@ -270,7 +264,7 @@ function BotRow({
       onReveal(result)
       void onChanged()
     } catch (err: unknown) {
-      showToast(`Rotate failed: ${(err as Error).message}`, 'error')
+      showToast(t('space.bots.rotate_failed', { error: (err as Error).message }), 'error')
     } finally {
       setBusy(false)
     }
@@ -278,16 +272,14 @@ function BotRow({
 
   const remove = async () => {
     if (!await confirmDialog(
-      `Delete bot "${bot.name}"?\n\n` +
-      `Existing posts will remain (attributed to "Home Assistant") but no new ` +
-      `posts can be made with this bot's token. This cannot be undone.`, { destructive: true })) return
+      t('space.bots.delete_confirm', { name: bot.name }), { destructive: true })) return
     setBusy(true)
     try {
       await api.delete(`/api/spaces/${spaceId}/bots/${bot.bot_id}`)
-      showToast(`Deleted bot "${bot.name}"`, 'success')
+      showToast(t('space.bots.deleted', { name: bot.name }), 'success')
       void onChanged()
     } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error).message}`, 'error')
+      showToast(t('space.bots.delete_failed', { error: (err as Error).message }), 'error')
     } finally {
       setBusy(false)
     }
@@ -311,17 +303,17 @@ function BotRow({
           <code>{bot.slug}</code>
           <span class="sh-muted">·</span>
           <span class="sh-muted">
-            Use <code>notify.social_home_{bot.slug.replace(/-/g, '_')}</code>
+            {t('space.bots.use_service')} <code>notify.social_home_{bot.slug.replace(/-/g, '_')}</code>
           </span>
         </div>
       </div>
       {manage && (
         <div class="sh-bot-row__actions">
           <Button variant="secondary" onClick={rotate} disabled={busy}>
-            Rotate token
+            {t('space.bots.rotate')}
           </Button>
           <Button variant="danger" onClick={remove} disabled={busy}>
-            Delete
+            {t('common.delete')}
           </Button>
         </div>
       )}
@@ -372,7 +364,7 @@ function CreateBotForm({
       }) as SpaceBotWithToken
       onCreated(bot)
     } catch (err: unknown) {
-      showToast(`Create failed: ${(err as Error).message}`, 'error')
+      showToast(t('space.bots.create_failed', { error: (err as Error).message }), 'error')
     } finally {
       setSaving(false)
     }
@@ -380,10 +372,10 @@ function CreateBotForm({
 
   return (
     <form class="sh-bot-create" onSubmit={submit}>
-      <h3>Register a new bot</h3>
+      <h3>{t('space.bots.new_title')}</h3>
       {canAdmin && (
         <div class="sh-bot-create__row">
-          <label>Type</label>
+          <label>{t('space.bots.type')}</label>
           <div class="sh-bot-create__scope">
             <label>
               <input
@@ -393,9 +385,9 @@ function CreateBotForm({
                 checked={scope === 'space'}
                 onChange={() => setScope('space')}
               />
-              <span>Shared household</span>
+              <span>{t('space.bots.type_shared')}</span>
               <small class="sh-muted">
-                Anyone sees posts; no member attribution.
+                {t('space.bots.type_shared_hint')}
               </small>
             </label>
             <label>
@@ -406,16 +398,16 @@ function CreateBotForm({
                 checked={scope === 'member'}
                 onChange={() => setScope('member')}
               />
-              <span>Personal</span>
+              <span>{t('space.bots.type_personal')}</span>
               <small class="sh-muted">
-                Posts show "via {`{you}`}" so others know it's yours.
+                {t('space.bots.type_personal_hint')}
               </small>
             </label>
           </div>
         </div>
       )}
       <div class="sh-bot-create__row">
-        <label>Icon (emoji)</label>
+        <label>{t('space.bots.icon')}</label>
         <input
           type="text"
           value={icon}
@@ -425,18 +417,18 @@ function CreateBotForm({
         />
       </div>
       <div class="sh-bot-create__row">
-        <label>Name</label>
+        <label>{t('space.bots.name')}</label>
         <input
           type="text"
           value={name}
-          placeholder="Doorbell"
+          placeholder={t('space.bots.name_placeholder')}
           maxLength={48}
           onInput={(e) => handleNameChange((e.target as HTMLInputElement).value)}
           required
         />
       </div>
       <div class="sh-bot-create__row">
-        <label>Slug</label>
+        <label>{t('space.bots.slug')}</label>
         <input
           type="text"
           value={slug}
@@ -447,16 +439,16 @@ function CreateBotForm({
           required
         />
         <small class="sh-muted">
-          Used in the Home Assistant service name
-          (<code>notify.social_home_{slug.replace(/-/g, '_') || '…'}</code>).
+          {t('space.bots.slug_hint')}
+          {' '}(<code>notify.social_home_{slug.replace(/-/g, '_') || '…'}</code>).
         </small>
       </div>
       <div class="sh-bot-create__actions">
         <Button type="submit" disabled={saving}>
-          {saving ? 'Creating…' : 'Create bot'}
+          {saving ? t('space.bots.creating') : t('space.bots.create_submit')}
         </Button>
         <Button type="button" variant="secondary" onClick={onCancel}>
-          Cancel
+          {t('common.cancel')}
         </Button>
       </div>
     </form>
@@ -475,29 +467,28 @@ function TokenReveal({
     try {
       await navigator.clipboard.writeText(bot.token)
       setCopied(true)
-      showToast('Token copied to clipboard', 'success')
+      showToast(t('space.bots.token_copied'), 'success')
     } catch {
-      showToast('Could not copy — select the token manually', 'error')
+      showToast(t('space.bots.copy_failed'), 'error')
     }
   }
   return (
     <div class="sh-bot-reveal" role="alertdialog" aria-live="assertive">
       <div class="sh-bot-reveal__title">
-        🔐 Bot token for "{bot.name}"
+        🔐 {t('space.bots.reveal_title', { name: bot.name })}
       </div>
       <p>
-        This is the <strong>only time</strong> this token will be shown.
-        Copy it now and paste it into your Home Assistant configuration.
-        If you lose it you'll need to rotate the token from this page.
+        <strong>{t('space.bots.reveal_once')}</strong>{' '}
+        {t('space.bots.reveal_body')}
       </p>
       <div class="sh-bot-reveal__token">
         <code>{bot.token}</code>
         <Button onClick={copy}>
-          {copied ? 'Copied ✓' : 'Copy'}
+          {copied ? t('space.bots.copied') : t('space.bots.copy')}
         </Button>
       </div>
       <details>
-        <summary class="sh-muted">Home Assistant configuration snippet</summary>
+        <summary class="sh-muted">{t('space.bots.snippet')}</summary>
         <pre class="sh-bot-reveal__snippet"><code>{`# configuration.yaml
 rest_command:
   sh_${bot.slug.replace(/-/g, '_')}:
@@ -509,7 +500,7 @@ rest_command:
     payload: '{"title": "{{ title }}", "message": "{{ message }}"}'`}</code></pre>
       </details>
       <div class="sh-bot-reveal__actions">
-        <Button onClick={onDismiss}>I've saved the token</Button>
+        <Button onClick={onDismiss}>{t('space.bots.saved_token')}</Button>
       </div>
     </div>
   )

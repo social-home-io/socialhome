@@ -26,6 +26,7 @@ import { UploadProgressBar, uploadWithProgress } from '@/components/UploadProgre
 import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
 import type { HighlightAudienceKind, HighlightInboxItem } from '@/types'
+import { addBase } from '@/baseUrl'
 
 /** A household the audience picker offers — a confirmed social peer. */
 interface RemoteHousehold {
@@ -316,7 +317,7 @@ export default function HighlightComposerPage() {
     <form class="sh-form sh-highlight-composer" onSubmit={submit}>
       <header class="sh-highlights-header">
         <h2>New highlight</h2>
-        <a href="/highlights" class="sh-link">Cancel</a>
+        <a href={addBase('/highlights')} class="sh-link">Cancel</a>
       </header>
 
       <MediaDropzone

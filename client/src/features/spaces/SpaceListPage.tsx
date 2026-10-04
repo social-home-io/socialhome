@@ -52,7 +52,7 @@ function SpaceRow({
 }) {
   return (
     <a
-      href={`/spaces/${space.id}`}
+      href={addBase(`/spaces/${space.id}`)}
       class={`sh-space-card sh-space-card--${space.space_type}`}
     >
       <span class="sh-space-emoji">{space.emoji || '🏠'}</span>

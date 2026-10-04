@@ -18,6 +18,7 @@ const { showToast } = await import('./Toast') as unknown as {
   showToast: ReturnType<typeof vi.fn>
 }
 const { RemoteInviteDialog, openRemoteInviteDialog } = await import('./RemoteInviteDialog')
+const { setLocale } = await import('@/i18n/i18n')
 
 const FRIENDS_PAYLOAD = {
   instance: {
@@ -220,5 +221,27 @@ describe('RemoteInviteDialog', () => {
       expect(result.container.textContent)
         .toContain('nobody else to add yet')
     })
+  })
+})
+
+describe('RemoteInviteDialog in German', () => {
+  it('renders the title, search and last-seen line in German', async () => {
+    await setLocale('de')
+    try {
+      const { container, baseElement } = await renderAndOpen()
+      expect(baseElement.textContent).toContain('Jemanden zu diesem Raum hinzufügen')
+      expect(container.querySelector('[data-testid="remote-invite-search"]')
+        ?.getAttribute('placeholder')).toBe('Name oder Haushalt eingeben …')
+      const bobMeta = container
+        .querySelector('[data-testid="remote-invite-row-uid-bob"]')
+        ?.querySelector('.sh-remote-invite-row__meta')?.textContent
+      expect(bobMeta).toBe('Beta House · zuletzt gesehen vor 5 Min.')
+      const carolMeta = container
+        .querySelector('[data-testid="remote-invite-row-uid-carol"]')
+        ?.querySelector('.sh-remote-invite-row__meta')?.textContent
+      expect(carolMeta).toContain('noch nie gesehen')
+    } finally {
+      await setLocale('en')
+    }
   })
 })

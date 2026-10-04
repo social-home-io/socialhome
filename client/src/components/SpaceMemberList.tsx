@@ -14,7 +14,7 @@ import { Avatar } from './Avatar'
 import { Spinner } from './Spinner'
 import { LoadErrorState } from './LoadErrorState'
 import { Button } from './Button'
-import { t } from '@/i18n/i18n'
+import { t, isOne } from '@/i18n/i18n'
 import { openReport } from './ReportDialog'
 import { showToast } from './Toast'
 import { AliasDialog, openAliasDialog } from './AliasDialog'
@@ -36,19 +36,21 @@ import { resolveAvatar } from '@/utils/avatar'
  *  member-joined wants weeks/months/years too. */
 function formatRelativeJoined(iso: string): string {
   const then = new Date(iso)
-  if (Number.isNaN(then.getTime())) return iso
+  if (Number.isNaN(then.getTime())) return t('space.members.joined_on', { date: iso })
   const now = new Date()
   const days = Math.floor((now.getTime() - then.getTime()) / 86400000)
-  if (days <= 0) return 'today'
-  if (days === 1) return 'yesterday'
-  if (days < 7) return `${days} days ago`
-  if (days < 14) return 'last week'
-  if (days < 30) return `${Math.floor(days / 7)} weeks ago`
-  if (days < 60) return 'last month'
-  if (days < 365) return `${Math.floor(days / 30)} months ago`
+  if (days <= 0) return t('space.members.joined_today')
+  if (days === 1) return t('space.members.joined_yesterday')
+  if (days < 7) return t('space.members.joined_days', { n: String(days) })
+  if (days < 14) return t('space.members.joined_last_week')
+  if (days < 30) return t('space.members.joined_weeks', { n: String(Math.floor(days / 7)) })
+  if (days < 60) return t('space.members.joined_last_month')
+  if (days < 365) return t('space.members.joined_months', { n: String(Math.floor(days / 30)) })
   // Older than a year — show the month + year so "joined Apr 2024"
   // reads cleaner than "joined 19 months ago".
-  return then.toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
+  return t('space.members.joined_on', {
+    date: then.toLocaleDateString(undefined, { month: 'short', year: 'numeric' }),
+  })
 }
 
 interface Member {
@@ -200,10 +202,10 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
   const unban = async (userId: string) => {
     try {
       await api.delete(`/api/spaces/${spaceId}/bans/${userId}`)
-      showToast('Member unbanned', 'success')
+      showToast(t('space.members.unbanned'), 'success')
       reload()
     } catch (e: any) {
-      showToast(e.message || 'Unban failed', 'error')
+      showToast(e.message || t('space.members.unban_failed'), 'error')
     }
   }
 
@@ -240,23 +242,28 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
             <div class="sh-member-me-card-body">
               <div class="sh-row" style={{ gap: 'var(--sh-space-xs)', alignItems: 'baseline' }}>
                 <strong>{myDisplayName}</strong>
-                <span class="sh-member-me-chip">you</span>
+                <span class="sh-member-me-chip">{t('space.members.you')}</span>
               </div>
               <span class="sh-muted"
                     style={{ fontSize: 'var(--sh-font-size-xs)' }}>
                 {hasOverride
-                  ? '✨ Custom profile for this space'
-                  : '⬇ Using your household profile'}
+                  ? `✨ ${t('space.members.custom_profile')}`
+                  : `⬇ ${t('space.members.household_profile')}`}
               </span>
             </div>
             <Button variant="secondary"
                     onClick={() => openSpaceProfileDialog(spaceId)}>
-              Edit
+              {t('common.edit')}
             </Button>
           </div>
         )}
         <div class="sh-member-list-header">
-          <h3>{members.value.length} members</h3>
+          <h3>
+            {t(
+              isOne(members.value.length) ? 'space.members.count_one' : 'space.members.count',
+              { n: String(members.value.length) },
+            )}
+          </h3>
           {canManage.value && (
             <div class="sh-member-list-invite-actions">
               <Button onClick={() => openSpaceInvite(spaceId, null, viewerRole)}>
@@ -300,26 +307,26 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                 <span class="sh-member-name">{r.name}</span>
                 {r.source === 'space' && r.name !== m.display_name && (
                   <span class="sh-member-original-name">
-                    (household: {m.display_name || m.user_id})
+                    {t('space.members.household_name', { name: m.display_name || m.user_id })}
                   </span>
                 )}
                 {r.source === 'personal' && (
                   <span class="sh-member-alias-chip"
-                        title={`Originally: ${r.fallback}`}>
-                    ✏ Your nickname
+                        title={t('space.members.originally', { name: r.fallback })}>
+                    ✏ {t('space.members.your_nickname')}
                   </span>
                 )}
                 {roleBadge(m.role)}
                 {m.instance_id && (
                   <span
                     class="sh-member-remote-chip"
-                    title="Joined from another household via federation"
+                    title={t('space.members.other_household_title')}
                   >
-                    🏘 Other household
+                    🏘 {t('space.members.other_household')}
                   </span>
                 )}
                 {isMe && (
-                  <span class="sh-muted sh-member-me-chip">you</span>
+                  <span class="sh-muted sh-member-me-chip">{t('space.members.you')}</span>
                 )}
                 {/* Joined date moved INSIDE the column-flex info block
                     so it stacks underneath the name + chips instead of
@@ -333,7 +340,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                   dateTime={m.joined_at}
                   title={new Date(m.joined_at).toLocaleString()}
                 >
-                  joined {formatRelativeJoined(m.joined_at)}
+                  {formatRelativeJoined(m.joined_at)}
                 </time>
               </div>
               {!isMe && (
@@ -342,8 +349,8 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                   type="button"
                   aria-label={
                     m.personal_alias
-                      ? `Edit nickname for ${r.fallback}`
-                      : `Set nickname for ${r.fallback}`
+                      ? t('space.members.nickname_edit_aria', { name: r.fallback })
+                      : t('space.members.nickname_set_aria', { name: r.fallback })
                   }
                   // Viewer-private nickname applies to local and
                   // remote members alike — ``personal_aliases`` is
@@ -351,7 +358,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                   // of which household ``target`` lives on. The
                   // backend's ``GET /api/spaces/{id}/members`` now
                   // surfaces the alias for remote rows too.
-                  title="Set a nickname (only you see it)"
+                  title={t('space.members.nickname_title')}
                   onClick={() =>
                     openAliasDialog({
                       targetUserId: m.user_id,
@@ -387,7 +394,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                 <button
                   class="sh-post-overflow"
                   type="button"
-                  aria-label={`Manage ${r.name}`}
+                  aria-label={t('space.members.manage_aria', { name: r.name })}
                   onClick={() => openMemberActions(
                     spaceId, m.user_id, m.is_owner ? 'owner' : m.role,
                     m.instance_id ?? null, viewerRole,
@@ -401,13 +408,13 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
         })}
         {canManage.value && bans.value.length > 0 && (
           <>
-            <h3>Banned</h3>
+            <h3>{t('space.members.banned_heading')}</h3>
             {bans.value.map(b => (
               <div key={b.user_id} class="sh-member-row sh-member-row--banned">
                 <Avatar name={b.user_id} size={32} />
                 <div class="sh-member-info">
                   <span class="sh-member-name">{b.user_id}</span>
-                  <span class="sh-badge sh-badge--danger">Banned</span>
+                  <span class="sh-badge sh-badge--danger">{t('space.members.banned_badge')}</span>
                   {b.reason && (
                     <span class="sh-muted">{b.reason}</span>
                   )}
@@ -416,7 +423,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                   variant="secondary"
                   onClick={() => unban(b.user_id)}
                 >
-                  Unban
+                  {t('space.members.unban')}
                 </Button>
               </div>
             ))}

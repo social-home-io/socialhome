@@ -23,6 +23,7 @@ import {
 import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { renderHashtagged } from './hashtags'
+import { addBase } from '@/baseUrl'
 
 const moments = signal<Moment[]>([])
 const loading = signal<boolean>(true)
@@ -86,7 +87,7 @@ export default function MomentumArchiveTab() {
         {trending.value.map(t => (
           <a
             key={t.tag}
-            href={`/momentum?tab=archive&tag=${encodeURIComponent(t.tag)}`}
+            href={addBase(`/momentum?tab=archive&tag=${encodeURIComponent(t.tag)}`)}
             class={`sh-momentum-chip${tag === t.tag ? ' sh-momentum-chip--active' : ''}`}
             onClick={(ev) => {
               ev.preventDefault()
@@ -113,7 +114,7 @@ export default function MomentumArchiveTab() {
     <div class="sh-momentum-filter-banner" role="status">
       <span>Filtering by <strong>#{tag}</strong></span>
       <a
-        href="/momentum?tab=archive"
+        href={addBase('/momentum?tab=archive')}
         onClick={(ev) => { ev.preventDefault(); loc.route('/momentum?tab=archive') }}
       >Clear</a>
     </div>
@@ -152,7 +153,7 @@ export default function MomentumArchiveTab() {
           <ul class="sh-momentum-list">
             {grouped.value.get(day)!.map(m => (
               <li key={m.id} class="sh-momentum-row">
-                <a href={`/momentum/${m.id}`}
+                <a href={addBase(`/momentum/${m.id}`)}
                   class="sh-momentum-row-link"
                   onClick={(ev) => {
                     ev.preventDefault()

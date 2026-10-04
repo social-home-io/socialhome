@@ -19,6 +19,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './FederationMap.css'
 import { connections, selfLat, selfLon, type TransportState } from '@/store/connections'
+import { t } from '@/i18n/i18n'
 import { addTileLayer, TILE_ERROR_MESSAGE } from '@/utils/mapTiles'
 import { haversineKm, bearing8, roundKm } from './_mapMath'
 
@@ -47,10 +48,10 @@ function _peerPinHtml(name: string | undefined, transport: TransportState | unde
 }
 
 function _transportLabel(transport: TransportState | undefined): string {
-  if (transport === 'rtc') return '⚡ Direct (WebRTC)'
-  if (transport === 'https') return '☁ HTTPS (fallback)'
-  if (transport === 'gfs_relay') return '🔁 Through the GFS'
-  return 'Transport unknown'
+  if (transport === 'rtc') return `⚡ ${t('connections.transport.direct')}`
+  if (transport === 'https') return `☁ ${t('connections.transport.internet')}`
+  if (transport === 'gfs_relay') return `🔁 ${t('connections.transport.gfs')}`
+  return t('connections.transport.unknown')
 }
 
 function escapeHtml(s: string): string {
@@ -133,8 +134,8 @@ export default function FederationMap() {
       })
       const selfMarker = L.marker([lat, lon], { icon }).addTo(layer)
       selfMarker.bindPopup(
-        '<strong>Your household</strong><br/>'
-        + '<span style="color:#6b7280">Local instance</span>',
+        `<strong>${escapeHtml(t('connections.map.you'))}</strong><br/>`
+        + `<span style="color:#6b7280">${escapeHtml(t('connections.map.you_sub'))}</span>`,
       )
       allMarkers.push(selfMarker)
     }
@@ -159,9 +160,9 @@ export default function FederationMap() {
           : ''
       marker.bindPopup(
         `<strong>${escapeHtml(peer.display_name ?? peer.instance_id)}</strong><br/>`
-        + `<span>${_transportLabel(transport)}</span><br/>`
+        + `<span>${escapeHtml(_transportLabel(transport))}</span><br/>`
         + distanceRow
-        + `<a id="${manageId}" href="#" style="font-size:13px">Manage</a>`,
+        + `<a id="${manageId}" href="#" style="font-size:13px">${escapeHtml(t('connections.manage'))}</a>`,
       )
       allMarkers.push(marker)
     }
@@ -192,12 +193,12 @@ export default function FederationMap() {
       </div>
       {offMap.length > 0 && (
         <div class="sh-federation-map__footer">
-          <h4 class="sh-federation-map__footer-heading">Not on map</h4>
+          <h4 class="sh-federation-map__footer-heading">{t('connections.map.not_on_map')}</h4>
           {offMap.map((p) => (
             <div key={p.instance_id} class="sh-federation-map__footer-row">
               <span class="sh-federation-map__footer-dot" aria-hidden="true" />
               <strong>{p.display_name ?? p.instance_id}</strong>
-              <span class="sh-muted">Paired but no home coordinates yet.</span>
+              <span class="sh-muted">{t('connections.map.no_coords')}</span>
             </div>
           ))}
         </div>

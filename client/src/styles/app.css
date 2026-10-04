@@ -9750,13 +9750,17 @@ hr {
  * pattern so list surfaces feel like cousins. */
 .sh-member-list-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--sh-space-xs);
   padding-block: var(--sh-space-xs) var(--sh-space-xs);
 }
+/* The count stays on one line ("3 Mitglieder"); the invite buttons
+ * wrap below it on a narrow screen instead of squeezing it. */
 .sh-member-list-header h3 {
   margin: 0;
+  white-space: nowrap;
 }
 .sh-member-row {
   position: relative;

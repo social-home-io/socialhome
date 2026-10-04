@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, waitFor, fireEvent, cleanup } from '@testing-library/preact'
+import { setLocale } from '@/i18n/i18n'
 
 // Mock the api module before importing the component so the
 // component's ``api.get`` / ``api.post`` resolve against vi.fn()s
@@ -245,5 +246,31 @@ describe('RemoteInviteInboxBanner', () => {
         {},
       )
     })
+  })
+})
+
+describe('RemoteInviteInboxBanner in German', () => {
+  it('shows the heading, inviter and buttons in German', async () => {
+    await setLocale('de')
+    try {
+      apiGet.mockImplementation((url: string) => {
+        if (url === '/api/remote_invites') return Promise.resolve([INVITE])
+        if (url === '/api/friends') return Promise.resolve(FRIENDS_WITH_ALICE)
+        return Promise.resolve([])
+      })
+      const { container, getByText } = render(<RemoteInviteInboxBanner />)
+      await waitFor(() => {
+        expect(container.querySelector('h2')?.textContent)
+          .toBe('📬 Offene Einladungen aus anderen Haushalten')
+      })
+      const row = container.querySelector('.sh-remote-invite-banner__row')!
+      expect(row.textContent).toContain('von Alpha House')
+      expect([...row.querySelectorAll('strong')].map(s => s.textContent)).toContain('Alpha House')
+      expect(getByText('Annehmen')).toBeTruthy()
+      fireEvent.click(getByText('Ablehnen'))
+      expect(getByText('Wirklich ablehnen')).toBeTruthy()
+    } finally {
+      await setLocale('en')
+    }
   })
 })

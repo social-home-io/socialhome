@@ -28,6 +28,7 @@ import { managesLocalUsers, usesHaUserDirectory } from '@/platform'
 import CpAdminPanel from '@/features/child-protection/CpAdminPanel'
 import type { User } from '@/types'
 import { confirmDialog } from '@/components/confirm'
+import { addBase } from '@/baseUrl'
 
 type TabId =
   | 'members' | 'ha-users' | 'spaces' | 'moderation'
@@ -481,7 +482,7 @@ function SpacesTab() {
               <td>{s.member_count}</td>
               <td><span class="sh-muted">{s.join_mode}</span></td>
               <td>
-                <a class="sh-link" href={`/spaces/${s.id}`}>Open</a>
+                <a class="sh-link" href={addBase(`/spaces/${s.id}`)}>Open</a>
                 {' · '}
                 <button type="button" class="sh-link"
                   onClick={() => void transferSpaceOwnership(s.id, s.owner_username)}>
@@ -642,7 +643,7 @@ function ModerationTab() {
             <li key={r.id} class="sh-admin-row">
               <div class="sh-admin-row__hd">
                 {href
-                  ? <a href={href}><strong>{target}</strong></a>
+                  ? <a href={addBase(href)}><strong>{target}</strong></a>
                   : <strong>{target}</strong>}
                 <span class="sh-muted">
                   reported as {category} by {_reporterLabel(r)}

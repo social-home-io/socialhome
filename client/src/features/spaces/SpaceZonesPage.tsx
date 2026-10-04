@@ -17,6 +17,7 @@ import { api } from '@/api'
 import { Spinner } from '@/components/Spinner'
 import { SpaceZonesAdmin } from '@/components/SpaceZonesAdmin'
 import type { Space } from '@/types'
+import { addBase } from '@/baseUrl'
 
 export default function SpaceZonesPage() {
   const { params } = useRoute()
@@ -58,7 +59,7 @@ export default function SpaceZonesPage() {
           Space Settings → Location sharing before adding zones.
         </p>
         <p>
-          <a href={`/spaces/${spaceId}/settings`}>← Back to settings</a>
+          <a href={addBase(`/spaces/${spaceId}/settings`)}>← Back to settings</a>
         </p>
       </div>
     )
@@ -69,7 +70,7 @@ export default function SpaceZonesPage() {
       <header class="sh-page__header">
         <h2>📍 Zones · {space.name}</h2>
         <p class="sh-muted">
-          <a href={`/spaces/${spaceId}/settings`}>← Back to settings</a>
+          <a href={addBase(`/spaces/${spaceId}/settings`)}>← Back to settings</a>
         </p>
       </header>
       <SpaceZonesAdmin spaceId={spaceId} />

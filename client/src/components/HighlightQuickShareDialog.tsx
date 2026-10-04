@@ -27,6 +27,7 @@ import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { UploadProgressBar, uploadWithProgress } from './UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
+import { addBase } from '@/baseUrl'
 
 const CAPTION_MAX = 140
 
@@ -200,7 +201,7 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
         <div class="sh-form-actions">
           <a
             class="sh-link sh-highlight-quick-escalate"
-            href="/highlights/new"
+            href={addBase('/highlights/new')}
             onClick={closeDialog}
           >
             Build a multi-frame story →

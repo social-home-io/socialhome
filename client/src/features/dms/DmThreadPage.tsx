@@ -52,6 +52,7 @@ import { emojiByShortcode } from '@/data/emojis'
 import { currentUser } from '@/store/auth'
 import { useTitle, useTitleAvatar } from '@/store/pageTitle'
 import { normaliseTimestamp } from '@/utils/relativeTime'
+import { addBase } from '@/baseUrl'
 
 const messages = signal<Message[]>([])
 const loading = signal(true)
@@ -2030,7 +2031,7 @@ export default function DmThreadPage() {
          * back affordance regardless of screen size. */}
         <a
           class="sh-thread-back"
-          href="/dms"
+          href={addBase('/dms')}
           aria-label="Back to chats"
         >‹</a>
         <div class="sh-thread-header-status" aria-live="polite">
@@ -2064,7 +2065,7 @@ export default function DmThreadPage() {
         <CallButton convId={convId} />
         <a
           class="sh-thread-history"
-          href={`/dms/${convId}/calls`}
+          href={addBase(`/dms/${convId}/calls`)}
           title="Call history"
           aria-label="Call history"
         >

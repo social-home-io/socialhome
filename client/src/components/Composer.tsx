@@ -120,15 +120,17 @@ const TYPE_ICONS_SPACE: Record<string, string> = {
 // are emoji-only; without these labels, screen-reader users hear
 // nothing meaningful when they tab through the row, and ``title``
 // alone is unreliable on mobile.
-const TYPE_LABELS: Record<string, string> = {
-  text:     'Text post',
-  image:    'Image post',
-  video:    'Video post',
-  file:     'File attachment',
-  poll:     'Poll',
-  schedule: 'Schedule',
-  location: 'Location share',
-  bazaar:   'Bazaar listing',
+// Called at render so the labels follow the UI language. Reuses the
+// space settings' post-type names (``space.post_type.*``).
+const TYPE_LABELS: Record<string, () => string> = {
+  text:     () => t('space.post_type.text'),
+  image:    () => t('space.post_type.image'),
+  video:    () => t('space.post_type.video'),
+  file:     () => t('space.post_type.file'),
+  poll:     () => t('space.post_type.poll'),
+  schedule: () => t('space.post_type.schedule'),
+  location: () => t('space.post_type.location'),
+  bazaar:   () => t('nav.bazaar'),
 }
 
 const MEDIA_TYPES = new Set(['image', 'video', 'file'])
@@ -163,17 +165,17 @@ function firstName(displayName: string | undefined | null): string {
  *  user's first name when we know it. */
 function placeholderFor(type: string, displayName: string | null | undefined): string {
   switch (type) {
-    case 'image':    return 'Add a caption…'
-    case 'video':    return 'Tell us about this clip…'
-    case 'file':     return 'What\'s this file for?'
-    case 'location': return 'Where are you headed? (optional caption)'
-    case 'bazaar':   return 'Describe what you\'re sharing or selling…'
+    case 'image':    return t('composer.placeholder.image')
+    case 'video':    return t('composer.placeholder.video')
+    case 'file':     return t('composer.placeholder.file')
+    case 'location': return t('composer.placeholder.location')
+    case 'bazaar':   return t('composer.placeholder.bazaar')
     case 'text':
     default: {
       const name = firstName(displayName)
       return name
-        ? `What's on your mind, ${name}?`
-        : 'What\'s on your mind?'
+        ? t('composer.placeholder.text_named', { name })
+        : t('composer.placeholder.text')
     }
   }
 }
@@ -182,6 +184,16 @@ function inferTypeFromFile(file: File): 'image' | 'video' | 'file' {
   if (file.type.startsWith('image/')) return 'image'
   if (file.type.startsWith('video/')) return 'video'
   return 'file'
+}
+
+/** Display label for the ``context`` badge. ``context`` doubles as the
+ *  draft key, so the prop stays English and only the badge is translated. */
+function contextLabel(context: string): string {
+  switch (context) {
+    case 'Space': return t('composer.context.space')
+    case 'Household': return t('composer.context.household')
+    default: return context
+  }
 }
 
 export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes, bazaarEnabled }: ComposerProps) {
@@ -492,7 +504,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
         <Avatar name={user?.display_name || '?'} src={user?.picture_url} size={32} />
         <div class="sh-composer-type-picker">
           {typeEntries.map(([type, icon]) => {
-            const label = TYPE_LABELS[type] ?? type
+            const label = TYPE_LABELS[type]?.() ?? type
             return (
               <button key={type} type="button"
                 class={`sh-type-btn ${postType.value === type ? 'sh-type-btn--active' : ''}`}
@@ -515,8 +527,8 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
                 scope: spaceId ? 'space' : 'household',
                 spaceId: spaceId ?? null,
               })}
-              aria-label="Share a highlight"
-              title="Share a highlight"
+              aria-label={t('composer.share_highlight')}
+              title={t('composer.share_highlight')}
             >
               ⭕
             </button>
@@ -526,8 +538,8 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
               type="button"
               class="sh-type-btn"
               onClick={() => openBazaarCreate(spaceId)}
-              aria-label="List something in the Bazaar"
-              title="List something in the Bazaar"
+              aria-label={t('composer.bazaar_listing')}
+              title={t('composer.bazaar_listing')}
             >
               🛍
             </button>
@@ -632,7 +644,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
              */
             <label class="sh-composer-image-add">
               <span aria-hidden="true">＋</span>
-              <span>Add photo</span>
+              <span>{t('composer.add_photo')}</span>
               {/*
                * Single-pick + specific MIME list for the same
                * HA-Android-WebView reason documented on the
@@ -739,7 +751,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
         </div>
       )}
       <div class="sh-composer-footer">
-        {context && <span class="sh-context-badge">🌐 {context}</span>}
+        {context && <span class="sh-context-badge">🌐 {contextLabel(context)}</span>}
         {!typeHidesTextarea(postType.value) && (
           <EmojiPickButton
             openKey="composer"
@@ -787,12 +799,12 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
             return !content.value.trim()
           })()}>
           {postType.value === 'schedule' && !pendingSchedule
-            ? 'Propose times…'
+            ? t('composer.submit.schedule')
             : postType.value === 'poll' && !pendingPoll
-              ? 'Build poll…'
+              ? t('composer.submit.poll')
               : postType.value === 'location' && !pendingLocation
-                ? 'Pick location…'
-                : 'Post'}
+                ? t('composer.submit.location')
+                : t('composer.submit.post')}
         </Button>
       </div>
       <ScheduleBuilder

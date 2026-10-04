@@ -81,7 +81,7 @@ describe('ConnectionDetail — alias rename row', () => {
     expect(input.placeholder).toBe('z7k63zfi')
     // Hint mentions the peer's advertised name when no alias is set.
     const hint = document.querySelector('.sh-connection-alias__hint')
-    expect(hint?.textContent).toMatch(/They advertise themselves as "z7k63zfi"/)
+    expect(hint?.textContent).toMatch(/They call themselves "z7k63zfi"/)
   })
 
   it('Save button is disabled until the alias differs from the persisted value', async () => {
@@ -162,7 +162,7 @@ describe('ConnectionDetail — alias rename row', () => {
 })
 
 describe('Transport row', () => {
-  it('shows Direct (WebRTC DataChannel) for rtc', async () => {
+  it('shows Direct for rtc', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
       <ConnectionDetail
@@ -171,10 +171,10 @@ describe('Transport row', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.getByText(/Direct \(WebRTC DataChannel\)/i)).toBeTruthy()
+    expect(screen.getByText(/^Direct$/)).toBeTruthy()
   })
 
-  it('shows HTTPS inbox (fallback) for https', async () => {
+  it('shows the slower internet path for https', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
       <ConnectionDetail
@@ -183,10 +183,10 @@ describe('Transport row', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.getByText(/HTTPS inbox \(fallback\)/i)).toBeTruthy()
+    expect(screen.getByText('Over the internet (slower)')).toBeTruthy()
   })
 
-  it('omits the Transport row when transport is null', async () => {
+  it('omits the Connection row when transport is null', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
       <ConnectionDetail
@@ -195,11 +195,11 @@ describe('Transport row', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.queryByText(/Transport/i)).toBeNull()
+    expect(screen.queryByText('Connection')).toBeNull()
   })
 })
 
-describe('Protocol version row', () => {
+describe('App version row', () => {
   it('shows the peer protocol version when present', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
@@ -209,11 +209,11 @@ describe('Protocol version row', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.getByText('Protocol version')).toBeTruthy()
+    expect(screen.getByText('App version')).toBeTruthy()
     expect(screen.getByText('v19')).toBeTruthy()
   })
 
-  it('omits the Protocol version row when the field is absent', async () => {
+  it('omits the App version row when the field is absent', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
       <ConnectionDetail
@@ -222,7 +222,7 @@ describe('Protocol version row', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.queryByText('Protocol version')).toBeNull()
+    expect(screen.queryByText('App version')).toBeNull()
   })
 })
 
@@ -271,7 +271,7 @@ describe('Federation compatibility row + re-check', () => {
     expect(screen.getByText('up to date ✓')).toBeTruthy()
   })
 
-  it('renders a "Re-check version" button that calls resyncPeerCapabilities', async () => {
+  it('renders a "Check version again" button that calls resyncPeerCapabilities', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
       <ConnectionDetail
@@ -281,7 +281,7 @@ describe('Federation compatibility row + re-check', () => {
         onRevoke={() => {}}
       />,
     )
-    const btn = await screen.findByText('Re-check version')
+    const btn = await screen.findByText('Check version again')
     fireEvent.click(btn)
     await new Promise(r => setTimeout(r, 0))
     expect(resyncPeerCapabilities).toHaveBeenCalledWith('z7k63zfi')
@@ -298,7 +298,7 @@ describe('Federation compatibility row + re-check', () => {
       />,
     )
     await screen.findByText('Missing features')
-    expect(screen.queryByText('Re-check version')).toBeNull()
+    expect(screen.queryByText('Check version again')).toBeNull()
   })
 
   it('renders no compat row when compat prop is absent', async () => {
@@ -313,7 +313,7 @@ describe('Federation compatibility row + re-check', () => {
     await screen.findByLabelText('Display this household as')
     expect(screen.queryByText('Missing features')).toBeNull()
     expect(screen.queryByText('Compatibility')).toBeNull()
-    expect(screen.queryByText('Re-check version')).toBeNull()
+    expect(screen.queryByText('Check version again')).toBeNull()
   })
 })
 
@@ -380,8 +380,8 @@ describe('DM path row', () => {
       />,
     )
     await waitFor(() => {
-      expect(screen.getByText(/Last DM took the relay path/i)).toBeTruthy()
-      expect(screen.getByText(/peer-relay/)).toBeTruthy()
+      expect(screen.getByText(/Your last chat went through peer-relay/)).toBeTruthy()
+      expect(screen.getByText(/You → 🔁 peer-relay →/)).toBeTruthy()
     })
   })
 
@@ -401,7 +401,7 @@ describe('DM path row', () => {
       />,
     )
     await waitFor(() =>
-      expect(screen.queryByText(/Last DM took the relay path/i)).toBeNull(),
+      expect(screen.queryByText(/Your last chat went through/i)).toBeNull(),
     )
   })
 
@@ -421,12 +421,12 @@ describe('DM path row', () => {
       />,
     )
     // The Transport row should still render — proves the panel didn't crash:
-    expect(screen.getByText(/HTTPS inbox \(fallback\)/i)).toBeTruthy()
-    expect(screen.queryByText(/Last DM took the relay path/i)).toBeNull()
+    expect(screen.getByText('Over the internet (slower)')).toBeTruthy()
+    expect(screen.queryByText(/Your last chat went through/i)).toBeNull()
   })
 })
 
-describe('Inbox row — admin-only, confirmed direct peers only', () => {
+describe('Address row — admin-only, confirmed direct peers only', () => {
   it('shows the inbox_url /transport-detail returns', async () => {
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/pairing/connections/z7k63zfi/transport-detail') {
@@ -437,7 +437,7 @@ describe('Inbox row — admin-only, confirmed direct peers only', () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(<ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />)
     expect(await screen.findByText('https://peer.example/federation/inbox/wh-1')).toBeTruthy()
-    expect(screen.getByText('Inbox')).toBeTruthy()
+    expect(screen.getByText('Address')).toBeTruthy()
   })
 
   it('hides the row when the server withholds the address (space_session / relay-only / non-admin)', async () => {
@@ -452,7 +452,7 @@ describe('Inbox row — admin-only, confirmed direct peers only', () => {
     await waitFor(() => expect(apiGet).toHaveBeenCalledWith(
       '/api/pairing/connections/z7k63zfi/transport-detail',
     ))
-    expect(screen.queryByText('Inbox')).toBeNull()
+    expect(screen.queryByText('Address')).toBeNull()
   })
 })
 
@@ -467,7 +467,7 @@ describe('Waiting to send — queued envelope backlog', () => {
       />,
     )
     expect(screen.getByText('Waiting to send')).toBeTruthy()
-    expect(screen.getByText('56 messages queued for delivery')).toBeTruthy()
+    expect(screen.getByText('56 messages waiting to be sent')).toBeTruthy()
   })
 
   it('uses the singular for exactly one queued envelope', async () => {
@@ -479,7 +479,7 @@ describe('Waiting to send — queued envelope backlog', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.getByText('1 message queued for delivery')).toBeTruthy()
+    expect(screen.getByText('1 message waiting to be sent')).toBeTruthy()
   })
 
   it('is absent when nothing is queued', async () => {
@@ -652,8 +652,8 @@ describe('GFS row — relay acceptance is not delivery', () => {
     expect(screen.getByText('GFS')).toBeTruthy()
     expect(screen.getByText('GFS only')).toBeTruthy()
     const stamp = new Date('2026-09-20T10:00:00Z').toLocaleString()
-    expect(screen.getByText(`Last accepted ${stamp}`, { exact: false })).toBeTruthy()
-    expect(screen.getByText(/not confirmed as delivered/i)).toBeTruthy()
+    expect(screen.getByText(`Last handed over ${stamp}`, { exact: false })).toBeTruthy()
+    expect(screen.getByText(/aren't confirmed as delivered/i)).toBeTruthy()
   })
 
   it('shows the acceptance time without the relay-only chip once delivery is proven', async () => {
@@ -731,5 +731,39 @@ describe('ConnectionDetail — writes only target registered routes', () => {
     render(<ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />)
     fireEvent.click(await screen.findByRole('checkbox', { name: /Anna/ }))
     await waitFor(() => expect(showToast).toHaveBeenCalledWith('Peer not found.', 'error'))
+  })
+})
+
+describe('ConnectionDetail in German', () => {
+  beforeEach(async () => {
+    const { setLocale } = await import('@/i18n/i18n')
+    await setLocale('de')
+  })
+  afterEach(async () => {
+    const { setLocale } = await import('@/i18n/i18n')
+    await setLocale('en')
+  })
+
+  it('labels the rows plainly and picks the singular for one waiting message', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ proto_version: 19, queued_envelopes: 1, transport: 'https' }) as any}
+        compat={{
+          instance_id: 'z7k63zfi', display_name: 'z7k63zfi', proto_version: 19,
+          status: 'confirmed', last_reachable_at: null,
+          capabilities_known: true, lacking_features: [],
+        } as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(screen.getByText('Haushalts-ID')).toBeTruthy()
+    expect(screen.getByText('App-Version')).toBeTruthy()
+    expect(screen.getByText('Verbunden')).toBeTruthy()
+    expect(screen.getByText('aktuell ✓')).toBeTruthy()
+    expect(screen.getByText('1 Nachricht wartet auf den Versand')).toBeTruthy()
+    expect(screen.getByText('Über das Internet (langsamer)')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Verbindung entfernen' })).toBeTruthy()
   })
 })

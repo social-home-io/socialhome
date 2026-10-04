@@ -23,6 +23,7 @@
 import type { Signal } from '@preact/signals'
 import { useRef } from 'preact/hooks'
 import { Avatar } from './Avatar'
+import { isOne, t } from '@/i18n/i18n'
 import {
   TabOverflowMenu,
   useScrollActiveTabIntoView,
@@ -56,8 +57,21 @@ interface SpaceSubHeaderProps {
   actions?: preact.ComponentChildren
 }
 
+/** The tab's name in the UI language. Reuses the nav labels where the
+ *  tab is the space's own copy of a household section. */
 function tabLabel(tab: SpaceTab): string {
-  return tab.charAt(0).toUpperCase() + tab.slice(1)
+  switch (tab) {
+    case 'feed':       return t('nav.feed')
+    case 'members':    return t('spaces.members')
+    case 'pages':      return t('nav.pages')
+    case 'calendar':   return t('nav.calendar')
+    case 'tasks':      return t('nav.tasks')
+    case 'stickies':   return t('nav.stickies')
+    case 'gallery':    return t('nav.gallery')
+    case 'bazaar':     return t('nav.bazaar')
+    case 'map':        return t('space.tab.map')
+    case 'moderation': return t('space.tab.moderation')
+  }
 }
 
 export function SpaceSubHeader({
@@ -66,14 +80,14 @@ export function SpaceSubHeader({
 }: SpaceSubHeaderProps) {
   const stripRef = useRef<HTMLElement | null>(null)
   const labels = Object.fromEntries(
-    visibleTabs.map((t) => [t, tabLabels?.[t] ?? tabLabel(t)]),
+    visibleTabs.map((tab) => [tab, tabLabels?.[tab] ?? tabLabel(tab)]),
   ) as Record<SpaceTab, string>
   const overflowing = useTabStripOverflow(stripRef, [visibleTabs])
   // A string key, not the arrays/objects themselves: hosts often pass
   // fresh literals each render, and re-running the reveal on every
   // render would yank back a strip the user just scrolled by hand.
   useScrollActiveTabIntoView(
-    stripRef, activeTab.value, [visibleTabs.map((t) => labels[t]).join('\u0000')],
+    stripRef, activeTab.value, [visibleTabs.map((tab) => labels[tab]).join('\u0000')],
   )
 
   return (
@@ -91,7 +105,8 @@ export function SpaceSubHeader({
         )}
         {memberCount !== null && (
           <span class="sh-space-subheader-meta">
-            {memberCount} {memberCount === 1 ? 'member' : 'members'}
+            {t(isOne(memberCount) ? 'space.header.members_one' : 'space.header.members',
+               { count: String(memberCount) })}
           </span>
         )}
       </div>
@@ -99,7 +114,7 @@ export function SpaceSubHeader({
         ref={stripRef}
         class="sh-space-tabs"
         role="tablist"
-        aria-label="Space sections"
+        aria-label={t('space.header.sections')}
       >
         {visibleTabs.map(tab => (
           <button

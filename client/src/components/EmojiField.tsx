@@ -20,6 +20,7 @@
  */
 import { signal, type Signal } from '@preact/signals'
 import { ReactionPicker } from './ReactionPicker'
+import { t } from '@/i18n/i18n'
 
 /** At most one EmojiField picker open per page (keyed by ``openKey``). */
 const openFor = signal<string | null>(null)
@@ -30,13 +31,13 @@ interface EmojiFieldProps {
   /** Unique-per-page key so a second tap on the same tile closes it
    *  and two fields can't both be open. */
   openKey: string
-  /** Visible field label. Defaults to ``"Icon"``. */
+  /** Visible field label. Defaults to the translated ``"Icon"``. */
   label?: string
   /** Optional helper line under the label. */
   hint?: string
 }
 
-export function EmojiField({ value, openKey, label = 'Icon', hint }: EmojiFieldProps) {
+export function EmojiField({ value, openKey, label, hint }: EmojiFieldProps) {
   const isOpen = openFor.value === openKey
   const has = value.value !== ''
 
@@ -54,14 +55,14 @@ export function EmojiField({ value, openKey, label = 'Icon', hint }: EmojiFieldP
 
   return (
     <div class="sh-emoji-field">
-      <span class="sh-emoji-field-label">{label}</span>
+      <span class="sh-emoji-field-label">{label ?? t('emoji_field.label')}</span>
       <div class="sh-emoji-field-row">
         <button
           type="button"
           class={`sh-emoji-field-tile${has ? '' : ' is-empty'}`}
           aria-haspopup="dialog"
           aria-expanded={isOpen}
-          aria-label={has ? `Icon ${value.value} — tap to change` : 'Choose an icon'}
+          aria-label={has ? t('emoji_field.change_aria', { emoji: value.value }) : t('emoji_field.choose_aria')}
           onClick={toggle}
         >
           {has
@@ -70,11 +71,11 @@ export function EmojiField({ value, openKey, label = 'Icon', hint }: EmojiFieldP
         </button>
         <div class="sh-emoji-field-meta">
           <span class="sh-emoji-field-hint">
-            {hint ?? (has ? 'Tap the icon to change it' : 'Pick an emoji to represent this space')}
+            {hint ?? (has ? t('emoji_field.hint_change') : t('emoji_field.hint_pick'))}
           </span>
           {has && (
             <button type="button" class="sh-emoji-field-clear" onClick={clear}>
-              Remove
+              {t('emoji_field.remove')}
             </button>
           )}
         </div>

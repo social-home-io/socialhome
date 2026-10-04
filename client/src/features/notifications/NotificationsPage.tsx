@@ -11,6 +11,7 @@ import { NotificationListSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
+import { appHref } from '@/baseUrl'
 
 const notifications = signal<Notification[]>([])
 const loading = signal(true)
@@ -90,7 +91,7 @@ export default function NotificationsPage() {
               {relativeDocsTime(n.created_at)}
             </time>
           </div>
-          {n.link_url && <a href={n.link_url} class="sh-notif-link">→</a>}
+          {n.link_url && <a href={appHref(n.link_url)} class="sh-notif-link">→</a>}
         </div>
       ))}
     </div>

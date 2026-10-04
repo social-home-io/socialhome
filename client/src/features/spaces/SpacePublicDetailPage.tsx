@@ -30,6 +30,7 @@ import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import { contentIsGated, GATED_CHIP, hostLabel, joinModeChip } from './SpaceCard'
+import { addBase } from '@/baseUrl'
 
 /** Shown when the space's owner has NOT opted into read-only followers
  *  (``SpaceFeatures.allow_subscribers`` off): the space is listed so people
@@ -187,7 +188,7 @@ export default function SpacePublicDetailPage() {
   if (error.value || !detail.value) {
     return (
       <div class="sh-space-public" role="alert">
-        <a class="sh-space-public__back" href="/spaces/browse"
+        <a class="sh-space-public__back" href={addBase('/spaces/browse')}
            onClick={(ev) => { ev.preventDefault(); loc.route('/spaces/browse') }}>
           ← Browse spaces
         </a>
@@ -228,7 +229,7 @@ export default function SpacePublicDetailPage() {
     <div class="sh-space-public">
       <a
         class="sh-space-public__back"
-        href="/spaces/browse"
+        href={addBase('/spaces/browse')}
         onClick={(ev) => { ev.preventDefault(); loc.route('/spaces/browse') }}
       >
         ← Browse spaces

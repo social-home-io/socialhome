@@ -39,23 +39,28 @@ export function visibilityOptions(): RadioCardOption[] {
 
 /** Discovery categories (§23.50) — shown for public/global spaces. Values
  *  mirror the backend ``SPACE_CATEGORIES`` (socialhome/domain/space.py) and the
- *  GFS label map (global_server/public.py). */
-export const SPACE_CATEGORIES: { value: string; label: string }[] = [
-  { value: 'general',          label: 'General' },
-  { value: 'hobby_crafts',     label: 'Hobby & crafts' },
-  { value: 'sports_outdoors',  label: 'Sports & outdoors' },
-  { value: 'gaming',           label: 'Gaming' },
-  { value: 'music_arts',       label: 'Music & arts' },
-  { value: 'food_drink',       label: 'Food & drink' },
-  { value: 'tech',             label: 'Tech' },
-  { value: 'local',            label: 'Local / neighborhood' },
-  { value: 'family_parenting', label: 'Family & parenting' },
-  { value: 'learning',         label: 'Learning' },
+ *  GFS label map (global_server/public.py). ``value`` is what gets stored and
+ *  sent; ``label`` is a getter, so it follows the UI language. */
+function category(value: string, label: () => string): { value: string; readonly label: string } {
+  return { value, get label() { return label() } }
+}
+
+export const SPACE_CATEGORIES: { value: string; readonly label: string }[] = [
+  category('general',          () => t('space.category.general')),
+  category('hobby_crafts',     () => t('space.category.hobby_crafts')),
+  category('sports_outdoors',  () => t('space.category.sports_outdoors')),
+  category('gaming',           () => t('space.category.gaming')),
+  category('music_arts',       () => t('space.category.music_arts')),
+  category('food_drink',       () => t('space.category.food_drink')),
+  category('tech',             () => t('space.category.tech')),
+  category('local',            () => t('space.category.local')),
+  category('family_parenting', () => t('space.category.family_parenting')),
+  category('learning',         () => t('space.category.learning')),
 ]
 
 /** Map any value (unknown/legacy/empty/null) to a display label; default General. */
 export function categoryLabel(value: string | null | undefined): string {
-  return SPACE_CATEGORIES.find(c => c.value === value)?.label ?? 'General'
+  return SPACE_CATEGORIES.find(c => c.value === value)?.label ?? t('space.category.general')
 }
 
 /** The join modes, in the UI language. */

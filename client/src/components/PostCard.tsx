@@ -25,6 +25,7 @@ import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import { t } from '@/i18n/i18n'
 import { Button } from './Button'
 import type { FeedPost } from '@/types'
+import { addBase } from '@/baseUrl'
 
 // Module-level signal so only one reaction picker is open across the
 // feed at a time. Holds the post id of the currently open picker, or
@@ -171,7 +172,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
           {post.edited_at && <span class="sh-post-edited">(edited)</span>}
         </div>
         {showCrossSpaceBadge && (
-          <a class="sh-post-space-badge" href={`/spaces/${spaceId}`}>
+          <a class="sh-post-space-badge" href={addBase(`/spaces/${spaceId}`)}>
             {spaceName}
           </a>
         )}

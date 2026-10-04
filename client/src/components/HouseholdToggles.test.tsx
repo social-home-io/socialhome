@@ -77,12 +77,12 @@ describe('HouseholdToggles', () => {
     const { getByText, container } = render(<HouseholdToggles />)
     // Feature cards
     expect(getByText('Feed')).toBeTruthy()
-    expect(getByText('The shared household activity feed')).toBeTruthy()
+    expect(getByText('The shared household feed')).toBeTruthy()
     expect(getByText('Gallery')).toBeTruthy()
     // Post-type cards
     expect(getByText('Text')).toBeTruthy()
     expect(getByText('Allow text posts in the feed')).toBeTruthy()
-    expect(getByText('Highlight share')).toBeTruthy()
+    expect(getByText('Shared highlight')).toBeTruthy()
     // 8 features + 7 post types + 1 link-preview switch = 16 cards
     const cards = container.querySelectorAll('.sh-radio-card')
     expect(cards).toHaveLength(16)
@@ -132,7 +132,7 @@ describe('HouseholdToggles', () => {
     const titles = Array.from(container.querySelectorAll('.sh-radio-card__title'))
       .map(el => el.textContent)
     expect(titles.indexOf('Timetable')).toBe(titles.indexOf('Calendar') + 1)
-    expect(getByText('Weekly school-style timetables')).toBeTruthy()
+    expect(getByText('Weekly school timetables')).toBeTruthy()
     const card = getByText('Timetable').closest('.sh-radio-card')!
     fireEvent.click(card.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
     expect(api.put).toHaveBeenCalledWith('/api/household/preferences', {

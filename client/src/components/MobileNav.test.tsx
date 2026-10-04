@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { render, act } from '@testing-library/preact'
 import { LocationProvider } from 'preact-iso'
 import { MobileNav, mobileSidebarOpen } from './MobileNav'
@@ -93,5 +93,31 @@ describe('MobileNav', () => {
     expect(
       container.querySelector('.sh-mobile-drawer')!.classList.contains('sh-mobile-drawer--open'),
     ).toBe(true)
+  })
+})
+
+describe('MobileNav — links under the HA ingress prefix', () => {
+  let baseEl: HTMLBaseElement
+  beforeEach(() => {
+    baseEl = document.createElement('base')
+    baseEl.href = '/api/hassio_ingress/tok/'
+    document.head.prepend(baseEl)
+    vi.resetModules()
+  })
+  afterEach(() => {
+    baseEl.remove()
+    vi.resetModules()
+  })
+
+  it('bottom tabs carry the ingress prefix (/api/hassio_ingress/<token>/)', async () => {
+    const { MobileNav: PrefixedNav } = await import('./MobileNav')
+    const iso = await import('preact-iso')
+    const { container } = render(<iso.LocationProvider><PrefixedNav /></iso.LocationProvider>)
+    const bar = container.querySelector('.sh-mobile-nav')!
+    const hrefs = [...bar.querySelectorAll('a.sh-mobile-tab')].map(a => a.getAttribute('href'))
+    expect(hrefs).toEqual([
+      '/api/hassio_ingress/tok/', '/api/hassio_ingress/tok/spaces',
+      '/api/hassio_ingress/tok/dms', '/api/hassio_ingress/tok/notifications',
+    ])
   })
 })

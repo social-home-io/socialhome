@@ -11,6 +11,7 @@
  *   3. Global Federation Servers.
  */
 import { useEffect, useState, lazy, Suspense } from 'preact/compat'
+import type { ComponentChildren } from 'preact'
 import { signal, useSignal } from '@preact/signals'
 import { api } from '@/api'
 import { Button } from '@/components/Button'
@@ -39,7 +40,7 @@ import {
 
 import { useTitle } from '@/store/pageTitle'
 import type { GfsConnection } from '@/types'
-import { t } from '@/i18n/i18n'
+import { t, isOne } from '@/i18n/i18n'
 import { isSupervisorAddon } from '@/platform'
 import { confirmDialog } from '@/components/confirm'
 import { relativeDocsTime } from '@/utils/relativeTime'
@@ -128,13 +129,13 @@ function hfsStatusDotClass(conn: Connection): string {
   return 'sh-status-dot sh-status-dot--pending'
 }
 
-function transportIcon(t: Connection['transport']) {
-  if (t === 'rtc') {
+function transportIcon(kind: Connection['transport']) {
+  if (kind === 'rtc') {
     return (
       <span
         class="sh-transport-icon sh-transport-icon--rtc"
-        title="Direct connection — low latency"
-        aria-label="Direct (WebRTC)"
+        title={t('connections.transport.direct_title')}
+        aria-label={t('connections.transport.direct')}
       >
         <svg width="14" height="14" viewBox="0 0 24 24"
              fill="currentColor" aria-hidden="true">
@@ -143,12 +144,12 @@ function transportIcon(t: Connection['transport']) {
       </span>
     )
   }
-  if (t === 'https') {
+  if (kind === 'https') {
     return (
       <span
         class="sh-transport-icon sh-transport-icon--https"
-        title="Via HTTPS — works, but slower than direct"
-        aria-label="Via HTTPS (fallback)"
+        title={t('connections.transport.internet_title')}
+        aria-label={t('connections.transport.internet')}
       >
         <svg width="14" height="14" viewBox="0 0 24 24"
              fill="currentColor" aria-hidden="true">
@@ -157,12 +158,12 @@ function transportIcon(t: Connection['transport']) {
       </span>
     )
   }
-  if (t === 'gfs_relay') {
+  if (kind === 'gfs_relay') {
     return (
       <span
         class="sh-transport-icon sh-transport-icon--gfs-relay"
-        title="Through the GFS"
-        aria-label="Through the GFS"
+        title={t('connections.transport.gfs')}
+        aria-label={t('connections.transport.gfs')}
       >
         <svg width="14" height="14" viewBox="0 0 24 24"
              fill="currentColor" aria-hidden="true">
@@ -188,16 +189,29 @@ function transportIcon(t: Connection['transport']) {
 function compatBadge(peer: CompatPeer | undefined) {
   if (peer === undefined) return null
   if (!peer.capabilities_known) {
-    return <span class="sh-chip sh-chip--muted">version unknown</span>
+    return <span class="sh-chip sh-chip--muted">{t('connections.compat.unknown')}</span>
   }
   if (peer.lacking_features.length === 0) {
-    return <span class="sh-chip sh-chip--success">up to date ✓</span>
+    return <span class="sh-chip sh-chip--success">{t('connections.compat.up_to_date')}</span>
   }
   return (
     <span class="sh-chip sh-chip--update" title={peer.lacking_features.join(', ')}>
-      {peer.lacking_features.length} behind
+      {behindLabel(peer.lacking_features.length)}
     </span>
   )
+}
+
+/** "{n} behind" badge text, singular/plural per the UI language. */
+function behindLabel(n: number): string {
+  return t(isOne(n) ? 'connections.compat.behind_one' : 'connections.compat.behind', { n: String(n) })
+}
+
+/** Render a translated sentence with one ``{name}``-style placeholder
+ *  replaced by a JSX node (bold name, ``<code>`` URL), so word order
+ *  stays the translator's choice. */
+function withNode(text: string, placeholder: string, node: ComponentChildren) {
+  const [before, after = ''] = text.split(`{${placeholder}}`)
+  return <>{before}{node}{after}</>
 }
 
 async function loadConnections() {
@@ -251,31 +265,31 @@ async function approveAutoPair(r: AutoPairRequest) {
     await api.post(
       `/api/pairing/auto-pair-requests/${r.request_id}/approve`, {},
     )
-    showToast(`Paired with ${r.from_a_display}`, 'success')
+    showToast(t('connections.requests.paired', { name: r.from_a_display }), 'success')
     autoPairRequests.value = autoPairRequests.value.filter(
       x => x.request_id !== r.request_id,
     )
   } catch (err: unknown) {
     showToast(
-      `Approve failed: ${(err as Error).message ?? err}`, 'error',
+      t('connections.requests.approve_failed', { error: String((err as Error).message ?? err) }), 'error',
     )
   }
 }
 
 async function declineAutoPair(r: AutoPairRequest) {
-  if (!await confirmDialog(`Decline ${r.from_a_display}'s pairing request?`, { destructive: true })) return
+  if (!await confirmDialog(t('connections.requests.decline_confirm', { name: r.from_a_display }), { destructive: true })) return
   try {
     await api.post(
       `/api/pairing/auto-pair-requests/${r.request_id}/decline`,
       {},
     )
-    showToast('Request declined', 'info')
+    showToast(t('connections.requests.declined'), 'info')
     autoPairRequests.value = autoPairRequests.value.filter(
       x => x.request_id !== r.request_id,
     )
   } catch (err: unknown) {
     showToast(
-      `Decline failed: ${(err as Error).message ?? err}`, 'error',
+      t('connections.requests.decline_failed', { error: String((err as Error).message ?? err) }), 'error',
     )
   }
 }
@@ -292,13 +306,13 @@ async function disconnectGfs(gfs: GfsConnection) {
 }
 
 async function unpair(instanceId: string) {
-  if (!await confirmDialog('Unpair this household? You will lose access to its spaces.', { destructive: true })) return
+  if (!await confirmDialog(t('connections.unpair_confirm'), { destructive: true })) return
   try {
     await api.delete(`/api/pairing/connections/${instanceId}`)
-    showToast('Unpaired', 'info')
+    showToast(t('connections.unpaired'), 'info')
     await loadConnections()
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Unpair failed', 'error')
+    showToast((e as Error).message || t('connections.unpair_failed'), 'error')
   }
 }
 
@@ -346,7 +360,7 @@ function DiagnosticsDownload() {
       // download in some browsers before it has read the blob.
       setTimeout(() => URL.revokeObjectURL(url), 0)
     } catch {
-      showToast('Could not build the diagnostics file.', 'error')
+      showToast(t('connections.diag.failed'), 'error')
     } finally {
       busy.value = false
     }
@@ -360,12 +374,10 @@ function DiagnosticsDownload() {
         disabled={busy.value}
         onClick={() => void download()}
       >
-        {busy.value ? 'Preparing…' : 'Download diagnostics'}
+        {busy.value ? t('connections.diag.preparing') : t('connections.diag.download')}
       </button>
       <span class="sh-diagnostics-note">
-        Connection state, peer reachability times and delivery backlog —
-        no messages, names, keys or locations. Safe to attach to a bug
-        report.
+        {t('connections.diag.note')}
       </span>
     </p>
   )
@@ -421,15 +433,15 @@ function IceServersPanel() {
     // lint suppression needed.
   }, [iceLoaded, iceServers])
 
-  const summary = !iceLoaded.value
+  const summary: 'unavailable' | 'ready' | 'broken' | 'direct_only' | '' = !iceLoaded.value
     ? ''
     : data === null
       ? 'unavailable'
       : data.turn_usable
-        ? 'relay ready'
+        ? 'ready'
         : data.has_turn
-          ? 'relay not usable'
-          : 'direct only'
+          ? 'broken'
+          : 'direct_only'
 
   return (
     <div class="sh-ice-panel">
@@ -443,31 +455,30 @@ function IceServersPanel() {
         <span class="sh-ice-panel__caret" aria-hidden="true">
           {iceOpen.value ? '▾' : '▸'}
         </span>
-        Connection servers
+        {t('connections.ice.title')}
         {summary && (
           <span class={`sh-ice-panel__badge sh-ice-panel__badge--${
-            summary === 'relay ready'
+            summary === 'ready'
               ? 'ok'
-              : summary === 'direct only' || summary === 'relay not usable'
+              : summary === 'direct_only' || summary === 'broken'
                 ? 'warn'
                 : 'muted'
           }`}>
-            {summary}
+            {t(`connections.ice.state_${summary}`)}
           </span>
         )}
       </button>
       {iceOpen.value && (
         <div id={panelId} class="sh-ice-panel__body">
-          {!iceLoaded.value && <p class="sh-muted">Loading…</p>}
+          {!iceLoaded.value && <p class="sh-muted">{t('connections.ice.loading')}</p>}
           {iceLoaded.value && data === null && (
-            <p class="sh-muted">Couldn’t read the server list.</p>
+            <p class="sh-muted">{t('connections.ice.read_failed')}</p>
           )}
           {iceLoaded.value && data !== null && (
             <>
               {data.servers.length === 0 ? (
                 <p class="sh-muted">
-                  No connection servers configured — households behind most
-                  home routers won’t be able to reach each other directly.
+                  {t('connections.ice.none')}
                 </p>
               ) : (
                 <ul class="sh-ice-list">
@@ -477,9 +488,9 @@ function IceServersPanel() {
                       <span class="sh-muted sh-ice-list__note">
                         {s.kinds.includes('turn') || s.kinds.includes('turns')
                           ? s.has_credentials
-                            ? 'relay · signed in'
-                            : 'relay · no credentials'
-                          : 'address lookup'}
+                            ? t('connections.ice.kind_backup_signed_in')
+                            : t('connections.ice.kind_backup_no_login')
+                          : t('connections.ice.kind_lookup')}
                       </span>
                     </li>
                   ))}
@@ -487,17 +498,11 @@ function IceServersPanel() {
               )}
               <p class="sh-muted sh-ice-panel__hint">
                 {!data.has_turn
-                  ? 'Only address lookup (STUN) is set up. That is enough for'
-                    + ' most home networks, but not for stricter ones — add a'
-                    + ' relay (TURN) if pairing connects but stays slow.'
+                  ? t('connections.ice.hint_no_turn')
                   : !data.turn_usable
-                    ? 'A relay is listed but has no credentials, so it will be'
-                      + ' rejected and connections quietly fall back to the'
-                      + ' slow path. Check the relay secret.'
-                    : 'A relay is available, so households behind strict'
-                      + ' routers can still reach each other.'}
-                {data.pulls_from_home_assistant
-                  && ' This list comes from Home Assistant and refreshes daily.'}
+                    ? t('connections.ice.hint_turn_broken')
+                    : t('connections.ice.hint_ready')}
+                {data.pulls_from_home_assistant && t('connections.ice.from_ha')}
               </p>
             </>
           )}
@@ -562,17 +567,18 @@ function ExternalUrlSection() {
       await loadExternalUrl()
       showToast(
         r.base === null
-          ? 'External URL cleared.'
+          ? t('connections.ext.cleared')
           : r.peers_notified > 0
-            ? `External URL saved — ${r.peers_notified} paired household(s) notified.`
-            : 'External URL saved.',
+            ? t(isOne(r.peers_notified) ? 'connections.ext.saved_notified_one' : 'connections.ext.saved_notified',
+              { n: String(r.peers_notified) })
+            : t('connections.ext.saved'),
         'success',
       )
     } catch (err) {
       showToast(
         err instanceof Error && /422/.test(err.message)
-          ? 'That needs to be a full http(s) URL, e.g. https://home.example.com'
-          : 'Could not save the external URL.',
+          ? t('connections.ext.invalid')
+          : t('connections.ext.failed'),
         'error',
       )
     } finally {
@@ -588,16 +594,15 @@ function ExternalUrlSection() {
     <section class="sh-connections-section sh-external-url-section">
       <div class="sh-section-header">
         <div class="sh-section-header__title">
-          <h2>External URL</h2>
+          <h2>{t('connections.ext.title')}</h2>
         </div>
       </div>
       <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-sm)' }}>
-        The address other households reach this Social Home at. Pairing
-        needs it — without one, generating a pairing code fails.
+        {t('connections.ext.intro')}
       </p>
       <div class="sh-external-url-row">
         <label class="sh-external-url-label" for="sh-external-url">
-          Base URL
+          {t('connections.ext.label')}
         </label>
         <input
           id="sh-external-url"
@@ -611,24 +616,23 @@ function ExternalUrlSection() {
           onInput={(e) => { extUrlDraft.value = (e.target as HTMLInputElement).value }}
         />
         <Button onClick={() => void save()} disabled={extUrlBusy.value || !dirty}>
-          {extUrlBusy.value ? 'Saving…' : 'Save'}
+          {extUrlBusy.value ? t('connections.ext.saving') : t('common.save')}
         </Button>
       </div>
       {extUrlEffective.value ? (
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-          Peers currently POST to <code>{extUrlEffective.value}</code>
-          {extUrlSource.value === 'auto' && ' (from this deployment’s configuration)'}
+          {withNode(t('connections.ext.effective'), 'url', <code>{extUrlEffective.value}</code>)}
+          {extUrlSource.value === 'auto' && t('connections.ext.from_config')}
           .
         </p>
       ) : (
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-          Not configured yet — pairing will fail until this is set.
+          {t('connections.ext.not_configured')}
         </p>
       )}
       {extUrlStored.value && (
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-          Clear the field and save to go back to this deployment’s own
-          configuration.
+          {t('connections.ext.clear_hint')}
         </p>
       )}
     </section>
@@ -719,14 +723,14 @@ export default function ConnectionsPage() {
 
       {/* ── List / Map toggle ─────────────────────────────────────── */}
       <div class="sh-connections-view-toggle">
-        <div class="sh-shopping-grouptoggle" role="group" aria-label="View">
+        <div class="sh-shopping-grouptoggle" role="group" aria-label={t('connections.view')}>
           <button
             type="button"
             class={view.value === 'list' ? 'sh-chip sh-chip--active' : 'sh-chip'}
             aria-pressed={view.value === 'list'}
             onClick={() => { view.value = 'list' }}
           >
-            List
+            {t('connections.view_list')}
           </button>
           <button
             type="button"
@@ -734,14 +738,14 @@ export default function ConnectionsPage() {
             aria-pressed={view.value === 'map'}
             onClick={() => { view.value = 'map' }}
           >
-            Map
+            {t('connections.view_map')}
           </button>
         </div>
       </div>
 
       {/* ── Federation Map ────────────────────────────────────────── */}
       {view.value === 'map' && (
-        <Suspense fallback={<div class="sh-federation-map__loading">Loading map…</div>}>
+        <Suspense fallback={<div class="sh-federation-map__loading">{t('connections.loading_map')}</div>}>
           <FederationMap />
         </Suspense>
       )}
@@ -751,25 +755,25 @@ export default function ConnectionsPage() {
       {/* ── Incoming auto-pair requests (admin-only inbox) ─────────── */}
       {isAdmin && autoPairRequests.value.length > 0 && (
         <section class="sh-auto-pair-inbox">
-          <h2>Pair requests</h2>
+          <h2>{t('connections.requests.title')}</h2>
           <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-sm)' }}>
-            One of your trusted peers has introduced a new household.
-            Approving pairs you instantly — the vouch signature
-            replaces the QR scan.
+            {t('connections.requests.intro')}
           </p>
           {autoPairRequests.value.map(r => (
             <div key={r.request_id} class="sh-auto-pair-request">
               <div class="sh-auto-pair-request-body">
                 <div>
-                  <strong>{r.from_a_display}</strong>
-                  <span class="sh-muted"
-                        style={{ fontSize: 'var(--sh-font-size-sm)' }}>
-                    {' '}wants to pair with you
-                  </span>
+                  {withNode(
+                    t('connections.requests.wants_to_pair'), 'name',
+                    <strong>{r.from_a_display}</strong>,
+                  )}
                 </div>
                 <div class="sh-muted"
                      style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-                  Vouched for by <strong>{r.via_b_display}</strong>
+                  {withNode(
+                    t('connections.requests.introduced_by'), 'name',
+                    <strong>{r.via_b_display}</strong>,
+                  )}
                   {' · '}
                   <time
                     dateTime={r.received_at}
@@ -782,10 +786,10 @@ export default function ConnectionsPage() {
               <div class="sh-row" style={{ gap: 'var(--sh-space-xs)' }}>
                 <Button variant="secondary"
                         onClick={() => void declineAutoPair(r)}>
-                  Decline
+                  {t('connections.requests.decline')}
                 </Button>
                 <Button onClick={() => void approveAutoPair(r)}>
-                  Approve &amp; pair
+                  {t('connections.requests.approve')}
                 </Button>
               </div>
             </div>
@@ -803,18 +807,23 @@ export default function ConnectionsPage() {
             <h2>{t('connections.households')}</h2>
             {compatOurs.value > 0 && (
               <span class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)' }}>
-                Your protocol version: v{compatOurs.value}
+                {t('connections.your_version', { v: String(compatOurs.value) })}
               </span>
             )}
             {peersBehindCount() > 0 && (
               <span class="sh-chip sh-chip--update"
-                    aria-label={`${peersBehindCount()} households behind`}>
-                {peersBehindCount()} behind
+                    aria-label={t(
+                      isOne(peersBehindCount())
+                        ? 'connections.compat.households_behind_one'
+                        : 'connections.compat.households_behind',
+                      { n: String(peersBehindCount()) },
+                    )}>
+                {behindLabel(peersBehindCount())}
               </span>
             )}
           </div>
           {isAdmin && (
-          <div class="sh-row" style={{ gap: 'var(--sh-space-xs)' }}>
+          <div class="sh-row" style={{ gap: 'var(--sh-space-xs)', flexWrap: 'wrap' }}>
             {confirmed.length > 0 && (
               <Button variant="secondary"
                       loading={autoPairBusy}
@@ -825,7 +834,7 @@ export default function ConnectionsPage() {
                           display_name: c.display_name,
                         })))
                       }}>
-                Pair via a trusted peer
+                {t('connections.pair_via_peer')}
               </Button>
             )}
             <Button onClick={() => openPairing('household')}>
@@ -836,8 +845,7 @@ export default function ConnectionsPage() {
         </div>
         {!isAdmin && (
           <p class="sh-muted sh-connections-admin-hint">
-            Managing household connections is admin-only. Ask a household
-            admin to pair with another household or change a connection.
+            {t('connections.admin_only')}
           </p>
         )}
         {loading.value ? (
@@ -857,8 +865,8 @@ export default function ConnectionsPage() {
           <div class="sh-connection-list">
             {pending.length > 0 && (
               <div class="sh-connections-pending-hint sh-muted">
-                ⏳ {pending.length} pending handshake
-                {pending.length === 1 ? '' : 's'} — waiting on the other side.
+                ⏳ {t(isOne(pending.length) ? 'connections.pending_one' : 'connections.pending',
+                  { n: String(pending.length) })}
               </div>
             )}
             {connections.value.map(c => (
@@ -869,25 +877,24 @@ export default function ConnectionsPage() {
                   <strong>{c.display_name}</strong>
                   {transportIcon(c.transport)}
                   <span class="sh-type-badge">
-                    {isSpaceOnly(c) ? 'Space only' : 'Household'}
+                    {isSpaceOnly(c) ? t('connections.type.space_only') : t('connections.type.household')}
                   </span>
                   {c.status === 'confirmed' && compatBadge(compatByInstance.get(c.instance_id))}
                   {c.status !== 'confirmed' && (
                     <span class="sh-muted">
-                      {c.status === 'pending_sent' ? 'Waiting for scan' :
-                       c.status === 'pending_received' ? 'Waiting for confirmation' :
+                      {c.status === 'pending_sent' ? t('connections.status.pending_sent') :
+                       c.status === 'pending_received' ? t('connections.status.pending_received') :
                        c.status}
                     </span>
                   )}
                   {c.status === 'confirmed' && !c.reachable && (
-                    <span class="sh-muted">Unreachable</span>
+                    <span class="sh-muted">{t('connections.status.unreachable')}</span>
                   )}
                   {isSpaceOnly(c) && (
                     <span class="sh-muted"
                           style={{ fontSize: 'var(--sh-font-size-xs)' }}
                           data-testid={`space-only-note-${c.instance_id}`}>
-                      Shared space only — no messages, profiles or
-                      presence.
+                      {t('connections.space_only_note')}
                     </span>
                   )}
                 </div>
@@ -897,12 +904,12 @@ export default function ConnectionsPage() {
                       {!isSpaceOnly(c) && (
                         <Button variant="secondary"
                                 onClick={() => setDetail(c)}>
-                          Manage
+                          {t('connections.manage')}
                         </Button>
                       )}
                       <Button variant="danger"
                               onClick={() => void unpair(c.instance_id)}>
-                        Unpair
+                        {t('connections.unpair')}
                       </Button>
                     </>
                   )}
@@ -941,7 +948,7 @@ export default function ConnectionsPage() {
                 <div class="sh-connection-info">
                   <span class={live.dotClass} />
                   <strong>{gfs.display_name}</strong>
-                  <span class="sh-type-badge">Global Server</span>
+                  <span class="sh-type-badge">{t('connections.type.gfs')}</span>
                   {live.labelKey && (
                     <span class={live.labelClass ?? 'sh-muted'}>
                       {t(live.labelKey)}

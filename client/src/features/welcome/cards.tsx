@@ -13,6 +13,7 @@
 import { Avatar } from '@/components/Avatar'
 import { t } from '@/i18n/i18n'
 import type { EffectiveLesson, TimetableColor } from '@/types'
+import { addBase } from '@/baseUrl'
 
 // ─── Types — match the slice of ``GET /api/me/corner`` we render ───
 
@@ -240,7 +241,7 @@ export function dayShape(
 
 export function TodayCard({ events }: { events: WelcomeEvent[] }) {
   return (
-    <a class="sh-welcome-card" href="/calendar">
+    <a class="sh-welcome-card" href={addBase('/calendar')}>
       <h2 class="sh-welcome-card__title">
         <span aria-hidden="true">📅</span> Today
       </h2>
@@ -261,7 +262,7 @@ export function TodayCard({ events }: { events: WelcomeEvent[] }) {
 
 export function UpNextCard({ events }: { events: WelcomeEvent[] }) {
   return (
-    <a class="sh-welcome-card" href="/calendar">
+    <a class="sh-welcome-card" href={addBase('/calendar')}>
       <h2 class="sh-welcome-card__title">
         <span aria-hidden="true">🗓</span> Up next
       </h2>
@@ -291,7 +292,7 @@ export function PendingCard({ tasks }: { tasks: WelcomeTask[] }) {
   const visible = tasks.slice(0, 5)
   const overflow = tasks.length - visible.length
   return (
-    <a class="sh-welcome-card" href="/organize">
+    <a class="sh-welcome-card" href={addBase('/organize')}>
       <h2 class="sh-welcome-card__title">
         <span aria-hidden="true">✅</span> Pending
       </h2>
@@ -339,14 +340,14 @@ export function CatchUpCard({
       </h2>
       <div class="sh-welcome-chips">
         {unreadConversations > 0 && (
-          <a class="sh-welcome-chip" href="/dms">
+          <a class="sh-welcome-chip" href={addBase('/dms')}>
             <span aria-hidden="true">💬</span>
             <strong>{unreadConversations}</strong>
             <span>{unreadConversations === 1 ? 'message' : 'messages'}</span>
           </a>
         )}
         {unreadNotifications > 0 && (
-          <a class="sh-welcome-chip" href="/notifications">
+          <a class="sh-welcome-chip" href={addBase('/notifications')}>
             <span aria-hidden="true">🔔</span>
             <strong>{unreadNotifications}</strong>
             <span>{unreadNotifications === 1 ? 'alert' : 'alerts'}</span>
@@ -357,7 +358,7 @@ export function CatchUpCard({
         <ul class="sh-welcome-card__list">
           {posts.map(p => (
             <li key={p.post_id}>
-              <a class="sh-welcome-catchup-row" href={`/spaces/${p.space_id}`}>
+              <a class="sh-welcome-catchup-row" href={addBase(`/spaces/${p.space_id}`)}>
                 <span class="sh-welcome-catchup-emoji" aria-hidden="true">
                   {p.space_emoji || '🪐'}
                 </span>
