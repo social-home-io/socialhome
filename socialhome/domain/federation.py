@@ -106,6 +106,11 @@ class FederationEventType(str, enum.Enum):
     #: outbounds. Payload carries actor identity + ``action`` + ``params``.
     #: Generalises ``SPACE_REMOTE_ADMIN_KICK`` (kept for back-compat).
     SPACE_REMOTE_ADMIN_ACTION = "space_remote_admin_action"
+    #: Host → member household: the answer to a forwarded invite-link mint
+    #: (``SPACE_REMOTE_ADMIN_ACTION`` ``create_invite_link``, v_52) —
+    #: ``{space_id, mint_nonce, link}`` or ``{space_id, mint_nonce, error}``.
+    #: See :mod:`socialhome.federation.invite_link_forward`.
+    SPACE_INVITE_LINK_FORWARD_RESULT = "space_invite_link_forward_result"
     #: Host → admin households: mirror of an open / resolved critical-action
     #: approval proposal + its tally (v_16+). Lets a remote admin's SPA
     #: render the pending dissolve / publication-tier change and vote. The
@@ -582,6 +587,10 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: there.
         FederationEventType.SPACE_REMOTE_ADMIN_KICK,
         FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
+        #: Host → a link-joined admin: the answer to its forwarded
+        #: invite-link mint (v_52). Accepted only for a request in flight
+        #: addressed to the sender.
+        FederationEventType.SPACE_INVITE_LINK_FORWARD_RESULT,
         #: Teardown of the space-scoped relationship itself (§D2b): the
         #: side that drops its row tells the other to drop its own.
         FederationEventType.SPACE_SESSION_CLEANUP,
@@ -874,6 +883,9 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
         FederationEventType.SPACE_ADMIN_PROPOSAL_UPDATED,
         # ── Invites / joins (how a household gets a seat at all) ──
+        #    (the forwarded-mint answer is a reply to a request we made,
+        #    not content — v_52)
+        FederationEventType.SPACE_INVITE_LINK_FORWARD_RESULT,
         FederationEventType.SPACE_INVITE,
         FederationEventType.SPACE_INVITE_VIA,
         FederationEventType.SPACE_ACCEPT,

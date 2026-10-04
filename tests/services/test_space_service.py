@@ -52,7 +52,7 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceMember,
     SpacePermissionError,
-    NotSpaceHostError,
+    PrivateGfsOffError,
     SpaceRole,
     SpaceType,
 )
@@ -79,6 +79,7 @@ from socialhome.services.space_service import (
     normalize_category,
 )
 from socialhome.services.user_service import UserService
+from socialhome.services.gfs_connection_service import GfsConnectionError
 import os
 from socialhome.crypto import ed25519_public_key
 from socialhome.domain.space_key import SpaceKey
@@ -8309,28 +8310,257 @@ async def test_redeeming_a_moderator_link_seats_a_moderator_and_gossips_it(stack
     )
 
 
-@pytest.mark.parametrize("role", ["member", "moderator", "admin"])
-async def test_a_member_household_may_not_mint_invite_links(stack, role):
-    """An invite link is a row in the HOST's token table, redeemed by the
-    host: a stub's admin minting one gets a link nobody can honour (or,
-    holding a delegated seed, one that bypasses the host). Refused before
-    anything is written, whatever the seat."""
-    space, _u = await _space_with_roles(stack)
-    await _as_stub(stack, space)
-    with pytest.raises(NotSpaceHostError):
-        await stack.space_svc.create_invite_link(
-            space.id, actor_username="anna", role=role
+class _FakeInviteForwarder:
+    """Records the forwarded mint and answers with ``answer``."""
+
+    def __init__(self, answer: dict | None = None):
+        self.calls: list[dict] = []
+        self.answer = (
+            answer
+            if answer is not None
+            else {"link": {"token": "tok-host", "role": "moderator", "code": "c"}}
         )
+
+    async def request_mint(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.answer
+
+
+async def _stub_with_forwarder(stack, *, answer=None, host_version_ok=True):
+    space, u = await _space_with_roles(stack)
+    fed = await _as_stub(stack, space)
+
+    async def _supports(iid, *, min_version):
+        if min_version >= FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK:
+            return host_version_ok
+        return True
+
+    fed.peer_supports = AsyncMock(side_effect=_supports)
+    fwd = _FakeInviteForwarder(answer)
+    stack.space_svc.attach_invite_forwarder(fwd)
+    return space, u, fwd
+
+
+async def test_a_member_household_admin_mint_is_forwarded_to_the_host(stack):
+    """On a stub the mint is the HOST's: the request carries the seat, the
+    limits and the link type (the host resolves ``via``) and the host's
+    link comes back as-is. Nothing is written into our own table."""
+    space, u, fwd = await _stub_with_forwarder(stack)
+    link = await stack.space_svc.create_invite_link(
+        space.id,
+        actor_username="olga",
+        role=SpaceRole.MODERATOR.value,
+        uses=3,
+        ttl_seconds=60,
+        via="internal",
+    )
+    assert link["token"] == "tok-host"
+    (call,) = fwd.calls
+    assert call["space_id"] == space.id
+    assert call["host_instance_id"] == "some-other-household"
+    assert call["actor_user_id"] == u["olga"].user_id
+    assert call["params"] == {
+        "role": "moderator",
+        "uses": 3,
+        "ttl_seconds": 60,
+        "via": "internal",
+        "publish_gfs_url": None,
+    }
     assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+@pytest.mark.parametrize(
+    ("actor", "role"),
+    [("mo", "member"), ("bob", "member"), ("olga", "admin")],
+)
+async def test_a_forward_the_local_checks_refuse_never_leaves(stack, actor, role):
+    """A moderator or member may mint nothing, and an admin link stays the
+    owner's (who is never on a member household) — refused before any
+    forward."""
+    space, _u, fwd = await _stub_with_forwarder(stack)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.create_invite_link(
+            space.id, actor_username=actor, role=role
+        )
+    assert fwd.calls == []
+
+
+async def test_a_forward_to_a_host_below_v52_is_host_too_old(stack):
+    space, _u, fwd = await _stub_with_forwarder(stack, host_version_ok=False)
+    with pytest.raises(HostTooOldError) as exc:
+        await stack.space_svc.create_invite_link(space.id, actor_username="olga")
+    assert exc.value.feature == "invite_link"
+    assert fwd.calls == []
+
+
+@pytest.mark.parametrize(
+    ("answer", "raises"),
+    [
+        ({"error": "forbidden"}, SpacePermissionError),
+        ({"error": "private_gfs_off"}, PrivateGfsOffError),
+        ({"error": "gfs_publish_failed", "gfs_status": 429}, GfsConnectionError),
+        ({"error": "gfs_not_paired"}, ValueError),
+        ({"error": "invalid"}, ValueError),
+        ({}, ValueError),
+    ],
+)
+async def test_the_hosts_refusal_maps_to_the_local_error(stack, answer, raises):
+    space, _u, _fwd = await _stub_with_forwarder(stack, answer=answer)
+    with pytest.raises(raises) as exc:
+        await stack.space_svc.create_invite_link(space.id, actor_username="olga")
+    if raises is GfsConnectionError:
+        assert exc.value.status == 429
+
+
+async def test_an_offline_host_is_host_unreachable(stack):
+    space, _u, fwd = await _stub_with_forwarder(stack)
+
+    async def _offline(**kwargs):
+        raise HostUnreachableError("some-other-household")
+
+    fwd.request_mint = _offline
+    with pytest.raises(HostUnreachableError):
+        await stack.space_svc.create_invite_link(space.id, actor_username="olga")
 
 
 async def test_the_host_still_mints_invite_links(stack):
     space, _u = await _space_with_roles(stack)
     assert stack.space_svc._own_instance_id == space.owner_instance_id
+    fwd = _FakeInviteForwarder()
+    stack.space_svc.attach_invite_forwarder(fwd)
     link = await stack.space_svc.create_invite_link(
         space.id, actor_username="olga", role=SpaceRole.MODERATOR.value
     )
     assert link["role"] == SpaceRole.MODERATOR.value
+    assert fwd.calls == []
+
+
+# ── host side of a forwarded mint ──
+
+
+async def _hosted_with_remote_seat(stack, role):
+    space, u = await _space_with_roles(stack)
+    remote = await _wire_remote_members(stack)
+    await remote.add(
+        space_id=space.id,
+        instance_id="peer-h",
+        user_id="ru-1",
+        user_pk=None,
+        display_name="Remote",
+        role=role,
+    )
+    # The connection server is ON, so ``via`` defaults to ``gfs`` (the
+    # private-space rule has a test of its own).
+    await stack.db.enqueue("UPDATE spaces SET private_gfs=1 WHERE id=?", (space.id,))
+    return space, u, remote
+
+
+async def test_the_host_mints_a_forwarded_link_that_redeems(stack):
+    """A live remote admin's forward lands in OUR table, so the link is an
+    ordinary link of ours: a redeem consumes it here and seats the role."""
+    space, _u, _remote = await _hosted_with_remote_seat(stack, "admin")
+    answer = await stack.space_svc.handle_forwarded_invite_mint(
+        space.id,
+        actor_instance_id="peer-h",
+        actor_user_id="ru-1",
+        params={"role": "moderator", "uses": 2, "ttl_seconds": 0, "via": None},
+    )
+    link = answer["link"]
+    assert link["role"] == "moderator"
+    (row,) = await stack.space_repo.list_live_invite_tokens(space.id)
+    assert row["token"] == link["token"]
+    assert row["created_by"] == "ru-1"
+    assert row["expires_at"] is None  # 0 = never, like the route
+    dave = await stack.provision_user("dave")
+    seated = await stack.space_svc.accept_invite_token(
+        link["token"], user_id=dave.user_id
+    )
+    assert seated.role == SpaceRole.MODERATOR
+
+
+@pytest.mark.parametrize(
+    ("seat_role", "actor_instance", "actor_user", "link_role"),
+    [
+        ("member", "peer-h", "ru-1", "member"),  # a member mints nothing
+        ("moderator", "peer-h", "ru-1", "member"),  # nor a moderator
+        ("admin", "peer-x", "ru-1", "member"),  # forged: not seated from there
+        ("admin", "peer-h", "ru-ghost", "member"),  # forged: no such seat
+        ("admin", "peer-h", "ru-1", "admin"),  # admin links stay owner-only
+        ("admin", "peer-h", "ru-1", "owner"),  # never mintable
+    ],
+)
+async def test_the_host_refuses_a_forward_the_seat_does_not_allow(
+    stack, seat_role, actor_instance, actor_user, link_role
+):
+    space, _u, _remote = await _hosted_with_remote_seat(stack, seat_role)
+    answer = await stack.space_svc.handle_forwarded_invite_mint(
+        space.id,
+        actor_instance_id=actor_instance,
+        actor_user_id=actor_user,
+        params={"role": link_role},
+    )
+    assert "link" not in answer
+    assert answer["error"] in ("forbidden", "invalid")
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+async def test_a_removed_admin_cannot_mint_through_a_forward(stack):
+    space, _u, remote = await _hosted_with_remote_seat(stack, "admin")
+    await remote.remove(space.id, "peer-h", "ru-1")
+    answer = await stack.space_svc.handle_forwarded_invite_mint(
+        space.id, actor_instance_id="peer-h", actor_user_id="ru-1", params={}
+    )
+    assert answer == {"error": "forbidden"}
+
+
+async def test_a_forward_to_a_household_that_is_not_the_host_is_refused(stack):
+    space, _u, _remote = await _hosted_with_remote_seat(stack, "admin")
+    await _as_stub(stack, space)
+    answer = await stack.space_svc.handle_forwarded_invite_mint(
+        space.id, actor_instance_id="peer-h", actor_user_id="ru-1", params={}
+    )
+    assert answer == {"error": "forbidden"}
+
+
+@pytest.mark.parametrize(
+    ("params", "error"),
+    [
+        ({"via": "carrier-pigeon"}, "invalid"),
+        ({"uses": "lots"}, "invalid"),
+        ({"ttl_seconds": -5}, "invalid"),
+        ({"via": "internal", "publish_gfs_url": "https://gfs.example"}, "invalid"),
+        # We hold no connection to that server: we never publish elsewhere.
+        ({"publish_gfs_url": "https://gfs.example"}, "gfs_not_paired"),
+    ],
+)
+async def test_the_host_validates_a_forwarded_mint(stack, params, error):
+    space, _u, _remote = await _hosted_with_remote_seat(stack, "admin")
+    answer = await stack.space_svc.handle_forwarded_invite_mint(
+        space.id, actor_instance_id="peer-h", actor_user_id="ru-1", params=params
+    )
+    assert answer["error"] == error
+    assert await stack.space_repo.list_live_invite_tokens(space.id) == []
+
+
+async def test_the_hosts_private_space_rules_apply_to_a_forward(stack):
+    """``via`` is resolved on the HOST: a ``gfs`` link on a private space
+    whose owner keeps the connection server off is refused there."""
+    space, _u, _remote = await _hosted_with_remote_seat(stack, "admin")
+    await stack.db.enqueue(
+        "UPDATE spaces SET space_type='private', private_gfs=0 WHERE id=?",
+        (space.id,),
+    )
+    answer = await stack.space_svc.handle_forwarded_invite_mint(
+        space.id,
+        actor_instance_id="peer-h",
+        actor_user_id="ru-1",
+        params={"via": "gfs"},
+    )
+    assert answer == {"error": "private_gfs_off"}
+    ok = await stack.space_svc.handle_forwarded_invite_mint(
+        space.id, actor_instance_id="peer-h", actor_user_id="ru-1", params={}
+    )
+    assert ok["link"]["via"] == "internal"
 
 
 async def test_moderator_roster_gossip_is_gated_on_v30(stack):

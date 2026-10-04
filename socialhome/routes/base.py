@@ -36,7 +36,6 @@ from ..domain.space import (
     ModerationInProgressError,
     HostTooOldError,
     HostUnreachableError,
-    NotSpaceHostError,
     ModerationPayloadTooLargeError,
     ModerationQueueFullError,
     ModerationStaleError,
@@ -255,12 +254,6 @@ class BaseView(web.View):
             return error_response(
                 409, "IN_PROGRESS", "This submission is being approved right now."
             )
-        except NotSpaceHostError:
-            return error_response(
-                409,
-                "NOT_SPACE_HOST",
-                "Invite links are created by the space's home household.",
-            )
         except HostUnreachableError as exc:
             return error_response(
                 503,
@@ -271,6 +264,14 @@ class BaseView(web.View):
                 extra={"reason": exc.reason},
             )
         except HostTooOldError as exc:
+            if exc.feature == "invite_link":
+                return error_response(
+                    409,
+                    "HOST_TOO_OLD",
+                    "The space's home household must be updated before invite "
+                    "links can be created from here.",
+                    extra={"feature": exc.feature},
+                )
             if exc.feature == "role_change":
                 return error_response(
                     409,

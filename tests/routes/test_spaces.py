@@ -1463,12 +1463,13 @@ async def test_a_moderator_invite_link_mints_and_seats_a_moderator(client):
     assert "pending_role" not in body
 
 
-async def test_an_invite_link_is_minted_only_on_the_host(client):
-    """On a member household's stub the mint is a 409 ``NOT_SPACE_HOST``
-    and no row is written; on the host it still mints."""
+async def test_a_member_household_mint_forwards_to_the_host(client):
+    """On a stub the mint is forwarded to the host (v_52). A host this
+    household cannot gate as v_52 is a 409 ``HOST_TOO_OLD`` naming the
+    feature — never a link minted into our own table."""
     r = await client.post(
         "/api/spaces",
-        json={"name": "HostOnlyLinks"},
+        json={"name": "ForwardedLinks"},
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
@@ -1493,8 +1494,8 @@ async def test_an_invite_link_is_minted_only_on_the_host(client):
     )
     assert resp.status == 409, await resp.text()
     err = (await resp.json())["error"]
-    assert err["code"] == "NOT_SPACE_HOST"
-    assert "home household" in err["detail"]
+    assert err["code"] == "HOST_TOO_OLD"
+    assert err["feature"] == "invite_link"
     after = await db.fetchall(
         "SELECT token FROM space_invite_tokens WHERE space_id=?", (sid,)
     )

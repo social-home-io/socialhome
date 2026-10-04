@@ -2660,7 +2660,10 @@ def cmd_gfs_invite_link() -> None:
        only then is e's household an admin on the host — still with no
        signing seed, which a link-joined admin must never hold (the
        connection server pins a space's identity key TOFU-immutably, so
-       that credential could never be taken back).
+       that credential could never be taken back). e, now an admin on a
+       member household, mints a moderator link there: forwarded to a (v_52),
+       minted in a's table, redeemed by b into a moderator seat; e's admin
+       link is refused (owner-only).
     10. Followers (v_30): a mints a ``subscriber`` link on a THIRD space
        and e redeems it into a read-only seat. Assert the seat on BOTH
        sides (``space_remote_members.role='subscriber'`` on the host —
@@ -3161,6 +3164,88 @@ def cmd_gfs_invite_link() -> None:
             f"gfs-invite-link: a shipped a seed share on this path: {shared!r}",
         )
     print("  e is admin on the second space and holds NO signing seed ✓")
+
+    # 9b. A member household's admin mints links too (v_52): e — link-joined,
+    #     reaching a only over the relay — asks for a moderator link on a's
+    #     space; the mint is forwarded to a, which mints it in ITS table and
+    #     hands it back. b (paired with a) redeems it straight into a
+    #     moderator seat. An admin link stays the owner's: e is refused.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        e_role = _rows(
+            "e",
+            "SELECT role FROM space_members WHERE space_id = ? AND user_id = ?",
+            (admin_space_id, e["user_id"]),
+        )
+        if e_role and e_role[0][0] == "admin":
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"gfs-invite-link: e's own seat on the admin space is {e_role!r}, "
+            "expected 'admin' after the approval",
+        )
+    s, fwd_link = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=e["token"],
+        method="POST",
+        body={"role": "moderator", "uses": 1},
+        timeout=40.0,
+    )
+    fwd_link = _must("e mints a forwarded moderator link", s, fwd_link, ok=(201,))
+    fwd_payload = _decode_invite_blob(fwd_link["code"])
+    if fwd_payload.get("issuer_instance_id") != a["instance_id"]:
+        raise SystemExit(
+            "gfs-invite-link: e's forwarded link names issuer "
+            f"{fwd_payload.get('issuer_instance_id')!r}, expected a — the "
+            "host mints it",
+        )
+    if not _rows(
+        "a",
+        "SELECT 1 FROM space_invite_tokens WHERE token = ? AND role = 'moderator'",
+        (fwd_link["token"],),
+    ):
+        raise SystemExit(
+            "gfs-invite-link: a holds no token row for e's forwarded link",
+        )
+    if _rows(
+        "e",
+        "SELECT 1 FROM space_invite_tokens WHERE token = ?",
+        (fwd_link["token"],),
+    ):
+        raise SystemExit(
+            "gfs-invite-link: e wrote the forwarded link into its OWN table",
+        )
+    b_fwd = state["instances"]["b"]
+    s, b_fwd_joined = _request(
+        f"http://127.0.0.1:{b_fwd['port']}/api/spaces/join",
+        token=b_fwd["token"],
+        method="POST",
+        body=_join_body_from_blob(fwd_payload),
+        timeout=40.0,
+    )
+    b_fwd_joined = _must("b redeems e's forwarded link", s, b_fwd_joined)
+    if b_fwd_joined.get("role") != "moderator":
+        raise SystemExit(
+            f"gfs-invite-link: b's redeem of e's forwarded link returned "
+            f"{b_fwd_joined!r}, expected role 'moderator'",
+        )
+    _assert_moderator_seat("b", b_fwd, admin_space_id)
+    s, refused_admin = _request(
+        f"{e_base}/api/spaces/{admin_space_id}/invite-tokens",
+        token=e["token"],
+        method="POST",
+        body={"role": "admin", "uses": 1},
+    )
+    if s != 403:
+        raise SystemExit(
+            f"gfs-invite-link: e's admin-link mint answered HTTP {s} "
+            f"(expected 403 — admin links are the owner's): {refused_admin!r}",
+        )
+    print(
+        "  e (link-joined admin) minted a moderator link through a; b redeemed "
+        "it as a moderator; e's admin link refused ✓"
+    )
 
     # 10. A ``subscriber`` (Follower) link, on a THIRD space, into a
     #     read-only seat: e receives the space's content over the relay and

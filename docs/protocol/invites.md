@@ -35,6 +35,12 @@ the token IS the approval)
 `SPACE_INVITE_TOKEN_REDEEM`, `SPACE_INVITE_TOKEN_REDEEM_ACK`,
 `SPACE_INVITE_TOKEN_REDEEM_DENY`.
 
+**Forwarded invite-link mint** (an admin on a member household, v_52; see
+["Links minted on a member household"](#links-minted-on-a-member-household-v_52))
+
+`SPACE_REMOTE_ADMIN_ACTION` (`action: "create_invite_link"`),
+`SPACE_INVITE_LINK_FORWARD_RESULT`.
+
 **Bootstrap invite redeem** (no pre-existing relationship at all — §D2b,
 v_29; see ["Bootstrap redeem"](#bootstrap-redeem--an-invite-link-from-a-stranger-d2b-v_29))
 
@@ -978,16 +984,54 @@ no settings authority and may not mint any link. `owner` is never
 mintable at all (422) — ownership moves only through
 `transfer_ownership`.
 
-**Only the host mints.** A link is a row in the issuer's
-`space_invite_tokens` table and every redeem path consumes it there, so
-only the space's **host** household (`owner_instance_id`) mints one. An
-admin seat on a member household's stub is refused with `409
-NOT_SPACE_HOST` (`NotSpaceHostError`) before anything is written: a stub's
-link would either be dead (no seed — the redeemer is seated in a roster
-nobody else trusts) or, with a delegated seed, a way to seat people past
-the host. Minting is not forwarded to the host the way a role change is
-(v_47): the forward is fire-and-forget, and a mint must hand the token and
-code back to the caller.
+#### Links minted on a member household (v_52)
+
+A link is a row in the issuer's `space_invite_tokens` table and every
+redeem path consumes it there, so the **host** (`owner_instance_id`)
+always holds it. Any admin may still mint one — an admin on a member
+household's stub included: the mint is **forwarded to the host**, which
+mints it in its own table and hands the link back, so its redeems are
+those of any host link.
+
+```mermaid
+sequenceDiagram
+    participant A as Admin (member household)
+    participant M as Member household
+    participant H as Host
+    A->>M: POST /api/spaces/{id}/invite-tokens
+    Note over M: same local checks (admin seat,<br/>moderator matrix, admin = owner only)
+    M->>H: SPACE_REMOTE_ADMIN_ACTION<br/>{action: create_invite_link, params: {mint_nonce,<br/>role, uses, ttl_seconds, via, publish_gfs_url}}
+    Note over H: actor = signed sender + actor_user_id:<br/>live owner/admin seat? seat matrix, via /<br/>private_gfs rules, publish to OUR GFS connection
+    H->>H: mint into space_invite_tokens
+    H-->>M: SPACE_INVITE_LINK_FORWARD_RESULT<br/>{space_id, mint_nonce, link | error}
+    M-->>A: 201 link (code names the host as issuer)
+```
+
+* **The host decides**, with its own data: the actor is the
+  §24.11-authenticated sender household plus `actor_user_id`, and must hold
+  a **live** `admin` seat there (a member, a moderator, a removed admin or
+  a forged actor gets `error: "forbidden"`). The moderator matrix runs
+  under that seat's role, an `admin` link stays owner-only (the owner is
+  never a remote seat, so no forwarded mint grants it), and `via` is
+  resolved on the host — including the private-space connection-server
+  option (`error: "private_gfs_off"`).
+* **Publishing happens on the host.** The member household names its chosen
+  connection server by URL (`publish_gfs_url`); the host publishes through
+  ITS own connection to that server, or answers `error: "gfs_not_paired"`.
+  The member household never parks a blob.
+* **Never held for owner approval.** Unlike a forwarded config edit or
+  role change, a mint needs no more than the seat that may mint on the host
+  itself.
+* **Synchronous.** The API waits up to 20 s for the host's answer; no
+  answer (the host is offline) or a request that went nowhere is
+  `503 HOST_UNREACHABLE`. Error codes map to the same responses as a local
+  mint: `forbidden` → 403, `private_gfs_off` → 409 `PRIVATE_GFS_OFF`,
+  `gfs_publish_failed` → 422 `GFS_PUBLISH_FAILED`, anything else → 422.
+* **Older hosts.** A host below v_52 would drop the unknown action in
+  silence, so the member household refuses up front with
+  `409 HOST_TOO_OLD` (`feature: "invite_link"`).
+* The link is listed and revoked on the **host** (`GET` / `DELETE` on the
+  host's household); the member household's own list does not include it.
 
 #### A `moderator` link seats a moderator
 
