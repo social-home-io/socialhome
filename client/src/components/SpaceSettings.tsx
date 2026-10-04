@@ -80,6 +80,45 @@ const pendingPublish = signal<Set<string>>(new Set())
 // = no dialog open.
 const confirmPublishGfs = signal<string | null>(null)
 
+/** A household named by a 409 ``PRIVATE_GFS_LINK_MEMBERS``. */
+interface LinkMemberHousehold {
+  instance_id: string
+  display_name: string
+  members: { user_id: string; display_name: string }[]
+}
+
+/** The households a 409 ``PRIVATE_GFS_LINK_MEMBERS`` names, or ``null``
+ *  for any other error. Defensive about the shape: a nameless row falls
+ *  back to its id rather than rendering blank. */
+function privateGfsLinkMembers(err: unknown): LinkMemberHousehold[] | null {
+  const e = err as { code?: unknown; extra?: { households?: unknown } } | null
+  if (!e || e.code !== 'PRIVATE_GFS_LINK_MEMBERS') return null
+  const raw = Array.isArray(e.extra?.households) ? e.extra.households : []
+  return raw.flatMap((h): LinkMemberHousehold[] => {
+    if (!h || typeof h !== 'object') return []
+    const r = h as Record<string, unknown>
+    const id = typeof r.instance_id === 'string' ? r.instance_id : ''
+    if (!id) return []
+    const members = (Array.isArray(r.members) ? r.members : []).flatMap(
+      (m): LinkMemberHousehold['members'] => {
+        if (!m || typeof m !== 'object') return []
+        const mm = m as Record<string, unknown>
+        const uid = typeof mm.user_id === 'string' ? mm.user_id : ''
+        if (!uid) return []
+        const name = typeof mm.display_name === 'string' && mm.display_name
+          ? mm.display_name : uid
+        return [{ user_id: uid, display_name: name }]
+      },
+    )
+    return [{
+      instance_id: id,
+      display_name: typeof r.display_name === 'string' && r.display_name
+        ? r.display_name : id,
+      members,
+    }]
+  })
+}
+
 async function loadFederationData(spaceId: string) {
   federationLoading.value = true
   try {
@@ -241,21 +280,30 @@ export function SpaceSettings({
   const gfsPublishMode = useSignal<GfsPublishMode>(
     space.features?.gfs_publish_mode ?? 'trusted',
   )
-  // Shown only where members actually publish over a connection server:
-  // a public / global space whose posts followers may read (the backend's
-  // ``_publicly_readable``), or (v_51) a private space that reaches
-  // link-joined members over an opaque channel. The live followers switch
-  // counts, so turning it on reveals the choice; a space already strict
-  // keeps it visible so the owner can always switch back.
-  const privateChannel = space.space_type === 'private'
-    && Boolean(space.gfs_private_channel)
+  // Owner-only, PRIVATE spaces: whether the space uses a connection
+  // server at all (``features.private_gfs``). Off by default.
+  const isPrivate = space.space_type === 'private'
+  const showPrivateGfs = isOwner && isPrivate
+  const privateGfs = useSignal(Boolean(space.features?.private_gfs))
+  // A 409 PRIVATE_GFS_LINK_MEMBERS: the households that joined through a
+  // connection-server link and must be removed before it can go off.
+  const linkMembers = useSignal<LinkMemberHousehold[] | null>(null)
+  // Shown only where members actually publish over a connection server.
+  // A public / global space: when followers may read its posts (the
+  // backend's ``_publicly_readable``) — the live followers switch counts,
+  // and a space already strict keeps it visible so the owner can always
+  // switch back. A private space: exactly while it uses the connection
+  // server (the live switch above); with it off the choice means nothing.
   const showGfsPublishMode = isOwner && (
-    (
-      (space.space_type === 'public' || space.space_type === 'global')
-      && allowSubscribers.value
-    )
-    || privateChannel
-    || (space.features?.gfs_publish_mode ?? 'trusted') !== 'trusted'
+    isPrivate
+      ? privateGfs.value
+      : (
+        (
+          (space.space_type === 'public' || space.space_type === 'global')
+          && allowSubscribers.value
+        )
+        || (space.features?.gfs_publish_mode ?? 'trusted') !== 'trusted'
+      )
   )
   // Subscriber-engagement opt-ins (§23.49) — admins flip these when
   // they want followers to be able to react / comment without being
@@ -420,6 +468,7 @@ export function SpaceSettings({
         gfsPublishMode.value,
         f?.gfs_publish_mode ?? 'trusted',
       ],
+      ['private_gfs', privateGfs.value, Boolean(f?.private_gfs)],
     ]
     for (const feature of ACCESS_FEATURES) {
       featureValues.push([
@@ -484,6 +533,15 @@ export function SpaceSettings({
       const households = body.force === true ? null : peersTooOldHouseholds(e)
       if (households) {
         peersTooOld.value = { body, households }
+        return
+      }
+      const stranded = privateGfsLinkMembers(e)
+      if (stranded) {
+        // Nothing was saved: the option stays on until these households
+        // are gone. Show the switch as it really is, and who blocks it.
+        privateGfs.value = true
+        linkMembers.value = stranded
+        showToast(t('space.private_gfs.link_members_toast'), 'error')
         return
       }
       showToast(e.message || 'Failed to update', 'error')
@@ -898,6 +956,71 @@ export function SpaceSettings({
           </p>
         </fieldset>
 
+        {/* Whether a PRIVATE space uses the connection server at all —
+         *  owner-only. Off: internal links only, no server traffic. */}
+        {showPrivateGfs && (
+          <fieldset class="sh-form-fieldset sh-private-gfs" data-testid="private-gfs">
+            <legend>🛰️ {t('space.private_gfs.legend')}</legend>
+            <label class="sh-toggle-row">
+              <input
+                type="checkbox"
+                checked={privateGfs.value}
+                data-testid="private-gfs-toggle"
+                onChange={(e) => {
+                  privateGfs.value = (e.target as HTMLInputElement).checked
+                  // A new choice; the old refusal no longer describes it.
+                  linkMembers.value = null
+                }}
+              />
+              {t('space.private_gfs.toggle')}
+            </label>
+            <dl class="sh-gfs-publish-mode__help">
+              <dt>{t('space.private_gfs.on')}</dt>
+              <dd>{t('space.private_gfs.on_help')}</dd>
+              <dt>{t('space.private_gfs.off')}</dt>
+              <dd>{t('space.private_gfs.off_help')}</dd>
+            </dl>
+            <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
+              {t('space.private_gfs.owner_only')}
+            </p>
+            {!privateGfs.value && Boolean(space.features?.private_gfs)
+              && !linkMembers.value && (
+              <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}
+                 data-testid="private-gfs-off-note">
+                {t('space.private_gfs.off_note')}
+              </p>
+            )}
+            {linkMembers.value && (
+              <div class="sh-private-gfs__blocked" role="alert"
+                   data-testid="private-gfs-link-members">
+                <p class="sh-private-gfs__blocked-title">
+                  {t('space.private_gfs.link_members_title')}
+                </p>
+                <p class="sh-muted" style={{ margin: 0 }}>
+                  {t('space.private_gfs.link_members_body')}
+                </p>
+                <ul class="sh-private-gfs__households">
+                  {linkMembers.value.map(h => (
+                    <li key={h.instance_id}>
+                      <strong>{h.display_name}</strong>
+                      {h.members.length > 0 && (
+                        <span class="sh-muted">
+                          {' — '}
+                          {h.members.map(m => m.display_name).join(', ')}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                <a href={addBase(`/spaces/${space.id}?tab=members`)}
+                   class="sh-private-gfs__members-link">
+                  {t('space.private_gfs.link_members_open')}
+                </a>
+              </div>
+            )}
+          </fieldset>
+        )}
+
         {/* Connection server publish mode (v_50) — owner-only, and only
          *  where members publish over a connection server at all. */}
         {showGfsPublishMode && (
@@ -906,9 +1029,9 @@ export function SpaceSettings({
               📡 {t('space.gfs_publish.legend')}
             </legend>
             <p class="sh-muted" style={{ marginTop: 0 }}>
-              {t(privateChannel
-                ? 'space.gfs_publish.private_intro'
-                : 'space.gfs_publish.intro')}
+              {isPrivate
+                ? t('space.gfs_publish.private_intro')
+                : t('space.gfs_publish.intro')}
             </p>
             <ChipRadioGroup<GfsPublishMode>
               labelledBy="space-settings-gfs-publish-legend"

@@ -331,6 +331,24 @@ def restricted_access_changes(
 
 
 # Default allowed post types for a fresh space. Ordered for a stable wire form.
+#: Invite link types (migration 0079), chosen by the issuer at mint time.
+#: ``gfs``: the code carries the issuer's key-wrap key, so a household that
+#: never met the issuer redeems it through the connection-server relay
+#: (§D2b) — allowed on a private space only while its owner has
+#: ``SpaceFeatures.private_gfs`` ON. ``internal``: paired / mesh households
+#: only — the code carries no key-wrap key and the issuer refuses a redeem of
+#: it that arrives over the relay, so it never touches a connection server.
+#: ``gfs_legacy``: never minted — a live link of a private space that
+#: migration 0079 left OFF (every pre-0079 link was relay-redeemable). It
+#: stays redeemable over the relay until used up or expired, and the first
+#: household that joins through one turns the space's ``private_gfs`` ON.
+INVITE_VIA_GFS = "gfs"
+INVITE_VIA_INTERNAL = "internal"
+INVITE_VIA_GFS_LEGACY = "gfs_legacy"
+#: The types a new link may be minted with.
+INVITE_VIAS: frozenset[str] = frozenset({INVITE_VIA_GFS, INVITE_VIA_INTERNAL})
+
+
 _ALL_POST_TYPES: tuple[str, ...] = (
     "bazaar",
     "event",
@@ -496,6 +514,22 @@ class SpaceFeatures:
     #: omit the field read ``"trusted"``.
     gfs_publish_mode: Literal["trusted", "strict"] = "trusted"
 
+    #: Owner choice for a PRIVATE space: may it use a connection server
+    #: (GFS) at all? OFF (the default for a new private space): the space
+    #: never touches a GFS — no invite link redeemable through the relay, no
+    #: opaque channel, no subscriptions. ON: invite links of type ``"gfs"``
+    #: are allowed (a stranger joins through the relay, no pairing needed),
+    #: the owner registers the space's opaque channel on its connection
+    #: servers, and EVERY member household connected to one of them —
+    #: paired and mesh-only members included — takes a seat on it, so
+    #: members reach each other while the host is offline. The server then
+    #: learns those member households, never the space id, name, key or
+    #: content. Turning it OFF is refused while link-joined members remain.
+    #: OWNER-only (like ``gfs_publish_mode``): pinned on host inbound and
+    #: only taken from the owner household everywhere else. Meaningless on a
+    #: public / global space. Older peers that omit the field read OFF.
+    private_gfs: bool = False
+
     allowed_post_types: tuple[str, ...] = _ALL_POST_TYPES
 
     # ── Helpers ──────────────────────────────────────────────────────────
@@ -628,6 +662,7 @@ class SpaceFeatures:
             allow_subscriber_react=bool(row.get("allow_subscriber_react", 0)),
             delegated_admin_authority=bool(row.get("delegated_admin_authority", 0)),
             gfs_publish_mode=_publish_mode(row.get("gfs_publish_mode"), "trusted"),
+            private_gfs=bool(row.get("private_gfs", 0)),
             allowed_post_types=allowed or ("text",),
         )
 
@@ -652,6 +687,7 @@ class SpaceFeatures:
             "allow_subscriber_react": int(self.allow_subscriber_react),
             "delegated_admin_authority": int(self.delegated_admin_authority),
             "gfs_publish_mode": self.gfs_publish_mode,
+            "private_gfs": int(self.private_gfs),
             "allow_post_text": int("text" in self.allowed_post_types),
             "allow_post_image": int("image" in self.allowed_post_types),
             "allow_post_video": int("video" in self.allowed_post_types),
@@ -689,6 +725,7 @@ class SpaceFeatures:
             "allow_subscriber_react": self.allow_subscriber_react,
             "delegated_admin_authority": self.delegated_admin_authority,
             "gfs_publish_mode": self.gfs_publish_mode,
+            "private_gfs": self.private_gfs,
             "allowed_post_types": list(self.allowed_post_types),
         }
 
@@ -771,6 +808,7 @@ class SpaceFeatures:
             gfs_publish_mode=_publish_mode(
                 raw.get("gfs_publish_mode"), defaults.gfs_publish_mode
             ),
+            private_gfs=bool(raw.get("private_gfs", defaults.private_gfs)),
             allowed_post_types=allowed,
         )
 
@@ -1070,6 +1108,27 @@ class PeersTooOldError(Exception):
     def __init__(self, households: "list[dict[str, object]]") -> None:
         super().__init__("some member households cannot enforce access levels yet")
         self.households = households
+
+
+class PrivateGfsLinkMembersError(Exception):
+    """The owner tried to turn a private space's connection-server option
+    (``SpaceFeatures.private_gfs``) OFF while households that joined through
+    an invite link are still members — they reach the host only over the
+    connection server, so turning it off would strand them. The API answers
+    409 ``PRIVATE_GFS_LINK_MEMBERS`` naming them; the owner removes them
+    first."""
+
+    def __init__(self, households: "list[dict[str, object]]") -> None:
+        super().__init__(
+            "households that joined through an invite link are still members"
+        )
+        self.households = households
+
+
+class PrivateGfsOffError(Exception):
+    """A connection-server (``gfs``) invite link was asked for on a private
+    space whose owner has not turned ``SpaceFeatures.private_gfs`` on. The
+    API answers 409 ``PRIVATE_GFS_OFF``."""
 
 
 class PublicSpaceLimitError(Exception):

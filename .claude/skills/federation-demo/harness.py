@@ -2443,7 +2443,9 @@ def _check_writer_cert_on_e(state: dict, failures: list[str], cap) -> None:
     space_id = state["gfs_invite_space_id"]
     try:
         own = _rows("e", "SELECT identity_public_key FROM instance_identity")
-        pin = _rows("e", "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,))
+        pin = _rows(
+            "e", "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,)
+        )
         certs = _rows(
             "e",
             "SELECT epoch, writer_cert FROM space_keys "
@@ -2496,7 +2498,9 @@ def _check_writer_key_on_e(state: dict, failures: list[str], cap) -> None:
     space_id = state["gfs_invite_space_id"]
     epoch = int(state["gfs_member_publish_strict_epoch"])
     try:
-        pin = _rows("e", "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,))
+        pin = _rows(
+            "e", "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,)
+        )
         row = _rows(
             "e",
             "SELECT writer_key FROM space_keys WHERE space_id=? AND epoch=?",
@@ -3854,7 +3858,10 @@ def _set_posts_access(state: dict, space_id: str, level: str) -> None:
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
         st, sp = _e_request(state, "GET", f"/api/spaces/{space_id}")
-        if st == 200 and ((sp or {}).get("features") or {}).get("posts_access") == level:
+        if (
+            st == 200
+            and ((sp or {}).get("features") or {}).get("posts_access") == level
+        ):
             return
         time.sleep(3.0)
     raise SystemExit(
@@ -3915,7 +3922,9 @@ def _moderation_outcomes_reach_followers(state: dict, space_id: str) -> None:
     listed = False
     while time.monotonic() < deadline and not listed:
         time.sleep(3.0)
-        st, items = _inst_request(state, "a", "GET", f"/api/spaces/{space_id}/moderation")
+        st, items = _inst_request(
+            state, "a", "GET", f"/api/spaces/{space_id}/moderation"
+        )
         listed = st == 200 and any(i.get("id") == item_id for i in items)
     if not listed:
         raise SystemExit(
@@ -4107,7 +4116,9 @@ def cmd_gfs_member_publish_strict() -> None:
             f"(access lines={anon_lines[-1:]!r}, rows queued for d={len(queued)}). "
             f"Check {_instance_dir('e') / 'log.txt'} for 'gfs.member_publish'."
         )
-    print(f"  the GFS took e's item on the anonymous route ({anon_lines[-1].strip()}) ✓")
+    print(
+        f"  the GFS took e's item on the anonymous route ({anon_lines[-1].strip()}) ✓"
+    )
     identified = [
         line
         for line in _gfs_log_lines_matching(
@@ -4190,7 +4201,9 @@ def cmd_gfs_member_publish_strict() -> None:
         req, signature=b64url_encode(sign_ed25519(e_seed, req.signing_bytes()))
     )
     ref_off = _gfs_log_size()
-    st, body = _request(f"{gfs_base}/gfs/member-publish", method="POST", body=req.to_wire())
+    st, body = _request(
+        f"{gfs_base}/gfs/member-publish", method="POST", body=req.to_wire()
+    )
     if st != 403:
         raise SystemExit(
             f"gfs-member-publish-strict: an identified publish into the strict "
@@ -4268,10 +4281,26 @@ def _check_private_channel(state: dict, failures: list[str], cap) -> None:
     if not _gfs_rows("SELECT 1 FROM gfs_channels WHERE channel_id = ?", (channel_id,)):
         failures.append(f"GFS: no row for channel {channel_id}")
     b_id = state["instances"]["b"]["instance_id"]
-    if _gfs_rows(
-        "SELECT 1 FROM gfs_channel_subscribers WHERE instance_id = ?", (b_id,)
+    if not _gfs_rows(
+        "SELECT 1 FROM gfs_channel_subscribers WHERE channel_id = ? AND instance_id = ?",
+        (channel_id, b_id),
     ):
-        failures.append("GFS: the paired member b holds a channel seat")
+        failures.append(
+            "GFS: the paired member b holds no seat although the owner turned "
+            "private_gfs on"
+        )
+    a_id = state["instances"]["a"]["instance_id"]
+    if _gfs_rows(
+        "SELECT 1 FROM gfs_channel_subscribers WHERE instance_id = ?", (a_id,)
+    ):
+        failures.append("GFS: the owner a holds a channel seat")
+    off_space = state.get("gfs_private_channel_off_space_id")
+    if off_space:
+        rows = _rows(
+            "a", "SELECT gfs_channel_id FROM spaces WHERE id = ?", (off_space,)
+        )
+        if rows and rows[0][0]:
+            failures.append("a: the OFF private space has a channel")
     if _gfs_rows(
         "SELECT 1 FROM gfs_channels WHERE channel_id = ? OR channel_pk LIKE ?",
         (space_id, f"%{space_id}%"),
@@ -4295,21 +4324,31 @@ def _poll_gfs_rows(sql: str, params: tuple, ok, *, what: str, timeout: float = 6
     )
 
 
-def _join_private_link(state: dict, label: str, space_id: str, owner_base: str) -> None:
+def _join_private_link(
+    state: dict, label: str, space_id: str, owner_base: str, *, via: str
+) -> None:
     """``label`` redeems a fresh, UNPUBLISHED member link to a's private
     space (a private space is never listed, so its link is never parked on
-    the connection server): e takes the §D2b bootstrap through the relay, a
-    paired household the direct path."""
+    the connection server): e takes the §D2b bootstrap through the relay
+    with a ``gfs`` link, a paired household the direct path with an
+    ``internal`` link (no key-wrap key in its code)."""
     a = state["instances"]["a"]
     inst = state["instances"][label]
     s, link = _request(
         f"{owner_base}/api/spaces/{space_id}/invite-tokens",
         token=a["token"],
         method="POST",
-        body={"role": "member", "uses": 1},
+        body={"role": "member", "uses": 1, "via": via},
     )
-    link = _must(f"a mints a private link for {label}", s, link, ok=(201,))
+    link = _must(f"a mints a {via} private link for {label}", s, link, ok=(201,))
+    if link.get("via") != via:
+        raise SystemExit(f"gfs-private-channel: a minted a {link.get('via')!r} link")
     payload = _decode_invite_blob(link["code"])
+    if via == "internal" and payload.get("issuer_keywrap_pk"):
+        raise SystemExit(
+            "gfs-private-channel: an internal link's code carries the key-wrap "
+            "key — it could be redeemed through the relay."
+        )
     if payload.get("via_gfs"):
         raise SystemExit(
             "gfs-private-channel: a private space's link names a connection "
@@ -4352,9 +4391,10 @@ def _ensure_gfs_client(state: dict, label: str) -> None:
 
 
 def cmd_gfs_private_channel() -> None:
-    """v_51: a PRIVATE space with a link-joined member gets member
-    publishing over the connection server through an OPAQUE channel — and
-    the server never learns the space.
+    """v_51 + the owner's ``private_gfs`` option: a PRIVATE space whose owner
+    turned the connection server on gets member publishing over it through
+    an OPAQUE channel every member household subscribes to — and the server
+    never learns the space.
 
     Prereqs: the gfs chain through ``gfs-member-publish-strict`` (a and e
     are GFS clients; e is paired with nobody; a↔b are paired).
@@ -4366,18 +4406,22 @@ def cmd_gfs_private_channel() -> None:
     2. a creates a PRIVATE space. e redeems an unpublished member link (the
        §D2b bootstrap through ``/gfs/envelope``), then b redeems another
        (the direct path).
-    3. a — the owner — creates the space's channel on e's seat: a random
+    3. The owner turns ``private_gfs`` ON first (a gfs link for e, an
+       internal one for b). a creates the space's channel: a random
        ``channel_id`` and a channel key registered anonymously at the GFS.
-       e (link-joined) gets a grant with a pass and takes the ONLY seat; b
-       (paired) gets a publish-only grant and never subscribes.
+       e (link-joined) AND b (paired, on the GFS) get grants with a pass
+       and both take a seat; the owner never does.
     4. Stop **a**. b posts over the channel; e receives it decrypted while
-       the host is offline. Then e posts (its envelope to a waits at the GFS).
+       the host is offline. Then e posts: b receives it live over the
+       channel (its envelope to a waits at the GFS).
     5. The GFS log and its whole database never contain the private space's
        id, its name or its authority public key (hex or base64url) — only
-       the channel id — and b never holds a seat.
+       the channel id — and the owner never holds a seat.
     6. Restart a (bookmark first); a catches both posts up over the member
-       path, and b gets e's post from a (a catch-up sync triggered by a's
-       capabilities re-advertisement on startup).
+       path.
+    7. A new private space (option OFF): a gfs link is refused (409
+       ``PRIVATE_GFS_OFF``), the default link is internal, b joins and
+       posts over federation, and the GFS gains no channel and no seat.
 
     Polls every 3 s and backs off on 429.
     """
@@ -4412,10 +4456,19 @@ def cmd_gfs_private_channel() -> None:
     space_pk_b64 = (
         base64.urlsafe_b64encode(bytes.fromhex(space_pk_hex)).rstrip(b"=").decode()
     )
-    _join_private_link(state, "e", space_id, a_base)
-    print(f"  e joined private space {space_id} through the relay ✓")
-    _join_private_link(state, "b", space_id, a_base)
-    print("  b (paired with a) joined it directly ✓")
+    # 2a. The owner turns the connection server on for this space first.
+    st, resp = _request(
+        f"{a_base}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": {"private_gfs": True}},
+    )
+    _must("a turns private_gfs on", st, resp, ok=(200,))
+    print("  a (owner) turned the connection server on for the space ✓")
+    _join_private_link(state, "e", space_id, a_base, via="gfs")
+    print(f"  e joined private space {space_id} through the relay (gfs link) ✓")
+    _join_private_link(state, "b", space_id, a_base, via="internal")
+    print("  b (paired with a) joined it directly (internal link) ✓")
 
     # 3. The channel, the grants, the seats.
     rows = _poll_rows(
@@ -4437,20 +4490,21 @@ def cmd_gfs_private_channel() -> None:
             what=f"{label} never took its channel grant",
         )
     print(f"  a started channel {channel_id}; e and b hold their grants ✓")
+    want = {e["instance_id"], b["instance_id"]}
     seats = _poll_gfs_rows(
         "SELECT instance_id FROM gfs_channel_subscribers WHERE channel_id = ?",
         (channel_id,),
-        lambda r: e["instance_id"] in {x[0] for x in r},
-        what="e never took its seat on the channel",
+        lambda r: want <= {x[0] for x in r},
+        what="e and b never both took their seats on the channel",
     )
     held = {x[0] for x in seats}
-    if held != {e["instance_id"]}:
+    if held != want:
         raise SystemExit(
-            f"gfs-private-channel: the channel's seats are {sorted(held)} — only "
-            "the link-joined household e may take one (never the owner, never "
-            "the paired member b)."
+            f"gfs-private-channel: the channel's seats are {sorted(held)} — with "
+            "private_gfs on every member household connected to the GFS takes "
+            "one (e and b), never the owner a."
         )
-    print("  the GFS seats only the link-joined household e (not a, not b) ✓")
+    print("  the GFS seats both members e and b (never the owner a) ✓")
 
     # 4. Host offline; b (paired, publish-only) posts; e gets it live.
     e_off = _log_size("e")
@@ -4479,7 +4533,9 @@ def cmd_gfs_private_channel() -> None:
             "it some other way."
         )
     print("  e received b's post over the channel with the host offline ✓")
-    # e posts too: its envelope to a waits at the GFS; b has no seat.
+    # e posts too: its envelope to a waits at the GFS, and b — seated now —
+    # gets it live over the channel while a is still down.
+    b_off = _log_size("b")
     content = f"Posted into a private space with the host offline — {time.time_ns()}"
     st, post = _e_request(
         state,
@@ -4489,6 +4545,21 @@ def cmd_gfs_private_channel() -> None:
     )
     post = _must("e posts with the host offline", st, post, ok=(201,))
     post_id = post["id"]
+    _poll_rows(
+        "b",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (post_id,),
+        lambda r: bool(r) and r[0][0] == content,
+        what=f"b never received e's post {post_id} live while a was down",
+    )
+    if not _log_lines_matching(
+        "b", f"gfs.relay.received: channel={channel_id}", offset=b_off
+    ):
+        raise SystemExit(
+            "gfs-private-channel: b logged no channel frame — e's post reached "
+            "it some other way."
+        )
+    print("  b received e's post live over the channel with the host offline ✓")
 
     # 5. What the GFS knows.
     leaks = (space_id, space_name, space_pk_hex, space_pk_b64)
@@ -4510,9 +4581,9 @@ def cmd_gfs_private_channel() -> None:
             raise SystemExit("gfs-private-channel: the GFS saw a post's text")
     if _gfs_rows(
         "SELECT 1 FROM gfs_channel_subscribers WHERE instance_id = ?",
-        (b["instance_id"],),
+        (a["instance_id"],),
     ):
-        raise SystemExit("gfs-private-channel: the paired member b holds a seat")
+        raise SystemExit("gfs-private-channel: the owner a holds a seat")
     if channel_id not in "\n".join(
         _gfs_log_lines_matching("gfs.channel", offset=gfs_off)
     ):
@@ -4539,22 +4610,110 @@ def cmd_gfs_private_channel() -> None:
             what=f"a (host) never caught {who}'s post {pid} up after restarting",
         )
     print("  a caught e's and b's posts up over the member path ✓")
-    _poll_rows(
-        "b",
-        "SELECT content FROM space_posts WHERE id = ?",
-        (post_id,),
-        lambda r: bool(r) and r[0][0] == content,
-        what=f"b never got e's post {post_id} from a after a came back",
-        timeout=120.0,
-    )
-    print("  b got e's post from a (catch-up sync on a's return) ✓")
+
+    # 7. A private space with the option OFF (the default) never touches
+    #    the GFS: no gfs link, no channel, no seat — b joins and posts over
+    #    federation only.
+    off_space_id = _check_private_space_off(state, a_base)
     state["gfs_private_channel_space_id"] = space_id
+    state["gfs_private_channel_off_space_id"] = off_space_id
     state["gfs_private_channel_id"] = channel_id
     _save(state)
     print(
-        "gfs-private-channel: ok (link-joined member reaches another member of "
-        "a private space over an opaque channel, the GFS never sees the space)"
+        "gfs-private-channel: ok (with the owner's private_gfs on, the members "
+        "of a private space reach each other over an opaque channel while the "
+        "host is offline; the GFS never sees the space; an OFF space never "
+        "touches the GFS)"
     )
+
+
+def _check_private_space_off(state: dict, a_base: str) -> str:
+    """A NEW private space is OFF: a ``gfs`` link is refused (409
+    ``PRIVATE_GFS_OFF``), the default link is ``internal``, b (paired)
+    joins and posts over federation, and the GFS gains no channel row and
+    no seat — the space produces no GFS traffic at all."""
+    a = state["instances"]["a"]
+    b = state["instances"]["b"]
+    channels_before = _gfs_rows("SELECT COUNT(*) FROM gfs_channels", ())[0][0]
+    seats_before = _gfs_rows("SELECT COUNT(*) FROM gfs_channel_subscribers", ())[0][0]
+    s, space = _request(
+        f"{a_base}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={"name": f"Off private space {time.time_ns()}", "space_type": "private"},
+    )
+    space = _must("a creates an OFF private space", s, space, ok=(200, 201))
+    off_id = space["id"]
+    s, detail = _request(f"{a_base}/api/spaces/{off_id}", token=a["token"])
+    detail = _must("a reads the OFF private space", s, detail, ok=(200,))
+    if detail.get("features", {}).get("private_gfs") is not False:
+        raise SystemExit("gfs-private-channel: a new private space is not OFF")
+    s, refused = _request(
+        f"{a_base}/api/spaces/{off_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "member", "uses": 1, "via": "gfs"},
+    )
+    code = (refused or {}).get("error", {}).get("code") if s == 409 else None
+    if code != "PRIVATE_GFS_OFF":
+        raise SystemExit(
+            f"gfs-private-channel: a gfs link on an OFF space answered {s} {refused!r}"
+        )
+    s, link = _request(
+        f"{a_base}/api/spaces/{off_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "member", "uses": 1},
+    )
+    link = _must("a mints the default link on the OFF space", s, link, ok=(201,))
+    if link.get("via") != "internal":
+        raise SystemExit(
+            "gfs-private-channel: the OFF space's default link isn't internal"
+        )
+    payload = _decode_invite_blob(link["code"])
+    s, joined = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/join",
+        token=b["token"],
+        method="POST",
+        body=_join_body_from_blob(payload),
+        timeout=40.0,
+    )
+    _must("b redeems the OFF space's internal link", s, joined, ok=(200, 201))
+    text = f"Posted into an OFF private space — {time.time_ns()}"
+    st, post = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{off_id}/posts",
+        token=b["token"],
+        method="POST",
+        body={"type": "text", "content": text},
+    )
+    post = _must("b posts into the OFF space", st, post, ok=(201,))
+    _poll_rows(
+        "a",
+        "SELECT content FROM space_posts WHERE id = ?",
+        (post["id"],),
+        lambda r: bool(r) and r[0][0] == text,
+        what="a never got b's post in the OFF space over federation",
+    )
+    time.sleep(3.0)
+    rows = _rows("a", "SELECT gfs_channel_id FROM spaces WHERE id = ?", (off_id,))
+    if rows and rows[0][0]:
+        raise SystemExit("gfs-private-channel: the OFF private space got a channel")
+    channels_after = _gfs_rows("SELECT COUNT(*) FROM gfs_channels", ())[0][0]
+    seats_after = _gfs_rows("SELECT COUNT(*) FROM gfs_channel_subscribers", ())[0][0]
+    if (channels_after, seats_after) != (channels_before, seats_before):
+        raise SystemExit(
+            "gfs-private-channel: the OFF private space changed the GFS "
+            f"(channels {channels_before}→{channels_after}, seats "
+            f"{seats_before}→{seats_after})"
+        )
+    db_bytes = b"".join(p.read_bytes() for p in GFS_DIR.glob("gfs.db*") if p.is_file())
+    if off_id.encode() in db_bytes or text.encode() in db_bytes:
+        raise SystemExit("gfs-private-channel: the GFS holds the OFF space")
+    print(
+        "  an OFF private space: gfs link refused (409 PRIVATE_GFS_OFF), internal "
+        "link by default, no channel, no seat — no GFS traffic ✓"
+    )
+    return off_id
 
 
 def cmd_gfs_down() -> None:
@@ -8780,7 +8939,9 @@ def _mesh_member_cert_failures(member: str, host: str, space_id: str) -> list[st
     from socialhome.domain.writer_cert import WriterCert
     from socialhome.writer_cert import verify_writer_cert
 
-    own = _rows(member, "SELECT instance_id, identity_public_key FROM instance_identity")
+    own = _rows(
+        member, "SELECT instance_id, identity_public_key FROM instance_identity"
+    )
     if not own:
         return [f"{member}: no instance_identity row"]
     member_id, member_pk = own[0]
@@ -8798,8 +8959,12 @@ def _mesh_member_cert_failures(member: str, host: str, space_id: str) -> list[st
     if not claim or claim[0][0] is None:
         return [f"{host} recorded no mesh claim for {member} in {space_id}: {claim!r}"]
     if claim[0][1] != member_pk:
-        return [f"{host} recorded {member}'s identity_pk={claim[0][1]!r}, expected its own key"]
-    pin = _rows(member, "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,))
+        return [
+            f"{host} recorded {member}'s identity_pk={claim[0][1]!r}, expected its own key"
+        ]
+    pin = _rows(
+        member, "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,)
+    )
     certs = _rows(
         member,
         "SELECT epoch, writer_cert FROM space_keys "
@@ -11726,7 +11891,9 @@ def cmd_space_report() -> None:
             f"http://127.0.0.1:{guest['port']}/api/remote_invites",
             token=guest["token"],
         )
-        items = invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        items = (
+            invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        )
         hit = next((i for i in items if i.get("space_id") == space_id), None)
         return hit["invite_token"] if s == 200 and hit else None
 
@@ -11756,7 +11923,9 @@ def cmd_space_report() -> None:
         )
 
     for label in ("a", "c", "d"):
-        _wait_for(f"b to seat {label}", lambda label=label: _seated(label), timeout=60.0)
+        _wait_for(
+            f"b to seat {label}", lambda label=label: _seated(label), timeout=60.0
+        )
     print("  a, c and d seated in the Report club")
 
     s, body = _request(
@@ -11775,7 +11944,9 @@ def cmd_space_report() -> None:
         )
         return rows[0][0] if rows else None
 
-    _wait_for("a to hold alice's moderator seat", lambda: _local_role("a") == "moderator")
+    _wait_for(
+        "a to hold alice's moderator seat", lambda: _local_role("a") == "moderator"
+    )
     # c must also know a reviews the space (the roster mirror carries it).
     _wait_for(
         "c to mirror alice as moderator",
@@ -11807,7 +11978,11 @@ def cmd_space_report() -> None:
         return bool(_rows(label, "SELECT 1 FROM space_posts WHERE id=?", (post_id,)))
 
     for label in ("a", "b", "c"):
-        _wait_for(f"{label} to hold d's post", lambda label=label: _holds_post(label), timeout=60.0)
+        _wait_for(
+            f"{label} to hold d's post",
+            lambda label=label: _holds_post(label),
+            timeout=60.0,
+        )
     d_log_before = _log_size("d")
 
     s, filed = _request(
@@ -11832,8 +12007,12 @@ def cmd_space_report() -> None:
         )
         return [r for r in rows if r.get("target_id") == post_id] if s == 200 else []
 
-    _wait_for("a's space report queue to list it", lambda: bool(_queue("a")), timeout=60.0)
-    _wait_for("b's space report queue to list it", lambda: bool(_queue("b")), timeout=60.0)
+    _wait_for(
+        "a's space report queue to list it", lambda: bool(_queue("a")), timeout=60.0
+    )
+    _wait_for(
+        "b's space report queue to list it", lambda: bool(_queue("b")), timeout=60.0
+    )
     print("  a (moderator household) and b (host) list the report ✓")
     for label in ("a", "b", "c"):
         v = inst[label]
@@ -11867,7 +12046,9 @@ def cmd_space_report() -> None:
         )
         return rows[0][0] if rows else None
 
-    _wait_for("b's copy to read resolved", lambda: _b_status() == "resolved", timeout=60.0)
+    _wait_for(
+        "b's copy to read resolved", lambda: _b_status() == "resolved", timeout=60.0
+    )
     if _queue("b"):
         raise SystemExit("space-report: b still lists the resolved report")
     print("  b: resolved by Alice's decision on a (SPACE_REPORT_DECIDED) ✓")
@@ -11942,7 +12123,9 @@ def cmd_federated_moderation() -> None:
             f"http://127.0.0.1:{guest['port']}/api/remote_invites",
             token=guest["token"],
         )
-        items = invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        items = (
+            invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        )
         hit = next((i for i in items if i.get("space_id") == space_id), None)
         return hit["invite_token"] if s == 200 and hit else None
 
@@ -11971,7 +12154,9 @@ def cmd_federated_moderation() -> None:
         return bool(rows)
 
     for label in ("a", "c", "d"):
-        _wait_for(f"b to seat {label}", lambda label=label: _seated(label), timeout=60.0)
+        _wait_for(
+            f"b to seat {label}", lambda label=label: _seated(label), timeout=60.0
+        )
     print("  a, c and d seated in the Reviewed club")
 
     s, body = _request(
@@ -11990,7 +12175,9 @@ def cmd_federated_moderation() -> None:
         )
         return rows[0][0] if rows else None
 
-    _wait_for("c to hold carol's moderator seat", lambda: _local_role("c") == "moderator")
+    _wait_for(
+        "c to hold carol's moderator seat", lambda: _local_role("c") == "moderator"
+    )
     s, lst = _request(
         f"{b_base}/api/spaces/{space_id}/tasks/lists",
         token=b["token"],
@@ -12011,10 +12198,15 @@ def cmd_federated_moderation() -> None:
         s, sp = _request(
             f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}", token=v["token"]
         )
-        return ((sp or {}).get("features") or {}).get("tasks_access") if s == 200 else None
+        return (
+            ((sp or {}).get("features") or {}).get("tasks_access") if s == 200 else None
+        )
 
     for label in ("a", "c"):
-        _wait_for(f"{label} to see tasks reviewed", lambda label=label: _level(label) == "moderated")
+        _wait_for(
+            f"{label} to see tasks reviewed",
+            lambda label=label: _level(label) == "moderated",
+        )
 
     def _has_list(label: str) -> bool:
         v = inst[label]
@@ -12050,8 +12242,12 @@ def cmd_federated_moderation() -> None:
         )
         return s == 200 and any(i.get("id") == item_id for i in items)
 
-    _wait_for("c's Moderation tab to list the item", lambda: _queue_has("c"), timeout=60.0)
-    _wait_for("b's Moderation tab to list the item", lambda: _queue_has("b"), timeout=60.0)
+    _wait_for(
+        "c's Moderation tab to list the item", lambda: _queue_has("c"), timeout=60.0
+    )
+    _wait_for(
+        "b's Moderation tab to list the item", lambda: _queue_has("b"), timeout=60.0
+    )
     print("  b (host) and c (moderator household) hold the pending item ✓")
 
     s, body = _request(
@@ -12074,7 +12270,11 @@ def cmd_federated_moderation() -> None:
             f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
             token=v["token"],
         )
-        hit = next((t for t in rows if t.get("title") == title), None) if s == 200 else None
+        hit = (
+            next((t for t in rows if t.get("title") == title), None)
+            if s == 200
+            else None
+        )
         return hit.get("created_by") if hit else None
 
     for label in ("a", "b", "c", "d"):
@@ -12094,7 +12294,9 @@ def cmd_federated_moderation() -> None:
     _wait_for("a's own queue row to read approved", lambda: _status("a") == "approved")
     print("  a's queue row: approved ✓")
     if _rows("d", "SELECT 1 FROM space_moderation_queue WHERE id=?", (item_id,)):
-        raise SystemExit("federated-moderation: plain member household d holds the item")
+        raise SystemExit(
+            "federated-moderation: plain member household d holds the item"
+        )
     if _log_contains("d", item_id, offset=d_log_before):
         raise SystemExit("federated-moderation: d's log mentions the pending item")
     print("  d (plain member) never received the pending item ✓")
@@ -12180,7 +12382,9 @@ def cmd_forwarded_role_change() -> None:
             f"http://127.0.0.1:{guest['port']}/api/remote_invites",
             token=guest["token"],
         )
-        items = invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        items = (
+            invites if isinstance(invites, list) else (invites or {}).get("items") or []
+        )
         hit = next((i for i in items if i.get("space_id") == space_id), None)
         return hit["invite_token"] if s == 200 and hit else None
 
@@ -12262,7 +12466,9 @@ def cmd_forwarded_role_change() -> None:
     print("  a, b, c and d all see carol as moderator ✓")
 
     # 3. A moderator can't drive a role change.
-    _wait_for("c to mirror dave's seat", lambda: _role_on("c", "d") == "member", timeout=60.0)
+    _wait_for(
+        "c to mirror dave's seat", lambda: _role_on("c", "d") == "member", timeout=60.0
+    )
     s, body = _request(
         f"{c_base}/api/spaces/{space_id}/remote-members/{d['instance_id']}/{d['user_id']}",
         token=c["token"],
@@ -12350,7 +12556,10 @@ def cmd_page_concurrent_edit() -> None:
             f"{b_base}/api/spaces/{space_id}/remote-invites",
             token=b["token"],
             method="POST",
-            body={"invitee_instance_id": who["instance_id"], "invitee_user_id": who["user_id"]},
+            body={
+                "invitee_instance_id": who["instance_id"],
+                "invitee_user_id": who["user_id"],
+            },
         )
         _must(f"remote-invite({label})", s, inv, ok=(201,))
         base = base_of[label]
@@ -12358,7 +12567,9 @@ def cmd_page_concurrent_edit() -> None:
         def _invite_token(base=base, who=who) -> str | None:
             s, invites = _request(f"{base}/api/remote_invites", token=who["token"])
             items = (
-                invites if isinstance(invites, list) else (invites or {}).get("items") or []
+                invites
+                if isinstance(invites, list)
+                else (invites or {}).get("items") or []
             )
             hit = next((i for i in items if i.get("space_id") == space_id), None)
             return hit["invite_token"] if s == 200 and hit else None
@@ -12415,7 +12626,9 @@ def cmd_page_concurrent_edit() -> None:
                 headers={
                     "Accept": "application/json",
                     "Authorization": f"Bearer {token}",
-                    **({"Content-Type": "application/json"} if body is not None else {}),
+                    **(
+                        {"Content-Type": "application/json"} if body is not None else {}
+                    ),
                 },
             )
             try:
@@ -12440,7 +12653,9 @@ def cmd_page_concurrent_edit() -> None:
     def _get(label: str) -> dict:
         st, body = _http(label, "GET", f"{pages}/{page_id}")
         if st != 200:  # once every household holds the page, never 404
-            raise SystemExit(f"page-concurrent-edit: reading the page on {label} answered {st} {body!r}")
+            raise SystemExit(
+                f"page-concurrent-edit: reading the page on {label} answered {st} {body!r}"
+            )
         return body
 
     def _all() -> dict[str, dict]:
@@ -12459,7 +12674,9 @@ def cmd_page_concurrent_edit() -> None:
         # arrives is a 404 the ``verify`` log audit would flag.
         st, body = _http(label, "GET", pages)
         if st != 200:
-            raise SystemExit(f"page-concurrent-edit: listing on {label} answered {st} {body!r}")
+            raise SystemExit(
+                f"page-concurrent-edit: listing on {label} answered {st} {body!r}"
+            )
         hit = next((p for p in body if p.get("id") == page_id), None)
         return bool(hit) and hit.get("seq", 0) >= 1 and not hit.get("pending")
 
@@ -12509,10 +12726,12 @@ def cmd_page_concurrent_edit() -> None:
     _poll(
         "a, b and c to hold the same seq and merged body",
         lambda: _same(
-            lambda ps: all(
-                w in ps["b"]["content"] for w in ("by Alice", "by Carol", "by Beta")
+            lambda ps: (
+                all(
+                    w in ps["b"]["content"] for w in ("by Alice", "by Carol", "by Beta")
+                )
+                and not any(p.get("conflict") for p in ps.values())
             )
-            and not any(p.get("conflict") for p in ps.values())
         ),
         timeout=90.0,
     )
@@ -12547,8 +12766,12 @@ def cmd_page_concurrent_edit() -> None:
         }
     )
     if any(st != 200 for st in statuses.values()):
-        raise SystemExit(f"page-concurrent-edit: same-paragraph edits answered {statuses}")
-    _poll("a, b and c to hold the same conflict", lambda: _same(_conflicted), timeout=90.0)
+        raise SystemExit(
+            f"page-concurrent-edit: same-paragraph edits answered {statuses}"
+        )
+    _poll(
+        "a, b and c to hold the same conflict", lambda: _same(_conflicted), timeout=90.0
+    )
     print("  same paragraph: a/b/c hold the identical conflict ✓")
     current = _get("b")
     st, body = _http(
@@ -12564,7 +12787,9 @@ def cmd_page_concurrent_edit() -> None:
     _poll(
         "the edit to reach a and c",
         lambda: _same(
-            lambda ps: _conflicted(ps) and "Edited while conflicted." in ps["b"]["content"]
+            lambda ps: (
+                _conflicted(ps) and "Edited while conflicted." in ps["b"]["content"]
+            )
         ),
         timeout=90.0,
     )
@@ -12587,8 +12812,10 @@ def cmd_page_concurrent_edit() -> None:
     _poll(
         "a, b and c to converge on the resolution",
         lambda: _same(
-            lambda ps: not any(p.get("conflict") for p in ps.values())
-            and ps["b"]["content"] == keep["content"]
+            lambda ps: (
+                not any(p.get("conflict") for p in ps.values())
+                and ps["b"]["content"] == keep["content"]
+            )
         ),
         timeout=90.0,
     )
@@ -12603,7 +12830,9 @@ def cmd_page_concurrent_edit() -> None:
     def _listed(label: str, pid: str) -> bool:
         st, body = _http(label, "GET", pages)
         if st != 200:
-            raise SystemExit(f"page-concurrent-edit: listing on {label} answered {st} {body!r}")
+            raise SystemExit(
+                f"page-concurrent-edit: listing on {label} answered {st} {body!r}"
+            )
         hit = next((p for p in body if p.get("id") == pid), None)
         return bool(hit) and hit.get("seq", 0) >= 1 and not hit.get("pending")
 
@@ -12648,7 +12877,9 @@ def cmd_page_concurrent_edit() -> None:
             con.commit()
         finally:
             con.close()
-    if not _rows("c", "SELECT 1 FROM space_pages WHERE id=? AND deleted_at IS NULL", (old_id,)):
+    if not _rows(
+        "c", "SELECT 1 FROM space_pages WHERE id=? AND deleted_at IS NULL", (old_id,)
+    ):
         raise SystemExit("page-concurrent-edit: offline c no longer holds the page?")
     print(f"  c offline missed b's delete ({lost} queued envelope(s) dropped)")
     new_pid = _spawn("c", c["port"])

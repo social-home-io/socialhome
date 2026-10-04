@@ -96,5 +96,14 @@
   "space.proposal.requested_by": "{name} = the requester's display name, or space.proposal.requester_unknown.",
   "space.proposal.requester_unknown": "Fallback for {name} in space.proposal.requested_by when the requester's name isn't known.",
   "space.proposal.role.moderator": "Fills {action} in space.proposal.owner_body. {name} = a member's display name, or space.proposal.someone.",
-  "space.proposal.fwd.ban": "Fills {action} in space.proposal.owner_body — like the other space.proposal.fwd.* / action.* phrases."
+  "space.proposal.fwd.ban": "Fills {action} in space.proposal.owner_body — like the other space.proposal.fwd.* / action.* phrases.",
+  "space.private_gfs.toggle": "Owner-only switch on a private space. 'Connection server' = the Global Federation Server (GFS); use the same term as the other connection-server strings.",
+  "space.private_gfs.on": "Heading over the explanation of the switch's ON state. Very short.",
+  "space.private_gfs.off": "Heading over the explanation of the switch's OFF state. Very short.",
+  "invite.via.gfs": "Invite link type: redeemed through the connection server, so households that never paired can join.",
+  "invite.via.internal": "Invite link type: only households already paired (directly or over the mesh) can use it.",
+  "invite.via.badge_gfs": "Small badge on an invite link row. Keep short.",
+  "invite.via.badge_internal": "Small badge on an invite link row. Keep short.",
+  "invite.via.badge_legacy": "Small badge on a pre-existing invite link row. Keep short.",
+  "invite.via.badge_legacy_hint": "Tooltip on the earlier-link badge: explains it still works and that using it turns the connection server on."
 }

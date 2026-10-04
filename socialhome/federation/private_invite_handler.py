@@ -1344,15 +1344,16 @@ class PrivateSpaceInviteHandler:
             await self._writer_certs.accept_writer_key(
                 space_id, event.payload.get("writer_key")
             )
-        # v_51 — and, in a private space with link-joined members, our
-        # channel grant for the new epoch (bound to the pinned space key).
-        if (
-            event.payload.get("gfs_channel") is not None
-            and self._writer_certs is not None
-        ):
-            await self._writer_certs.accept_channel_grant(
-                space_id, event.payload.get("gfs_channel")
-            )
+        # v_51 — and, in a private space using a channel, our channel grant
+        # for the new epoch (bound to the pinned space key). No grant for the
+        # new epoch while an earlier one seated us: drop that seat.
+        if self._writer_certs is not None:
+            if event.payload.get("gfs_channel") is not None:
+                await self._writer_certs.accept_channel_grant(
+                    space_id, event.payload.get("gfs_channel")
+                )
+            else:
+                await self._writer_certs.drop_stale_channel(space_id)
 
     async def _on_admin_key_share(self, event: "FederationEvent") -> None:
         """Delegated-admin signing-seed share from the space owner (v_22).

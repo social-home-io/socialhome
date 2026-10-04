@@ -6831,8 +6831,11 @@ async def test_the_minted_code_decodes_to_the_documented_fields(stack):
     import json
 
     await stack.provision_user("anna", is_admin=True)
-    space = await stack.space_svc.create_space(owner_username="anna", name="Coded")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Coded", space_type=SpaceType.PUBLIC
+    )
     link = await stack.space_svc.create_invite_link(space.id, actor_username="anna")
+    assert link["via"] == "gfs"
     code = link["code"]
     assert code.startswith("socialhome://invite#")
     blob = code.split("#", 1)[1]
@@ -6932,7 +6935,9 @@ async def test_publishing_a_link_records_the_server_and_returns_its_url(stack):
     gfs = _FakeGfs()
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)
-    space = await stack.space_svc.create_space(owner_username="anna", name="Public")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Public", space_type=SpaceType.PUBLIC
+    )
     link = await stack.space_svc.create_invite_link(
         space.id,
         actor_username="anna",
@@ -6964,7 +6969,9 @@ async def test_revoking_a_published_link_takes_the_blob_down(stack):
     gfs = _FakeGfs()
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)
-    space = await stack.space_svc.create_space(owner_username="anna", name="Public2")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Public2", space_type=SpaceType.PUBLIC
+    )
     link = await stack.space_svc.create_invite_link(
         space.id,
         actor_username="anna",
@@ -6982,7 +6989,9 @@ async def test_a_gfs_outage_still_revokes_locally_with_one_warning(stack, caplog
     gfs = _FakeGfs()
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)
-    space = await stack.space_svc.create_space(owner_username="anna", name="Public3")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Public3", space_type=SpaceType.PUBLIC
+    )
     link = await stack.space_svc.create_invite_link(
         space.id,
         actor_username="anna",
@@ -7013,7 +7022,9 @@ async def test_a_server_without_invite_links_creates_no_local_row(stack):
     )
     stack.space_svc.attach_gfs_connection_service(gfs)
     await stack.provision_user("anna", is_admin=True)
-    space = await stack.space_svc.create_space(owner_username="anna", name="Old")
+    space = await stack.space_svc.create_space(
+        owner_username="anna", name="Old", space_type=SpaceType.PUBLIC
+    )
     with pytest.raises(GfsConnectionError):
         await stack.space_svc.create_invite_link(
             space.id,

@@ -33,6 +33,8 @@ from typing import Protocol, runtime_checkable
 from ..db import AsyncDatabase
 from ..infrastructure.hlc import HLC
 from ..domain.space import (
+    INVITE_VIA_GFS,
+    INVITE_VIAS,
     JoinMode,
     ModerationStatus,
     Space,
@@ -261,6 +263,7 @@ class AbstractSpaceRepo(Protocol):
         gfs_id: str | None = None,
         gfs_token: str | None = None,
         gfs_url: str | None = None,
+        via: str = INVITE_VIA_GFS,
     ) -> str: ...
     async def get_live_invite_token(self, token: str) -> dict | None: ...
     async def consume_invite_token(
@@ -273,6 +276,7 @@ class AbstractSpaceRepo(Protocol):
     async def get_invite_token_space_id(self, token: str) -> str | None: ...
     async def list_live_invite_tokens(self, space_id: str) -> list[dict]: ...
     async def delete_invite_token(self, space_id: str, token: str) -> dict | None: ...
+    async def delete_invite_tokens_via(self, space_id: str, via: str) -> list[dict]: ...
 
     # ── Invitations ────────────────────────────────────────────────────
     async def save_invitation(
@@ -502,7 +506,7 @@ class SqliteSpaceRepo:
                 calendar_access, tasks_access,
                 allow_subscribers,
                 allow_subscriber_comment, allow_subscriber_react,
-                delegated_admin_authority, gfs_publish_mode,
+                delegated_admin_authority, gfs_publish_mode, private_gfs,
                 allow_post_text, allow_post_image, allow_post_video,
                 allow_post_transcript, allow_post_poll, allow_post_schedule,
                 allow_post_file, allow_post_bazaar,
@@ -511,7 +515,7 @@ class SqliteSpaceRepo:
                 dissolved, archived, archived_reason, about_markdown, cover_hash, tz,
                 min_age, category
             ) VALUES(
-                -- 58 placeholders, one per column listed above.
+                -- 59 placeholders, one per column listed above.
                 ?, ?, ?, ?,                   -- id, name, description, emoji
                 ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
                 ?, ?, ?,                      -- config_sequence, roster_sequence, config_hlc
@@ -524,7 +528,7 @@ class SqliteSpaceRepo:
                 ?, ?,                         -- calendar_access, tasks_access
                 ?,                            -- allow_subscribers
                 ?, ?,                         -- allow_subscriber_comment, allow_subscriber_react
-                ?, ?,                         -- delegated_admin_authority, gfs_publish_mode
+                ?, ?, ?,                      -- delegated_admin_authority, gfs_publish_mode, private_gfs
                 ?, ?, ?,                      -- allow_post_text, allow_post_image, allow_post_video
                 ?, ?, ?,                      -- allow_post_transcript, allow_post_poll, allow_post_schedule
                 ?, ?,                         -- allow_post_file, allow_post_bazaar
@@ -564,6 +568,7 @@ class SqliteSpaceRepo:
                 allow_subscriber_react=excluded.allow_subscriber_react,
                 delegated_admin_authority=excluded.delegated_admin_authority,
                 gfs_publish_mode=excluded.gfs_publish_mode,
+                private_gfs=excluded.private_gfs,
                 allow_post_text=excluded.allow_post_text,
                 allow_post_image=excluded.allow_post_image,
                 allow_post_video=excluded.allow_post_video,
@@ -624,6 +629,7 @@ class SqliteSpaceRepo:
                 cols["allow_subscriber_react"],
                 cols["delegated_admin_authority"],
                 cols["gfs_publish_mode"],
+                cols["private_gfs"],
                 cols["allow_post_text"],
                 cols["allow_post_image"],
                 cols["allow_post_video"],
@@ -1892,6 +1898,7 @@ class SqliteSpaceRepo:
         gfs_id: str | None = None,
         gfs_token: str | None = None,
         gfs_url: str | None = None,
+        via: str = INVITE_VIA_GFS,
     ) -> str:
         """Mint one invite token and return it.
 
@@ -1911,15 +1918,19 @@ class SqliteSpaceRepo:
         ``SpaceService.create_invite_link``), so the token string is
         minted there and handed down rather than generated here.
         ``gfs_*`` record the one connection server the blob was parked
-        on, so a later revoke can take it down.
+        on, so a later revoke can take it down. ``via`` is the link's type
+        (migration 0079): ``gfs`` (redeemable through the connection-server
+        relay) or ``internal`` (paired / mesh households only).
         """
+        if via not in INVITE_VIAS:
+            raise ValueError(f"unknown invite link type {via!r}")
         token = token or uuid.uuid4().hex
         await self._db.enqueue(
             """
             INSERT INTO space_invite_tokens(
                 token, space_id, created_by, uses_remaining, expires_at,
-                role, gfs_id, gfs_token, gfs_url, uses_total
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                role, gfs_id, gfs_token, gfs_url, uses_total, via
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 token,
@@ -1935,6 +1946,7 @@ class SqliteSpaceRepo:
                 # decremented in place and the admin list wants
                 # "3 of 10 left".
                 uses,
+                via,
             ),
         )
         return token
@@ -1964,7 +1976,8 @@ class SqliteSpaceRepo:
         row = await self._db.fetchone(
             """
             SELECT token, space_id, created_by, uses_remaining, created_at,
-                   expires_at, role, gfs_id, gfs_token, gfs_url, uses_total
+                   expires_at, role, gfs_id, gfs_token, gfs_url, uses_total,
+                   via
               FROM space_invite_tokens
              WHERE token=?
                AND uses_remaining > 0
@@ -1989,6 +2002,7 @@ class SqliteSpaceRepo:
             "gfs_token": row[8],
             "gfs_url": row[9],
             "uses_total": row[10],
+            "via": row[11] or INVITE_VIA_GFS,
         }
 
     async def consume_invite_token(
@@ -2050,7 +2064,8 @@ class SqliteSpaceRepo:
                 return None
             row = conn.execute(
                 """
-                SELECT space_id, created_by, uses_remaining, expires_at, role
+                SELECT space_id, created_by, uses_remaining, expires_at, role,
+                       via
                   FROM space_invite_tokens WHERE token=?
                 """,
                 (token,),
@@ -2066,6 +2081,10 @@ class SqliteSpaceRepo:
                 # redeem path (local accept, §D2 ACK, §D2b bootstrap)
                 # reads it from here — never from the redeem request.
                 "role": row[4] or SpaceRole.MEMBER.value,
+                # The link's type (0079): a redeem that arrived over the
+                # connection-server relay is refused for an ``internal``
+                # link — read here, never from the redeem request.
+                "via": row[5] or INVITE_VIA_GFS,
             }
 
         return await self._db.transact(_run)
@@ -2122,7 +2141,8 @@ class SqliteSpaceRepo:
         rows = await self._db.fetchall(
             """
             SELECT token, space_id, created_by, uses_remaining, created_at,
-                   expires_at, role, gfs_id, gfs_token, gfs_url, uses_total
+                   expires_at, role, gfs_id, gfs_token, gfs_url, uses_total,
+                   via
               FROM space_invite_tokens
              WHERE space_id=?
                AND uses_remaining > 0
@@ -2151,7 +2171,7 @@ class SqliteSpaceRepo:
                 """
                 SELECT token, space_id, created_by, uses_remaining, created_at,
                        expires_at, role, gfs_id, gfs_token, gfs_url,
-                       uses_total
+                       uses_total, via
                   FROM space_invite_tokens
                  WHERE space_id=? AND token=?
                 """,
@@ -2175,7 +2195,34 @@ class SqliteSpaceRepo:
                 "gfs_token": row[8],
                 "gfs_url": row[9],
                 "uses_total": row[10],
+                "via": row[11] or INVITE_VIA_GFS,
             }
+
+        return await self._db.transact(_run)
+
+    async def delete_invite_tokens_via(self, space_id: str, via: str) -> list[dict]:
+        """Delete every invite token of ``space_id`` of type ``via`` and
+        return the deleted rows — the owner turned a private space's
+        connection-server option OFF, so its ``gfs`` links must stop
+        working (and come down wherever they were parked)."""
+
+        def _run(conn):
+            rows = conn.execute(
+                """
+                SELECT token, gfs_id, gfs_token, gfs_url
+                  FROM space_invite_tokens
+                 WHERE space_id=? AND via=?
+                """,
+                (space_id, via),
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM space_invite_tokens WHERE space_id=? AND via=?",
+                (space_id, via),
+            )
+            return [
+                {"token": r[0], "gfs_id": r[1], "gfs_token": r[2], "gfs_url": r[3]}
+                for r in rows
+            ]
 
         return await self._db.transact(_run)
 

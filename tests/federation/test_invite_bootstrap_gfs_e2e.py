@@ -430,6 +430,9 @@ async def _mint_invite(b, gfs_url: str):
         space_type=SpaceType.PRIVATE,
         join_mode=JoinMode.INVITE_ONLY,
     )
+    # A stranger joins a private space through the relay only once its
+    # owner turned the connection-server option on.
+    await b.db.enqueue("UPDATE spaces SET private_gfs=1 WHERE id=?", (space.id,))
     await b.space_repo.create_invite_token(space.id, b.user_id, uses=1)
     # The token value is chosen by the repo; re-mint a known one so the
     # leak assertions below can grep for a distinctive marker.

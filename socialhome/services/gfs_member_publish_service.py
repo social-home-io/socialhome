@@ -249,8 +249,9 @@ class GfsMemberPublishService:
         #: Background publishes in flight (strong refs) and the stop flag.
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
-        #: v_51 — opaque channels for PRIVATE spaces with link-joined
-        #: members. ``None`` → private spaces always take the host path.
+        #: v_51 — opaque channels for PRIVATE spaces whose owner turned
+        #: ``private_gfs`` on. ``None`` → private spaces always take the host
+        #: path.
         self._channels: "GfsChannelService | None" = None
 
     def attach_channels(self, channels: "GfsChannelService") -> None:
@@ -276,6 +277,12 @@ class GfsMemberPublishService:
         space's channel while its key can still be signed for."""
         if self._channels is not None and await self._private(space_id):
             await self._channels.retire(space_id)
+
+    async def enable_channel(self, space_id: str) -> None:
+        """The owner turned a private space's ``private_gfs`` ON: start (or
+        keep) its channel, announce it and distribute the grants."""
+        if self._channels is not None and await self._private(space_id):
+            await self._channels.enable(space_id)
 
     async def reconcile_channel(self, space_id: str) -> None:
         """Before an authority-rotation bundle goes out: let the channel
@@ -721,7 +728,8 @@ class GfsMemberPublishService:
 
         v_51 — a PRIVATE space announces to its opaque channel instead (the
         owner first reconciles the channel, so a space that lost its last
-        link-joined member retires it before this rotation's rekey)."""
+        remote member, or whose owner turned ``private_gfs`` off, retires it
+        before this rotation's rekey)."""
         space = await self._spaces.get(space_id)
         if (
             space is not None

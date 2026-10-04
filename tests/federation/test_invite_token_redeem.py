@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -85,6 +85,9 @@ class _FakeInstance:
     #: Carried over when a stale (non-CONFIRMED) row is replaced by a
     #: space-session seat — the peer may already hold this URL.
     local_inbox_id: str = "existing-inbox-id"
+    #: A paired peer by default; ``SPACE_SESSION`` for a household seated
+    #: through an invite link (its §D2 redeem rides the connection server).
+    source: InstanceSource = InstanceSource.MANUAL
 
 
 class _FakeFederationRepo:
@@ -181,6 +184,8 @@ class _FakeSpaceRepo:
             "expires_at": row.get("expires_at"),
             # Migration 0053 — the seat the issuer minted the link for.
             "role": row.get("role", SpaceRole.MEMBER.value),
+            # Migration 0079 — the link's type.
+            "via": row.get("via", "gfs"),
         }
 
     async def release_invite_token_use(self, token):
@@ -402,7 +407,9 @@ def _a_space(space_id, *, owner_instance_id="issuer-1", min_age=0):
         owner_username="owner",
         identity_public_key="aa" * 32,
         config_sequence=1,
-        features=SpaceFeatures(),
+        # The connection-server option is ON: the bootstrap tests redeem
+        # through the relay (an OFF private space refuses that).
+        features=SpaceFeatures(private_gfs=True),
         space_type=SpaceType.PRIVATE,
         join_mode=JoinMode.INVITE_ONLY,
         min_age=min_age,
@@ -2324,6 +2331,7 @@ class _RecordingSpaceService:
         self.joined: list[dict] = []
         self.elevations: list[dict] = []
         self.revoked: list[tuple[str, bool]] = []
+        self.unlocked: list[str] = []
 
     async def broadcast_remote_member_joined(self, space_id, **kwargs):
         self.joined.append({"space_id": space_id, **kwargs})
@@ -2333,6 +2341,10 @@ class _RecordingSpaceService:
 
     async def revoke_space_session_if_orphaned(self, instance_id, *, notify=True):
         self.revoked.append((instance_id, notify))
+        return True
+
+    async def enable_private_gfs_for_legacy_link(self, space_id):
+        self.unlocked.append(space_id)
         return True
 
 
@@ -2853,3 +2865,172 @@ async def test_bootstrap_ack_carries_the_link_joined_households_cert():
         ("space-1", {"for": env.redeemer_party.instance_id}),
         ("space-1", {"channel_for": env.redeemer_party.instance_id}),
     ]
+
+
+# ── Private spaces: the connection-server option and the link type ─────
+
+
+def _set_space(env, **features):
+    space = env.issuer_spaces.space_rows_for_get["space-1"]
+    env.issuer_spaces.space_rows_for_get["space-1"] = replace(
+        space, features=replace(space.features, **features)
+    )
+
+
+@pytest.mark.security
+async def test_bootstrap_into_a_private_space_with_the_option_off_is_refused():
+    """A private space whose owner never turned the connection server on
+    seats nobody through the relay — and the link keeps its use."""
+    env = _bootstrap_pair()
+    _set_space(env, private_gfs=False)
+    with pytest.raises(SpacePermissionError):
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+    assert env.issuer_spaces.space_instances == []
+    assert env.issuer_members.added == []
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
+    assert env.issuer_repo.saved == []
+
+
+@pytest.mark.security
+async def test_bootstrap_of_an_internal_link_is_refused_even_with_the_option_on():
+    """The issuer's key-wrap key is the same on every code it minted, so a
+    holder of an internal token could graft it onto a relayed redeem — the
+    issuer refuses it by the token's own type."""
+    env = _bootstrap_pair()
+    env.issuer_spaces.tokens["tok-1"]["via"] = "internal"
+    with pytest.raises(SpacePermissionError):
+        await env.redeemer.request_redeem(
+            "tok-1",
+            viewer_user_id="u-local",
+            issuer_instance_id=env.issuer_party.instance_id,
+            bootstrap=env.hint,
+        )
+    assert env.issuer_members.added == []
+    assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
+
+
+async def test_bootstrap_into_a_public_space_is_unchanged():
+    env = _bootstrap_pair()
+    _set_space(env, private_gfs=False)
+    space = env.issuer_spaces.space_rows_for_get["space-1"]
+    env.issuer_spaces.space_rows_for_get["space-1"] = replace(
+        space, space_type=SpaceType.PUBLIC
+    )
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["space_id"] == "space-1"
+
+
+def _internal_pair(
+    *, sender_source: InstanceSource, private_gfs: bool = True, space_service=None
+):
+    sender, issuer, _sf, _if, issuer_repo, issuer_members = _wire_pair(
+        {
+            "space_id": "sp-1",
+            "created_by": "owner",
+            "uses_remaining": 1,
+            "via": "internal",
+        },
+    )
+    issuer._federation_repo = _FakeFederationRepo(  # noqa: SLF001
+        {"sender-1": _FakeInstance("sender-1", source=sender_source)}
+    )
+    issuer_repo.space_rows_for_get["sp-1"] = replace(
+        _a_space("sp-1"),
+        features=replace(_a_space("sp-1").features, private_gfs=private_gfs),
+    )
+    if space_service is not None:
+        issuer.attach_space_service(space_service)
+    return sender, issuer_repo, issuer_members
+
+
+async def test_an_internal_link_redeems_for_a_paired_household():
+    sender, issuer_repo, issuer_members = _internal_pair(
+        sender_source=InstanceSource.MANUAL, private_gfs=False
+    )
+    result = await sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    assert result["space_id"] == "sp-1"
+    assert len(issuer_members.added) == 1
+
+
+@pytest.mark.security
+async def test_an_internal_link_is_refused_over_the_relay_from_a_link_joined_household():
+    """A household seated through an invite link (another space) has no
+    route to us but the connection-server relay: its plain §D2 redeem of an
+    internal link would ride the relay, so it is refused."""
+    sender, issuer_repo, issuer_members = _internal_pair(
+        sender_source=InstanceSource.SPACE_SESSION
+    )
+    with pytest.raises(SpacePermissionError):
+        await sender.request_redeem(
+            "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+        )
+    assert issuer_members.added == []
+    assert issuer_repo.tokens["good-token"]["uses_remaining"] == 1
+
+
+@pytest.mark.security
+async def test_a_relayed_redeem_into_an_off_private_space_is_refused():
+    sender, issuer_repo, issuer_members = _internal_pair(
+        sender_source=InstanceSource.SPACE_SESSION, private_gfs=False
+    )
+    issuer_repo.tokens["good-token"]["via"] = "gfs"
+    with pytest.raises(SpacePermissionError):
+        await sender.request_redeem(
+            "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+        )
+    assert issuer_members.added == []
+
+
+# ── Grandfathered (pre-0079) links of a private space left OFF ─────────
+
+
+@pytest.mark.security
+async def test_a_grandfathered_link_still_redeems_over_the_relay_and_turns_it_on():
+    """Owner decision 2026-10-04: a live pre-0079 link of a private space
+    the migration left OFF stays redeemable over the relay; the first
+    household that joins through it turns ``private_gfs`` ON on the host."""
+    env = _bootstrap_pair()
+    _set_space(env, private_gfs=False)
+    env.issuer_spaces.tokens["tok-1"]["via"] = "gfs_legacy"
+    recorder = _RecordingSpaceService()
+    env.issuer.attach_space_service(recorder)
+    result = await env.redeemer.request_redeem(
+        "tok-1",
+        viewer_user_id="u-local",
+        issuer_instance_id=env.issuer_party.instance_id,
+        bootstrap=env.hint,
+    )
+    assert result["space_id"] == "space-1"
+    assert recorder.unlocked == ["space-1"]
+    # Unlocked only once the joiner is a fan-out target (its grants follow).
+    assert ("space-1", env.redeemer_party.instance_id) in (
+        env.issuer_spaces.space_instances
+    )
+
+
+async def test_a_grandfathered_link_redeemed_directly_does_not_turn_it_on():
+    """A paired household needs no connection server: its direct redeem of
+    a grandfathered link seats it and leaves the option OFF."""
+    recorder = _RecordingSpaceService()
+    sender, issuer_repo, issuer_members = _internal_pair(
+        sender_source=InstanceSource.MANUAL, private_gfs=False, space_service=recorder
+    )
+    issuer_repo.tokens["good-token"]["via"] = "gfs_legacy"
+    result = await sender.request_redeem(
+        "good-token", viewer_user_id="u-local", issuer_instance_id="issuer-1"
+    )
+    assert result["space_id"] == "sp-1"
+    assert len(issuer_members.added) == 1
+    assert recorder.unlocked == []

@@ -64,9 +64,12 @@ from ..domain.media_constraints import (
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
 from ..domain.space import (
+    INVITE_VIA_GFS_LEGACY,
+    INVITE_VIA_INTERNAL,
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
+    SpaceType,
     mirrorable_remote_role,
     owner_seat_from_roster,
 )
@@ -238,6 +241,10 @@ class _SeatReservation:
     display_name: str | None
     seat: str
     pending_admin: bool
+    #: A grandfathered (``gfs_legacy``) link seated this household over the
+    #: relay into a private space whose ``private_gfs`` is OFF: the commit
+    #: turns the option ON (the owner's normal ON path).
+    unlock_private_gfs: bool = False
 
 
 class SpaceInviteTokenRedeemCoordinator:
@@ -946,6 +953,11 @@ class SpaceInviteTokenRedeemCoordinator:
             )
             return
 
+        # A household seated through an invite link (``space_session``) has
+        # no other route to us than the connection-server relay, so its §D2
+        # redeem rode the relay — exactly like a §D2b bootstrap redeem.
+        sender = await self._federation_repo.get_instance(event.from_instance)
+        over_gfs = sender is not None and sender.source is InstanceSource.SPACE_SESSION
         async with self._redeem_lock(event.from_instance):
             (
                 ack_payload,
@@ -957,6 +969,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 redeemer_user_id=redeemer_user_id,
                 redeemer_pk=redeemer_pk,
                 redeemer_display=redeemer_display,
+                over_gfs=over_gfs,
             )
             if ack_payload is None:
                 await self._send_deny(
@@ -1017,6 +1030,7 @@ class SpaceInviteTokenRedeemCoordinator:
         redeemer_pk: str | None,
         redeemer_display: str | None,
         bootstrap: bool = False,
+        over_gfs: bool = False,
     ) -> tuple[dict | None, str | None, _SeatReservation | None]:
         """Issuer-side authorization + seating for one redeem.
 
@@ -1024,6 +1038,14 @@ class SpaceInviteTokenRedeemCoordinator:
         connection server's size-capped relay: the snapshot's cover and
         icon are bounded to ``SPACE_*_BOOTSTRAP_MAX_BYTES`` instead of the
         peer-envelope defaults.
+
+        ``over_gfs`` (implied by ``bootstrap``) marks a redeem that reached
+        us over the connection-server relay. Such a redeem is refused — the
+        use handed back — for an ``internal`` link (migration 0079), and for
+        any link of a PRIVATE space whose owner has ``private_gfs`` OFF: an
+        internal link, or a private space that does not use a connection
+        server, never seats a household through one. Read from the consumed
+        row and the stored space, never from the request.
 
         Returns ``(ack_body, None, reservation)`` on success or
         ``(None, reason, None)`` on every denial. The redeem is NOT
@@ -1082,6 +1104,20 @@ class SpaceInviteTokenRedeemCoordinator:
         space_id = str(row.get("space_id") or "")
         if not space_id:
             log.warning("invite redeem: consumed token row carried no space_id")
+            return None, REDEEM_DENY_REASON, None
+
+        relayed = bootstrap or over_gfs
+        allowed, unlock = (
+            await self._relay_redeem_allowed(row) if relayed else (True, False)
+        )
+        if not allowed:
+            log.info(
+                "invite redeem: refused a redeem over the connection-server "
+                "relay for space %s — the link is internal, or the private "
+                "space does not use a connection server",
+                space_id,
+            )
+            await self._release_token_use(token, space_id)
             return None, REDEEM_DENY_REASON, None
 
         # The seat the ISSUER decided at mint time (migration 0053). The
@@ -1163,6 +1199,7 @@ class SpaceInviteTokenRedeemCoordinator:
             display_name=redeemer_display,
             seat=seat,
             pending_admin=pending_admin,
+            unlock_private_gfs=unlock,
         )
 
         # An ADMIN seat gets the ROLE and nothing else. NO signing-seed
@@ -1367,6 +1404,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 res.space_id,
                 res.instance_id,
             )
+        await self._unlock_private_gfs(res)
         if res.pending_admin and self._space_service is not None:
             # Host-side pending elevation for the owner to approve. The
             # owner can still promote from the members list if it raises.
@@ -1384,6 +1422,23 @@ class SpaceInviteTokenRedeemCoordinator:
                     res.space_id,
                     res.instance_id,
                 )
+
+    async def _unlock_private_gfs(self, res: _SeatReservation) -> None:
+        """A grandfathered link just seated a household over the relay into a
+        private space whose ``private_gfs`` is OFF: turn it ON on the host
+        through the owner's normal path (config federation, channel,
+        grants). Runs after the seat and its ``space_instances`` row exist,
+        so the new channel's grants reach the joiner too. Fail-soft."""
+        if not res.unlock_private_gfs or self._space_service is None:
+            return
+        try:
+            await self._space_service.enable_private_gfs_for_legacy_link(res.space_id)
+        except Exception:
+            log.exception(
+                "invite redeem: turning private_gfs on after a grandfathered "
+                "link failed for space_id=%s",
+                res.space_id,
+            )
 
     async def _rollback_redeem(
         self,
@@ -1432,6 +1487,24 @@ class SpaceInviteTokenRedeemCoordinator:
                     "invite redeem: dropping the space-session seat of %s failed",
                     res.instance_id,
                 )
+
+    async def _relay_redeem_allowed(self, row: dict) -> tuple[bool, bool]:
+        """``(allowed, unlock)`` for a consumed token ``row`` redeemed through
+        the connection-server relay. Never an ``internal`` link; never a link
+        of a PRIVATE space whose owner has ``private_gfs`` OFF — except a
+        grandfathered ``gfs_legacy`` link (minted before migration 0079),
+        which still seats and then turns the option ON (``unlock``)."""
+        via = str(row.get("via") or "")
+        if via == INVITE_VIA_INTERNAL:
+            return False, False
+        space = await self._spaces.get(str(row.get("space_id") or ""))
+        if space is None:
+            return False, False
+        if space.space_type is not SpaceType.PRIVATE or space.features.private_gfs:
+            return True, False
+        if via == INVITE_VIA_GFS_LEGACY:
+            return True, True
+        return False, False
 
     async def _release_token_use(self, token: str, space_id: str) -> None:
         try:

@@ -10,18 +10,20 @@ server knows only by a random id and a channel key — never the space id,
 name or authority key (wire shapes: :mod:`socialhome.domain.gfs_channel`;
 keys: :mod:`socialhome.gfs_channel`; server: ``global_server/channels.py``).
 
-**Which spaces get one (the owner decides, automatically).** A PRIVATE space
-this household owns (seed matching the pin) that has at least one live
-link-joined member household, while at least one active connection server
-proves ``private_channels`` in its signed ``/gfs/info``
-(:meth:`GfsChannelService.reconcile`). Checked when a remote seat goes live
-(:class:`SpaceRemoteSeatLive`), at every content-key rotation (before the
-member rekey, so the rekey carries the grants) and on every GFS
-(re)connect. A space that stops qualifying (its last link-joined member
-left, it is no longer private) has its channel unregistered and forgotten;
-its members simply get no grant for the next epoch, which ends their use of
-it. No space that doesn't already use the connection-server relay ever gets
-channel material.
+**Which spaces get one (the owner's explicit option).** A PRIVATE space this
+household owns (seed matching the pin) whose owner turned
+``SpaceFeatures.private_gfs`` ON ("use the connection server for this
+space"), that has at least one live remote member household, while at least
+one active connection server proves ``private_channels`` in its signed
+``/gfs/info`` (:meth:`GfsChannelService.reconcile`). Checked when the owner
+turns the option on (:meth:`GfsChannelService.enable`), when a remote seat
+goes live (:class:`SpaceRemoteSeatLive`), at every content-key rotation
+(before the member rekey, so the rekey carries the grants) and on every GFS
+(re)connect. A space that stops qualifying (the option turned off, its last
+remote member left, it is no longer private) has its channel unregistered
+and forgotten; its members simply get no grant for the next epoch, which
+ends their use of it. A private space with the option OFF never gets channel
+material, and never touches a connection server.
 
 **The channel.** A random 128-bit id (``new_channel_id``) and a key
 HKDF-derived from the space seed with its own domain separation, registered
@@ -34,24 +36,25 @@ key and could race any re-pin chained to it.
 **Grants.** Every seed holder derives the channel key and issues, per member
 household and epoch, a :class:`~socialhome.domain.gfs_channel.GfsChannelGrant`
 (channel cert for a writer in a trusted space, channel writer key in a
-strict space, and a pass ONLY for a link-joined household — the only seats;
-a paired member's grant is publish-only), bound to the space by the space
-authority key. It rides INSIDE the per-peer encrypted payloads of
+strict space, and a seat pass for EVERY member household — link-joined,
+paired and mesh-only: the owner's ``private_gfs`` opt-in), bound to the
+space by the space authority key. It rides INSIDE the per-peer encrypted payloads of
 the four channels that already carry writer certs — never to a household
 below v_51 (:data:`FederationCapability.MIN_FOR_PRIVATE_CHANNELS`), never to
 ourselves. The owner itself holds no grant and never subscribes: it receives
 everything over federation.
 
 **Members** verify a grant against the pinned space key, keep it
-KEK-wrapped on that epoch's key row, subscribe with its pass when they have
-one (identified, like a follower — the accepted residual: the server learns
-the link-joined households), and publish items to it: trusted with the
-channel cert (identified), strict with the channel writer key (anonymous).
-A paired member never subscribes; it catches the link-joined members' items
-up from the host by §25.6 sync when the host is back (it re-advertises its
-capabilities on startup). Without
-a grant for the current epoch, nothing goes to any server — the host path
-always carries the item.
+KEK-wrapped on that epoch's key row, subscribe with its pass on every server
+it names that they are connected to (identified, like a follower — the
+accepted residual: the server learns the member households connected to
+it), and publish items to it: trusted with the channel cert (identified),
+strict with the channel writer key (anonymous). A member without a usable
+seat (not connected to the channel's server, or a v_51 owner's publish-only
+grant) catches the others' items up from the host by §25.6 sync when the
+host is back (it re-advertises its capabilities on startup). Without a grant
+for the current epoch, nothing goes to any server — the host path always
+carries the item.
 
 **Self-heal.** The server answers the owner's notice with what it holds;
 when another channel-key holder moved the channel past the owner's CURRENT
@@ -84,6 +87,7 @@ import aiohttp
 
 from ..crypto import b64url_decode, b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.events import (
+    SpaceFeaturesApplied,
     PeerCapabilitiesAdvertised,
     PeerTransportChanged,
     SpaceRemoteSeatLive,
@@ -313,6 +317,9 @@ class GfsChannelService:
         bus.subscribe(SpaceRemoteSeatLive, self._on_seat_live)
         bus.subscribe(PeerTransportChanged, self._on_peer_transport)
         bus.subscribe(PeerCapabilitiesAdvertised, self._on_peer_advertised)
+        # The owner's applied config (stored, validated, pinned): a member
+        # drops its seat when ``private_gfs`` went off, takes it when on.
+        bus.subscribe(SpaceFeaturesApplied, self._on_features_applied)
 
     async def start(self) -> None:
         self._stopping = False
@@ -396,11 +403,14 @@ class GfsChannelService:
     # ── Owner: create / keep / retire ────────────────────────────────────
 
     async def eligible(self, space: "Space", *, joining: str | None = None) -> bool:
-        """A PRIVATE space we own, our seed matching the pin, with at least
-        one live link-joined member household (``joining`` counts too: the
-        seat-live event fires before its ``space_instances`` row lands)."""
+        """A PRIVATE space we own whose owner turned ``private_gfs`` ON, our
+        seed matching the pin, with at least one live remote member household
+        — link-joined, paired or mesh-only (``joining`` counts too: the
+        seat-live event fires before its ``space_instances`` row lands). A
+        space with the option OFF never gets a channel."""
         if (
             space.space_type is not SpaceType.PRIVATE
+            or not space.features.private_gfs
             or space.owner_instance_id != self._own_instance_id
             or await self._matching_seed(space) is None
         ):
@@ -410,9 +420,20 @@ class GfsChannelService:
             candidates.add(joining)
         candidates.discard(self._own_instance_id)
         for inst in candidates:
-            if await self._is_link_joined(space.id, inst):
+            if await self._live_seat(space.id, inst):
                 return True
         return False
+
+    async def enable(self, space_id: str) -> str:
+        """The owner just turned ``private_gfs`` ON: create the channel when
+        the space now qualifies, announce it and hand every member household
+        its grant (with a seat pass) in a roster snapshot. Returns the
+        :meth:`reconcile` outcome."""
+        result = await self.reconcile(space_id)
+        if result in ("created", "kept"):
+            await self.announce_epoch(space_id)
+            await self.distribute(space_id)
+        return result
 
     async def reconcile(
         self, space_id: str, *, joining: str | None = None, fresh: bool = False
@@ -558,8 +579,8 @@ class GfsChannelService:
                 )
         await self._spaces.set_gfs_channel(space.id, None, None)
         log.info(
-            "gfs.channel: retired channel %s — private space %s has no link-joined "
-            "member left",
+            "gfs.channel: retired channel %s — private space %s no longer uses "
+            "the connection server",
             channel_id,
             space.id,
         )
@@ -586,6 +607,68 @@ class GfsChannelService:
                 log.exception("gfs.channel: snapshot to %s failed", inst)
         return done
 
+    async def _on_features_applied(self, event: SpaceFeaturesApplied) -> None:
+        """After an inbound ``SPACE_CONFIG_CHANGED`` was applied: re-read the
+        STORED space (the inbound service already validated and pinned it)
+        and follow the owner's ``private_gfs`` on a space we are a member
+        of."""
+        space_id = event.space_id
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or space.owner_instance_id == self._own_instance_id
+        ):
+            return
+        if space.features.private_gfs:
+            self._spawn(self.subscribe(space_id), "subscribe")
+        else:
+            await self.drop_stale(space_id)
+
+    async def drop_stale(self, space_id: str) -> bool:
+        """Member side: leave a channel we may no longer use — the owner
+        turned ``private_gfs`` off, or the current epoch came without a grant
+        though an earlier one carried one (the owner retired the channel or
+        removed us from it). Unsubscribes at the servers the last grant
+        named and forgets the channel. ``True`` when a seat was dropped."""
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or space.owner_instance_id == self._own_instance_id
+        ):
+            return False
+        stored = await self._spaces.get_gfs_channel(space_id)
+        if stored is None:
+            return False
+        grant = await self.current_grant(space_id)
+        if grant is not None and space.features.private_gfs:
+            return False  # still ours to use
+        if grant is None:
+            grant = await self._previous_grant(space_id)
+        gfs_ids = grant.gfs_ids if grant is not None else ()
+        await self._spaces.set_gfs_channel(space_id, None, None)
+        if gfs_ids:
+            await self._unsubscribe_all(stored[0], gfs_ids)
+        log.info(
+            "gfs.channel: left channel %s of private space %s (no grant for "
+            "the current epoch, or the owner turned the connection server off)",
+            stored[0],
+            space_id,
+        )
+        return True
+
+    async def _previous_grant(self, space_id: str) -> GfsChannelGrant | None:
+        """The newest stored grant below the current epoch that still names
+        the stored channel."""
+        epoch = await self._crypto.get_current_epoch(space_id)
+        if epoch is None:
+            return None
+        found = await self._keys.latest_gfs_channel_before(space_id, epoch)
+        if found is None:
+            return None
+        return await self.own_grant(space_id, found[0])
+
     async def _on_seat_live(self, event: SpaceRemoteSeatLive) -> None:
         self._spawn(self._after_seat(event.space_id, event.instance_id), "seat")
 
@@ -600,11 +683,11 @@ class GfsChannelService:
         await self._host_back(event.instance_id)
 
     async def _host_back(self, host: str) -> None:
-        """When ``host`` is the host of a private space where we hold a
-        publish-only grant (a paired member: no seat on the channel), ask it
-        for a catch-up sync shortly — that is how the link-joined members'
-        items, which only reached the host while it was away, reach us. One
-        pending catch-up per space."""
+        """When ``host`` is the host of a private space where we hold a grant
+        but no usable seat (a publish-only grant, or a pass for servers we
+        are not connected to), ask it for a catch-up sync shortly — that is
+        how the other members' items, which only reached the host while it
+        was away, reach us. One pending catch-up per space."""
         if self._sync is None:
             return
         for space in await self._spaces.list_all():
@@ -615,7 +698,11 @@ class GfsChannelService:
             ):
                 continue
             grant = await self.current_grant(space.id)
-            if grant is None or grant.channel_pass is not None:
+            if grant is None:
+                continue
+            if grant.channel_pass is not None and await self._capable_in(grant.gfs_ids):
+                # We hold a seat on a server we are connected to: the
+                # others' items reached us live.
                 continue
             log.info(
                 "gfs.channel: host of %s is back — catch-up sync in %.0f s",
@@ -658,9 +745,10 @@ class GfsChannelService:
 
     async def on_rotation(self, space_id: str) -> int:
         """At every content-key rotation, BEFORE the member rekey: the owner
-        reconciles (so a space that lost its last link-joined member retires
-        its channel, and a newly qualifying one gets it in this rekey), then
-        any seed holder announces the new epoch. Never raises."""
+        reconciles (so a space that lost its last remote member, or whose
+        owner turned ``private_gfs`` off, retires its channel, and a newly
+        qualifying one gets it in this rekey), then any seed holder announces
+        the new epoch. Never raises."""
         try:
             await self.reconcile(space_id)
             return await self.announce_epoch(space_id)
@@ -1003,12 +1091,17 @@ class GfsChannelService:
             if scope is not None and strict
             else None
         )
-        # Only a link-joined household takes a seat (the GFS must see as
-        # little as possible: the seats are exactly the households it
-        # already relays envelopes for). A paired member's grant is
-        # publish-only; it gets the others' items from the host.
-        link_joined = await self._is_link_joined(space_id, instance_id)
-        if not link_joined and cert is None and writer_key is None:
+        # Who takes a seat: a link-joined household always (it reaches the
+        # host only over the server anyway). With the owner's ``private_gfs``
+        # ON, every member household too — paired and mesh-only — so all of
+        # them receive each other's items while the host is offline: the
+        # owner's explicit opt-in to the server learning those households.
+        # Without the option a paired member's grant would be publish-only
+        # (#815) — but a space with the option OFF has no channel at all.
+        seated = space.features.private_gfs or await self._is_link_joined(
+            space_id, instance_id
+        )
+        if not seated and cert is None and writer_key is None:
             return None
         grant = GfsChannelGrant(
             channel_suite="ed25519",
@@ -1027,7 +1120,7 @@ class GfsChannelService:
                     epoch=wire_epoch,
                     instance_pk=pk,
                 )
-                if link_joined
+                if seated
                 else None
             ),
             channel_cert=cert,
@@ -1157,9 +1250,14 @@ class GfsChannelService:
     async def subscribe(self, space_id: str, *, only: str | None = None) -> int:
         """Take our fan-out seat on the channel's servers with the current
         grant's pass. Fail-soft per server. Returns how many accepted."""
+        space = await self._spaces.get(space_id)
+        if space is None or not space.features.private_gfs:
+            # Defence in depth: never a seat for a space whose stored option
+            # is OFF, whatever grant we hold.
+            return 0
         grant = await self.current_grant(space_id)
         if grant is None or grant.channel_pass is None:
-            # A publish-only (paired) member never takes a seat.
+            # A publish-only member never takes a seat.
             return 0
         done = 0
         for conn in await self._capable_in(grant.gfs_ids):
@@ -1210,7 +1308,11 @@ class GfsChannelService:
         writer key (never identified there); or a trusted grant without a
         channel cert (a reader seat). ``[]`` means the host path."""
         space = await self._spaces.get(space_id)
-        if space is None or space.space_type is not SpaceType.PRIVATE:
+        if (
+            space is None
+            or space.space_type is not SpaceType.PRIVATE
+            or not space.features.private_gfs
+        ):
             return []
         grant = await self.current_grant(space_id)
         if grant is None:
@@ -1236,7 +1338,7 @@ class GfsChannelService:
         space. Returns the servers that accepted on the first attempt."""
         grant = await self.own_grant(space_id, epoch)
         space = await self._spaces.get(space_id)
-        if grant is None or space is None:
+        if grant is None or space is None or not space.features.private_gfs:
             return []
         if grant.writer_key is not None:
             kind = _KIND_ANON
@@ -1268,7 +1370,7 @@ class GfsChannelService:
         epoch = int(data["epoch"])
         grant = await self.own_grant(space_id, epoch)
         space = await self._spaces.get(space_id)
-        if grant is None or space is None:
+        if grant is None or space is None or not space.features.private_gfs:
             return PublishOutcome.permanent()
         if anon:
             client = self._gfs.publish_client()

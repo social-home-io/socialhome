@@ -43,6 +43,8 @@ from ..domain.events import SpaceMemberLocationOptedIn
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.post import LocationData, PostType
 from ..domain.space import (
+    INVITE_VIA_INTERNAL,
+    INVITE_VIAS,
     PUBLIC_SPACE_TIERS,
     SpaceFeatures,
     SpacePermissionError,
@@ -84,7 +86,8 @@ def _features_from_body(
 
     The wire shape mirrors :meth:`SpaceFeatures.to_wire_dict` —
     boolean flags + access-level enums + an ``allowed_post_types``
-    list + ``gfs_publish_mode`` (``"trusted"`` / ``"strict"``, owner-only).
+    list + ``gfs_publish_mode`` (``"trusted"`` / ``"strict"``, owner-only) +
+    ``private_gfs`` (boolean, owner-only, private spaces).
     Missing keys fall back to *defaults*.
     Returns ``None`` when the caller didn't include a ``features``
     block, so the service layer treats it as "leave unchanged".
@@ -104,6 +107,10 @@ def _features_from_body(
     mode = raw.get("gfs_publish_mode")
     if mode is not None and mode not in GFS_PUBLISH_MODES:
         raise ValueError("gfs_publish_mode must be 'trusted' or 'strict'")
+    # ``private_gfs`` likewise: a JSON boolean, never a truthy string.
+    private_gfs = raw.get("private_gfs")
+    if private_gfs is not None and not isinstance(private_gfs, bool):
+        raise ValueError("private_gfs must be a boolean")
     return SpaceFeatures.from_wire_dict(raw, defaults=defaults)
 
 
@@ -1273,13 +1280,22 @@ class SpaceInviteTokenView(BaseView):
     """``POST /api/spaces/{id}/invite-tokens`` — mint an invite link.
     ``GET`` — list the space's live links (admin or owner).
 
-    POST body: ``{role?, uses?, ttl_seconds?: int | null, publish_to_gfs?}``.
+    POST body: ``{role?, uses?, ttl_seconds?: int | null, publish_to_gfs?,
+    via?: "gfs" | "internal"}``.
     ``role`` is the seat the redeemer lands in (``member`` — the default
     — / ``subscriber`` / ``admin``) and is the ISSUER's decision: it is
     stored on the token row and the redeemer never gets to ask for it.
     Minting ``admin`` is owner-only, ``owner`` is never mintable.
     ``publish_to_gfs`` is a paired connection server's id — the link's
     blob is parked there and the response carries the shareable URL.
+
+    ``via`` is the link's type: ``"gfs"`` — a household that never met us
+    redeems it through the connection-server relay; ``"internal"`` — only
+    households paired with us or reachable over the mesh, never touching a
+    connection server. Omitted: ``"internal"`` on a private space whose
+    owner has not turned ``features.private_gfs`` on, ``"gfs"`` otherwise.
+    ``"gfs"`` on such a private space → 409 ``PRIVATE_GFS_OFF``; an
+    unknown value, or ``"internal"`` with ``publish_to_gfs`` → 422.
 
     ``ttl_seconds`` bounds the link's lifetime and defaults to
     :data:`DEFAULT_INVITE_TOKEN_TTL_SECONDS` when omitted. **Both
@@ -1336,6 +1352,17 @@ class SpaceInviteTokenView(BaseView):
                 # boundary owns the two spellings.
                 ttl_seconds = None
         publish_raw = body.get("publish_to_gfs")
+        via_raw = body.get("via")
+        if via_raw is not None and via_raw not in INVITE_VIAS:
+            return error_response(
+                422, "UNPROCESSABLE", "via must be 'gfs' or 'internal'"
+            )
+        if via_raw == INVITE_VIA_INTERNAL and publish_raw:
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                "An internal link is never published to a connection server.",
+            )
         try:
             link = await svc.create_invite_link(
                 space_id,
@@ -1344,6 +1371,7 @@ class SpaceInviteTokenView(BaseView):
                 uses=body.get("uses", 1),
                 ttl_seconds=ttl_seconds,
                 publish_to_gfs=str(publish_raw) if publish_raw else None,
+                via=via_raw,
             )
         except GfsConnectionError as exc:
             # Nothing was persisted — the publish runs before the row is

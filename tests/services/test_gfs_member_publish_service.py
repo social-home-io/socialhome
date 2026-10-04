@@ -1209,6 +1209,10 @@ class _Channels:
 
     async def retire(self, space_id):
         self.rotations.append(f"retire:{space_id}")
+
+    async def enable(self, space_id):
+        self.rotations.append(f"enable:{space_id}")
+        return "created"
         return True
 
 
@@ -1265,6 +1269,8 @@ async def test_private_epoch_notices_and_heal_go_to_the_channel(world):
     assert channels.healed == ["conn-1"]
     await svc.retire_channel(SPACE_ID)
     assert channels.rotations[-1] == f"retire:{SPACE_ID}"
+    await svc.enable_channel(SPACE_ID)
+    assert channels.rotations[-1] == f"enable:{SPACE_ID}"
 
 
 async def test_a_public_space_never_touches_the_channel(world):
@@ -1272,4 +1278,5 @@ async def test_a_public_space_never_touches_the_channel(world):
     world["svc"].attach_channels(channels)
     assert not await world["svc"].channel_space(SPACE_ID)
     await world["svc"].reconcile_channel(SPACE_ID)
+    await world["svc"].enable_channel(SPACE_ID)
     assert channels.rotations == []

@@ -554,6 +554,152 @@ async def test_an_unknown_gfs_publish_mode_is_a_422(client):
     assert r.status == 422, await r.text()
 
 
+# ── private_gfs (owner-only) + invite link type ──────────────────────────
+
+
+async def _private_space(client, name: str) -> str:
+    r = await client.post(
+        "/api/spaces",
+        json={"name": name, "space_type": "private"},
+        headers=_auth(client._admin_token),
+    )
+    return (await r.json())["id"]
+
+
+async def _features(client, sid: str) -> dict:
+    r = await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    return (await r.json())["features"]
+
+
+async def test_private_gfs_defaults_off_and_the_owner_turns_it_on(client):
+    sid = await _private_space(client, "PrivGfs")
+    assert (await _features(client, sid))["private_gfs"] is False
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"private_gfs": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    assert (await _features(client, sid))["private_gfs"] is True
+
+
+async def test_private_gfs_change_by_an_admin_is_forbidden(client):
+    sid = await _private_space(client, "PrivGfsAdmin")
+    await _promote_bob_to_admin(client, sid)
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"private_gfs": True}},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403, await r.text()
+    assert (await _features(client, sid))["private_gfs"] is False
+
+
+async def test_a_non_boolean_private_gfs_is_a_422(client):
+    sid = await _private_space(client, "PrivGfsBad")
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"private_gfs": "false"}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422, await r.text()
+    assert (await _features(client, sid))["private_gfs"] is False
+
+
+async def test_turning_private_gfs_off_with_link_joined_members_is_a_409(client):
+    sid = await _private_space(client, "PrivGfsStranded")
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"private_gfs": True}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, source) VALUES('link-hh', 'Erin home', 'pk', 'k1',"
+        " 'k2', '', 'inbox-link-hh', 'space_session')"
+    )
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id,"
+        " display_name) VALUES(?, 'link-hh', 'u-erin', 'Erin')",
+        (sid,),
+    )
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"private_gfs": False}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 409, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "PRIVATE_GFS_LINK_MEMBERS"
+    assert body["error"]["households"] == [
+        {
+            "instance_id": "link-hh",
+            "display_name": "Erin home",
+            "members": [{"user_id": "u-erin", "display_name": "Erin"}],
+        }
+    ]
+    assert (await _features(client, sid))["private_gfs"] is True
+
+
+async def test_invite_link_type_on_a_private_space(client):
+    sid = await _private_space(client, "PrivLinks")
+    # Off: the default is internal, and a gfs link is a 409.
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 201, await r.text()
+    assert (await r.json())["via"] == "internal"
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"via": "gfs"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 409, await r.text()
+    assert (await r.json())["error"]["code"] == "PRIVATE_GFS_OFF"
+    # On: the default is gfs; internal stays available.
+    await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"private_gfs": True}},
+        headers=_auth(client._admin_token),
+    )
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={},
+        headers=_auth(client._admin_token),
+    )
+    assert (await r.json())["via"] == "gfs"
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json={"via": "internal"},
+        headers=_auth(client._admin_token),
+    )
+    assert (await r.json())["via"] == "internal"
+    r = await client.get(
+        f"/api/spaces/{sid}/invite-tokens", headers=_auth(client._admin_token)
+    )
+    vias = sorted(t["via"] for t in (await r.json())["tokens"])
+    assert vias == ["gfs", "internal", "internal"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"via": "relay"}, {"via": 1}, {"via": "internal", "publish_to_gfs": "g1"}],
+)
+async def test_a_bad_invite_link_type_is_a_422(client, body):
+    sid = await _private_space(client, "PrivLinksBad")
+    r = await client.post(
+        f"/api/spaces/{sid}/invite-tokens",
+        json=body,
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422, await r.text()
+
+
 async def test_the_space_detail_says_whether_a_private_channel_is_in_use(client):
     """v_51 — the SPA shows the publish-mode choice on a private space only
     once it reaches link-joined members over an opaque channel."""
@@ -2530,7 +2676,12 @@ async def test_mint_invite_link_returns_the_full_shape(client):
     import base64
     import json
 
-    sid = await _a_space(client, "LinkShape")
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "LinkShape", "space_type": "public"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
     resp = await client.post(
         f"/api/spaces/{sid}/invite-tokens",
         json={"role": "subscriber", "uses": 3},
@@ -2539,6 +2690,7 @@ async def test_mint_invite_link_returns_the_full_shape(client):
     assert resp.status == 201
     body = await resp.json()
     assert body["role"] == "subscriber"
+    assert body["via"] == "gfs"
     assert body["uses_remaining"] == 3
     assert body["gfs"] is None
     assert body["created_by"] and body["created_at"] and body["expires_at"]

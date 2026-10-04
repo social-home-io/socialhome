@@ -3,9 +3,10 @@ connection server nothing about the space.
 
 Drives a real GFS app end to end with the households' real services: the
 owner's :class:`GfsChannelService` registers the channel and announces its
-epoch; a link-joined member takes a seat, and a paired member (publish-only,
-never a seat) publishes through the real :class:`GfsMemberPublishService`
-(trusted, then strict).
+epoch (the owner turned ``private_gfs`` ON); a link-joined member and a
+paired member both take a seat, and the paired member publishes through the
+real :class:`GfsMemberPublishService` (trusted, then strict). A private space
+with the option OFF sends the server nothing at all.
 Every place the server could see or keep anything is checked — every request
 it receives over every session (URL and body), its log records, its database
 file and the fan-out frames. None may carry the private space's id, its name
@@ -19,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -242,7 +244,9 @@ def _space(owner: str, *, strict: bool = False) -> Space:
         owner_username="o",
         identity_public_key=SPACE_PK.hex(),
         config_sequence=0,
-        features=SpaceFeatures(gfs_publish_mode="strict" if strict else "trusted"),
+        features=SpaceFeatures(
+            gfs_publish_mode="strict" if strict else "trusted", private_gfs=True
+        ),
         space_type=SpaceType.PRIVATE,
         join_mode=JoinMode.INVITE_ONLY,
     )
@@ -369,9 +373,7 @@ async def test_the_gfs_never_learns_the_private_space(world):
     await _grant(world, world.a)
     await _grant(world, world.b)
 
-    # Trusted: a publishes a post; b's seat gets it.
-    # Trusted: paired b (publish-only, no seat) publishes; link-joined a's
-    # seat gets it.
+    # Trusted: paired b publishes; link-joined a's seat gets it.
     targets = await world.b.member.plan_item(SPACE_ID, AUTHOR, "post")
     assert targets
     inner = {"post_id": "p-1", "space_id": SPACE_ID, "content": "secret recipe"}
@@ -393,11 +395,14 @@ async def test_the_gfs_never_learns_the_private_space(world):
         world.a.h.instance_id, now=0
     )
     assert len(queued) == 2
-    # Only the link-joined household holds a seat: the server learns the
-    # paired member b only as a (trusted) publisher, never as a subscriber.
+    # With the owner's ``private_gfs`` ON every member household holds a
+    # seat — the link-joined a AND the paired b (the server learns those
+    # member households, the owner's opt-in) — never the owner.
     seats = [b for _m, u, b in world.requests if u.endswith("/gfs/channels/subscribe")]
-    assert [b["instance_id"] for b in seats] == [world.a.h.instance_id] * len(seats)
-    assert seats
+    assert {b["instance_id"] for b in seats} == {
+        world.a.h.instance_id,
+        world.b.h.instance_id,
+    }
     for row in queued:
         assert set(row.sealed) == CHANNEL_FRAME_KEYS
         assert row.sealed["channel_id"] == channel_id
@@ -438,6 +443,35 @@ async def test_the_gfs_never_learns_the_private_space(world):
     for leak in _leaks():
         assert leak.encode() not in dump
     assert channel_id.encode() in dump
+
+
+async def test_an_off_private_space_never_touches_the_gfs(world):
+    """The owner's ``private_gfs`` OFF (the default for a new private
+    space): no channel registration, no notice, no grant, no seat, no
+    publish — not one request reaches the connection server for the space,
+    even with a link-joined member household seated."""
+    off = replace(
+        _space(world.owner.h.instance_id),
+        features=replace(_space(world.owner.h.instance_id).features, private_gfs=False),
+    )
+    for node in (world.owner, world.a, world.b):
+        node.spaces.space = off
+    assert await world.owner.channels.reconcile(SPACE_ID) == "none"
+    assert await world.owner.channels.enable(SPACE_ID) == "none"
+    assert await world.owner.channels.on_rotation(SPACE_ID) == 0
+    assert await world.owner.member.announce_epoch(SPACE_ID) == 0
+    for node in (world.owner, world.a, world.b):
+        assert await node.channels.heal("conn-1") == 0
+        await node.channels.wait_idle()
+    for node in (world.a, world.b):
+        assert (
+            await world.owner.channels.grant_for_peer(SPACE_ID, node.h.instance_id)
+            is None
+        )
+        assert await node.member.plan_item(SPACE_ID, AUTHOR, "post") == []
+        assert await node.channels.subscribe(SPACE_ID) == 0
+    assert world.owner.spaces.channel is None
+    assert world.requests == []
 
 
 async def test_a_v50_member_household_gets_no_grant_and_falls_back(world):

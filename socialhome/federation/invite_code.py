@@ -34,9 +34,15 @@ The wire shape is owned by the SPA decoder
 **Never** a household address: the blob is served to anyone holding the
 link, and the redeem travels by instance id through the envelope relay.
 
-The bootstrap block rides on *every* code, published or not, so a code
-copied out of the SPA and pasted by a stranger redeems through the relay
-just like one lifted off a /join page.
+The bootstrap block rides on every **``gfs``-type** code, published or not,
+so a code copied out of the SPA and pasted by a stranger redeems through the
+relay just like one lifted off a /join page. An **``internal``** link
+(migration 0079) carries no key-wrap key and no ``via_gfs`` (``relay=False``):
+there is nothing to seal a relayed redeem to, so only a household paired with
+the issuer, or reachable over the mesh, can redeem it — and the issuer refuses
+a relayed redeem of an internal token anyway, since its key-wrap key is the
+same on every code it ever minted. The identity key stays: the mesh redeem
+verifies the issuer's routed reply with it.
 """
 
 from __future__ import annotations
@@ -63,12 +69,14 @@ def build_invite_payload(
     expires_at: str | None = None,
     gfs_url: str | None = None,
     gfs_space_id: str | None = None,
+    relay: bool = True,
 ) -> dict:
     """The decoded invite payload. See the module docstring for the fields.
 
     ``via_gfs`` is included only when ``gfs_url`` is set — an unpublished
     link has no relay to name, and an empty one would have the redeemer
-    hand its sealed request to nowhere.
+    hand its sealed request to nowhere. ``relay=False`` (an ``internal``
+    link) leaves out the key-wrap key, its signature and ``via_gfs``.
     """
     payload: dict = {
         "token": token,
@@ -81,6 +89,9 @@ def build_invite_payload(
         "issuer_proto_version": int(issuer_proto_version),
         "expires_at": expires_at,
     }
+    if not relay:
+        del payload["issuer_keywrap_pk"], payload["issuer_keywrap_sig"]
+        return payload
     if gfs_url:
         payload["via_gfs"] = {
             "gfs_url": gfs_url,

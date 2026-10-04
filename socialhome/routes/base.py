@@ -42,6 +42,8 @@ from ..domain.space import (
     ModerationTargetGoneError,
     ModerationUnavailableError,
     PeersTooOldError,
+    PrivateGfsLinkMembersError,
+    PrivateGfsOffError,
     PublicSpaceLimitError,
     SpaceModerationItem,
     SpacePermissionError,
@@ -452,6 +454,23 @@ class BaseView(web.View):
                 "PEERS_TOO_OLD",
                 "Some member households need an update to enforce this.",
                 extra={"households": exc.households},
+            )
+        except PrivateGfsLinkMembersError as exc:
+            # Turning a private space's connection-server option off would
+            # strand the households that joined through an invite link.
+            return error_response(
+                409,
+                "PRIVATE_GFS_LINK_MEMBERS",
+                "Remove the households that joined through an invite link "
+                "before turning the connection server off for this space.",
+                extra={"households": exc.households},
+            )
+        except PrivateGfsOffError:
+            return error_response(
+                409,
+                "PRIVATE_GFS_OFF",
+                "This private space doesn't use a connection server. Turn it "
+                "on in the space settings, or create an internal link.",
             )
         except HouseholdUpgradeRequiredError as exc:
             # A SpacePermissionError subclass — must precede it. A stable
