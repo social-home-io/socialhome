@@ -1735,5 +1735,12 @@
   "stickies.report_label": "Report note: {text}",
   "stickies.report_title": "Report this note to the space's moderators",
   "stickies.read_only_archived": "This space is archived — its sticky notes are read-only.",
-  "stickies.read_only_viewer": "You can read these notes but not add or change them."
+  "stickies.read_only_viewer": "You can read these notes but not add or change them.",
+  "space.gfs_publish.legend": "Publishing over the connection server",
+  "space.gfs_publish.intro": "How members' posts, comments and reactions reach followers through your connection server. Only you, the owner, can change this.",
+  "space.gfs_publish.trusted": "Trusted",
+  "space.gfs_publish.strict": "Strict",
+  "space.gfs_publish.trusted_help": "The default. Members can post through your connection server even when this household is offline. The server learns which household posted, never what was posted.",
+  "space.gfs_publish.strict_help": "Members post anonymously — the server can't tell which household posted. This needs the connection server and the members' households to support it; those that can't post through this household instead, so their posts wait until it's online.",
+  "space.gfs_publish.strict_switch_note": "Saving renews this space's keys. Members don't need to do anything."
 }

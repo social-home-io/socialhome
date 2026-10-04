@@ -9,8 +9,9 @@ memory — a one-request OOM against every home that paired with it.
 :func:`read_json_capped` is the single read path for every GFS response
 this household parses. It refuses an over-large body *before* parsing it,
 and it never trusts ``Content-Length`` on its own: the header is
-attacker-supplied, so the actual read is bounded too (``limit + 1`` bytes,
-rejected when the extra byte materialises).
+attacker-supplied, so the actual read is bounded too (at most ``limit + 1``
+bytes, rejected when the extra byte materialises). The body is read to EOF
+chunk by chunk — a single ``read(n)`` returns only what has arrived so far.
 
 The caps are generous on purpose. A single space listing legitimately
 carries a base64 ``data:image/webp`` icon, and a directory carries one per
@@ -59,7 +60,17 @@ async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
             limit,
         )
         return None
-    raw = await resp.content.read(limit + 1)
+    # ``StreamReader.read(n)`` returns whatever has ARRIVED, up to ``n``
+    # bytes — one network chunk, not the whole body. Read until EOF (an
+    # empty chunk) or until the cap is crossed, or a large listing split
+    # over several chunks is parsed half-read ("Unterminated string").
+    buf = bytearray()
+    while len(buf) <= limit:
+        chunk = await resp.content.read(limit + 1 - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    raw = bytes(buf)
     if len(raw) > limit:
         log.warning(
             "gfs_http: %s returned more than %d bytes — refusing to parse it",

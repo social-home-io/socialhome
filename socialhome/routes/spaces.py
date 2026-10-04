@@ -38,6 +38,7 @@ from ..app_keys import (
     space_zone_repo_key,
     user_repo_key,
 )
+from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.events import SpaceMemberLocationOptedIn
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.post import LocationData, PostType
@@ -83,7 +84,8 @@ def _features_from_body(
 
     The wire shape mirrors :meth:`SpaceFeatures.to_wire_dict` —
     boolean flags + access-level enums + an ``allowed_post_types``
-    list.  Missing keys fall back to *defaults*.
+    list + ``gfs_publish_mode`` (``"trusted"`` / ``"strict"``, owner-only).
+    Missing keys fall back to *defaults*.
     Returns ``None`` when the caller didn't include a ``features``
     block, so the service layer treats it as "leave unchanged".
 
@@ -96,6 +98,12 @@ def _features_from_body(
     """
     if not isinstance(raw, dict):
         return None
+    # v_50 — ``gfs_publish_mode`` is a privacy setting: an unknown value is a
+    # 422, never silently read as the default (owner-only is enforced by the
+    # service).
+    mode = raw.get("gfs_publish_mode")
+    if mode is not None and mode not in GFS_PUBLISH_MODES:
+        raise ValueError("gfs_publish_mode must be 'trusted' or 'strict'")
     return SpaceFeatures.from_wire_dict(raw, defaults=defaults)
 
 

@@ -1098,6 +1098,21 @@ sends each follower household its `comment` cert at once.
 receiver, plus the 10-minute grace — and if no seed holder is online to
 rotate, until one is. Before this release demotion did not rotate at all.
 
+**Writer group key (v_50, strict spaces).** Where the owner set
+`gfs_publish_mode = "strict"`, the same four channels also carry
+`writer_key` — the epoch's writer group key (`{writer_key_suite, space_id,
+epoch, writer_seed, writer_key_cert}`, derived from the space seed per epoch)
+— next to the cert, only to a v_50 household holding a publishing scope
+(`write` and `comment` get the same key). The receiver verifies it against
+the pinned space key and keeps it KEK-wrapped on `space_keys.writer_key`; it
+signs the household's anonymous publishes to the connection server (see
+[`discovery.md`](./discovery.md#member-publish-strict-mode-v_50)). It
+rotates with the epoch, so revocation = rotation covers it too; the switch
+to strict rotates once so the key arrives with a fresh epoch. The setting is
+owner-only: a member household takes it only from the owner household's own
+`SPACE_CONFIG_CHANGED` (a delegated admin's signed config can't flip it), and
+the host pins it like `allow_subscribers`.
+
 ## Flow — rekey
 
 Triggered on every member-removal path (#121, PR #432): local kick,

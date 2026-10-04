@@ -1445,5 +1445,12 @@
   "stickies.report_label": "Denunciar nota: {text}",
   "stickies.report_title": "Denunciar esta nota a los moderadores del espacio",
   "stickies.read_only_archived": "Este espacio está archivado: sus notas son de solo lectura.",
-  "stickies.read_only_viewer": "Puedes leer estas notas, pero no añadir ni cambiar ninguna."
+  "stickies.read_only_viewer": "Puedes leer estas notas, pero no añadir ni cambiar ninguna.",
+  "space.gfs_publish.legend": "Publicar a través del servidor de conexión",
+  "space.gfs_publish.intro": "Cómo llegan a los seguidores las publicaciones, comentarios y reacciones de los miembros a través de tu servidor de conexión. Solo tú, como propietario, puedes cambiarlo.",
+  "space.gfs_publish.trusted": "De confianza",
+  "space.gfs_publish.strict": "Estricto",
+  "space.gfs_publish.trusted_help": "La opción predeterminada. Los miembros pueden publicar a través de tu servidor de conexión aunque este hogar esté desconectado. El servidor sabe qué hogar publicó, nunca qué se publicó.",
+  "space.gfs_publish.strict_help": "Los miembros publican de forma anónima: el servidor no puede saber qué hogar publicó. Requiere que el servidor de conexión y los hogares de los miembros lo admitan; los que no, publican a través de este hogar y sus publicaciones esperan hasta que esté conectado.",
+  "space.gfs_publish.strict_switch_note": "Al guardar se renuevan las claves de este espacio. Los miembros no tienen que hacer nada."
 }

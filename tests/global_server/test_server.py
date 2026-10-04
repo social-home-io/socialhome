@@ -297,6 +297,9 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # ``POST /gfs/member-publish``. A household sends an identified item
         # body only to a server whose signed block proves it.
         "member_publish_trusted": True,
+        # v_50 — this GFS carries the anonymous, writer-group-key-signed
+        # ``POST /gfs/member-publish-anon`` and enforces strict mode.
+        "member_publish_strict": True,
     }
     assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
     assert verify_capabilities(

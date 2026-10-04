@@ -1107,3 +1107,156 @@ describe('SpaceSettings — an edit forwarded to the host', () => {
     expect(showToast).toHaveBeenCalledWith('space.settings.forwarded', 'info')
   })
 })
+
+describe('SpaceSettings — connection server publish mode (owner-only)', () => {
+  beforeEach(() => {
+    apiMock.get.mockResolvedValue([])
+    apiMock.patch.mockReset()
+    vi.mocked(showToast).mockClear()
+  })
+
+  function publicSpace(features: object = {}, spaceType = 'public') {
+    return {
+      ...(makeSpace() as unknown as Record<string, unknown>),
+      space_type: spaceType,
+      features: {
+        calendar: true, todo: true, location: false,
+        stickies: false, pages: true, gallery: true,
+        posts_access: 'open', pages_access: 'open',
+        stickies_access: 'open', calendar_access: 'open',
+        tasks_access: 'open',
+        allowed_post_types: ['text'],
+        allow_subscribers: true,
+        ...features,
+      },
+    } as never
+  }
+
+  const group = (c: Element) =>
+    c.querySelector('[role="radiogroup"][aria-labelledby="space-settings-gfs-publish-legend"]')
+  const radio = (c: Element, label: string) =>
+    [...c.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find(r => r.textContent === label)!
+
+  it('renders for the owner of a public space with followers allowed', () => {
+    const { container, getByText } = render(
+      <SpaceSettings space={publicSpace()} onUpdate={() => {}} isOwner />,
+    )
+    expect(group(container)).toBeTruthy()
+    expect(getByText(/space\.gfs_publish\.legend/)).toBeTruthy()
+    expect(getByText('space.gfs_publish.trusted_help')).toBeTruthy()
+    expect(getByText('space.gfs_publish.strict_help')).toBeTruthy()
+  })
+
+  it('is hidden for a non-owner admin', () => {
+    const { container } = render(
+      <SpaceSettings space={publicSpace()} onUpdate={() => {}} />,
+    )
+    expect(group(container)).toBeNull()
+  })
+
+  it('is hidden where members never publish over a connection server', () => {
+    // Private space; and a public one with followers off.
+    const priv = render(
+      <SpaceSettings space={publicSpace({}, 'private')} onUpdate={() => {}} isOwner />,
+    )
+    expect(group(priv.container)).toBeNull()
+    priv.unmount()
+    const noFollow = render(
+      <SpaceSettings
+        space={publicSpace({ allow_subscribers: false })}
+        onUpdate={() => {}}
+        isOwner
+      />,
+    )
+    expect(group(noFollow.container)).toBeNull()
+    // Turning followers on reveals it.
+    fireEvent.click(noFollow.getByLabelText(/Let anyone follow this space/))
+    expect(group(noFollow.container)).toBeTruthy()
+  })
+
+  it('stays visible on a strict space so the owner can switch back', () => {
+    const { container } = render(
+      <SpaceSettings
+        space={publicSpace({ allow_subscribers: false, gfs_publish_mode: 'strict' })}
+        onUpdate={() => {}}
+        isOwner
+      />,
+    )
+    expect(group(container)).toBeTruthy()
+    expect(radio(container, 'space.gfs_publish.strict').getAttribute('aria-checked'))
+      .toBe('true')
+  })
+
+  it('defaults to trusted when the field is missing', () => {
+    const { container } = render(
+      <SpaceSettings space={publicSpace()} onUpdate={() => {}} isOwner />,
+    )
+    expect(radio(container, 'space.gfs_publish.trusted').getAttribute('aria-checked'))
+      .toBe('true')
+    expect(radio(container, 'space.gfs_publish.strict').getAttribute('aria-checked'))
+      .toBe('false')
+  })
+
+  it('PATCHes exactly {features: {gfs_publish_mode: "strict"}} and confirms', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const onUpdate = vi.fn()
+    const { container, getByText } = render(
+      <SpaceSettings space={publicSpace()} onUpdate={onUpdate} isOwner />,
+    )
+    fireEvent.click(radio(container, 'space.gfs_publish.strict'))
+    expect(getByText('space.gfs_publish.strict_switch_note')).toBeTruthy()
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0]).toEqual([
+      '/api/spaces/s-1', { features: { gfs_publish_mode: 'strict' } },
+    ])
+    await vi.waitFor(() => expect(onUpdate).toHaveBeenCalled())
+    expect(showToast).toHaveBeenCalledWith('Space updated', 'success')
+  })
+
+  it('PATCHes back to trusted from a strict space', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const { container, getByText } = render(
+      <SpaceSettings
+        space={publicSpace({ gfs_publish_mode: 'strict' })}
+        onUpdate={() => {}}
+        isOwner
+      />,
+    )
+    fireEvent.keyDown(radio(container, 'space.gfs_publish.strict'), { key: 'ArrowLeft' })
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({
+      features: { gfs_publish_mode: 'trusted' },
+    })
+  })
+
+  it('shows the server error when the save is refused (403 owner required)', async () => {
+    apiMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('owner required'), { status: 403 }),
+    )
+    const onUpdate = vi.fn()
+    const { container, getByText } = render(
+      <SpaceSettings space={publicSpace()} onUpdate={onUpdate} isOwner />,
+    )
+    fireEvent.click(radio(container, 'space.gfs_publish.strict'))
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith('owner required', 'error'),
+    )
+    expect(onUpdate).not.toHaveBeenCalled()
+  })
+
+  it('falls back to a generic error on a network failure', async () => {
+    apiMock.patch.mockRejectedValueOnce(new Error(''))
+    const { container, getByText } = render(
+      <SpaceSettings space={publicSpace()} onUpdate={() => {}} isOwner />,
+    )
+    fireEvent.click(radio(container, 'space.gfs_publish.strict'))
+    fireEvent.click(getByText('Save changes'))
+    await vi.waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith('Failed to update', 'error'),
+    )
+  })
+})

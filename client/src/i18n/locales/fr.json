@@ -1418,5 +1418,12 @@
   "stickies.report_label": "Signaler la note : {text}",
   "stickies.report_title": "Signaler cette note aux modérateurs de l’espace",
   "stickies.read_only_archived": "Cet espace est archivé — ses notes sont en lecture seule.",
-  "stickies.read_only_viewer": "Vous pouvez lire ces notes, mais pas en ajouter ni les modifier."
+  "stickies.read_only_viewer": "Vous pouvez lire ces notes, mais pas en ajouter ni les modifier.",
+  "space.gfs_publish.legend": "Publication via le serveur de connexion",
+  "space.gfs_publish.intro": "Comment les publications, commentaires et réactions des membres parviennent aux abonnés via votre serveur de connexion. Vous seul, en tant que propriétaire, pouvez le modifier.",
+  "space.gfs_publish.trusted": "De confiance",
+  "space.gfs_publish.strict": "Strict",
+  "space.gfs_publish.trusted_help": "Le réglage par défaut. Les membres peuvent publier via votre serveur de connexion même quand ce foyer est hors ligne. Le serveur sait quel foyer a publié, jamais ce qui a été publié.",
+  "space.gfs_publish.strict_help": "Les membres publient anonymement : le serveur ne peut pas savoir quel foyer a publié. Le serveur de connexion et les foyers des membres doivent le prendre en charge ; ceux qui ne le peuvent pas publient via ce foyer, et leurs publications attendent qu'il soit en ligne.",
+  "space.gfs_publish.strict_switch_note": "L'enregistrement renouvelle les clés de cet espace. Les membres n'ont rien à faire."
 }

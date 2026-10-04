@@ -76,6 +76,9 @@ export default function SpaceSettingsPage() {
   const [space, setSpace] = useState<SpaceDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [canAdmin, setCanAdmin] = useState(false)
+  // Owner-only settings (e.g. how members publish over a connection server)
+  // render only for the space owner — the server refuses anyone else.
+  const [isOwner, setIsOwner] = useState(false)
   const [isMember, setIsMember] = useState(false)
 
   /** ``quiet`` is the live-refresh path: a failed refetch keeps the
@@ -94,11 +97,13 @@ export default function SpaceSettingsPage() {
         m => m.user_id === currentUser.value?.user_id,
       )
       setCanAdmin(mine?.role === 'owner' || mine?.role === 'admin')
+      setIsOwner(mine?.role === 'owner')
       setIsMember(Boolean(mine))
     } catch {
       if (quiet) return
       setSpace(null)
       setCanAdmin(false)
+      setIsOwner(false)
       setIsMember(false)
     } finally {
       setLoading(false)
@@ -204,6 +209,7 @@ export default function SpaceSettingsPage() {
           space={space}
           onUpdate={() => void reload()}
           isRemoteSpace={isRemoteSpace}
+          isOwner={isOwner}
         />
       )}
       {activeTab.value === 'about' && (

@@ -1423,5 +1423,12 @@
   "stickies.report_label": "Notiz melden: {text}",
   "stickies.report_title": "Diese Notiz den Moderatoren des Space melden",
   "stickies.read_only_archived": "Dieser Space ist archiviert — seine Haftnotizen sind schreibgeschützt.",
-  "stickies.read_only_viewer": "Du kannst diese Notizen lesen, aber keine hinzufügen oder ändern."
+  "stickies.read_only_viewer": "Du kannst diese Notizen lesen, aber keine hinzufügen oder ändern.",
+  "space.gfs_publish.legend": "Veröffentlichen über den Verbindungsserver",
+  "space.gfs_publish.intro": "Wie Beiträge, Kommentare und Reaktionen der Mitglieder über deinen Verbindungsserver bei den Followern ankommen. Nur du als Eigentümer kannst das ändern.",
+  "space.gfs_publish.trusted": "Vertraut",
+  "space.gfs_publish.strict": "Streng",
+  "space.gfs_publish.trusted_help": "Die Voreinstellung. Mitglieder können über deinen Verbindungsserver posten, auch wenn dieser Haushalt offline ist. Der Server erfährt, welcher Haushalt gepostet hat – aber nie, was gepostet wurde.",
+  "space.gfs_publish.strict_help": "Mitglieder posten anonym – der Server kann nicht erkennen, welcher Haushalt gepostet hat. Dafür müssen der Verbindungsserver und die Haushalte der Mitglieder das unterstützen; wer es nicht kann, postet stattdessen über diesen Haushalt, und die Beiträge warten, bis er online ist.",
+  "space.gfs_publish.strict_switch_note": "Beim Speichern werden die Schlüssel dieses Space erneuert. Mitglieder müssen nichts tun."
 }

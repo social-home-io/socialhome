@@ -482,6 +482,78 @@ async def test_explicit_allow_subscribers_change_by_an_admin_is_still_forbidden(
     assert body["features"]["allow_subscribers"] is True
 
 
+# ── v_50: gfs_publish_mode (owner-only) ──────────────────────────────────
+
+
+async def test_gfs_publish_mode_defaults_to_trusted_and_the_owner_sets_strict(client):
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Strict", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["gfs_publish_mode"] == "trusted"
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"gfs_publish_mode": "strict"}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["gfs_publish_mode"] == "strict"
+    # A partial edit of another key leaves it alone.
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"bazaar": False}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["gfs_publish_mode"] == "strict"
+
+
+async def test_gfs_publish_mode_change_by_an_admin_is_forbidden(client):
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "StrictAdmin", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    await _promote_bob_to_admin(client, sid)
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"gfs_publish_mode": "strict"}},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403, await r.text()
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["features"]["gfs_publish_mode"] == "trusted"
+
+
+async def test_an_unknown_gfs_publish_mode_is_a_422(client):
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "StrictBad", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"gfs_publish_mode": "open"}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422, await r.text()
+
+
 def test_features_from_body_merges_onto_supplied_defaults():
     """Unit: with ``defaults`` given, an absent key takes the CURRENT space's
     value; a present key still wins (including an explicit ``False``)."""

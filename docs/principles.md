@@ -261,8 +261,9 @@ carries its writer cert in plaintext. **What it concedes, exactly:**
   posts.** A household with a writer seat auto-subscribes to the fan-out of
   each of its public/global spaces on every capable server (so other
   members' items reach it live), and a subscribe is household-signed — so
-  the server learns which households are writers in which spaces. Strict
-  mode (PR 4) must not auto-subscribe with identified requests.
+  the server learns which households subscribe to which spaces. In trusted
+  mode their publishes then tell it which of them write; in strict mode
+  (below) nothing does.
 - **It learns when the space content key rotates** — from the owner's
   (household-signed) and delegated admins' (authority-signed) epoch notices
   — as it already could from the `epoch` of authority-signed post relays.
@@ -272,11 +273,45 @@ carries its writer cert in plaintext. **What it concedes, exactly:**
 
 **Why this is accepted:** the owner judged that a host-independent space is
 worth the GFS knowing the publisher, never the content. Owners who disagree
-get an opt-in **strict** mode (a later change) where the GFS authorizes
-anonymously with a per-epoch writer group key and learns only that *some*
-writer posted. Until a household's GFS advertises `member_publish_trusted`
-in its signed capability block, nothing identified is sent to it at all and
-posts take today's host path.
+get the opt-in **strict** mode below. Until a household's GFS advertises
+`member_publish_trusted` in its signed capability block, nothing identified
+is sent to it at all and posts take today's host path.
+
+### Strict mode: anonymous to the connection server among the space's publishers (v_50)
+
+An owner who sets `gfs_publish_mode = "strict"` gets member publishing over
+the connection server that is **anonymous among the space's publishers**:
+the request (`POST /gfs/member-publish-anon`) carries no household id, no
+household signature and no plaintext writer cert — it is authorized by the
+epoch's writer group key, which every household allowed to publish anything
+in the space shares (posters and commenters alike) and nobody else holds.
+The GFS learns that *some* publisher of the space posted, at which epoch,
+when and in which size bucket — and the space's subscriber set, in which
+writers look exactly like followers (the member auto-subscribe is the same
+signed request a follower sends). It refuses identified publishes into a
+strict space. This restores, for publishing, the invariant the identity-free
+`/gfs/publish` relay keeps: **the GFS must not learn which household
+published** — and it removes the trusted-mode scope / role residuals,
+because the cert never leaves the ciphertext.
+
+What strict mode does **not** hide, stated so nobody reads more into it: the
+publish arrives from the household's IP address, like its identified WS, so
+IP and timing correlation with the household's authenticated connection
+remains the accepted limit of every anonymous GFS path (the server also
+limits anonymous publishes per space and client address, the only handle
+on abuse it has); a household never sends an identified publish to a
+server whose public listing says the space is strict, so only one caught
+between the owner's switch and its next look at that listing could still
+send one (refused, but seen). **Abuse inside a strict space is
+unattributable**: every publisher holds the same key, so the owner cannot
+tell who floods it, and rotating the key does not help (the abuser gets the
+new one). The remedy is switching the space back to trusted mode, which
+attributes every publish, or removing households. Revocation is by rotation, as
+for certs: a removed publisher keeps the old key until the next content
+epoch, plus the 600 s grace. A household that cannot publish anonymously
+(older build, no key yet, no strict-capable server) never falls back to the
+identified path — its items take the host path. Pinned by
+`tests/protocol/test_gfs_member_publish_strict_blind.py`.
 
 ### Sign-off: per-user routing on the app channel (§FIX-I2 relaxed, v_18)
 

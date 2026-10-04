@@ -59,7 +59,10 @@ class _Content:
         self._raw = raw
 
     async def read(self, n: int = -1) -> bytes:
-        return self._raw if n < 0 else self._raw[:n]
+        # Consumes, like aiohttp's StreamReader (the reader loops to EOF).
+        size = len(self._raw) if n < 0 else n
+        out, self._raw = self._raw[:size], self._raw[size:]
+        return out
 
 
 class _StubResp:
@@ -3519,6 +3522,47 @@ async def test_member_publish_trusted_ignores_the_unsigned_flag(env):
     session = _InviteSession(info={"server_name": "x", "member_publish_trusted": True})
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
     assert not await svc.member_publish_trusted_supported(conn)
+
+
+async def test_member_publish_strict_needs_the_signed_flag(env):
+    _db, repo = env
+    conn = _make_conn("mp-3", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={
+                "member_publish_trusted": True,
+                "member_publish_strict": True,
+            },
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert await svc.member_publish_strict_supported(conn)
+
+
+async def test_member_publish_strict_ignores_the_unsigned_flag(env):
+    _db, repo = env
+    conn = _make_conn("mp-4", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _InviteSession(info={"server_name": "x", "member_publish_strict": True})
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert not await svc.member_publish_strict_supported(conn)
+
+
+async def test_member_publish_strict_is_absent_on_a_trusted_only_server(env):
+    _db, repo = env
+    conn = _make_conn("mp-5", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _InviteSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"member_publish_trusted": True},
+        )
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert await svc.member_publish_trusted_supported(conn)
+    assert not await svc.member_publish_strict_supported(conn)
 
 
 async def _repin_svc(env, monkeypatch, *, with_cert: bool):

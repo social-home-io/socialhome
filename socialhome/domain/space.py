@@ -389,6 +389,19 @@ def normalize_retention_exempt_types(
     return tuple(sorted(kept))
 
 
+def _publish_mode(
+    raw: object, default: Literal["trusted", "strict"]
+) -> Literal["trusted", "strict"]:
+    """A ``gfs_publish_mode`` value: ``"strict"`` / ``"trusted"`` as given,
+    ``default`` for anything else (absent, or an unknown value from a newer
+    peer — never silently ``strict``, never an error)."""
+    if raw == "strict":
+        return "strict"
+    if raw == "trusted":
+        return "trusted"
+    return default
+
+
 @dataclass(slots=True, frozen=True)
 class SpaceFeatures:
     """Per-space feature toggles and access levels."""
@@ -471,6 +484,17 @@ class SpaceFeatures:
     #: OWNER-only (a host-local admin can't enact it). Defaults OFF
     #: (least-privilege). Older peers that omit the field default to False.
     delegated_admin_authority: bool = False
+
+    #: Owner choice (v_50): how member households publish over a connection
+    #: server (GFS). ``"trusted"`` (the default): the publish is IDENTIFIED —
+    #: the server learns which household posted, never the content.
+    #: ``"strict"``: the publish is ANONYMOUS, signed with the epoch's writer
+    #: group key; the server learns only that some publisher of the space
+    #: posted, and refuses identified publishes into the space. OWNER-only
+    #: (like ``allow_subscribers``): pinned on host inbound and only taken
+    #: from the owner household on every other household. Older peers that
+    #: omit the field read ``"trusted"``.
+    gfs_publish_mode: Literal["trusted", "strict"] = "trusted"
 
     allowed_post_types: tuple[str, ...] = _ALL_POST_TYPES
 
@@ -603,6 +627,7 @@ class SpaceFeatures:
             allow_subscriber_comment=bool(row.get("allow_subscriber_comment", 0)),
             allow_subscriber_react=bool(row.get("allow_subscriber_react", 0)),
             delegated_admin_authority=bool(row.get("delegated_admin_authority", 0)),
+            gfs_publish_mode=_publish_mode(row.get("gfs_publish_mode"), "trusted"),
             allowed_post_types=allowed or ("text",),
         )
 
@@ -626,6 +651,7 @@ class SpaceFeatures:
             "allow_subscriber_comment": int(self.allow_subscriber_comment),
             "allow_subscriber_react": int(self.allow_subscriber_react),
             "delegated_admin_authority": int(self.delegated_admin_authority),
+            "gfs_publish_mode": self.gfs_publish_mode,
             "allow_post_text": int("text" in self.allowed_post_types),
             "allow_post_image": int("image" in self.allowed_post_types),
             "allow_post_video": int("video" in self.allowed_post_types),
@@ -662,6 +688,7 @@ class SpaceFeatures:
             "allow_subscriber_comment": self.allow_subscriber_comment,
             "allow_subscriber_react": self.allow_subscriber_react,
             "delegated_admin_authority": self.delegated_admin_authority,
+            "gfs_publish_mode": self.gfs_publish_mode,
             "allowed_post_types": list(self.allowed_post_types),
         }
 
@@ -740,6 +767,9 @@ class SpaceFeatures:
             ),
             delegated_admin_authority=bool(
                 raw.get("delegated_admin_authority", defaults.delegated_admin_authority)
+            ),
+            gfs_publish_mode=_publish_mode(
+                raw.get("gfs_publish_mode"), defaults.gfs_publish_mode
             ),
             allowed_post_types=allowed,
         )

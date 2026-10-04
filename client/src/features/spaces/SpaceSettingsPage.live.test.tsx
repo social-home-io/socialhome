@@ -4,7 +4,7 @@
  * refresh never flips it to "Space not found".
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { fireEvent, render, waitFor } from '@testing-library/preact'
 
 const apiGet = vi.fn()
 vi.mock('@/api', () => ({
@@ -79,5 +79,25 @@ describe('SpaceSettingsPage live config', () => {
     await new Promise(r => setTimeout(r, 0))
     expect(view.getByRole('heading', { name: /Garden — settings/ })).toBeTruthy()
     expect(view.queryByText('Space not found')).toBeNull()
+  })
+
+  it('shows the connection server publish mode to the owner only', async () => {
+    // Public space whose posts followers may read — where members publish
+    // over a connection server at all.
+    detail = {
+      ...detail, space_type: 'public', join_mode: 'open',
+      features: { allow_subscribers: true },
+    }
+    role = 'admin'
+    const { default: Page } = await import('./SpaceSettingsPage')
+    const view = render(<Page />)
+    fireEvent.click(await view.findByRole('tab', { name: 'General' }))
+    await view.findByRole('heading', { name: 'Space Settings' })
+    expect(view.queryByRole('radiogroup', { name: /connection server/ })).toBeNull()
+
+    role = 'owner'
+    emit('space.config.changed', { space_id: 'sp-1', event_type: 'owner_transferred' })
+    const group = await view.findByRole('radiogroup', { name: /connection server/ })
+    expect(group.querySelector('[aria-checked="true"]')?.textContent).toBe('Trusted')
   })
 })

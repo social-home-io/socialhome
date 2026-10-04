@@ -765,7 +765,23 @@ from __future__ import annotations
 #:   is refused). A member household's self-leave now reaches the host as
 #:   ``SPACE_INSTANCE_LEFT {space_id, user_id}`` (gated on v_49 — an older
 #:   host would drop the whole household's row and end no seat).
-OURS: int = 49
+#: * **v_50** (2026-10-04) — strict (anonymous) member publish over the
+#:   connection server. A space owner may set ``SpaceFeatures
+#:   .gfs_publish_mode = "strict"`` (federated in ``SPACE_CONFIG_CHANGED``,
+#:   owner-only, pinned on host inbound). In a strict space a seed holder
+#:   delivers each publish-capable household (``write`` OR ``comment`` scope)
+#:   the epoch's **writer group key** — ``writer_key`` (``{writer_key_suite,
+#:   space_id, epoch, writer_seed, writer_key_cert}``,
+#:   :mod:`socialhome.writer_key`) — next to its writer cert, sealed per peer,
+#:   in the same four channels. A member then publishes to
+#:   ``POST /gfs/member-publish-anon`` signed with that key (no household
+#:   identity; the cert rides inside the ciphertext), and the GFS — told the
+#:   mode and the authority-signed ``writer_key_cert`` on the owner's epoch
+#:   notice — refuses identified publishes into the space. **Gated, degraded
+#:   fallback**: a household below v_50 is sent no writer key; its posts take
+#:   the host path (its identified publish into a strict space is refused by
+#:   the GFS, and the member broadcast to the host always runs anyway).
+OURS: int = 50
 
 
 class FederationCapability:
@@ -1184,6 +1200,12 @@ class FederationCapability:
     #: their items keep the host-signed relay path.
     MIN_FOR_MEMBER_GFS_PUBLISH = 49
 
+    #: Strict member publish (v_50): a seed holder delivers the space's
+    #: per-epoch writer group key next to the writer cert, only to a v_50
+    #: publish-capable household of a strict space. Older households get no
+    #: key, so their items take the host path.
+    MIN_FOR_STRICT_MEMBER_PUBLISH = 50
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1335,6 +1357,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     (
         FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH,
         "Space writer certificates",
+    ),
+    (
+        FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH,
+        "Anonymous posting over the connection server",
     ),
 ]
 

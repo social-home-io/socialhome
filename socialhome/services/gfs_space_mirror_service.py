@@ -71,7 +71,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 import time
+from collections.abc import Iterable
 
 import aiohttp
 
@@ -583,7 +585,7 @@ class GfsSpaceMirrorService:
         """
         await self._gfs.subscribe_to_gfs_space(space_id, gfs_id)
 
-    async def resubscribe_all(self, gfs_id: str) -> int:
+    async def resubscribe_all(self, gfs_id: str, *, also: Iterable[str] = ()) -> int:
         """Re-register every local subscription on *gfs_id*. Returns the count
         the GFS accepted.
 
@@ -606,11 +608,21 @@ class GfsSpaceMirrorService:
         Fail-soft per space: this is a background self-heal, so one space's
         failure must never skip the rest or break the caller's reconnect
         sequence.
+
+        ``also`` (v_50): further space ids to subscribe in the SAME batch —
+        the spaces this household writes in (member auto-subscribe). The
+        merged batch is de-duplicated and SHUFFLED, so the order and timing
+        of the identical signed subscribes never tell the server which seats
+        are writers' and which are followers'.
         """
-        restored = 0
+        batch: list[str] = []
         for space_id in await self._spaces.list_subscribed_space_ids():
-            if not await self.was_gfs_listed(space_id):
-                continue
+            if await self.was_gfs_listed(space_id):
+                batch.append(space_id)
+        batch = list(dict.fromkeys([*batch, *also]))
+        secrets.SystemRandom().shuffle(batch)
+        restored = 0
+        for space_id in batch:
             try:
                 await self._gfs.subscribe_to_gfs_space(space_id, gfs_id)
             except GfsConnectionError as exc:

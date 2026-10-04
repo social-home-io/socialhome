@@ -1322,6 +1322,15 @@ class PrivateSpaceInviteHandler:
             and self._writer_certs is not None
         ):
             await self._writer_certs.accept(space_id, event.payload.get("writer_cert"))
+        # v_50 — and, in a strict space, the new epoch's writer group key
+        # (verified against the pinned space key on its own).
+        if (
+            event.payload.get("writer_key") is not None
+            and self._writer_certs is not None
+        ):
+            await self._writer_certs.accept_writer_key(
+                space_id, event.payload.get("writer_key")
+            )
 
     async def _on_admin_key_share(self, event: "FederationEvent") -> None:
         """Delegated-admin signing-seed share from the space owner (v_22).
@@ -1766,6 +1775,10 @@ class PrivateSpaceInviteHandler:
             and event.from_instance == space.owner_instance_id
         ):
             await self._writer_certs.accept(space_id, p.get("writer_cert"))
+            if p.get("writer_key") is not None:
+                await self._writer_certs.accept_writer_key(
+                    space_id, p.get("writer_key")
+                )
         if not candidates:
             return
         # Thousands of signature checks are CPU work: batch them off the

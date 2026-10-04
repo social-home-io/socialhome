@@ -327,7 +327,10 @@ async def test_gfs_connect_hook_resubscribes_our_seats(tmp_dir):
             GfsSpaceMirrorService, "resubscribe_all", new_callable=AsyncMock
         ) as resub:
             await on_connected("gfs-1")
-        resub.assert_awaited_once_with("gfs-1")
+        resub.assert_awaited_once()
+        assert resub.await_args.args == ("gfs-1",)
+        # v_50 — writer spaces ride the same (shuffled) batch.
+        assert list(resub.await_args.kwargs["also"]) == []
 
 
 # ── GFS relay fan-out dispatch (identity-free frame) ──────────────────────

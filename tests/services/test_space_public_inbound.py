@@ -1441,3 +1441,55 @@ async def test_a_member_household_hands_its_roster_view_to_the_applier(item_env)
     )
     assert await item_env["post_repo"].get_comment(cid) is None
     assert access.calls[-1]["subscriber_ok"] is False
+
+
+# ── Strict-mode frames (v_50): no plaintext cert ─────────────────────────
+
+
+def _strict(frame: dict) -> dict:
+    """A strict-mode fan-out frame: the GFS relays no cert at all."""
+    return {k: v for k, v in frame.items() if k != "writer_cert"}
+
+
+async def test_a_strict_frame_takes_its_cert_from_inside_the_ciphertext(item_env):
+    await item_env["inbound"].handle(_strict(await _item_frame(item_env)))
+    got = await item_env["post_repo"].get("post-1")
+    assert got is not None and got[1].content == "member-published content"
+
+
+@pytest.mark.parametrize(
+    "case", ["forged", "other_space", "other_household", "comment_scope"]
+)
+async def test_a_strict_frame_runs_every_cert_check(item_env, case):
+    over: dict = {
+        "forged": {"space_seed": generate_space_keypair().private_key},
+        "other_space": {"space_id": "sp-2"},
+        "other_household": {"instance_pk": generate_identity_keypair().public_key},
+        "comment_scope": {"scope": "comment"},
+    }[case]
+    frame = _strict(await _item_frame(item_env, cert=await _cert(item_env, **over)))
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_a_strict_frame_without_an_inner_cert_is_dropped(item_env):
+    inner = dict(_signed_inner(item_env))
+    _e, ct = await item_env["crypto"].encrypt(
+        "sp-1", json.dumps({"item_type": "post", "inner": inner}).encode()
+    )
+    frame = {
+        "type": "relay",
+        "space_id": "sp-1",
+        "event_type": "space_item",
+        "epoch": _e,
+        "payload": ct,
+    }
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None
+
+
+async def test_a_strict_frame_needs_the_user_binding(item_env):
+    cert = await _cert(item_env)
+    frame = _strict(await _item_frame(item_env, cert=_v1(cert)))
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is None

@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+import socialhome.services.gfs_space_mirror_service as mirror_mod
+
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
@@ -39,7 +41,10 @@ class _Content:
         self._raw = raw
 
     async def read(self, n: int = -1) -> bytes:
-        return self._raw if n < 0 else self._raw[:n]
+        # Consumes, like aiohttp's StreamReader (the reader loops to EOF).
+        size = len(self._raw) if n < 0 else n
+        out, self._raw = self._raw[:size], self._raw[size:]
+        return out
 
 
 class _StubResp:
@@ -703,6 +708,31 @@ async def test_resubscribe_all_swallows_a_refusal_per_space(env, caplog):
         assert await svc.resubscribe_all("gfs-1") == 1
     assert gfs.subscribes == [("sp-ok", "gfs-1")]
     assert caplog.text == ""
+
+
+@pytest.mark.security
+async def test_resubscribe_all_shuffles_writer_spaces_into_the_follower_batch(
+    env, monkeypatch
+):
+    """v_50: the spaces this household WRITES in ride the same reconnect
+    batch, merged with the followed ones and shuffled — the server sees one
+    run of identical signed subscribes and can't separate writer seats by
+    order or timing."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
+    repo = await _seat_subscription(env, "sp-follow")
+    gfs = _StubGfs()
+    svc = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+    shuffled: list[list[str]] = []
+
+    def _shuffle(self, items):
+        shuffled.append(list(items))
+        items.reverse()
+
+    monkeypatch.setattr(mirror_mod.secrets.SystemRandom, "shuffle", _shuffle)
+    assert await svc.resubscribe_all("gfs-1", also=["sp-write", "sp-follow"]) == 2
+    # One batch, de-duplicated, shuffled as a whole.
+    assert shuffled == [["sp-follow", "sp-write"]]
+    assert gfs.subscribes == [("sp-write", "gfs-1"), ("sp-follow", "gfs-1")]
 
 
 # ─── v_44: a follower heals its pin from the GFS that seated it ──────────

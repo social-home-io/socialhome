@@ -187,6 +187,7 @@ class GfsConnectionService:
         "_info_failed_at",
         "_envelope_relay",
         "_invite_links",
+        "_member_publish_strict",
         "_member_publish_trusted",
         "_authority_rotation",
         "_rotation_warned",
@@ -259,6 +260,11 @@ class GfsConnectionService:
         # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
         # to a GFS that has not proved it under a valid signature.
         self._member_publish_trusted: dict[str, bool] = {}
+        # Same again for ``member_publish_strict`` (v_50): whether the GFS
+        # carries the anonymous ``POST /gfs/member-publish-anon`` and takes
+        # ``publish_mode`` / ``writer_key_cert`` on the epoch notice (an older
+        # server would refuse an owner notice carrying them).
+        self._member_publish_strict: dict[str, bool] = {}
         # Same again for ``authority_rotation`` (v_44): whether the GFS
         # re-pins a space's authority key from an owner cert. A GFS without
         # it keeps the OLD key — and so keeps honouring a revoked admin's
@@ -700,6 +706,19 @@ class GfsConnectionService:
             conn,
             "member_publish_trusted",
             self._member_publish_trusted,
+        )
+
+    async def member_publish_strict_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``member_publish_strict`` on /gfs/info.
+
+        Gates every anonymous member publish and the v_50 fields of the
+        epoch notice (:mod:`socialhome.services.gfs_member_publish_service`).
+        Without it a strict space's items take the host path — never the
+        identified one."""
+        return await self._signed_capability_supported(
+            conn,
+            "member_publish_strict",
+            self._member_publish_strict,
         )
 
     async def _signed_capability_supported(

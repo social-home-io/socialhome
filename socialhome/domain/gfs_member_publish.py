@@ -37,6 +37,23 @@ Fan-out frame (to the space's subscribers, never naming the publisher)::
 
     {"space_id", "event_type": "space_item", "epoch", "writer_cert", "payload"}
 
+**Strict mode (v_50).** A space whose owner set ``gfs_publish_mode`` to
+``"strict"`` publishes over ``POST /gfs/member-publish-anon`` instead
+(:class:`MemberPublishAnonRequest`)::
+
+    {"gfs_instance_id", "ts", "nonce", "target", "event_type": "space_item",
+     "epoch", "payload", "writer_sig", "writer_sig_suite"}
+
+No ``instance_id``, no household signature, no plaintext writer cert: the
+writer cert rides INSIDE the ciphertext, and ``writer_sig`` is made with the
+space's per-epoch writer GROUP key (:mod:`socialhome.writer_key`) over
+``b"gfs-member-publish-anon:v1:"`` + the canonical JSON of every other field.
+The server verifies it against the writer key the space authority pinned for
+that epoch, and learns only that *some* publisher of the space posted. Its
+fan-out frame carries no ``writer_cert`` either::
+
+    {"space_id", "event_type": "space_item", "epoch", "payload"}
+
 Pure module: dataclasses + codec only, importable by the content-blind GFS
 process.
 """
@@ -47,6 +64,7 @@ import json
 from dataclasses import dataclass
 
 from .writer_cert import MAX_WRITER_CERT_EPOCH, WriterCert
+from .writer_key import WriterKeyCert
 
 #: The one outer event type a member-published item ever carries. The real
 #: type travels inside the ciphertext.
@@ -60,6 +78,28 @@ OWNER_EPOCH_NOTICE_ACTION: str = "gfs-owner-epoch-notice:v1"
 
 #: Route the GFS mounts the trusted member-publish endpoint at.
 MEMBER_PUBLISH_ROUTE: str = "/gfs/member-publish"
+
+#: Route of the strict-mode (anonymous) member publish (v_50).
+MEMBER_PUBLISH_ANON_ROUTE: str = "/gfs/member-publish-anon"
+
+#: Domain-separation prefix of the writer-key signature over an anonymous
+#: publish — distinct from every household and authority prefix.
+MEMBER_PUBLISH_ANON_PREFIX: bytes = b"gfs-member-publish-anon:v1:"
+
+#: The owner's per-space choice of how members publish over the GFS
+#: (``SpaceFeatures.gfs_publish_mode``). ``trusted`` (the default): the
+#: request is identified by the household. ``strict``: anonymous, signed with
+#: the epoch's writer group key; the GFS refuses identified publishes.
+GFS_PUBLISH_MODE_TRUSTED: str = "trusted"
+GFS_PUBLISH_MODE_STRICT: str = "strict"
+GFS_PUBLISH_MODES: frozenset[str] = frozenset(
+    {GFS_PUBLISH_MODE_TRUSTED, GFS_PUBLISH_MODE_STRICT}
+)
+
+#: Length bounds of the anonymous request's ``nonce`` (b64url of >= 12
+#: random bytes).
+MIN_NONCE_CHARS: int = 16
+MAX_NONCE_CHARS: int = 64
 
 #: How long the GFS keeps accepting certs of an epoch older than the newest
 #: one it knows, after it learned the newer one (seconds). Mirrors the
@@ -117,6 +157,28 @@ MEMBER_PUBLISH_FRAME_KEYS: frozenset[str] = frozenset(
     {"space_id", "event_type", "epoch", "writer_cert", "payload"}
 )
 
+#: Exact key set of a strict-mode (anonymous) request — no ``instance_id``,
+#: no household ``signature``, no ``writer_cert``.
+MEMBER_PUBLISH_ANON_REQUEST_KEYS: frozenset[str] = frozenset(
+    {
+        "gfs_instance_id",
+        "ts",
+        "nonce",
+        "target",
+        "event_type",
+        "epoch",
+        "payload",
+        "writer_sig",
+        "writer_sig_suite",
+    }
+)
+
+#: Exact key set of a strict-mode fan-out frame (no cert anywhere outside
+#: the ciphertext).
+MEMBER_PUBLISH_ANON_FRAME_KEYS: frozenset[str] = frozenset(
+    {"space_id", "event_type", "epoch", "payload"}
+)
+
 
 def owner_epoch_notice_signing_payload(
     *,
@@ -125,12 +187,22 @@ def owner_epoch_notice_signing_payload(
     space_id: str,
     epoch: int,
     ts: str,
+    publish_mode: str | None = None,
+    writer_key_cert: dict | None = None,
 ) -> dict:
     """What the space OWNER's household signs to confirm a content epoch at
     one connection server (``POST /gfs/spaces/{id}/epoch``). Canonical JSON of
     this dict (sorted keys, compact) is the signed message; ``action`` is the
-    domain separator and ``gfs_instance_id`` binds it to one server."""
-    return {
+    domain separator and ``gfs_instance_id`` binds it to one server.
+
+    v_50 adds two OPTIONAL fields, signed only when present (a v_49 owner's
+    notice keeps its exact bytes): ``publish_mode`` — the space's
+    ``gfs_publish_mode``, so the server can refuse identified publishes into
+    a strict space — and ``writer_key_cert``, the authority-signed pin of the
+    writer group key for ``epoch``. A household sends them only to a server
+    whose signed ``/gfs/info`` proves ``member_publish_strict`` (an older
+    server would verify without them and refuse the notice)."""
+    payload: dict = {
         "action": OWNER_EPOCH_NOTICE_ACTION,
         "owning_instance": owning_instance,
         "gfs_instance_id": gfs_instance_id,
@@ -138,6 +210,11 @@ def owner_epoch_notice_signing_payload(
         "epoch": epoch,
         "ts": ts,
     }
+    if publish_mode is not None:
+        payload["publish_mode"] = publish_mode
+    if writer_key_cert is not None:
+        payload["writer_key_cert"] = writer_key_cert
+    return payload
 
 
 class InvalidMemberPublish(ValueError):
@@ -257,35 +334,135 @@ class MemberPublishRequest:
         )
 
 
+def _nonce(raw: dict) -> str:
+    value = raw.get("nonce")
+    if (
+        not isinstance(value, str)
+        or not MIN_NONCE_CHARS <= len(value) <= MAX_NONCE_CHARS
+    ):
+        raise InvalidMemberPublish("invalid field: nonce")
+    return value
+
+
+@dataclass(slots=True, frozen=True)
+class MemberPublishAnonRequest:
+    """One strict-mode (anonymous) member-publish request (v_50, see the
+    module docstring). Nothing in it names the publishing household."""
+
+    gfs_instance_id: str
+    ts: str
+    nonce: str
+    target: str
+    epoch: int
+    payload: str
+    writer_sig: str
+    writer_sig_suite: str
+
+    @property
+    def event_type(self) -> str:
+        return SPACE_ITEM_EVENT_TYPE
+
+    def signing_body(self) -> dict:
+        """Every signed field: the request minus ``writer_sig`` (the suite
+        tag is inside the signature)."""
+        return {
+            "gfs_instance_id": self.gfs_instance_id,
+            "ts": self.ts,
+            "nonce": self.nonce,
+            "target": self.target,
+            "event_type": SPACE_ITEM_EVENT_TYPE,
+            "epoch": self.epoch,
+            "payload": self.payload,
+            "writer_sig_suite": self.writer_sig_suite,
+        }
+
+    def signing_bytes(self) -> bytes:
+        """Canonical, domain-separated bytes the writer group key signs."""
+        return MEMBER_PUBLISH_ANON_PREFIX + json.dumps(
+            self.signing_body(), separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+
+    def to_wire(self) -> dict:
+        return {**self.signing_body(), "writer_sig": self.writer_sig}
+
+    def fan_out_frame(self) -> dict:
+        """The frame the GFS fans out: routing fields + ciphertext only."""
+        return {
+            "space_id": self.target,
+            "event_type": SPACE_ITEM_EVENT_TYPE,
+            "epoch": self.epoch,
+            "payload": self.payload,
+        }
+
+    @classmethod
+    def from_wire(cls, raw: object) -> "MemberPublishAnonRequest":
+        """Parse a request body; :class:`InvalidMemberPublish` on any
+        missing, extra or malformed field — so a body carrying
+        ``instance_id``, a household ``signature`` or a ``writer_cert`` is
+        refused outright."""
+        if not isinstance(raw, dict):
+            raise InvalidMemberPublish("expected a JSON object")
+        if set(raw) != MEMBER_PUBLISH_ANON_REQUEST_KEYS:
+            raise InvalidMemberPublish("unexpected or missing fields")
+        _event_type(raw)
+        return cls(
+            gfs_instance_id=_short_str(raw, "gfs_instance_id", MAX_WIRE_ID_CHARS),
+            ts=_short_str(raw, "ts", _MAX_SHORT_FIELD_CHARS),
+            nonce=_nonce(raw),
+            target=_short_str(raw, "target", MAX_WIRE_ID_CHARS),
+            epoch=_epoch(raw),
+            payload=_payload(raw),
+            writer_sig=_short_str(raw, "writer_sig", _MAX_SHORT_FIELD_CHARS),
+            writer_sig_suite=_short_str(raw, "writer_sig_suite", MAX_WIRE_ID_CHARS),
+        )
+
+
+def parse_writer_key_cert(raw: object) -> WriterKeyCert:
+    """A ``writer_key_cert`` off an epoch notice, or
+    :class:`InvalidMemberPublish`."""
+    try:
+        return WriterKeyCert.from_wire(raw)
+    except ValueError as exc:
+        raise InvalidMemberPublish("invalid field: writer_key_cert") from exc
+
+
 @dataclass(slots=True, frozen=True)
 class SpaceItemFrame:
-    """A member-published item as a subscriber receives it from the GFS."""
+    """A member-published item as a subscriber receives it from the GFS.
+
+    ``writer_cert`` is the plaintext v1 cert of a trusted-mode frame, or
+    ``None`` for a strict-mode frame — whose cert rides only inside the
+    ciphertext (receivers take it from there either way)."""
 
     space_id: str
     epoch: int
-    writer_cert: WriterCert
+    writer_cert: WriterCert | None
     payload: str
 
     def to_wire(self) -> dict:
-        return {
+        wire: dict = {
             "space_id": self.space_id,
             "event_type": SPACE_ITEM_EVENT_TYPE,
             "epoch": self.epoch,
-            "writer_cert": self.writer_cert.v1().to_wire(),
             "payload": self.payload,
         }
+        if self.writer_cert is not None:
+            wire["writer_cert"] = self.writer_cert.v1().to_wire()
+        return wire
 
     @classmethod
     def from_wire(cls, raw: object) -> "SpaceItemFrame":
         """Parse a fan-out frame. The WS ``type`` key (and any key an older
         or newer GFS adds) is ignored — receivers authenticate the item by
-        the cert and the author signature inside, never by outer fields."""
+        the cert and the author signature inside, never by outer fields. A
+        frame WITHOUT ``writer_cert`` is a strict-mode frame; a present but
+        malformed one is refused."""
         if not isinstance(raw, dict):
             raise InvalidMemberPublish("expected a JSON object")
         _event_type(raw)
         return cls(
             space_id=_short_str(raw, "space_id", MAX_WIRE_ID_CHARS),
             epoch=_epoch(raw),
-            writer_cert=_cert(raw),
+            writer_cert=_cert(raw) if "writer_cert" in raw else None,
             payload=_payload(raw),
         )

@@ -18,6 +18,7 @@ import os
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -211,7 +212,7 @@ async def test_the_user_binding_never_reaches_the_gfs(gfs, caplog):
     svc = GfsMemberPublishService(
         gfs=_HouseholdGfs(gfs.session),  # type: ignore[arg-type]
         conn_repo=None,  # type: ignore[arg-type]
-        space_repo=None,  # type: ignore[arg-type]
+        space_repo=_TrustedSpaces(),  # type: ignore[arg-type]
         space_crypto=_OneKey(),  # type: ignore[arg-type]
         writer_certs=_FixedCert(cert),  # type: ignore[arg-type]
         own_instance_id=publisher.instance_id,
@@ -264,6 +265,15 @@ class _HouseholdGfs:
         return self.session
 
 
+class _TrustedSpaces:
+    """A space repo holding the one (trusted-mode) public space."""
+
+    async def get(self, space_id):
+        return SimpleNamespace(
+            id=space_id, features=SimpleNamespace(gfs_publish_mode="trusted")
+        )
+
+
 class _OneKey:
     key = AESGCM.generate_key(bit_length=256)
 
@@ -283,6 +293,10 @@ class _FixedCert:
 
     async def own_cert(self, space_id, epoch):
         return self.cert
+
+    async def own_writer_key(self, space_id, epoch):
+        # Trusted mode: no writer group key held (v_50 strict is its own test).
+        return None
 
 
 ITEM_TYPES = (
@@ -320,7 +334,7 @@ async def test_no_member_item_type_ever_reaches_the_gfs_in_plaintext(
     svc = GfsMemberPublishService(
         gfs=_HouseholdGfs(gfs.session),  # type: ignore[arg-type]
         conn_repo=None,  # type: ignore[arg-type]
-        space_repo=None,  # type: ignore[arg-type]
+        space_repo=_TrustedSpaces(),  # type: ignore[arg-type]
         space_crypto=_OneKey(),  # type: ignore[arg-type]
         writer_certs=_FixedCert(cert),  # type: ignore[arg-type]
         own_instance_id=publisher.instance_id,

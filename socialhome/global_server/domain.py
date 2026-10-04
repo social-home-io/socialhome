@@ -103,6 +103,13 @@ class GlobalSpace:
     #: space from DISCOVERY only (listing, detail route, public pages);
     #: existing subscribers and the relay keep working.
     withdrawn: bool = False
+    #: The owner's ``gfs_publish_mode`` (v_50, GFS migration 0015), learned
+    #: only from its household-signed epoch notice and never written by a
+    #: publish or cluster upsert. Served on the public directory so a
+    #: household reads it (over its cookie-less session) before it would ever
+    #: send an identified member publish — and never sends one into a space
+    #: listed as ``strict``.
+    member_publish_mode: str = "trusted"
 
 
 @dataclass(slots=True, frozen=True)
@@ -406,6 +413,43 @@ class GfsSpaceEpoch:
             epoch == self.current + 1
             and now - self.raised_at >= MIN_EPOCH_STEP_INTERVAL_S
         )
+
+
+@dataclass(slots=True, frozen=True)
+class GfsSpaceStrictState:
+    """What this server knows for strict-mode member publish (v_50,
+    migration 0015): the owner's ``publish_mode`` and the pinned writer group
+    keys of the newest and the previous content epoch.
+
+    Kept off :class:`GlobalSpace` so the public directory never shows it. The
+    keys are cleared on an authority re-pin; the mode (the owner's household-
+    signed statement) is not.
+    """
+
+    space_id: str
+    publish_mode: str = "trusted"
+    mode_at: int | None = None
+    writer_key_epoch: int | None = None
+    writer_key_pk: str | None = None
+    writer_key_prev_epoch: int | None = None
+    writer_key_prev_pk: str | None = None
+
+    @property
+    def strict(self) -> bool:
+        return self.publish_mode == "strict"
+
+    def writer_pk_for(self, epoch: int) -> str | None:
+        """The pinned writer public key (b64url) for ``epoch``, or ``None``.
+        Only the newest and the previous pin are kept; freshness (the grace
+        on the previous epoch) is :meth:`GfsSpaceEpoch.admits`'s job."""
+        if self.writer_key_epoch is not None and epoch == self.writer_key_epoch:
+            return self.writer_key_pk
+        if (
+            self.writer_key_prev_epoch is not None
+            and epoch == self.writer_key_prev_epoch
+        ):
+            return self.writer_key_prev_pk
+        return None
 
 
 @dataclass(slots=True, frozen=True)
