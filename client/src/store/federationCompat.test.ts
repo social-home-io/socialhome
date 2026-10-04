@@ -54,7 +54,7 @@ describe('federationCompat store', () => {
           peer({ instance_id: 'i1', display_name: 'Alpha', proto_version: 18 }),
           peer({
             instance_id: 'i2', display_name: 'Beta', proto_version: 15,
-            lacking_features: ['Bazaar bids'],
+            lacking_features: ['Bids and offers in the bazaar'],
           }),
         ],
       }),

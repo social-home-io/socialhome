@@ -62,7 +62,7 @@ export function peersBehindCount(): number {
  * ``MIN_FOR_INSTANCE_RESYNC``) — a peer that still *lacks* this can't honor a
  * resync request, so the "Re-check" affordance is hidden for it.
  */
-export const RESYNC_FEATURE = 'Instance resync request'
+export const RESYNC_FEATURE = 'Asking a household to send updates again'
 
 /**
  * True iff we can ask this peer to re-advertise (it understands the v_19

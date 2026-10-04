@@ -39,7 +39,7 @@
 import { computed, signal, type ReadonlySignal, type Signal } from '@preact/signals'
 import { api } from '@/api'
 import { connectionState, ws } from '@/ws'
-import { locale, t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
 import { pendingDeletes, undoableDelete, type CommitOptions } from '@/utils/undoableDelete'
 import type { TaskItem, TaskListEntry, TaskPriority } from '@/types'
 import { resetFilters } from '@/features/tasks/board/filters'
@@ -181,14 +181,8 @@ function tn(key: string, n: number, params: Record<string, string> = {}): string
   return t(isOne(n) ? `${key}_one` : key, { ...params, n: String(n) })
 }
 
-/** The UI language's "one" plural category (French counts 0 as one). */
-export function isOne(n: number): boolean {
-  try {
-    return new Intl.PluralRules(locale.value || undefined).select(n) === 'one'
-  } catch {
-    return n === 1
-  }
-}
+/** Re-exported for the call sites that import it from here. */
+export { isOne }
 
 function isNotFound(err: unknown): boolean {
   return (err as { status?: unknown } | null)?.status === 404

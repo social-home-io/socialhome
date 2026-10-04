@@ -21,6 +21,8 @@
  * or screen-reader still gets the full stamp.
  */
 
+import { locale, t } from '@/i18n/i18n'
+
 const MS_PER_MIN = 60_000
 const MS_PER_DAY = 86_400_000
 
@@ -129,35 +131,46 @@ export function relativeDocsTime(iso: string): string {
 }
 
 /**
- * Forward-looking shape — "in 6 days" / "in 3h" / "in 5 min" — for a
- * timestamp that is expected to sit in the future (an invite link's
- * ``expires_at``, say).
+ * Forward-looking shape — "in 6 days" / "in 3 hours" / "in 5 minutes" —
+ * for a timestamp that is expected to sit in the future (an invite
+ * link's ``expires_at``, say), in the UI language.
  *
  * ``relativeDocsTime`` is past-tense only: every future stamp collapses
  * to "just now" there, which reads as *already expired* on exactly the
  * surface where the remaining life is the point. Anything at or past
- * the moment of the call returns ``"expired"``.
+ * the moment of the call returns the translated "expired".
  */
 export function relativeFutureTime(iso: string): string {
-  const t = Date.parse(normaliseTimestamp(iso))
-  if (Number.isNaN(t)) return iso
-  const ms = t - Date.now()
-  if (ms <= 0) return 'expired'
+  const at = Date.parse(normaliseTimestamp(iso))
+  if (Number.isNaN(at)) return iso
+  const ms = at - Date.now()
+  if (ms <= 0) return t('time.expired')
   const min = Math.floor(ms / MS_PER_MIN)
-  if (min < 1) return 'in under a minute'
-  if (min < 60) return `in ${min} min`
-  // Round, don't floor, from here up: a link minted seconds ago with a
-  // 7-day life is 6.9999 days out, and flooring made the confirmation
+  // Round, don't floor, from the hour up: a link minted seconds ago with
+  // a 7-day life is 6.9999 days out, and flooring made the confirmation
   // sentence contradict the picker the user had just used ("Stops
-  // working after 7 days" → "lapses in 6 days"). Same for the 1-day
-  // option, which read as "in 23h".
+  // working after 7 days" → "in 6 days"). Same for the 1-day option,
+  // which read as "in 23 hours".
   const hr = ms / (MS_PER_MIN * 60)
-  if (hr < 23.5) return `in ${Math.round(hr)}h`
   const days = Math.round(ms / MS_PER_DAY)
-  if (days < 30) return `in ${days} day${days === 1 ? '' : 's'}`
-  return `on ${new Date(t).toLocaleDateString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  })}`
+  if (days >= 30) {
+    return t('time.on_date', {
+      date: new Date(at).toLocaleDateString(locale.value || undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      }),
+    })
+  }
+  const [value, unit]: [number, Intl.RelativeTimeFormatUnit] = min < 60
+    ? [Math.max(1, min), 'minute']
+    : hr < 23.5
+      ? [Math.round(hr), 'hour']
+      : [days, 'day']
+  try {
+    return new Intl.RelativeTimeFormat(locale.value || undefined, { numeric: 'always' })
+      .format(value, unit)
+  } catch {
+    return `in ${value} ${unit}${value === 1 ? '' : 's'}`
+  }
 }

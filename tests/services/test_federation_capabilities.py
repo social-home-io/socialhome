@@ -57,23 +57,23 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     assert FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE == 31
     assert (
         FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS,
-        "Admin authoritative config offline",
+        "Admins changing settings while the owner is away",
     ) in CAPABILITY_FEATURES
     assert (
         FederationCapability.MIN_FOR_USER_IDENTITY_KEY,
-        "Per-user identity binding",
+        "Checking each person's identity",
     ) in CAPABILITY_FEATURES
     assert (
         FederationCapability.MIN_FOR_IDENTITY_ANCHOR,
-        "UUID identity anchor",
+        "Stable identity when a username changes",
     ) in CAPABILITY_FEATURES
     assert (
         FederationCapability.MIN_FOR_USER_MOVE,
-        "User move-out link",
+        "Moving to another household",
     ) in CAPABILITY_FEATURES
     assert (
         FederationCapability.MIN_FOR_ROUTE_STALE_NACK,
-        "Mesh route-stale nack",
+        "Noticing when a path through other households breaks",
     ) in CAPABILITY_FEATURES
 
 
@@ -109,9 +109,9 @@ def test_features_missing_below_mid_version():
     """A mid-version peer lacks only features above its version."""
     missing = features_missing_below(13)
     # Sync HTTPS fallback (v13) is supported -> not missing.
-    assert "Sync HTTPS fallback" not in missing
+    assert "Syncing when a direct link fails" not in missing
     # Media DataChannel (v14) is above 13 -> missing.
-    assert "Media DataChannel" in missing
+    assert "Faster photo and video transfer" in missing
     expected = [label for ver, label in sorted(CAPABILITY_FEATURES) if ver > 13]
     assert missing == expected
 
@@ -131,28 +131,28 @@ def test_space_features_missing_below_v1_lists_only_space_scoped():
     ]
     assert missing == expected
     # Non-space features are excluded even though a v1 peer lacks them too.
-    assert "Calendar timezones" not in missing
-    assert "DM media" not in missing
-    assert "Home-location sharing" not in missing
-    assert "App federation channel" not in missing
-    assert "App user routing" not in missing
+    assert "Event times in the right time zone" not in missing
+    assert "Photos and files in direct messages" not in missing
+    assert "Sharing your home location" not in missing
+    assert "Apps that work across households" not in missing
+    assert "Apps that reach the right person" not in missing
 
 
 def test_space_features_missing_below_v13():
     """A v13 member household lacks the space features above v13."""
     assert space_features_missing_below(13) == [
-        "Media DataChannel",
-        "Remote admin actions",
-        "Multi-admin approvals",
-        "Authenticated mesh route discovery",
-        "Space delegated admin authority",
-        "Space roster gossip",
-        "Admin authoritative config offline",
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Faster photo and video transfer",
+        "Admin actions from other households",
+        "Changes that need several admins to agree",
+        "Finding a safe path through other households",
+        "Admins running a space without the owner",
+        "Member lists shared between households",
+        "Admins changing settings while the owner is away",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -160,7 +160,7 @@ def test_space_features_missing_below_v13():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -174,15 +174,15 @@ def test_space_features_missing_below_v16():
     discovery (v_21), delegated admin authority (v_22), and roster
     gossip (v_23)."""
     assert space_features_missing_below(16) == [
-        "Authenticated mesh route discovery",
-        "Space delegated admin authority",
-        "Space roster gossip",
-        "Admin authoritative config offline",
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Finding a safe path through other households",
+        "Admins running a space without the owner",
+        "Member lists shared between households",
+        "Admins changing settings while the owner is away",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -190,7 +190,7 @@ def test_space_features_missing_below_v16():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -203,13 +203,13 @@ def test_space_features_missing_below_v22():
     """A v22 member household still lacks roster gossip (v_23) and admin
     authoritative config (v_24)."""
     assert space_features_missing_below(22) == [
-        "Space roster gossip",
-        "Admin authoritative config offline",
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Member lists shared between households",
+        "Admins changing settings while the owner is away",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -217,7 +217,7 @@ def test_space_features_missing_below_v22():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -229,12 +229,12 @@ def test_space_features_missing_below_v22():
 def test_space_features_missing_below_v23():
     """A v23 member household still lacks admin authoritative config (v_24)."""
     assert space_features_missing_below(23) == [
-        "Admin authoritative config offline",
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Admins changing settings while the owner is away",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -242,7 +242,7 @@ def test_space_features_missing_below_v23():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -256,11 +256,11 @@ def test_space_features_missing_below_v24():
     v_25 / v_26 / v_27 are per-user surfaces, not space-scoped, so they do
     not appear here even though a v24 member lacks them too."""
     assert space_features_missing_below(24) == [
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -268,7 +268,7 @@ def test_space_features_missing_below_v24():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -276,11 +276,11 @@ def test_space_features_missing_below_v24():
         "Shared pages without lost edits",
     ]
     assert space_features_missing_below(27) == [
-        "Mesh route-stale nack",
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Noticing when a path through other households breaks",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -288,7 +288,7 @@ def test_space_features_missing_below_v24():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -305,10 +305,10 @@ def test_space_features_missing_below_v32_is_empty():
     one also lacks cross-household Follower seats, a v28 one the
     invite-link bootstrap redeem."""
     assert space_features_missing_below(28) == [
-        "Invite-link bootstrap redeem",
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Joining by link without being connected",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -316,7 +316,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -324,9 +324,9 @@ def test_space_features_missing_below_v32_is_empty():
         "Shared pages without lost edits",
     ]
     assert space_features_missing_below(29) == [
-        "Cross-household Follower seats",
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Followers from other households",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -334,7 +334,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -342,8 +342,8 @@ def test_space_features_missing_below_v32_is_empty():
         "Shared pages without lost edits",
     ]
     assert space_features_missing_below(30) == [
-        "Authenticated mesh-routed origin",
-        "Space roster snapshot",
+        "Checking who sent a passed-on message",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -351,7 +351,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -359,7 +359,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Shared pages without lost edits",
     ]
     assert space_features_missing_below(31) == [
-        "Space roster snapshot",
+        "Up-to-date member lists for every household",
         "Shared gallery albums",
         "Albums tied to their creator",
         "Posts tied to their creator",
@@ -367,7 +367,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -382,7 +382,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -396,7 +396,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -409,7 +409,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -422,7 +422,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -434,7 +434,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -446,7 +446,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -457,7 +457,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -467,7 +467,7 @@ def test_space_features_missing_below_v32_is_empty():
     assert space_features_missing_below(40) == [
         "Space moderators",
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -476,7 +476,7 @@ def test_space_features_missing_below_v32_is_empty():
     ]
     assert space_features_missing_below(41) == [
         "Admin-only space features",
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",
@@ -484,7 +484,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Shared pages without lost edits",
     ]
     assert space_features_missing_below(42) == [
-        "Reviewed across households",
+        "Reviewing posts from other households",
         "Locking out removed admins",
         "Space reports for moderators",
         "Catching up on missed security updates",

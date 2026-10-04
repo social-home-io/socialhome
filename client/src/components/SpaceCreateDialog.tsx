@@ -12,7 +12,7 @@ import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { EmojiField } from './EmojiField'
 import { RadioCardGroup } from './RadioCardGroup'
 import {
-  VISIBILITY_OPTIONS,
+  visibilityOptions as tierOptions,
   SPACE_CATEGORIES,
   joinOptionsForVisibility,
 } from './spaceModeOptions'
@@ -124,8 +124,8 @@ export function SpaceCreateDialog() {
   // The Global tier is disabled (with an explanatory subtitle) until an
   // active global server connection exists.
   const visibilityOptions = hasActiveGfs.value
-    ? VISIBILITY_OPTIONS
-    : VISIBILITY_OPTIONS.map((o) =>
+    ? tierOptions()
+    : tierOptions().map((o) =>
       o.value === 'global'
         ? {
           ...o,
@@ -189,7 +189,7 @@ export function SpaceCreateDialog() {
           </p>
         )}
         <RadioCardGroup
-          legend="How people join"
+          legend={t('space.join.legend')}
           name="space-create-join-mode"
           value={joinMode.value}
           options={joinOptionsForVisibility(spaceType.value)}

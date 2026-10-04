@@ -1,10 +1,18 @@
 import { describe, it, expect } from 'vitest'
-import { VISIBILITY_OPTIONS, SPACE_CATEGORIES, categoryLabel } from './spaceModeOptions'
+import { visibilityOptions, joinModeOptions, SPACE_CATEGORIES, categoryLabel } from './spaceModeOptions'
 
 describe('spaceModeOptions', () => {
   it('lists four tiers in ladder order', () => {
-    expect(VISIBILITY_OPTIONS.map(o => o.value)).toEqual([
+    expect(visibilityOptions().map(o => o.value)).toEqual([
       'private', 'household', 'public', 'global',
+    ])
+  })
+
+  it('labels tiers and join modes from the catalog', () => {
+    expect(visibilityOptions()[0].title).toBe('Private')
+    expect(visibilityOptions()[3].subtitle).toBe('Published worldwide through your GFS.')
+    expect(joinModeOptions().map(o => o.title)).toEqual([
+      'Invite only', 'Request to join', 'Open',
     ])
   })
 

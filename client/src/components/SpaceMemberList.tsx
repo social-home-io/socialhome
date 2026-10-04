@@ -260,13 +260,13 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
           {canManage.value && (
             <div class="sh-member-list-invite-actions">
               <Button onClick={() => openSpaceInvite(spaceId, null, viewerRole)}>
-                + Invite by code
+                + {t('space.members.invite_by_code')}
               </Button>
               <Button
                 variant="secondary"
                 onClick={() => openRemoteInviteDialog(spaceId)}
               >
-                + Add person
+                + {t('space.members.add_person')}
               </Button>
             </div>
           )}

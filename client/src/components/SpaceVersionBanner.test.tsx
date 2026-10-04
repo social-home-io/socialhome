@@ -10,13 +10,13 @@ function compat(over: Record<string, unknown> = {}) {
   return {
     ours: 18,
     min_member_proto_version: 13,
-    lagging_features: ['Media DataChannel', 'Remote admin actions'],
+    lagging_features: ['Faster photo and video transfer', 'Admin actions from other households'],
     behind_members: [
       {
         instance_id: 'peer-13',
         display_name: "Brother's house",
         proto_version: 13,
-        lacking_features: ['Media DataChannel', 'Remote admin actions'],
+        lacking_features: ['Faster photo and video transfer', 'Admin actions from other households'],
       },
     ],
     ...over,
@@ -47,8 +47,8 @@ describe('SpaceVersionBanner', () => {
         'Some members are on an older version',
       ),
     )
-    expect(container.textContent).toContain('Media DataChannel')
-    expect(container.textContent).toContain('Remote admin actions')
+    expect(container.textContent).toContain('Faster photo and video transfer')
+    expect(container.textContent).toContain('Admin actions from other households')
     expect(container.textContent).toContain("Brother's house (v13)")
   })
 

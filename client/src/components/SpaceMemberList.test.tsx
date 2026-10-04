@@ -57,7 +57,8 @@ describe('SpaceMemberList', () => {
     expect(r.container.querySelector('.sh-badge--owner')!.textContent).toBe('Owner')
     // Content authority only — no member-management kebab, no invites.
     expect(r.container.querySelector('.sh-post-overflow')).toBeNull()
-    expect(r.queryByText('+ Invite by code')).toBeNull()
+    expect(r.container.querySelector('.sh-member-list-invite-actions')).toBeNull()
+    expect(r.container.textContent).not.toContain('Invite by code')
   })
 
   it("refetches when the host's role update arrives, not for other config", async () => {

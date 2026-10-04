@@ -27,14 +27,14 @@ import { useEffect } from 'preact/hooks'
 import { api, ApiError } from '@/api'
 import { instanceConfig } from '@/store/instance'
 import { buildInviteCode, gfsBaseFromInviteUrl } from '@/lib/spaceInviteCode'
-import { relativeFutureTime } from '@/utils/relativeTime'
+import { normaliseTimestamp, relativeFutureTime } from '@/utils/relativeTime'
 import type { GfsConnection } from '@/types'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { QrCodeImg } from './QrCodeImg'
 import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
-import { t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
 import { addBase } from '@/baseUrl'
 
 /** Roles an invite link can seat someone as. ``owner`` is deliberately
@@ -83,16 +83,22 @@ interface InviteTokenRow {
   via?: InviteVia
 }
 
+/* For ``i18n:check``: t('invite.expiry.1d') t('invite.expiry.7d')
+ * t('invite.expiry.30d') t('invite.expiry.never') t('invite.created.uses')
+ * t('invite.created.uses_one') t('invite.links.uses_left')
+ * t('invite.links.uses_left_one') t('invite.created.joins_as_member')
+ * t('invite.created.joins_as_subscriber') t('invite.created.joins_as_moderator')
+ * t('invite.created.joins_as_admin') */
 const EXPIRY_CHOICES = [
-  { id: '1d', label: '1 day', ttl: 86_400 },
-  { id: '7d', label: '7 days', ttl: 604_800 },
-  { id: '30d', label: '30 days', ttl: 2_592_000 },
+  { id: '1d', labelKey: 'invite.expiry.1d', ttl: 86_400 },
+  { id: '7d', labelKey: 'invite.expiry.7d', ttl: 604_800 },
+  { id: '30d', labelKey: 'invite.expiry.30d', ttl: 2_592_000 },
   // ``0`` is "never expires" — the route maps it onto the service's
   // ``None`` precisely because this picker sends it. (An explicit
   // ``null`` means the same thing; OMITTING the field is what takes the
   // server's 7-day default, which is the opposite of what the user
   // picked here.)
-  { id: 'never', label: 'Never', ttl: 0 },
+  { id: 'never', labelKey: 'invite.expiry.never', ttl: 0 },
 ] as const
 
 type ExpiryId = typeof EXPIRY_CHOICES[number]['id']
@@ -113,6 +119,40 @@ const ROLE_CHOICES: { id: InviteRole; labelKey: string; hintKey: string }[] = [
 function roleLabel(r: string): string {
   const c = ROLE_CHOICES.find(x => x.id === r)
   return c ? t(c.labelKey) : r
+}
+
+/** "They join as a member." — one sentence per role, so each language
+ *  gets its own grammar (article, case, capitalisation). */
+const JOINS_AS_KEYS: Record<InviteRole, string> = {
+  member: 'invite.created.joins_as_member',
+  subscriber: 'invite.created.joins_as_subscriber',
+  moderator: 'invite.created.joins_as_moderator',
+  admin: 'invite.created.joins_as_admin',
+}
+
+function joinsAsText(r: string): string {
+  const key = JOINS_AS_KEYS[r as InviteRole]
+  return key ? t(key) : t('invite.created.joins_as', { role: r })
+}
+
+/** True when ``iso`` is already in the past. */
+function isPast(iso: string): boolean {
+  const at = Date.parse(normaliseTimestamp(iso))
+  return !Number.isNaN(at) && at <= Date.now()
+}
+
+/** "expires in 7 days" / "expired" / "never expires" for a list row. */
+function rowExpiryText(expiresAt: string | null): string {
+  if (!expiresAt) return t('invite.links.never_expires')
+  if (isPast(expiresAt)) return t('invite.links.expired')
+  return t('invite.links.expires', { when: relativeFutureTime(expiresAt) })
+}
+
+/** "It stops working in 7 days." for the just-made link. */
+function createdExpiryText(expiresAt: string | null): string {
+  if (!expiresAt) return t('invite.created.never_expires')
+  if (isPast(expiresAt)) return t('invite.created.expired')
+  return t('invite.created.expires', { when: relativeFutureTime(expiresAt) })
 }
 
 /** Message for a failure on a member household, where the dialog's calls
@@ -254,13 +294,17 @@ function codeFor(row: InviteTokenRow): string {
   })
 }
 
-async function copy(text: string, label: string) {
+/** Copy the invite code or the web link, with a toast in either case. */
+async function copy(text: string, what: 'code' | 'link') {
   try {
     await navigator.clipboard.writeText(text)
-    showToast(`${label} copied!`, 'success')
+    showToast(
+      what === 'code' ? t('invite.copied_code') : t('invite.copied_link'),
+      'success',
+    )
   } catch {
     showToast(
-      `Could not copy — select the ${label.toLowerCase()} to copy manually.`,
+      what === 'code' ? t('invite.copy_failed_code') : t('invite.copy_failed_link'),
       'error',
     )
   }
@@ -288,13 +332,17 @@ async function loadLinks() {
 }
 
 /** "3 of 5 uses left" when the mint size is known, "3 uses left"
- *  otherwise. The remaining count alone hid how generous a link was. */
+ *  otherwise. The remaining count alone hid how generous a link was.
+ *  The "of" form only shows when total > left ≥ 1, so total is at least
+ *  2 and needs no ``_one`` variant. */
 function usesLabel(row: InviteTokenRow): string {
   const left = row.uses_remaining
   const total = row.uses ?? null
-  const noun = left === 1 ? 'use' : 'uses'
-  if (total && total !== left) return `${left} of ${total} ${noun} left`
-  return `${left} ${noun} left`
+  if (total && total !== left) {
+    return t('invite.links.uses_of', { n: String(left), total: String(total) })
+  }
+  return t(isOne(left) ? 'invite.links.uses_left_one' : 'invite.links.uses_left',
+    { n: String(left) })
 }
 
 /** Display name for the link's minter, falling back to the raw id. */
@@ -414,11 +462,11 @@ export function SpaceInviteDialog() {
         publishBlocked.value = {
           ...publishBlocked.value,
           [publishedTo]: e.detail
-            || "This GFS can't host invite links yet.",
+            || t('invite.publish.blocked_default'),
         }
       }
       showToast(
-        hostErrorMessage(e) ?? (e as Error)?.message ?? 'Failed to create invite',
+        hostErrorMessage(e) ?? (e as Error)?.message ?? t('invite.create_failed'),
         'error',
       )
     } finally {
@@ -428,11 +476,10 @@ export function SpaceInviteDialog() {
 
   const revoke = async (target: InviteTokenRow) => {
     const ok = await confirmDialog(
-      'This link stops working immediately, here and on the connection '
-      + 'server. People who already joined with it stay.',
+      t('invite.revoke_confirm.body'),
       {
-        title: 'Revoke this invite link?',
-        confirmLabel: 'Revoke link',
+        title: t('invite.revoke_confirm.title'),
+        confirmLabel: t('invite.revoke_confirm.ok'),
         destructive: true,
       },
     )
@@ -444,13 +491,13 @@ export function SpaceInviteDialog() {
       await api.delete(
         `/api/spaces/${spaceId.value}/invite-tokens/${target.token}`,
       )
-      showToast('Link revoked.', 'success')
+      showToast(t('invite.revoked'), 'success')
     } catch (e: unknown) {
       // Put it back — a revoke that didn't land must not look like one
       // that did, or the owner walks away believing a live link is dead.
       links.value = before
       showToast(
-        hostErrorMessage(e) ?? (e as Error)?.message ?? 'Could not revoke that link.',
+        hostErrorMessage(e) ?? (e as Error)?.message ?? t('invite.revoke_failed'),
         'error',
       )
     }
@@ -458,17 +505,16 @@ export function SpaceInviteDialog() {
 
   return (
     <Modal open={open.value} onClose={() => open.value = false}
-           title="Invite to space">
+           title={t('invite.title')}>
       <div class="sh-invite-dialog">
         {!row ? (
           <>
             <p class="sh-muted" style={{ marginTop: 0 }}>
-              Make a link or code to share. Whoever gets it joins from
-              their own Social Home.
+              {t('invite.intro')}
             </p>
 
             <fieldset class="sh-invite-fieldset">
-              <legend>They join as</legend>
+              <legend>{t('invite.role.legend')}</legend>
               <div class="sh-invite-roles">
                 {roleChoices.map(c => (
                   <label
@@ -548,7 +594,7 @@ export function SpaceInviteDialog() {
             )}
 
             <label class="sh-form-field">
-              <span>How many people can use this link?</span>
+              <span>{t('invite.uses.label')}</span>
               <input
                 type="number"
                 min={1}
@@ -566,7 +612,7 @@ export function SpaceInviteDialog() {
             </label>
 
             <label class="sh-form-field">
-              <span>Stops working after</span>
+              <span>{t('invite.expiry.label')}</span>
               <select
                 value={expiry.value}
                 data-testid="invite-expiry"
@@ -575,16 +621,14 @@ export function SpaceInviteDialog() {
                 }}
               >
                 {EXPIRY_CHOICES.map(c => (
-                  <option key={c.id} value={c.id}>{c.label}</option>
+                  <option key={c.id} value={c.id}>{t(c.labelKey)}</option>
                 ))}
               </select>
             </label>
             {expiry.value === 'never' && (
               <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-xs)' }}
                  data-testid="invite-never-hint">
-                A link that never lapses keeps working until its uses run
-                out or you revoke it — anyone it was ever forwarded to can
-                still join.
+                {t('invite.expiry.never_hint')}
               </p>
             )}
 
@@ -603,10 +647,9 @@ export function SpaceInviteDialog() {
                     }}
                   />
                   <span>
-                    Also publish to{' '}
                     {servers.value.length === 1
-                      ? servers.value[0].display_name
-                      : 'a GFS'}
+                      ? t('invite.publish.toggle', { server: servers.value[0].display_name })
+                      : t('invite.publish.toggle_any')}
                   </span>
                 </label>
                 {publish.value && servers.value.length > 1 && (
@@ -624,8 +667,9 @@ export function SpaceInviteDialog() {
                         value={g.id}
                         disabled={!!publishBlocked.value[g.id]}
                       >
-                        {g.display_name}
-                        {publishBlocked.value[g.id] ? ' — unavailable' : ''}
+                        {publishBlocked.value[g.id]
+                          ? t('invite.publish.unavailable', { server: g.display_name })
+                          : g.display_name}
                       </option>
                     ))}
                   </select>
@@ -639,9 +683,7 @@ export function SpaceInviteDialog() {
                 {publish.value && !blockedReason && (
                   <p class="sh-muted"
                      style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-                    Publishing gets you a plain web link you can send to
-                    someone who has never heard of Social Home. The server
-                    only ever shows the space name and the code.
+                    {t('invite.publish.note')}
                   </p>
                 )}
               </div>
@@ -650,20 +692,18 @@ export function SpaceInviteDialog() {
             <div class="sh-form-actions sh-invite-dialog__submit"
                  data-testid="invite-submit-row">
               <Button onClick={createToken} loading={loading.value}>
-                Create invite link
+                {t('invite.create')}
               </Button>
             </div>
           </>
         ) : (
           <>
-            <p class="sh-muted" style={{ marginTop: 0 }}>
-              Good for {row.uses_remaining}{' '}
-              {row.uses_remaining === 1 ? 'use' : 'uses'}
-              {row.expires_at
-                ? `, lapses ${relativeFutureTime(row.expires_at)}`
-                : ', never lapses'}
-              . They join as{' '}
-              {roleLabel(row.role).toLowerCase()}.
+            <p class="sh-muted" style={{ marginTop: 0 }}
+               data-testid="invite-created-summary">
+              {t(isOne(row.uses_remaining) ? 'invite.created.uses_one' : 'invite.created.uses',
+                { n: String(row.uses_remaining) })}
+              {' '}{createdExpiryText(row.expires_at)}
+              {' '}{joinsAsText(row.role)}
             </p>
 
             {row.via === 'internal' && (
@@ -678,21 +718,18 @@ export function SpaceInviteDialog() {
               <p class="sh-muted"
                  style={{ marginTop: 0, fontSize: 'var(--sh-font-size-xs)' }}
                  data-testid="invite-published-never-hint">
-                The web link is the exception: it stops opening after{' '}
-                {PUBLISHED_LINK_MAX_DAYS} days, because the GFS only keeps it
-                that long. The code below keeps working until its uses run
-                out or you revoke it.
+                {t('invite.created.web_link_limit', { days: String(PUBLISHED_LINK_MAX_DAYS) })}
               </p>
             )}
 
             <div class="sh-invite-artifact sh-invite-artifact--primary">
               <div class="sh-invite-artifact-label">
-                Invite code · paste into chat
+                {t('invite.code.label')}
               </div>
               <code class="sh-invite-link" data-testid="invite-code">{code}</code>
               <div class="sh-form-actions">
-                <Button onClick={() => copy(code, 'Code')}>
-                  Copy code
+                <Button onClick={() => copy(code, 'code')}>
+                  {t('invite.code.copy')}
                 </Button>
               </div>
             </div>
@@ -700,19 +737,18 @@ export function SpaceInviteDialog() {
             {row.gfs && (
               <div class="sh-invite-artifact">
                 <div class="sh-invite-artifact-label">
-                  🌐 Web link · published
+                  🌐 {t('invite.web_link.label')}
                 </div>
                 <code class="sh-invite-link" data-testid="invite-link-url">
                   {row.gfs.url}
                 </code>
                 <p class="sh-muted"
                    style={{ margin: 0, fontSize: 'var(--sh-font-size-xs)' }}>
-                  Anyone with this link sees the space name and can request
-                  the code — they join from their own Social Home.
+                  {t('invite.web_link.hint')}
                 </p>
                 <div class="sh-form-actions">
-                  <Button onClick={() => copy(row.gfs!.url, 'Link')}>
-                    Copy link
+                  <Button onClick={() => copy(row.gfs!.url, 'link')}>
+                    {t('invite.web_link.copy')}
                   </Button>
                 </div>
               </div>
@@ -720,37 +756,37 @@ export function SpaceInviteDialog() {
 
             <div class="sh-invite-artifact sh-invite-artifact--qr">
               <div class="sh-invite-artifact-label">
-                QR · scan with another device
+                {t('invite.qr.label')}
               </div>
-              <QrCodeImg data={code} size={180} alt="Invite QR code" />
+              <QrCodeImg data={code} size={180} alt={t('invite.qr.alt')} />
             </div>
 
             <div class="sh-form-actions">
               <Button variant="secondary" onClick={() => { created.value = null }}>
-                Make another
+                {t('invite.another')}
               </Button>
             </div>
           </>
         )}
 
         <section class="sh-invite-links" data-testid="invite-links">
-          <h3 class="sh-invite-links__title">Active links</h3>
+          <h3 class="sh-invite-links__title">{t('invite.links.title')}</h3>
           {linksLoading.value && links.value.length === 0 ? (
-            <p class="sh-muted">Loading links…</p>
+            <p class="sh-muted">{t('invite.links.loading')}</p>
           ) : linksError.value ? (
             <div class="sh-invite-links__error" data-testid="invite-links-error">
               <p class="sh-muted" style={{ margin: 0 }}
                  data-testid="invite-links-error-text">
                 {linksErrorReason.value
-                  ?? "Couldn't load the links for this space."}
+                  ?? t('invite.links.error')}
               </p>
               <Button variant="secondary" onClick={() => void loadLinks()}>
-                Try again
+                {t('common.try_again')}
               </Button>
             </div>
           ) : links.value.length === 0 ? (
             <p class="sh-muted" data-testid="invite-links-empty">
-              No active links.
+              {t('invite.links.empty')}
             </p>
           ) : (
             links.value.map(l => (
@@ -776,31 +812,29 @@ export function SpaceInviteDialog() {
                   )}
                   {l.gfs && (
                     <span class="sh-invite-link-row-item__web"
-                          title="Published as a web link">
+                          title={t('invite.links.web_title')}>
                       🌐
                     </span>
                   )}
                   <span class="sh-muted">
                     {usesLabel(l)}
                     {' · '}
-                    {l.expires_at
-                      ? `lapses ${relativeFutureTime(l.expires_at)}`
-                      : 'never lapses'}
+                    {rowExpiryText(l.expires_at)}
                     {' · '}
-                    by {creatorName(l.created_by)}
+                    {t('invite.links.by', { name: creatorName(l.created_by) })}
                   </span>
                 </div>
                 <div class="sh-invite-link-row-item__actions">
                   {l.gfs && (
                     <Button variant="secondary"
-                            onClick={() => copy(l.gfs!.url, 'Link')}>
-                      Copy link
+                            onClick={() => copy(l.gfs!.url, 'link')}>
+                      {t('invite.web_link.copy')}
                     </Button>
                   )}
                   <Button variant="danger"
                           data-testid={`invite-revoke-${l.token}`}
                           onClick={() => void revoke(l)}>
-                    Revoke
+                    {t('invite.revoke')}
                   </Button>
                 </div>
               </div>
