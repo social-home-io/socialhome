@@ -268,8 +268,8 @@ class BaseView(web.View):
                 return error_response(
                     409,
                     "HOST_TOO_OLD",
-                    "The space's home household must be updated before invite "
-                    "links can be created from here.",
+                    "The space's home household needs an update before you "
+                    "can manage its invite links from here.",
                     extra={"feature": exc.feature},
                 )
             if exc.feature == "role_change":

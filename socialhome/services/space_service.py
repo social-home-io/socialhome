@@ -4792,24 +4792,22 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 return answer
             case "forbidden":
                 raise SpacePermissionError(
-                    "the space's home household refused this request"
+                    "The space's home household said no. Only the space's "
+                    "admins can manage its invite links."
                 )
             case "private_gfs_off":
-                raise PrivateGfsOffError(
-                    "this private space does not use a connection server"
-                )
+                raise PrivateGfsOffError("this private space does not use the GFS")
             case "gfs_publish_failed":
                 status = answer.get("gfs_status")
                 raise GfsConnectionError(
-                    "the space's home household could not publish the link",
+                    "the space's home household could not publish the link to the GFS",
                     status=status
                     if isinstance(status, int) and not isinstance(status, bool)
                     else None,
                 )
             case "gfs_not_paired":
                 raise ValueError(
-                    "the space's home household is not connected to that "
-                    "connection server"
+                    "the space's home household is not connected to that GFS"
                 )
             case _:
                 raise ValueError(
@@ -4925,7 +4923,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         publish_url = params.get("publish_gfs_url")
         if publish_url:
             if link_via == INVITE_VIA_INTERNAL:
-                raise ValueError("an internal invite link is never published")
+                raise ValueError("a local invite link is never published to a GFS")
             gfs_id = await self._gfs_id_for_url(str(publish_url))
             if gfs_id is None:
                 return {"error": "gfs_not_paired"}
@@ -5214,7 +5212,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             await self._spaces.get_invite_token_role(space_id, token)
             == SpaceRole.ADMIN.value
         ):
-            raise SpacePermissionError("only the owner revokes an admin link")
+            raise SpacePermissionError("Only the space owner can revoke an admin link.")
         row = await self._spaces.delete_invite_token(space_id, token)
         if row is None:
             return
