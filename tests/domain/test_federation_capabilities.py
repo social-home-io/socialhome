@@ -20,24 +20,24 @@ def test_space_authority_rotation_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.space_features_missing_below(43) == [
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
     assert fc.features_missing_below(45) == [
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
-        "Space writer certificates",
+        "Shared pages without lost edits",
+        "Members can post without the host",
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
-        "Host-sequenced shared pages",
-        "Space writer certificates",
+        "Shared pages without lost edits",
+        "Members can post without the host",
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
     ]
@@ -53,14 +53,14 @@ def test_authority_epoch_echo_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.space_features_missing_below(45) == [
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
-        "Host-sequenced shared pages",
-        "Space writer certificates",
+        "Shared pages without lost edits",
+        "Members can post without the host",
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
     ]
@@ -75,9 +75,9 @@ def test_space_report_scope_capability_threshold():
     )
     assert fc.space_features_missing_below(44) == [
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
 
 
@@ -92,11 +92,11 @@ def test_federated_moderation_capability_threshold():
     )
     assert fc.space_features_missing_below(42) == [
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
     assert "Reviewed across households" not in fc.features_missing_below(43)
 
@@ -113,11 +113,11 @@ def test_content_access_enforcement_capability_threshold():
     assert fc.space_features_missing_below(41) == [
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -135,11 +135,11 @@ def test_space_moderator_role_capability_threshold():
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -158,11 +158,11 @@ def test_task_priority_labels_capability_threshold():
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -187,8 +187,8 @@ def test_moment_no_relay_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_MOMENT_NO_RELAY not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Direct-only moments" in fc.features_missing_below(37)
-    assert "Direct-only moments" not in fc.features_missing_below(38)
+    assert "Moments that are never passed on" in fc.features_missing_below(37)
+    assert "Moments that are never passed on" not in fc.features_missing_below(38)
 
 
 def test_cross_household_group_dm_capability_threshold():
@@ -212,20 +212,20 @@ def test_owner_bound_content_id_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Creator-bound content ids" in fc.features_missing_below(35)
-    assert "Creator-bound content ids" not in fc.features_missing_below(36)
+    assert "Posts tied to their creator" in fc.features_missing_below(35)
+    assert "Posts tied to their creator" not in fc.features_missing_below(36)
     assert fc.space_features_missing_below(35) == [
-        "Creator-bound content ids",
+        "Posts tied to their creator",
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
 
 
@@ -237,20 +237,20 @@ def test_moment_origin_signature_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Signed relayed moments" in fc.features_missing_below(34)
-    assert "Signed relayed moments" not in fc.features_missing_below(35)
+    assert "Checked moments from other households" in fc.features_missing_below(34)
+    assert "Checked moments from other households" not in fc.features_missing_below(35)
     assert fc.space_features_missing_below(34) == [
-        "Creator-bound content ids",
+        "Posts tied to their creator",
         "Space timetables",
         "Task priority and labels",
         "Space moderators",
         "Admin-only space features",
         "Reviewed across households",
-        "Space key rotation on revoke",
+        "Locking out removed admins",
         "Space reports for moderators",
-        "Space key epoch echo",
+        "Catching up on missed security updates",
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
 
 
@@ -489,9 +489,9 @@ def test_owner_bound_album_id_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert "Creator-bound album ids" in dict(fc.CAPABILITY_FEATURES).values()
-    assert "Creator-bound album ids" in fc.features_missing_below(33)
-    assert "Creator-bound album ids" not in fc.features_missing_below(34)
+    assert "Albums tied to their creator" in dict(fc.CAPABILITY_FEATURES).values()
+    assert "Albums tied to their creator" in fc.features_missing_below(33)
+    assert "Albums tied to their creator" not in fc.features_missing_below(34)
 
 
 def test_forwarded_role_change_capability_threshold():
@@ -505,11 +505,11 @@ def test_forwarded_role_change_capability_threshold():
     )
     assert fc.space_features_missing_below(46) == [
         "Role changes from member households",
-        "Host-sequenced shared pages",
+        "Shared pages without lost edits",
     ]
     assert fc.features_missing_below(47) == [
-        "Host-sequenced shared pages",
-        "Space writer certificates",
+        "Shared pages without lost edits",
+        "Members can post without the host",
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
     ]
@@ -523,9 +523,9 @@ def test_host_sequenced_pages_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.space_features_missing_below(47) == ["Host-sequenced shared pages"]
+    assert fc.space_features_missing_below(47) == ["Shared pages without lost edits"]
     assert fc.features_missing_below(48) == [
-        "Space writer certificates",
+        "Members can post without the host",
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
     ]

@@ -118,13 +118,13 @@ describe('SpaceSettings', () => {
     const { getByLabelText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
-    const follow = getByLabelText(/Let anyone follow this space/) as HTMLInputElement
+    const follow = getByLabelText('space.followers.allow') as HTMLInputElement
     expect(follow.checked).toBe(false)
     expect(
-      (getByLabelText(/Let followers leave reactions/) as HTMLInputElement).disabled,
+      (getByLabelText('space.followers.react') as HTMLInputElement).disabled,
     ).toBe(true)
     expect(
-      (getByLabelText(/Let followers comment on posts/) as HTMLInputElement).disabled,
+      (getByLabelText('space.followers.comment') as HTMLInputElement).disabled,
     ).toBe(true)
   })
 
@@ -134,11 +134,11 @@ describe('SpaceSettings', () => {
     const { getByLabelText, getByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
-    const follow = getByLabelText(/Let anyone follow this space/) as HTMLInputElement
+    const follow = getByLabelText('space.followers.allow') as HTMLInputElement
     fireEvent.click(follow)
     // The engagement boxes come alive once followers may exist.
     expect(
-      (getByLabelText(/Let followers leave reactions/) as HTMLInputElement).disabled,
+      (getByLabelText('space.followers.react') as HTMLInputElement).disabled,
     ).toBe(false)
     fireEvent.click(getByText('Save changes'))
     await vi.waitFor(() => expect(apiMock.patch).toHaveBeenCalled())
@@ -163,10 +163,10 @@ describe('SpaceSettings', () => {
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
     expect(
-      (getByLabelText(/Let anyone follow this space/) as HTMLInputElement).checked,
+      (getByLabelText('space.followers.allow') as HTMLInputElement).checked,
     ).toBe(true)
     expect(
-      (getByLabelText(/Let followers comment on posts/) as HTMLInputElement).disabled,
+      (getByLabelText('space.followers.comment') as HTMLInputElement).disabled,
     ).toBe(false)
   })
 
@@ -1171,7 +1171,7 @@ describe('SpaceSettings — GFS publish mode (owner-only)', () => {
     )
     expect(group(noFollow.container)).toBeNull()
     // Turning followers on reveals it.
-    fireEvent.click(noFollow.getByLabelText(/Let anyone follow this space/))
+    fireEvent.click(noFollow.getByLabelText('space.followers.allow'))
     expect(group(noFollow.container)).toBeTruthy()
   })
 
@@ -1361,6 +1361,15 @@ describe('SpaceSettings — private space GFS (owner-only)', () => {
       expect(r.queryByTestId('private-gfs')).toBeNull()
       r.unmount()
     }
+  })
+
+  it('introduces the GFS in one sentence above the switch', () => {
+    const r = render(<SpaceSettings space={space()} onUpdate={() => {}} isOwner />)
+    const intro = r.getByTestId('private-gfs-intro')
+    expect(intro.textContent?.trim()).toBe('space.private_gfs.intro')
+    const toggleRow = r.getByTestId('private-gfs-toggle').closest('label')!
+    expect(intro.compareDocumentPosition(toggleRow) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
   })
 
   it('reflects the stored value (absent → off)', () => {
