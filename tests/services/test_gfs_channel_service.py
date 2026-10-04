@@ -19,16 +19,15 @@ from socialhome.crypto import derive_instance_id, ed25519_public_key
 from socialhome.domain.events import (
     PeerCapabilitiesAdvertised,
     PeerTransportChanged,
+    SpaceFeaturesApplied,
     SpaceRemoteSeatLive,
 )
 from socialhome.domain.federation import (
-    FederationEventType,
     GfsConnection,
     InstanceSource,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.writer_cert import WriterEntitlement
-from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_envelope_queue_repo_key,
@@ -1095,9 +1094,7 @@ async def test_a_member_follows_the_owners_option_from_config(env):
     # The owner's config turned private_gfs OFF (applied by the inbound
     # service before this second handler runs).
     env.member.spaces.spaces[SPACE_ID] = replace(env.space, features=SpaceFeatures())
-    await env.member.svc._on_config_event(
-        SimpleNamespace(payload={"space_id": SPACE_ID})
-    )
+    await env.member.svc._on_features_applied(SpaceFeaturesApplied(space_id=SPACE_ID))
     assert not await repo.has_subscription(channel_id, env.member.h.instance_id)
     assert SPACE_ID not in env.member.spaces.channels
 
@@ -1110,26 +1107,23 @@ async def test_the_config_handler_takes_the_seat_when_the_option_goes_on(env):
     # The grant arrived before the config: no seat while the stored option is OFF.
     assert not await repo.has_subscription(channel_id, env.member.h.instance_id)
     env.member.spaces.spaces[SPACE_ID] = env.space
-    await env.member.svc._on_config_event(
-        SimpleNamespace(payload={"space_id": SPACE_ID})
-    )
+    await env.member.svc._on_features_applied(SpaceFeaturesApplied(space_id=SPACE_ID))
     await env.member.svc.wait_idle()
     assert await repo.has_subscription(channel_id, env.member.h.instance_id)
     # The owner itself and unknown payloads are ignored.
-    await env.owner.svc._on_config_event(
-        SimpleNamespace(payload={"space_id": SPACE_ID})
-    )
-    await env.owner.svc._on_config_event(SimpleNamespace(payload=None))
+    await env.owner.svc._on_features_applied(SpaceFeaturesApplied(space_id=SPACE_ID))
 
 
-def test_the_config_handler_registers_after_the_inbound_one():
-    registry = EventDispatchRegistry()
-    fed = SimpleNamespace(_event_registry=registry)
+def test_the_config_handler_follows_applied_features_on_the_bus():
+    """The handler reacts to ``SpaceFeaturesApplied`` (the stored, validated
+    config) — never registers itself on the federation's private registry."""
+    bus = EventBus()
     svc = GfsChannelService.__new__(GfsChannelService)
+    GfsChannelService.wire(svc, bus)
+    assert svc._on_features_applied in bus._handlers[SpaceFeaturesApplied]
+    fed = SimpleNamespace()
     GfsChannelService.attach_federation(svc, fed)  # type: ignore[arg-type]
-    assert registry._handlers[FederationEventType.SPACE_CONFIG_CHANGED] == [
-        svc._on_config_event
-    ]
+    assert not hasattr(fed, "_event_registry")
 
 
 @pytest.mark.security

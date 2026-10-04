@@ -87,11 +87,12 @@ import aiohttp
 
 from ..crypto import b64url_decode, b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.events import (
+    SpaceFeaturesApplied,
     PeerCapabilitiesAdvertised,
     PeerTransportChanged,
     SpaceRemoteSeatLive,
 )
-from ..domain.federation import FederationEventType, GfsConnection, InstanceSource
+from ..domain.federation import GfsConnection, InstanceSource
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import (
     CHANNEL_EPOCH_ROUTE,
@@ -294,17 +295,8 @@ class GfsChannelService:
     # ── Wiring + lifecycle ───────────────────────────────────────────────
 
     def attach_federation(self, federation: "FederationService") -> None:
-        """Peer versions (the v_51 gate on every grant), and a second
-        ``SPACE_CONFIG_CHANGED`` handler — registered after the inbound
-        service's, so it reads the config that handler just applied (never
-        the event itself): a member drops its seat when the owner turned
-        ``private_gfs`` off, and takes it when the owner turned it on."""
+        """Peer versions (the v_51 gate on every grant)."""
         self._federation = federation
-        registry = getattr(federation, "_event_registry", None)
-        if registry is not None:
-            registry.register(
-                FederationEventType.SPACE_CONFIG_CHANGED, self._on_config_event
-            )
 
     def attach_space_service(self, space_service: object) -> None:
         """The roster-snapshot sender that distributes a new channel's
@@ -325,6 +317,9 @@ class GfsChannelService:
         bus.subscribe(SpaceRemoteSeatLive, self._on_seat_live)
         bus.subscribe(PeerTransportChanged, self._on_peer_transport)
         bus.subscribe(PeerCapabilitiesAdvertised, self._on_peer_advertised)
+        # The owner's applied config (stored, validated, pinned): a member
+        # drops its seat when ``private_gfs`` went off, takes it when on.
+        bus.subscribe(SpaceFeaturesApplied, self._on_features_applied)
 
     async def start(self) -> None:
         self._stopping = False
@@ -612,15 +607,12 @@ class GfsChannelService:
                 log.exception("gfs.channel: snapshot to %s failed", inst)
         return done
 
-    async def _on_config_event(self, event: object) -> None:
+    async def _on_features_applied(self, event: SpaceFeaturesApplied) -> None:
         """After an inbound ``SPACE_CONFIG_CHANGED`` was applied: re-read the
         STORED space (the inbound service already validated and pinned it)
         and follow the owner's ``private_gfs`` on a space we are a member
         of."""
-        payload = getattr(event, "payload", None)
-        space_id = payload.get("space_id") if isinstance(payload, dict) else None
-        if not isinstance(space_id, str) or not space_id:
-            return
+        space_id = event.space_id
         space = await self._spaces.get(space_id)
         if (
             space is None

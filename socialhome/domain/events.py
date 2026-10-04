@@ -271,6 +271,17 @@ class SpaceConfigChanged(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceFeaturesApplied(DomainEvent):
+    """An inbound ``SPACE_CONFIG_CHANGED`` passed every gate and was saved:
+    the STORED space now holds the owner's validated, pinned config.
+    Followers of a space's settings (e.g. the GFS channel service following
+    ``private_gfs``) re-read the stored row — never the wire payload."""
+
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceProposalUpdated(DomainEvent):
     """A critical-action approval proposal was opened / voted / resolved.
 

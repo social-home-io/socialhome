@@ -47,6 +47,7 @@ from ..domain.events import (
     PostDeleted,
     PostEdited,
     SpaceConfigChanged,
+    SpaceFeaturesApplied,
     SpaceMemberProfileUpdated,
     SpacePostCreated,
     HighlightFrameAdded,
@@ -2890,6 +2891,7 @@ class FederationInboundService(ProtectionGateMixin):
             # §24.11 envelope sender, not by the pinned key.
             await self._space_repo.save(refreshed)
             await self._space_repo.mark_config_authority(space_id)
+        await self._bus.publish(SpaceFeaturesApplied(space_id=space_id))
         if (
             is_owner
             and existing.owner_instance_id != own_instance_id

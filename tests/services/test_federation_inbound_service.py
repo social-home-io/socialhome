@@ -14,6 +14,7 @@ from PIL import Image as PILImage
 
 from socialhome.crypto import derive_user_id, generate_space_keypair
 from socialhome.domain.events import (
+    SpaceFeaturesApplied,
     CommentAdded,
     CommentUpdated,
     DmMessageCreated,
@@ -4995,3 +4996,32 @@ async def test_a_co_admin_cannot_strip_our_seed_with_a_signed_off_flip(
         )
     )
     assert await repo.get_space_seed("sp-coadmin") == kp.private_key
+
+
+async def test_config_changed_announces_the_applied_features(db, bus, inbound):
+    """Followers of a space's config (e.g. the GFS channel service) react to
+    the STORED result through ``SpaceFeaturesApplied`` — published only once
+    the change was validated, pinned and saved."""
+    kp = generate_space_keypair()
+    await _seed_signed_space(
+        db,
+        space_id="sp-applied",
+        owner_instance="owner-i",
+        space_pub_hex=kp.public_key.hex(),
+        seq=5,
+    )
+    applied: list[SpaceFeaturesApplied] = []
+    bus.subscribe(SpaceFeaturesApplied, applied.append)
+    _own_instance(inbound, "own-i")
+    await inbound._on_space_config_changed(
+        _signed_cfg_event(
+            space_id="sp-applied",
+            from_instance="owner-i",
+            owner_instance="owner-i",
+            sequence=9,
+            name="Applied",
+            seed=kp.private_key,
+            features={**_OWNER_ONLY_FEATURES_ON},
+        )
+    )
+    assert [e.space_id for e in applied] == ["sp-applied"]
