@@ -67,7 +67,7 @@ const isDiscoverable = () =>
 
 function useMyLocation() {
   if (!navigator.geolocation) {
-    showToast('Location is not available in this browser.', 'error')
+    showToast(t('space.create.location_unavailable'), 'error')
     return
   }
   locating.value = true
@@ -80,7 +80,7 @@ function useMyLocation() {
       locating.value = false
     },
     () => {
-      showToast('Couldn\'t get your location — enter it manually.', 'info')
+      showToast(t('space.create.location_failed'), 'info')
       locating.value = false
     },
   )
@@ -107,10 +107,10 @@ export function SpaceCreateDialog() {
       // Refresh the cached spaces list so the new row appears on the
       // list page without a hard reload.
       await loadSpaces()
-      showToast('Space created', 'success')
+      showToast(t('space.create.created'), 'success')
       open.value = false
     } catch (e: any) {
-      showToast(e.message || 'Failed to create space', 'error')
+      showToast(e.message || t('space.create.failed'), 'error')
     } finally {
       submitting.value = false
     }
@@ -131,8 +131,8 @@ export function SpaceCreateDialog() {
           ...o,
           disabled: true,
           subtitle: isAdmin
-            ? 'Connect a global server to publish worldwide.'
-            : 'Needs a global server connection.',
+            ? t('space.create.global_needs_gfs_admin')
+            : t('space.create.global_needs_gfs_member'),
         }
         : o,
     )
@@ -152,22 +152,22 @@ export function SpaceCreateDialog() {
   const noLocation = isPublic() && !lat.value.trim() && !lon.value.trim()
 
   return (
-    <Modal open={open.value} onClose={() => open.value = false} title="Create a space">
+    <Modal open={open.value} onClose={() => open.value = false} title={t('space.create.title')}>
       <div class="sh-form">
         <label>
-          Name *
+          {t('space.create.name')}
           <input value={name.value} onInput={(e) => name.value = (e.target as HTMLInputElement).value}
-            placeholder="e.g. Family, Makers Club" />
+            placeholder={t('space.create.name_placeholder')} />
         </label>
         <label>
-          Description
+          {t('space.create.description')}
           <textarea value={description.value}
             onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value}
-            placeholder="What's this space about?" rows={2} />
+            placeholder={t('space.create.description_placeholder')} rows={2} />
         </label>
         <EmojiField value={emoji} openKey="space-create-icon" />
         <RadioCardGroup
-          legend="Visibility"
+          legend={t('space.create.visibility')}
           name="space-create-visibility"
           value={spaceType.value}
           options={offeredOptions}
@@ -182,9 +182,13 @@ export function SpaceCreateDialog() {
         {!tierLocked && !hasActiveGfs.value && (
           <p class="sh-muted" style={{ marginTop: 'calc(-1 * var(--sh-space-sm))' }}>
             {isAdmin ? (
-              <>Want a Global space? <a href={addBase('/connections')}>Connect a global server</a> first.</>
+              <>
+                {t('space.create.gfs_hint_before')}
+                <a href={addBase('/connections')}>{t('space.create.gfs_hint_link')}</a>
+                {t('space.create.gfs_hint_after')}
+              </>
             ) : (
-              <>Want a Global space? Ask a household admin to connect a global server first.</>
+              <>{t('space.create.gfs_hint_member')}</>
             )}
           </p>
         )}
@@ -197,10 +201,10 @@ export function SpaceCreateDialog() {
         />
         {isDiscoverable() && (
           <fieldset class="sh-form-fieldset sh-space-create-discovery">
-            <legend>🧭 Discovery</legend>
+            <legend>🧭 {t('space.create.discovery')}</legend>
             <div class="sh-row" style={{ gap: 'var(--sh-space-sm)' }}>
               <label>
-                Category
+                {t('space.create.category')}
                 <select
                   name="space-create-category"
                   value={category.value}
@@ -212,7 +216,7 @@ export function SpaceCreateDialog() {
                 </select>
               </label>
               <label>
-                Minimum age
+                {t('space.create.min_age')}
                 <select
                   name="space-create-min-age"
                   value={String(minAge.value)}
@@ -220,7 +224,9 @@ export function SpaceCreateDialog() {
                 >
                   {MIN_AGE_OPTIONS.map((a) => (
                     <option key={a} value={String(a)}>
-                      {a === 0 ? 'No restriction' : `${a}+`}
+                      {a === 0
+                        ? t('space.create.min_age_none')
+                        : t('space.create.min_age_value', { age: String(a) })}
                     </option>
                   ))}
                 </select>
@@ -230,21 +236,20 @@ export function SpaceCreateDialog() {
         )}
         {isPublic() && (
           <fieldset class="sh-form-fieldset sh-space-create-location">
-            <legend>📍 Map location</legend>
+            <legend>📍 {t('space.create.map_location')}</legend>
             <p class="sh-muted" style={{ marginTop: 0 }}>
-              Public spaces can be pinned on the map so people nearby can find
-              them. Coordinates are rounded to ~11 m.
+              {t('space.create.map_intro')}
             </p>
             <Button
               variant="secondary"
               onClick={useMyLocation}
               loading={locating.value}
             >
-              📍 Use my location
+              📍 {t('space.create.use_my_location')}
             </Button>
             <div class="sh-row" style={{ gap: 'var(--sh-space-sm)' }}>
               <label>
-                Latitude
+                {t('space.create.latitude')}
                 <input
                   type="number" inputMode="decimal" step="0.0001"
                   min={-90} max={90}
@@ -254,7 +259,7 @@ export function SpaceCreateDialog() {
                 />
               </label>
               <label>
-                Longitude
+                {t('space.create.longitude')}
                 <input
                   type="number" inputMode="decimal" step="0.0001"
                   min={-180} max={180}
@@ -266,7 +271,7 @@ export function SpaceCreateDialog() {
             </div>
             {noLocation && (
               <p class="sh-muted" style={{ marginBottom: 0 }}>
-                Optional — add a location so people nearby can find you on the map.
+                {t('space.create.location_optional')}
               </p>
             )}
           </fieldset>
@@ -275,7 +280,7 @@ export function SpaceCreateDialog() {
           <Button variant="secondary" onClick={() => open.value = false}>{t('common.cancel')}</Button>
           <Button onClick={handleSubmit} loading={submitting.value}
             disabled={!name.value.trim()}>
-            Create
+            {t('space.create.submit')}
           </Button>
         </div>
       </div>

@@ -55,3 +55,19 @@ describe('EmojiField', () => {
     expect(container.querySelector('.sh-reaction-picker')).toBeNull()
   })
 })
+
+describe('EmojiField in German', () => {
+  it('labels, hints and the Remove control follow the UI language', async () => {
+    const { setLocale } = await import('@/i18n/i18n')
+    await setLocale('de')
+    try {
+      const value = signal('🏠')
+      const { container, getByText } = render(<EmojiField value={value} openKey="de1" />)
+      expect(container.querySelector('.sh-emoji-field-label')!.textContent).toBe('Symbol')
+      expect(getByText('Tippe auf das Symbol, um es zu ändern')).toBeTruthy()
+      expect(container.querySelector('.sh-emoji-field-clear')!.textContent?.trim()).toBe('Entfernen')
+    } finally {
+      await setLocale('en')
+    }
+  })
+})

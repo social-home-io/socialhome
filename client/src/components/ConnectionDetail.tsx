@@ -11,6 +11,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { Spinner } from './Spinner'
 import { showToast } from './Toast'
 import { ShareHomeToggle } from './ShareHomeToggle'
+import { t, isOne } from '@/i18n/i18n'
 import {
   peerSupportsResync,
   resyncPeerCapabilities,
@@ -81,6 +82,18 @@ interface RelayDetail {
 }
 
 const showRevoke = signal(false)
+
+const STATUS_KEYS: Record<string, string> = {
+  confirmed: 'connections.status.confirmed',
+  pending_sent: 'connections.status.pending_sent',
+  pending_received: 'connections.status.pending_received',
+}
+
+/** Translated label for a connection status; unknown values show as-is. */
+function statusLabel(status: string): string {
+  const key = STATUS_KEYS[status]
+  return key ? t(key) : status
+}
 
 export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved }: {
   conn: Connection
@@ -156,13 +169,13 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
       ) as { users: VisibleUser[] }
       setVisUsers(body.users)
       showToast(
-        next
-          ? `${u.display_name} is now visible to ${conn.display_name}`
-          : `${u.display_name} is now hidden from ${conn.display_name}`,
+        t(next ? 'connections.detail.toast_visible' : 'connections.detail.toast_hidden', {
+          user: u.display_name, name: conn.display_name,
+        }),
         'success',
       )
     } catch (e: any) {
-      showToast(e.message || 'Failed to update visibility', 'error')
+      showToast(e.message || t('connections.detail.visibility_failed'), 'error')
     } finally {
       setVisBusy(b => {
         const n = new Set(b)
@@ -185,13 +198,13 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
       })
       showToast(
         next
-          ? `Renamed to "${next}" — only visible to your household.`
-          : 'Local rename cleared. Showing the household’s own name.',
+          ? t('connections.detail.alias_saved', { name: next })
+          : t('connections.detail.alias_cleared'),
         'success',
       )
       onAliasSaved?.()
     } catch (e: any) {
-      showToast(e.message || 'Failed to save', 'error')
+      showToast(e.message || t('connections.detail.save_failed'), 'error')
     } finally {
       setAliasBusy(false)
     }
@@ -204,10 +217,10 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
     setRecheckBusy(true)
     try {
       await resyncPeerCapabilities(conn.instance_id)
-      showToast(`Asked ${conn.display_name ?? 'peer'} to re-advertise its version`, 'info')
+      showToast(t('connections.detail.recheck_sent', { name: conn.display_name }), 'info')
       setTimeout(() => { void loadFederationCompat() }, 2500)
     } catch (e: any) {
-      showToast(e.message || 'Re-check failed', 'error')
+      showToast(e.message || t('connections.detail.recheck_failed'), 'error')
     } finally {
       setRecheckBusy(false)
     }
@@ -216,10 +229,10 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
   const revoke = async () => {
     try {
       await api.delete(`/api/pairing/connections/${conn.instance_id}`)
-      showToast('Connection revoked', 'info')
+      showToast(t('connections.detail.removed'), 'info')
       showRevoke.value = false
       onRevoke()
-    } catch (e: any) { showToast(e.message || 'Failed', 'error') }
+    } catch (e: any) { showToast(e.message || t('common.error'), 'error') }
   }
 
   const aliasDirty = alias.trim() !== (conn.local_alias ?? '').trim()
@@ -231,7 +244,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             class="sh-connection-alias__label"
             for="sh-connection-alias-input"
           >
-            Display this household as
+            {t('connections.detail.alias_label')}
           </label>
           <div class="sh-connection-alias__row">
             <input
@@ -257,39 +270,39 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
               onClick={() => void saveAlias()}
               disabled={!aliasDirty || aliasBusy}
             >
-              Save
+              {t('common.save')}
             </Button>
           </div>
           <p class="sh-muted sh-connection-alias__hint">
-            Only your household sees this name.
+            {t('connections.detail.alias_hint')}
             {conn.local_alias
               ? null
-              : ` They advertise themselves as "${peerName}".`}
+              : ` ${t('connections.detail.alias_own_name', { name: peerName })}`}
           </p>
         </section>
         <hr />
         <dl>
-          <dt>Instance ID</dt><dd class="sh-mono">{conn.instance_id}</dd>
-          <dt>Status</dt><dd class={`sh-status sh-status--${conn.status}`}>{conn.status}</dd>
+          <dt>{t('connections.detail.household_id')}</dt><dd class="sh-mono">{conn.instance_id}</dd>
+          <dt>{t('connections.detail.status')}</dt><dd class={`sh-status sh-status--${conn.status}`}>{statusLabel(conn.status)}</dd>
           {inboxUrl && (
-            <><dt>Inbox</dt><dd class="sh-mono sh-muted">{inboxUrl}</dd></>
+            <><dt>{t('connections.detail.address')}</dt><dd class="sh-mono sh-muted">{inboxUrl}</dd></>
           )}
-          {conn.paired_at && <><dt>Paired</dt><dd>{new Date(conn.paired_at).toLocaleString()}</dd></>}
+          {conn.paired_at && <><dt>{t('connections.detail.paired')}</dt><dd>{new Date(conn.paired_at).toLocaleString()}</dd></>}
           {conn.proto_version != null && (
-            <><dt>Protocol version</dt><dd>v{conn.proto_version}</dd></>
+            <><dt>{t('connections.detail.app_version')}</dt><dd>v{conn.proto_version}</dd></>
           )}
           {compat && compat.capabilities_known && (
             compat.lacking_features.length === 0 ? (
-              <><dt>Compatibility</dt><dd><span class="sh-chip sh-chip--success">up to date ✓</span></dd></>
+              <><dt>{t('connections.detail.compatibility')}</dt><dd><span class="sh-chip sh-chip--success">{t('connections.compat.up_to_date')}</span></dd></>
             ) : (
-              <><dt>Missing features</dt><dd>{compat.lacking_features.join(', ')}</dd></>
+              <><dt>{t('connections.detail.missing_features')}</dt><dd>{compat.lacking_features.join(', ')}</dd></>
             )
           )}
           {/* Absolute timestamp AND a relative hint: the absolute one is
               what you quote in a bug report, the relative one is what
               tells you at a glance whether this is a blip or weeks of
               silence. */}
-          <dt>Last connected</dt>
+          <dt>{t('connections.detail.last_connected')}</dt>
           <dd>
             {conn.last_reachable_at ? (
               <>
@@ -299,7 +312,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
                 </span>
               </>
             ) : (
-              <span class="sh-muted">never</span>
+              <span class="sh-muted">{t('connections.detail.never')}</span>
             )}
           </dd>
           {/* Relay acceptance is shown apart from "Last connected": the
@@ -309,23 +322,22 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             <><dt>GFS</dt><dd>
               {conn.relay_only && (
                 <span class="sh-chip sh-chip--honey" style={{ marginRight: 'var(--sh-space-xs)' }}>
-                  GFS only
+                  {t('connections.detail.gfs_only')}
                 </span>
               )}
-              Last accepted {new Date(normaliseTimestamp(conn.last_relay_accepted_at)).toLocaleString()}
+              {t('connections.detail.gfs_last_handed', { time: new Date(normaliseTimestamp(conn.last_relay_accepted_at)).toLocaleString() })}
               <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
                 ({relativeDocsTime(conn.last_relay_accepted_at)})
               </span>
               {conn.relay_only && (
                 <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                  The GFS accepted these messages, but they are not confirmed as delivered
-                  yet. It holds them for up to 24 hours until this household connects.
+                  {t('connections.detail.gfs_only_hint')}
                 </span>
               )}
             </dd></>
           )}
           {conn.unreachable_since && (
-            <><dt>Unreachable since</dt><dd class="sh-text-warning">
+            <><dt>{t('connections.detail.unreachable_since')}</dt><dd class="sh-text-warning">
               {new Date(normaliseTimestamp(conn.unreachable_since)).toLocaleString()}
               <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
                 ({relativeDocsTime(conn.unreachable_since)})
@@ -333,56 +345,52 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             </dd></>
           )}
           {(conn.queued_envelopes ?? 0) > 0 && (
-            <><dt>Waiting to send</dt><dd>
-              {conn.queued_envelopes === 1
-                ? '1 message queued for delivery'
-                : `${conn.queued_envelopes} messages queued for delivery`}
+            <><dt>{t('connections.detail.waiting')}</dt><dd>
+              {t(isOne(conn.queued_envelopes ?? 0) ? 'connections.detail.queued_one' : 'connections.detail.queued',
+                { n: String(conn.queued_envelopes) })}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                They'll be sent automatically once this household is reachable again.
+                {t('connections.detail.queued_hint')}
               </span>
             </dd></>
           )}
           {(conn.dropped_envelopes ?? 0) > 0 && (
-            <><dt>Undelivered</dt><dd class="sh-text-warning">
-              {conn.dropped_envelopes === 1
-                ? '1 message could not be delivered and was dropped.'
-                : `${conn.dropped_envelopes} messages could not be delivered and were dropped.`}
+            <><dt>{t('connections.detail.undelivered')}</dt><dd class="sh-text-warning">
+              {t(isOne(conn.dropped_envelopes ?? 0) ? 'connections.detail.dropped_one' : 'connections.detail.dropped',
+                { n: String(conn.dropped_envelopes) })}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                These will not be retried.
+                {t('connections.detail.dropped_hint')}
               </span>
             </dd></>
           )}
           {conn.transport === 'rtc' && (
             <><dt>Transport</dt><dd>
-              Direct (WebRTC DataChannel)
+              {t('connections.transport.direct')}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                Low-latency channel open between your add-on and the peer's.
+                {t('connections.detail.direct_hint')}
               </span>
             </dd></>
           )}
           {conn.transport === 'https' && (
             <><dt>Transport</dt><dd>
-              HTTPS inbox (fallback)
+              {t('connections.transport.internet')}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                Direct channel unavailable — usually a NAT or firewall block.
-                Federation works, just at higher latency.
+                {t('connections.detail.internet_hint')}
               </span>
             </dd></>
           )}
           {conn.transport === 'gfs_relay' && (
             <><dt>Transport</dt><dd>
-              Through the GFS
+              {t('connections.transport.gfs')}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                This household joined with an invite link, so everything
-                reaches it through the GFS (Global Federation Server).
+                {t('connections.detail.gfs_hint')}
               </span>
             </dd></>
           )}
           {relay !== null && (
-            <><dt>DM path</dt><dd>
-              You → 🔁 {relay.via} → {conn.display_name}
+            <><dt>{t('connections.detail.chat_route')}</dt><dd>
+              {t('connections.detail.you')} → 🔁 {relay.via} → {conn.display_name}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                Last DM took the relay path {relativeDocsTime(relay.ts)}.
+                {t('connections.detail.chat_route_hint', { via: relay.via, time: relativeDocsTime(relay.ts) })}
               </span>
             </dd></>
           )}
@@ -390,12 +398,12 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
         {compat && peerSupportsResync(compat) && (
           <div class="sh-row" style={{ marginBottom: 'var(--sh-space-sm)' }}>
             <Button variant="secondary" onClick={() => void recheck()} loading={recheckBusy}>
-              Re-check version
+              {t('connections.detail.recheck')}
             </Button>
           </div>
         )}
         <section class="sh-connection-share-home">
-          <h4 style={{ margin: '12px 0 4px' }}>Home location</h4>
+          <h4 style={{ margin: '12px 0 4px' }}>{t('connections.detail.home_location')}</h4>
           <ShareHomeToggle
             instanceId={conn.instance_id}
             peerName={conn.display_name}
@@ -408,14 +416,10 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             <hr />
             <div class="sh-visible-users">
               <h4 style={{ margin: '0 0 4px' }}>
-                Who's visible to {conn.display_name}?
+                {t('connections.detail.visible_title', { name: conn.display_name })}
               </h4>
               <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-sm)' }}>
-                Unticked members are removed from this household's view.
-                Their existing DMs, highlights, and moments are deleted
-                on this side; future ones don't arrive at all. Posts in
-                shared spaces stay — spaces own their own audience.
-                Tick again to restore the contact for new content.
+                {t('connections.detail.visible_hint')}
               </p>
               <ul class="sh-visible-users-list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                 {visUsers.map(u => (
@@ -431,7 +435,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
                         {u.display_name || u.username}
                         {u.is_admin && (
                           <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)', fontSize: 'var(--sh-font-size-xs)' }}>
-                            admin
+                            {t('connections.detail.admin')}
                           </span>
                         )}
                       </span>
@@ -449,11 +453,11 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
         )}
 
         <hr />
-        <Button variant="danger" onClick={() => showRevoke.value = true}>Revoke connection</Button>
+        <Button variant="danger" onClick={() => showRevoke.value = true}>{t('connections.detail.remove')}</Button>
       </div>
-      <ConfirmDialog open={showRevoke.value} title="Revoke connection?"
-        message="This will permanently disconnect this household. All shared spaces will stop syncing. You'll need to re-pair via QR to reconnect."
-        confirmLabel="Revoke" destructive onConfirm={revoke}
+      <ConfirmDialog open={showRevoke.value} title={t('connections.detail.remove_title')}
+        message={t('connections.detail.remove_message')}
+        confirmLabel={t('connections.detail.remove_ok')} destructive onConfirm={revoke}
         onCancel={() => showRevoke.value = false} />
     </Modal>
   )

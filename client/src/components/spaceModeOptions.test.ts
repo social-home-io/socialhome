@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
+import { setLocale } from '@/i18n/i18n'
 import { visibilityOptions, joinModeOptions, SPACE_CATEGORIES, categoryLabel } from './spaceModeOptions'
 
 describe('spaceModeOptions', () => {
@@ -30,5 +31,17 @@ describe('spaceModeOptions', () => {
     expect(categoryLabel('nonsense')).toBe('General')
     expect(categoryLabel(undefined)).toBe('General')
     expect(categoryLabel(null)).toBe('General')
+  })
+
+  describe('in German', () => {
+    afterEach(async () => { await setLocale('en') })
+
+    it('translates the category labels but keeps the stored values', async () => {
+      await setLocale('de')
+      expect(SPACE_CATEGORIES.find(c => c.value === 'gaming')?.label).toBe('Spiele')
+      expect(SPACE_CATEGORIES.map(c => c.value)).toContain('food_drink')
+      expect(categoryLabel('food_drink')).toBe('Essen & Trinken')
+      expect(categoryLabel('nonsense')).toBe('Allgemein')
+    })
   })
 })

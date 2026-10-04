@@ -3,6 +3,7 @@
  */
 import { signal } from '@preact/signals'
 import { addBase } from '@/baseUrl'
+import { t } from '@/i18n/i18n'
 
 const open = signal(false)
 const query = signal('')
@@ -23,18 +24,18 @@ if (typeof window !== 'undefined') {
 
 function defaultItems() {
   return [
-    { label: 'Feed', href: '/', type: 'page' },
-    { label: 'Spaces', href: '/spaces', type: 'page' },
-    { label: 'Messages', href: '/dms', type: 'page' },
-    { label: 'Calendar', href: '/calendar', type: 'page' },
-    { label: 'Timetable', href: '/calendar?tab=timetable', type: 'page' },
-    { label: 'Tasks', href: '/organize', type: 'page' },
-    { label: 'Shopping', href: '/organize?tab=shopping', type: 'page' },
-    { label: 'Stickies', href: '/organize?tab=stickies', type: 'page' },
-    { label: 'Pages', href: '/pages', type: 'page' },
-    { label: 'Notifications', href: '/notifications', type: 'page' },
-    { label: 'Settings', href: '/settings', type: 'page' },
-    { label: 'Admin', href: '/admin', type: 'page' },
+    { label: t('nav.feed'), href: '/', type: 'page' },
+    { label: t('nav.spaces'), href: '/spaces', type: 'page' },
+    { label: t('nav.messages'), href: '/dms', type: 'page' },
+    { label: t('nav.calendar'), href: '/calendar', type: 'page' },
+    { label: t('nav.timetable'), href: '/calendar?tab=timetable', type: 'page' },
+    { label: t('nav.tasks'), href: '/organize', type: 'page' },
+    { label: t('nav.shopping'), href: '/organize?tab=shopping', type: 'page' },
+    { label: t('nav.stickies'), href: '/organize?tab=stickies', type: 'page' },
+    { label: t('nav.pages'), href: '/pages', type: 'page' },
+    { label: t('nav.notifications'), href: '/notifications', type: 'page' },
+    { label: t('nav.settings'), href: '/settings', type: 'page' },
+    { label: t('nav.admin'), href: '/admin', type: 'page' },
   ]
 }
 
@@ -48,7 +49,7 @@ export function QuickSwitcher() {
   return (
     <div class="sh-switcher-overlay" onClick={() => open.value = false}>
       <div class="sh-switcher" onClick={(e) => e.stopPropagation()}>
-        <input class="sh-switcher-input" placeholder="Go to..."
+        <input class="sh-switcher-input" placeholder={t('nav.go_to')}
           value={query.value} autofocus
           onInput={(e) => query.value = (e.target as HTMLInputElement).value} />
         <div class="sh-switcher-results">

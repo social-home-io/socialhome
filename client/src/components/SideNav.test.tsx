@@ -14,6 +14,7 @@ import { toggles } from '@/components/HouseholdToggles'
 import { userPreferences } from '@/store/userPreferences'
 import { shortcutsHelpOpen } from '@/lib/shortcuts'
 import { SideNav } from './SideNav'
+import { setLocale } from '@/i18n/i18n'
 
 const ALL_FEATURES_ON = {
   feat_feed: true, feat_pages: true, feat_tasks: true,
@@ -142,7 +143,7 @@ describe('SideNav', () => {
   it('hides the gated Settings sub-entries for a non-admin non-guardian, but keeps Personal + the header', () => {
     // Settings now always has at least the ungated Personal item, so
     // the *group header* never disappears for an authenticated user.
-    // The gated sub-entries (Parent Control / Federation / Admin)
+    // The gated sub-entries (Parent Control / Connections / Admin)
     // still hide individually based on role.
     setUser({ is_admin: false })
     isGuardian.value = false
@@ -150,8 +151,8 @@ describe('SideNav', () => {
     expect(queryByText('Settings')).toBeTruthy()
     expect(queryByText('Personal')).toBeTruthy()
     expect(queryByText('Admin')).toBeNull()
-    expect(queryByText('Federation')).toBeNull()
-    expect(queryByText('Parent Control')).toBeNull()
+    expect(queryByText('Connections')).toBeNull()
+    expect(queryByText('Parental controls')).toBeNull()
     // AT HOME header still renders because Shopping/Presence/Gallery
     // are unconditionally visible.
     const headers = Array.from(container.querySelectorAll('.sh-sidenav-group-header'))
@@ -160,11 +161,11 @@ describe('SideNav', () => {
     expect(headers).toContain('Settings')
   })
 
-  it('hides Admin and Federation for non-admin users', () => {
+  it('hides Admin and Connections for non-admin users', () => {
     setUser({ is_admin: false })
     const { queryByText } = renderAt('/')
     expect(queryByText('Admin')).toBeNull()
-    expect(queryByText('Federation')).toBeNull()
+    expect(queryByText('Connections')).toBeNull()
   })
 
   it('renders a Personal link to /settings inside the Settings group for every authenticated user', () => {
@@ -189,35 +190,35 @@ describe('SideNav', () => {
     shortcutsHelpOpen.value = false
   })
 
-  it('also renders Personal for admins (alongside Federation / Admin)', () => {
+  it('also renders Personal for admins (alongside Connections / Admin)', () => {
     setUser({ is_admin: true })
     isGuardian.value = true
     const { getByText, queryByText } = renderAt('/')
     expect(getByText('Personal').closest('a')?.getAttribute('href')).toBe('/settings')
     expect(queryByText('Admin')).toBeTruthy()
-    expect(queryByText('Federation')).toBeTruthy()
-    expect(queryByText('Parent Control')).toBeTruthy()
+    expect(queryByText('Connections')).toBeTruthy()
+    expect(queryByText('Parental controls')).toBeTruthy()
   })
 
-  it('shows Admin and Federation for admin users', () => {
+  it('shows Admin and Connections for admin users', () => {
     setUser({ is_admin: true })
     const { queryByText } = renderAt('/')
     expect(queryByText('Admin')).toBeTruthy()
-    expect(queryByText('Federation')).toBeTruthy()
+    expect(queryByText('Connections')).toBeTruthy()
   })
 
-  it('hides Parent Control when the caller is not a guardian', () => {
+  it('hides Parental controls when the caller is not a guardian', () => {
     setUser({ is_admin: true })
     isGuardian.value = false
     const { queryByText } = renderAt('/')
-    expect(queryByText('Parent Control')).toBeNull()
+    expect(queryByText('Parental controls')).toBeNull()
   })
 
-  it('shows Parent Control when isGuardian is true and links to /parent', () => {
+  it('shows Parental controls when isGuardian is true and links to /parent', () => {
     setUser({ is_admin: false })
     isGuardian.value = true
     const { getByText } = renderAt('/')
-    const link = getByText('Parent Control').closest('a')
+    const link = getByText('Parental controls').closest('a')
     expect(link).toBeTruthy()
     expect(link?.getAttribute('href')).toBe('/parent')
   })
@@ -351,11 +352,11 @@ describe('SideNav', () => {
     expect(link.querySelector('.sh-sidenav-badge')).toBeNull()
   })
 
-  it('renders the federation link as Federation, not Connections', () => {
+  it('names the households link plainly as Connections, not Federation', () => {
     setUser({ is_admin: true })
     const { queryByText, getByText } = renderAt('/')
-    expect(queryByText('Connections')).toBeNull()
-    const link = getByText('Federation').closest('a')
+    expect(queryByText('Federation')).toBeNull()
+    const link = getByText('Connections').closest('a')
     expect(link?.getAttribute('href')).toBe('/connections')
   })
 
@@ -471,5 +472,28 @@ describe('SideNav — links under the HA ingress prefix', () => {
     expect(hrefs).toContain('/api/hassio_ingress/tok/dms')
     expect(hrefs).toContain('/api/hassio_ingress/tok/settings')
     expect(hrefs.filter(h => !h.startsWith('/api/hassio_ingress/tok/'))).toEqual([])
+  })
+})
+
+describe('SideNav in German', () => {
+  afterEach(async () => { await setLocale('en') })
+
+  it('renders the section headers, links and unread badge in German', async () => {
+    await setLocale('de')
+    setUser({ is_admin: true })
+    isGuardian.value = true
+    dmUnreadTotal.value = 3
+    const { container, getByText } = renderAt('/')
+    const headers = Array.from(container.querySelectorAll('.sh-sidenav-group-header'))
+      .map((el) => el.textContent?.trim())
+    expect(headers).toEqual(['Zuhause', 'Reden', 'Entdecken', 'Einstellungen'])
+    for (const label of ['Kalender', 'Organisieren', 'Chats', 'Räume', 'Freunde',
+      'Persönlich', 'Jugendschutz', 'Verbindungen']) {
+      expect(getByText(label).closest('a'), label).toBeTruthy()
+    }
+    expect(getByText('Verbindungen').closest('a')?.getAttribute('href')).toBe('/connections')
+    expect(container.querySelector('.sh-sidenav-badge')?.getAttribute('aria-label'))
+      .toBe('3 ungelesen')
+    expect(container.querySelector('aside')?.getAttribute('aria-label')).toBe('Seitenleiste')
   })
 })

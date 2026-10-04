@@ -1,4 +1,5 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { setLocale } from '@/i18n/i18n'
 import { render, waitFor, fireEvent } from '@testing-library/preact'
 
 type WsHandler = (e: { data: Record<string, unknown> }) => void
@@ -108,5 +109,44 @@ describe('SpaceMemberList', () => {
     fireEvent.click(r.getByLabelText('Manage Hannah'))
     await waitFor(() => expect(r.baseElement.querySelector('.sh-member-actions')).toBeTruthy())
     expect(r.baseElement.querySelector('[data-role-option]')).toBeNull()
+  })
+})
+
+describe('SpaceMemberList — header count and language', () => {
+  afterEach(async () => { await setLocale('en') })
+
+  const members = (n: number) => Array.from({ length: n }, (_, i) => ({
+    user_id: `u-${i}`, display_name: `Person ${i}`, role: 'member', joined_at: '2026-01-01',
+  }))
+  const banned = [{ user_id: 'u-x', banned_by: 'u-0', banned_at: '2026-01-01' }]
+  const serve = (n: number) => apiGet.mockImplementation(async (url: string) =>
+    url.endsWith('/members') ? members(n) : url.endsWith('/bans') ? banned : [])
+
+  it('says "1 member" for one and "3 members" for more', async () => {
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    serve(1)
+    const one = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
+    await waitFor(() => expect(one.container.querySelector('h3')?.textContent).toBe('1 member'))
+    one.unmount()
+    serve(3)
+    const many = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
+    await waitFor(() => expect(many.container.querySelector('h3')?.textContent).toBe('3 members'))
+  })
+
+  it('renders the header, ban list and chips in German', async () => {
+    await setLocale('de')
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    serve(1)
+    const one = render(<SpaceMemberList spaceId="sp-1" viewerRole="admin" />)
+    await waitFor(() => expect(one.container.querySelector('h3')?.textContent).toBe('1 Mitglied'))
+    const headings = [...one.container.querySelectorAll('h3')].map(h => h.textContent)
+    expect(headings).toEqual(['1 Mitglied', 'Gesperrt'])
+    expect(one.getByText('Entsperren')).toBeTruthy()
+    expect(one.container.textContent).toContain('Nutzt dein Haushaltsprofil')
+    expect(one.getByLabelText('Person 0 verwalten')).toBeTruthy()
+    one.unmount()
+    serve(4)
+    const many = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
+    await waitFor(() => expect(many.container.querySelector('h3')?.textContent).toBe('4 Mitglieder'))
   })
 })

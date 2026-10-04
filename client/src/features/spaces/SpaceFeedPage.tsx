@@ -115,35 +115,23 @@ export function archivedCopy(
   if (!archived) return null
   if (reason === 'dissolved') {
     return {
-      title: 'This space was dissolved by its owner.',
-      body:
-        'This is a read-only archive of what you had — no new posts or '
-        + 'comments. It can’t be revived.',
-      empty:
-        'This space was dissolved by its owner. This is a read-only archive '
-        + 'of what you had.',
+      title: t('space.archived.dissolved_title'),
+      body: t('space.archived.dissolved_body'),
+      empty: t('space.archived.dissolved_empty'),
     }
   }
   if (reason === 'removed') {
     return {
-      title: 'You’re no longer a member of this space.',
-      body:
-        'This is a read-only archive of what you had — no new posts or '
-        + 'comments.',
-      empty:
-        'You’re no longer a member of this space. This is a read-only '
-        + 'archive of what you had.',
+      title: t('space.archived.removed_title'),
+      body: t('space.archived.removed_body'),
+      empty: t('space.archived.removed_empty'),
     }
   }
   // Normal, reversible admin archive.
   return {
-    title: 'This space is archived.',
-    body:
-      'It’s read-only — existing content is kept, but no new posts or '
-      + 'comments can be added until an admin unarchives it.',
-    empty:
-      'This space is archived (read-only). Unarchive it from settings to '
-      + 'start posting again.',
+    title: t('space.archived.title'),
+    body: t('space.archived.body'),
+    empty: t('space.archived.empty'),
   }
 }
 
@@ -302,7 +290,7 @@ export default function SpaceFeedPage() {
   useTitle(
     detail
       ? (detail.emoji ? `${detail.emoji} ${detail.name}` : detail.name)
-      : 'Space',
+      : t('spaces.space_title'),
   )
 
   useEffect(() => {
@@ -445,9 +433,9 @@ export default function SpaceFeedPage() {
   }
 
   const handleDelete = async (postId: string) => {
-    if (!await confirmDialog('Delete this post?', { destructive: true })) return
+    if (!await confirmDialog(t('space.feed.delete_confirm'), { destructive: true })) return
     await api.delete(`/api/spaces/${spaceId}/posts/${postId}`)
-    showToast('Post deleted', 'info')
+    showToast(t('space.feed.deleted'), 'info')
     void loadSpaceFeed(spaceId)
   }
 
@@ -523,7 +511,7 @@ export default function SpaceFeedPage() {
   return (
     <div class="sh-space-feed sh-space-scope">
       <SpaceSubHeader
-        name={s?.name ?? 'Space'}
+        name={s?.name ?? t('spaces.space_title')}
         emoji={s?.emoji ?? null}
         iconUrl={s?.icon_url ?? null}
         memberCount={memberCount.value}
@@ -544,8 +532,8 @@ export default function SpaceFeedPage() {
             {isWriterRole(viewerRole.value) && (
               <a href={addBase(`/spaces/${spaceId}/settings`)}
                  class="sh-space-settings-btn"
-                 aria-label="Space settings">
-                ⚙ Settings
+                 aria-label={t('space.header.settings_aria')}>
+                ⚙ {t('nav.settings')}
               </a>
             )}
           </>
@@ -593,7 +581,7 @@ export default function SpaceFeedPage() {
             <div class="sh-subscriber-banner" role="status">
               <span class="sh-subscriber-banner__icon" aria-hidden="true">🔔</span>
               <div class="sh-subscriber-banner__body">
-                <strong>You're following this space.</strong>
+                <strong>{t('space.subscriber.title')}</strong>
                 <p class="sh-muted">
                   {(() => {
                     // Subscriber-engagement opt-ins (§23.49) — admins can
@@ -607,31 +595,27 @@ export default function SpaceFeedPage() {
                     const canReact   = !!f?.allow_subscriber_react
                     const canComment = !!f?.allow_subscriber_comment
                     if (canReact && canComment) {
-                      return 'You can react and comment, but posting is for full members. ' +
-                             'Ask an admin if you want to start posts of your own.'
+                      return t('space.subscriber.react_comment')
                     }
                     if (canReact) {
-                      return 'You can leave reactions, but commenting and posting are for full members. ' +
-                             'Ask an admin if you want to join the conversation.'
+                      return t('space.subscriber.react')
                     }
                     if (canComment) {
-                      return 'You can leave comments, but reactions and posting are for full members. ' +
-                             'Ask an admin if you want to react too.'
+                      return t('space.subscriber.comment')
                     }
-                    return 'You see new posts here but can\'t post, comment, or react. ' +
-                           'Ask an admin to upgrade you to a full member if you want to join in.'
+                    return t('space.subscriber.read_only')
                   })()}
                 </p>
               </div>
               <button
                 type="button"
                 class="sh-subscribe-btn sh-subscribe-btn--on"
-                aria-label="Unsubscribe from this space"
-                title="Stop receiving updates from this space."
+                aria-label={t('space.subscriber.unsubscribe_aria')}
+                title={t('space.subscriber.unsubscribe_title')}
                 onClick={async () => {
                   try {
                     await api.delete(`/api/spaces/${spaceId}/subscribe`)
-                    showToast('Unsubscribed', 'info')
+                    showToast(t('space.subscriber.unsubscribed'), 'info')
                     // ``addBase`` prepends the HA Supervisor ingress
                     // prefix (no-op for standalone) so the
                     // hard-navigate stays inside the SPA shell instead
@@ -642,7 +626,7 @@ export default function SpaceFeedPage() {
                   }
                 }}
               >
-                🔕 Unsubscribe
+                🔕 {t('space.subscriber.unsubscribe')}
               </button>
             </div>
           ) : spaceDetail.value?.archived ? (
@@ -674,7 +658,7 @@ export default function SpaceFeedPage() {
           {posts.value.length === 0 && (
             <div class="sh-empty-state">
               <div aria-hidden="true">{spaceDetail.value?.archived ? '🗄️' : '💬'}</div>
-              <h3>No posts in this space</h3>
+              <h3>{t('spaces.no_posts')}</h3>
               {spaceDetail.value?.archived ? (
                 <p class="sh-muted">
                   {archivedCopy(
@@ -684,13 +668,8 @@ export default function SpaceFeedPage() {
                 </p>
               ) : adminOnly('posts') ? null : (
                 <>
-                  <p>
-                    Be the first to share something with the rest of the space.
-                    Members from connected households see what you post here.
-                  </p>
-                  <p class="sh-muted">
-                    Use the composer above ↑ to start the conversation.
-                  </p>
+                  <p>{t('space.feed.empty_body')}</p>
+                  <p class="sh-muted">{t('space.feed.empty_hint')}</p>
                 </>
               )}
             </div>

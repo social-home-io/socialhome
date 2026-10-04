@@ -260,9 +260,9 @@ function AboutTab({
       }
       setIconUrl(resp.icon_url)
       onSaved()
-      showToast('Icon updated', 'success')
+      showToast(t('space.about.icon_updated'), 'success')
     } catch (err: unknown) {
-      showToast(`Upload failed: ${(err as Error).message ?? err}`, 'error')
+      showToast(t('space.about.upload_failed', { error: String((err as Error).message ?? err) }), 'error')
     } finally {
       setUploadingIcon(false)
       input.value = ''
@@ -270,14 +270,14 @@ function AboutTab({
   }
 
   const clearIcon = async () => {
-    if (!(await confirmDialog('Remove the space icon?', { destructive: true }))) return
+    if (!(await confirmDialog(t('space.about.icon_remove_confirm'), { destructive: true }))) return
     try {
       await api.delete(`/api/spaces/${space.id}/icon`)
       setIconUrl(null)
       onSaved()
-      showToast('Icon removed', 'info')
+      showToast(t('space.about.icon_removed'), 'info')
     } catch (err: unknown) {
-      showToast(`Clear failed: ${(err as Error).message ?? err}`, 'error')
+      showToast(t('space.about.remove_failed', { error: String((err as Error).message ?? err) }), 'error')
     }
   }
 
@@ -287,11 +287,11 @@ function AboutTab({
       await api.patch(`/api/spaces/${space.id}`, {
         about_markdown: markdown,
       })
-      showToast('About updated', 'success')
+      showToast(t('space.about.saved'), 'success')
       onSaved()
     } catch (err: unknown) {
       showToast(
-        `Save failed: ${(err as Error).message ?? err}`, 'error',
+        t('space.about.save_failed', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setSaving(false)
@@ -311,10 +311,10 @@ function AboutTab({
       ) as { cover_url: string }
       setCoverUrl(resp.cover_url)
       onSaved()
-      showToast('Cover updated', 'success')
+      showToast(t('space.about.cover_updated'), 'success')
     } catch (err: unknown) {
       showToast(
-        `Upload failed: ${(err as Error).message ?? err}`, 'error',
+        t('space.about.upload_failed', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setUploadingCover(false)
@@ -323,15 +323,15 @@ function AboutTab({
   }
 
   const clearCover = async () => {
-    if (!await confirmDialog('Remove the space cover image?', { destructive: true })) return
+    if (!await confirmDialog(t('space.about.cover_remove_confirm'), { destructive: true })) return
     try {
       await api.delete(`/api/spaces/${space.id}/cover`)
       setCoverUrl(null)
       onSaved()
-      showToast('Cover removed', 'info')
+      showToast(t('space.about.cover_removed'), 'info')
     } catch (err: unknown) {
       showToast(
-        `Clear failed: ${(err as Error).message ?? err}`, 'error',
+        t('space.about.remove_failed', { error: String((err as Error).message ?? err) }), 'error',
       )
     }
   }
@@ -339,37 +339,35 @@ function AboutTab({
   return (
     <div class="sh-form sh-about-editor">
       <section>
-        <h3 style={{ margin: 0 }}>Cover image</h3>
+        <h3 style={{ margin: 0 }}>{t('space.about.cover_title')}</h3>
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-          Shown as the hero banner at the top of the space. Up to 10 MB;
-          large photos are auto-resized and converted to WebP.
+          {t('space.about.cover_hint')}
         </p>
         <div class="sh-about-cover-preview"
              style={coverUrl ? { backgroundImage: `url(${coverUrl})` } : {}}>
           {!coverUrl && (
-            <span class="sh-muted">No cover set yet.</span>
+            <span class="sh-muted">{t('space.about.cover_empty')}</span>
           )}
         </div>
         <div class="sh-row" style={{ gap: 'var(--sh-space-xs)', flexWrap: 'wrap' }}>
           <label class="sh-btn sh-btn--secondary">
-            {coverUrl ? 'Change cover' : 'Upload cover'}
+            {coverUrl ? t('space.about.cover_change') : t('space.about.cover_upload')}
             <input ref={fileRef} type="file" accept="image/*"
                    class="sr-only" onChange={uploadCover} />
           </label>
-          {uploadingCover && <span class="sh-muted">Uploading…</span>}
+          {uploadingCover && <span class="sh-muted">{t('space.about.uploading')}</span>}
           {coverUrl && (
             <Button variant="secondary" onClick={clearCover}>
-              Remove
+              {t('space.about.remove')}
             </Button>
           )}
         </div>
       </section>
 
       <section>
-        <h3 style={{ margin: 0 }}>Icon</h3>
+        <h3 style={{ margin: 0 }}>{t('space.about.icon_title')}</h3>
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-          The space's avatar — shown as a circle on the cover header and in
-          the tab bar. Falls back to the emoji icon when none is set.
+          {t('space.about.icon_hint')}
         </p>
         <div class="sh-row" style={{ gap: 'var(--sh-space-sm)', alignItems: 'center' }}>
           <span
@@ -379,31 +377,30 @@ function AboutTab({
             {!iconUrl && (space.emoji || '🏠')}
           </span>
           <label class="sh-btn sh-btn--secondary">
-            {iconUrl ? 'Change icon' : 'Upload icon'}
+            {iconUrl ? t('space.about.icon_change') : t('space.about.icon_upload')}
             <input type="file" accept="image/*" class="sr-only" onChange={uploadIcon} />
           </label>
-          {uploadingIcon && <span class="sh-muted">Uploading…</span>}
+          {uploadingIcon && <span class="sh-muted">{t('space.about.uploading')}</span>}
           {iconUrl && (
             <Button variant="secondary" onClick={clearIcon}>
-              Remove
+              {t('space.about.remove')}
             </Button>
           )}
         </div>
       </section>
 
       <section>
-        <h3 style={{ margin: 0 }}>About (Markdown)</h3>
+        <h3 style={{ margin: 0 }}>{t('space.about.text_title')}</h3>
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-          Rendered at the top of the space. Bold, italic, lists,
-          links, and code are supported.
+          {t('space.about.text_hint')}
         </p>
         <div class="sh-about-editor-grid">
           <label class="sh-about-editor-pane">
-            <span class="sh-muted">Write</span>
+            <span class="sh-muted">{t('space.about.write')}</span>
             <textarea class="sh-about-editor-textarea"
                       value={markdown}
                       rows={12} maxLength={8000}
-                      placeholder="# Welcome!\n\nWhat's this space about?"
+                      placeholder={t('space.about.placeholder')}
                       onInput={(e) =>
                         setMarkdown((e.target as HTMLTextAreaElement).value)} />
             <span class="sh-char-count">
@@ -411,16 +408,16 @@ function AboutTab({
             </span>
           </label>
           <div class="sh-about-editor-pane">
-            <span class="sh-muted">Preview</span>
+            <span class="sh-muted">{t('theme.preview')}</span>
             <div class="sh-about-editor-preview">
               {markdown.trim()
                 ? <MarkdownView src={markdown} live />
-                : <span class="sh-muted">Nothing to preview yet.</span>}
+                : <span class="sh-muted">{t('space.about.preview_empty')}</span>}
             </div>
           </div>
         </div>
         <div class="sh-form-actions">
-          <Button onClick={saveAbout} loading={saving}>Save about</Button>
+          <Button onClick={saveAbout} loading={saving}>{t('space.about.save')}</Button>
         </div>
       </section>
     </div>

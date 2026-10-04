@@ -12,6 +12,7 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
+import { t } from '@/i18n/i18n'
 
 interface SpaceLink {
   id: string
@@ -41,7 +42,7 @@ export function SpaceLinksTab({ spaceId }: Props) {
       }
       setLinks(body.links)
     } catch (err: unknown) {
-      showToast(`Failed to load links: ${(err as Error).message}`, 'error')
+      showToast(t('space.links.load_failed', { error: (err as Error).message }), 'error')
       setLinks([])
     } finally {
       setLoading(false)
@@ -55,7 +56,7 @@ export function SpaceLinksTab({ spaceId }: Props) {
     const label = draft.label.trim()
     const url = draft.url.trim()
     if (!label || !url) {
-      showToast('Label and URL are required.', 'error')
+      showToast(t('space.links.required'), 'error')
       return
     }
     setSaving(true)
@@ -67,9 +68,9 @@ export function SpaceLinksTab({ spaceId }: Props) {
       })
       setDraft({ label: '', url: '' })
       await reload()
-      showToast('Link added.', 'success')
+      showToast(t('space.links.added'), 'success')
     } catch (err: unknown) {
-      showToast(`Could not add link: ${(err as Error).message}`, 'error')
+      showToast(t('space.links.add_failed', { error: (err as Error).message }), 'error')
     } finally {
       setSaving(false)
     }
@@ -83,18 +84,18 @@ export function SpaceLinksTab({ spaceId }: Props) {
       )
       await reload()
     } catch (err: unknown) {
-      showToast(`Save failed: ${(err as Error).message}`, 'error')
+      showToast(t('space.links.save_failed', { error: (err as Error).message }), 'error')
     }
   }
 
   const deleteLink = async (link: SpaceLink) => {
-    if (!await confirmDialog(`Remove "${link.label}"?`, { destructive: true })) return
+    if (!await confirmDialog(t('space.links.remove_confirm', { label: link.label }), { destructive: true })) return
     try {
       await api.delete(`/api/spaces/${spaceId}/links/${link.id}`)
       await reload()
-      showToast('Link removed.', 'info')
+      showToast(t('space.links.removed'), 'info')
     } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error).message}`, 'error')
+      showToast(t('space.links.remove_failed', { error: (err as Error).message }), 'error')
     }
   }
 
@@ -113,16 +114,15 @@ export function SpaceLinksTab({ spaceId }: Props) {
 
   return (
     <section class="sh-space-links-tab">
-      <h2>Quick links</h2>
+      <h2>{t('space.links.title')}</h2>
       <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)' }}>
-        Shortcuts shown to every member under the space header. Good for the
-        household wiki, the shared grocery board, a shared calendar link, etc.
+        {t('space.links.intro')}
       </p>
 
       {loading && <Spinner />}
 
       {!loading && links.length === 0 && (
-        <p class="sh-muted">No links yet. Add one below.</p>
+        <p class="sh-muted">{t('space.links.empty')}</p>
       )}
 
       {!loading && links.length > 0 && (
@@ -132,7 +132,7 @@ export function SpaceLinksTab({ spaceId }: Props) {
               <input
                 class="sh-space-links-editor__label"
                 value={link.label}
-                aria-label="Link label"
+                aria-label={t('space.links.label_aria')}
                 onBlur={(e) => {
                   const next = (e.target as HTMLInputElement).value.trim()
                   if (next && next !== link.label) {
@@ -143,7 +143,7 @@ export function SpaceLinksTab({ spaceId }: Props) {
               <input
                 class="sh-space-links-editor__url"
                 value={link.url}
-                aria-label="Link URL"
+                aria-label={t('space.links.url_aria')}
                 onBlur={(e) => {
                   const next = (e.target as HTMLInputElement).value.trim()
                   if (next && next !== link.url) {
@@ -154,17 +154,17 @@ export function SpaceLinksTab({ spaceId }: Props) {
               <div class="sh-space-links-editor__actions">
                 <button type="button"
                         class="sh-icon-btn"
-                        aria-label="Move up"
+                        aria-label={t('space.links.move_up')}
                         disabled={i === 0}
                         onClick={() => void moveLink(i, -1)}>↑</button>
                 <button type="button"
                         class="sh-icon-btn"
-                        aria-label="Move down"
+                        aria-label={t('space.links.move_down')}
                         disabled={i === links.length - 1}
                         onClick={() => void moveLink(i, 1)}>↓</button>
                 <button type="button"
                         class="sh-icon-btn sh-icon-btn--danger"
-                        aria-label={`Remove ${link.label}`}
+                        aria-label={t('space.links.remove_aria', { label: link.label })}
                         onClick={() => void deleteLink(link)}>✕</button>
               </div>
             </li>
@@ -173,10 +173,10 @@ export function SpaceLinksTab({ spaceId }: Props) {
       )}
 
       <form class="sh-space-links-editor__create" onSubmit={createLink}>
-        <h3>Add link</h3>
+        <h3>{t('space.links.add')}</h3>
         <input type="text"
                value={draft.label}
-               placeholder="Label (e.g. Family wiki)"
+               placeholder={t('space.links.label_placeholder')}
                maxLength={64}
                onInput={(e) =>
                  setDraft({ ...draft, label: (e.target as HTMLInputElement).value })
@@ -188,7 +188,7 @@ export function SpaceLinksTab({ spaceId }: Props) {
                onInput={(e) =>
                  setDraft({ ...draft, url: (e.target as HTMLInputElement).value })
                } />
-        <Button type="submit" loading={saving}>Add link</Button>
+        <Button type="submit" loading={saving}>{t('space.links.add')}</Button>
       </form>
     </section>
   )

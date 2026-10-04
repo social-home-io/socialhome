@@ -104,7 +104,7 @@ describe('FederationMap', () => {
     render(<FederationMap />)
     expect(screen.getByText('Not on map')).toBeDefined()
     expect(screen.getByText('Bob')).toBeDefined()
-    expect(screen.getByText('Paired but no home coordinates yet.')).toBeDefined()
+    expect(screen.getByText('Paired, but no home location yet.')).toBeDefined()
   })
 
   test('omits the footer when every peer has coords', () => {

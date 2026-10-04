@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, waitFor } from '@testing-library/preact'
 import { signal } from '@preact/signals'
 import { SpaceSubHeader, type SpaceTab } from './SpaceSubHeader'
+import { setLocale } from '@/i18n/i18n'
 
 const TABS: readonly SpaceTab[] = ['feed', 'members', 'pages', 'calendar', 'gallery']
 const FULL_TABS: readonly SpaceTab[] = [
@@ -254,5 +255,24 @@ describe('SpaceSubHeader', () => {
     await waitFor(() => {
       expect(queryByRole('menu', { name: 'All sections' })).toBeNull()
     })
+  })
+})
+
+describe('SpaceSubHeader in German', () => {
+  afterEach(async () => { await setLocale('en') })
+
+  it('names the tabs and counts members with the right plural form', async () => {
+    await setLocale('de')
+    const props = {
+      name: 'Familie', emoji: null, activeTab: signal<SpaceTab>('feed'),
+      visibleTabs: ['feed', 'members', 'calendar', 'map', 'moderation'] as SpaceTab[],
+      onSelectTab: () => {},
+    }
+    const { container, rerender } = render(<SpaceSubHeader {...props} memberCount={1} />)
+    expect([...container.querySelectorAll('[role="tab"]')].map(b => b.textContent))
+      .toEqual(['Feed', 'Mitglieder', 'Kalender', 'Karte', 'Moderation'])
+    expect(container.querySelector('.sh-space-subheader-meta')?.textContent).toBe('1 Mitglied')
+    rerender(<SpaceSubHeader {...props} memberCount={3} />)
+    expect(container.querySelector('.sh-space-subheader-meta')?.textContent).toBe('3 Mitglieder')
   })
 })

@@ -41,7 +41,7 @@ export function HouseholdToggles() {
     return () => { off() }
   }, [])
 
-  if (!toggles.value) return <p class="sh-muted">Loading features...</p>
+  if (!toggles.value) return <p class="sh-muted">{t('common.loading')}</p>
 
   const toggle = async (key: keyof Toggles) => {
     if (!toggles.value) return
@@ -52,7 +52,7 @@ export function HouseholdToggles() {
     try {
       await api.put('/api/household/preferences', { toggles: { [key]: !val } })
     } catch {
-      showToast('Failed to update', 'error')
+      showToast(t('household.toggles.update_failed'), 'error')
       void loadToggles()
     }
   }
@@ -61,23 +61,24 @@ export function HouseholdToggles() {
   // toggle, no post-type toggle. Listings live inside spaces and the
   // Bazaar tab in the SPA stays visible to everyone for browsing.
   const featureCards: { value: keyof Toggles; icon: string; title: string; subtitle: string }[] = [
-    { value: 'feat_feed', icon: '📮', title: 'Feed', subtitle: 'The shared household activity feed' },
-    { value: 'feat_pages', icon: '📄', title: 'Pages', subtitle: 'Wiki-style shared pages' },
-    { value: 'feat_tasks', icon: '✅', title: 'Tasks', subtitle: 'Shared to-do lists' },
-    { value: 'feat_stickies', icon: '📝', title: 'Stickies', subtitle: 'A shared sticky-note board' },
-    { value: 'feat_calendar', icon: '🗓', title: 'Calendar', subtitle: 'The shared household calendar' },
-    { value: 'feat_timetable', icon: '🏫', title: 'Timetable', subtitle: 'Weekly school-style timetables' },
-    { value: 'feat_presence', icon: '👥', title: 'Presence', subtitle: "Show who's home and online" },
-    { value: 'feat_gallery', icon: '🖼', title: 'Gallery', subtitle: 'Shared photo galleries' },
+    { value: 'feat_feed', icon: '📮', title: t('nav.feed'), subtitle: t('household.toggles.feed_hint') },
+    { value: 'feat_pages', icon: '📄', title: t('nav.pages'), subtitle: t('household.toggles.pages_hint') },
+    { value: 'feat_tasks', icon: '✅', title: t('nav.tasks'), subtitle: t('household.toggles.tasks_hint') },
+    { value: 'feat_stickies', icon: '📝', title: t('nav.stickies'), subtitle: t('household.toggles.stickies_hint') },
+    { value: 'feat_calendar', icon: '🗓', title: t('nav.calendar'), subtitle: t('household.toggles.calendar_hint') },
+    { value: 'feat_timetable', icon: '🏫', title: t('nav.timetable'), subtitle: t('household.toggles.timetable_hint') },
+    { value: 'feat_presence', icon: '👥', title: t('nav.presence'), subtitle: t('household.toggles.presence_hint') },
+    { value: 'feat_gallery', icon: '🖼', title: t('nav.gallery'), subtitle: t('household.toggles.gallery_hint') },
   ]
+  // Titles reuse the space settings' post-type names.
   const postTypeCards: { value: keyof Toggles; icon: string; title: string; subtitle: string }[] = [
-    { value: 'allow_text', icon: '🔤', title: 'Text', subtitle: 'Allow text posts in the feed' },
-    { value: 'allow_image', icon: '📷', title: 'Image', subtitle: 'Allow image posts' },
-    { value: 'allow_video', icon: '🎬', title: 'Video', subtitle: 'Allow video posts' },
-    { value: 'allow_file', icon: '📄', title: 'File', subtitle: 'Allow file attachments' },
-    { value: 'allow_poll', icon: '📊', title: 'Poll', subtitle: 'Allow polls' },
-    { value: 'allow_schedule', icon: '📅', title: 'Schedule', subtitle: 'Allow scheduled-event posts' },
-    { value: 'allow_highlight_share', icon: '⭕', title: 'Highlight share', subtitle: 'Allow sharing highlights to the feed' },
+    { value: 'allow_text', icon: '🔤', title: t('space.post_type.text'), subtitle: t('household.toggles.post_text_hint') },
+    { value: 'allow_image', icon: '📷', title: t('space.post_type.image'), subtitle: t('household.toggles.post_image_hint') },
+    { value: 'allow_video', icon: '🎬', title: t('space.post_type.video'), subtitle: t('household.toggles.post_video_hint') },
+    { value: 'allow_file', icon: '📄', title: t('space.post_type.file'), subtitle: t('household.toggles.post_file_hint') },
+    { value: 'allow_poll', icon: '📊', title: t('space.post_type.poll'), subtitle: t('household.toggles.post_poll_hint') },
+    { value: 'allow_schedule', icon: '📅', title: t('space.post_type.schedule'), subtitle: t('household.toggles.post_schedule_hint') },
+    { value: 'allow_highlight_share', icon: '⭕', title: t('space.post_type.highlight_share'), subtitle: t('household.toggles.post_highlight_share_hint') },
   ]
 
   const linkCards: { value: keyof Toggles; icon: string; title: string; subtitle: string }[] = [
@@ -100,12 +101,12 @@ export function HouseholdToggles() {
   return (
     <div class="sh-toggles">
       <CheckboxCardGroup
-        legend="Household features"
+        legend={t('household.toggles.features_legend')}
         options={featureCards.map(toOption)}
         onToggle={(k) => void toggle(k as keyof Toggles)}
       />
       <CheckboxCardGroup
-        legend="Feed post types"
+        legend={t('household.toggles.post_types_legend')}
         options={postTypeCards.map(toOption)}
         onToggle={(k) => void toggle(k as keyof Toggles)}
       />

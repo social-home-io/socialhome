@@ -33,6 +33,7 @@ import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 import {
   householdDisplayName,
   loadHouseholdUsers,
@@ -54,6 +55,17 @@ type InFlightState = Record<string, 'accept' | 'decline' | null>
 type ConfirmState = Record<string, boolean>
 
 const CONFIRM_RESET_MS = 4000
+
+/** "from {name}" with the name in bold — split on the placeholder so
+ *  each language keeps its own word order. */
+function FromLine({ name }: { name: string }) {
+  const [before, after = ''] = t('remote_invite.from').split('{name}')
+  return (
+    <span class="sh-muted">
+      {' '}{before}<strong>{name}</strong>{after}
+    </span>
+  )
+}
 
 export function RemoteInviteInboxBanner() {
   const [invites, setInvites] = useState<RemoteInvite[]>([])
@@ -131,7 +143,7 @@ export function RemoteInviteInboxBanner() {
         `/api/remote_invites/${invite.invite_token}/${decision}`, {},
       )
       showToast(
-        decision === 'accept' ? 'Invite accepted' : 'Invite declined',
+        decision === 'accept' ? t('remote_invite.accepted') : t('remote_invite.declined'),
         decision === 'accept' ? 'success' : 'info',
       )
       await load()
@@ -155,7 +167,7 @@ export function RemoteInviteInboxBanner() {
         `/api/local_invites/${invite.invitation_id}/${decision}`, {},
       )
       showToast(
-        decision === 'accept' ? 'Invite accepted' : 'Invite declined',
+        decision === 'accept' ? t('remote_invite.accepted') : t('remote_invite.declined'),
         decision === 'accept' ? 'success' : 'info',
       )
       await load()
@@ -196,13 +208,13 @@ export function RemoteInviteInboxBanner() {
     <aside class="sh-remote-invite-banner">
       {localInvites.length > 0 && (
         <>
-          <h2>📬 Pending invites from your household</h2>
+          <h2>📬 {t('remote_invite.banner_local')}</h2>
           {localInvites.map((inv) => {
             const busy = inFlight[inv.invitation_id] != null
             const declineConfirming = confirming[inv.invitation_id] === true
             const inviter = inv.invited_by
               ? householdDisplayName(inv.invited_by)
-              : 'an admin'
+              : t('remote_invite.an_admin')
             return (
               <div
                 key={inv.invitation_id}
@@ -210,9 +222,7 @@ export function RemoteInviteInboxBanner() {
               >
                 <div>
                   <strong>{inv.space_id}</strong>
-                  <span class="sh-muted">
-                    {' '}from <strong>{inviter}</strong>
-                  </span>
+                  <FromLine name={inviter} />
                 </div>
                 <div class="sh-remote-invite-banner__actions">
                   <Button
@@ -222,7 +232,7 @@ export function RemoteInviteInboxBanner() {
                     loading={inFlight[inv.invitation_id] === 'decline'}
                     data-testid="local-invite-decline"
                   >
-                    {declineConfirming ? 'Confirm decline' : 'Decline'}
+                    {declineConfirming ? t('remote_invite.confirm_decline') : t('remote_invite.decline')}
                   </Button>
                   <Button
                     variant="primary"
@@ -231,7 +241,7 @@ export function RemoteInviteInboxBanner() {
                     loading={inFlight[inv.invitation_id] === 'accept'}
                     data-testid="local-invite-accept"
                   >
-                    Accept
+                    {t('remote_invite.accept')}
                   </Button>
                 </div>
               </div>
@@ -240,7 +250,7 @@ export function RemoteInviteInboxBanner() {
         </>
       )}
       {invites.length > 0 && (
-        <h2>📬 Pending invites from other households</h2>
+        <h2>📬 {t('remote_invite.banner_remote')}</h2>
       )}
       {invites.map((inv) => {
         const busy = inFlight[inv.invite_token] != null
@@ -249,9 +259,7 @@ export function RemoteInviteInboxBanner() {
           <div key={inv.invite_token} class="sh-remote-invite-banner__row">
             <div>
               <strong>{inv.space_display_hint || inv.space_id}</strong>
-              <span class="sh-muted">
-                {' '}from <strong>{householdLabel(inv.inviter_instance_id)}</strong>
-              </span>
+              <FromLine name={householdLabel(inv.inviter_instance_id)} />
             </div>
             <div class="sh-remote-invite-banner__actions">
               <Button
@@ -261,7 +269,7 @@ export function RemoteInviteInboxBanner() {
                 loading={inFlight[inv.invite_token] === 'decline'}
                 data-testid="invite-decline"
               >
-                {declineConfirming ? 'Confirm decline' : 'Decline'}
+                {declineConfirming ? t('remote_invite.confirm_decline') : t('remote_invite.decline')}
               </Button>
               <Button
                 variant="primary"
@@ -270,7 +278,7 @@ export function RemoteInviteInboxBanner() {
                 loading={inFlight[inv.invite_token] === 'accept'}
                 data-testid="invite-accept"
               >
-                Accept
+                {t('remote_invite.accept')}
               </Button>
             </div>
           </div>

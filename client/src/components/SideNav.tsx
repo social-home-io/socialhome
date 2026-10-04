@@ -34,7 +34,8 @@ import { addBase } from '@/baseUrl'
 
 interface SideNavItem {
   key: string
-  label: string
+  /** Called at render so the label follows the UI language. */
+  label: () => string
   href: string
   icon: SideNavIconName
   /**
@@ -53,7 +54,7 @@ interface SideNavItem {
 
 interface SideNavGroup {
   key: string
-  label: string
+  label: () => string
   items: SideNavItem[]
 }
 
@@ -91,17 +92,17 @@ const ALL_ON: Omit<SideNavState, 'isAdmin' | 'isGuardian' | 'hasActiveCall' | 'd
 
 const HOME_GROUP: SideNavGroup = {
   key: 'home',
-  label: 'At home',
+  label: () => t('nav.section.home'),
   items: [
     // ``/`` belongs to the Welcome surface (corner-light) — clicking
     // "Feed" should land on the actual feed, not the welcome card.
     // Both routes already resolve to FeedPage; the welcome surface
     // sits at ``/`` via LandingDispatch.
-    { key: 'feed',     label: 'Feed',     href: '/feed',     icon: 'feed',
+    { key: 'feed',     label: () => t('nav.feed'),     href: '/feed',     icon: 'feed',
       gate: s => s.feat_feed },
     // The Calendar page also hosts the Timetable tab, so it stays in
     // the nav while either feature is on.
-    { key: 'calendar', label: 'Calendar', href: '/calendar', icon: 'calendar',
+    { key: 'calendar', label: () => t('nav.calendar'), href: '/calendar', icon: 'calendar',
       gate: s => s.feat_calendar || s.feat_timetable },
     // Tasks · Shopping · Stickies share a single hub at /organize —
     // individually low-traffic, collectively crowded the sidebar; the
@@ -109,53 +110,53 @@ const HOME_GROUP: SideNavGroup = {
     // Shopping · 4 · Stickies"). Hidden iff every underlying feature
     // is disabled, which keeps minimal household configurations from
     // showing a dead nav row.
-    { key: 'organize', label: 'Organize', href: '/organize', icon: 'tasks',
+    { key: 'organize', label: () => t('nav.organize'), href: '/organize', icon: 'tasks',
       gate: s => s.feat_tasks || s.feat_stickies },
-    { key: 'presence', label: 'Presence', href: '/presence', icon: 'presence',
+    { key: 'presence', label: () => t('nav.presence'), href: '/presence', icon: 'presence',
       gate: s => s.feat_presence },
-    { key: 'gallery',  label: 'Gallery',  href: '/gallery',  icon: 'gallery',
+    { key: 'gallery',  label: () => t('nav.gallery'),  href: '/gallery',  icon: 'gallery',
       gate: s => s.feat_gallery },
-    { key: 'pages',    label: 'Pages',    href: '/pages',    icon: 'pages',
+    { key: 'pages',    label: () => t('nav.pages'),    href: '/pages',    icon: 'pages',
       gate: s => s.feat_pages },
   ],
 }
 
 const TALK_GROUP: SideNavGroup = {
   key: 'talk',
-  label: 'Talk',
+  label: () => t('nav.section.talk'),
   items: [
-    { key: 'messages', label: 'Chats',    href: '/dms',     icon: 'messages',
+    { key: 'messages', label: () => t('nav.chats'),    href: '/dms',     icon: 'messages',
       badge: s => s.dmUnread },
     // Time-critical fast lane: only renders while a call is live so
     // the user can hop back in one click. The Chats panel's Calls
     // tab stays the canonical surface (history, hang-up controls).
-    { key: 'calls',    label: 'Calls',    href: '/dms?tab=calls', icon: 'calls',
+    { key: 'calls',    label: () => t('nav.calls'),    href: '/dms?tab=calls', icon: 'calls',
       gate: s => s.hasActiveCall },
     // Highlights + Momentum are user-level features — gated by the user's own
     // hide_* preferences (from /api/me/preferences), not household toggles.
-    { key: 'highlights',  label: 'Highlights',  href: '/highlights', icon: 'highlights',
+    { key: 'highlights',  label: () => t('nav.highlights'),  href: '/highlights', icon: 'highlights',
       gate: s => !s.hide_highlights },
-    { key: 'momentum', label: 'Momentum', href: '/momentum', icon: 'momentum',
+    { key: 'momentum', label: () => t('nav.momentum'), href: '/momentum', icon: 'momentum',
       gate: s => !s.hide_momentum },
   ],
 }
 
 const BROWSE_GROUP: SideNavGroup = {
   key: 'browse',
-  label: 'Browse',
+  label: () => t('nav.section.browse'),
   items: [
-    { key: 'spaces',  label: 'Spaces', href: '/spaces',  icon: 'spaces' },
-    { key: 'friends', label: 'Friends', href: '/friends', icon: 'connections' },
-    { key: 'bazaar',  label: 'Bazaar', href: '/bazaar',  icon: 'bazaar',
+    { key: 'spaces',  label: () => t('nav.spaces'), href: '/spaces',  icon: 'spaces' },
+    { key: 'friends', label: () => t('nav.friends'), href: '/friends', icon: 'connections' },
+    { key: 'bazaar',  label: () => t('nav.bazaar'), href: '/bazaar',  icon: 'bazaar',
       gate: s => !s.hide_bazaar },
-    { key: 'corner',  label: 'Corner', href: '/corner',  icon: 'corner' },
-    { key: 'apps',    label: 'Apps',   href: '/apps',    icon: 'apps' },
+    { key: 'corner',  label: () => t('nav.corner'), href: '/corner',  icon: 'corner' },
+    { key: 'apps',    label: () => t('nav.apps'),   href: '/apps',    icon: 'apps' },
   ],
 }
 
 const LOCAL_GROUP: SideNavGroup = {
   key: 'local',
-  label: 'Settings',
+  label: () => t('nav.section.settings'),
   items: [
     // First-class entry to personal settings for every authenticated
     // user (no ``gate``). Previously the only path was the identity
@@ -163,16 +164,15 @@ const LOCAL_GROUP: SideNavGroup = {
     // that non-admins reported "I can't find where to change my
     // profile". Lifting it into the sidebar group makes the path the
     // same regardless of role.
-    { key: 'personal', label: 'Personal', href: '/settings', icon: 'person' },
-    { key: 'parent-control', label: 'Parent Control', href: '/parent', icon: 'parent-control',
+    { key: 'personal', label: () => t('nav.personal'), href: '/settings', icon: 'person' },
+    { key: 'parent-control', label: () => t('nav.parent_control'), href: '/parent', icon: 'parent-control',
       gate: s => s.isGuardian },
-    // Labelled "Federation" in the sidebar to disambiguate from the
-    // Browse-group "Friends" link (people-you-know vs federated
-    // households). Route + key stay ``/connections`` so URL bookmarks
-    // and i18n keys keep working.
-    { key: 'connections', label: 'Federation', href: '/connections', icon: 'connections',
+    // "Connections" = the households this one is linked with (admin
+    // only); distinct from the Browse-group "Friends" (people you
+    // know). Route + key stay ``/connections``.
+    { key: 'connections', label: () => t('nav.connections'), href: '/connections', icon: 'connections',
       gate: s => s.isAdmin },
-    { key: 'admin',       label: 'Admin',       href: '/admin',       icon: 'admin',
+    { key: 'admin',       label: () => t('nav.admin'),       href: '/admin',       icon: 'admin',
       gate: s => s.isAdmin },
   ],
 }
@@ -208,7 +208,7 @@ export function SideNav() {
 
   const view = useComputed(() => {
     const user = currentUser.value
-    const t = toggles.value
+    const tg = toggles.value
     // The identity strip only renders outside haos mode. In haos mode
     // the SH SPA is iframed under HA Core's left sidebar, which already
     // shows the signed-in user — a second avatar in our sidebar
@@ -226,16 +226,16 @@ export function SideNav() {
       dmUnread: dmUnreadTotal.value,
       // Toggles haven't loaded yet → assume everything visible. Avoids
       // a "feature appears" flash once the API responds.
-      ...(t
+      ...(tg
         ? {
-            feat_feed: t.feat_feed,
-            feat_calendar: t.feat_calendar,
-            feat_timetable: t.feat_timetable,
-            feat_tasks: t.feat_tasks,
-            feat_pages: t.feat_pages,
-            feat_stickies: t.feat_stickies,
-            feat_presence: t.feat_presence,
-            feat_gallery: t.feat_gallery,
+            feat_feed: tg.feat_feed,
+            feat_calendar: tg.feat_calendar,
+            feat_timetable: tg.feat_timetable,
+            feat_tasks: tg.feat_tasks,
+            feat_pages: tg.feat_pages,
+            feat_stickies: tg.feat_stickies,
+            feat_presence: tg.feat_presence,
+            feat_gallery: tg.feat_gallery,
           }
         : ALL_ON),
       // User-level hide_* prefs — default to false (show) while prefs
@@ -275,7 +275,7 @@ export function SideNav() {
         class={`sh-sidenav-group${isActive ? ' sh-sidenav-group--active' : ''}`}
         aria-labelledby={headerId}
       >
-        <h2 id={headerId} class="sh-sidenav-group-header">{group.label}</h2>
+        <h2 id={headerId} class="sh-sidenav-group-header">{group.label()}</h2>
         {items.map(i => {
           const count = i.badge ? i.badge(state) : 0
           // The "Spaces" link is the parent of the active-space row;
@@ -294,9 +294,9 @@ export function SideNav() {
                 aria-current={ariaCurrent}
               >
                 <SideNavIcon name={i.icon} />
-                <span class="sh-sidenav-link-label">{i.label}</span>
+                <span class="sh-sidenav-link-label">{i.label()}</span>
                 {count > 0 && (
-                  <span class="sh-sidenav-badge" aria-label={`${count} unread`}>
+                  <span class="sh-sidenav-badge" aria-label={t('nav.unread', { count: String(count) })}>
                     {count > 99 ? '99+' : count}
                   </span>
                 )}
@@ -330,7 +330,7 @@ export function SideNav() {
   }
 
   return (
-    <aside class="sh-sidenav" aria-label="Sidebar">
+    <aside class="sh-sidenav" aria-label={t('nav.sidebar')}>
       <Wordmark as="a" href={addBase('/')} size={28} className="sh-sidenav-brand" />
       {main.map(({ group, items }) => renderGroup(group, items))}
       {local.items.length > 0 && (
@@ -357,7 +357,7 @@ export function SideNav() {
         <a
           href={addBase('/settings')}
           class="sh-sidenav-identity"
-          aria-label={`Signed in as ${user.display_name} — open settings`}
+          aria-label={t('nav.signed_in_as', { name: user.display_name })}
           aria-current={currentPath === '/settings' ? 'page' : undefined}
         >
           <Avatar src={user.picture_url} name={user.display_name} size={32} />
