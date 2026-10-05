@@ -5,7 +5,15 @@ from __future__ import annotations
 import pytest
 
 import socialhome.csp as csp_module
-from socialhome.csp import SPA_CSP_DIRECTIVES, build_spa_csp, render_csp
+from socialhome.csp import (
+    INLINE_MEDIA_TYPES,
+    MEDIA_CSP,
+    PLAYABLE_MEDIA_CSP,
+    SPA_CSP_DIRECTIVES,
+    build_spa_csp,
+    media_response_headers,
+    render_csp,
+)
 from socialhome.routes.map_tiles import TILE_URL_TEMPLATE
 
 
@@ -109,3 +117,82 @@ def test_tile_template_is_relative_so_self_covers_it():
     so the CSP needs no tile host whatever ``map_tile_url`` says."""
     assert not TILE_URL_TEMPLATE.startswith(("http:", "https:", "//", "/"))
     assert TILE_URL_TEMPLATE.startswith("api/")
+
+
+# ── Stored-media responses ───────────────────────────────────────────────
+
+
+def test_media_csp_blocks_script_and_sandboxes():
+    d = _parse(MEDIA_CSP)
+    assert d["default-src"] == ["'none'"]
+    assert d["img-src"] == ["'self'", "data:"]
+    assert d["media-src"] == ["'self'"]
+    assert d["style-src"] == ["'unsafe-inline'"]
+    assert d["sandbox"] == []
+    assert "script-src" not in d
+
+
+def test_playable_media_csp_is_the_media_csp_without_sandbox():
+    """A sandboxed (opaque-origin) media document re-fetches its own
+    ``<video>`` / ``<audio>`` src cross-origin and fails CORS, so
+    video and audio drop ``sandbox`` — ``default-src 'none'`` still
+    refuses every script."""
+    d = _parse(PLAYABLE_MEDIA_CSP)
+    assert "sandbox" not in d
+    assert d == {k: v for k, v in _parse(MEDIA_CSP).items() if k != "sandbox"}
+
+
+@pytest.mark.parametrize(
+    "mime",
+    sorted(INLINE_MEDIA_TYPES),
+)
+def test_safe_types_are_served_inline_and_sandboxed(mime):
+    h = media_response_headers(mime, "abc.bin")
+    assert h["Content-Type"] == mime
+    assert h["Content-Disposition"] == 'inline; filename="abc.bin"'
+    assert h["Content-Security-Policy"] == MEDIA_CSP
+
+
+@pytest.mark.parametrize("mime", ["video/webm", "video/mp4", "audio/ogg", "audio/webm"])
+def test_video_and_audio_are_inline_and_playable(mime):
+    h = media_response_headers(mime, "clip")
+    assert h["Content-Type"] == mime
+    assert h["Content-Disposition"].startswith("inline;")
+    assert h["Content-Security-Policy"] == PLAYABLE_MEDIA_CSP
+
+
+@pytest.mark.parametrize(
+    "mime",
+    [
+        "image/svg+xml",
+        "text/html",
+        "application/xhtml+xml",
+        "application/xml",
+        "text/xml",
+        "text/javascript",
+        "application/javascript",
+        "application/x-unknown",
+        "image/heic",
+        "multipart/x-mixed-replace",
+        "",
+        None,
+    ],
+)
+def test_unsafe_or_unknown_types_become_sandboxed_attachments(mime):
+    h = media_response_headers(mime, "x.svg")
+    assert h["Content-Type"] == "application/octet-stream"
+    assert h["Content-Disposition"] == 'attachment; filename="x.svg"'
+    assert h["Content-Security-Policy"] == MEDIA_CSP
+
+
+def test_media_type_parameters_and_case_are_normalised():
+    h = media_response_headers("Image/JPEG; charset=binary", "a.jpg")
+    assert h["Content-Type"] == "image/jpeg"
+    assert h["Content-Disposition"].startswith("inline;")
+    h = media_response_headers("TEXT/HTML; charset=utf-8", "a.html")
+    assert h["Content-Type"] == "application/octet-stream"
+
+
+def test_media_filename_cannot_break_the_disposition_header():
+    h = media_response_headers("image/png", 'a"; x=1\r\n.png')
+    assert h["Content-Disposition"] == 'inline; filename="a___x_1__.png"'

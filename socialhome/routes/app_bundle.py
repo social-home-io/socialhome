@@ -220,8 +220,8 @@ class AppBundleView(BaseView):
             content_type = "application/octet-stream"
 
         # ── Response with explicit security headers ───────────────────────
-        # ``hardening.build_security_headers_middleware`` uses ``setdefault``
-        # so any header set EXPLICITLY here on the response wins.
+        # ``hardening.install_security_headers`` uses ``setdefault`` so
+        # any header set EXPLICITLY here on the response wins.
         response = web.StreamResponse(status=200)
         response.content_type = content_type
         response.headers["Content-Security-Policy"] = APP_CSP

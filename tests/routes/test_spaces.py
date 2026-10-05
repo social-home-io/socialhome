@@ -13,6 +13,7 @@ from socialhome.app_keys import db_key as _db_key
 from socialhome.app_keys import space_service_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
+from socialhome.csp import MEDIA_CSP
 from socialhome.crypto import derive_user_id
 from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
 from socialhome.routes.spaces import _features_from_body
@@ -2149,6 +2150,7 @@ async def test_space_cover_upload_and_fetch(client, tmp_path):
     )
     assert fetch.status == 200
     assert fetch.headers["Content-Type"] == "image/webp"
+    assert fetch.headers["Content-Security-Policy"] == MEDIA_CSP
     payload = await fetch.read()
     assert payload[:4] == b"RIFF"  # WebP magic
 
@@ -2201,6 +2203,7 @@ async def test_space_icon_upload_fetch_and_clear(client):
     )
     assert fetch.status == 200
     assert fetch.headers["Content-Type"] == "image/webp"
+    assert fetch.headers["Content-Security-Policy"] == MEDIA_CSP
     assert (await fetch.read())[:4] == b"RIFF"
 
     detail = await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))

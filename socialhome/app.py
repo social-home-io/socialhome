@@ -55,7 +55,7 @@ from .federation.transport import FederationTransport, HttpsInboxTransport
 from .hardening import (
     build_body_size_middleware,
     build_cors_deny_middleware,
-    build_security_headers_middleware,
+    install_security_headers,
 )
 from .i18n import Catalog
 from .identity_bootstrap import ensure_instance_identity
@@ -1866,9 +1866,7 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             "/api/pairing": (5, 60),  # pairing handshakes
         },
     )
-    security_headers_middleware = build_security_headers_middleware()
     return (
-        security_headers_middleware,
         body_size_middleware,
         cors_middleware,
         rate_middleware,
@@ -2575,7 +2573,6 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Rate-limit + hardening middleware (§25.7) ────────────────────────
     limiter = RateLimiter()
     (
-        security_headers_middleware,
         body_size_middleware,
         cors_middleware,
         rate_middleware,
@@ -2586,13 +2583,15 @@ def create_app(config: Config | None = None) -> web.Application:
     # then per-route rate limiting.
     app = web.Application(
         middlewares=[
-            security_headers_middleware,
             body_size_middleware,
             cors_middleware,
             auth_middleware,
             rate_middleware,
         ]
     )
+    # Security headers go on at prepare time, so streamed responses
+    # (``/api/media/*``) and early rejects carry them too.
+    install_security_headers(app)
 
     # ── Federation infrastructure (KEK + federation + outbox processor) ──
     # The KEK protects the Ed25519 identity seed at rest; the seed is needed

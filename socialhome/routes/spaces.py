@@ -38,6 +38,7 @@ from ..app_keys import (
     space_zone_repo_key,
     user_repo_key,
 )
+from ..csp import MEDIA_CSP
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.errors import ImageTooLargeError
 from ..domain.events import SpaceMemberLocationOptedIn
@@ -1062,6 +1063,7 @@ class SpaceMemberPictureView(BaseView):
             body=bytes_webp,
             content_type="image/webp",
             headers={
+                "Content-Security-Policy": MEDIA_CSP,
                 "Cache-Control": "private, max-age=31536000, immutable",
             },
         )
@@ -1092,6 +1094,7 @@ class SpaceCoverView(BaseView):
             body=bytes_webp,
             content_type="image/webp",
             headers={
+                "Content-Security-Policy": MEDIA_CSP,
                 "Cache-Control": "private, max-age=31536000, immutable",
             },
         )
@@ -1153,7 +1156,10 @@ class SpaceIconView(BaseView):
         return web.Response(
             body=bytes_webp,
             content_type="image/webp",
-            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            headers={
+                "Content-Security-Policy": MEDIA_CSP,
+                "Cache-Control": "private, max-age=31536000, immutable",
+            },
         )
 
     async def post(self) -> web.Response:

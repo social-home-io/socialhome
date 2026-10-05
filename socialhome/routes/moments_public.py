@@ -26,6 +26,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import moment_public_service_key
+from ..csp import media_response_headers
 from ..services.moment_public_service import MomentPublicError
 from .base import BaseView
 
@@ -179,10 +180,12 @@ class GfsUserPictureProxyView(BaseView):
         if got is None:
             return web.Response(status=404)
         raw, mime, digest = got
+        # ``mime`` is the GFS's ``Content-Type`` header — untrusted; a
+        # script-capable type must never render on our origin.
         return web.Response(
             body=raw,
-            content_type=mime,
             headers={
+                **media_response_headers(mime, "picture"),
                 "Cache-Control": "public, max-age=86400, immutable",
                 "ETag": f'"{digest}"',
             },

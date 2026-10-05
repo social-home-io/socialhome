@@ -1026,7 +1026,30 @@ script.
   proxy framed by an HA `panel_iframe`; a same-origin framer gives an
   attacker nothing, and every other origin is refused. All responses keep
   the global headers from `hardening.py` (`X-Frame-Options: SAMEORIGIN`,
-  `Permissions-Policy`, `nosniff`, `Referrer-Policy`).
+  `Permissions-Policy`, `nosniff`, `Referrer-Policy`). Those go on in an
+  `on_response_prepare` hook (`install_security_headers`), not a
+  middleware, so streamed responses that `prepare()` themselves
+  (`/api/media/*`, app bundles) carry them too; a header a handler sets
+  explicitly wins.
+- **Stored media is sandboxed:** a stored `.svg` / `.html` opened directly
+  would otherwise run as a document on our origin.
+  `csp.media_response_headers()` shapes every stored-file response
+  (`/api/media/{filename}`, which serves feed / DM / gallery / link-preview
+  files; the GFS picture proxy `/api/gfs/{gfs_id}/moments/users/{user_id}/picture`;
+  the GFS's own `/gfs/moments/users/{user_id}/picture`). Only
+  `image/jpeg|png|webp|gif|avif`, `video/*`, `audio/*`, `application/pdf`,
+  `text/plain` and `text/csv` are served inline. Anything else (SVG, HTML,
+  XML, JS, unknown) becomes `Content-Type: application/octet-stream` +
+  `Content-Disposition: attachment`, so it downloads. Every response
+  carries `default-src 'none'; img-src 'self' data:; media-src 'self';
+  style-src 'unsafe-inline'; sandbox` (`MEDIA_CSP`). The exception is
+  `video/*` / `audio/*`, which drop `sandbox` (`PLAYABLE_MEDIA_CSP`):
+  Chromium's sandboxed (opaque-origin) media document re-fetches its own
+  `src` cross-origin and fails CORS, so the file would not play. A media
+  document runs no page script, and `default-src 'none'` still refuses
+  any. PDFs preview under `sandbox` in Chromium's PDF viewer. Profile /
+  space pictures (always re-encoded `image/webp`) carry `MEDIA_CSP` as
+  well. App bundles (`routes/app_bundle.py`) keep their own policy.
 
 Rules:
 

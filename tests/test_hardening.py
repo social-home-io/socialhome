@@ -10,7 +10,7 @@ from socialhome.hardening import (
     DEFAULT_MEDIA_MAX_BYTES,
     build_body_size_middleware,
     build_cors_deny_middleware,
-    build_security_headers_middleware,
+    install_security_headers,
 )
 
 # pytest-homeassistant-custom-component (a transitive dev dep when this
@@ -294,7 +294,8 @@ async def test_permissions_policy_allows_same_origin_camera_and_microphone(
     async def echo(request: web.Request) -> web.Response:
         return web.Response(text="ok")
 
-    app = web.Application(middlewares=[build_security_headers_middleware()])
+    app = web.Application()
+    install_security_headers(app)
     app.router.add_get("/", echo)
     tc = await aiohttp_client(app)
     r = await tc.get("/")
@@ -318,9 +319,35 @@ async def test_security_headers_let_the_ha_ingress_panel_frame_the_spa(aiohttp_c
     async def echo(request: web.Request) -> web.Response:
         return web.Response(text="ok")
 
-    app = web.Application(middlewares=[build_security_headers_middleware()])
+    app = web.Application()
+    install_security_headers(app)
     app.router.add_get("/", echo)
     tc = await aiohttp_client(app)
     r = await tc.get("/")
     assert r.headers["X-Frame-Options"] != "DENY"
     assert r.headers["X-Frame-Options"] == "SAMEORIGIN"
+
+
+async def test_security_headers_reach_streamed_responses(aiohttp_client):
+    """A handler that ``prepare()``s its own ``StreamResponse`` (media,
+    app bundles) sends its headers before any middleware sees the
+    response again — the hardening headers must be added at prepare
+    time, not after the handler returns."""
+
+    async def stream(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(headers={"X-Frame-Options": "DENY"})
+        await resp.prepare(request)
+        await resp.write(b"chunk")
+        await resp.write_eof()
+        return resp
+
+    app = web.Application()
+    install_security_headers(app)
+    app.router.add_get("/", stream)
+    tc = await aiohttp_client(app)
+    r = await tc.get("/")
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert "Permissions-Policy" in r.headers
+    # A header the handler set explicitly wins.
+    assert r.headers["X-Frame-Options"] == "DENY"

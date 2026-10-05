@@ -28,6 +28,7 @@ import logging
 
 from aiohttp import web
 
+from ...csp import media_response_headers
 from .. import app_keys as K
 from ..domain import GfsUserPicture
 from ..safe_embed import script_json
@@ -321,8 +322,8 @@ class GfsUserPictureView(GfsBaseView):
             return web.Response(status=404)
         return web.Response(
             body=pic.bytes_,
-            content_type=pic.mime,
             headers={
+                **media_response_headers(pic.mime, "picture"),
                 "Cache-Control": "public, max-age=86400, immutable",
                 "ETag": f'"{pic.digest}"',
             },

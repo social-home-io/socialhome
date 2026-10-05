@@ -1,9 +1,15 @@
-"""Content-Security-Policy for the SPA shell.
+"""Content-Security-Policy for the SPA shell and for stored media.
 
 The bearer token lives in ``localStorage``, so any script that runs in
 the SPA's origin owns the account. The CSP is defence in depth behind
 DOMPurify / Preact escaping: even if HTML lands in the DOM unsanitised,
 the browser refuses to run inline or foreign script.
+
+Stored user files (``/api/media/*``, profile / space pictures, GFS
+picture proxies) are the other way script could reach the origin: a
+stored ``.svg`` / ``.html`` opened directly would run as a document on
+our origin. :func:`media_response_headers` closes that — see the
+"Stored media" section at the bottom.
 
 Every external host the SPA talks to goes through
 :data:`SPA_CSP_DIRECTIVES` and :func:`build_spa_csp` — never hand-edit
@@ -58,6 +64,7 @@ Directive notes (what each allowance is for):
 from __future__ import annotations
 
 import functools
+import re
 from collections.abc import Mapping
 
 #: Directive → sources of the SPA shell's policy. Order is kept in the
@@ -106,3 +113,75 @@ def build_spa_csp() -> str:
     The same in every platform mode.
     """
     return render_csp(SPA_CSP_DIRECTIVES)
+
+
+# ── Stored media ─────────────────────────────────────────────────────────
+
+#: Content types a stored file may be served *inline* as (plus any
+#: ``video/*`` / ``audio/*``). Everything else — SVG, HTML, XML, JS,
+#: unknown — is served as an ``application/octet-stream`` attachment,
+#: so it downloads instead of rendering on our origin.
+INLINE_MEDIA_TYPES: frozenset[str] = frozenset(
+    {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+        "application/pdf",
+        "text/plain",
+        "text/csv",
+    },
+)
+
+#: Played in the browser's built-in media document, which runs no page
+#: script. See :data:`PLAYABLE_MEDIA_CSP` for why these skip ``sandbox``.
+_PLAYABLE_PREFIXES: tuple[str, ...] = ("video/", "audio/")
+
+#: Directives for a stored file opened directly as a document: no script
+#: at all; the browser's own image / media document may load the file
+#: itself (``'self'``) and style it (``'unsafe-inline'``).
+MEDIA_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
+    "default-src": ("'none'",),
+    "img-src": ("'self'", "data:"),
+    "media-src": ("'self'",),
+    "style-src": ("'unsafe-inline'",),
+}
+
+#: ``PLAYABLE_MEDIA_CSP`` + ``sandbox`` (opaque origin, no script, no
+#: forms, no storage access). Images, text and PDFs still display in
+#: Chromium under it (checked against Chromium 152, PDF viewer included).
+PLAYABLE_MEDIA_CSP: str = render_csp(MEDIA_CSP_DIRECTIVES)
+MEDIA_CSP: str = f"{PLAYABLE_MEDIA_CSP}; sandbox"
+# ``PLAYABLE_MEDIA_CSP`` exists because Chromium's video / audio document
+# under ``sandbox`` gets an opaque origin, re-fetches its own ``src`` as
+# a cross-origin request and fails CORS — the file would not play. A
+# media document runs no page script, and ``default-src 'none'`` still
+# refuses any, so dropping ``sandbox`` for ``video/*`` / ``audio/*``
+# costs nothing.
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def media_response_headers(content_type: str | None, filename: str) -> dict[str, str]:
+    """``Content-Type`` / ``Content-Disposition`` / CSP for a stored file.
+
+    ``content_type`` is whatever the caller guessed or was told (file
+    extension, a remote ``Content-Type`` header) — untrusted. Types in
+    :data:`INLINE_MEDIA_TYPES` or ``video/*`` / ``audio/*`` are served
+    inline; anything else becomes an ``application/octet-stream``
+    attachment. Every response carries a script-free CSP. Pair with
+    ``X-Content-Type-Options: nosniff`` (the global hardening default).
+    """
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+    playable = mime.startswith(_PLAYABLE_PREFIXES)
+    if playable or mime in INLINE_MEDIA_TYPES:
+        disposition = "inline"
+    else:
+        mime, disposition = "application/octet-stream", "attachment"
+    safe_name = _UNSAFE_FILENAME_CHARS.sub("_", filename)
+    return {
+        "Content-Type": mime,
+        "Content-Disposition": f'{disposition}; filename="{safe_name}"',
+        "Content-Security-Policy": PLAYABLE_MEDIA_CSP if playable else MEDIA_CSP,
+    }

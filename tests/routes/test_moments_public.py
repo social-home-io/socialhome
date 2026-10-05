@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from socialhome.app_keys import moment_public_service_key
+from socialhome.csp import MEDIA_CSP
 from socialhome.domain.moment_public import MomentPublicFollow, MomentPublicRegistration
 from socialhome.services.moment_public_service import MomentPublicError
 
@@ -272,8 +273,22 @@ async def test_picture_proxy_returns_bytes(client, stub):
     assert r.headers["ETag"] == '"abc"'
     assert r.headers["Cache-Control"].startswith("public")
     assert r.content_type == "image/webp"
+    assert r.headers["Content-Security-Policy"] == MEDIA_CSP
     assert (await r.read()) == b"\x00"
     assert stub.picture_calls == [("g1", "u-remote")]
+
+
+async def test_picture_proxy_never_reflects_a_script_capable_type(client, stub):
+    """The ``Content-Type`` comes from the GFS's response — a hostile or
+    broken GFS must not get ``text/html`` rendered on our origin."""
+    stub.picture_response = (b"<script>alert(1)</script>", "text/html", "abc")
+    r = await client.get(
+        "/api/gfs/g1/moments/users/u-remote/picture", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert r.content_type == "application/octet-stream"
+    assert r.headers["Content-Disposition"].startswith("attachment;")
+    assert r.headers["Content-Security-Policy"] == MEDIA_CSP
 
 
 async def test_picture_proxy_404_when_unknown(client, stub):
