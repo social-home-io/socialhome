@@ -66,6 +66,7 @@ Directive notes (what each allowance is for):
 from __future__ import annotations
 
 import functools
+import mimetypes
 import re
 from collections.abc import Mapping
 
@@ -179,6 +180,44 @@ MEDIA_CSP: str = f"{PLAYABLE_MEDIA_CSP}; sandbox"
 # media document runs no page script, and ``default-src 'none'`` still
 # refuses any, so dropping ``sandbox`` for :data:`PLAYABLE_MEDIA_TYPES`
 # costs nothing.
+
+#: Extensions Social Home itself writes → the type it serves them as.
+#: Pinned so a host's ``/etc/mime.types`` can't change them (an old table
+#: maps ``.m4a`` to ``audio/mpeg``, which would turn Safari voice notes
+#: into downloads).
+_PRODUCED_TYPES: Mapping[str, str] = {
+    ".webm": "video/webm",
+    ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4",
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".avif": "image/avif",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+}
+
+#: Python's built-in table only — never the host's mime database.
+_BUILTIN_MIME = mimetypes.MimeTypes()
+
+
+def media_type_for(filename: str) -> str | None:
+    """The type a stored media file is served as, from its name alone.
+
+    Deterministic across hosts: Social Home's own extensions first, then
+    Python's built-in table. ``None`` for an unknown or missing extension
+    (:func:`media_response_headers` turns that into an attachment).
+    """
+    ext = ("." + filename.rsplit(".", 1)[1].lower()) if "." in filename else ""
+    if ext in _PRODUCED_TYPES:
+        return _PRODUCED_TYPES[ext]
+    if not ext:
+        return None
+    return _BUILTIN_MIME.guess_type("x" + ext, strict=True)[0]
+
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 

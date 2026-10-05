@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import mimetypes
+
 import pytest
 
 import socialhome.csp as csp_module
@@ -13,6 +15,7 @@ from socialhome.csp import (
     SPA_CSP_DIRECTIVES,
     build_spa_csp,
     media_response_headers,
+    media_type_for,
     render_csp,
 )
 from socialhome.routes.map_tiles import TILE_URL_TEMPLATE
@@ -223,3 +226,29 @@ def test_media_type_parameters_and_case_are_normalised():
 def test_media_filename_cannot_break_the_disposition_header():
     h = media_response_headers("image/png", 'a"; x=1\r\n.png')
     assert h["Content-Disposition"] == 'inline; filename="a___x_1__.png"'
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("0a1d.m4a", "audio/mp4"),
+        ("note.ogg", "audio/ogg"),
+        ("clip.webm", "video/webm"),
+        ("pic.webp", "image/webp"),
+        ("PIC.JPG", "image/jpeg"),
+        ("doc.pdf", "application/pdf"),
+        ("x.svg", "image/svg+xml"),
+        ("noext", None),
+    ],
+)
+def test_media_type_for_ignores_the_hosts_mime_database(monkeypatch, name, expected):
+    """A host /etc/mime.types that maps .m4a to audio/mpeg (or .webm to
+    something odd) must not change what we serve: Safari voice notes would
+    download instead of playing."""
+    monkeypatch.setattr(
+        mimetypes,
+        "types_map",
+        {**mimetypes.types_map, ".m4a": "audio/mpeg", ".webm": "application/x-odd"},
+    )
+    monkeypatch.setattr(mimetypes, "guess_type", lambda *_a, **_k: ("audio/mpeg", None))
+    assert media_type_for(name) == expected

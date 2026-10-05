@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import mimetypes
 import pathlib
 import uuid
 
@@ -19,7 +18,7 @@ from ..app_keys import (
     media_transcode_service_key,
     storage_quota_service_key,
 )
-from ..csp import media_response_headers
+from ..csp import media_response_headers, media_type_for
 from ..domain.errors import CodedError
 from ..domain.media_constraints import (
     AUDIO_ACCEPTED_MIMES,
@@ -114,7 +113,7 @@ class MediaServeView(BaseView):
         # ``.html`` would otherwise render as a document on our origin.
         # ``media_response_headers`` downgrades every script-capable or
         # unknown type to an octet-stream attachment and sandboxes the rest.
-        content_type, _ = mimetypes.guess_type(str(file_path))
+        content_type = media_type_for(filename)
         stat_result = await aiofiles.os.stat(file_path)
         headers = {
             **media_response_headers(content_type, filename),
