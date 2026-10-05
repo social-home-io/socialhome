@@ -49,7 +49,9 @@ from ....domain.space import (
     SpaceMember,
     SpaceZone,
     validate_zone_color,
+    validate_zone_coord,
     validate_zone_name,
+    validate_zone_radius,
 )
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
@@ -1848,15 +1850,13 @@ def _zone_from_record(
     if not zone_id or not r.get("name"):
         return None
     try:
-        latitude = float(r["latitude"])
-        longitude = float(r["longitude"])
-        radius_m = int(r["radius_m"])
-    except KeyError, TypeError, ValueError:
-        log.debug("zone record %s missing coords/radius", str(zone_id)[:64])
-        return None
-    try:
         name = validate_zone_name(r.get("name"))
         color = validate_zone_color(r.get("color"))
+        # Same geometry rules as the local API: finite, in range, 4 dp
+        # (CLAUDE.md GPS rule), radius 25 m – 50 km.
+        latitude = validate_zone_coord(r.get("latitude"), name="latitude", limit=90)
+        longitude = validate_zone_coord(r.get("longitude"), name="longitude", limit=180)
+        radius_m = validate_zone_radius(r.get("radius_m"))
     except ValueError as exc:
         log.warning(
             "space sync from %s: zone %s in space %s refused — %s",

@@ -30,7 +30,9 @@ from socialhome.domain.space import (
     restricted_access_changes,
     MAX_ZONE_NAME_LENGTH,
     validate_zone_color,
+    validate_zone_coord,
     validate_zone_name,
+    validate_zone_radius,
     InvalidSpaceLinkError,
     validate_space_link_url,
 )
@@ -734,3 +736,52 @@ def test_validate_space_link_url_rejects(bad):
 
 def test_invalid_space_link_error_is_a_value_error():
     assert issubclass(InvalidSpaceLinkError, ValueError)
+
+
+@pytest.mark.parametrize(
+    ("value", "limit", "expected"),
+    [
+        (47.376912345, 90, 47.3769),
+        (-8.541789, 180, -8.5418),
+        ("12.5", 90, 12.5),
+        (90, 90, 90.0),
+        (-180, 180, -180.0),
+        (-0.00001, 90, 0.0),
+    ],
+)
+def test_validate_zone_coord_truncates_to_4dp(value, limit, expected):
+    assert validate_zone_coord(value, name="latitude", limit=limit) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "limit"),
+    [
+        (float("nan"), 90),
+        ("nan", 90),
+        (float("inf"), 180),
+        ("-inf", 180),
+        (90.0001, 90),
+        (-180.5, 180),
+        (True, 90),
+        (None, 90),
+        ("north", 90),
+    ],
+)
+def test_validate_zone_coord_refuses(value, limit):
+    with pytest.raises(ValueError):
+        validate_zone_coord(value, name="latitude", limit=limit)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(25, 25), (50_000, 50_000), ("100", 100), (30.7, 30)]
+)
+def test_validate_zone_radius_accepts(value, expected):
+    assert validate_zone_radius(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value", [-1, 0, 24, 50_001, 10**12, float("nan"), float("inf"), True, None, "x"]
+)
+def test_validate_zone_radius_refuses(value):
+    with pytest.raises(ValueError):
+        validate_zone_radius(value)

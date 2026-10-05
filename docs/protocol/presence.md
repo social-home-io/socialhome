@@ -114,10 +114,13 @@ catalogue via the chunked `SPACE_SYNC_BEGIN/CHUNK` flow — the
 
 **Validation.** Every zone write — local REST, `SPACE_ZONE_UPSERTED`
 and the `space_zones` sync resource — passes the same checks
-(`domain/space.py:validate_zone_name` / `validate_zone_color`):
+(`domain/space.py:validate_zone_name` / `validate_zone_color` /
+`validate_zone_coord` / `validate_zone_radius`):
 `name` is stripped, non-empty, at most 64 characters and free of
 control characters (Unicode `Cc`, `Zl`, `Zp`); `color` is `#RRGGBB` or
-`null`, stored lower-cased. An inbound event or sync record that fails
+`null`, stored lower-cased; `latitude` / `longitude` are finite numbers
+within ±90 / ±180, stored truncated to 4 decimals; `radius_m` is a whole
+number of metres between 25 and 50 000. An inbound event or sync record that fails
 is dropped (the rest of a sync chunk still applies) with a WARNING
 naming the sender and space — never the name. HTML escaping is the
 client's job at render (Leaflet popups / tooltips take HTML strings).

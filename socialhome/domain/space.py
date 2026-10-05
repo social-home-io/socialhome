@@ -17,6 +17,7 @@ Defines:
 from __future__ import annotations
 
 import copy
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from typing import Literal, TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .errors import CodedError
+from .presence import truncate_coord
 
 if TYPE_CHECKING:
     from .post import PostType
@@ -1565,6 +1567,51 @@ def validate_zone_color(color: object) -> str | None:
     if not isinstance(color, str) or not _ZONE_COLOR_RE.fullmatch(color):
         raise ValueError("color must be a #RRGGBB hex string or None")
     return color.lower()
+
+
+#: §23.8.7: 25 m floor (just above the 4-dp ~11 m precision); 50 km
+#: ceiling (a "city-wide" zone is the largest meaningful display bucket
+#: on a per-space map).
+MIN_ZONE_RADIUS_M: int = 25
+MAX_ZONE_RADIUS_M: int = 50_000
+
+
+def validate_zone_coord(value: object, *, name: str, limit: float) -> float:
+    """Return a zone centre coordinate rounded to 4 dp, or raise
+    :class:`ValueError`.
+
+    ``limit`` is 90 for latitude, 180 for longitude. NaN, ±inf, booleans
+    and out-of-range values are refused; the 4-dp truncation is the
+    CLAUDE.md GPS rule. Applied to the local API, ``SPACE_ZONE_UPSERTED``
+    and the ``space_zones`` sync resource alike.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number")
+    try:
+        coerced = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not math.isfinite(coerced) or not -limit <= coerced <= limit:
+        raise ValueError(f"{name} out of range")
+    # ``+ 0.0`` folds a rounded ``-0.0`` into ``0.0``.
+    return truncate_coord(coerced) + 0.0  # type: ignore[operator]
+
+
+def validate_zone_radius(value: object) -> int:
+    """Return the zone radius in whole metres, or raise :class:`ValueError`
+    when it is not a finite number between :data:`MIN_ZONE_RADIUS_M` and
+    :data:`MAX_ZONE_RADIUS_M`."""
+    if isinstance(value, bool):
+        raise ValueError("radius_m must be an integer")
+    try:
+        coerced = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("radius_m must be an integer") from exc
+    if not (MIN_ZONE_RADIUS_M <= coerced <= MAX_ZONE_RADIUS_M):
+        raise ValueError(
+            f"radius_m must be between {MIN_ZONE_RADIUS_M} and {MAX_ZONE_RADIUS_M}",
+        )
+    return coerced
 
 
 #: Longest quick-link URL a space admin may store.

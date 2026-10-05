@@ -3563,6 +3563,63 @@ async def test_zone_upserted_normalises_valid_display_data(zone_handlers):
     assert zones.upserted[0].color == "#3b82f6"
 
 
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"latitude": "nan"},
+        {"longitude": "inf"},
+        {"latitude": float("nan")},
+        {"latitude": -90.0001},
+        {"longitude": 181},
+        {"radius_m": -1},
+        {"radius_m": 24},
+        {"radius_m": 50_001},
+        {"radius_m": 10**12},
+    ],
+    ids=[
+        "nan-str-lat",
+        "inf-str-lon",
+        "nan-lat",
+        "lat-below",
+        "lon-181",
+        "neg-radius",
+        "radius-24",
+        "radius-50001",
+        "huge-radius",
+    ],
+)
+async def test_zone_upserted_invalid_geometry_dropped(zone_handlers, caplog, over):
+    """F8: the same coordinate / radius rules as the local API — a peer
+    can't plant a NaN / infinite / out-of-range zone or a radius outside
+    25 m – 50 km on every member's map. Dropped with a WARNING."""
+    handlers, zones = zone_handlers
+    with caplog.at_level("WARNING"):
+        await handlers._on_zone_upserted(
+            _event(
+                FederationEventType.SPACE_ZONE_UPSERTED,
+                dict(_ZONE, **over),
+                space_id="sp-1",
+                from_instance="peer-x",
+            )
+        )
+    assert zones.upserted == []
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+async def test_zone_upserted_truncates_coordinates_to_4dp(zone_handlers):
+    """F8 / CLAUDE.md GPS rule: inbound zone coords are stored at 4 dp."""
+    handlers, zones = zone_handlers
+    await handlers._on_zone_upserted(
+        _event(
+            FederationEventType.SPACE_ZONE_UPSERTED,
+            dict(_ZONE, latitude=47.123456789, longitude=8.98765432),
+            space_id="sp-1",
+        )
+    )
+    z = zones.upserted[0]
+    assert (z.latitude, z.longitude) == (47.1235, 8.9877)
+
+
 async def test_zone_cross_space_is_refused(zone_handlers, caplog):
     handlers, zones = zone_handlers
     zones.rows.claim("z-1", "sp-b")
@@ -3878,7 +3935,7 @@ _BOUND = [
     ("_on_gallery_item_deleted", {"id": "gi-1"}, "may_mutate", "u-up", "gallery"),
     (
         "_on_zone_upserted",
-        {"zone_id": "z", "name": "Z", "latitude": 1, "longitude": 1, "radius_m": 9},
+        {"zone_id": "z", "name": "Z", "latitude": 1, "longitude": 1, "radius_m": 100},
         "is_admin_household",
         "",
         None,
@@ -4184,7 +4241,7 @@ async def test_a_new_zone_binds_its_claimed_creator(full):
                 "name": "Z",
                 "latitude": 1,
                 "longitude": 1,
-                "radius_m": 9,
+                "radius_m": 100,
                 "created_by": "u-claimed",
             },
             space_id="sp-1",

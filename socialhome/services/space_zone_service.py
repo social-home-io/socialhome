@@ -12,8 +12,8 @@ Service responsibilities:
   :mod:`space_service`.
 * validation — radius range (25 m – 50 km), color hex shape, name
   uniqueness within a space, 50-zones-per-space cap.
-* GPS truncation — every persisted coordinate goes through
-  :func:`truncate_coord` (§25 / CLAUDE.md).
+* coordinates — finite, in range and truncated to 4 dp via
+  :func:`~socialhome.domain.space.validate_zone_coord` (§25 / CLAUDE.md).
 * domain events — emit :class:`SpaceZoneUpserted` /
   :class:`SpaceZoneDeleted` after a successful write so federation +
   realtime fan-outs can pick them up via the bus.
@@ -29,12 +29,15 @@ import secrets
 from datetime import datetime, timezone
 
 from ..domain.events import SpaceZoneDeleted, SpaceZoneUpserted
-from ..domain.presence import truncate_coord
 from ..domain.space import (
+    MAX_ZONE_RADIUS_M,
+    MIN_ZONE_RADIUS_M,
     SETTINGS_AUTHORITY_ROLES,
     SpaceZone,
     validate_zone_color,
+    validate_zone_coord,
     validate_zone_name,
+    validate_zone_radius,
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -43,11 +46,10 @@ from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
 from .space_member_guard import SpaceMemberGuardMixin
 
-#: §23.8.7: 25 m floor (just above the 4-dp ~11 m precision); 50 km
-#: ceiling (a "city-wide" zone is the largest meaningful display
-#: bucket on a per-space map).
-MIN_RADIUS_M = 25
-MAX_RADIUS_M = 50_000
+#: §23.8.7 radius bounds — defined in :mod:`socialhome.domain.space` so
+#: the inbound federation / sync paths apply the same rule.
+MIN_RADIUS_M = MIN_ZONE_RADIUS_M
+MAX_RADIUS_M = MAX_ZONE_RADIUS_M
 
 #: §23.8.7: cap enforced at the service layer so we can adjust without
 #: a schema migration. With this cap the client-side zone-match per
@@ -132,8 +134,8 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         clean_name = validate_zone_name(name)
         clean_radius = _validate_radius(radius_m)
         clean_color = validate_zone_color(color)
-        clean_lat = truncate_coord(float(latitude))
-        clean_lon = truncate_coord(float(longitude))
+        clean_lat = validate_zone_coord(latitude, name="latitude", limit=90)
+        clean_lon = validate_zone_coord(longitude, name="longitude", limit=180)
         assert clean_lat is not None and clean_lon is not None  # noqa: S101
 
         existing = await self._zones.count_for_space(space_id)
@@ -193,12 +195,14 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         )
         new_color = existing.color if color is _UNSET else validate_zone_color(color)
         new_lat = (
-            existing.latitude if latitude is None else truncate_coord(float(latitude))
+            existing.latitude
+            if latitude is None
+            else validate_zone_coord(latitude, name="latitude", limit=90)
         )
         new_lon = (
             existing.longitude
             if longitude is None
-            else truncate_coord(float(longitude))
+            else validate_zone_coord(longitude, name="longitude", limit=180)
         )
         assert new_lat is not None and new_lon is not None  # noqa: S101
 
@@ -292,15 +296,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
 
 
 def _validate_radius(radius_m: int) -> int:
-    try:
-        coerced = int(radius_m)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("radius_m must be an integer") from exc
-    if not (MIN_RADIUS_M <= coerced <= MAX_RADIUS_M):
-        raise ValueError(
-            f"radius_m must be between {MIN_RADIUS_M} and {MAX_RADIUS_M}",
-        )
-    return coerced
+    return validate_zone_radius(radius_m)
 
 
 def _now_iso() -> str:

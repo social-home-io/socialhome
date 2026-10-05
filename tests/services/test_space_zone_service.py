@@ -218,6 +218,19 @@ async def test_create_zone_radius_too_large_rejected(env):
         )
 
 
+@pytest.mark.parametrize(
+    ("lat", "lon"),
+    [(float("nan"), 0.0), (0.0, float("inf")), (91.0, 0.0), (0.0, -181.0)],
+)
+async def test_create_zone_non_finite_or_out_of_range_coords_rejected(env, lat, lon):
+    """F8: the local API refuses what inbound refuses — a NaN / infinite /
+    out-of-range centre would break every member's map."""
+    with pytest.raises(ValueError, match="latitude|longitude"):
+        await env.svc.create_zone(
+            "sp_test", "admin", name="Bad", latitude=lat, longitude=lon, radius_m=200
+        )
+
+
 async def test_create_zone_bad_color_rejected(env):
     with pytest.raises(ValueError, match="color"):
         await env.svc.create_zone(

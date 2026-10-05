@@ -98,7 +98,9 @@ from ...domain.space import (
     ContentAction,
     SpaceZone,
     validate_zone_color,
+    validate_zone_coord,
     validate_zone_name,
+    validate_zone_radius,
 )
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
@@ -2226,9 +2228,16 @@ class SpaceContentInboundHandlers:
             return
         # Same display-data rules as the local API (§23.8.7): the name and
         # colour reach every member's map. Never log the name itself.
+        # Coordinates and radius pass the same rules too: finite, in
+        # range, truncated to 4 dp (CLAUDE.md GPS rule), 25 m – 50 km.
         try:
             name = validate_zone_name(p.get("name"))
             color = validate_zone_color(p.get("color"))
+            latitude = validate_zone_coord(p.get("latitude"), name="latitude", limit=90)
+            longitude = validate_zone_coord(
+                p.get("longitude"), name="longitude", limit=180
+            )
+            radius_m = validate_zone_radius(p.get("radius_m"))
         except ValueError as exc:
             log.warning(
                 "SPACE_ZONE_UPSERTED from %s: zone %s in space %s refused — %s",
@@ -2236,16 +2245,6 @@ class SpaceContentInboundHandlers:
                 zone_id[:64],
                 space_id,
                 exc,
-            )
-            return
-        try:
-            latitude = float(p["latitude"])
-            longitude = float(p["longitude"])
-            radius_m = int(p["radius_m"])
-        except KeyError, TypeError, ValueError:
-            log.debug(
-                "SPACE_ZONE_UPSERTED malformed coords/radius for zone %s",
-                zone_id[:64],
             )
             return
         if not await self._zone_write_allowed(event, space_id, zone_id):
