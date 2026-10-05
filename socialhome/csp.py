@@ -43,11 +43,13 @@ Directive notes (what each allowance is for):
 * ``frame-src 'self'`` — sandboxed app bundles
   (``routes/app_bundle.py``, which sets its own stricter CSP), served
   same-origin.
-* ``frame-ancestors`` — from the platform adapter's capabilities (see
-  :func:`build_spa_csp`): ``'self'`` with :data:`Capability.INGRESS`,
-  because HA's add-on panel frames ``/api/hassio_ingress/<token>/`` on
-  HA's own origin (a same-origin frame); ``'none'`` otherwise — nothing
-  legitimately frames a standalone / HA-Core-direct SPA.
+* ``frame-ancestors 'self'`` — in every platform mode. HA's add-on
+  panel frames ``/api/hassio_ingress/<token>/`` on HA's own origin (a
+  same-origin frame), and an ``ha`` install may sit behind a
+  same-origin path-prefix proxy that an HA ``panel_iframe`` frames.
+  Same-origin framing gives an attacker nothing; every other origin is
+  refused. The legacy ``X-Frame-Options: SAMEORIGIN`` that agrees with
+  it is the global default in ``hardening.py`` — no SPA override.
 * ``base-uri 'self'`` — ``SpaIndexView`` rewrites ``<base href>`` to
   the ingress prefix, which is a same-origin path. A header smuggling
   ``//evil.example`` into the base is refused by the browser.
@@ -56,13 +58,10 @@ Directive notes (what each allowance is for):
 from __future__ import annotations
 
 import functools
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 
-from .platform.adapter import Capability
-
-#: Directive → sources shared by every platform mode. ``frame-ancestors``
-#: is appended by :func:`build_spa_csp` from the adapter's capabilities.
-#: Order is kept in the header.
+#: Directive → sources of the SPA shell's policy. Order is kept in the
+#: header.
 SPA_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
     "default-src": ("'self'",),
     "script-src": ("'self'",),
@@ -78,6 +77,7 @@ SPA_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
     "object-src": ("'none'",),
     "base-uri": ("'self'",),
     "form-action": ("'self'",),
+    "frame-ancestors": ("'self'",),
 }
 
 
@@ -100,29 +100,9 @@ def render_csp(directives: Mapping[str, tuple[str, ...]]) -> str:
 
 
 @functools.cache
-def _build(frameable_same_origin: bool) -> tuple[str, str]:
-    directives = dict(SPA_CSP_DIRECTIVES)
-    directives["frame-ancestors"] = (
-        ("'self'",) if frameable_same_origin else ("'none'",)
-    )
-    frame_options = "SAMEORIGIN" if frameable_same_origin else "DENY"
-    return render_csp(directives), frame_options
+def build_spa_csp() -> str:
+    """The SPA shell's ``Content-Security-Policy`` (built once, cached).
 
-
-def build_spa_csp(capabilities: Collection[Capability]) -> str:
-    """The SPA shell's ``Content-Security-Policy`` for this platform.
-
-    Built once per capability shape (cached). Only
-    :data:`Capability.INGRESS` changes the policy: it relaxes
-    ``frame-ancestors`` to ``'self'`` so HA's ingress panel can frame us.
+    The same in every platform mode.
     """
-    return _build(Capability.INGRESS in capabilities)[0]
-
-
-def spa_frame_options(capabilities: Collection[Capability]) -> str:
-    """Legacy ``X-Frame-Options`` that agrees with :func:`build_spa_csp`.
-
-    Modern browsers obey ``frame-ancestors`` and ignore this; it only
-    matters to browsers without CSP2.
-    """
-    return _build(Capability.INGRESS in capabilities)[1]
+    return render_csp(SPA_CSP_DIRECTIVES)

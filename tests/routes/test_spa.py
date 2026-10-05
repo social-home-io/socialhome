@@ -292,9 +292,9 @@ async def ingress_spa_client(aiohttp_client, tmp_dir, fake_spa, monkeypatch):
     """The SPA mount behind an adapter advertising ``Capability.INGRESS``
     (the ``haos`` shape), with a non-default ``map_tile_url``.
 
-    The capability is patched in *after* ``create_app`` so only the
-    per-request CSP lookup sees it — the ingress auth strategy (which
-    needs a real Supervisor) stays unwired."""
+    The capability is patched in *after* ``create_app`` so the ingress
+    auth strategy (which needs a real Supervisor) stays unwired; it
+    proves the SPA headers do not depend on it."""
     monkeypatch.setattr(spa_module, "DEFAULT_STATIC_DIR", fake_spa)
     cfg = Config(
         data_dir=str(tmp_dir),
@@ -325,11 +325,12 @@ async def ingress_spa_client(aiohttp_client, tmp_dir, fake_spa, monkeypatch):
 @pytest.mark.parametrize("path", ["/", "/feed"], ids=["root", "deep"])
 async def test_standalone_shell_carries_csp(spa_client, path):
     """The SPA shell — root and the deep-link catchall — carries the
-    enforced (not report-only) CSP, and refuses every framer."""
+    enforced (not report-only) CSP and admits same-origin framers only
+    (an ``ha`` install behind a path-prefix proxy framed by HA)."""
     resp = await spa_client.get(path)
     assert resp.status == 200
     csp = resp.headers["Content-Security-Policy"]
-    assert csp == build_spa_csp(frozenset())
+    assert csp == build_spa_csp()
     assert "Content-Security-Policy-Report-Only" not in resp.headers
     d = _csp_directives(csp)
     assert d["default-src"] == ["'self'"]
@@ -337,8 +338,9 @@ async def test_standalone_shell_carries_csp(spa_client, path):
     assert d["object-src"] == ["'none'"]
     assert d["base-uri"] == ["'self'"]
     assert d["form-action"] == ["'self'"]
-    assert d["frame-ancestors"] == ["'none'"]
-    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert d["frame-ancestors"] == ["'self'"]
+    # The global hardening default, which agrees with ``frame-ancestors``.
+    assert resp.headers["X-Frame-Options"] == "SAMEORIGIN"
 
 
 @pytest.mark.parametrize("path", ["/", "/spaces/abc"], ids=["root", "deep"])
@@ -346,11 +348,12 @@ async def test_ingress_shell_carries_csp_frameable_by_ha(ingress_spa_client, pat
     """HA's add-on panel frames ``/api/hassio_ingress/<token>/`` on HA's
     own origin, so the frame is same-origin with its parent:
     ``frame-ancestors 'self'`` admits it and still refuses foreign
-    embedders. ``X-Frame-Options`` agrees."""
+    embedders. ``X-Frame-Options`` agrees. The policy is the same one
+    every mode gets — ``Capability.INGRESS`` changes nothing."""
     resp = await ingress_spa_client.get(path, headers=_INGRESS_HEADERS)
     assert resp.status == 200
     csp = resp.headers["Content-Security-Policy"]
-    assert csp == build_spa_csp(frozenset({Capability.INGRESS}))
+    assert csp == build_spa_csp()
     d = _csp_directives(csp)
     assert d["script-src"] == ["'self'"]
     assert d["frame-ancestors"] == ["'self'"]

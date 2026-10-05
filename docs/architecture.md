@@ -1001,8 +1001,8 @@ lands in the DOM unsanitised, the browser refuses to run inline or foreign
 script.
 
 - **Where it is built:** `socialhome/csp.py`. `SPA_CSP_DIRECTIVES` is the
-  shared directive table; `build_spa_csp(adapter.capabilities)` adds
-  `frame-ancestors` and caches the result per capability shape.
+  directive table; `build_spa_csp()` renders it once (cached) — the policy
+  is the same in every platform mode.
   `SpaIndexView` / `SpaCatchallView` (`routes/spa.py`) serve it, enforced
   (not report-only), on every response that carries the shell.
 - **The policy:** `default-src 'self'`, `script-src 'self'` (no
@@ -1018,11 +1018,13 @@ script.
   `fonts.googleapis.com` / `fonts.gstatic.com` for the Google Fonts
   stylesheet. Map tiles and link-preview images are proxied/stored locally,
   so no tile host is ever needed, whatever `map_tile_url` says.
-- **Framing comes from the adapter, never `config.mode`:** with
-  `Capability.INGRESS` (`haos`) the shell is `frame-ancestors 'self'` +
-  `X-Frame-Options: SAMEORIGIN`, because HA's add-on panel frames
-  `/api/hassio_ingress/<token>/` on HA's own origin. Every other mode is
-  `frame-ancestors 'none'` + `X-Frame-Options: DENY`. Other responses keep
+- **Same-origin framing in every mode:** the shell is
+  `frame-ancestors 'self'`, and the global `X-Frame-Options: SAMEORIGIN`
+  from `hardening.py` agrees with it (the SPA sets no override). HA's
+  add-on panel frames `/api/hassio_ingress/<token>/` on HA's own origin
+  (`haos`), and an `ha` install may sit behind a same-origin path-prefix
+  proxy framed by an HA `panel_iframe`; a same-origin framer gives an
+  attacker nothing, and every other origin is refused. All responses keep
   the global headers from `hardening.py` (`X-Frame-Options: SAMEORIGIN`,
   `Permissions-Policy`, `nosniff`, `Referrer-Policy`).
 

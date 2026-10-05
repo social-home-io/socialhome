@@ -40,8 +40,7 @@ import aiofiles
 import aiofiles.os
 from aiohttp import web
 
-from ..app_keys import platform_adapter_key
-from ..csp import build_spa_csp, spa_frame_options
+from ..csp import build_spa_csp
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -134,8 +133,7 @@ class SpaIndexView(_SpaFileView):
     absent the base stays ``/``.
 
     Served with the SPA ``Content-Security-Policy``
-    (:func:`socialhome.csp.build_spa_csp`), shaped by the platform
-    adapter's capabilities — never by ``config.mode``.
+    (:func:`socialhome.csp.build_spa_csp`) — the same in every mode.
     """
 
     _filename = "index.html"
@@ -175,8 +173,6 @@ class SpaIndexView(_SpaFileView):
                 "ingress prefix injection skipped"
             )
             substituted = html
-        adapter = self.request.app.get(platform_adapter_key)
-        caps = adapter.capabilities if adapter is not None else frozenset()
         return web.Response(
             text=substituted,
             content_type="text/html",
@@ -184,11 +180,9 @@ class SpaIndexView(_SpaFileView):
                 "Cache-Control": self._cache_control,
                 # See ``socialhome/csp.py`` — every external host and
                 # every relaxation is declared there, not here.
-                "Content-Security-Policy": build_spa_csp(caps),
-                # Overrides the global ``SAMEORIGIN`` default
-                # (``hardening.py``) so the legacy header agrees with
-                # ``frame-ancestors``.
-                "X-Frame-Options": spa_frame_options(caps),
+                # ``X-Frame-Options: SAMEORIGIN`` comes from the global
+                # hardening middleware and agrees with ``frame-ancestors``.
+                "Content-Security-Policy": build_spa_csp(),
             },
         )
 
