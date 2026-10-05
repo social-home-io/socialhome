@@ -17,6 +17,8 @@ beforeAll(() => {
 const mapHandlers: Record<string, (e: unknown) => void> = {}
 /** Every popup HTML string handed to a marker. */
 const popups: string[] = []
+/** Every tooltip / popup content handed to a zone circle, in order. */
+const zoneOverlays: unknown[] = []
 vi.mock('leaflet', () => ({
   default: {
     map: vi.fn(() => ({
@@ -41,9 +43,21 @@ vi.mock('leaflet', () => ({
       }
       return m
     }),
-    circle: vi.fn(() => ({ addTo: vi.fn() })),
+    circle: vi.fn(() => {
+      const bounds = { getSouthWest: vi.fn(), getNorthEast: vi.fn() }
+      const c = {
+        addTo: vi.fn(() => c),
+        bindTooltip: vi.fn((content: unknown) => { zoneOverlays.push(content); return c }),
+        bindPopup: vi.fn((content: unknown) => { zoneOverlays.push(content); return c }),
+        getBounds: vi.fn(() => bounds),
+      }
+      return c
+    }),
     divIcon: vi.fn(),
-    latLngBounds: vi.fn(() => ({ pad: vi.fn(() => ({})) })),
+    latLngBounds: vi.fn(() => {
+      const b = { pad: vi.fn(() => ({})), extend: vi.fn(() => b) }
+      return b
+    }),
   },
 }))
 
@@ -63,6 +77,7 @@ vi.mock('@/utils/mapTiles', async (importOriginal) => ({
 
 beforeEach(() => {
   popups.length = 0
+  zoneOverlays.length = 0
   for (const k of Object.keys(mapHandlers)) delete mapHandlers[k]
   addTileLayer.mockReset()
   addTileLayer.mockResolvedValue(undefined)
@@ -165,6 +180,31 @@ describe('LocationMap', () => {
     expect(popups[0]).toContain('&quot;quoted&quot; &amp; &lt;b&gt;')
   })
 
+  it('shows a hostile zone name literally in the zone tooltip and popup', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const name = '<img src=x onerror="window.__xss=1"> & <b>Bold</b>'
+    render(
+      <LocationMap
+        markers={[]}
+        zones={[{
+          id: 'z1', name, latitude: 1, longitude: 2, radius_m: 100, color: null,
+        }]}
+      />,
+    )
+    expect(zoneOverlays).toHaveLength(2)
+    for (const content of zoneOverlays) {
+      // Mount the way Leaflet's ``DivOverlay._updateContent`` does:
+      // a string goes through ``innerHTML``.
+      const el = document.createElement('div')
+      if (typeof content === 'string') el.innerHTML = content
+      else el.appendChild(content as Node)
+      expect(el.querySelector('img')).toBeNull()
+      expect(el.querySelector('b')).toBeNull()
+      expect(el.textContent).toBe(name)
+    }
+  })
+
   it('reports map clicks in pick mode and hides the empty pane', async () => {
     const { render } = await import('@testing-library/preact')
     const { LocationMap } = await import('./LocationMap')
@@ -175,14 +215,5 @@ describe('LocationMap', () => {
     expect(queryByText('Nothing here yet.')).toBeNull()
     mapHandlers.click({ latlng: { lat: 52.1, lng: 4.2 } })
     expect(onPick).toHaveBeenCalledWith(52.1, 4.2)
-  })
-})
-
-describe('escapeHtml', () => {
-  it('escapes the five HTML-significant characters', async () => {
-    const { escapeHtml } = await import('./LocationMap')
-    expect(escapeHtml(`<a href="x">'&'</a>`)).toBe(
-      '&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;',
-    )
   })
 })

@@ -28,4 +28,35 @@ describe('SearchPage', () => {
     expect(getByText('Pages')).toBeTruthy()
     expect(getByText('DMs')).toBeTruthy()
   })
+
+  it('renders a hostile snippet as text, keeping only the match highlight', async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { api } = await import('@/api')
+    // FTS5 ``snippet()`` copies the indexed body verbatim — a post or
+    // DM from another household can carry raw markup in it.
+    vi.mocked(api.get).mockResolvedValueOnce({
+      hits: [{
+        scope: 'post', ref_id: 'p1', space_id: null, title: '',
+        snippet: '<img src=x onerror="window.__xss=1"> <mark>hello</mark> & <b>x</b>',
+      }],
+      counts: { post: 1 },
+    })
+    window.history.replaceState(null, '', '/search?q=hello')
+    const mod = await import('./SearchPage')
+    const { container } = render(<mod.default />)
+    const snippet = await waitFor(() => {
+      const el = container.querySelector('.sh-snippet')
+      expect(el).not.toBeNull()
+      return el!
+    })
+    expect(snippet.querySelector('img')).toBeNull()
+    expect(snippet.querySelector('b')).toBeNull()
+    const marks = snippet.querySelectorAll('mark')
+    expect(marks).toHaveLength(1)
+    expect(marks[0].textContent).toBe('hello')
+    expect(snippet.textContent).toBe(
+      '<img src=x onerror="window.__xss=1"> hello & <b>x</b>',
+    )
+    window.history.replaceState(null, '', '/')
+  })
 })

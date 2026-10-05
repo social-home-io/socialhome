@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
+import { escapeHtml } from '@/utils/html'
 import { t } from '@/i18n/i18n'
 
 export interface LocationMarker {
@@ -67,19 +68,6 @@ export interface LocationMapProps {
   onPick?: (lat: number, lon: number) => void
   /** Accessible name for the map region. */
   ariaLabel?: string
-}
-
-/** Escape text for the HTML strings Leaflet popups / icons take.
- *  Labels and names can come from another household (a DM location
- *  label, a remote member's display name) — never interpolate them
- *  raw. */
-export function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
 }
 
 /** Deterministic palette colour from a string id, used when a zone
@@ -223,7 +211,10 @@ export function LocationMap({
         weight: 2,
       })
         .addTo(zoneLayer)
-        .bindTooltip(z.name, {
+        // Leaflet mounts string tooltip / popup content via
+        // ``innerHTML``, and a zone name can come from another
+        // household's admin over federation — escape both.
+        .bindTooltip(escapeHtml(z.name), {
           // Desktop hover surface — invisible to touch devices,
           // so we also bind a popup below for tap discoverability.
           direction: 'top',

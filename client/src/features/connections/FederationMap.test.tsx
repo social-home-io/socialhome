@@ -68,6 +68,7 @@ vi.mock('@/utils/mapTiles', async (importOriginal) => ({
   get addTileLayer() { return addTileLayer },
 }))
 
+import L from 'leaflet'
 import { connections, selfLat, selfLon } from '@/store/connections'
 import FederationMap from './FederationMap'
 
@@ -194,5 +195,37 @@ describe('FederationMap', () => {
     await waitFor(() => {
       expect(screen.getByText(/Map unavailable/)).toBeDefined()
     })
+  })
+
+  test('peer-supplied name and instance id stay inert in the pin and popup HTML', () => {
+    const marker = L.marker([0, 0])
+    vi.mocked(marker.bindPopup).mockClear()
+    vi.mocked(L.divIcon).mockClear()
+    const hostileId = '"><img src=x onerror="window.__xss=1">'
+    connections.value = [
+      {
+        instance_id: hostileId,
+        display_name: '<img src=x>',
+        reachable: true,
+        home_lat: 52.52,
+        home_lon: 13.40,
+      },
+    ]
+    render(<FederationMap />)
+    const pinHtml = vi.mocked(L.divIcon).mock.calls[0][0]!.html as string
+    const popupHtml = vi.mocked(marker.bindPopup).mock.calls[0][0] as string
+    for (const html of [pinHtml, popupHtml]) {
+      // Mount the way Leaflet does: ``innerHTML`` on the overlay node.
+      const el = document.createElement('div')
+      el.innerHTML = html
+      expect(el.querySelector('img')).toBeNull()
+    }
+    const pin = document.createElement('div')
+    pin.innerHTML = pinHtml
+    expect(pin.querySelector('.sh-fed-pin')!.textContent).toBe('<')
+    const popup = document.createElement('div')
+    popup.innerHTML = popupHtml
+    expect(popup.querySelector('strong')!.textContent).toBe('<img src=x>')
+    expect(popup.querySelector('a')!.id).toBe(`sh-map-manage-${hostileId}`)
   })
 })

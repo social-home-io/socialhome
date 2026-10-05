@@ -21,6 +21,7 @@ import './FederationMap.css'
 import { connections, selfLat, selfLon, type TransportState } from '@/store/connections'
 import { t } from '@/i18n/i18n'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
+import { escapeHtml } from '@/utils/html'
 import { haversineKm, bearing8, roundKm } from './_mapMath'
 
 function _initial(name: string | undefined): string {
@@ -41,7 +42,7 @@ function _peerPinHtml(name: string | undefined, transport: TransportState | unde
       : ''
   return (
     `<div class="sh-fed-pin${modifier}">`
-    + _initial(name)
+    + escapeHtml(_initial(name))
     + badge
     + `</div>`
   )
@@ -52,12 +53,6 @@ function _transportLabel(transport: TransportState | undefined): string {
   if (transport === 'https') return `☁ ${t('connections.transport.internet')}`
   if (transport === 'gfs_relay') return `🔁 ${t('connections.transport.gfs')}`
   return t('connections.transport.unknown')
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => (
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]!
-  ))
 }
 
 export default function FederationMap() {
@@ -162,7 +157,7 @@ export default function FederationMap() {
         `<strong>${escapeHtml(peer.display_name ?? peer.instance_id)}</strong><br/>`
         + `<span>${escapeHtml(_transportLabel(transport))}</span><br/>`
         + distanceRow
-        + `<a id="${manageId}" href="#" style="font-size:13px">${escapeHtml(t('connections.manage'))}</a>`,
+        + `<a id="${escapeHtml(manageId)}" href="#" style="font-size:13px">${escapeHtml(t('connections.manage'))}</a>`,
       )
       allMarkers.push(marker)
     }

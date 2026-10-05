@@ -4,7 +4,7 @@
  *
  * Hits ``GET /api/search?q=&type=&space_id=&limit=`` and renders the
  * snippet (which the backend wraps in ``<mark>`` tags via FTS5
- * ``snippet()``).
+ * ``snippet()``) as text — see :func:`snippetParts`.
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -83,6 +83,29 @@ function emptyMessage(type: string, q: string): string {
     case 'messages': return t('search.empty.messages', { query: q })
     default:         return t('search.empty.all', { query: q })
   }
+}
+
+/** Split an FTS5 ``snippet()`` into text runs, flagging the ones the
+ *  server wrapped in ``<mark>…</mark>``.
+ *
+ *  ``snippet()`` copies the indexed body verbatim — only the
+ *  ``<mark>`` delimiters are server-generated, the text between them
+ *  is whatever a post / DM / page author (possibly on another
+ *  household) typed, markup included. So the snippet is rendered as
+ *  Preact text nodes, never via ``innerHTML``. A literal ``<mark>``
+ *  typed by an author is indistinguishable from a delimiter and gets
+ *  highlighted — harmless, it carries no attributes. */
+function snippetParts(snippet: string): { text: string, mark: boolean }[] {
+  const out: { text: string, mark: boolean }[] = []
+  const re = /<mark>([\s\S]*?)<\/mark>/g
+  let last = 0
+  for (let m = re.exec(snippet); m !== null; m = re.exec(snippet)) {
+    if (m.index > last) out.push({ text: snippet.slice(last, m.index), mark: false })
+    out.push({ text: m[1], mark: true })
+    last = m.index + m[0].length
+  }
+  if (last < snippet.length) out.push({ text: snippet.slice(last), mark: false })
+  return out
 }
 
 export default function SearchPage() {
@@ -169,12 +192,11 @@ export default function SearchPage() {
               {h.space_id && <span class="sh-muted">{h.space_id}</span>}
             </header>
             {h.title && <h4>{h.title}</h4>}
-            <p
-              class="sh-snippet"
-              // FTS5 returns plain text wrapped in <mark> — we trust it
-              // because both delimiters are server-controlled.
-              dangerouslySetInnerHTML={{ __html: h.snippet }}
-            />
+            <p class="sh-snippet">
+              {snippetParts(h.snippet).map((part, i) => (
+                part.mark ? <mark key={i}>{part.text}</mark> : part.text
+              ))}
+            </p>
           </li>
         ))}
       </ul>

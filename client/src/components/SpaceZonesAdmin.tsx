@@ -25,6 +25,7 @@ import 'leaflet/dist/leaflet.css'
 
 import { api } from '@/api'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
+import { escapeHtml } from '@/utils/html'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Modal } from './Modal'
@@ -327,14 +328,17 @@ function ZonesPreviewMap({
         weight: 2,
       })
         .addTo(layer)
-        .bindTooltip(z.name, {
+        // Leaflet mounts string tooltip / popup content via
+        // ``innerHTML``, and a zone name can come from another
+        // household's admin over federation — escape both.
+        .bindTooltip(escapeHtml(z.name), {
           // Desktop hover surface — touch users get the tap popup below.
           direction: 'top',
           offset: [0, -4],
           className: 'sh-zone-tooltip',
         })
         .bindPopup(
-          `<strong>${z.name}</strong>`,
+          `<strong>${escapeHtml(z.name)}</strong>`,
           { closeButton: false, autoPan: false },
         )
     }
