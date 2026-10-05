@@ -13,6 +13,7 @@ import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { TabHeader } from '@/components/TabHeader'
 import { MomentumComposerDialog } from '@/components/MomentumComposerDialog'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import MomentumInboxTab from './MomentumInboxTab'
 import MomentumArchiveTab from './MomentumArchiveTab'
@@ -36,7 +37,7 @@ function tabFromUrl(url: string): MomentumTab {
 
 
 export default function MomentumPage() {
-  useTitle(activeTab.value === 'archive' ? 'Moments archive' : 'Momentum')
+  useTitle(activeTab.value === 'archive' ? t('page_title.moments_archive') : t('nav.momentum'))
   const loc = useLocation()
 
   useEffect(() => {

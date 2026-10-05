@@ -13,6 +13,7 @@ import { Button } from '@/components/Button'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import {
   fetchGfsDirectory,
@@ -73,7 +74,7 @@ async function bootstrap(): Promise<void> {
 }
 
 export default function PublicDiscoveryPage() {
-  useTitle('Discover Momentum')
+  useTitle(t('page_title.discover_momentum'))
   useEffect(() => {
     void bootstrap()
   }, [])

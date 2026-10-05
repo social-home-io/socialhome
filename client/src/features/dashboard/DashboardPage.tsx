@@ -15,6 +15,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
 import { Avatar } from '@/components/Avatar'
@@ -83,7 +84,7 @@ const EMPTY: CornerBundle = {
 }
 
 export default function DashboardPage() {
-  useTitle('My Corner')
+  useTitle(t('dashboard.title'))
   const [bundle, setBundle] = useState<CornerBundle | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -181,11 +182,9 @@ export default function DashboardPage() {
     && b.unread_conversations === 0
 
   const greetee = firstName(currentUser.value?.display_name)
-  const heroGreeting = greetee
-    ? `${timeOfDayGreeting()}, ${greetee}`
-    : timeOfDayGreeting()
+  const heroGreeting = timeOfDayGreeting(greetee)
   const heroSub = cornerAllClear
-    ? `${longDate(new Date())} · all clear`
+    ? `${longDate(new Date())} · ${t('welcome.sub.all_clear')}`
     : `${longDate(new Date())} · ${dayShape(today, tasks, upNext, b, lessons)}`
 
   // Presence is "showing on the corner-only" — Welcome doesn't have

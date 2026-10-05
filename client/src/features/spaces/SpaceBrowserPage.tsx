@@ -15,6 +15,7 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -227,7 +228,7 @@ function filterBy(entries: DirectoryEntry[], term: string): DirectoryEntry[] {
 }
 
 export default function SpaceBrowserPage() {
-  useTitle('Browse spaces')
+  useTitle(t('spaces.list.browse'))
   const loc = useLocation()
   // Refreshing the global directory and pairing with another household
   // are both household-admin actions.

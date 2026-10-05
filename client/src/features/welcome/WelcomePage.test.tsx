@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, waitFor } from '@testing-library/preact'
 
 vi.mock('@/api', () => {
@@ -28,6 +28,7 @@ vi.mock('@/store/pageTitle', () => ({
 }))
 
 import WelcomePage from './WelcomePage'
+import { setLocale } from '@/i18n/i18n'
 import { api } from '@/api'
 
 const apiMock = api as unknown as { get: ReturnType<typeof vi.fn> }
@@ -265,5 +266,45 @@ describe('WelcomePage', () => {
     const titles = [...container.querySelectorAll('.sh-welcome-card__title')].map(el => el.textContent ?? '')
     expect(titles.some(t => t.includes('Up next'))).toBe(true)
     expect(container.textContent).toContain('Dinner reservation')
+  })
+
+  describe('in German', () => {
+    beforeEach(async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      // Sunday, October 4 2026, 08:00 local — a morning greeting.
+      vi.setSystemTime(new Date(2026, 9, 4, 8, 0, 0))
+      await setLocale('de')
+    })
+    afterEach(async () => {
+      await setLocale('en')
+      vi.useRealTimers()
+    })
+
+    it('greets, dates and counts in German', async () => {
+      apiMock.get.mockResolvedValueOnce(bundle({ unread_notifications: 3, unread_conversations: 1 }))
+      const { container } = render(<WelcomePage />)
+      await waitFor(() => {
+        expect(container.querySelector('.sh-welcome-card--catchup')).not.toBeNull()
+      })
+      expect(container.querySelector('.sh-welcome-hero__greeting')!.textContent)
+        .toBe('Guten Morgen, Pascal')
+      expect(container.querySelector('.sh-welcome-hero__sub')!.textContent)
+        .toBe('Sonntag, 4. Oktober · 1 Nachricht · 3 Hinweise ungelesen')
+      const card = container.querySelector('.sh-welcome-card--catchup')!
+      expect(card.querySelector('.sh-welcome-card__title')!.textContent).toContain('Nachholen')
+      const chips = [...card.querySelectorAll('.sh-welcome-chip')].map(c => c.textContent)
+      expect(chips).toEqual(['💬1Nachricht', '🔔3Hinweise'])
+    })
+
+    it('says all clear in German', async () => {
+      apiMock.get.mockResolvedValueOnce(bundle())
+      const { container } = render(<WelcomePage />)
+      await waitFor(() => {
+        expect(container.querySelector('.sh-welcome-allclear')).not.toBeNull()
+      })
+      expect(container.querySelector('.sh-welcome-allclear__title')!.textContent).toBe('Alles erledigt')
+      expect(container.querySelector('.sh-welcome-hero__sub')!.textContent)
+        .toBe('Sonntag, 4. Oktober · alles erledigt')
+    })
   })
 })

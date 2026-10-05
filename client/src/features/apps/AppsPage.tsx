@@ -12,6 +12,7 @@
  * Non-admins see no tab chrome — just the enabled apps they can open.
  */
 import { useEffect, useState } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
 import {
@@ -63,7 +64,7 @@ const TAB_LABELS: Record<AppsTab, string> = {
 }
 
 export default function AppsPage() {
-  useTitle('Apps')
+  useTitle(t('nav.apps'))
   const isAdmin = !!currentUser.value?.is_admin
   const [tab, setTab] = useState<AppsTab>('installed')
 

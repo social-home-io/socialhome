@@ -21,7 +21,7 @@
  * or screen-reader still gets the full stamp.
  */
 
-import { locale, t } from '@/i18n/i18n'
+import { isOne, locale, t } from '@/i18n/i18n'
 
 const MS_PER_MIN = 60_000
 const MS_PER_DAY = 86_400_000
@@ -110,20 +110,21 @@ export function relativeChatTime(iso: string): string {
 
 /**
  * Verbose "docs" shape. Use for surfaces that have room for a friendly
- * phrase (Pages byline, Notifications row).
+ * phrase (Pages byline, Notifications row). In the UI language.
  */
 export function relativeDocsTime(iso: string): string {
   const d = parseDelta(iso)
   if (!d) return iso
-  if (d.min < 1) return 'just now'
-  if (d.min < 60) return `${d.min} min ago`
-  if (d.sameDay) return `${d.hr}h ago`
-  if (d.yesterday) return 'yesterday'
+  if (d.min < 1) return t('time.just_now')
+  if (d.min < 60) return t('time.minutes_ago', { n: String(d.min) })
+  if (d.sameDay) return t('time.hours_ago_short', { n: String(d.hr) })
+  if (d.yesterday) return t('time.yesterday')
   if (d.diff < 7 * MS_PER_DAY) {
-    return `${Math.floor(d.diff / MS_PER_DAY)} days ago`
+    const days = Math.floor(d.diff / MS_PER_DAY)
+    return t(isOne(days) ? 'time.days_ago_long_one' : 'time.days_ago_long', { n: String(days) })
   }
   const sameYear = new Date(d.t).getFullYear() === new Date(d.now).getFullYear()
-  return new Date(d.t).toLocaleDateString(undefined, {
+  return new Date(d.t).toLocaleDateString(locale.value || undefined, {
     month: 'short',
     day: 'numeric',
     year: sameYear ? undefined : 'numeric',

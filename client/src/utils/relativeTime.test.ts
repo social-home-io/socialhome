@@ -62,6 +62,26 @@ describe('relativeDocsTime', () => {
   it('echoes the input on a parse failure', () => {
     expect(relativeDocsTime('not-a-date')).toBe('not-a-date')
   })
+  it('says "1 day ago" in the singular', () => {
+    // 01:00 UTC "now" minus 25h is two calendar days back but one whole day.
+    vi.setSystemTime(new Date('2026-05-08T00:30:00'))
+    const stamp = new Date(new Date('2026-05-08T00:30:00').getTime() - 25 * 3_600_000).toISOString()
+    expect(relativeDocsTime(stamp)).toBe('1 day ago')
+  })
+  it('speaks the UI language', async () => {
+    await setLocale('de')
+    try {
+      expect(relativeDocsTime(iso(15_000))).toBe('gerade eben')
+      expect(relativeDocsTime(iso(5 * 60_000))).toBe('vor 5 Min.')
+      expect(relativeDocsTime(iso(3 * 3_600_000))).toBe('vor 3 Std.')
+      expect(relativeDocsTime(iso(30 * 3_600_000))).toBe('gestern')
+      expect(relativeDocsTime(iso(3 * 86_400_000))).toBe('vor 3 Tagen')
+      // Past the week: a German short date ("15. März").
+      expect(relativeDocsTime('2026-03-15T12:00:00Z')).toBe('15. März')
+    } finally {
+      await setLocale('en')
+    }
+  })
 })
 
 describe('SQLite naive-UTC normalisation', () => {

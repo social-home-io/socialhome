@@ -11,6 +11,7 @@
  */
 import { useState } from 'preact/hooks'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 interface MediaDropzoneProps {
   /** Called once per drop / pick with every selected File. */
@@ -35,9 +36,9 @@ export function MediaDropzone({
   multiple = false,
   accept,
   disabled = false,
-  hint = 'Drag a file here, or',
-  pickLabel = 'choose a file…',
-  draggingHint = 'Drop to attach',
+  hint = t('composer.drop.hint_file'),
+  pickLabel = t('composer.drop.pick_file'),
+  draggingHint = t('composer.drop.dragging'),
 }: MediaDropzoneProps) {
   const [dragActive, setDragActive] = useState(false)
 
@@ -56,11 +57,7 @@ export function MediaDropzone({
       // to the page. Without this toast the user sees pure silence
       // and assumes the upload is broken. Surfacing it directs them
       // to retry or fall back to drag-and-drop / desktop.
-      showToast(
-        'The file picker didn\'t return a photo. Tap "choose photos…" again, '
-        + 'or drag a file in.',
-        'error',
-      )
+      showToast(t('composer.drop.picker_empty'), 'error')
       return
     }
     await handleFiles(files)

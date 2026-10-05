@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { addTileLayer, TILE_ERROR_MESSAGE } from '@/utils/mapTiles'
+import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 
 export interface LocationMarker {
   /** Stable id for the marker (used as the React key). */
@@ -309,7 +309,7 @@ export function LocationMap({
       <div ref={containerRef} class="sh-location-map__canvas" />
       {tileError ? (
         <div class="sh-map-error">
-          {TILE_ERROR_MESSAGE}
+          {tileErrorMessage()}
         </div>
       ) : !hasMarkers && !onPick && (
         <div class="sh-location-map__empty sh-muted">

@@ -3,6 +3,7 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { t } from '@/i18n/i18n'
 
 const query = signal('')
 const results = signal<any[]>([])
@@ -38,7 +39,9 @@ export function SearchBar({ onSelect }: SearchBarProps) {
 
   return (
     <div class="sh-search">
-      <input class="sh-search-input" type="search" placeholder="🔍 Search..."
+      <input class="sh-search-input" type="search"
+        placeholder={`🔍 ${t('search.bar_placeholder')}`}
+        aria-label={t('nav.search')}
         data-shortcut="search" aria-keyshortcuts="/"
         value={query.value} onInput={handleInput}
         onFocus={() => open.value = true}

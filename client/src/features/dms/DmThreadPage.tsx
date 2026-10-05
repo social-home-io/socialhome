@@ -1893,7 +1893,7 @@ export default function DmThreadPage() {
   const mentionRender = conversationMentionRender(convId)
   const peerTitle =
     isGroupThread && threadInfo.value?.name ? threadInfo.value.name
-    : peers.length === 0 ? 'Chats'
+    : peers.length === 0 ? t('nav.chats')
     : peers.length === 1 && !isGroupThread ? peers[0].display_name
     // Group DM: join the peers with " · " — same shape the inbox
     // uses as the row-title fallback, so the topbar and the inbox

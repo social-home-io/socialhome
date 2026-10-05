@@ -40,7 +40,7 @@ import {
 
 import { useTitle } from '@/store/pageTitle'
 import type { GfsConnection } from '@/types'
-import { t, isOne } from '@/i18n/i18n'
+import { t, isOne, locale } from '@/i18n/i18n'
 import { isSupervisorAddon } from '@/platform'
 import { confirmDialog } from '@/components/confirm'
 import { relativeDocsTime } from '@/utils/relativeTime'
@@ -777,7 +777,7 @@ export default function ConnectionsPage() {
                   {' · '}
                   <time
                     dateTime={r.received_at}
-                    title={new Date(r.received_at).toLocaleString()}
+                    title={new Date(r.received_at).toLocaleString(locale.value || undefined)}
                   >
                     {relativeDocsTime(r.received_at)}
                   </time>

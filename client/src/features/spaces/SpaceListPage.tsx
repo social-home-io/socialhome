@@ -12,9 +12,18 @@ import { instanceConfig } from '@/store/instance'
 import { openSpaceCreate } from '@/components/SpaceCreateDialog'
 import { RemoteInviteInboxBanner } from '@/components/RemoteInviteInboxBanner'
 import { openSpaceJoinByCode } from './SpaceJoinByCodeDialog'
+import { t } from '@/i18n/i18n'
 
 /** One row in the caller's /api/me/subscriptions list. */
 interface MySubscription { space_id: string; subscribed_at: string }
+
+/** The space's kind ("private", "public", …) in the UI language; an
+ *  unknown kind from a newer server shows as sent. */
+function spaceTypeLabel(kind: string): string {
+  const key = `space.visibility.${kind}`
+  const label = t(key)
+  return label === key ? kind : label
+}
 
 const subscribedIds = signal<Set<string>>(new Set())
 const loading = signal(true)
@@ -60,13 +69,13 @@ function SpaceRow({
         <strong>{space.name}</strong>
         {space.description && <p class="sh-muted">{space.description}</p>}
         <div class="sh-space-card__chips">
-          <span class="sh-byline">{space.space_type}</span>
+          <span class="sh-byline">{spaceTypeLabel(space.space_type)}</span>
           {subscribed && (
             <span
               class="sh-subscribed-pill"
-              title="You receive this space's updates (read-only)"
+              title={t('spaces.list.subscribed_pill_title')}
             >
-              🔔 Subscribed
+              🔔 {t('spaces.list.subscribed_pill')}
             </span>
           )}
           {space.owner_instance_id
@@ -74,13 +83,9 @@ function SpaceRow({
             && space.owner_instance_id !== instanceConfig.value.instance_id && (
               <span
                 class="sh-space-remote-chip"
-                title={
-                  "This space is hosted on another household's server. "
-                  + "You can read and write through your own home, but "
-                  + "the canonical roster + admins live on the host."
-                }
+                title={t('spaces.list.remote_title')}
               >
-                🏘 Other household
+                🏘 {t('spaces.list.remote_chip')}
               </span>
             )}
         </div>
@@ -90,8 +95,8 @@ function SpaceRow({
           type="button"
           class="sh-subscribe-btn sh-subscribe-btn--on"
           disabled={busy}
-          aria-label={`Unsubscribe from ${space.name}`}
-          title="Stop receiving this space's updates."
+          aria-label={t('spaces.list.unsubscribe_aria', { name: space.name })}
+          title={t('space.subscriber.unsubscribe_title')}
           onClick={(ev) => {
             // Clicking the unsubscribe button must not navigate.
             ev.preventDefault()
@@ -101,7 +106,7 @@ function SpaceRow({
         >
           {busy
             ? <span class="sh-spinner-sm" aria-hidden="true" />
-            : <><span aria-hidden="true">🔕</span> Unsubscribe</>}
+            : <><span aria-hidden="true">🔕</span> {t('space.subscriber.unsubscribe')}</>}
         </button>
       )}
     </a>
@@ -109,7 +114,7 @@ function SpaceRow({
 }
 
 export default function SpaceListPage() {
-  useTitle('Spaces')
+  useTitle(t('nav.spaces'))
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set<string>())
 
   useEffect(() => {
@@ -125,7 +130,7 @@ export default function SpaceListPage() {
     setBusyIds((prev) => new Set(prev).add(s.id))
     try {
       await api.delete(`/api/spaces/${s.id}/subscribe`)
-      showToast(`Unsubscribed from ${s.name}`, 'info')
+      showToast(t('spaces.list.unsubscribed', { name: s.name }), 'info')
       await loadAll()
     } catch (exc) {
       showToast((exc as Error).message, 'error')
@@ -146,33 +151,29 @@ export default function SpaceListPage() {
             variant="secondary"
             onClick={() => { window.location.href = addBase('/spaces/browse') }}
           >
-            🔭 Browse spaces
+            🔭 {t('spaces.list.browse')}
           </Button>
           <Button variant="secondary" onClick={openSpaceJoinByCode}>
-            🎟 Join with code
+            🎟 {t('spaces.list.join_code')}
           </Button>
-          <Button onClick={openSpaceCreate}>+ Create space</Button>
+          <Button onClick={openSpaceCreate}>+ {t('spaces.list.create')}</Button>
         </div>
       </div>
       <RemoteInviteInboxBanner />
       {memberSpaces.length === 0 && subscribedSpaces.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🏘️</div>
-          <h3>No spaces yet</h3>
-          <p>
-            Spaces are shared corners — a school-run group, a holiday
-            crew, a neighbourhood watch — where members from one or
-            more households post together.
-          </p>
+          <h3>{t('spaces.list.empty_title')}</h3>
+          <p>{t('spaces.list.empty_body')}</p>
           <div class="sh-empty-state__cta-row">
             <Button onClick={openSpaceCreate}>
-              + Create your first space
+              + {t('spaces.list.create_first')}
             </Button>
             <Button
               variant="secondary"
               onClick={() => { window.location.href = addBase('/spaces/browse') }}
             >
-              🔭 Browse public spaces
+              🔭 {t('spaces.list.browse_public')}
             </Button>
           </div>
         </div>
@@ -181,7 +182,7 @@ export default function SpaceListPage() {
       {memberSpaces.length > 0 && (
         <section class="sh-spaces-section">
           {subscribedSpaces.length > 0 && (
-            <h2 class="sh-spaces-section__title">Your spaces</h2>
+            <h2 class="sh-spaces-section__title">{t('spaces.list.yours')}</h2>
           )}
           {memberSpaces.map((s) => (
             <SpaceRow key={s.id} space={s} subscribed={false} />
@@ -192,9 +193,9 @@ export default function SpaceListPage() {
       {subscribedSpaces.length > 0 && (
         <section class="sh-spaces-section">
           <h2 class="sh-spaces-section__title">
-            Subscribed
+            {t('spaces.list.subscribed')}
             <span class="sh-muted sh-spaces-section__hint">
-              · read-only — you won't be able to post
+              {' · '}{t('spaces.list.subscribed_hint')}
             </span>
           </h2>
           {subscribedSpaces.map((s) => (

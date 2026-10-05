@@ -24,7 +24,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
 import { api } from '@/api'
-import { addTileLayer, TILE_ERROR_MESSAGE } from '@/utils/mapTiles'
+import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Modal } from './Modal'
@@ -366,7 +366,7 @@ function ZonesPreviewMap({
       <div ref={containerRef} class="sh-zones-admin__canvas" data-testid="zones-map" />
       {tileError && (
         <div class="sh-map-error">
-          {TILE_ERROR_MESSAGE}
+          {tileErrorMessage()}
         </div>
       )}
     </div>
@@ -597,7 +597,7 @@ function ZoneEditDialog({
           <div ref={pickerRef} class="sh-zone-form__map" data-testid="zone-picker-map" />
           {tileError && (
             <div class="sh-map-error">
-              {TILE_ERROR_MESSAGE}
+              {tileErrorMessage()}
             </div>
           )}
         </div>

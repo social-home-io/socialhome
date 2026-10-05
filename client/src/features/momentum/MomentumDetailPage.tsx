@@ -29,6 +29,7 @@ import {
   householdPictureUrl,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { relativeChatTime } from '@/utils/relativeTime'
 import { ws } from '@/ws'
@@ -42,7 +43,7 @@ const loading = signal<boolean>(true)
 
 
 export default function MomentumDetailPage() {
-  useTitle('Moment')
+  useTitle(t('page_title.moment'))
   const { params } = useRoute()
   const loc = useLocation()
   const momentId = params.momentId
