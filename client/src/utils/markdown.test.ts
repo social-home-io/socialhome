@@ -223,3 +223,63 @@ describe('extractHeadings', () => {
     expect(extractHeadings('')).toEqual([])
   })
 })
+
+describe('renderMarkdown — no Referer to third parties', () => {
+  const parse = (html: string): HTMLElement => {
+    const div = document.createElement('div')
+    div.innerHTML = html
+    return div
+  }
+
+  it('external images carry referrerpolicy=no-referrer and loading=lazy', () => {
+    const img = parse(renderMarkdown('![cat](https://img.example.net/cat.png)'))
+      .querySelector('img')!
+    expect(img.getAttribute('src')).toBe('https://img.example.net/cat.png')
+    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer')
+    expect(img.getAttribute('loading')).toBe('lazy')
+  })
+
+  it('raw <img> HTML gets the same attributes', () => {
+    const img = parse(renderMarkdown('<img src="https://x.example/a.png" alt="a">'))
+      .querySelector('img')!
+    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer')
+    expect(img.getAttribute('loading')).toBe('lazy')
+  })
+
+  it('an author cannot override the referrer policy or loading', () => {
+    const img = parse(renderMarkdown(
+      '<img src="https://x.example/a.png" referrerpolicy="unsafe-url" loading="eager">',
+    )).querySelector('img')!
+    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer')
+    expect(img.getAttribute('loading')).toBe('lazy')
+  })
+
+  it('local uploads get the attributes too (ingress-relative src kept)', () => {
+    const img = parse(renderMarkdown('![p](/api/media/abc.webp)')).querySelector('img')!
+    expect(img.getAttribute('src')).toBe('api/media/abc.webp')
+    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer')
+    expect(img.getAttribute('loading')).toBe('lazy')
+  })
+
+  it('external links carry rel="noopener noreferrer"', () => {
+    const a = parse(renderMarkdown('[site](https://example.org/x)')).querySelector('a')!
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+  })
+
+  it('an author-supplied rel is replaced, not trusted', () => {
+    const a = parse(renderMarkdown('<a href="https://e.example" rel="opener">e</a>'))
+      .querySelector('a')!
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+  })
+
+  it('an external href with leading whitespace still gets rel', () => {
+    const a = parse(renderMarkdown('<a href=" https://e.example">e</a>')).querySelector('a')!
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+  })
+
+  it('in-app links (wikilinks) are left without rel', () => {
+    const a = parse(renderMarkdown('[[Home]]')).querySelector('a')!
+    expect(a.getAttribute('href')).toBe('/pages?title=Home')
+    expect(a.hasAttribute('rel')).toBe(false)
+  })
+})

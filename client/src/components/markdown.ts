@@ -6,7 +6,10 @@
  * the output is XSS-safe by construction. Link hrefs are filtered to
  * ``http:`` / ``https:`` / ``mailto:`` / an app path (``/…``) —
  * ``javascript:``, data URLs and protocol-relative ``//host`` are
- * stripped.
+ * stripped. Links open in a new tab with ``rel="noopener noreferrer"`` so
+ * the household's origin never reaches the target as a Referer. There is
+ * deliberately no image grammar: ``![alt](url)`` stays a link, so showing
+ * a post never makes the viewer's browser fetch from a third party.
  *
  * This is deliberately tiny (no dep). When we need tables, footnotes,
  * or embed syntax we'll swap for ``marked`` + ``DOMPurify``.

@@ -80,6 +80,28 @@ DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
   }
 })
 
+// Pages and space "about" text arrive over federation and may embed
+// third-party images / links. Under the server's
+// ``Referrer-Policy: strict-origin-when-cross-origin`` the browser would
+// still send this household's origin to that third party — on image load
+// (no click needed) and on link navigation. Pin every ``<img>`` to
+// ``referrerpolicy="no-referrer"`` + ``loading="lazy"`` and every link that
+// is not an in-app path (``/…`` / ``#…``, read the way the browser reads
+// it) to ``rel="noopener noreferrer"``. Runs AFTER the
+// attribute allow-list, so an author can't supply (or override) any of
+// these — ``rel`` / ``referrerpolicy`` / ``loading`` are not in
+// ``ALLOWED_ATTR`` and are dropped from the input first.
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'IMG') {
+    node.setAttribute('referrerpolicy', 'no-referrer')
+    node.setAttribute('loading', 'lazy')
+  } else if (node.tagName === 'A') {
+    const read = (node.getAttribute('href') ?? '')
+      .replace(_URL_STRIPPED, '').replace(_URL_EDGE, '')
+    if (!/^[/#]/.test(read)) node.setAttribute('rel', 'noopener noreferrer')
+  }
+})
+
 const WIKILINK_RE = /\[\[([^\]|]+)\]\]/g
 
 const ALLOWED_TAGS = [
