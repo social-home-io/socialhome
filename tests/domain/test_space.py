@@ -774,6 +774,7 @@ def test_validate_zone_coord_truncates_to_4dp(value, limit, expected):
         (True, 90),
         (None, 90),
         ("north", 90),
+        (10**400, 90),
     ],
 )
 def test_validate_zone_coord_refuses(value, limit):

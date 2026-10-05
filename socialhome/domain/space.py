@@ -1589,7 +1589,7 @@ def validate_zone_coord(value: object, *, name: str, limit: float) -> float:
         raise ValueError(f"{name} must be a number")
     try:
         coerced = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{name} must be a number") from exc
     if not math.isfinite(coerced) or not -limit <= coerced <= limit:
         raise ValueError(f"{name} out of range")

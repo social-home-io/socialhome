@@ -74,9 +74,11 @@ class SpaceZonesCollectionView(BaseView):
             space_id,
             self.user.username,
             name=str(body.get("name", "")),
-            latitude=float(body.get("latitude", 0.0)),
-            longitude=float(body.get("longitude", 0.0)),
-            radius_m=int(body.get("radius_m", 0)),
+            # Raw values: the domain validators coerce and refuse (bools,
+            # NaN / inf, overflow, out of range) — a 422, never a 500.
+            latitude=body.get("latitude", 0.0),
+            longitude=body.get("longitude", 0.0),
+            radius_m=body.get("radius_m", 0),
             color=body.get("color"),
         )
         return self._json(_zone_to_dict(zone), status=201)
@@ -104,11 +106,11 @@ class SpaceZoneDetailView(BaseView):
         if "name" in body:
             kwargs["name"] = str(body["name"])
         if "latitude" in body:
-            kwargs["latitude"] = float(body["latitude"])
+            kwargs["latitude"] = body["latitude"]
         if "longitude" in body:
-            kwargs["longitude"] = float(body["longitude"])
+            kwargs["longitude"] = body["longitude"]
         if "radius_m" in body:
-            kwargs["radius_m"] = int(body["radius_m"])
+            kwargs["radius_m"] = body["radius_m"]
         if "color" in body:  # explicit None means "clear"
             kwargs["color"] = body["color"]
 
