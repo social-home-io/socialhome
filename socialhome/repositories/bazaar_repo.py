@@ -448,11 +448,9 @@ class SqliteBazaarRepo:
                 (bid.listing_post_id, space_id),
             ).fetchone()
             if row is None:
-                raise ValueError(
-                    f"listing {bid.listing_post_id!r} not found in space {space_id!r}"
-                )
+                raise ValueError("listing not found in this space")
             if row[0] != BazaarStatus.ACTIVE.value:
-                raise ValueError(f"listing {bid.listing_post_id!r} is not active")
+                raise ValueError("listing is not active")
             conn.execute(
                 """
                 INSERT INTO bazaar_bids(

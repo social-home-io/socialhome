@@ -47,6 +47,7 @@ from ..domain.conversation import (
     GroupRosterMember,
     RemoteConversationMember,
 )
+from ..domain.errors import CodedError
 from ..domain.events import DmConversationCreated, DmGroupRosterChanged
 from ..domain.federation import FederationEventType, InstanceSource, PairingStatus
 from ..domain.federation_capabilities import FederationCapability
@@ -87,13 +88,21 @@ MAX_MEMBERSHIP_VERSION: int = 2**53
 _LEAVE_RETRIES: int = 3
 
 
-class GroupMemberUnsupportedError(ValueError):
+class GroupMemberUnsupportedError(CodedError, ValueError):
     """A person can't be seated in a cross-household group.
 
     Their household is not a directly paired one, or its Social Home is
-    too old to take part (below v_37). Mapped to HTTP 422
-    ``GROUP_MEMBER_UNSUPPORTED`` with the message, so the SPA can say why.
+    too old to take part (below v_37). HTTP 422
+    ``GROUP_MEMBER_UNSUPPORTED``; ``params.reason`` (``legacy_group`` /
+    ``not_paired`` / ``too_old``) and ``params.name`` (the person's display
+    name) let the SPA say why in the user's language.
     """
+
+    status = 422
+    code = "GROUP_MEMBER_UNSUPPORTED"
+
+    def __init__(self, detail: str, *, reason: str, name: str = "") -> None:
+        super().__init__(detail, params={"reason": reason, "name": name})
 
 
 class GroupManagedElsewhereError(PermissionError):
@@ -214,7 +223,8 @@ class DmGroupService:
         if not is_owner_bound(conversation_id):
             raise GroupMemberUnsupportedError(
                 "This group was created before groups could include other "
-                "households — start a new group to add them."
+                "households — start a new group to add them.",
+                reason="legacy_group",
             )
         remote = await self._users.get_remote(user_id)
         if remote is None:
@@ -232,7 +242,9 @@ class DmGroupService:
         ):
             raise GroupMemberUnsupportedError(
                 f"{remote.display_name} can only join once their household is "
-                "paired with yours."
+                "paired with yours.",
+                reason="not_paired",
+                name=remote.display_name,
             )
         if not await self._federation.peer_supports(
             remote.instance_id,
@@ -240,7 +252,9 @@ class DmGroupService:
         ):
             raise GroupMemberUnsupportedError(
                 f"{remote.display_name}'s household needs a Social Home update "
-                "before they can join group chats."
+                "before they can join group chats.",
+                reason="too_old",
+                name=remote.display_name,
             )
         return RemoteConversationMember(
             conversation_id=conversation_id,

@@ -33,12 +33,12 @@ log aggregation.** Code must never log the full query string of
 
 - Content type is `application/json` unless otherwise stated.
   Multipart is used for avatar / cover / media uploads.
-- Responses follow `{"ok": true, …}` on success and
-  `{"ok": false, "error": {"code": "...", "message": "..."}}` on
-  domain errors. HTTP status codes are standard: 200 / 201 / 204 for
-  success, 400 for validation, 401 for missing auth, 403 for
-  authorisation failures, 404 for missing resources, 409 for
-  conflicts, 429 for rate limits.
+- Errors use one shape, `{"error": {"code": "...", "detail": "...",
+  "params": {…}}}` — see [Errors](#errors). HTTP status codes are
+  standard: 200 / 201 / 204 for success, 400 for validation, 401 for
+  missing auth, 403 for authorisation failures, 404 for missing
+  resources, 409 for conflicts, 422 for refused input, 429 for rate
+  limits.
 - Pagination uses `?limit=N&cursor=…`. Cursors are opaque; don't
   parse them.
 - Timestamps are ISO-8601 UTC, serialised via orjson.
@@ -51,6 +51,56 @@ log aggregation.** Code must never log the full query string of
   | "tasks" | "stickies" | "calendar", …}}` and nothing changes. Comments,
   reactions, votes, schedule answers, bids and RSVPs are never gated. See
   [`protocol/spaces.md`](./protocol/spaces.md#feature-access-levels-v_42).
+
+## Errors
+
+Every error answer is `{"error": {"code", "detail", …}}`, built centrally by
+`BaseView._iter` (`socialhome/routes/base.py`):
+
+- `code` — a stable, machine-readable code. Branch on this, never on `detail`.
+- `detail` — a short English sentence for API clients and logs. It never
+  carries raw ids, library error text or other internals.
+- `params` — optional, flat JSON values the message needs (a minimum age, a
+  length limit, a price floor). Present only when the code has some.
+- A few older codes carry their hints as top-level fields instead
+  (`feature`, `reason`, `section`, `count`, `current_version`…).
+
+The SPA shows its own translated text for a known `code`
+(`client/src/apiErrors.ts`, keys `error.*`); an unknown code shows `detail`,
+and a generic answer (`NOT_FOUND`, `RATE_LIMITED`, `INTERNAL_ERROR`, the
+blanket `422 UNPROCESSABLE`, any 5xx, or no body) shows a per-status line.
+
+Coded refusals (`socialhome/domain/errors.py` `CodedError` subclasses):
+
+| Code | Status | `params` | Raised by |
+|---|---|---|---|
+| `ALREADY_MEMBER` | 422 | — | `POST /api/spaces/{id}/join-requests` by a member |
+| `USER_ALREADY_MEMBER` | 403 | — | `POST /api/spaces/{id}/members` for someone already in |
+| `BANNED` | 403 | — | Joining, following or accepting an invite to a space you're banned from |
+| `USER_BANNED` | 403 | — | An admin adding / inviting a banned person (no user id in the answer) |
+| `INVITE_ONLY` | 403 | — | A join request to an invite-only space |
+| `INVITE_EXPIRED` | 404 | — | `POST /api/remote_invites/{token}/accept` / `decline`, `POST /api/spaces/join` with an unknown, expired or used-up token |
+| `SUBSCRIBE_NOT_ALLOWED` | 403 | — | `POST /api/spaces/{id}/subscribe` on a space that takes no followers |
+| `SUBSCRIBER_READ_ONLY` | 403 | `action` (`post` / `comment` / `react` …) | A follower writing to a space |
+| `SPACE_ARCHIVED` | 403 | — | Any write to an archived space (posts, pages, tasks, stickies, calendar) |
+| `NOT_PAIRED` | 403 | — | `POST /api/public_spaces/{space_id}/join-request` when the host household isn't a confirmed connection |
+| `AGE_RESTRICTED` | 403 | `min_age` | §CP.F1 age gate on joining a space |
+| `DM_SELF` | 422 | — | `POST /api/conversations/dm` to yourself |
+| `GROUP_TOO_SMALL` | 422 | `min` | `POST /api/conversations/group` with fewer than 3 people |
+| `DM_TOO_LONG` | 422 | `max` | Sending / editing a message over the length cap |
+| `DM_BLOCKED` | 403 | — | The recipient blocked you (a guardian block reads the same) |
+| `DM_YOU_BLOCKED` | 403 | — | You blocked the recipient |
+| `DM_NOT_ALLOWED` | 403 | — | A protected account messaging someone its guardian blocked |
+| `DM_GROUP_NOT_ALLOWED` | 403 | — | A group that a guardian block rules out |
+| `GROUP_MEMBER_UNSUPPORTED` | 422 | `reason` (`legacy_group` / `not_paired` / `too_old`), `name` | Adding a remote person to a group |
+| `RSVP_PAST` | 422 | — | `POST /api/calendars/events/{id}/rsvp` for an occurrence that has ended |
+| `POLL_CLOSED` | 409 | — | Voting on a closed poll |
+| `MOMENT_RATE_LIMIT` | 429 | — | Posting more than one moment per 15 minutes |
+| `BID_TOO_LOW` | 422 | `floor_amount` (the listing's stored units — cents, or whole units for JPY / KRW / ISK), `currency` | `POST /api/bazaar/{id}/bids` under the floor |
+| `OWN_LISTING` | 422 (bids) / 403 (offers) | — | A seller bidding on / offering for their own listing |
+| `LISTING_NOT_ACTIVE` | 422 (bids) / 409 (offers) | — | A bid or offer on a sold, expired or cancelled listing |
+| `IMAGE_TOO_LARGE` | 422 | `max_mb` | `POST /api/me/picture`, `/api/spaces/{id}/members/me/picture`, `/cover`, `/icon` over the size limit |
+| `IMAGE_UNREADABLE` | 422 | — | The same picture endpoints and `POST /api/media/upload`, when the file isn't a supported image or the image library can't open it (the library's error text and the file name stay in the server log) |
 
 ## HFS — Authentication & self
 

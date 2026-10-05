@@ -16,6 +16,7 @@ import pillow_heif
 from PIL import Image, ImageOps
 from PIL.Image import Resampling
 
+from ..domain.errors import ImageUnreadableError
 from ..domain.media_constraints import (
     IMAGE_ACCEPTED_MIMES,
     IMAGE_MAX_DIMENSION,
@@ -106,9 +107,9 @@ class ImageProcessor:
 
         Raises
         ------
-        ValueError
-            If the data fails magic-byte validation or Pillow cannot
-            open it.
+        ImageUnreadableError
+            (a ``ValueError``) if the data fails magic-byte validation or
+            Pillow cannot open it.
         """
         # Pillow's decode + resize + encode are CPU-bound and would
         # stall the event loop on every upload. Mirror the pattern in
@@ -119,15 +120,16 @@ class ImageProcessor:
     def _process_sync(self, data: bytes, filename: str) -> tuple[bytes, str]:
         mime = self._detect_mime(data)
         if mime is None:
-            raise ValueError(
-                f"Unsupported image format for file {filename!r}. "
-                f"Accepted types: {', '.join(sorted(self.ACCEPTED_MIME_TYPES))}"
-            )
+            # Not a format we take — to the user that's "can't be opened"
+            # too. The file name stays in the log, never in the answer.
+            log.info("image processor: unsupported image format for %r", filename)
+            raise ImageUnreadableError()
 
         try:
             img = Image.open(io.BytesIO(data))
         except Exception as exc:
-            raise ValueError(f"Cannot open image {filename!r}: {exc}") from exc
+            log.info("image processor: cannot open %r: %s", filename, exc)
+            raise ImageUnreadableError() from exc
 
         # Auto-orient via EXIF (handles camera rotation)
         try:
@@ -173,7 +175,8 @@ class ImageProcessor:
         try:
             img = Image.open(io.BytesIO(data))
         except Exception as exc:
-            raise ValueError(f"Cannot open image for thumbnail: {exc}") from exc
+            log.info("image processor: cannot open image for thumbnail: %s", exc)
+            raise ImageUnreadableError() from exc
 
         try:
             # exif_transpose returns a new (possibly sRGB-reencoded) Image.
@@ -256,7 +259,8 @@ class ImageProcessor:
             img = Image.open(io.BytesIO(data))
             img.load()
         except Exception as exc:
-            raise ValueError(f"Cannot open image to fit it: {exc}") from exc
+            log.info("image processor: cannot open image to fit it: %s", exc)
+            raise ImageUnreadableError() from exc
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGBA" if "transparency" in img.info else "RGB")
         src_dim = max(img.size)

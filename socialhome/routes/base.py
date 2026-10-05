@@ -25,6 +25,7 @@ from aiohttp import web
 from ..app_keys import preferences_service_key, space_repo_key
 from ..auth import current_user
 from ..domain.child_protection import AccountProtectedError
+from ..domain.errors import CodedError
 from ..domain.preferences import FeatureDisabledError
 from ..services.preferences_service import ScopeMismatchError
 from ..domain.space import (
@@ -65,7 +66,6 @@ from ..repositories.page_repo import PageLockError, PageNotFoundError
 from ..security import error_response, sanitise_for_api
 from ..services.bazaar_service import BazaarServiceError, ListingNotFoundError
 from ..peer_url import InvalidPeerUrlError
-from ..services.dm_group_service import GroupMemberUnsupportedError
 from ..services.dm_service import MediaRequiresDirectPairingError
 from ..services.child_protection_service import (
     ChildProtectionError,
@@ -77,7 +77,7 @@ from ..services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictStaleError,
 )
-from ..services.poll_service import PollClosedError, PollNotFoundError
+from ..services.poll_service import PollNotFoundError
 from ..services.presence_service import UserNotFoundError as PresenceUserNotFoundError
 from ..services.space_zone_service import (
     SpaceZoneLimitError,
@@ -225,6 +225,17 @@ class BaseView(web.View):
         except ContentQueuedForReview as queued:
             # Not an error: the write waits for a moderator (202).
             return self._queued(queued.item)
+        except CodedError as exc:
+            # A refusal that carries its own status, stable code, fixed
+            # English detail and safe params (``domain/errors.py``). Comes
+            # first: coded errors also subclass the old exception type
+            # (``ValueError``, ``SpacePermissionError``…) for their callers.
+            return error_response(
+                exc.status,
+                exc.code,
+                exc.detail,
+                extra={"params": exc.params} if exc.params else None,
+            )
         except ModerationQueueFullError:
             return error_response(
                 429, "QUEUE_FULL", "Too many submissions are waiting for review."
@@ -389,8 +400,6 @@ class BaseView(web.View):
             return error_response(409, "SPACE_LIMIT", str(exc))
         except ModerationAlreadyDecidedError as exc:
             return error_response(409, "ALREADY_DECIDED", str(exc))
-        except PollClosedError as exc:
-            return error_response(409, "POLL_CLOSED", str(exc))
         except SpaceBotSlugTakenError as exc:
             return error_response(409, "SLUG_TAKEN", str(exc))
         except SpaceBotDisabledError as exc:
@@ -506,10 +515,6 @@ class BaseView(web.View):
                 "MEDIA_REQUIRES_DIRECT_PAIRING",
                 str(exc),
             )
-        except GroupMemberUnsupportedError as exc:
-            # The message says which person and why (not paired / their
-            # household needs an update) — the picker shows it verbatim.
-            return error_response(422, "GROUP_MEMBER_UNSUPPORTED", str(exc))
         except TimetableValidationError as exc:
             # Subclasses ValueError — must precede it. The domain composes
             # these messages itself (field + rule, user input truncated),

@@ -19,6 +19,7 @@ from ..app_keys import (
     media_transcode_service_key,
     storage_quota_service_key,
 )
+from ..domain.errors import CodedError
 from ..domain.media_constraints import (
     AUDIO_ACCEPTED_MIMES,
     FILE_DENIED_EXTENSIONS,
@@ -245,6 +246,10 @@ class MediaUploadView(BaseView):
                     )
                 out_name = f"{uuid.uuid4().hex}{_sanitise_file_ext(filename)}"
                 out_bytes = data
+        except CodedError:
+            # ``ImageUnreadableError`` is also a ``ValueError`` — let
+            # ``BaseView._iter`` answer it with its stable code.
+            raise
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
         except RuntimeError as exc:

@@ -89,6 +89,11 @@ async def test_media_upload_invalid_image(client):
     )
     r = await client.post("/api/media/upload", data=data, headers=h)
     assert r.status == 422
+    err = (await r.json())["error"]
+    # The SPA translates the code; Pillow's own words stay in the log.
+    assert err["code"] == "IMAGE_UNREADABLE"
+    assert "identify" not in err["detail"].lower()
+    assert "bad.jpg" not in await r.text()
 
 
 async def test_media_serve_webp(client):

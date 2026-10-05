@@ -83,7 +83,7 @@ export function UsernameEditor() {
       // (network) falls back to its message.
       if (err instanceof ApiError) {
         error.value =
-          err.detail || err.message || t('username.change_failed')
+          err.message || t('username.change_failed')
       } else {
         error.value = (err as Error).message || t('username.change_failed')
       }

@@ -38,6 +38,7 @@ from ..app_keys import (
     user_repo_key,
     user_service_key,
 )
+from ..domain.errors import ImageTooLargeError
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.user import User, UserStatus, _picture_url
 from ..media_signer import sign_media_urls_in
@@ -112,7 +113,7 @@ async def _read_multipart_image(request: web.Request) -> bytes:
             break
         total += len(chunk)
         if total > PROFILE_PICTURE_MAX_UPLOAD_BYTES:
-            raise ValueError("Upload exceeds size limit.")
+            raise ImageTooLargeError(PROFILE_PICTURE_MAX_UPLOAD_BYTES)
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -271,10 +272,9 @@ class MePictureView(BaseView):
             raw = await _read_multipart_image(self.request)
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
-        try:
-            user = await svc.set_picture(ctx.user_id, raw)
-        except ValueError as exc:
-            return error_response(422, "UNPROCESSABLE", str(exc))
+        # An unreadable image raises ``ImageUnreadableError`` — BaseView
+        # answers it (422 IMAGE_UNREADABLE), never the library's error text.
+        user = await svc.set_picture(ctx.user_id, raw)
         return web.json_response(_user_to_dict_signed(self.request, user))
 
     async def delete(self) -> web.Response:
@@ -332,10 +332,9 @@ class MePictureRefreshFromHaView(BaseView):
                 "Home Assistant has no picture for this user.",
             )
         svc = self.svc(user_service_key)
-        try:
-            user = await svc.set_picture(ctx.user_id, raw)
-        except ValueError as exc:
-            return error_response(422, "UNPROCESSABLE", str(exc))
+        # An unreadable image raises ``ImageUnreadableError`` — BaseView
+        # answers it (422 IMAGE_UNREADABLE), never the library's error text.
+        user = await svc.set_picture(ctx.user_id, raw)
         return web.json_response(_user_to_dict_signed(self.request, user))
 
 

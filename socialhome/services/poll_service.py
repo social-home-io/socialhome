@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 
+from ..domain.errors import CodedError
 from ..domain.events import (
     PollClosed,
     PollCreated,
@@ -37,8 +38,17 @@ class PollNotFoundError(PollServiceError):
     """No poll exists for the given post_id."""
 
 
-class PollClosedError(PollServiceError):
-    """Votes are rejected once the poll is closed."""
+class PollClosedError(CodedError, PollServiceError):
+    """Votes are rejected once the poll is closed. HTTP 409 ``POLL_CLOSED``
+    — the detail never echoes the post id."""
+
+    status = 409
+    code = "POLL_CLOSED"
+    detail = "This poll is closed."
+
+    def __init__(self, post_id: str) -> None:
+        super().__init__()
+        self.post_id = post_id
 
 
 class PollService(BusPublisherMixin):

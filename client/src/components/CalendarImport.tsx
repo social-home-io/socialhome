@@ -131,7 +131,7 @@ export function importErrorMessage(e: unknown, source: Source): string {
         : t('calendar.import.err_ai_text')
     }
     if (e.status === 404) return t('calendar.import.err_gone')
-    if (e.detail) return e.detail
+    if (e.detail) return e.message
   }
   if (e instanceof TypeError) {
     return t('calendar.import.err_network')

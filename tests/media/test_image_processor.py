@@ -6,6 +6,7 @@ import random
 import pytest
 from PIL import Image as _Image
 
+from socialhome.domain.errors import ImageUnreadableError
 from socialhome.media import image_processor
 from socialhome.media.image_processor import ImageProcessor, MAGIC_BYTES
 
@@ -40,10 +41,11 @@ async def test_process_valid_jpeg():
 
 
 async def test_process_invalid_data():
-    """Random bytes are rejected with ValueError."""
+    """Random bytes are rejected as unreadable — never echoing the name."""
     proc = ImageProcessor()
-    with pytest.raises(ValueError):
+    with pytest.raises(ImageUnreadableError) as exc_info:
         await proc.process(b"not an image at all", "garbage.jpg")
+    assert "garbage.jpg" not in str(exc_info.value)
 
 
 async def test_generate_thumbnail():
@@ -206,8 +208,11 @@ async def test_fit_within_gives_up_below_the_minimum_dimension():
 
 
 async def test_fit_within_rejects_undecodable_bytes_over_the_bound():
-    with pytest.raises(ValueError, match="Cannot open image to fit it"):
+    # Still a ValueError for internal callers; the client only ever sees
+    # the fixed detail, never Pillow's error text.
+    with pytest.raises(ValueError, match="couldn't be opened") as exc_info:
         await ImageProcessor().fit_within(b"not an image" * 10, 16)
+    assert isinstance(exc_info.value, ImageUnreadableError)
 
 
 async def test_fit_within_converts_palette_images():

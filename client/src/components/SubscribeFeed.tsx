@@ -70,7 +70,7 @@ export function SubscribeFeed({ spaceId }: SubscribeFeedProps) {
       )
     } catch (e) {
       error.value = e instanceof ApiError && e.detail
-        ? e.detail
+        ? e.message
         : t('event.subscribe.failed')
     } finally {
       busy.value = false
@@ -92,7 +92,7 @@ export function SubscribeFeed({ spaceId }: SubscribeFeedProps) {
       showToast(t('event.subscribe.revoked'), 'success')
     } catch (e) {
       error.value = e instanceof ApiError && e.detail
-        ? e.detail
+        ? e.message
         : t('event.subscribe.failed')
     } finally {
       busy.value = false

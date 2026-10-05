@@ -39,6 +39,7 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
+from ..domain.errors import ImageTooLargeError
 from ..domain.events import SpaceMemberLocationOptedIn
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.post import LocationData, PostType
@@ -879,7 +880,7 @@ async def _read_multipart_image_bytes(request: web.Request) -> bytes:
             break
         total += len(chunk)
         if total > _PROFILE_PICTURE_MAX_UPLOAD_BYTES:
-            raise ValueError("Upload exceeds size limit.")
+            raise ImageTooLargeError(_PROFILE_PICTURE_MAX_UPLOAD_BYTES)
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -1020,8 +1021,6 @@ class SpaceMemberMePictureView(BaseView):
             )
         except PermissionError as exc:
             return error_response(403, "FORBIDDEN", str(exc))
-        except ValueError as exc:
-            return error_response(422, "UNPROCESSABLE", str(exc))
         return web.json_response(_member_to_dict_signed(self.request, member, space_id))
 
     async def delete(self) -> web.Response:
@@ -1113,8 +1112,6 @@ class SpaceCoverView(BaseView):
             )
         except PermissionError as exc:
             return error_response(403, "FORBIDDEN", str(exc))
-        except ValueError as exc:
-            return error_response(422, "UNPROCESSABLE", str(exc))
         payload = {
             "cover_hash": updated.cover_hash,
             "cover_url": f"/api/spaces/{space_id}/cover?v={updated.cover_hash}",
@@ -1175,8 +1172,6 @@ class SpaceIconView(BaseView):
             )
         except PermissionError as exc:
             return error_response(403, "FORBIDDEN", str(exc))
-        except ValueError as exc:
-            return error_response(422, "UNPROCESSABLE", str(exc))
         payload = {
             "icon_hash": updated.icon_hash,
             "icon_url": f"/api/spaces/{space_id}/icon?v={updated.icon_hash}",

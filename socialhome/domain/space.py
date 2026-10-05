@@ -22,6 +22,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, TYPE_CHECKING
 
+from .errors import CodedError
+
 if TYPE_CHECKING:
     from .post import PostType
 
@@ -1081,6 +1083,118 @@ class SpacePermissionError(Exception):
     def __init__(self, message: str, *, banned: bool = False) -> None:
         super().__init__(message)
         self.banned = banned
+
+
+class AlreadyMemberError(CodedError, ValueError):
+    """The caller asked to join a space they already belong to."""
+
+    status = 422
+    code = "ALREADY_MEMBER"
+    detail = "already a member"
+
+
+class UserAlreadyMemberError(CodedError, SpacePermissionError):
+    """An admin invited someone who already belongs to the space."""
+
+    status = 403
+    code = "USER_ALREADY_MEMBER"
+    detail = "user is already a member"
+
+
+class BannedFromSpaceError(CodedError, SpacePermissionError):
+    """The caller is banned from the space they tried to join. The detail
+    names nobody — never the raw user id."""
+
+    status = 403
+    code = "BANNED"
+    detail = "banned from this space"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.banned = True
+
+
+class UserBannedError(CodedError, SpacePermissionError):
+    """An admin tried to add or invite someone banned from the space."""
+
+    status = 403
+    code = "USER_BANNED"
+    detail = "user is banned from this space"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.banned = True
+
+
+class InviteOnlyError(CodedError, SpacePermissionError):
+    """A join request to a space that only takes invited members."""
+
+    status = 403
+    code = "INVITE_ONLY"
+    detail = "space is invite-only"
+
+
+class SubscribeNotAllowedError(CodedError, SpacePermissionError):
+    """A follow (subscribe) of a space that doesn't take followers."""
+
+    status = 403
+    code = "SUBSCRIBE_NOT_ALLOWED"
+    detail = "this space does not allow subscribers"
+
+
+class SubscriberReadOnlyError(CodedError, SpacePermissionError):
+    """A subscriber (follower) tried to post, comment or react where
+    followers may only read. ``params.action`` is the attempted action."""
+
+    status = 403
+    code = "SUBSCRIBER_READ_ONLY"
+
+    def __init__(self, action: str) -> None:
+        super().__init__(
+            f"subscribers can only read — joining as a member is required to {action}",
+            params={"action": action},
+        )
+
+
+class SpaceArchivedError(CodedError, SpacePermissionError):
+    """A write to an archived (read-only) space."""
+
+    status = 403
+    code = "SPACE_ARCHIVED"
+    detail = "space is archived (read-only) — unarchive it to make changes"
+
+
+class HostNotPairedError(CodedError, SpacePermissionError):
+    """The space's host household isn't a confirmed connection."""
+
+    status = 403
+    code = "NOT_PAIRED"
+    detail = "host household is not a CONFIRMED peer — pair first"
+
+
+class AgeRestrictedError(CodedError, SpacePermissionError):
+    """§CP.F1: a protected account below the space's minimum age."""
+
+    status = 403
+    code = "AGE_RESTRICTED"
+
+    def __init__(self, min_age: int) -> None:
+        super().__init__(
+            f"This space is restricted to users aged {min_age}+.",
+            params={"min_age": min_age},
+        )
+
+
+class InviteExpiredError(CodedError, KeyError):
+    """An invite token that is unknown, expired or used up."""
+
+    status = 404
+    code = "INVITE_EXPIRED"
+    detail = "invite token invalid, expired, or exhausted"
+
+    def __str__(self) -> str:
+        # ``KeyError.__str__`` would quote the detail.
+        return self.detail
 
 
 class HouseholdUpgradeRequiredError(SpacePermissionError):

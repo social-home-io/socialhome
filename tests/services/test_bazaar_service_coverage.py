@@ -16,7 +16,10 @@ from socialhome.services.bazaar_service import (
     BazaarService,
     BazaarServiceError,
     BidNotFoundError,
+    BidTooLowError,
+    ListingNotActiveError,
     ListingNotFoundError,
+    OwnListingError,
     _coerce_mode,
     _validate_price_fields,
 )
@@ -227,7 +230,7 @@ async def test_cancel_listing_happy(env):
 
 async def test_place_bid_self_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
-    with pytest.raises(ValueError):
+    with pytest.raises(OwnListingError):
         await env.svc.place_bid(
             listing_post_id=pid,
             bidder_user_id="u-seller",
@@ -253,18 +256,19 @@ async def test_place_bid_below_floor_raises(env):
         amount=110,
     )
     # Next bid must clear 110 + step=10 → 120.
-    with pytest.raises(ValueError):
+    with pytest.raises(BidTooLowError) as exc_info:
         await env.svc.place_bid(
             listing_post_id=pid,
             bidder_user_id="u-c",
             amount=115,
         )
+    assert exc_info.value.params == {"floor_amount": 120, "currency": "EUR"}
 
 
 async def test_place_bid_on_inactive_raises(env):
     pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
     await env.repo.mark_cancelled(pid, space_id=_DEFAULT_SPACE_ID)
-    with pytest.raises(ValueError):
+    with pytest.raises(ListingNotActiveError):
         await env.svc.place_bid(
             listing_post_id=pid,
             bidder_user_id="u-b",

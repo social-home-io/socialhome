@@ -26,6 +26,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..domain.conversation import (
+    DmSelfError,
+    DmTooLongError,
+    GroupTooSmallError,
     Conversation,
     ConversationMember,
     ConversationMessage,
@@ -35,6 +38,7 @@ from ..domain.conversation import (
     RemoteConversationMember,
     mute_until_for,
 )
+from ..domain.errors import CodedError
 from ..domain.dm_location import normalise_location_content
 from ..domain.events import (
     DmConversationCreated,
@@ -88,13 +92,36 @@ GUARDIAN_BLOCK_GROUP_DETAIL = "One of these people can't be added to this group.
 MAX_DM_LENGTH: int = 1000
 
 
-class RecipientBlockedError(PermissionError):
+#: What a sender who blocked the recipient hears.
+YOU_BLOCKED_DETAIL = (
+    "You have blocked this user — unblock them in Settings to "
+    "continue this conversation."
+)
+
+#: The stable API code for each refusal, keyed by its words. A guardian
+#: block reaches the person it blocks as ``RECIPIENT_BLOCKED_DETAIL`` — so
+#: it carries the very same code, and nothing in the answer tells a
+#: guardian (or a protected account) is involved.
+_BLOCK_CODES: dict[str, str] = {
+    RECIPIENT_BLOCKED_DETAIL: "DM_BLOCKED",
+    YOU_BLOCKED_DETAIL: "DM_YOU_BLOCKED",
+    GUARDIAN_BLOCK_DETAIL: "DM_NOT_ALLOWED",
+    GUARDIAN_BLOCK_GROUP_DETAIL: "DM_GROUP_NOT_ALLOWED",
+}
+
+
+class RecipientBlockedError(CodedError, PermissionError):
     """Raised when a DM cannot be sent because of a personal block.
 
     Symmetric: rejects both "I blocked them, why am I DMing them?" and
     "they blocked me, they don't want this." :class:`BaseView._iter`
-    maps :class:`PermissionError` (and subclasses) to a 403 response.
+    answers 403 with the code matching the detail (``_BLOCK_CODES``).
     """
+
+    status = 403
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail, code=_BLOCK_CODES.get(detail, "FORBIDDEN"))
 
 
 class MediaRequiresDirectPairingError(ValueError):
@@ -253,7 +280,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         if other_username is not None:
             other = await self._require_user(other_username)
             if creator.username == other.username:
-                raise ValueError("cannot DM yourself")
+                raise DmSelfError()
             await self._guard_block_pair(creator.user_id, other.user_id)
 
             existing = await self._convos.list_for_user(creator_username)
@@ -308,7 +335,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         if remote is None:
             raise KeyError(f"remote user {other_user_id!r} not found")
         if remote.user_id == creator.user_id:
-            raise ValueError("cannot DM yourself")
+            raise DmSelfError()
         await self._guard_block_pair(creator.user_id, remote.user_id)
 
         existing = await self._convos.list_for_user(creator_username)
@@ -373,7 +400,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         creator = await self._require_user(creator_username)
         requested = {creator.username, *(member_usernames or [])}
         if len(requested) + len(set(member_user_ids or [])) < 3:
-            raise ValueError("group DM requires at least 3 participants")
+            raise GroupTooSmallError(3)
         conv_id = self._groups.mint_conversation_id()
         local_names, remote_seats = await self._resolve_new_members(
             conv_id,
@@ -382,7 +409,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         )
         local_names = list(dict.fromkeys([creator.username, *local_names]))
         if len(local_names) + len(remote_seats) < 3:
-            raise ValueError("group DM requires at least 3 participants")
+            raise GroupTooSmallError(3)
         await self._guard_group_roster(local_names, remote_seats)
         conv = Conversation(
             id=conv_id,
@@ -665,7 +692,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         if not content and not is_media and type == "text":
             raise ValueError("message content must not be empty")
         if len(content) > MAX_DM_LENGTH:
-            raise ValueError(f"message content exceeds {MAX_DM_LENGTH} chars")
+            raise DmTooLongError(MAX_DM_LENGTH)
         if is_media and not media_url:
             raise ValueError(f"{type!r} messages require ``media_url``")
         if type == "location":
@@ -996,7 +1023,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         if not new_content:
             raise ValueError("content must not be empty")
         if len(new_content) > MAX_DM_LENGTH:
-            raise ValueError(f"message content exceeds {MAX_DM_LENGTH} chars")
+            raise DmTooLongError(MAX_DM_LENGTH)
         if msg.type == "location":
             new_content = normalise_location_content(new_content)
         await self._convos.edit_message(message_id, new_content)
@@ -1431,10 +1458,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         if await self._users.is_blocked(recipient_id, sender_id):
             raise RecipientBlockedError(RECIPIENT_BLOCKED_DETAIL)
         if await self._users.is_blocked(sender_id, recipient_id):
-            raise RecipientBlockedError(
-                "You have blocked this user — unblock them in Settings to "
-                "continue this conversation."
-            )
+            raise RecipientBlockedError(YOU_BLOCKED_DETAIL)
 
     async def _seat_user_ids(self, conversation_id: str) -> list[str]:
         """``user_id`` of every active seat — local members and remote seats."""

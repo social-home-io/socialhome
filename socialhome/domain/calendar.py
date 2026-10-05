@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from ..utils.timezones import is_valid_tz, local_date
+from .errors import CodedError
 
 
 @dataclass(slots=True, frozen=True)
@@ -276,3 +277,11 @@ def all_day_covers(event: CalendarEvent, day: date, fallback_tz: str) -> bool:
         else first
     )
     return first <= day <= max(first, last)
+
+
+class RsvpPastError(CodedError):
+    """An RSVP to an occurrence that has already ended."""
+
+    status = 422
+    code = "RSVP_PAST"
+    detail = "cannot RSVP to an occurrence that has already ended"

@@ -112,7 +112,8 @@ describe('AppHostInner', () => {
     const { container, getByText } = render(<AppHostInner appId="broken" />)
 
     await waitFor(() => {
-      expect(getByText('Unexpected error')).toBeTruthy()
+      // A 5xx shows the translated server line, not the raw detail.
+      expect(getByText('Something went wrong on the server. Try again in a moment.')).toBeTruthy()
     })
 
     expect(container.querySelector('iframe')).toBeNull()

@@ -87,7 +87,7 @@ describe('ApiError — friendly-detail unwrap', () => {
     }
   })
 
-  it('falls back to "API <status>: <path>" when the body is not the canonical shape', async () => {
+  it('shows the translated server line for a 5xx whose body is not the canonical shape', async () => {
     stubFetch(502, '<html>Bad Gateway</html>')
     try {
       await api.get('/api/whatever')
@@ -98,11 +98,11 @@ describe('ApiError — friendly-detail unwrap', () => {
       expect(err.status).toBe(502)
       expect(err.code).toBeNull()
       expect(err.detail).toBeNull()
-      expect(err.message).toBe('API 502: /api/whatever')
+      expect(err.message).toBe('Something went wrong on the server. Try again in a moment.')
     }
   })
 
-  it('falls back to "API <status>: <path>" when the body is empty / unparseable', async () => {
+  it('shows the translated server line when a 500 body is empty / unparseable', async () => {
     const res = {
       ok: false,
       status: 500,
@@ -115,7 +115,7 @@ describe('ApiError — friendly-detail unwrap', () => {
     } catch (e) {
       expect(e).toBeInstanceOf(ApiError)
       const err = e as ApiError
-      expect(err.message).toBe('API 500: /api/foo')
+      expect(err.message).toBe('Something went wrong on the server. Try again in a moment.')
     }
   })
 
@@ -129,8 +129,8 @@ describe('ApiError — friendly-detail unwrap', () => {
       expect(err.code).toBeNull()
       expect(err.detail).toBeNull()
       expect(err.status).toBe(404)
-      // No friendly detail to use — fall back to the historic shape.
-      expect(err.message).toBe('API 404: /api/foo')
+      // No usable detail — the translated per-status line.
+      expect(err.message).toBe('Not found — it may have been deleted or moved.')
     }
   })
 

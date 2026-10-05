@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 
+from .errors import CodedError
+
 
 class ConversationType(StrEnum):
     DM = "dm"  # exactly 2 participants
@@ -287,3 +289,37 @@ class GroupRosterMember:
         if self.since is not None:
             wire["since"] = self.since
         return wire
+
+
+class DmSelfError(CodedError, ValueError):
+    """A direct message to yourself."""
+
+    status = 422
+    code = "DM_SELF"
+    detail = "cannot DM yourself"
+
+
+class GroupTooSmallError(CodedError, ValueError):
+    """A group conversation needs at least ``min`` people, creator included."""
+
+    status = 422
+    code = "GROUP_TOO_SMALL"
+
+    def __init__(self, minimum: int = 3) -> None:
+        super().__init__(
+            f"group DM requires at least {minimum} participants",
+            params={"min": minimum},
+        )
+
+
+class DmTooLongError(CodedError, ValueError):
+    """A message over the per-message length cap (``params.max``)."""
+
+    status = 422
+    code = "DM_TOO_LONG"
+
+    def __init__(self, maximum: int) -> None:
+        super().__init__(
+            f"message content exceeds {maximum} chars",
+            params={"max": maximum},
+        )
