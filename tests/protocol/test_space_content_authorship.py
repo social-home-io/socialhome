@@ -363,6 +363,13 @@ async def _deliver(app, event_type, payload, *, sender) -> None:
 
 _CAL = {"calendar_id": SP, "start": _OCC, "end": _END}
 
+#: Zone display data no household may store, whoever sends it (§23.8.7).
+_HOSTILE_ZONE_DATA: list[tuple[str, dict]] = [
+    ("a 10 KB name", {"name": "x" * 10_240}),
+    ("a control-character name", {"name": "Ho\x00me<img src=x>"}),
+    ("a CSS-injection colour", {"color": "red;background:url(x)"}),
+]
+
 #: ``(event_type, label, payload, allowed senders, refused senders)``.
 #: Every allowed sender is a positive control run on a fresh database.
 CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ...]]] = [
@@ -886,6 +893,25 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         {"zone_id": "zone-a"},
         (ADMIN, HOST),
         (AUTHOR, OTHER, MOD),
+    ),
+    # Zone display data is validated like the local API: even the settings
+    # authority can't plant a hostile name or colour on other households.
+    *(
+        (
+            FET.SPACE_ZONE_UPSERTED,
+            f"zone with {label}",
+            {
+                "zone_id": "zone-a",
+                "name": "Moved",
+                "latitude": 1.0,
+                "longitude": 1.0,
+                "radius_m": 100,
+                **over,
+            },
+            (),
+            (ADMIN, HOST),
+        )
+        for label, over in _HOSTILE_ZONE_DATA
     ),
     # ── Timetables: moderators only, recorded as a moderator of the sender ──
     (
@@ -1917,6 +1943,26 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         ],
         (ADMIN, HOST),
         (AUTHOR, OTHER),
+    ),
+    *(
+        (
+            "space_zones",
+            f"zone with {label}",
+            [
+                {
+                    "id": "zone-a",
+                    "name": "Moved",
+                    "latitude": 2.0,
+                    "longitude": 2.0,
+                    "radius_m": 50,
+                    "created_by": "u-adm",
+                    **over,
+                }
+            ],
+            (),
+            (ADMIN, HOST),
+        )
+        for label, over in _HOSTILE_ZONE_DATA
     ),
     (
         "bazaar",

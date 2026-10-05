@@ -3516,6 +3516,53 @@ async def test_zone_upserted_malformed_or_missing_drops(zone_handlers):
     assert zones.upserted == [] and zones.deleted == []
 
 
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"name": "x" * 10_240},
+        {"name": "Ho\x00me<img src=x>"},
+        {"name": "   "},
+        {"color": "red;background:url(x)"},
+        {"color": "#3b82f6\n"},
+    ],
+    ids=["10kb-name", "control-char-name", "blank-name", "css-color", "nl-color"],
+)
+async def test_zone_upserted_invalid_display_data_dropped(zone_handlers, caplog, over):
+    """A space admin household can't plant an oversized / control-char
+    name or a CSS-injection colour: the event is dropped with a WARNING
+    naming the space and sender — never the (hostile) name itself."""
+    handlers, zones = zone_handlers
+    with caplog.at_level("WARNING"):
+        await handlers._on_zone_upserted(
+            _event(
+                FederationEventType.SPACE_ZONE_UPSERTED,
+                dict(_ZONE, **over),
+                space_id="sp-1",
+                from_instance="peer-x",
+            )
+        )
+    assert zones.upserted == []
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "drop must be logged at WARNING"
+    text = " ".join(r.getMessage() for r in warnings)
+    assert "sp-1" in text and "peer-x" in text
+    assert "<img" not in text and "xxxxxxxx" not in text
+    assert "background" not in text
+
+
+async def test_zone_upserted_normalises_valid_display_data(zone_handlers):
+    handlers, zones = zone_handlers
+    await handlers._on_zone_upserted(
+        _event(
+            FederationEventType.SPACE_ZONE_UPSERTED,
+            dict(_ZONE, name="  Home  ", color="#3B82F6"),
+            space_id="sp-1",
+        )
+    )
+    assert zones.upserted[0].name == "Home"
+    assert zones.upserted[0].color == "#3b82f6"
+
+
 async def test_zone_cross_space_is_refused(zone_handlers, caplog):
     handlers, zones = zone_handlers
     zones.rows.claim("z-1", "sp-b")

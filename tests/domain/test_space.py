@@ -28,6 +28,9 @@ from socialhome.domain.space import (
     normalize_min_age,
     normalize_retention_exempt_types,
     restricted_access_changes,
+    MAX_ZONE_NAME_LENGTH,
+    validate_zone_color,
+    validate_zone_name,
 )
 from socialhome.domain.post import PostType
 
@@ -615,3 +618,70 @@ def test_owner_seat_from_roster_takes_only_the_hosts_own_owner_entry():
     assert owner_seat_from_roster(roster, "") is None
     assert owner_seat_from_roster(None, "host") is None
     assert owner_seat_from_roster(["junk", {"role": "owner"}], "host") is None
+
+
+# ─── Zone display-data validation (§23.8.7) ──────────────────────────────
+
+
+def test_validate_zone_name_strips_and_accepts_unicode():
+    assert validate_zone_name("  Grandma's 🏡 Zürich  ") == "Grandma's 🏡 Zürich"
+    # ZWJ emoji sequences are format characters, not control characters.
+    assert validate_zone_name("👨\u200d👩\u200d👧") == "👨\u200d👩\u200d👧"
+
+
+def test_validate_zone_name_accepts_exactly_the_cap():
+    assert validate_zone_name("x" * MAX_ZONE_NAME_LENGTH) == "x" * 64
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "   ",
+        None,
+        42,
+        "x" * (MAX_ZONE_NAME_LENGTH + 1),
+        "x" * 10_240,
+        "Home\x00",
+        "Ho\nme",
+        "Ho\tme",
+        "Home\x1b[31m",
+        "Home\x7f",
+        "Ho\x85me",
+        "Ho\u2028me",
+        "Ho\u2029me",
+    ],
+)
+def test_validate_zone_name_rejects(bad):
+    with pytest.raises(ValueError, match="zone name"):
+        validate_zone_name(bad)
+
+
+def test_validate_zone_name_error_never_echoes_the_name():
+    with pytest.raises(ValueError) as exc:
+        validate_zone_name("secret\x00<img src=x>")
+    assert "secret" not in str(exc.value)
+
+
+def test_validate_zone_color_normalises_hex_and_passes_none():
+    assert validate_zone_color("#3B82F6") == "#3b82f6"
+    assert validate_zone_color(None) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "red;background:url(x)",
+        "#3b82f6;background:url(x)",
+        "#3b82f6\n",
+        "#fff",
+        "3b82f6",
+        "pink",
+        "",
+        123,
+        ["#3b82f6"],
+    ],
+)
+def test_validate_zone_color_rejects(bad):
+    with pytest.raises(ValueError, match="color"):
+        validate_zone_color(bad)

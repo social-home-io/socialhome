@@ -17,6 +17,8 @@ Defines:
 from __future__ import annotations
 
 import copy
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -1514,6 +1516,54 @@ class SpaceMember:
     # Per-space picture hash (bytes live in
     # ``space_member_profile_pictures``). NULL means inherit household.
     picture_hash: str | None = None
+
+
+#: §23.8.7: a zone name is a short map label — longer than this is not
+#: a label, and from a peer it's a payload-size abuse.
+MAX_ZONE_NAME_LENGTH = 64
+
+#: Unicode categories a zone name may not contain: C0/C1 controls
+#: (``Cc`` — NUL, ESC, newline, tab, DEL, NEL…) and the line / paragraph
+#: separators (``Zl`` / ``Zp``). Format characters (``Cf``) stay allowed
+#: so ZWJ emoji sequences keep working.
+_ZONE_NAME_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+
+#: ``#RRGGBB`` only — the colour reaches inline styles and SVG attributes
+#: on every member's map, so nothing else may get through.
+_ZONE_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def validate_zone_name(name: object) -> str:
+    """Return the stripped zone name, or raise :class:`ValueError`.
+
+    Applied to every zone write — the local API, ``SPACE_ZONE_UPSERTED``
+    and the space-sync ``space_zones`` resource — so a peer can't store
+    what a local admin couldn't. The error never echoes the name.
+    """
+    if not isinstance(name, str):
+        raise ValueError("zone name must be a string")
+    cleaned = name.strip()
+    if not cleaned:
+        raise ValueError("zone name must not be empty")
+    if len(cleaned) > MAX_ZONE_NAME_LENGTH:
+        raise ValueError(
+            f"zone name must be {MAX_ZONE_NAME_LENGTH} characters or fewer",
+        )
+    if any(
+        unicodedata.category(ch) in _ZONE_NAME_FORBIDDEN_CATEGORIES for ch in cleaned
+    ):
+        raise ValueError("zone name must not contain control characters")
+    return cleaned
+
+
+def validate_zone_color(color: object) -> str | None:
+    """Return the lower-cased ``#RRGGBB`` colour (``None`` passes through),
+    or raise :class:`ValueError`."""
+    if color is None:
+        return None
+    if not isinstance(color, str) or not _ZONE_COLOR_RE.fullmatch(color):
+        raise ValueError("color must be a #RRGGBB hex string or None")
+    return color.lower()
 
 
 @dataclass(slots=True, frozen=True)

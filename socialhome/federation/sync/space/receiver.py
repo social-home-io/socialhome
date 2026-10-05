@@ -44,7 +44,13 @@ from ....domain.post import (
     PostType,
 )
 from ....domain.gallery import GalleryAlbum, GalleryItem
-from ....domain.space import ContentAction, SpaceMember, SpaceZone
+from ....domain.space import (
+    ContentAction,
+    SpaceMember,
+    SpaceZone,
+    validate_zone_color,
+    validate_zone_name,
+)
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
 from ....domain.events import PageDeleted, TaskDeleted, TaskListDeleted, TimetableSaved
@@ -709,7 +715,7 @@ class SpaceSyncReceiver:
                 )
                 return
             for r in records:
-                zone = _zone_from_record(r, space_id)
+                zone = _zone_from_record(r, space_id, provider=provider)
                 if zone is not None and not await self._zone_repo.upsert(
                     zone, space_id=space_id
                 ):
@@ -1824,33 +1830,50 @@ def _sticky_from_record(r: dict[str, Any], space_id: str) -> Sticky | None:
     )
 
 
-def _zone_from_record(r: dict[str, Any], space_id: str) -> SpaceZone | None:
+def _zone_from_record(
+    r: dict[str, Any], space_id: str, *, provider: str
+) -> SpaceZone | None:
     """Reconstruct a :class:`SpaceZone` from an exporter chunk record.
 
     Lenient: skip the row rather than raising if a malformed record
     leaks into the chunk. The federation layer has already verified
     the envelope signature, so the worst case is a peer with a buggy
     catalogue — log and drop the offending row, keep the others.
+
+    Name and colour pass the same validation as the local API
+    (§23.8.7) — a refused row is a WARNING naming the space and the
+    provider, never the name.
     """
     zone_id = r.get("id")
-    name = r.get("name")
-    if not zone_id or not name:
+    if not zone_id or not r.get("name"):
         return None
     try:
         latitude = float(r["latitude"])
         longitude = float(r["longitude"])
         radius_m = int(r["radius_m"])
     except KeyError, TypeError, ValueError:
-        log.debug("zone record missing coords/radius: %r", r)
+        log.debug("zone record %s missing coords/radius", str(zone_id)[:64])
+        return None
+    try:
+        name = validate_zone_name(r.get("name"))
+        color = validate_zone_color(r.get("color"))
+    except ValueError as exc:
+        log.warning(
+            "space sync from %s: zone %s in space %s refused — %s",
+            provider,
+            str(zone_id)[:64],
+            space_id,
+            exc,
+        )
         return None
     return SpaceZone(
         id=str(zone_id),
         space_id=space_id or str(r.get("space_id") or ""),
-        name=str(name),
+        name=name,
         latitude=latitude,
         longitude=longitude,
         radius_m=radius_m,
-        color=r.get("color"),
+        color=color,
         created_by=str(r.get("created_by") or ""),
         created_at=str(r.get("created_at") or ""),
         updated_at=str(r.get("updated_at") or ""),

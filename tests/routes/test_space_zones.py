@@ -8,6 +8,8 @@ shape all stay covered.
 
 from __future__ import annotations
 
+import pytest
+
 from .conftest import _auth
 
 
@@ -78,6 +80,34 @@ async def test_create_zone_invalid_radius_422(client):
         headers=_auth(client._tok),
     )
     assert r.status == 422
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"name": "Office\x00"},
+        {"name": "Off\u2028ice"},
+        {"name": "x" * 10_240},
+        {"color": "red;background:url(x)"},
+    ],
+)
+async def test_create_zone_hostile_name_or_color_422(client, over):
+    space_id = await _create_space(client)
+    body = {
+        "name": "Office",
+        "latitude": 47.0,
+        "longitude": 8.0,
+        "radius_m": 150,
+        **over,
+    }
+    r = await client.post(
+        f"/api/spaces/{space_id}/zones",
+        json=body,
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422, await r.text()
+    r = await client.get(f"/api/spaces/{space_id}/zones", headers=_auth(client._tok))
+    assert (await r.json()) == {"zones": []}
 
 
 async def test_create_zone_duplicate_name_409(client):

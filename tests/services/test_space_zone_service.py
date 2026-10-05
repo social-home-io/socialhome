@@ -243,6 +243,32 @@ async def test_create_zone_empty_name_rejected(env):
         )
 
 
+@pytest.mark.parametrize("name", ["Ho\x00me", "Ho\nme", "x" * 10_240])
+async def test_create_zone_control_char_or_oversized_name_rejected(env, name):
+    with pytest.raises(ValueError, match="zone name"):
+        await env.svc.create_zone(
+            "sp_test",
+            "admin",
+            name=name,
+            latitude=0.0,
+            longitude=0.0,
+            radius_m=200,
+        )
+
+
+async def test_create_zone_css_injection_color_rejected(env):
+    with pytest.raises(ValueError, match="color"):
+        await env.svc.create_zone(
+            "sp_test",
+            "admin",
+            name="Pink",
+            latitude=0.0,
+            longitude=0.0,
+            radius_m=200,
+            color="red;background:url(x)",
+        )
+
+
 async def test_create_zone_duplicate_name_rejected(env):
     await env.svc.create_zone(
         "sp_test",

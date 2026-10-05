@@ -93,7 +93,13 @@ from ...domain.post import (
     BazaarStatus,
     Post,
 )
-from ...domain.space import MODERATION_BLOCK_KEY, ContentAction, SpaceZone
+from ...domain.space import (
+    MODERATION_BLOCK_KEY,
+    ContentAction,
+    SpaceZone,
+    validate_zone_color,
+    validate_zone_name,
+)
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
@@ -2209,9 +2215,22 @@ class SpaceContentInboundHandlers:
             return
         p = event.payload
         zone_id = str(p.get("zone_id") or p.get("id") or "")
-        name = str(p.get("name") or "")
-        if not zone_id or not name:
+        if not zone_id or not p.get("name"):
             log.debug("SPACE_ZONE_UPSERTED missing required field")
+            return
+        # Same display-data rules as the local API (§23.8.7): the name and
+        # colour reach every member's map. Never log the name itself.
+        try:
+            name = validate_zone_name(p.get("name"))
+            color = validate_zone_color(p.get("color"))
+        except ValueError as exc:
+            log.warning(
+                "SPACE_ZONE_UPSERTED from %s: zone %s in space %s refused — %s",
+                event.from_instance,
+                zone_id[:64],
+                space_id,
+                exc,
+            )
             return
         try:
             latitude = float(p["latitude"])
@@ -2219,8 +2238,8 @@ class SpaceContentInboundHandlers:
             radius_m = int(p["radius_m"])
         except KeyError, TypeError, ValueError:
             log.debug(
-                "SPACE_ZONE_UPSERTED malformed coords/radius: %r",
-                p,
+                "SPACE_ZONE_UPSERTED malformed coords/radius for zone %s",
+                zone_id[:64],
             )
             return
         if not await self._zone_write_allowed(event, space_id, zone_id):
@@ -2246,7 +2265,7 @@ class SpaceContentInboundHandlers:
             latitude=latitude,
             longitude=longitude,
             radius_m=radius_m,
-            color=p.get("color"),
+            color=color,
             created_by=created_by,
             created_at=str(
                 p.get("created_at") or p.get("updated_at") or "",

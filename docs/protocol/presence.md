@@ -112,6 +112,16 @@ A remote member instance joining a space mid-life picks up the full
 catalogue via the chunked `SPACE_SYNC_BEGIN/CHUNK` flow — the
 `space_zones` resource rides between `polls` and the sentinel.
 
+**Validation.** Every zone write — local REST, `SPACE_ZONE_UPSERTED`
+and the `space_zones` sync resource — passes the same checks
+(`domain/space.py:validate_zone_name` / `validate_zone_color`):
+`name` is stripped, non-empty, at most 64 characters and free of
+control characters (Unicode `Cc`, `Zl`, `Zp`); `color` is `#RRGGBB` or
+`null`, stored lower-cased. An inbound event or sync record that fails
+is dropped (the rest of a sync chunk still applies) with a WARNING
+naming the sender and space — never the name. HTML escaping is the
+client's job at render (Leaflet popups / tooltips take HTML strings).
+
 Local admin CRUD also fires a `space_zone_changed` WS frame to space
 members on this instance so the admin UI redraws without polling.
 The frame shape is `{type: "space_zone_changed", data: {space_id,
