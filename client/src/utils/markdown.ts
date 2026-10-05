@@ -5,9 +5,14 @@
  *   raw markdown → wikilink pre-pass → marked (GFM + breaks) → DOMPurify
  *
  * DOMPurify is configured with a narrow allow-list so a hostile page body
- * cannot sneak in `<script>`, `<iframe>`, style/onclick attrs, or
- * `javascript:` URLs. Images + links resolve only `http:` / `https:` /
- * `mailto:`; anything else is stripped before rendering.
+ * (Pages and space about text arrive over federation) cannot sneak in
+ * `<script>`, `<iframe>`, a phishing `<form>`/`<button>`/`<select>`,
+ * autoplaying `<video>`/`<audio>`, `class`/style/onclick attrs, or
+ * `javascript:` URLs. Never pass ``USE_PROFILES`` here — DOMPurify then
+ * replaces ``ALLOWED_TAGS``/``ALLOWED_ATTR`` with its whole HTML profile.
+ * Images + links resolve only `http:` / `https:` / `mailto:` / local
+ * (`/…`, `#…`, `api/…`); anything else is stripped before rendering.
+ * The one `<input>` kept is the GFM task-list checkbox, forced disabled.
  *
  * Wikilinks: `[[Page Title]]` rewrites to an anchor pointing at
  * `/pages?title=Page+Title` — the Pages router reads the `title` query
@@ -60,15 +65,36 @@ const ALLOWED_TAGS = [
   'blockquote',
   'img',
   'table', 'thead', 'tbody', 'tr', 'th', 'td',
-  'span', 'input',  // input for GFM checklist items (<input type=checkbox>)
+  'span', 'input',  // input for GFM checklist items — see _onlyTaskBoxes
 ]
 
 const ALLOWED_ATTR = [
   'href', 'title', 'alt', 'src', 'width', 'height',
   'colspan', 'rowspan', 'align',
   'type', 'checked', 'disabled',
-  'class', 'id',
+  'id',
 ]
+
+// DOMPurify tests EVERY allowed attribute value that is not in its
+// URI-safe set (``type``, ``align``, ``width``…) against this regex, so it
+// must admit plain scheme-less values too. Allowed: ``http:`` / ``https:``
+// / ``mailto:``, or anything without a URL scheme — a leading non-letter
+// (``/feed``, ``#x``, ``100``) or a word that ends before any ``:``
+// (``api/media/…``, ``checkbox``). ``javascript:``, ``data:``, ``blob:``
+// and ``httpsx:`` all have a scheme that is not on the list.
+const ALLOWED_URI = /^(?:https?:|mailto:|[^a-z]|[a-z][a-z0-9+.-]*(?:[^a-z0-9+.\-:]|$))/i
+
+/** Keep only ``<input type=checkbox>`` (GFM task lists) and pin it
+ *  disabled; any other input type is removed outright. */
+function _onlyTaskBoxes(root: DocumentFragment): void {
+  for (const input of Array.from(root.querySelectorAll('input'))) {
+    if ((input.getAttribute('type') || '').toLowerCase() !== 'checkbox') {
+      input.remove()
+      continue
+    }
+    input.setAttribute('disabled', '')
+  }
+}
 
 /** Pre-pass that converts `[[Page Title]]` into plain anchor markdown. */
 function replaceWikilinks(src: string): string {
@@ -84,17 +110,20 @@ function replaceWikilinks(src: string): string {
 export function renderMarkdown(src: string): string {
   const withLinks = replaceWikilinks(src || '')
   const rawHtml = marked.parse(withLinks, { async: false }) as string
-  return DOMPurify.sanitize(rawHtml, {
+  const frag = DOMPurify.sanitize(rawHtml, {
     ALLOWED_TAGS,
     ALLOWED_ATTR,
-    // ``api/`` is permitted after the ``uponSanitizeAttribute`` hook
-    // above rewrites ``/api/...`` → ``api/...`` for ingress-correctness;
-    // without it DOMPurify rejects the relative URL and drops the img.
-    ALLOWED_URI_REGEXP: /^(?:https?|mailto|\/|#|api\/)/i,
+    // ``api/…`` (scheme-less) must stay valid: the ``uponSanitizeAttribute``
+    // hook above rewrites ``/api/...`` → ``api/...`` for ingress.
+    ALLOWED_URI_REGEXP: ALLOWED_URI,
     FORBID_TAGS:      ['style', 'script', 'iframe', 'object', 'embed'],
     FORBID_ATTR:      ['style', 'onerror', 'onload', 'onclick'],
-    USE_PROFILES:     { html: true },
+    RETURN_DOM_FRAGMENT: true,
   })
+  _onlyTaskBoxes(frag)
+  const out = document.createElement('div')
+  out.appendChild(frag)
+  return out.innerHTML
 }
 
 /** Auto-generate a flat table of contents from ``##`` / ``###`` headings.
