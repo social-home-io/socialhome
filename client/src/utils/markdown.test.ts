@@ -143,9 +143,9 @@ describe('renderMarkdown', () => {
       // need it (uploads become api/media/…), and a peer-supplied data:
       // SVG / tracking blob has no place in a federated body.
       const d = host(renderMarkdown(`![md](${bad.trim()})\n\n<img src="${bad}" alt="raw">`))
-      const imgs = Array.from(d.querySelectorAll('img'))
-      expect(imgs.length).toBe(2)
-      for (const img of imgs) expect(img.hasAttribute('src')).toBe(false)
+      expect(d.querySelectorAll('img').length).toBe(0)
+      expect(d.querySelector('a')).toBeNull()
+      expect(d.innerHTML).not.toMatch(/data:/i)
     })
 
     it.each([
@@ -161,7 +161,8 @@ describe('renderMarkdown', () => {
         `<a href="${bad}">raw</a>\n\n<img src="${bad}" alt="i">`,
       ))
       expect(d.querySelector('a')?.hasAttribute('href')).toBe(false)
-      expect(d.querySelector('img')?.hasAttribute('src')).toBe(false)
+      expect(d.querySelector('img')).toBeNull()
+      expect(d.innerHTML).not.toContain('evil.example')
     })
 
     it('drops a protocol-relative markdown link', () => {
@@ -231,29 +232,6 @@ describe('renderMarkdown — no Referer to third parties', () => {
     return div
   }
 
-  it('external images carry referrerpolicy=no-referrer and loading=lazy', () => {
-    const img = parse(renderMarkdown('![cat](https://img.example.net/cat.png)'))
-      .querySelector('img')!
-    expect(img.getAttribute('src')).toBe('https://img.example.net/cat.png')
-    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer')
-    expect(img.getAttribute('loading')).toBe('lazy')
-  })
-
-  it('raw <img> HTML gets the same attributes', () => {
-    const img = parse(renderMarkdown('<img src="https://x.example/a.png" alt="a">'))
-      .querySelector('img')!
-    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer')
-    expect(img.getAttribute('loading')).toBe('lazy')
-  })
-
-  it('an author cannot override the referrer policy or loading', () => {
-    const img = parse(renderMarkdown(
-      '<img src="https://x.example/a.png" referrerpolicy="unsafe-url" loading="eager">',
-    )).querySelector('img')!
-    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer')
-    expect(img.getAttribute('loading')).toBe('lazy')
-  })
-
   it('local uploads get the attributes too (ingress-relative src kept)', () => {
     const img = parse(renderMarkdown('![p](/api/media/abc.webp)')).querySelector('img')!
     expect(img.getAttribute('src')).toBe('api/media/abc.webp')
@@ -281,5 +259,91 @@ describe('renderMarkdown — no Referer to third parties', () => {
     const a = parse(renderMarkdown('[[Home]]')).querySelector('a')!
     expect(a.getAttribute('href')).toBe('/pages?title=Home')
     expect(a.hasAttribute('rel')).toBe(false)
+  })
+})
+
+describe('renderMarkdown — no third-party image fetches', () => {
+  // Owner decision 2026-10-05: an external picture in user content would
+  // load from every viewer's browser (a tracking pixel — IP + view time
+  // to the image host). Only uploaded (local) pictures render; anything
+  // else becomes a plain link the reader may choose to open.
+  const parse = (html: string): HTMLElement => {
+    const div = document.createElement('div')
+    div.innerHTML = html
+    return div
+  }
+  const externalSrcs = (d: HTMLElement): string[] =>
+    Array.from(d.querySelectorAll('img'))
+      .map((i) => i.getAttribute('src') ?? '')
+      .filter((s) => !s.startsWith('api/'))
+
+  it('an external markdown image becomes a link labelled with its alt', () => {
+    const d = parse(renderMarkdown('![A cat](https://img.example.net/cat.png)'))
+    expect(d.querySelector('img')).toBeNull()
+    const a = d.querySelector('a')!
+    expect(a.getAttribute('href')).toBe('https://img.example.net/cat.png')
+    expect(a.textContent).toBe('A cat')
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(a.getAttribute('target')).toBe('_blank')
+  })
+
+  it('an alt-less external image is labelled with its host', () => {
+    const d = parse(renderMarkdown('![](http://pix.example.org:8080/t.gif?u=1)'))
+    expect(d.querySelector('img')).toBeNull()
+    const a = d.querySelector('a')!
+    expect(a.getAttribute('href')).toBe('http://pix.example.org:8080/t.gif?u=1')
+    expect(a.textContent).toBe('pix.example.org')
+  })
+
+  it('raw <img> HTML with an external src becomes a link too', () => {
+    const d = parse(renderMarkdown(
+      '<img src="https://x.example/a.png" alt="a" referrerpolicy="unsafe-url" loading="eager">',
+    ))
+    expect(externalSrcs(d)).toEqual([])
+    expect(d.querySelector('img')).toBeNull()
+    expect(d.querySelector('a')?.getAttribute('href')).toBe('https://x.example/a.png')
+  })
+
+  it('an external image inside a link becomes text, not a nested link', () => {
+    const d = parse(renderMarkdown(
+      '[![logo](https://x.example/logo.png)](https://x.example/)',
+    ))
+    expect(d.querySelector('img')).toBeNull()
+    const links = Array.from(d.querySelectorAll('a'))
+    expect(links.length).toBe(1)
+    expect(links[0].getAttribute('href')).toBe('https://x.example/')
+    expect(links[0].textContent).toBe('logo')
+  })
+
+  it.each([
+    ['javascript:alert(1)'],
+    ['data:image/png;base64,iVBORw0KGgo='],
+    ['blob:https://x/y'],
+    ['ftp://x.example/a.png'],
+    ['//x.example/a.png'],
+    ['pic.png'],
+  ])('drops a non-http(s), non-local image source %s', (bad) => {
+    const d = parse(renderMarkdown(`![alt](${bad})\n\n<img src="${bad}">`))
+    expect(d.querySelector('img')).toBeNull()
+    expect(d.querySelector('a')).toBeNull()
+    expect(d.innerHTML).not.toContain(bad)
+    expect(d.textContent).toContain('alt')
+  })
+
+  it('a hostile alt cannot inject markup into the link label', () => {
+    const d = parse(renderMarkdown(
+      '<img src="https://x.example/a.png" alt="<b onclick=1>x</b>">',
+    ))
+    expect(d.querySelector('b')).toBeNull()
+    expect(d.querySelector('a')?.textContent).toBe('<b onclick=1>x</b>')
+  })
+
+  it('a mixed body keeps the uploaded picture and links the external one', () => {
+    const d = parse(renderMarkdown(
+      '![up](/api/media/abc.webp)\n\n![ext](https://img.example.net/x.png)',
+    ))
+    const imgs = Array.from(d.querySelectorAll('img'))
+    expect(imgs.map((i) => i.getAttribute('src'))).toEqual(['api/media/abc.webp'])
+    expect(d.querySelector('a')?.getAttribute('href')).toBe('https://img.example.net/x.png')
   })
 })

@@ -55,10 +55,19 @@ export function closeLightbox(): void { lightbox.value = null }
  *  The lightbox always shows server-signed URLs (they have a 1h TTL);
  *  pasting that signed form into a saved page body would expire fast.
  *  We copy the canonical path instead — the page route re-signs on
- *  every read. */
+ *  every read. An absolute same-origin URL (``img.currentSrc``, maybe
+ *  under the ingress prefix) is reduced to its ``/api/…`` path: pasted
+ *  absolute, it would be an external picture to every other household,
+ *  which the markdown renderer shows as a link, never fetches. */
 function canonicalMediaUrl(url: string): string {
   const q = url.indexOf('?')
-  return q >= 0 ? url.slice(0, q) : url
+  let path = q >= 0 ? url.slice(0, q) : url
+  if (/^https?:/i.test(path) && path.startsWith(`${location.origin}/`)) {
+    path = path.slice(location.origin.length)
+    const api = path.lastIndexOf('/api/')
+    if (api > 0) path = path.slice(api)
+  }
+  return path
 }
 
 

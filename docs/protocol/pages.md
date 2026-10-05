@@ -307,6 +307,11 @@ A page `cover_image_url` is stored as received (it is part of the
 version identity above, so host and members must keep the same bytes),
 but the API serves it as `null` unless it is a local media reference
 (`api/media/<name>`) — a third-party cover never reaches an `<img>`.
+The page *body* is stored as received too; the reader's markdown renderer
+shows only local pictures (`api/…`) and turns an external image into a
+plain link, so opening a page never fetches from a host its author picked
+(`client/src/utils/markdown.ts`, `docs/principles.md` → "No third-party
+fetches from user content").
 
 ## Mixed fleets
 

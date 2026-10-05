@@ -113,11 +113,24 @@ def test_spa_csp_allows_google_fonts():
 
 def test_spa_csp_media_and_previews():
     d = _parse(build_spa_csp())
-    assert {"'self'", "data:", "blob:"} <= set(d["img-src"])
+    assert d["img-src"] == ["'self'", "data:", "blob:"]
     assert d["media-src"] == ["'self'", "blob:"]
     assert d["connect-src"] == ["'self'"]
     assert d["worker-src"] == ["'self'"]
     assert d["frame-src"] == ["'self'"]
+
+
+def test_spa_csp_loads_no_third_party_images():
+    """Owner decision 2026-10-05: an external picture in user content is a
+    tracking pixel (every viewer's IP + view time to the image host), so
+    the SPA renders it as a link and the CSP refuses to load it at all —
+    no scheme or host source in ``img-src`` besides ``'self'``."""
+    d = _parse(build_spa_csp())
+    for src in d["img-src"]:
+        assert src in {"'self'", "data:", "blob:"}, src
+    assert "https:" not in d["img-src"]
+    assert "http:" not in d["img-src"]
+    assert "*" not in d["img-src"]
 
 
 def test_tile_template_is_relative_so_self_covers_it():

@@ -62,7 +62,7 @@ vi.mock('@/components/TabHeader', () => ({
   ),
 }))
 
-import AppsPage, { safeIconSrc } from './AppsPage'
+import AppsPage from './AppsPage'
 
 function makeApp(over: Partial<any> = {}) {
   return {
@@ -82,24 +82,6 @@ beforeEach(() => {
   appsError.value = null; catalogError.value = null
   householdHasProtectedMinor.value = true
   currentUser.value = { is_admin: true }
-})
-
-describe('safeIconSrc', () => {
-  it('returns data: URIs unchanged', () => {
-    const d = 'data:image/svg+xml,%3Csvg%3E%3C/svg%3E'
-    expect(safeIconSrc(d)).toBe(d)
-  })
-  it('returns absolute http(s) URLs unchanged', () => {
-    expect(safeIconSrc('https://example.com/icon.png')).toBe('https://example.com/icon.png')
-  })
-  it('rejects relative paths', () => {
-    expect(safeIconSrc('icon.svg')).toBeNull()
-    expect(safeIconSrc('/api/apps/chess/bundle/icon.svg')).toBeNull()
-  })
-  it('rejects empty / null / undefined', () => {
-    expect(safeIconSrc(null)).toBeNull()
-    expect(safeIconSrc('')).toBeNull()
-  })
 })
 
 describe('AppsPage tabs (admin)', () => {
@@ -124,6 +106,23 @@ describe('AppsPage tabs (admin)', () => {
     expect(queryByText('Check for updates')).toBeTruthy()
     fireEvent.click(getByRole('tab', { name: 'Catalog' }))
     expect(queryByText('Check for updates')).toBeNull()
+  })
+})
+
+describe('AppsPage icons never load from a remote host', () => {
+  it('renders the placeholder for an https icon and the data: icon inline', () => {
+    installedApps.value = [makeApp({ icon: 'https://tracker.example/i.png' })]
+    catalog.value = [
+      { app_id: 'notes', name: 'Notes', latest_version: '2.0.0', description: 'd',
+        icon_url: 'https://tracker.example/c.png', capabilities: [] },
+      { app_id: 'go', name: 'Go', latest_version: '1.0.0', description: 'd',
+        icon_url: 'data:image/svg+xml,%3Csvg%3E%3C/svg%3E', capabilities: [] },
+    ]
+    const { container, getByRole } = render(<AppsPage />)
+    expect(container.querySelector('img')).toBeNull()
+    fireEvent.click(getByRole('tab', { name: 'Catalog' }))
+    const srcs = Array.from(container.querySelectorAll('img')).map((i) => i.getAttribute('src'))
+    expect(srcs).toEqual(['data:image/svg+xml,%3Csvg%3E%3C/svg%3E'])
   })
 })
 

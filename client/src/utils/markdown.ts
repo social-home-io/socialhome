@@ -10,10 +10,14 @@
  * autoplaying `<video>`/`<audio>`, `class`/style/onclick attrs, or
  * `javascript:` URLs. Never pass ``USE_PROFILES`` here — DOMPurify then
  * replaces ``ALLOWED_TAGS``/``ALLOWED_ATTR`` with its whole HTML profile.
- * Images + links resolve only `http:` / `https:` / `mailto:` / local
+ * Links resolve only `http:` / `https:` / `mailto:` / local
  * (`/…`, `#…`, `api/…`); anything else — including `data:` (which
  * DOMPurify would otherwise allow on `<img>`) and protocol-relative
  * `//host` / `\\host` — is stripped before rendering.
+ * Pictures render only from this household's own `api/…` paths
+ * (uploads): an external `http(s)` image becomes a plain link, any other
+ * source is dropped — viewing a body never fetches from a third party
+ * (`_onlyLocalImages`).
  * The one `<input>` kept is the GFM task-list checkbox, forced disabled.
  *
  * Wikilinks: `[[Page Title]]` rewrites to an anchor pointing at
@@ -80,14 +84,16 @@ DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
   }
 })
 
-// Pages and space "about" text arrive over federation and may embed
-// third-party images / links. Under the server's
+// Pages and space "about" text arrive over federation and may link to
+// third parties. Under the server's
 // ``Referrer-Policy: strict-origin-when-cross-origin`` the browser would
-// still send this household's origin to that third party — on image load
-// (no click needed) and on link navigation. Pin every ``<img>`` to
-// ``referrerpolicy="no-referrer"`` + ``loading="lazy"`` and every link that
-// is not an in-app path (``/…`` / ``#…``, read the way the browser reads
-// it) to ``rel="noopener noreferrer"``. Runs AFTER the
+// still send this household's origin to that third party on link
+// navigation, so every link that is not an in-app path (``/…`` / ``#…``,
+// read the way the browser reads it) gets ``rel="noopener noreferrer"``.
+// Only local pictures survive to render (``_onlyLocalImages``); they
+// still get ``referrerpolicy="no-referrer"`` + ``loading="lazy"`` — moot
+// for a same-origin fetch today, kept so a future loosening of the
+// local-only rule cannot silently start sending Referers. Runs AFTER the
 // attribute allow-list, so an author can't supply (or override) any of
 // these — ``rel`` / ``referrerpolicy`` / ``loading`` are not in
 // ``ALLOWED_ATTR`` and are dropped from the input first.
@@ -144,6 +150,46 @@ function _onlyTaskBoxes(root: DocumentFragment): void {
   }
 }
 
+/** A local picture: an ``api/…`` path on this household's own origin
+ *  (uploads are ``api/media/…``; the sanitize hook has already turned
+ *  ``/api/…`` into ``api/…`` for ingress). */
+const _LOCAL_IMAGE = /^api\//
+
+/** Replace every non-local ``<img>`` so rendering a body never makes the
+ *  viewer's browser fetch from a host the author picked (owner decision
+ *  2026-10-05: an external picture is a tracking pixel — it leaks every
+ *  viewer's IP and view time to the image host).
+ *
+ *  * ``http(s)`` source → a plain link to it, labelled with the alt text
+ *    (or the host when there is none). Inside an existing link the label
+ *    becomes text instead, so links never nest.
+ *  * anything else (``data:``, ``javascript:``, a relative path that is
+ *    not an upload, a source the sanitizer already stripped) → the alt
+ *    text alone. */
+function _onlyLocalImages(root: DocumentFragment): void {
+  for (const img of Array.from(root.querySelectorAll('img'))) {
+    const src = (img.getAttribute('src') ?? '')
+      .replace(_URL_STRIPPED, '').replace(_URL_EDGE, '')
+    if (_LOCAL_IMAGE.test(src)) continue
+    const alt = (img.getAttribute('alt') ?? '').trim()
+    let url: URL | null = null
+    if (/^https?:/i.test(src)) {
+      try { url = new URL(src) } catch { url = null }
+    }
+    const doc = img.ownerDocument
+    if (url === null || img.closest('a') !== null) {
+      img.replaceWith(doc.createTextNode(alt || (url?.hostname ?? '')))
+      continue
+    }
+    const a = doc.createElement('a')
+    a.setAttribute('href', src)
+    a.setAttribute('rel', 'noopener noreferrer')
+    a.setAttribute('target', '_blank')
+    a.textContent = alt || url.hostname
+    img.replaceWith(a)
+  }
+}
+
 /** Pre-pass that converts `[[Page Title]]` into plain anchor markdown. */
 function replaceWikilinks(src: string): string {
   return src.replace(WIKILINK_RE, (_m, title) => {
@@ -169,6 +215,7 @@ export function renderMarkdown(src: string): string {
     RETURN_DOM_FRAGMENT: true,
   })
   _onlyTaskBoxes(frag)
+  _onlyLocalImages(frag)
   const out = document.createElement('div')
   out.appendChild(frag)
   return out.innerHTML

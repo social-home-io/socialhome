@@ -384,6 +384,8 @@ async def test_standalone_shell_carries_csp(spa_client, path):
     assert d["base-uri"] == ["'self'"]
     assert d["form-action"] == ["'self'"]
     assert d["frame-ancestors"] == ["'self'"]
+    # No third-party picture loads, whatever a page or post embeds.
+    assert d["img-src"] == ["'self'", "data:", "blob:"]
     # The global hardening default, which agrees with ``frame-ancestors``.
     assert resp.headers["X-Frame-Options"] == "SAMEORIGIN"
 

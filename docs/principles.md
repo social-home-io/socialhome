@@ -552,6 +552,39 @@ Any change that lets a *receiving* household fetch a preview, forwards a
 member's cookies / identity with the request, or weakens the address guard
 is a §2-principle change requiring a new sign-off.
 
+## No third-party fetches from user content
+
+Viewing content never makes the viewer's browser contact a host the
+author picked. An external picture embedded in a post, a page, a space's
+about text or an event works as a tracking pixel: the image host learns
+every viewer's IP address and the moment they looked — and through
+federation that reaches readers in other households, who never chose to
+trust that host. Owner decision (2026-10-05): **external images in user
+content are blocked entirely.**
+
+1. **Only local pictures render.** A picture shows only when it is this
+   household's own media (`api/…` — an upload, a space cover, a profile
+   picture). Federated media fields are cut to that shape on receipt
+   (`services/inbound_media_store.local_media_ref`); the Pages markdown
+   renderer turns an external `http(s)` image into a plain link the reader
+   may choose to open, and drops any other source
+   (`client/src/utils/markdown.ts`); the post renderer has no image
+   grammar at all (`client/src/components/markdown.ts`).
+2. **The browser enforces it.** The SPA's `img-src` is
+   `'self' data: blob:` — no `https:`, no host (`socialhome/csp.py`), so a
+   path that slips past the renderers still loads nothing remote.
+   App icons render only as inline `data:image/…`; the GFS Momentum
+   directory shows only pictures our backend mirrors from the GFS.
+3. **Links stay links.** A followed link opens in a new tab with
+   `rel="noopener noreferrer"` — a click is the reader's own choice, and
+   it sends no `Referer`.
+
+Re-admitting any remote image source — a host in `img-src`, an external
+`<img>` in a renderer, a federated field that may carry a remote URL — is
+a §2-principle change requiring explicit sign-off. (The author-side link
+preview fetch above is the one sanctioned outbound fetch tied to content,
+and it runs on the author's household, never in a reader's browser.)
+
 ## Plaintext locally, encrypted on the wire
 
 Local SQLite stores plaintext rows — that is your data, on your disk,

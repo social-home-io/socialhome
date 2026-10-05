@@ -175,7 +175,7 @@ export default function PublicDiscoveryPage() {
         {filtered.value.map((u) => (
           <li key={u.user_id} class="sh-momentum-discover-row">
             <Avatar
-              src={discoveryAvatarUrl(u)}
+              src={discoveryAvatarUrl(u, selectedGfs.value)}
               name={u.display_name || u.username}
               size={48}
             />
@@ -198,17 +198,17 @@ export default function PublicDiscoveryPage() {
   )
 }
 
-function discoveryAvatarUrl(u: MomentPublicDirectoryUser): string | null {
-  // Prefer the GFS-mirrored avatar when we have a digest; falls back
-  // to the per-instance picture_url (only reachable when the home
-  // instance is publicly addressable).
-  if (u.picture_digest) {
-    const gfs = selectedGfs.value
-    if (gfs) {
-      return `/api/gfs/${encodeURIComponent(gfs)}/moments/users/${encodeURIComponent(
-        u.user_id,
-      )}/picture?v=${encodeURIComponent(u.picture_digest)}`
-    }
-  }
-  return u.picture_url
+/** Avatar for a directory row: only the GFS-mirrored picture, fetched
+ *  through our own backend. Never the row's ``picture_url`` — a household
+ *  registers whatever string it likes there (a third-party tracker, or a
+ *  path that resolves against our origin), and loading it would hand the
+ *  viewer's IP to that host. No digest → the initials fallback. The
+ *  path is relative so it resolves under the ingress ``<base href>``. */
+export function discoveryAvatarUrl(
+  u: MomentPublicDirectoryUser, gfs: string | null,
+): string | null {
+  if (!u.picture_digest || !gfs) return null
+  return `api/gfs/${encodeURIComponent(gfs)}/moments/users/${encodeURIComponent(
+    u.user_id,
+  )}/picture?v=${encodeURIComponent(u.picture_digest)}`
 }

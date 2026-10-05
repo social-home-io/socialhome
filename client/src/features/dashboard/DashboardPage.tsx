@@ -45,6 +45,7 @@ import {
 import { TodayScheduleCard } from '../welcome/TodayScheduleCard'
 import { activeTimetables, lessonCount } from '../welcome/schedule'
 import { addBase } from '@/baseUrl'
+import { safeIconSrc } from '@/utils/appIcon'
 
 interface CornerPresence {
   user_id: string
@@ -444,8 +445,8 @@ function AppsCard() {
       <ul class="sh-welcome-card__list">
         {apps.map(app => (
           <li key={app.app_id} class="sh-apps-corner-row">
-            {app.icon ? (
-              <img src={app.icon} alt="" class="sh-apps-corner-icon" aria-hidden="true" />
+            {safeIconSrc(app.icon) ? (
+              <img src={safeIconSrc(app.icon)!} alt="" class="sh-apps-corner-icon" aria-hidden="true" />
             ) : (
               <span class="sh-apps-corner-icon-placeholder" aria-hidden="true">📦</span>
             )}

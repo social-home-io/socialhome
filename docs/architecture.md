@@ -1011,9 +1011,12 @@ script.
   same-host WebSocket), `worker-src 'self'` (push service worker),
   `frame-src 'self'` (sandboxed app bundles, which carry their own stricter
   CSP from `routes/app_bundle.py`), `media-src 'self' blob:`. Relaxations,
-  each for one reason: `img-src` adds `data:` (QR codes, Leaflet sprites),
-  `blob:` (local upload previews) and `https:` (external images in Pages /
-  event markdown); `style-src-attr 'unsafe-inline'` for the `style="…"`
+  each for one reason: `img-src` adds `data:` (QR codes, Leaflet sprites,
+  app catalog icons) and `blob:` (local upload previews) — **no `https:`
+  and no host**: an external picture in user content would be a tracking
+  pixel for every viewer (owner decision 2026-10-05, see
+  `docs/principles.md` → "No third-party fetches from user content");
+  `style-src-attr 'unsafe-inline'` for the `style="…"`
   attributes in Leaflet pin / popup HTML (`<style>` elements stay blocked);
   `fonts.googleapis.com` / `fonts.gstatic.com` for the Google Fonts
   stylesheet. Map tiles and link-preview images are proxied/stored locally,
@@ -1073,14 +1076,22 @@ script.
   shell for another. The app-bundle cookie `Path`
   (`routes/app_bundle.py`) follows the same rule; both call
   `routes/ingress_path.py:trusted_ingress_path`.
-- **No Referer to third parties from markdown:** Pages / space-about
-  markdown (`client/src/utils/markdown.ts`) may embed external images and
-  links. A DOMPurify `afterSanitizeAttributes` hook gives every `<img>`
-  `referrerpolicy="no-referrer"` + `loading="lazy"` and every link that is
-  not an in-app path `rel="noopener noreferrer"`, after the attribute
-  allow-list, so an author can't override them. The post renderer
+- **No third-party fetches or Referer from markdown:** Pages /
+  space-about markdown (`client/src/utils/markdown.ts`) renders a picture
+  only from this household's own `api/…` paths (uploads). An external
+  `http(s)` image becomes a plain `target=_blank` link labelled with its
+  alt text (or its host), so viewing never contacts the image host; any
+  other source (`data:`, `javascript:`, a non-upload relative path) is
+  dropped, keeping the alt text. A DOMPurify `afterSanitizeAttributes`
+  hook gives every link that is not an in-app path
+  `rel="noopener noreferrer"`, and the surviving local `<img>`s
+  `referrerpolicy="no-referrer"` + `loading="lazy"` (moot for a
+  same-origin fetch; kept as a backstop), after the attribute allow-list,
+  so an author can't override them. The post renderer
   (`client/src/components/markdown.ts`) has no image grammar and marks its
-  `target=_blank` links `noreferrer`.
+  `target=_blank` links `noreferrer`. App icons render only as
+  `data:image/…` (`client/src/utils/appIcon.ts`; the published catalog
+  ships `data:` SVGs) — a remote `icon_url` shows the placeholder.
 - **Stored media is sandboxed:** a stored `.svg` / `.html` opened directly
   would otherwise run as a document on our origin.
   `csp.media_response_headers()` shapes every stored-file response

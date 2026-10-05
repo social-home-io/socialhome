@@ -51,6 +51,20 @@ describe('ImageLightbox', () => {
         '![holiday-photo](/api/media/holiday-photo.webp)',
       )
     })
+
+    it.each([
+      [`${location.origin}/api/media/pic.webp?exp=1&sig=2`],
+      [`${location.origin}/api/hassio_ingress/TOKEN/api/media/pic.webp?sig=2`],
+    ])('reduces an absolute same-origin src %s to the /api/media path', async (url) => {
+      // MarkdownView hands the lightbox ``img.currentSrc`` — absolute. A
+      // pasted absolute URL would be an external picture to every other
+      // household (rendered as a link, never fetched), so copy the path.
+      await copyReferenceForItem({ url, caption: 'p' })
+      const writeText = navigator.clipboard.writeText as unknown as ReturnType<
+        typeof vi.fn
+      >
+      expect(writeText.mock.calls[0][0]).toBe('![p](/api/media/pic.webp)')
+    })
   })
 
   describe('video item', () => {

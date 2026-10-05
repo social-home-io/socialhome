@@ -31,13 +31,21 @@ Directive notes (what each allowance is for):
   blocked. (Preact's ``style={{…}}`` goes through the CSSOM, which CSP
   does not govern.)
 * ``font-src`` — bundled Nunito + ``fonts.gstatic.com`` (Google Fonts).
-* ``img-src`` — ``data:`` (QR codes, Leaflet CSS sprites), ``blob:``
-  (local upload previews) and ``https:`` because Pages / event markdown
-  may embed external ``https`` images (``client/src/utils/markdown.ts``).
-  Map tiles need no host: the backend proxies them
-  (``routes/map_tiles.py``) whatever ``map_tile_url`` is configured, and
-  hands Leaflet a relative template. Link-preview thumbnails are local
-  media too (``services/link_preview_service.py``).
+* ``img-src 'self' data: blob:`` — ``data:`` (QR codes, Leaflet CSS
+  sprites, app catalog icons), ``blob:`` (local upload previews). **No
+  third-party image host, ever** (owner decision 2026-10-05): an external
+  picture in user content works as a tracking pixel, leaking every
+  viewer's IP and view time to the image host — including through
+  content from other households. The markdown renderer turns an external
+  image into a plain link (``client/src/utils/markdown.ts``), federated
+  media fields are local-only on receipt
+  (``services/inbound_media_store.local_media_ref``), app icons render
+  only as ``data:image/…`` (``client/src/utils/appIcon.ts``), and this
+  directive refuses whatever slips past. Map tiles need no host: the
+  backend proxies them (``routes/map_tiles.py``) whatever
+  ``map_tile_url`` is configured, and hands Leaflet a relative template.
+  Link-preview thumbnails are local media too
+  (``services/link_preview_service.py``).
 * ``media-src 'self' blob:`` — signed media + local voice-note /
   video previews. Call streams use ``srcObject``, which CSP ignores.
 * ``connect-src 'self'`` — every fetch and WebSocket is same-origin
@@ -84,7 +92,7 @@ SPA_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
     "style-src": ("'self'", "https://fonts.googleapis.com"),
     "style-src-attr": ("'unsafe-inline'",),
     "font-src": ("'self'", "https://fonts.gstatic.com"),
-    "img-src": ("'self'", "data:", "blob:", "https:"),
+    "img-src": ("'self'", "data:", "blob:"),
     "media-src": ("'self'", "blob:"),
     "connect-src": ("'self'",),
     "worker-src": ("'self'",),
