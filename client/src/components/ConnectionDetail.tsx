@@ -364,7 +364,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             </dd></>
           )}
           {conn.transport === 'rtc' && (
-            <><dt>Transport</dt><dd>
+            <><dt>{t('connections.detail.connection')}</dt><dd>
               {t('connections.transport.direct')}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
                 {t('connections.detail.direct_hint')}
@@ -372,7 +372,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             </dd></>
           )}
           {conn.transport === 'https' && (
-            <><dt>Transport</dt><dd>
+            <><dt>{t('connections.detail.connection')}</dt><dd>
               {t('connections.transport.internet')}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
                 {t('connections.detail.internet_hint')}
@@ -380,7 +380,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             </dd></>
           )}
           {conn.transport === 'gfs_relay' && (
-            <><dt>Transport</dt><dd>
+            <><dt>{t('connections.detail.connection')}</dt><dd>
               {t('connections.transport.gfs')}
               <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
                 {t('connections.detail.gfs_hint')}

@@ -21,6 +21,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { showToast } from '@/components/Toast'
+import { t } from '@/i18n/i18n'
 
 type NotifLevel = 'all' | 'mentions' | 'muted'
 
@@ -40,10 +41,13 @@ const LEVEL_ICONS: Record<NotifLevel, string> = {
   muted: '🔕',
 }
 
-const LEVEL_LABELS: Record<NotifLevel, string> = {
-  all: 'All posts',
-  mentions: 'Only @mentions',
-  muted: 'Muted',
+/** The level's label, in the UI language — looked up at render time. */
+function levelLabel(level: NotifLevel): string {
+  switch (level) {
+    case 'all': return t('space.notif.level_all')
+    case 'mentions': return t('space.notif.level_mentions')
+    case 'muted': return t('space.notif.level_muted')
+  }
 }
 
 export function SpaceNotifPrefsMenu({ spaceId }: Props) {
@@ -108,14 +112,14 @@ export function SpaceNotifPrefsMenu({ spaceId }: Props) {
       setOpen(false)
       showToast(
         next === 'muted'
-          ? 'Muted — you won\'t see new post alerts from this space.'
+          ? t('space.notif.muted_toast')
           : next === 'mentions'
-            ? 'You\'ll only be notified when someone @mentions you.'
-            : 'You\'re getting all posts from this space.',
+            ? t('space.notif.mentions_toast')
+            : t('space.notif.all_toast'),
         'success',
       )
     } catch (err: unknown) {
-      showToast(`Could not save: ${(err as Error).message}`, 'error')
+      showToast(t('space.notif.save_failed', { error: (err as Error).message }), 'error')
     } finally {
       setSaving(false)
     }
@@ -136,13 +140,13 @@ export function SpaceNotifPrefsMenu({ spaceId }: Props) {
       )
       showToast(
         next
-          ? 'Now sharing your location with this space'
-          : 'You stopped sharing your location with this space',
+          ? t('space.notif.location_on_toast')
+          : t('space.notif.location_off_toast'),
         'success',
       )
     } catch (err: unknown) {
       setShareLocation(prev)
-      showToast(`Could not save: ${(err as Error).message}`, 'error')
+      showToast(t('space.notif.save_failed', { error: (err as Error).message }), 'error')
     } finally {
       setSavingLocation(false)
     }
@@ -154,11 +158,11 @@ export function SpaceNotifPrefsMenu({ spaceId }: Props) {
               class="sh-notif-prefs-menu__trigger"
               aria-haspopup="menu"
               aria-expanded={open}
-              title={`Notifications: ${LEVEL_LABELS[level]}`}
+              title={t('space.notif.trigger', { level: levelLabel(level) })}
               onClick={() => setOpen(!open)}>
         <span aria-hidden="true">{LEVEL_ICONS[level]}</span>
         <span class="sr-only">
-          Notifications: {LEVEL_LABELS[level]}
+          {t('space.notif.trigger', { level: levelLabel(level) })}
         </span>
       </button>
       {open && (
@@ -174,7 +178,7 @@ export function SpaceNotifPrefsMenu({ spaceId }: Props) {
                     disabled={saving}
                     onClick={() => void choose(opt)}>
               <span aria-hidden="true">{LEVEL_ICONS[opt]}</span>
-              <span>{LEVEL_LABELS[opt]}</span>
+              <span>{levelLabel(opt)}</span>
               {level === opt && <span aria-hidden="true">✓</span>}
             </button>
           ))}
@@ -191,7 +195,7 @@ export function SpaceNotifPrefsMenu({ spaceId }: Props) {
                       data-testid="space-location-toggle"
                       onClick={() => void toggleLocation()}>
                 <span aria-hidden="true">📍</span>
-                <span>Share my location with this space</span>
+                <span>{t('space.notif.share_location')}</span>
                 {shareLocation && <span aria-hidden="true">✓</span>}
               </button>
             </>

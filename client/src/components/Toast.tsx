@@ -1,4 +1,5 @@
 import { signal } from '@preact/signals'
+import { t as tr } from '@/i18n/i18n'
 
 /** One inline action on a toast — typically "Undo". */
 export interface ToastAction {
@@ -165,7 +166,7 @@ export function ToastContainer() {
              onMouseLeave={() => resumeDismiss(t.id)}>
           <span class="sh-toast-message">{t.message}</span>
           {t.count > 1 && (
-            <span class="sh-toast-count" aria-label={`${t.count} occurrences`}>
+            <span class="sh-toast-count" aria-label={tr('toast.occurrences', { n: String(t.count) })}>
               × {t.count}
             </span>
           )}

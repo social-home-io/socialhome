@@ -30,6 +30,7 @@ import {
 } from '@/components/NewDmDialog'
 import { MuteSection } from './ConversationMute'
 import type { ConversationNotifLevel } from '@/store/dms'
+import { t, isOne } from '@/i18n/i18n'
 
 /** The slice of a ``GET /api/conversations/{id}/members`` row this uses. */
 export interface GroupMember {
@@ -81,8 +82,10 @@ function resetState() {
 }
 
 function householdLabel(m: GroupMember): string {
-  if (!m.instance_id) return 'Home'
-  return m.household_name ? `at ${m.household_name}` : 'at another household'
+  if (!m.instance_id) return t('dms.group.home')
+  return m.household_name
+    ? t('dms.new_dialog.at_household', { household: m.household_name })
+    : t('dms.group.other_household')
 }
 
 async function loadCandidates() {
@@ -92,7 +95,7 @@ async function loadCandidates() {
     candidates.value = flattenFriends(payload)
   } catch {
     candidates.value = []
-    candidatesError.value = 'Couldn’t load people — check your connection and try again.'
+    candidatesError.value = t('dms.group.load_failed')
   }
 }
 
@@ -118,7 +121,7 @@ export function GroupInfoDialog({
       onChanged()
       return true
     } catch (e: any) {
-      showToast(e?.message || 'That didn’t work — try again.', 'error')
+      showToast(e?.message || t('dms.group.action_failed'), 'error')
       return false
     } finally {
       busy.value = false
@@ -130,7 +133,7 @@ export function GroupInfoDialog({
     if (trimmed === (name ?? '')) return
     const done = await run(
       () => api.patch(`/api/conversations/${convId}`, { name: trimmed || null }),
-      trimmed ? `Renamed to "${trimmed}"` : 'Group name cleared',
+      trimmed ? t('dms.group.renamed', { name: trimmed }) : t('dms.group.name_cleared'),
     )
     if (done) nameDraft.value = null
   }
@@ -143,7 +146,9 @@ export function GroupInfoDialog({
         usernames: picks.filter(p => p.instance_id === null).map(p => p.username),
         user_ids: picks.filter(p => p.instance_id !== null).map(p => p.user_id),
       }),
-      picks.length === 1 ? `${picks[0].display_name} added` : `${picks.length} people added`,
+      picks.length === 1
+        ? t('dms.group.added_one', { name: picks[0].display_name })
+        : t('dms.group.added_many', { n: String(picks.length) }),
     )
     if (done) {
       adding.value = false
@@ -155,7 +160,7 @@ export function GroupInfoDialog({
     confirmRemove.value = null
     await run(
       () => api.delete(`/api/conversations/${convId}/members/${encodeURIComponent(m.user_id)}`),
-      `${m.display_name} removed`,
+      t('dms.group.removed', { name: m.display_name }),
     )
   }
 
@@ -165,11 +170,11 @@ export function GroupInfoDialog({
     busy.value = true
     try {
       await api.post(`/api/conversations/${convId}/leave`)
-      showToast('You left the group', 'success')
+      showToast(t('dms.group.left'), 'success')
       resetState()
       onLeft()
     } catch (e: any) {
-      showToast(e?.message || 'Couldn’t leave the group — try again.', 'error')
+      showToast(e?.message || t('dms.group.leave_failed'), 'error')
     } finally {
       busy.value = false
     }
@@ -184,7 +189,7 @@ export function GroupInfoDialog({
 
   return (
     <>
-      <Modal open={open} onClose={close} title="Group info">
+      <Modal open={open} onClose={close} title={t('dms.group_info')}>
         <div class="sh-form sh-groupinfo">
           {managedHere ? (
             <form
@@ -192,12 +197,12 @@ export function GroupInfoDialog({
               onSubmit={(e) => { e.preventDefault(); void saveName() }}
             >
               <label>
-                Group name <span class="sh-muted">(optional)</span>
+                {t('dms.group_name')} <span class="sh-muted">{t('dms.optional')}</span>
                 <input
                   type="text"
                   maxLength={80}
                   value={draft}
-                  placeholder="e.g. Sunday lunch crew"
+                  placeholder={t('dms.group_name_placeholder')}
                   onInput={(e) => { nameDraft.value = (e.target as HTMLInputElement).value }}
                 />
               </label>
@@ -206,34 +211,35 @@ export function GroupInfoDialog({
                 variant="secondary"
                 disabled={busy.value || draft.trim() === (name ?? '')}
               >
-                Save
+                {t('common.save')}
               </Button>
             </form>
           ) : (
             <p class="sh-muted sh-groupinfo-note">
               {name ? <strong class="sh-groupinfo-title">{name}</strong> : null}
-              Only people in the household that started this group can
-              rename it or change who is in it. You can leave at any time.
+              {t('dms.group.not_managed_note')}
             </p>
           )}
 
-          <h3 class="sh-groupinfo-heading">{members.length} people</h3>
+          <h3 class="sh-groupinfo-heading">
+            {t(isOne(members.length) ? 'dms.group.people_one' : 'dms.group.people', { n: String(members.length) })}
+          </h3>
           <ul class="sh-groupinfo-members">
             {members.map(m => (
               <li key={m.user_id} class="sh-groupinfo-member">
                 <Avatar name={m.display_name} src={m.picture_url} size={32} />
                 <div class="sh-newdm-row-meta">
-                  <strong>{m.display_name}{m.is_self ? ' (you)' : ''}</strong>
+                  <strong>{m.display_name}{m.is_self ? ` ${t('dms.group.you')}` : ''}</strong>
                   <span class="sh-muted">{householdLabel(m)}</span>
                 </div>
                 {managedHere && !m.is_self && (
                   <Button
                     variant="ghost"
                     disabled={busy.value}
-                    aria-label={`Remove ${m.display_name} from the group`}
+                    aria-label={t('dms.group.remove_aria', { name: m.display_name })}
                     onClick={() => { confirmRemove.value = m }}
                   >
-                    Remove
+                    {t('dms.group.remove')}
                   </Button>
                 )}
               </li>
@@ -245,21 +251,20 @@ export function GroupInfoDialog({
               variant="secondary"
               onClick={() => { adding.value = true; void loadCandidates() }}
             >
-              Add people
+              {t('dms.group.add_people')}
             </Button>
           )}
 
           {managedHere && adding.value && (
             <div class="sh-groupinfo-add">
-              <h3 class="sh-groupinfo-heading">Add people</h3>
-              {candidates.value === null && <p class="sh-muted">Loading…</p>}
+              <h3 class="sh-groupinfo-heading">{t('dms.group.add_people')}</h3>
+              {candidates.value === null && <p class="sh-muted">{t('dms.group.loading')}</p>}
               {candidatesError.value && (
                 <p class="sh-muted" role="alert">{candidatesError.value}</p>
               )}
               {candidates.value !== null && !candidatesError.value && addable.length === 0 && (
                 <p class="sh-muted">
-                  Everyone you can reach is already in this group — pair
-                  another household to add its people.
+                  {t('dms.group.everyone_in')}
                 </p>
               )}
               {addable.length > 0 && (
@@ -267,7 +272,7 @@ export function GroupInfoDialog({
                   {addable.map(c => {
                     const checked = picked.value.has(c.user_id)
                     const disabled = !c.supports_group
-                    const note = `${c.household_name ?? 'Their household'} needs a Social Home update for group chats`
+                    const note = t('dms.group.needs_update', { household: c.household_name ?? t('dms.new_dialog.their_household') })
                     return (
                       <button
                         key={c.user_id}
@@ -290,7 +295,9 @@ export function GroupInfoDialog({
                         <div class="sh-newdm-row-meta">
                           <strong>{c.display_name}</strong>
                           <span class="sh-muted">
-                            {c.household_name ? `at ${c.household_name}` : `@${c.username}`}
+                            {c.household_name
+                              ? t('dms.new_dialog.at_household', { household: c.household_name })
+                              : `@${c.username}`}
                           </span>
                           {disabled && <span class="sh-newdm-row-note">{note}</span>}
                         </div>
@@ -305,14 +312,16 @@ export function GroupInfoDialog({
                   variant="secondary"
                   onClick={() => { adding.value = false; picked.value = new Set() }}
                 >
-                  Cancel
+                  {t('common.cancel')}
                 </Button>
                 <Button
                   onClick={() => { void addPicked() }}
                   loading={busy.value}
                   disabled={picked.value.size === 0}
                 >
-                  {picked.value.size > 0 ? `Add (${picked.value.size})` : 'Add'}
+                  {picked.value.size > 0
+                    ? t('dms.group.add_n', { n: String(picked.value.size) })
+                    : t('dms.group.add')}
                 </Button>
               </div>
             </div>
@@ -335,7 +344,7 @@ export function GroupInfoDialog({
               disabled={busy.value}
               onClick={() => { confirmLeave.value = true }}
             >
-              Leave group
+              {t('dms.group.leave')}
             </Button>
           </div>
           )}
@@ -343,22 +352,22 @@ export function GroupInfoDialog({
       </Modal>
       <ConfirmDialog
         open={confirmRemove.value !== null}
-        title="Remove from group?"
+        title={t('dms.group.remove_confirm_title')}
         message={
           confirmRemove.value
-            ? `${confirmRemove.value.display_name} won't get new messages in this group. You can add them back later.`
+            ? t('dms.group.remove_confirm_body', { name: confirmRemove.value.display_name })
             : ''
         }
-        confirmLabel="Remove"
+        confirmLabel={t('dms.group.remove')}
         destructive
         onConfirm={() => { const m = confirmRemove.value; if (m) void remove(m) }}
         onCancel={() => { confirmRemove.value = null }}
       />
       <ConfirmDialog
         open={confirmLeave.value}
-        title="Leave this group?"
-        message="You'll stop getting its messages. To come back, someone in the group has to add you again."
-        confirmLabel="Leave"
+        title={t('dms.group.leave_confirm_title')}
+        message={t('dms.group.leave_confirm_body')}
+        confirmLabel={t('dms.group.leave_short')}
         destructive
         onConfirm={() => { void leave() }}
         onCancel={() => { confirmLeave.value = false }}

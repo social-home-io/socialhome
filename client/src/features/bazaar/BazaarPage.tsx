@@ -11,7 +11,7 @@
  * frame so the grid updates live — no manual refresh needed.
  */
 import { useEffect } from 'preact/hooks'
-import { t } from '@/i18n/i18n'
+import { t, tValue } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -105,7 +105,7 @@ export default function BazaarPage() {
         {/* A protected account sees the notice once: here on the list, or
          *  in the open listing where "Buy" would be — never both. */}
         {!isRestricted('bazaar')
-          ? <Button onClick={() => openBazaarCreate()}>+ New listing</Button>
+          ? <Button onClick={() => openBazaarCreate()}>+ {t('bazaar.new_listing')}</Button>
           : !selected.value && <ProtectedNotice capability="bazaar" />}
       </div>
 
@@ -123,17 +123,17 @@ export default function BazaarPage() {
                 selected.value = null
               }}
             >
-              {tab === 'all' ? 'All'
-                : tab === 'mine' ? 'My listings'
-                : tab === 'saved' ? '♥ Saved'
-                : 'Won by me'}
+              {tab === 'all' ? t('bazaar.tab.all')
+                : tab === 'mine' ? t('bazaar.tab.mine')
+                : tab === 'saved' ? `♥ ${t('bazaar.tab.saved')}`
+                : t('bazaar.tab.won')}
             </button>
           ))}
         </nav>
         <div class="sh-row" style={{ gap: 'var(--sh-space-sm)' }}>
-          <input type="search" placeholder="Search titles…"
+          <input type="search" placeholder={t('bazaar.search_placeholder')}
                  class="sh-bazaar-search"
-                 value={search.value} aria-label="Search listings"
+                 value={search.value} aria-label={t('bazaar.search_aria')}
                  onInput={(e) => search.value = (e.target as HTMLInputElement).value} />
           {activeTab.value === 'mine' && (
             <select class="sh-bazaar-status-filter"
@@ -141,11 +141,11 @@ export default function BazaarPage() {
                     onChange={(e) =>
                       statusFilter.value =
                         (e.target as HTMLSelectElement).value as typeof statusFilter.value}>
-              <option value="all">All statuses</option>
-              <option value="active">Active</option>
-              <option value="sold">Sold</option>
-              <option value="expired">Expired</option>
-              <option value="cancelled">Cancelled</option>
+              <option value="all">{t('bazaar.status.all')}</option>
+              <option value="active">{t('bazaar.status.active')}</option>
+              <option value="sold">{t('bazaar.status.sold')}</option>
+              <option value="expired">{t('bazaar.status.expired')}</option>
+              <option value="cancelled">{t('bazaar.status.cancelled')}</option>
             </select>
           )}
         </div>
@@ -160,7 +160,7 @@ export default function BazaarPage() {
         <div class="sh-bazaar-detail">
           <Button variant="secondary"
                   onClick={() => { selected.value = null }}>
-            ← Back to listings
+            ← {t('bazaar.back')}
           </Button>
           <BazaarPostBody postId={selected.value.post_id} />
         </div>
@@ -225,23 +225,19 @@ function buildVisibleList(
 
 function EmptyState({ tab }: { tab: BazaarTab }) {
   const [icon, heading, body] = tab === 'mine'
-    ? ['🛒', 'No listings yet',
-       'Post something your household no longer needs.']
+    ? ['🛒', t('bazaar.empty.mine_title'), t('bazaar.empty.mine_body')]
     : tab === 'saved'
-      ? ['♡', 'No saved listings yet',
-         'Tap the heart on any listing to keep it here for later.']
+      ? ['♡', t('bazaar.empty.saved_title'), t('bazaar.empty.saved_body')]
       : tab === 'won'
-        ? ['🎉', 'No winning bids yet',
-           'When you win an auction it shows up here.']
-        : ['🛍️', 'No active listings',
-           "Be the first — something you don't need anymore?"]
+        ? ['🎉', t('bazaar.empty.won_title'), t('bazaar.empty.won_body')]
+        : ['🛍️', t('bazaar.empty.all_title'), t('bazaar.empty.all_body')]
   return (
     <div class="sh-empty-state">
       <div aria-hidden="true">{icon}</div>
       <h3>{heading}</h3>
       <p>{body}</p>
       {!isRestricted('bazaar') && (
-        <Button onClick={() => openBazaarCreate()}>+ Create a listing</Button>
+        <Button onClick={() => openBazaarCreate()}>+ {t('bazaar.empty.create')}</Button>
       )}
     </div>
   )
@@ -263,7 +259,7 @@ export function BazaarCard({
           : <span class="sh-bazaar-tile-placeholder">🛍</span>}
         {listing.status !== 'active' && (
           <span class={`sh-bazaar-tile-badge sh-bazaar-tile-badge--${listing.status}`}>
-            {listing.status}
+            {tValue('bazaar.status', listing.status)}
           </span>
         )}
       </div>
@@ -277,7 +273,7 @@ export function BazaarCard({
               : formatBazaarAmount(listing.price, listing.currency)}
         </div>
         <span class={`sh-bazaar-mode-chip sh-bazaar-mode-chip--${listing.mode}`}>
-          {listing.mode.replace('_', ' ')}
+          {tValue('bazaar.card.mode', listing.mode)}
         </span>
       </div>
     </button>

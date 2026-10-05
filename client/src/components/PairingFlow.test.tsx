@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent, screen, cleanup } from '@testing-library/preact'
+import en from '@/i18n/locales/en.json'
 
 const apiPost = vi.fn()
 vi.mock('@/api', () => ({
@@ -396,29 +397,41 @@ describe('PairingFlow — "external URL not configured" hint per platform', () =
     return document.body.textContent ?? ''
   }
 
+  // The i18n mock renders keys, so each case asserts which hint key the
+  // flow picked, and the English catalog pins what that hint says.
+  const HAOS = 'pairing.error.no_url_haos'
+  const HA = 'pairing.error.no_url_ha'
+  const STANDALONE = 'pairing.error.no_url'
+  // Most specific first: the standalone key is a prefix of the other two.
+  const hint = (text: string) =>
+    [HAOS, HA, STANDALONE].find((k) => text.includes(k)) ?? null
+
   it('haos: points at the HA custom integration, never at settings', async () => {
     const text = await hintAfter422('haos')
-    expect(text).toContain('Social Home integration in Home Assistant')
+    expect(hint(text)).toBe(HAOS)
+    expect(en[HAOS]).toContain('Social Home integration in Home Assistant')
     // The add-on has no external-URL field, so mentioning settings here
     // would send the admin hunting for a control that does not exist.
-    expect(text).not.toContain('Settings → Federation')
+    expect(en[HAOS]).not.toContain('Settings → Connections')
     // The add-on ships the integration (Supervisor discovery), so there
     // is no HACS step for the user to take.
-    expect(text).not.toContain('HACS')
+    expect(en[HAOS]).not.toContain('HACS')
   })
 
   it('ha: offers the settings field AND the integration', async () => {
     const text = await hintAfter422('ha')
-    expect(text).toContain('Settings → Federation')
-    expect(text).toContain('Social Home integration in Home Assistant')
-    expect(text).not.toContain('HACS')
+    expect(hint(text)).toBe(HA)
+    expect(en[HA]).toContain('Settings → Connections')
+    expect(en[HA]).toContain('Social Home integration in Home Assistant')
+    expect(en[HA]).not.toContain('HACS')
   })
 
   it('standalone: unchanged — settings only, no HA wording', async () => {
     const text = await hintAfter422('standalone')
-    expect(text).toContain('Settings → Federation')
-    expect(text).not.toContain('Home Assistant')
-    expect(text).not.toContain('HACS')
+    expect(hint(text)).toBe(STANDALONE)
+    expect(en[STANDALONE]).toContain('Settings → Connections')
+    expect(en[STANDALONE]).not.toContain('Home Assistant')
+    expect(en[STANDALONE]).not.toContain('HACS')
   })
 
   it('falls back to the standalone wording before the config loads', async () => {
@@ -426,7 +439,6 @@ describe('PairingFlow — "external URL not configured" hint per platform', () =
     // hint must still be the text this always showed, not an HA-specific
     // one guessed at from nothing.
     const text = await hintAfter422(null)
-    expect(text).toContain('Settings → Federation')
-    expect(text).not.toContain('Home Assistant')
+    expect(hint(text)).toBe(STANDALONE)
   })
 })

@@ -72,13 +72,13 @@ export function SpaceJoinByCodeDialog() {
   const submit = async (raw?: string) => {
     const input = (raw ?? draft.value).trim()
     if (!input) {
-      errorMsg.value = 'Paste a code or scan a QR first.'
+      errorMsg.value = t('space.join_code.empty')
       return
     }
     errorMsg.value = null
     const payload = decodeInviteCode(input)
     if (!payload) {
-      errorMsg.value = "That doesn't look like a Social Home invite code."
+      errorMsg.value = t('space.join_code.invalid')
       return
     }
     submitting.value = true
@@ -138,36 +138,26 @@ export function SpaceJoinByCodeDialog() {
       // for an owner to approve it, so say so rather than implying you are
       // already an admin.
       if (r.pending_role === 'admin') {
-        showToast(
-          "You're in as a member — an owner still needs to approve your " +
-          'admin role.',
-          'success',
-        )
+        showToast(t('space.join_code.admin_pending'), 'success')
       } else if (r.role === 'moderator') {
         // A moderator link seats a moderator outright. (On a household too
         // old for the role the host seats a plain member, and the generic
         // toast below is the honest one.)
         showToast(t('space.join.joined_moderator'), 'success')
       } else {
-        showToast("You're in! 🎉", 'success')
+        showToast(t('space.join.joined'), 'success')
       }
       loc.route(dest)
     } catch (e) {
       if (e instanceof ApiError && (e.status === 404 || e.status === 410)) {
-        errorMsg.value = (
-          'This invite has expired or already been used. Ask the ' +
-          'sender for a fresh one.'
-        )
+        errorMsg.value = t('space.join_code.expired')
       } else if (e instanceof ApiError && e.status === 403) {
         // Prefer the backend's specific reason — e.g. the child-protection
         // age gate's "This space is restricted to users aged 18+." — so a
         // blocked minor sees WHY, not a misleading "invite revoked".
-        errorMsg.value = e.detail || (
-          "You're not allowed to join this space (the issuer may have " +
-          'revoked the invite).'
-        )
+        errorMsg.value = e.detail || t('space.join_code.forbidden')
       } else {
-        errorMsg.value = (e as Error)?.message ?? 'Could not join.'
+        errorMsg.value = (e as Error)?.message ?? t('space.join_code.failed')
       }
     } finally {
       submitting.value = false
@@ -177,10 +167,10 @@ export function SpaceJoinByCodeDialog() {
   if (!open.value) return null
 
   return (
-    <Modal open={true} onClose={close} title="Join a space">
+    <Modal open={true} onClose={close} title={t('space.join_code.title')}>
       <div class="sh-join-by-code">
         <p class="sh-muted" style={{ marginTop: 0 }}>
-          Paste a code or scan a QR you got from another member.
+          {t('space.join_code.intro')}
         </p>
 
         {/* Two-tile method picker — same class names as PairingFlow's
@@ -189,7 +179,7 @@ export function SpaceJoinByCodeDialog() {
         <div
           class="sh-pairing-method-grid"
           role="tablist"
-          aria-label="How to receive the invite"
+          aria-label={t('space.join_code.method_aria')}
         >
           <button
             type="button"
@@ -236,7 +226,7 @@ export function SpaceJoinByCodeDialog() {
                 draft.value = (e.target as HTMLTextAreaElement).value
                 if (errorMsg.value) errorMsg.value = null
               }}
-              aria-label="Invite code"
+              aria-label={t('space.join_code.input_aria')}
               data-testid="join-by-code-input"
               autoFocus
             />
@@ -251,7 +241,7 @@ export function SpaceJoinByCodeDialog() {
                 loading={submitting.value}
                 disabled={!draft.value.trim()}
               >
-                Join
+                {t('space.join_code.submit')}
               </Button>
             </div>
           </>

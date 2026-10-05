@@ -32,6 +32,7 @@ import {
 import { ws } from '@/ws'
 import type { HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
+import { t, isOne, formatLocale } from '@/i18n/i18n'
 
 const inbox = signal<HighlightInboxItem[]>([])
 const loading = signal<boolean>(true)
@@ -43,13 +44,13 @@ function humaniseDate(iso: string): string {
   // the recent past, and a fully spelled-out date otherwise.
   const today = new Date()
   const todayStr = today.toISOString().slice(0, 10)
-  if (iso === todayStr) return 'Today'
+  if (iso === todayStr) return t('highlight.inbox.today')
   const yest = new Date(today)
   yest.setUTCDate(yest.getUTCDate() - 1)
-  if (iso === yest.toISOString().slice(0, 10)) return 'Yesterday'
+  if (iso === yest.toISOString().slice(0, 10)) return t('highlight.inbox.yesterday')
   const dt = new Date(iso + 'T00:00:00Z')
   if (Number.isNaN(dt.getTime())) return iso
-  return dt.toLocaleDateString(undefined, {
+  return dt.toLocaleDateString(formatLocale(), {
     weekday: 'long',
     month: 'short',
     day: 'numeric',
@@ -73,7 +74,7 @@ export default function HighlightsInboxTab() {
         })
         .catch((err: unknown) => {
           if (initial) loading.value = false
-          showToast(`Failed to load highlights: ${(err as Error)?.message ?? err}`,
+          showToast(t('highlight.inbox.load_failed', { error: String((err as Error)?.message ?? err) }),
             'error')
         })
     void fetchInbox(true)
@@ -114,20 +115,20 @@ export default function HighlightsInboxTab() {
           type="button"
           class={cls}
           onClick={onClick}
-          aria-label={`Open ${name}'s highlight`}
+          aria-label={t('highlight.inbox.open_aria', { name })}
         >
           <span class="sh-highlight-ring-avatar">
             <Avatar name={name} src={picture} size={56} />
           </span>
           <span class="sh-highlight-ring-label">
-            {isMine ? 'Your highlight' : name}
+            {isMine ? t('highlight.inbox.yours') : name}
           </span>
         </button>
         {!isMine && (
           <button
             type="button"
             class="sh-highlight-ring-overflow"
-            aria-label={`More actions for ${name}`}
+            aria-label={t('highlight.more_actions', { name })}
             onClick={(ev) => {
               ev.stopPropagation()
               openUserActions(item.highlight.author_user_id)
@@ -142,17 +143,17 @@ export default function HighlightsInboxTab() {
 
   return (
     <div class="sh-highlights-page">
-      <section class="sh-highlight-rings" aria-label="Recent highlights">
+      <section class="sh-highlight-rings" aria-label={t('highlight.inbox.recent_aria')}>
         <button
           type="button"
           class="sh-highlight-ring sh-highlight-ring--new"
           onClick={() => openHighlightQuickShare()}
-          aria-label="Post a new highlight"
+          aria-label={t('highlight.inbox.new_aria')}
         >
           <span class="sh-highlight-ring-avatar">
             <span class="sh-highlight-ring-plus" aria-hidden="true">+</span>
           </span>
-          <span class="sh-highlight-ring-label">New</span>
+          <span class="sh-highlight-ring-label">{t('highlight.inbox.new')}</span>
         </button>
         {myItems.map(ring)}
         {peerItems.map(ring)}
@@ -161,25 +162,23 @@ export default function HighlightsInboxTab() {
       {items.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🌅</div>
-          <h3>No highlights yet</h3>
+          <h3>{t('highlight.inbox.empty_title')}</h3>
           <p>
-            Highlights are short photo or video moments that disappear
-            after the day is over. Share one with your household and
-            connected peers.
+            {t('highlight.inbox.empty_body')}
           </p>
           <Button onClick={() => openHighlightQuickShare()}>
-            + Share your first highlight
+            {t('highlight.inbox.share_first')}
           </Button>
         </div>
       )}
 
       {items.length > 0 && (
-        <section class="sh-highlight-list" aria-label="All highlights">
+        <section class="sh-highlight-list" aria-label={t('highlight.inbox.all_aria')}>
           {items.map(item => {
             const first = item.frames[0]
             const isMine = item.highlight.author_user_id === me
             const name = isMine
-              ? 'You'
+              ? t('highlight.inbox.you')
               : householdDisplayName(item.highlight.author_user_id)
             return (
               <a
@@ -207,7 +206,7 @@ export default function HighlightsInboxTab() {
                   <strong>{name}</strong>
                   <span class="sh-muted">
                     {humaniseDate(item.highlight.highlight_date)} ·{' '}
-                    {item.frames.length} frame{item.frames.length === 1 ? '' : 's'}
+                    {t(isOne(item.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(item.frames.length) })}
                   </span>
                 </span>
                 {item.unseen_count > 0 && (

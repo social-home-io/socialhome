@@ -18,6 +18,7 @@ import { showToast } from './Toast'
 import { currentUser } from '@/store/auth'
 import type { BazaarBid, BazaarListing, BazaarOffer } from '@/types'
 import { confirmDialog } from '@/components/confirm'
+import { t, isOne, formatLocale } from '@/i18n/i18n'
 import { CURRENCY_FRACTION_DIGITS, formatBazaarAmount } from './bazaarFormat'
 
 // Re-exported so existing ``import { formatBazaarAmount } from
@@ -27,11 +28,11 @@ export { formatBazaarAmount } from './bazaarFormat'
 
 function modeLabel(mode: BazaarListing['mode']): string {
   switch (mode) {
-    case 'fixed':      return 'Fixed price'
-    case 'offer':      return 'Offers'
-    case 'bid_from':   return 'Bid from'
-    case 'negotiable': return 'Negotiable'
-    case 'auction':    return 'Auction'
+    case 'fixed':      return t('bazaar.card.mode.fixed')
+    case 'offer':      return t('bazaar.card.mode.offer')
+    case 'bid_from':   return t('bazaar.card.mode.bid_from')
+    case 'negotiable': return t('bazaar.card.mode.negotiable')
+    case 'auction':    return t('bazaar.card.mode.auction')
   }
 }
 
@@ -39,13 +40,13 @@ function formatCountdown(iso: string): string {
   const end = Date.parse(iso)
   if (Number.isNaN(end)) return ''
   const diff = end - Date.now()
-  if (diff <= 0) return 'ended'
+  if (diff <= 0) return t('bazaar.card.ended')
   const mins = Math.floor(diff / 60_000)
-  if (mins < 60)  return `${mins}m left`
+  if (mins < 60)  return t('bazaar.card.left_minutes', { m: String(mins) })
   const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ${mins % 60}m left`
+  if (hours < 24) return t('bazaar.card.left_hours', { h: String(hours), m: String(mins % 60) })
   const days = Math.floor(hours / 24)
-  return `${days}d ${hours % 24}h left`
+  return t('bazaar.card.left_days', { d: String(days), h: String(hours % 24) })
 }
 
 interface Props {
@@ -128,7 +129,7 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   if (loadState === 'loading') {
     return (
       <div class="sh-bazaar-card sh-bazaar-card--loading">
-        <span class="sh-muted">Loading listing…</span>
+        <span class="sh-muted">{t('bazaar.card.loading')}</span>
       </div>
     )
   }
@@ -136,7 +137,7 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
     return (
       <div class="sh-bazaar-card sh-bazaar-card--missing">
         <span class="sh-muted">
-          🛍 Listing details haven't been attached to this post yet.
+          🛍 {t('bazaar.card.missing')}
         </span>
       </div>
     )
@@ -144,7 +145,7 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   if (loadState === 'error' || !listing) {
     return (
       <div class="sh-bazaar-card sh-bazaar-card--error">
-        <span class="sh-muted">Couldn't load this listing. Try again later.</span>
+        <span class="sh-muted">{t('bazaar.card.load_error')}</span>
       </div>
     )
   }
@@ -171,11 +172,11 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
       })
       setBidAmount('')
       setOfferMessage('')
-      showToast('Bid placed', 'success')
+      showToast(t('bazaar.card.bid_placed'), 'success')
       onUpdated?.()
     } catch (err: unknown) {
       showToast(
-        `Could not bid: ${(err as Error).message ?? err}`, 'error',
+        t('bazaar.error.bid', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -183,15 +184,15 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   }
 
   const withdraw = async (bidId: string) => {
-    if (!await confirmDialog('Withdraw this bid?', { destructive: true })) return
+    if (!await confirmDialog(t('bazaar.card.confirm_withdraw_bid'), { destructive: true })) return
     setBusy(true)
     try {
       await api.delete(`/api/bazaar/${postId}/bids/${bidId}`)
-      showToast('Bid withdrawn', 'info')
+      showToast(t('bazaar.card.bid_withdrawn'), 'info')
       onUpdated?.()
     } catch (err: unknown) {
       showToast(
-        `Could not withdraw: ${(err as Error).message ?? err}`, 'error',
+        t('bazaar.error.withdraw', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -199,15 +200,15 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   }
 
   const acceptOffer = async (bidId: string) => {
-    if (!await confirmDialog('Accept this offer? The listing will be marked sold.')) return
+    if (!await confirmDialog(t('bazaar.card.confirm_accept'))) return
     setBusy(true)
     try {
       await api.post(`/api/bazaar/${postId}/bids/${bidId}/accept`)
-      showToast('Offer accepted', 'success')
+      showToast(t('bazaar.card.offer_accepted'), 'success')
       onUpdated?.()
     } catch (err: unknown) {
       showToast(
-        `Could not accept: ${(err as Error).message ?? err}`, 'error',
+        t('bazaar.error.accept', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -215,18 +216,18 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   }
 
   const rejectOffer = async (bidId: string) => {
-    const reason = prompt('Reason (optional):') ?? ''
+    const reason = prompt(t('bazaar.card.reason_prompt')) ?? ''
     setBusy(true)
     try {
       await api.post(
         `/api/bazaar/${postId}/bids/${bidId}/reject`,
         reason ? { reason } : {},
       )
-      showToast('Offer declined', 'info')
+      showToast(t('bazaar.card.offer_declined'), 'info')
       onUpdated?.()
     } catch (err: unknown) {
       showToast(
-        `Could not reject: ${(err as Error).message ?? err}`, 'error',
+        t('bazaar.error.decline', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -234,15 +235,15 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   }
 
   const cancelListing = async () => {
-    if (!await confirmDialog('Cancel this listing? Active bids will be voided.', { destructive: true })) return
+    if (!await confirmDialog(t('bazaar.card.confirm_cancel'), { destructive: true })) return
     setBusy(true)
     try {
       await api.delete(`/api/bazaar/${postId}`)
-      showToast('Listing cancelled', 'info')
+      showToast(t('bazaar.card.cancelled_toast'), 'info')
       onUpdated?.()
     } catch (err: unknown) {
       showToast(
-        `Could not cancel: ${(err as Error).message ?? err}`, 'error',
+        t('bazaar.error.cancel', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -267,11 +268,11 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
       })
       setBidAmount('')
       setOfferMessage('')
-      showToast('Offer sent — the seller has been notified.', 'success')
+      showToast(t('bazaar.card.offer_sent'), 'success')
       onUpdated?.()
     } catch (err: unknown) {
       showToast(
-        `Could not send offer: ${(err as Error).message ?? err}`, 'error',
+        t('bazaar.error.offer', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -282,7 +283,7 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
     e.preventDefault()
     const n = Number(bidAmount)
     if (!Number.isFinite(n) || n <= 0) {
-      showToast('Enter a valid amount', 'error')
+      showToast(t('bazaar.card.invalid_amount'), 'error')
       return
     }
     const digits = CURRENCY_FRACTION_DIGITS[listing.currency] ?? 2
@@ -333,7 +334,7 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
               : formatBazaarAmount(listing.price, listing.currency)}
         </div>
         <div class="sh-bazaar-countdown"
-             title={new Date(listing.end_time).toLocaleString()}>
+             title={new Date(listing.end_time).toLocaleString(formatLocale())}>
           ⏱ {countdown}
         </div>
       </div>
@@ -346,26 +347,26 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
          *  fixed (no bids exist) and confusing for offers. */}
         {(listing.mode === 'auction' || listing.mode === 'bid_from') && (
           <span>
-            {activeBids.length} {activeBids.length === 1 ? 'bid' : 'bids'}
+            {t(isOne(activeBids.length) ? 'bazaar.card.bids_one' : 'bazaar.card.bids', { n: String(activeBids.length) })}
           </span>
         )}
         {(listing.mode === 'offer' || listing.mode === 'negotiable') && (
           <span>
-            {pendingOffers.length} {pendingOffers.length === 1 ? 'offer' : 'offers'}
+            {t(isOne(pendingOffers.length) ? 'bazaar.card.offers_one' : 'bazaar.card.offers', { n: String(pendingOffers.length) })}
           </span>
         )}
         {/* listing.mode === 'fixed' → no activity row; the price + countdown
          *  carry enough information.  ``status`` pills below still render. */}
         {listing.status === 'sold' && listing.winning_price != null && (
           <span class="sh-bazaar-sold-pill">
-            Sold · {formatBazaarAmount(listing.winning_price, listing.currency)}
+            {t('bazaar.card.sold', { price: formatBazaarAmount(listing.winning_price, listing.currency) })}
           </span>
         )}
         {listing.status === 'expired' && (
-          <span class="sh-bazaar-meta-pill">Ended without a buyer</span>
+          <span class="sh-bazaar-meta-pill">{t('bazaar.card.expired')}</span>
         )}
         {listing.status === 'cancelled' && (
-          <span class="sh-bazaar-meta-pill">Cancelled by seller</span>
+          <span class="sh-bazaar-meta-pill">{t('bazaar.card.cancelled')}</span>
         )}
       </div>
 
@@ -376,12 +377,12 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
         listing.mode === 'fixed' ? (
           <Button loading={busy}
                   onClick={() => void placeBid(listing.price ?? 0)}>
-            Buy for {formatBazaarAmount(listing.price, listing.currency)}
+            {t('bazaar.card.buy_for', { price: formatBazaarAmount(listing.price, listing.currency) })}
           </Button>
         ) : (
           <form class="sh-bazaar-bid-form" onSubmit={submitBid}>
             <label class="sh-bazaar-bid-amount">
-              <span>Your {listing.mode === 'offer' ? 'offer' : 'bid'}</span>
+              <span>{listing.mode === 'offer' ? t('bazaar.card.your_offer') : t('bazaar.card.your_bid')}</span>
               <input type="number" step="0.01" min="0"
                      value={bidAmount}
                      placeholder={floorCents != null
@@ -392,7 +393,7 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
             </label>
             {(listing.mode === 'offer' || listing.mode === 'negotiable') && (
               <label>
-                <span>Message (optional)</span>
+                <span>{t('bazaar.card.message')}</span>
                 <input type="text" maxLength={280}
                        value={offerMessage}
                        onInput={(e) =>
@@ -401,7 +402,7 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
             )}
             <Button type="submit" loading={busy}
                     disabled={!bidAmount || Number(bidAmount) <= 0}>
-              {listing.mode === 'offer' ? 'Send offer' : 'Place bid'}
+              {listing.mode === 'offer' ? t('bazaar.card.send_offer') : t('bazaar.place_bid_submit')}
             </Button>
           </form>
         )
@@ -409,13 +410,13 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
 
       {!closed && myBid && !isSeller && (
         <div class="sh-bazaar-mybid">
-          Your bid: <strong>
+          {t('bazaar.card.your_bid_is')} <strong>
             {formatBazaarAmount(myBid.amount, listing.currency)}
           </strong>
           <button type="button" class="sh-link sh-link--danger"
                   disabled={busy}
                   onClick={() => void withdraw(myBid.id)}>
-            Withdraw
+            {t('bazaar.withdraw')}
           </button>
         </div>
       )}
@@ -459,7 +460,7 @@ function SellerControls({
     (listing.mode === 'auction' || listing.mode === 'bid_from')
   return (
     <div class="sh-bazaar-seller">
-      <strong class="sh-muted">You own this listing</strong>
+      <strong class="sh-muted">{t('bazaar.card.yours')}</strong>
       {showBids && (
         <ul class="sh-bazaar-incoming">
           {bids.map(b => (
@@ -473,11 +474,11 @@ function SellerControls({
               <div class="sh-row" style={{ marginLeft: 'auto' }}>
                 <Button variant="secondary" loading={busy}
                         onClick={() => void onReject(b.id)}>
-                  Decline
+                  {t('bazaar.decline')}
                 </Button>
                 <Button loading={busy}
                         onClick={() => void onAccept(b.id)}>
-                  Accept
+                  {t('bazaar.accept')}
                 </Button>
               </div>
             </li>
@@ -486,7 +487,7 @@ function SellerControls({
       )}
       {active && (
         <Button variant="danger" loading={busy} onClick={() => void onCancel()}>
-          Cancel listing
+          {t('bazaar.card.cancel_listing')}
         </Button>
       )}
     </div>

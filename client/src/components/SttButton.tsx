@@ -14,6 +14,7 @@
 import type preact from 'preact'
 import { signal, useSignal } from '@preact/signals'
 import { token } from '@/store/auth'
+import { t } from '@/i18n/i18n'
 
 const TARGET_SAMPLE_RATE = 16000
 
@@ -78,7 +79,7 @@ export function SttButton({ onText, language = 'en', disabled, className }: SttB
         },
       })
     } catch {
-      return fail('Microphone access denied.')
+      return fail(t('stt.mic_denied'))
     }
 
     const ctx = new AudioContext()
@@ -87,7 +88,7 @@ export function SttButton({ onText, language = 'en', disabled, className }: SttB
     } catch {
       stream.getTracks().forEach(t => t.stop())
       await ctx.close()
-      return fail('Audio processing unavailable.')
+      return fail(t('stt.audio_unavailable'))
     }
     const source = ctx.createMediaStreamSource(stream)
     const worklet = new AudioWorkletNode(ctx, 'stt-pcm16-downsampler', {
@@ -140,16 +141,16 @@ export function SttButton({ onText, language = 'en', disabled, className }: SttB
         state.value = 'idle'
         await cleanup()
       } else if (msg.type === 'error') {
-        const detail = msg.detail || 'Transcription failed.'
+        const detail = msg.detail || t('stt.failed')
         const isUnsupported = /not configured|unsupported/i.test(detail)
         await fail(detail, isUnsupported)
       }
     }
 
-    ws.onerror = async () => { await fail('Connection to STT failed.') }
+    ws.onerror = async () => { await fail(t('stt.connect_failed')) }
     ws.onclose = async () => {
       if (state.value === 'recording' || state.value === 'uploading') {
-        await fail('STT stream closed unexpectedly.')
+        await fail(t('stt.closed'))
       }
     }
   }
@@ -199,10 +200,10 @@ export function SttButton({ onText, language = 'en', disabled, className }: SttB
     state.value === 'uploading' ? '⏳' :
     state.value === 'error' ? '⚠' : idleMic
   const title =
-    state.value === 'error' ? (error.value || 'Error') :
-    state.value === 'recording' ? 'Release to transcribe' :
-    state.value === 'uploading' ? 'Transcribing…' :
-    'Hold to record voice note'
+    state.value === 'error' ? (error.value || t('stt.error')) :
+    state.value === 'recording' ? t('stt.release') :
+    state.value === 'uploading' ? t('stt.transcribing') :
+    t('stt.hold')
 
   return (
     <button

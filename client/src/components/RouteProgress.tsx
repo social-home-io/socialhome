@@ -13,6 +13,7 @@
  * render the bar whenever the count is > 0.
  */
 import { signal } from '@preact/signals'
+import { t } from '@/i18n/i18n'
 
 const inflight = signal(0)
 
@@ -44,7 +45,7 @@ export function RouteProgress() {
     <div
       class="sh-route-progress"
       role="progressbar"
-      aria-label="Loading page"
+      aria-label={t('route.loading')}
       aria-busy="true"
     >
       <div class="sh-route-progress__bar" />

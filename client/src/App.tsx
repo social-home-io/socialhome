@@ -5,6 +5,7 @@ import { useComputed, signal } from '@preact/signals'
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { basePath, addBase } from '@/baseUrl'
+import { t } from '@/i18n/i18n'
 import { isAuthed, currentUser, loadCurrentUser, setToken, token } from '@/store/auth'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
 import { usesIngressAuth } from '@/platform'
@@ -83,7 +84,7 @@ function LoginPage() {
   async function submit(e: Event) {
     e.preventDefault()
     if (!username || !password) {
-      setError('Username and password are required.')
+      setError(t('login.required'))
       return
     }
     setBusy(true)
@@ -96,17 +97,17 @@ function LoginPage() {
       // ``isAuthed`` is ``currentUser != null``, and ``currentUser``
       // stays null until ``/api/me`` resolves.
       await loadCurrentUser()
-      showToast('Welcome back', 'success')
+      showToast(t('login.welcome_back'), 'success')
     } catch (err: any) {
       const status = err?.status
       if (status === 401) {
-        setError('Invalid credentials.')
+        setError(t('login.invalid'))
       } else if (status === 404) {
-        setError('Token login is disabled — log in via Home Assistant.')
+        setError(t('login.disabled'))
       } else if (status === 429) {
-        setError('Too many attempts — wait a few minutes.')
+        setError(t('login.rate_limit'))
       } else {
-        setError(err?.message || 'Login failed.')
+        setError(err?.message || t('login.failed'))
       }
     } finally {
       setBusy(false)
@@ -116,11 +117,11 @@ function LoginPage() {
   return (
     <div class="sh-login" role="main">
       <div class="sh-login-hero">
-        <Wordmark size={48} tagline="The social home for your household." />
+        <Wordmark size={48} tagline={t('login.tagline')} />
       </div>
       <form onSubmit={submit} class="sh-login-form">
         <label>
-          Username
+          {t('login.username')}
           <input
             name="username"
             type="text"
@@ -135,7 +136,7 @@ function LoginPage() {
           />
         </label>
         <label>
-          Password
+          {t('login.password')}
           <input
             name="password"
             type="password"
@@ -151,11 +152,11 @@ function LoginPage() {
         </label>
         <FormError id="login-error" message={error} />
         <Button type="submit" disabled={busy}>
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? t('login.signing_in') : t('login.submit')}
         </Button>
       </form>
       <p class="sh-muted" style={{ textAlign: 'center', marginTop: 'var(--sh-space-md)' }}>
-        <a class="sh-link" href={addBase('/forgot-password')}>Forgot password?</a>
+        <a class="sh-link" href={addBase('/forgot-password')}>{t('login.forgot_password')}</a>
       </p>
     </div>
   )
@@ -185,19 +186,15 @@ function IngressAuthFailed() {
   return (
     <div class="sh-login" role="main">
       <div class="sh-login-hero">
-        <Wordmark size={48} tagline="The social home for your household." />
+        <Wordmark size={48} tagline={t('login.tagline')} />
       </div>
-      <h1 style={{ textAlign: 'center' }}>Couldn't reach Social Home</h1>
+      <h1 style={{ textAlign: 'center' }}>{t('ingress_failed.title')}</h1>
       <p class="sh-muted" style={{ maxWidth: '34em', margin: '0 auto var(--sh-space-md)' }}>
-        Home Assistant didn't pass through the authentication
-        headers Social Home needs to sign you in. This usually means
-        the panel was opened from a stale link, or the add-on was
-        restarted mid-session. Open the <strong>Social Home</strong>
-        sidebar entry again — that re-runs the ingress handshake.
+        {t('ingress_failed.body')}
       </p>
       <div style={{ textAlign: 'center' }}>
         <Button onClick={() => { window.location.assign(basePath) }}>
-          Reload
+          {t('ingress_failed.reload')}
         </Button>
       </div>
     </div>
@@ -372,7 +369,7 @@ export function App() {
   return (
     <ErrorBoundary>
       <LocationProvider>
-        <a href="#main" class="sh-skip-link">Skip to main content</a>
+        <a href="#main" class="sh-skip-link">{t('a11y.skip_to_main')}</a>
         <OfflineIndicator />
         <InstallPrompt />
         <div class="sh-layout">

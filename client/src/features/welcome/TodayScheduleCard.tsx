@@ -24,7 +24,7 @@
  * ``.sh-timetable-badge`` / colour tokens).
  */
 import { useEffect, useId, useState } from 'preact/hooks'
-import { locale, t } from '@/i18n/i18n'
+import { formatLocale, locale, t } from '@/i18n/i18n'
 import { colorClass } from '@/features/timetable/colors'
 import { loadViewPrefs } from '@/features/timetable/viewPrefs'
 import { changesOf, statusAria } from '@/features/timetable/weekView'
@@ -201,7 +201,7 @@ function EventItem({ row, now }: { row: EventRow; now: number }) {
   // An event that began on an earlier day (a party past midnight) says
   // which day, so "21:00" isn't read as tonight.
   const day = row.start < startOfDay(now)
-    ? new Date(row.start).toLocaleDateString(undefined, { weekday: 'short' })
+    ? new Date(row.start).toLocaleDateString(formatLocale(), { weekday: 'short' })
     : null
   const sr = `${day ? `${day} ` : ''}${clockRange(row.start, row.end)}, ${row.event.summary}`
   return (

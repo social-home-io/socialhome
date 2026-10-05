@@ -72,7 +72,7 @@ export function SpaceBazaarTab({ spaceId, canSell = true }: {
       <div class="sh-bazaar-detail">
         {dialog}
         <Button variant="secondary" onClick={() => { selected.value = null }}>
-          ← Back to listings
+          ← {t('bazaar.back')}
         </Button>
         <BazaarPostBody postId={selected.value.post_id} />
       </div>

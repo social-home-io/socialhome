@@ -9,7 +9,7 @@
  * 1. **Compact ("chat" shape)** — for dense lists like the DM inbox or
  *    the Momentum feed where a one-or-two-character pill is what the
  *    user is scanning. ``now`` / ``5m`` / ``3h`` / ``Yesterday`` /
- *    ``Mon`` / ``Apr 23``.
+ *    ``Mon`` / ``Apr 23`` — in the UI language, through ``Intl``.
  * 2. **Verbose ("docs" shape)** — for surfaces where the row has space
  *    for a friendly phrase like a Pages byline or a notification row.
  *    ``just now`` / ``5 min ago`` / ``3h ago`` / ``yesterday`` /
@@ -95,17 +95,41 @@ function parseDelta(iso: string): ParsedDelta | null {
 export function relativeChatTime(iso: string): string {
   const d = parseDelta(iso)
   if (!d) return iso
-  if (d.min < 1) return 'now'
-  if (d.min < 60) return `${d.min}m`
-  if (d.sameDay) return `${d.hr}h`
-  if (d.yesterday) return 'Yesterday'
+  const loc = formatLocale()
+  if (d.min < 1) return chatRelative(loc, 0, 'second', 'now', false)
+  if (d.min < 60) return chatUnit(loc, d.min, 'minute', `${d.min}m`)
+  if (d.sameDay) return chatUnit(loc, d.hr, 'hour', `${d.hr}h`)
+  if (d.yesterday) return chatRelative(loc, -1, 'day', 'Yesterday', true)
   if (d.diff < 6 * MS_PER_DAY) {
-    return new Date(d.t).toLocaleDateString(undefined, { weekday: 'short' })
+    return new Date(d.t).toLocaleDateString(loc, { weekday: 'short' })
   }
-  return new Date(d.t).toLocaleDateString(undefined, {
+  return new Date(d.t).toLocaleDateString(loc, {
     month: 'short',
     day: 'numeric',
   })
+}
+
+/** ``now`` / ``Yesterday`` in the UI language (``capitalise`` for the
+ *  day word, as before). ``fallback`` covers an engine without the API. */
+function chatRelative(
+  loc: string, value: number, unit: Intl.RelativeTimeFormatUnit, fallback: string,
+  capitalise: boolean,
+): string {
+  try {
+    const out = new Intl.RelativeTimeFormat(loc, { numeric: 'auto' }).format(value, unit)
+    return capitalise ? out.charAt(0).toLocaleUpperCase(loc) + out.slice(1) : out
+  } catch {
+    return fallback
+  }
+}
+
+/** The narrowest unit form (``5m``, ``5 Min.``, ``3 u``) in the UI language. */
+function chatUnit(loc: string, value: number, unit: 'minute' | 'hour', fallback: string): string {
+  try {
+    return new Intl.NumberFormat(loc, { style: 'unit', unit, unitDisplay: 'narrow' }).format(value)
+  } catch {
+    return fallback
+  }
 }
 
 /**

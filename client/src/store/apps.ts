@@ -9,6 +9,7 @@
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { showToast } from '@/components/Toast'
+import { t } from '@/i18n/i18n'
 
 export interface InstalledApp {
   app_id:       string
@@ -69,7 +70,7 @@ export async function loadInstalled(): Promise<void> {
     const data = await api.get('/api/apps') as { apps: InstalledApp[] }
     installedApps.value = data.apps ?? []
   } catch (err: unknown) {
-    appsError.value = (err as Error).message ?? 'Could not load apps.'
+    appsError.value = (err as Error).message ?? t('apps.load_failed')
   } finally {
     appsLoading.value = false
   }
@@ -82,7 +83,7 @@ export async function loadCatalog(): Promise<void> {
     const data = await api.get('/api/apps/catalog') as { apps: CatalogEntry[] }
     catalog.value = data.apps ?? []
   } catch (err: unknown) {
-    catalogError.value = (err as Error).message ?? 'Could not load catalog.'
+    catalogError.value = (err as Error).message ?? t('apps.catalog_failed')
   } finally {
     catalogLoading.value = false
   }
@@ -111,7 +112,7 @@ export async function updateApp(appId: string): Promise<void> {
 export async function installApp(appId: string): Promise<void> {
   const app = await api.post('/api/apps', { app_id: appId }) as InstalledApp
   installedApps.value = [...installedApps.value, app]
-  showToast(`${app.name} installed.`, 'success')
+  showToast(t('apps.installed_toast', { name: app.name }), 'success')
 }
 
 export async function uninstallApp(appId: string): Promise<void> {

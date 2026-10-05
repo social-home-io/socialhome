@@ -35,6 +35,7 @@ import {
   mentionCandidates,
   type MentionCandidate,
 } from '@/utils/mentions'
+import { t } from '@/i18n/i18n'
 
 type SpliceCallback = (text: string, range: [number, number]) => void
 
@@ -264,7 +265,7 @@ export function MentionAutocomplete() {
   if (matches === null) {
     return (
       <div ref={ref} class="sh-mention-autocomplete" style={style} role="status">
-        <div class="sh-mention-autocomplete-note">Loading members…</div>
+        <div class="sh-mention-autocomplete-note">{t('mention.loading')}</div>
       </div>
     )
   }
@@ -274,8 +275,8 @@ export function MentionAutocomplete() {
       <div ref={ref} class="sh-mention-autocomplete" style={style} role="status">
         <div class="sh-mention-autocomplete-note">
           {s.scope.kind === 'space'
-            ? `No member of this space matches “@${s.query}”`
-            : `Nobody in this chat matches “@${s.query}”`}
+            ? t('mention.no_match_space', { query: s.query })
+            : t('mention.no_match_chat', { query: s.query })}
         </div>
       </div>
     )
@@ -287,7 +288,7 @@ export function MentionAutocomplete() {
       id={MENTION_LISTBOX_ID}
       class="sh-mention-autocomplete"
       role="listbox"
-      aria-label="Mention a member"
+      aria-label={t('mention.aria')}
       style={style}
     >
       {matches.map((c, idx) => (

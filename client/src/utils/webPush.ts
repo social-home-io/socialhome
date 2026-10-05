@@ -13,6 +13,7 @@
  * ``PushSubscription`` and deletes exactly that row.
  */
 import { api, ApiError } from '@/api'
+import { t } from '@/i18n/i18n'
 
 /** True when this browser can do Web Push at all. */
 export function webPushSupported(): boolean {
@@ -52,7 +53,7 @@ export async function currentPushSubscription(): Promise<PushSubscription | null
  *  server. Returns false when the user declined permission; throws on
  *  any other failure so the caller can tell the user. */
 export async function enableWebPush(): Promise<boolean> {
-  if (!webPushSupported()) throw new Error('This browser does not support push notifications')
+  if (!webPushSupported()) throw new Error(t('push.unsupported'))
   const permission = await Notification.requestPermission()
   if (permission !== 'granted') return false
   // Relative URL — resolves against ``document.baseURI`` so the worker

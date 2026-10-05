@@ -79,7 +79,7 @@ export function buildHouseholdEntries(
     .map((s) => ({
       space_id:           s.id,
       host_instance_id:   'local',
-      host_display_name:  'Your household',
+      host_display_name:  t('spaces.browse.your_household'),
       host_is_paired:     true,
       name:               s.name,
       description:        s.description,
@@ -228,7 +228,7 @@ function filterBy(entries: DirectoryEntry[], term: string): DirectoryEntry[] {
 }
 
 export default function SpaceBrowserPage() {
-  useTitle(t('spaces.list.browse'))
+  useTitle(t('page_title.browse'))
   const loc = useLocation()
   // Refreshing the global directory and pairing with another household
   // are both household-admin actions.
@@ -279,7 +279,7 @@ export default function SpaceBrowserPage() {
       // dialog that could only fail.
       if (!isAdmin) {
         showToast(
-          `Ask a household admin to connect with ${hostLabel(entry)}.`,
+          t('spaces.browse.ask_admin_connect', { host: hostLabel(entry) }),
           'info',
         )
         return
@@ -295,10 +295,10 @@ export default function SpaceBrowserPage() {
       try {
         if (subscribing) {
           await api.post(`/api/spaces/${entry.space_id}/subscribe`, {})
-          showToast(`Subscribed to ${entry.name}`, 'success')
+          showToast(t('spaces.browse.followed_toast', { name: entry.name }), 'success')
         } else {
           await api.delete(`/api/spaces/${entry.space_id}/subscribe`)
-          showToast(`Unsubscribed from ${entry.name}`, 'info')
+          showToast(t('spaces.browse.unfollowed_toast', { name: entry.name }), 'info')
         }
       } catch (exc) {
         // Revert optimism on failure.
@@ -317,7 +317,7 @@ export default function SpaceBrowserPage() {
           await api.post(
             `/api/spaces/${entry.space_id}/join-requests`, {},
           )
-          showToast(`Joined ${entry.name}`, 'success')
+          showToast(t('spaces.browse.joined_toast', { name: entry.name }), 'success')
           await loadAll()
         } catch (exc) {
           showToast((exc as Error).message, 'error')
@@ -329,7 +329,7 @@ export default function SpaceBrowserPage() {
             { host_instance_id: entry.host_instance_id },
           )
           showToast(
-            `Request sent to ${entry.host_display_name}`, 'success',
+            t('spaces.browse.request_sent_to', { host: entry.host_display_name }), 'success',
           )
           entry.request_pending = true
           // Trigger reactivity.
@@ -353,13 +353,13 @@ export default function SpaceBrowserPage() {
       await api.post(
         `/api/spaces/${e.space_id}/join-requests`, { message },
       )
-      showToast(`Request sent for ${e.name}`, 'success')
+      showToast(t('spaces.browse.request_sent_for', { name: e.name }), 'success')
     } else {
       await api.post(
         `/api/public_spaces/${e.space_id}/join-request`,
         { host_instance_id: e.host_instance_id, message },
       )
-      showToast(`Request sent to ${e.host_display_name}`, 'success')
+      showToast(t('spaces.browse.request_sent_to', { host: e.host_display_name }), 'success')
     }
     e.request_pending = true
     global_.value = [...global_.value]
@@ -371,7 +371,7 @@ export default function SpaceBrowserPage() {
     setRefreshing(true)
     try {
       await api.post('/api/public_spaces/refresh', {})
-      showToast('Directory refresh requested', 'info')
+      showToast(t('spaces.browse.refresh_requested'), 'info')
       // Wait a short beat before reloading so the refreshed poll lands.
       setTimeout(() => { void loadAll() }, 2000)
     } catch (exc) {
@@ -404,37 +404,37 @@ export default function SpaceBrowserPage() {
   const emptyCopy = (tab: Tab): { lead: string; hint?: string } => {
     if (searching) {
       return {
-        lead: `No matches for "${term}" in ${
-          tab === 'global' ? 'the global directory'
-            : tab === 'friends' ? 'your friends'
-            : 'your household'
-        }.`,
-        hint: 'Clear the search or pick a different tab.',
+        lead: t(
+          tab === 'global' ? 'spaces.browse.no_match_global'
+            : tab === 'friends' ? 'spaces.browse.no_match_friends'
+            : 'spaces.browse.no_match_household',
+          { term },
+        ),
+        hint: t('spaces.browse.no_match_hint'),
       }
     }
     if (tab === 'global') {
       return {
-        lead: 'No global spaces yet.',
+        lead: t('spaces.browse.empty_global'),
         hint: canRefresh
           // Refreshing only helps if this household is actually connected to
           // a connection server — with none paired the directory is empty no
           // matter how often it is polled, so name the other way out too.
-          ? 'Try refreshing the directory above, or connect to a connection '
-            + 'server in Settings → Federation.'
-          : 'Ask a household admin to refresh the global directory.',
+          ? t('spaces.browse.empty_global_hint')
+          : t('spaces.browse.empty_global_hint_member'),
       }
     }
     if (tab === 'friends') {
       return {
-        lead: 'None of your paired households have shared a public space yet.',
+        lead: t('spaces.browse.empty_friends'),
         hint: isAdmin
-          ? 'Pair with another household to start sharing.'
-          : 'Ask a household admin to pair with another household.',
+          ? t('spaces.browse.empty_friends_hint')
+          : t('spaces.browse.empty_friends_hint_member'),
       }
     }
     return {
-      lead: 'No spaces in your household yet.',
-      hint: 'Create one to get started.',
+      lead: t('spaces.browse.empty_household'),
+      hint: t('spaces.browse.empty_household_hint'),
     }
   }
 
@@ -442,12 +442,8 @@ export default function SpaceBrowserPage() {
     <div class="sh-space-browser">
       <header class="sh-browser-header">
         <div class="sh-browser-header__copy">
-          <h1>Browse spaces</h1>
-          <p class="sh-muted">
-            Spaces are shared corners — a school-run, a holiday crew, a
-            neighbourhood watch.  Browse what's already here, or
-            create your own.
-          </p>
+          <h1>{t('spaces.list.browse')}</h1>
+          <p class="sh-muted">{t('spaces.browse.intro')}</p>
         </div>
         <div class="sh-browser-header__actions">
           {canRefresh && (
@@ -455,10 +451,10 @@ export default function SpaceBrowserPage() {
               variant="secondary" loading={refreshing}
               onClick={onRefreshGfs}
             >
-              ⟳ Refresh global directory
+              ⟳ {t('spaces.browse.refresh')}
             </Button>
           )}
-          <Button onClick={openSpaceCreate}>+ Create space</Button>
+          <Button onClick={openSpaceCreate}>+ {t('spaces.list.create')}</Button>
         </div>
       </header>
 
@@ -466,7 +462,7 @@ export default function SpaceBrowserPage() {
         <input
           class="sh-input"
           type="search"
-          placeholder="Search by name or description…"
+          placeholder={t('spaces.browse.search_placeholder')}
           value={term}
           onInput={(e) => {
             searchTerm.value = (e.target as HTMLInputElement).value
@@ -478,7 +474,7 @@ export default function SpaceBrowserPage() {
             class="sh-browser-toolbar__clear"
             onClick={() => { searchTerm.value = '' }}
           >
-            Clear
+            {t('spaces.browse.clear')}
           </button>
         )}
       </div>
@@ -493,7 +489,7 @@ export default function SpaceBrowserPage() {
           }
           onClick={() => { activeTab.value = 'household' }}
         >
-          🏠 Your household ({searching
+          🏠 {t('spaces.browse.your_household')} ({searching
             ? `${lists.household.length}/${totals.household}`
             : totals.household})
         </button>
@@ -506,7 +502,7 @@ export default function SpaceBrowserPage() {
           }
           onClick={() => { activeTab.value = 'friends' }}
         >
-          🤝 From friends ({searching
+          🤝 {t('spaces.browse.from_friends')} ({searching
             ? `${lists.friends.length}/${totals.friends}`
             : totals.friends})
         </button>
@@ -519,7 +515,7 @@ export default function SpaceBrowserPage() {
           }
           onClick={() => { activeTab.value = 'global' }}
         >
-          🌐 Global ({searching
+          🌐 {t('space.public.scope_global')} ({searching
             ? `${lists.global.length}/${totals.global}`
             : totals.global})
         </button>
@@ -533,14 +529,14 @@ export default function SpaceBrowserPage() {
               <p class="sh-muted">{lead}</p>
               {hint && <p class="sh-muted">{hint}</p>}
               {!searching && activeTab.value === 'household' && (
-                <Button onClick={openSpaceCreate}>+ Create your first space</Button>
+                <Button onClick={openSpaceCreate}>+ {t('spaces.list.create_first')}</Button>
               )}
               {!searching && activeTab.value === 'friends' && isAdmin && (
                 <Button
                   variant="secondary"
                   onClick={() => openPairing('household')}
                 >
-                  🤝 Pair with another household
+                  🤝 {t('spaces.browse.pair_cta')}
                 </Button>
               )}
             </div>

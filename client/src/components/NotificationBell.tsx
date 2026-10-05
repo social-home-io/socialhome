@@ -17,6 +17,7 @@ import { api } from '@/api'
 import { recent, unreadCount } from '@/store/notifications'
 import type { Notification } from '@/types'
 import { appHref } from '@/baseUrl'
+import { formatLocale, isOne, t } from '@/i18n/i18n'
 
 const panelOpen = signal(false)
 /** Full notifications list — populated when the panel opens.
@@ -152,8 +153,9 @@ export function NotificationBell() {
         onClick={togglePanel}
         aria-label={
           unreadCount.value > 0
-            ? `Notifications (${unreadCount.value} unread)`
-            : 'Notifications'
+            ? t(isOne(unreadCount.value) ? 'notifications.bell_aria_unread_one' : 'notifications.bell_aria_unread',
+              { n: String(unreadCount.value) })
+            : t('notifications.title')
         }
       >
         🔔
@@ -166,14 +168,14 @@ export function NotificationBell() {
       {panelOpen.value && (
         <div class="sh-notif-panel">
           <div class="sh-notif-header">
-            <h4>Notifications</h4>
+            <h4>{t('notifications.title')}</h4>
             {unreadCount.value > 0 && (
-              <button class="sh-link" onClick={markAllRead}>Mark all read</button>
+              <button class="sh-link" onClick={markAllRead}>{t('notifications.mark_all_read')}</button>
             )}
           </div>
           <div class="sh-notif-list">
             {items.length === 0 && (
-              <p class="sh-muted">No notifications</p>
+              <p class="sh-muted">{t('notifications.bell_empty')}</p>
             )}
             {items.map(n => {
               const cls = `sh-notif-item ${n.read_at ? '' : 'sh-notif--unread'}`
@@ -181,7 +183,7 @@ export function NotificationBell() {
                 <>
                   <div class="sh-notif-title">{n.title}</div>
                   <time class="sh-notif-time">
-                    {new Date(n.created_at).toLocaleString()}
+                    {new Date(n.created_at).toLocaleString(formatLocale())}
                   </time>
                 </>
               )

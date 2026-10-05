@@ -48,7 +48,7 @@ describe('SetupPage haos welcome', () => {
 
     expect(await findByText('Welcome to your home')).toBeTruthy()
     expect(post).not.toHaveBeenCalled()
-    expect(queryByText(/Detecting your Home Assistant owner/)).toBeNull()
+    expect(queryByText(/Finding your Home Assistant owner/)).toBeNull()
 
     // Welcome → "Let’s go" → name step (no POST yet).
     fireEvent.click(await findByText("Let’s go"))

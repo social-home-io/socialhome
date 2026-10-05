@@ -22,6 +22,7 @@ import { Avatar } from './Avatar'
 import { householdUsers } from '@/store/householdUsers'
 import { currentUser } from '@/store/auth'
 import { resolveCalendarColor } from '@/utils/calendar'
+import { t } from '@/i18n/i18n'
 
 /** Smaller summary shape than the one in the route — only the fields
  *  the strip needs. Callers pass the full list and we ignore the rest. */
@@ -160,7 +161,7 @@ export function CalendarFilterStrip({
     <div class="sh-cal-strip-wrap">
       <nav
         class="sh-cal-strip"
-        aria-label="Household calendars"
+        aria-label={t('calendar.strip.aria')}
       >
         <div class="sh-cal-strip-inner">
           {cards.map((card, i) => {
@@ -174,7 +175,9 @@ export function CalendarFilterStrip({
             // modifier classes (colour saturation + tape hue + opacity).
             // The aria-label keeps a screen-reader-friendly text version of
             // the same state.
-            const stateLabel = on ? 'showing' : partial ? 'partial' : 'hidden'
+            const stateLabel = on
+              ? t('calendar.strip.state_on')
+              : partial ? t('calendar.strip.state_partial') : t('calendar.strip.state_off')
             return (
               <button
                 key={card.ownerKey}
@@ -189,7 +192,7 @@ export function CalendarFilterStrip({
                   '--sh-pin-rot': `${PIN_ROTATIONS[i % PIN_ROTATIONS.length]}deg`,
                 } as Record<string, string>}
                 aria-pressed={on}
-                aria-label={`${card.displayName} — ${stateLabel}. Press to toggle.`}
+                aria-label={t('calendar.strip.pin_aria', { name: card.displayName, state: stateLabel })}
                 onClick={() => toggle(card)}
               >
                 <span class="sh-cal-strip-tape" aria-hidden="true" />
@@ -199,7 +202,7 @@ export function CalendarFilterStrip({
                   size={44}
                 />
                 <span class="sh-cal-strip-name">
-                  {card.isMine ? 'You' : card.displayName}
+                  {card.isMine ? t('calendar.page.owner_you') : card.displayName}
                 </span>
               </button>
             )
@@ -207,20 +210,20 @@ export function CalendarFilterStrip({
         </div>
       </nav>
       <div class="sh-cal-strip-actions">
-        <div class="sh-cal-strip-quick" role="group" aria-label="Calendar filters">
+        <div class="sh-cal-strip-quick" role="group" aria-label={t('calendar.strip.filters_aria')}>
           <button
             type="button"
             class="sh-cal-strip-quick__btn"
             onClick={onShowOnlyMine}
           >
-            Just me
+            {t('calendar.strip.just_me')}
           </button>
           <button
             type="button"
             class="sh-cal-strip-quick__btn"
             onClick={onShowAll}
           >
-            Everyone
+            {t('calendar.strip.everyone')}
           </button>
         </div>
         {primaryAction && (

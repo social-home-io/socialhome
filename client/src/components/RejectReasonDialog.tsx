@@ -5,6 +5,7 @@
 import { signal } from '@preact/signals'
 import { Modal } from './Modal'
 import { Button } from './Button'
+import { t } from '@/i18n/i18n'
 
 interface PendingAsk {
   title:   string
@@ -47,11 +48,11 @@ export function RejectReasonDialog() {
     <Modal
       open={open.value}
       onClose={close}
-      title={current?.title || 'Reason'}
+      title={current?.title || t('reject_reason.title')}
     >
       <div class="sh-form">
         <label>
-          {current?.label || 'Reason (optional)'}
+          {current?.label || t('reject_reason.label')}
           <textarea
             rows={3}
             maxLength={500}
@@ -62,8 +63,8 @@ export function RejectReasonDialog() {
           />
         </label>
         <div class="sh-form-actions">
-          <Button variant="secondary" onClick={close}>Cancel</Button>
-          <Button onClick={submit} loading={busy.value}>Submit</Button>
+          <Button variant="secondary" onClick={close}>{t('common.cancel')}</Button>
+          <Button onClick={submit} loading={busy.value}>{t('reject_reason.submit')}</Button>
         </div>
       </div>
     </Modal>

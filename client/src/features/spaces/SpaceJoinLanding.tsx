@@ -61,7 +61,7 @@ async function consumeToken(token: string, spaceId: string | null) {
       return
     }
     const msg = (err as Error)?.message ?? String(err)
-    message.value = msg || 'Invite link rejected'
+    message.value = msg || t('space.join_landing.rejected')
     status.value = 'error'
   }
 }
@@ -95,9 +95,9 @@ async function fetchIssuerCode(token: string): Promise<string | null> {
 async function copyCode() {
   try {
     await navigator.clipboard.writeText(pasteCode.value)
-    showToast('Code copied!', 'success')
+    showToast(t('invite.copied_code'), 'success')
   } catch {
-    showToast('Could not copy — select the code to copy manually.', 'error')
+    showToast(t('invite.copy_failed_code'), 'error')
   }
 }
 
@@ -113,7 +113,7 @@ export default function SpaceJoinLanding() {
     const spaceId = params.get('space_id') || params.get('space') || null
     if (!token) {
       status.value = 'error'
-      message.value = 'This invite link is missing its token.'
+      message.value = t('space.join_landing.no_token')
       return
     }
     void consumeToken(token, spaceId)
@@ -123,21 +123,21 @@ export default function SpaceJoinLanding() {
     return (
       <div class="sh-join-landing">
         <Spinner />
-        <p>Joining the space…</p>
+        <p>{t('space.join_landing.joining')}</p>
       </div>
     )
   }
   if (status.value === 'joined' && joined.value) {
     return (
       <div class="sh-join-landing sh-card">
-        <h2>You're in! 🎉</h2>
+        <h2>{t('space.join.joined')}</h2>
         <p data-testid="join-landing-welcome">
           {joined.value.role === 'moderator'
             ? t('space.join.welcome_moderator')
-            : 'Welcome to the space.'}
+            : t('space.join_landing.welcome')}
         </p>
         <Button onClick={() => loc.route(addBase(`/spaces/${joined.value!.space_id}`))}>
-          Open space
+          {t('space.join_landing.open')}
         </Button>
       </div>
     )
@@ -145,32 +145,28 @@ export default function SpaceJoinLanding() {
   if (status.value === 'wrong-instance') {
     return (
       <div class="sh-join-landing sh-card" data-testid="join-landing-wrong-instance">
-        <h2>This invite is for another Social Home</h2>
-        <p>
-          Open <strong>your own</strong> Social Home, go to{' '}
-          <strong>Spaces</strong>, and paste this code into the
-          "Join with invite code" card:
-        </p>
+        <h2>{t('space.join_landing.wrong_title')}</h2>
+        <p>{t('space.join_landing.wrong_body')}</p>
         <code class="sh-invite-link" data-testid="fallback-code">
           {pasteCode.value}
         </code>
         <div class="sh-invite-artifact sh-invite-artifact--qr">
-          <QrCodeImg data={pasteCode.value} size={180} alt="Invite QR code" />
+          <QrCodeImg data={pasteCode.value} size={180} alt={t('invite.qr.alt')} />
         </div>
         <div class="sh-form-actions">
           <Button variant="secondary" onClick={() => loc.route(addBase('/spaces'))}>
-            Back to spaces
+            {t('space.join_landing.back')}
           </Button>
-          <Button onClick={copyCode}>Copy code</Button>
+          <Button onClick={copyCode}>{t('invite.code.copy')}</Button>
         </div>
       </div>
     )
   }
   return (
     <div class="sh-join-landing sh-card sh-error">
-      <h2>Couldn't join</h2>
+      <h2>{t('space.join_landing.failed_title')}</h2>
       <p>{message.value}</p>
-      <Button onClick={() => loc.route(addBase('/spaces'))}>Back to spaces</Button>
+      <Button onClick={() => loc.route(addBase('/spaces'))}>{t('space.join_landing.back')}</Button>
     </div>
   )
 }

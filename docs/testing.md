@@ -137,6 +137,29 @@ Run the full client suite:
 cd client && pnpm vitest run
 ```
 
+### Translation check (`pnpm i18n:check`)
+
+`client/scripts/i18n-check.js` runs in the CI `frontend` job and fails when:
+
+- a `t('key')` call in `client/src/` has no entry in `locales/en.json`;
+- a shipped locale (`locales/_meta.json`) is missing an `en.json` key;
+- a locale has a key that `en.json` no longer has;
+- a translation's `{placeholder}` names differ from the English source.
+  A `_one` plural may spell out its count instead.
+
+Translations come in through Weblate (`client/weblate.yml`), which picks
+up new English keys only after they land on `main`. A PR that adds keys
+should translate them. If a PR deliberately leaves keys for Weblate, list
+them per locale in `client/scripts/i18n-untranslated.json`:
+
+```json
+{ "de": ["feed.empty.title"], "fr": ["feed.empty.title"] }
+```
+
+Remove the entries once the Weblate PR with the translations is merged.
+Unused `en.json` keys only print a warning, because some keys are built
+at runtime.
+
 ## CI
 
 `.github/workflows/ci.yml` runs four jobs in parallel:

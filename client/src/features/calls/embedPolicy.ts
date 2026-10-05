@@ -26,6 +26,8 @@
  * possible embed denial rather than a certain one.
  */
 
+import { t } from '@/i18n/i18n'
+
 interface PolicyApi { allowsFeature(feature: string): boolean }
 
 export class CallEmbedBlockedError extends Error {
@@ -37,11 +39,8 @@ export class CallEmbedBlockedError extends Error {
     const certain = opts.certain ?? true
     super(
       certain
-        ? "Calls can't use the microphone inside this embedded view. "
-          + 'Open Social Home in its own tab to call.'
-        : "Microphone access is blocked. If you've already allowed it, the page "
-          + "embedding Social Home isn't letting calls use it — open Social Home "
-          + 'in its own tab to call.',
+        ? t('calls.embed.blocked_certain')
+        : t('calls.embed.blocked_maybe'),
       { cause: opts.cause },
     )
     this.name = 'CallEmbedBlockedError'

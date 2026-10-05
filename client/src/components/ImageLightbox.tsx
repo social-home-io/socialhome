@@ -15,7 +15,7 @@ import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 
 import { showToast } from './Toast'
-import { t } from '@/i18n/i18n'
+import { t, formatLocale } from '@/i18n/i18n'
 
 export interface LightboxItem {
   id?:            string
@@ -81,9 +81,9 @@ export async function copyReferenceForItem(item: LightboxItem): Promise<void> {
   const snippet = `![${defaultAltText(item)}](${canonical})`
   try {
     await navigator.clipboard.writeText(snippet)
-    showToast('Reference copied — paste into a page', 'success')
+    showToast(t('lightbox.reference_copied'), 'success')
   } catch (err) {
-    showToast(`Copy failed: ${(err as Error)?.message ?? err}`, 'error')
+    showToast(t('lightbox.copy_failed', { error: String((err as Error)?.message ?? err) }), 'error')
   }
 }
 
@@ -128,7 +128,7 @@ export function ImageLightbox() {
       class="sh-lightbox"
       role="dialog"
       aria-modal="true"
-      aria-label="Media viewer"
+      aria-label={t('lightbox.aria')}
     >
       {/* Dim backdrop — click closes. */}
       <div
@@ -139,24 +139,24 @@ export function ImageLightbox() {
 
       <button
         type="button" class="sh-lightbox-close"
-        onClick={closeLightbox} aria-label="Close viewer (Esc)"
-        title="Close (Esc)"
+        onClick={closeLightbox} aria-label={t('lightbox.close_aria')}
+        title={t('lightbox.close_title')}
       >✕</button>
 
       {canPrev && (
         <button
           type="button" class="sh-lightbox-nav sh-lightbox-nav--prev"
           onClick={() => goto(-1)}
-          aria-label="Previous item (←)"
-          title="Previous (←)"
+          aria-label={t('lightbox.prev_aria')}
+          title={t('lightbox.prev_title')}
         >‹</button>
       )}
       {canNext && (
         <button
           type="button" class="sh-lightbox-nav sh-lightbox-nav--next"
           onClick={() => goto(+1)}
-          aria-label="Next item (→)"
-          title="Next (→)"
+          aria-label={t('lightbox.next_aria')}
+          title={t('lightbox.next_title')}
         >›</button>
       )}
 
@@ -181,7 +181,7 @@ export function ImageLightbox() {
         ) : (
           <img
             src={item.url}
-            alt={item.caption || 'Media'}
+            alt={item.caption || t('lightbox.media_alt')}
             class="sh-lightbox-media"
           />
         )}
@@ -192,7 +192,7 @@ export function ImageLightbox() {
           {item.caption && <strong>{item.caption}</strong>}
           {item.taken_at && (
             <time class="sh-muted">
-              {new Date(item.taken_at).toLocaleDateString(undefined, {
+              {new Date(item.taken_at).toLocaleDateString(formatLocale(), {
                 year:  'numeric',
                 month: 'short',
                 day:   'numeric',
@@ -210,15 +210,15 @@ export function ImageLightbox() {
             type="button"
             class="sh-lightbox-copyref"
             onClick={() => void copyReferenceForItem(item)}
-            aria-label="Copy a markdown reference for use in a page"
-            title="Copy reference"
-          >📋 Copy reference</button>
+            aria-label={t('lightbox.copy_reference_aria')}
+            title={t('lightbox.copy_reference')}
+          >📋 {t('lightbox.copy_reference')}</button>
           <a
             class="sh-lightbox-download"
             href={item.url}
             download
-            aria-label="Download this item"
-          >↓ Download</a>
+            aria-label={t('lightbox.download_aria')}
+          >↓ {t('media.download')}</a>
           {item.onReport && (
             <button
               type="button"

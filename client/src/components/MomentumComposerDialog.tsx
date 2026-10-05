@@ -28,6 +28,7 @@ import {
   registrations,
 } from '@/store/momentPublic'
 import type { Moment } from '@/types'
+import { t, isOne } from '@/i18n/i18n'
 
 const MAX_CONTENT = 1_000
 const MAX_VIDEO_MS = 15_000
@@ -90,7 +91,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
     const isVideo = f.type.startsWith('video/')
     const isImage = f.type.startsWith('image/')
     if (!isVideo && !isImage) {
-      showToast('Pick an image or video.', 'error')
+      showToast(t('highlight.quick.pick_media'), 'error')
       return
     }
     if (isVideo) {
@@ -104,7 +105,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
       }).finally(() => URL.revokeObjectURL(url))
       if (dur > MAX_VIDEO_MS + 50) {
         showToast(
-          `Videos cap at ${MAX_VIDEO_MS / 1000} seconds. This one is ${(dur / 1000).toFixed(1)} s.`,
+          t('moment.composer.video_too_long', { max: String(MAX_VIDEO_MS / 1000), len: (dur / 1000).toFixed(1) }),
           'error',
         )
         return
@@ -136,11 +137,11 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
     e.preventDefault()
     const text = content.value.trim()
     if (!text && !mediaUrl.value) {
-      showToast('Add some text or media first.', 'error')
+      showToast(t('moment.composer.empty'), 'error')
       return
     }
     if (text.length > MAX_CONTENT) {
-      showToast(`Trim to ${MAX_CONTENT} characters.`, 'error')
+      showToast(t('moment.composer.too_long', { n: String(MAX_CONTENT) }), 'error')
       return
     }
     submitting.value = true
@@ -160,7 +161,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
       onPosted?.(m)
     } catch (err: unknown) {
       const msg = (err as Error)?.message ?? String(err)
-      showToast(`Couldn't post: ${msg}`, 'error')
+      showToast(t('moment.composer.failed', { error: msg }), 'error')
       submitting.value = false
     }
   }
@@ -172,12 +173,12 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
     <Modal
       open={open.value}
       onClose={closeDialog}
-      title={isReply ? 'Reply' : 'New moment'}
+      title={isReply ? t('moment.composer.reply') : t('moment.composer.title')}
     >
       <form class="sh-momentum-composer-form" onSubmit={submit}>
         {isReply && (
           <p class="sh-muted sh-momentum-composer-reply-hint">
-            ↪ Replying to this moment
+            ↪ {t('moment.composer.replying')}
           </p>
         )}
 
@@ -186,14 +187,14 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
           class="sh-momentum-composer-text"
           rows={5}
           maxLength={MAX_CONTENT}
-          placeholder={isReply ? 'Your reply…' : 'Share a moment…'}
-          aria-label={isReply ? 'Your reply' : 'Your moment'}
+          placeholder={isReply ? t('moment.composer.reply_placeholder') : t('moment.composer.placeholder')}
+          aria-label={isReply ? t('moment.composer.reply_aria') : t('moment.composer.aria')}
           value={content.value}
           onInput={(e) => { content.value = (e.target as HTMLTextAreaElement).value }}
         />
         <div class="sh-momentum-composer-meta">
           <span class={remaining < 0 ? 'sh-error' : 'sh-muted'}>
-            {remaining} characters left
+            {t(isOne(remaining) ? 'highlight.quick.chars_left_one' : 'highlight.quick.chars_left', { n: String(remaining) })}
           </span>
         </div>
 
@@ -208,7 +209,7 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
               <button
                 type="button"
                 class="sh-composer-remove-attach"
-                aria-label="Remove attachment"
+                aria-label={t('composer.remove_attachment')}
                 onClick={clearMedia}
               >✕</button>
             </div>
@@ -224,14 +225,14 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
               />
               {durationMs.value !== null && (
                 <span class="sh-momentum-composer-duration"
-                      aria-label={`Video duration ${(durationMs.value / 1000).toFixed(1)} seconds (cap ${MAX_VIDEO_MS / 1000} s)`}>
+                      aria-label={t('moment.composer.duration_aria', { len: (durationMs.value / 1000).toFixed(1), max: String(MAX_VIDEO_MS / 1000) })}>
                   ⏱ {(durationMs.value / 1000).toFixed(1)}s
                 </span>
               )}
               <button
                 type="button"
                 class="sh-composer-remove-attach"
-                aria-label="Remove attachment"
+                aria-label={t('composer.remove_attachment')}
                 onClick={clearMedia}
               >✕</button>
             </div>
@@ -239,9 +240,9 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
           {!mediaUrl.value && (
             <MediaDropzone
               accept="image/*,video/*"
-              hint="Drag a photo or video here, or"
-              pickLabel="choose media…"
-              draggingHint="Drop to attach"
+              hint={t('highlight.quick.drop_hint')}
+              pickLabel={t('highlight.quick.pick_label')}
+              draggingHint={t('composer.drop.dragging')}
               onFiles={acceptFiles}
             />
           )}
@@ -257,16 +258,14 @@ export function MomentumComposerDialog({ onPosted }: Props = {}) {
                 isPublic.value = (ev.currentTarget as HTMLInputElement).checked
               }}
             />
-            Share publicly via {registrations.value.length === 1
-              ? '1 GFS'
-              : `${registrations.value.length} GFSes`} — uncheck to keep household-only
+            {t(registrations.value.length === 1 ? 'moment.composer.share_public_one' : 'moment.composer.share_public', { n: String(registrations.value.length) })}
           </label>
         )}
 
         <div class="sh-form-actions">
-          <Button variant="secondary" onClick={closeDialog}>Cancel</Button>
+          <Button variant="secondary" onClick={closeDialog}>{t('common.cancel')}</Button>
           <Button type="submit" loading={submitting.value}>
-            {isReply ? 'Reply' : 'Post moment'}
+            {isReply ? t('moment.composer.reply') : t('moment.composer.post')}
           </Button>
         </div>
       </form>

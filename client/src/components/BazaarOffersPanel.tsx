@@ -20,6 +20,7 @@ import { showToast } from './Toast'
 import { formatBazaarAmount } from './bazaarFormat'
 import type { BazaarListing, BazaarOffer } from '@/types'
 import { confirmDialog } from '@/components/confirm'
+import { t, tValue } from '@/i18n/i18n'
 
 interface Props {
   listing: BazaarListing
@@ -70,19 +71,18 @@ export function BazaarOffersPanel({
   const accept = async (offer: BazaarOffer) => {
     const amountStr = formatBazaarAmount(offer.amount, listing.currency)
     if (!await confirmDialog(
-      `Accept this ${amountStr} offer? The listing will be marked sold ` +
-      'and every other pending offer on this listing will be auto-rejected.')) return
+      t('bazaar.offers.confirm_accept', { amount: amountStr }))) return
     setBusy(true)
     try {
       await api.post(
         `/api/bazaar/${listing.post_id}/offers/${offer.id}/accept`,
         {},
       )
-      showToast('Offer accepted — listing is sold.', 'success')
+      showToast(t('bazaar.offers.accepted'), 'success')
       onListingChanged?.()
     } catch (err: unknown) {
       showToast(
-        `Could not accept: ${(err as Error)?.message ?? err}`, 'error',
+        t('bazaar.error.accept', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -91,7 +91,7 @@ export function BazaarOffersPanel({
 
   const reject = async (offer: BazaarOffer) => {
     const reason = prompt(
-      'Optional reason (shown to the buyer):',
+      t('bazaar.offers.reason_prompt'),
     ) ?? ''
     setBusy(true)
     try {
@@ -99,10 +99,10 @@ export function BazaarOffersPanel({
         `/api/bazaar/${listing.post_id}/offers/${offer.id}/reject`,
         reason.trim() ? { reason: reason.trim() } : {},
       )
-      showToast('Offer declined.', 'info')
+      showToast(t('bazaar.offers.declined'), 'info')
     } catch (err: unknown) {
       showToast(
-        `Could not reject: ${(err as Error)?.message ?? err}`, 'error',
+        t('bazaar.error.decline', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -110,16 +110,16 @@ export function BazaarOffersPanel({
   }
 
   const withdraw = async (offer: BazaarOffer) => {
-    if (!await confirmDialog('Withdraw your offer?', { destructive: true })) return
+    if (!await confirmDialog(t('bazaar.offers.confirm_withdraw'), { destructive: true })) return
     setBusy(true)
     try {
       await api.delete(
         `/api/bazaar/${listing.post_id}/offers/${offer.id}`,
       )
-      showToast('Offer withdrawn.', 'info')
+      showToast(t('bazaar.offers.withdrawn'), 'info')
     } catch (err: unknown) {
       showToast(
-        `Could not withdraw: ${(err as Error)?.message ?? err}`, 'error',
+        t('bazaar.error.withdraw', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -132,7 +132,7 @@ export function BazaarOffersPanel({
     if (pending.length === 0) {
       return (
         <p class="sh-bazaar-offers-empty sh-muted">
-          No pending offers yet.
+          {t('bazaar.offers.none')}
         </p>
       )
     }
@@ -152,11 +152,11 @@ export function BazaarOffersPanel({
               <Button variant="secondary"
                       loading={busy}
                       onClick={() => void reject(o)}>
-                Decline
+                {t('bazaar.decline')}
               </Button>
               <Button loading={busy}
                       onClick={() => void accept(o)}>
-                Accept
+                {t('bazaar.accept')}
               </Button>
             </div>
           </li>
@@ -172,12 +172,12 @@ export function BazaarOffersPanel({
   return (
     <div class={`sh-bazaar-offers-own sh-bazaar-offers-own--${newest.status}`}>
       <span>
-        Your offer: <strong>
+        {t('bazaar.offers.yours')} <strong>
           {formatBazaarAmount(newest.amount, listing.currency)}
         </strong>
         {' · '}
         <span class={`sh-bazaar-offers-status-pill sh-bazaar-offers-status-pill--${newest.status}`}>
-          {newest.status}
+          {tValue('bazaar.offers.status', newest.status)}
         </span>
       </span>
       {newest.status === 'pending' && (
@@ -185,7 +185,7 @@ export function BazaarOffersPanel({
                 class="sh-link sh-link--danger"
                 disabled={busy}
                 onClick={() => void withdraw(newest)}>
-          Withdraw
+          {t('bazaar.withdraw')}
         </button>
       )}
     </div>

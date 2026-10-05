@@ -10,6 +10,7 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { t } from '@/i18n/i18n'
 
 export interface CompatPeer {
   instance_id:       string
@@ -41,7 +42,7 @@ export async function loadFederationCompat(): Promise<void> {
     compatOurs.value = data.ours ?? 0
     compatPeers.value = data.peers ?? []
   } catch (err: unknown) {
-    compatError.value = (err as Error).message ?? 'Could not load federation compatibility.'
+    compatError.value = (err as Error).message ?? t('compat.load_failed')
     compatPeers.value = []
   } finally {
     compatLoading.value = false

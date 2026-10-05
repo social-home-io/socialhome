@@ -79,11 +79,7 @@ vi.mock('@/utils/mapTiles', async (importOriginal) => ({
 }))
 
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
-vi.mock('@/i18n/i18n', () => ({
-  t: (k: string) => k,
-  locale: { value: 'en' },
-}))
-
+import { t } from '@/i18n/i18n'
 import { SpaceZonesAdmin } from './SpaceZonesAdmin'
 
 const _zone = (over: Partial<any> = {}) => ({
@@ -218,8 +214,8 @@ describe('SpaceZonesAdmin', () => {
     addTileLayer.mockRejectedValue(new Error('API 502: /api/map/config'))
     mockApi.get.mockResolvedValue({ zones: [] })
     const { findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
-    // The i18n mock echoes keys: the overlay renders the map.tile_error copy.
-    await findByText('map.tile_error')
+    // The overlay renders the translated map.tile_error copy.
+    await findByText(t('map.tile_error'))
   })
   it('surfaces a tile-load failure on the preview map too', async () => {
     let report: (() => void) | undefined
@@ -233,7 +229,7 @@ describe('SpaceZonesAdmin', () => {
     await waitFor(() => { expect(report).toBeTypeOf('function') })
     act(() => { report!() })
 
-    // The i18n mock echoes keys: the overlay renders the map.tile_error copy.
-    await findByText('map.tile_error')
+    // The overlay renders the translated map.tile_error copy.
+    await findByText(t('map.tile_error'))
   })
 })

@@ -13,7 +13,7 @@ import { Button } from './Button'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { getPreferences, setPreference } from '@/utils/preferences'
-import { t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
 
 interface SpaceRow {
   id: string
@@ -46,7 +46,7 @@ export function FollowedSpacesPicker({ open, onClose, onChanged }: Props) {
         setSelected(new Set(prefs.followed_space_ids ?? []))
       } catch (err: unknown) {
         showToast(
-          `Could not load spaces: ${(err as Error).message ?? err}`,
+          t('followed.load_failed', { error: String((err as Error).message ?? err) }),
           'error',
         )
       } finally {
@@ -64,7 +64,7 @@ export function FollowedSpacesPicker({ open, onClose, onChanged }: Props) {
     } else {
       if (next.size >= MAX_FOLLOWED) {
         showToast(
-          `You can follow at most ${MAX_FOLLOWED} spaces.`,
+          t('followed.max', { n: String(MAX_FOLLOWED) }),
           'info',
         )
         return
@@ -83,15 +83,15 @@ export function FollowedSpacesPicker({ open, onClose, onChanged }: Props) {
       await setPreference('followed_space_ids', ids)
       showToast(
         ids.length
-          ? `Following ${ids.length} ${ids.length === 1 ? 'space' : 'spaces'}`
-          : 'Cleared followed spaces',
+          ? t(isOne(ids.length) ? 'followed.saved_one' : 'followed.saved', { n: String(ids.length) })
+          : t('followed.cleared'),
         'success',
       )
       onChanged?.(ids)
       onClose()
     } catch (err: unknown) {
       showToast(
-        `Save failed: ${(err as Error).message ?? err}`, 'error',
+        t('followed.save_failed', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setSaving(false)
@@ -100,24 +100,23 @@ export function FollowedSpacesPicker({ open, onClose, onChanged }: Props) {
 
   return (
     <Modal open={open} onClose={onClose}
-           title="Follow spaces on your dashboard">
+           title={t('followed.title')}>
       <div class="sh-form sh-followed-picker">
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)' }}>
-          Pick up to {MAX_FOLLOWED} spaces. You'll see their newest
-          posts in the "Spaces you follow" widget on My Corner.
+          {t('followed.intro', { n: String(MAX_FOLLOWED) })}
         </p>
 
         <div class="sh-followed-picker-count">
           <strong>{selected.size}</strong>
           <span class="sh-muted">
-            {' '}of {spaces.length} {spaces.length === 1 ? 'space' : 'spaces'} followed
+            {' '}{t(isOne(spaces.length) ? 'followed.count_of_one' : 'followed.count_of', { n: String(spaces.length) })}
           </span>
         </div>
 
         {loading ? (
-          <p class="sh-muted">Loading your spaces…</p>
+          <p class="sh-muted">{t('followed.loading')}</p>
         ) : spaces.length === 0 ? (
-          <p class="sh-muted">You're not a member of any spaces yet.</p>
+          <p class="sh-muted">{t('followed.empty')}</p>
         ) : (
           <ul class="sh-followed-picker-list">
             {spaces.map(s => (

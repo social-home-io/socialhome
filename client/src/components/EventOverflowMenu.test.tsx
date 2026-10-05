@@ -28,7 +28,7 @@ describe('EventOverflowMenu', () => {
         <button role="menuitem" data-testid="extra">Custom</button>
       </EventOverflowMenu>,
     )
-    fireEvent.click(getByRole('button', { name: /event actions/i }))
+    fireEvent.click(getByRole('button', { name: 'event.actions' }))
     const items = container.querySelectorAll('[role=menuitem]')
     // First item is the parent-supplied button, last is the export link.
     expect(items.length).toBe(2)

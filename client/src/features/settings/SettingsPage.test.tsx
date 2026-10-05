@@ -549,6 +549,10 @@ describe('SettingsPage — language picker keyboard', () => {
     await waitFor(() => expect(locale.value).not.toBe(before))
     const after = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]'))
     expect(document.activeElement).toBe(after[(checked + 1) % after.length])
+    // The tab labels are translated now — switch back so later tests
+    // can find them by their English names.
+    const { setLocale } = await import('@/i18n/i18n')
+    await setLocale('en')
   })
 })
 

@@ -15,6 +15,7 @@ import { ws } from '@/ws'
 import { Button } from './Button'
 import { showToast } from './Toast'
 import { confirmDialog } from '@/components/confirm'
+import { t } from '@/i18n/i18n'
 
 interface Slot {
   id: string
@@ -105,19 +106,19 @@ export function ScheduleUI(
 
   if (loadState === 'loading') return (
     <div class="sh-schedule">
-      <p class="sh-muted">Loading schedule…</p>
+      <p class="sh-muted">{t('schedule.loading')}</p>
     </div>
   )
   if (loadState === 'missing') return (
     <div class="sh-schedule sh-schedule--missing">
       <p class="sh-muted">
-        🗓 Schedule slots haven't been attached to this post yet.
+        {t('schedule.missing')}
       </p>
     </div>
   )
   if (loadState === 'error' || !data) return (
     <div class="sh-schedule sh-schedule--error">
-      <p class="sh-muted">Couldn't load this schedule. Try again later.</p>
+      <p class="sh-muted">{t('schedule.load_failed')}</p>
     </div>
   )
 
@@ -128,7 +129,7 @@ export function ScheduleUI(
     return (
       <div class="sh-schedule sh-schedule--missing">
         <p class="sh-muted">
-          🗓 Schedule slots haven't been attached to this post yet.
+          {t('schedule.missing')}
         </p>
       </div>
     )
@@ -158,7 +159,7 @@ export function ScheduleUI(
       setData(next)
     } catch (err: unknown) {
       showToast(
-        `Could not vote: ${(err as Error)?.message ?? err}`, 'error',
+        t('schedule.vote_failed', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -166,8 +167,7 @@ export function ScheduleUI(
   }
 
   const finalize = async (slotId: string) => {
-    if (!await confirmDialog(
-      'Finalise this slot? All members will be notified and a calendar event will be created.')) return
+    if (!await confirmDialog(t('schedule.finalize_confirm'))) return
     setBusy(true)
     try {
       const next = await api.post(
@@ -177,13 +177,13 @@ export function ScheduleUI(
       setData(next)
       showToast(
         spaceId
-          ? 'Finalised — added to the space calendar.'
-          : 'Finalised.',
+          ? t('schedule.finalized_space')
+          : t('schedule.finalized'),
         'success',
       )
     } catch (err: unknown) {
       showToast(
-        `Could not finalise: ${(err as Error)?.message ?? err}`, 'error',
+        t('schedule.finalize_failed', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -205,14 +205,14 @@ export function ScheduleUI(
     : null
 
   return (
-    <div class="sh-schedule" role="region" aria-label="Schedule poll">
+    <div class="sh-schedule" role="region" aria-label={t('schedule.region')}>
       <h4 class="sh-schedule-title">📅 {data.title}</h4>
       {deadlineLabel && (
         <div class="sh-schedule-deadline">{deadlineLabel}</div>
       )}
       {finalizedSlot && (
         <div class="sh-schedule-finalized">
-          ✅ Confirmed: <strong>{finalizedSlot.slot_date}</strong>
+          {t('schedule.confirmed')} <strong>{finalizedSlot.slot_date}</strong>
           {finalizedSlot.start_time && (
             <> · {finalizedSlot.start_time}
               {finalizedSlot.end_time ? `–${finalizedSlot.end_time}` : ''}
@@ -244,12 +244,12 @@ export function ScheduleUI(
                     </span>
                   )}
                 </div>
-                <div class="sh-schedule-votes" aria-label="tally">
+                <div class="sh-schedule-votes" aria-label={t('schedule.tally')}>
                   <span>✅ {summary.yes}</span>
                   <span>🤔 {summary.maybe}</span>
                   <span>❌ {summary.no}</span>
                   {isChosen && (
-                    <span class="sh-schedule-chosen-badge">Chosen</span>
+                    <span class="sh-schedule-chosen-badge">{t('schedule.chosen')}</span>
                   )}
                 </div>
               </div>
@@ -260,11 +260,12 @@ export function ScheduleUI(
                       data-a={a}
                       class={`sh-schedule-btn ${myVote === a ? 'sh-schedule-btn--active' : ''}`}
                       disabled={busy}
-                      aria-label={`Respond ${a}`}
+                      // schedule.respond_yes / schedule.respond_maybe / schedule.respond_no
+                      aria-label={t(`schedule.respond_${a}`)}
                       aria-pressed={myVote === a}
                       onClick={() => void respond(slot.id, a)}>
-                      {a === 'yes' ? '✅ Yes'
-                        : a === 'maybe' ? '🤔 Maybe' : '❌ No'}
+                      {a === 'yes' ? `✅ ${t('schedule.yes')}`
+                        : a === 'maybe' ? `🤔 ${t('schedule.maybe')}` : `❌ ${t('schedule.no')}`}
                     </button>
                   ))}
                   {isAuthor && !isChosen && (
@@ -272,7 +273,7 @@ export function ScheduleUI(
                       variant="secondary"
                       loading={busy}
                       onClick={() => void finalize(slot.id)}>
-                      Pick
+                      {t('schedule.pick')}
                     </Button>
                   )}
                 </div>
@@ -290,11 +291,11 @@ function _formatDeadline(iso: string | null): string | null {
   const end = Date.parse(iso)
   if (Number.isNaN(end)) return null
   const diff = end - Date.now()
-  if (diff <= 0) return '⌛ voting closed'
+  if (diff <= 0) return `⌛ ${t('schedule.voting_closed')}`
   const mins = Math.floor(diff / 60_000)
-  if (mins < 60)   return `⌛ closes in ${mins}m`
+  if (mins < 60)   return `⌛ ${t('poll.closes_in_min', { n: String(mins) })}`
   const hours = Math.floor(mins / 60)
-  if (hours < 24)  return `⌛ closes in ${hours}h`
+  if (hours < 24)  return `⌛ ${t('poll.closes_in_hours', { n: String(hours) })}`
   const days = Math.floor(hours / 24)
-  return `⌛ closes in ${days}d`
+  return `⌛ ${t('poll.closes_in_days', { n: String(days) })}`
 }

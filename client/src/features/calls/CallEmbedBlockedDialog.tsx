@@ -15,6 +15,7 @@ import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
 import { CallEmbedBlockedError, ownTabUrl } from './embedPolicy'
+import { t } from '@/i18n/i18n'
 
 const blocked = signal<string | null>(null)
 
@@ -25,24 +26,24 @@ export function showCallError(prefix: string, err: unknown): void {
     blocked.value = err.message
     return
   }
-  showToast(`${prefix}: ${(err as Error)?.message ?? err}`, 'error')
+  showToast(t('calls.error_reason', { prefix, reason: String((err as Error)?.message ?? err) }), 'error')
 }
 
 export function CallEmbedBlockedDialog() {
   if (blocked.value === null) return null
   const close = () => { blocked.value = null }
   return (
-    <Modal open onClose={close} title="Open Social Home in its own tab">
+    <Modal open onClose={close} title={t('calls.embed.title')}>
       <p class="sh-call-embed-copy">{blocked.value}</p>
       <div class="sh-form-actions">
-        <Button variant="secondary" onClick={close}>Not now</Button>
+        <Button variant="secondary" onClick={close}>{t('common.not_now')}</Button>
         <a
           class="sh-btn sh-btn--primary"
           href={ownTabUrl()}
           target="_blank"
           rel="noopener noreferrer"
           onClick={close}
-        >Open in a new tab</a>
+        >{t('calls.embed.open_tab')}</a>
       </div>
     </Modal>
   )

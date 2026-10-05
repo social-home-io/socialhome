@@ -32,6 +32,7 @@ import { currentUser } from '@/store/auth'
 import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { renderHashtagged } from './hashtags'
+import { t, isOne, formatLocale } from '@/i18n/i18n'
 
 const moments = signal<Moment[]>([])
 const loading = signal<boolean>(true)
@@ -45,13 +46,24 @@ function relativeTime(iso: string): string {
   if (Number.isNaN(dt.getTime())) return iso
   const ms = Date.now() - dt.getTime()
   const m = Math.floor(ms / 60_000)
-  if (m < 1)   return 'now'
-  if (m < 60)  return `${m}m`
+  if (m < 1)   return t('moment.time.now')
+  if (m < 60)  return narrowUnit(m, 'minute')
   const h = Math.floor(m / 60)
-  if (h < 24)  return `${h}h`
+  if (h < 24)  return narrowUnit(h, 'hour')
   const d = Math.floor(h / 24)
-  if (d < 7)   return `${d}d`
-  return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  if (d < 7)   return narrowUnit(d, 'day')
+  return dt.toLocaleDateString(formatLocale(), { month: 'short', day: 'numeric' })
+}
+
+/** ``5m`` / ``5 Min.`` / ``5j`` — the UI language's narrow unit form. */
+function narrowUnit(n: number, unit: 'minute' | 'hour' | 'day'): string {
+  try {
+    return new Intl.NumberFormat(formatLocale(), {
+      style: 'unit', unit, unitDisplay: 'narrow',
+    }).format(n)
+  } catch {
+    return `${n}${unit[0]}`
+  }
 }
 
 
@@ -71,7 +83,7 @@ export default function MomentumInboxTab() {
         })
         .catch((err: unknown) => {
           if (initial) loading.value = false
-          showToast(`Failed to load moments: ${(err as Error)?.message ?? err}`,
+          showToast(t('moment.inbox.load_failed', { error: String((err as Error)?.message ?? err) }),
             'error')
         })
     void fetchInbox(true)
@@ -112,7 +124,7 @@ export default function MomentumInboxTab() {
           i === idx ? { ...x, reaction_count: Math.max(0, x.reaction_count - 1) } : x,
         )
       }
-      showToast(`Reaction failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.viewer.reaction_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
@@ -128,22 +140,20 @@ export default function MomentumInboxTab() {
         onClick={() => openMomentumComposer()}
       >
         <Avatar name={myDisplayName} src={myPicture} size={32} />
-        <span class="sh-momentum-compose-prompt">What's on your mind?</span>
+        <span class="sh-momentum-compose-prompt">{t('moment.inbox.prompt')}</span>
       </button>
 
       {topLevel.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🌅</div>
-          <h3>No moments yet</h3>
+          <h3>{t('moment.inbox.empty_title')}</h3>
           <p>
-            A moment is a one-shot post that fans out to your paired
-            households and theirs. They live 24 h by default, or 7 d
-            for people you follow.
+            {t('moment.inbox.empty_body')}
           </p>
         </div>
       )}
 
-      <ul class="sh-momentum-list" aria-label="Moments">
+      <ul class="sh-momentum-list" aria-label={t('moment.inbox.list_aria')}>
         {topLevel.map(m => (
           <MomentRow
             key={m.id}
@@ -191,13 +201,13 @@ function MomentRow({
       <div class="sh-momentum-row-body">
         <div class="sh-momentum-row-head">
           <strong class="sh-momentum-row-author">
-            {mine ? 'You' : authorName}
+            {mine ? t('highlight.inbox.you') : authorName}
           </strong>
           <span class="sh-muted">· {relativeTime(m.created_at)}</span>
           {m.received_via === 'gfs' && (
             <span
               class="sh-momentum-row-via-gfs"
-              title="Received via a public-share GFS"
+              title={t('moment.inbox.via_gfs')}
             >
               · via GFS
             </span>
@@ -206,7 +216,7 @@ function MomentRow({
             <button
               type="button"
               class="sh-momentum-row-overflow"
-              aria-label={`More actions for ${authorName}`}
+              aria-label={t('highlight.more_actions', { name: authorName })}
               onClick={(ev) => {
                 ev.preventDefault()
                 ev.stopPropagation()
@@ -235,7 +245,7 @@ function MomentRow({
                   expanded.value = true
                 }}
               >
-                Show more
+                {t('moment.inbox.show_more')}
               </button>
             )}
           </p>
@@ -245,7 +255,7 @@ function MomentRow({
           <button
             type="button"
             class="sh-momentum-row-media-button"
-            aria-label="Open photo full-size"
+            aria-label={t('moment.open_photo')}
             onClick={(ev) => {
               ev.preventDefault()
               ev.stopPropagation()
@@ -260,7 +270,7 @@ function MomentRow({
           >
             <img
               src={m.media_url}
-              alt={m.content ? '' : `Photo from ${authorName}`}
+              alt={m.content ? '' : t('moment.photo_from', { name: authorName })}
               loading="lazy"
               class="sh-momentum-row-media"
             />
@@ -282,7 +292,7 @@ function MomentRow({
           <button
             type="button"
             class="sh-momentum-chip"
-            aria-label={`${m.reply_count} replies`}
+            aria-label={t(isOne(m.reply_count) ? 'moment.detail.replies_one' : 'moment.detail.replies', { n: String(m.reply_count) })}
             onClick={onOpen}
           >
             💬 {m.reply_count > 0 ? m.reply_count : ''}
@@ -290,7 +300,7 @@ function MomentRow({
           <button
             type="button"
             class="sh-momentum-chip"
-            aria-label={`React ${DEFAULT_REACTION}`}
+            aria-label={t('moment.detail.react_aria', { emoji: DEFAULT_REACTION })}
             disabled={mine}
             onClick={mine ? undefined : onReact}
           >

@@ -18,6 +18,7 @@ import { Spinner } from '@/components/Spinner'
 import { SpaceZonesAdmin } from '@/components/SpaceZonesAdmin'
 import type { Space } from '@/types'
 import { addBase } from '@/baseUrl'
+import { t } from '@/i18n/i18n'
 
 export default function SpaceZonesPage() {
   const { params } = useRoute()
@@ -39,13 +40,13 @@ export default function SpaceZonesPage() {
   }, [spaceId])
 
   if (!spaceId) {
-    return <div class="sh-error-state">Missing space id.</div>
+    return <div class="sh-error-state">{t('space.zones_page.missing_id')}</div>
   }
   if (loading) return <Spinner />
   if (error) {
     return (
       <div class="sh-error-state" role="alert">
-        Could not load space: {error}
+        {t('space.zones_page.load_failed', { error })}
       </div>
     )
   }
@@ -54,12 +55,9 @@ export default function SpaceZonesPage() {
   if (!space.features?.location) {
     return (
       <div class="sh-page sh-muted">
+        <p>{t('space.zones_page.location_off')}</p>
         <p>
-          Location sharing is off for this space. Turn it on in
-          Space Settings → Location sharing before adding zones.
-        </p>
-        <p>
-          <a href={addBase(`/spaces/${spaceId}/settings`)}>← Back to settings</a>
+          <a href={addBase(`/spaces/${spaceId}/settings`)}>← {t('space.zones_page.back')}</a>
         </p>
       </div>
     )
@@ -68,9 +66,9 @@ export default function SpaceZonesPage() {
   return (
     <div class="sh-page">
       <header class="sh-page__header">
-        <h2>📍 Zones · {space.name}</h2>
+        <h2>📍 {t('space.zones_page.title', { name: space.name })}</h2>
         <p class="sh-muted">
-          <a href={addBase(`/spaces/${spaceId}/settings`)}>← Back to settings</a>
+          <a href={addBase(`/spaces/${spaceId}/settings`)}>← {t('space.zones_page.back')}</a>
         </p>
       </header>
       <SpaceZonesAdmin spaceId={spaceId} />

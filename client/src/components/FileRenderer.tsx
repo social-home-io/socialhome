@@ -14,6 +14,7 @@
  */
 import { openLightbox } from './ImageLightbox'
 import { VideoMedia } from './VideoMedia'
+import { t } from '@/i18n/i18n'
 
 interface FileAttachment {
   url: string
@@ -34,7 +35,7 @@ export function FileRenderer({ file }: { file: FileAttachment }) {
         <span class="sh-file-name">{file.original_name}</span>
         <span class="sh-file-size">{sizeLabel}</span>
       </div>
-      <span class="sh-file-download" aria-label="Download">⬇</span>
+      <span class="sh-file-download" aria-label={t('media.download')}>⬇</span>
     </a>
   )
 }
@@ -59,11 +60,11 @@ export function VideoRenderer({
 export function ImageRenderer({ src, alt }: { src: string; alt?: string }) {
   return (
     <button type="button" class="sh-image-wrapper"
-            aria-label="Open image full-size"
+            aria-label={t('media.open_full_size')}
             onClick={() => openLightbox({
               items: [{ url: src, item_type: 'photo', caption: alt }],
             })}>
-      <img class="sh-image" src={src} alt={alt || 'Post image'}
+      <img class="sh-image" src={src} alt={alt || t('media.post_image')}
            loading="lazy" />
     </button>
   )

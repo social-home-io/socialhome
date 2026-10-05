@@ -9,6 +9,7 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import QRCode from 'qrcode'
+import { t } from '@/i18n/i18n'
 
 export interface QrCodeImgProps {
   data: string
@@ -37,7 +38,7 @@ export function QrCodeImg({
     return (
       <div class="sh-qr-skeleton"
            style={{ width: size, height: size }}
-           aria-label={`Generating ${alt}`} />
+           aria-label={t('qr.generating', { name: alt })} />
     )
   }
   return (

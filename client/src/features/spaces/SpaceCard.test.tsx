@@ -168,7 +168,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(getByText(/Subscribe/)).toBeTruthy()
+    expect(getByText(/Follow/)).toBeTruthy()
   })
 
   it('hides Subscribe when the space takes no followers', () => {
@@ -183,7 +183,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(queryByText(/Subscribe/)).toBeNull()
+    expect(queryByText(/Follow/)).toBeNull()
   })
 
   it('says the content is private when the space takes no followers', () => {
@@ -210,7 +210,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(getByText(/Subscribe/)).toBeTruthy()
+    expect(getByText(/Follow/)).toBeTruthy()
     // …and it does NOT claim the content is private, because it isn't.
     expect(getByText(/Invite-only/)).toBeTruthy()
   })
@@ -228,7 +228,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(queryByText(/Subscribe/)).toBeNull()
+    expect(queryByText(/Follow/)).toBeNull()
     expect(getByText(/Open to join/)).toBeTruthy()
     expect(getByText(/content is private/i)).toBeTruthy()
   })
@@ -275,7 +275,7 @@ describe('SpaceCard', () => {
       />,
     )
     expect(queryByText(/content is private/i)).toBeNull()
-    expect(queryByText(/Subscribe/)).toBeNull()
+    expect(queryByText(/Follow/)).toBeNull()
   })
 
   it('shows both chips on a private approval-required space, CTA still live', () => {
@@ -300,7 +300,7 @@ describe('SpaceCard', () => {
     const { queryByText } = render(
       <SpaceCard entry={baseEntry} onAction={() => {}} />,
     )
-    expect(queryByText(/Subscribe/)).toBeNull()
+    expect(queryByText(/Follow/)).toBeNull()
   })
 
   it('does not render a Subscribe button for household-scope entries', () => {
@@ -310,7 +310,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(queryByText(/Subscribe/)).toBeNull()
+    expect(queryByText(/Follow/)).toBeNull()
   })
 
   it('flips to Unsubscribe when already subscribed', () => {
@@ -320,9 +320,9 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(getByText(/Unsubscribe/)).toBeTruthy()
+    expect(getByText(/Unfollow/)).toBeTruthy()
     // Subscribed pill also appears in the header.
-    expect(getByText(/🔔 Subscribed/)).toBeTruthy()
+    expect(getByText(/🔔 Following/)).toBeTruthy()
   })
 
   it('does not offer Subscribe once the user is a full member', () => {
@@ -332,7 +332,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(queryByText(/Subscribe/)).toBeNull()
+    expect(queryByText(/Follow/)).toBeNull()
   })
 
   it('calls onAction with kind=subscribe on click', () => {
@@ -343,7 +343,7 @@ describe('SpaceCard', () => {
         onAction={(_e, a) => { captured = a }}
       />,
     )
-    ;(getByText(/Subscribe/) as HTMLButtonElement).click()
+    ;(getByText(/Follow/) as HTMLButtonElement).click()
     expect(captured).toEqual({ kind: 'subscribe' })
   })
 
@@ -370,7 +370,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(getByText(/Subscribe/)).toBeTruthy()
+    expect(getByText(/Follow/)).toBeTruthy()
   })
 
   it('hides Subscribe on a remote global space that takes no followers', () => {
@@ -385,7 +385,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(queryByText(/Subscribe/)).toBeNull()
+    expect(queryByText(/Follow/)).toBeNull()
   })
 
   it('hides Subscribe on a peer "From friends" space', () => {
@@ -403,7 +403,7 @@ describe('SpaceCard', () => {
         onAction={() => {}}
       />,
     )
-    expect(queryByText(/Subscribe/)).toBeNull()
+    expect(queryByText(/Follow/)).toBeNull()
   })
 
   it('disables Subscribe while the parent reports it busy', () => {
@@ -414,7 +414,7 @@ describe('SpaceCard', () => {
         subscribeBusy={true}
       />,
     )
-    const btn = getByLabelText(/Subscribe to Chess Club/) as HTMLButtonElement
+    const btn = getByLabelText(/Follow Chess Club/) as HTMLButtonElement
     expect(btn.disabled).toBe(true)
   })
 })

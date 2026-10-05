@@ -20,9 +20,12 @@
 #    in-app locale picker (§23.41 "Contribute translations…").
 #
 # No CLI tooling is required: Weblate polls the repo, there is no
-# ``i18n:push`` step. The ``i18n:check`` script below is the only CI
-# gate — it fails the PR when a ``t()`` call in ``src/`` has no
-# matching key in ``src/i18n/locales/en.json``.
+# ``i18n:push`` step. The ``i18n:check`` script is the only CI gate.
+# It fails the PR when a ``t()`` call in ``src/`` has no matching key
+# in ``src/i18n/locales/en.json``. It also fails when a locale lacks an
+# en key, unless that key is listed for the locale in
+# ``scripts/i18n-untranslated.json`` (see docs/testing.md).
+# Leave keys for Weblate by listing them there.
 
 component:
   name:            Social Home UI

@@ -21,10 +21,10 @@ import MomentumArchiveTab from './MomentumArchiveTab'
 type MomentumTab = 'inbox' | 'archive'
 
 const TABS: readonly MomentumTab[] = ['inbox', 'archive'] as const
-const TAB_LABELS: Readonly<Record<MomentumTab, string>> = {
-  inbox:   'Momentum',
-  archive: 'Archive',
-}
+const tabLabels = (): Readonly<Record<MomentumTab, string>> => ({
+  inbox:   t('nav.momentum'),
+  archive: t('highlight.tab.archive'),
+})
 
 const activeTab = signal<MomentumTab>('inbox')
 
@@ -67,8 +67,8 @@ export default function MomentumPage() {
       <TabHeader<MomentumTab>
         activeTab={activeTab.value}
         visibleTabs={TABS}
-        labels={TAB_LABELS}
-        ariaLabel="Momentum sections"
+        labels={tabLabels()}
+        ariaLabel={t('moment.sections_aria')}
         onSelectTab={onSelectTab}
       />
       {activeTab.value === 'archive' ? <MomentumArchiveTab /> : <MomentumInboxTab />}

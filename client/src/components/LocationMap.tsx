@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
+import { t } from '@/i18n/i18n'
 
 export interface LocationMarker {
   /** Stable id for the marker (used as the React key). */
@@ -129,7 +130,7 @@ function _avatarHtml(m: LocationMarker): string {
 }
 
 export function LocationMap({
-  markers, zones, height = 320, emptyLabel = 'No locations to show.',
+  markers, zones, height = 320, emptyLabel,
   onPick, ariaLabel,
 }: LocationMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -313,7 +314,7 @@ export function LocationMap({
         </div>
       ) : !hasMarkers && !onPick && (
         <div class="sh-location-map__empty sh-muted">
-          {emptyLabel}
+          {emptyLabel ?? t('location.map_empty')}
         </div>
       )}
     </div>

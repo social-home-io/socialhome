@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { t, locale, formatLocale } from './i18n'
+import { t, tValue, locale, formatLocale } from './i18n'
 
 describe('i18n', () => {
   it('returns the key for known translations', () => {
@@ -92,9 +92,38 @@ describe('formatLocale', () => {
     expect(formatLocale()).toBe('de-CH')
   })
 
-  it('falls back to the UI language when no browser language matches', () => {
+  it('borrows the browser region when no browser language matches', () => {
     setLangs(['en-US'])
     locale.value = 'fr'
-    expect(formatLocale()).toBe('fr')
+    expect(formatLocale()).toBe('fr-US')
+  })
+
+  it('keeps a German browser on 18:00 under the default English UI (en-DE)', () => {
+    setLangs(['de-DE', 'de'])
+    locale.value = 'en'
+    expect(formatLocale()).toBe('en-DE')
+    const d = new Date(Date.UTC(2026, 9, 5, 18, 0))
+    expect(d.toLocaleTimeString(formatLocale(), { timeZone: 'UTC', timeStyle: 'short' })).toBe('18:00')
+  })
+
+  it('falls back to the UI language when the browser gives no region', () => {
+    setLangs(['de'])
+    locale.value = 'en'
+    expect(formatLocale()).toBe('en')
+  })
+})
+
+describe('t() parameters', () => {
+  it('inserts values literally, even with $ patterns', () => {
+    // 'feed.empty.title' has no params; use a raw key so the key is the text.
+    expect(t('Hi {name}!', { name: "x$'y" })).toBe("Hi x$'y!")
+    expect(t('{q} and {q}', { q: 'a$$b' })).toBe('a$$b and a$$b')
+  })
+})
+
+describe('tValue', () => {
+  it('translates a known raw value and shows an unknown one as is', () => {
+    expect(tValue('calls.state', 'ended')).not.toBe('calls.state.ended')
+    expect(tValue('calls.state', 'some_future_state')).toBe('some_future_state')
   })
 })

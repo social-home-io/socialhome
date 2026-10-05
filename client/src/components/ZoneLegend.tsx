@@ -10,6 +10,7 @@
  * details that used to live in those boxes.
  */
 import type { SpaceZone } from '@/types'
+import { t } from '@/i18n/i18n'
 
 const _ZONE_PALETTE = [
   '#3b82f6', '#f97316', '#10b981', '#a855f7', '#ec4899',
@@ -47,7 +48,7 @@ export function ZoneLegend({ zones, emptyLabel }: ZoneLegendProps) {
     )
   }
   return (
-    <div class="sh-zone-legend" role="list" aria-label="Zones legend">
+    <div class="sh-zone-legend" role="list" aria-label={t('location.zones_legend')}>
       {zones.map((z) => (
         <div key={z.id} class="sh-zone-legend__row" role="listitem">
           <span

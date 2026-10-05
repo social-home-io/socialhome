@@ -10,6 +10,7 @@
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { Button } from './Button'
+import { t } from '@/i18n/i18n'
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
@@ -79,10 +80,10 @@ export function InstallPrompt() {
   }
 
   return (
-    <div class="sh-install-prompt" role="dialog" aria-label="Install Social Home">
-      <span class="sh-install-prompt-text">Install Social Home for quick access</span>
-      <Button onClick={handleInstall}>Install</Button>
-      <Button variant="secondary" onClick={handleDismiss}>Not now</Button>
+    <div class="sh-install-prompt" role="dialog" aria-label={t('install.aria')}>
+      <span class="sh-install-prompt-text">{t('install.text')}</span>
+      <Button onClick={handleInstall}>{t('install.button')}</Button>
+      <Button variant="secondary" onClick={handleDismiss}>{t('common.not_now')}</Button>
     </div>
   )
 }

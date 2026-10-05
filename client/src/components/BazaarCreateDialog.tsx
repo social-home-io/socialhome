@@ -15,7 +15,7 @@ import { contentWrite } from '@/utils/contentWrite'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
-import { t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
 import { showToast } from './Toast'
 import { uploadWithProgress, UploadProgressBar } from './UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
@@ -144,7 +144,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
 
   const submit = async () => {
     if (!spaceId.value) {
-      showToast('Pick a space for this listing', 'error')
+      showToast(t('bazaar.create.pick_space'), 'error')
       return
     }
     const body: Record<string, unknown> = {
@@ -162,14 +162,14 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
     const stepC  = toCents(stepPrice.value,  currency.value)
     if (mode.value === 'fixed' || mode.value === 'negotiable') {
       if (priceC == null || priceC <= 0) {
-        showToast('Enter a valid price', 'error')
+        showToast(t('bazaar.create.invalid_price'), 'error')
         return
       }
       body.price = priceC
     }
     if (mode.value === 'auction' || mode.value === 'bid_from') {
       if (startC == null || startC <= 0) {
-        showToast('Enter a valid starting price', 'error')
+        showToast(t('bazaar.create.invalid_start_price'), 'error')
         return
       }
       body.start_price = startC
@@ -181,12 +181,12 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
       // "Reviewed", §4.3) — then nothing is listed yet; ``contentWrite``
       // toasts that.
       const res = await contentWrite(api.post('/api/bazaar', body), { spaceId: spaceId.value })
-      if (!res.queued) showToast('Listing created', 'success')
+      if (!res.queued) showToast(t('bazaar.create.created'), 'success')
       open.value = false
       if (!res.queued) onCreated?.()
     } catch (err: unknown) {
       showToast(
-        `Create failed: ${(err as Error).message ?? err}`, 'error',
+        t('bazaar.create.failed', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       submitting.value = false
@@ -196,30 +196,30 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
   return (
     <Modal open={open.value}
            onClose={() => { open.value = false }}
-           title="New listing">
+           title={t('bazaar.new_listing')}>
       {isRestricted('bazaar') && <ProtectedNotice capability="bazaar" />}
       {!isRestricted('bazaar') && step.value === 1 && (
         <div class="sh-form sh-bazaar-create">
           {lockedSpaceId.value ? (
             <label>
-              Space
+              {t('bazaar.create.space')}
               <span class="sh-muted">
                 {(() => {
                   const s = availableSpaces.value.find(
                     (x) => x.id === lockedSpaceId.value,
                   )
-                  return s ? `${s.emoji ? `${s.emoji} ` : ''}${s.name}` : 'This space'
+                  return s ? `${s.emoji ? `${s.emoji} ` : ''}${s.name}` : t('bazaar.create.this_space')
                 })()}
               </span>
             </label>
           ) : (
             <label>
-              Space *
+              {t('bazaar.create.space')} *
               {spacesLoading.value ? (
-                <span class="sh-muted">Loading spaces…</span>
+                <span class="sh-muted">{t('bazaar.create.loading_spaces')}</span>
               ) : availableSpaces.value.length === 0 ? (
                 <span class="sh-muted">
-                  Create or join a space first — listings live inside spaces.
+                  {t('bazaar.create.no_spaces')}
                 </span>
               ) : (
                 <select
@@ -238,27 +238,27 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
             </label>
           )}
           <label>
-            Title *
+            {t('bazaar.create.title')} *
             <input value={title.value} maxLength={200}
               onInput={(e) => title.value = (e.target as HTMLInputElement).value} />
           </label>
           <label>
-            Description
+            {t('bazaar.create.description')}
             <textarea value={description.value} rows={4} maxLength={2000}
               onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value} />
           </label>
 
           <div>
-            <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>Photos</strong>
+            <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>{t('bazaar.create.photos')}</strong>
             <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)', margin: '2px 0 8px' }}>
-              Up to {MAX_IMAGES} images. Drag or pick from your device.
+              {t('bazaar.create.photos_hint', { n: String(MAX_IMAGES) })}
             </p>
             <div class="sh-bazaar-create-images">
               {imageUrls.value.map(entry => (
                 <div key={entry.url} class="sh-bazaar-create-img">
                   <img src={entry.preview} alt="" />
                   <button type="button" class="sh-composer-remove-attach"
-                          aria-label="Remove image"
+                          aria-label={t('bazaar.create.remove_image')}
                           onClick={() => removeImage(entry.url)}>✕</button>
                 </div>
               ))}
@@ -266,7 +266,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
                 <button type="button" class="sh-bazaar-create-add"
                         onClick={() => fileRef.current?.click()}>
                   <span>＋</span>
-                  <span>Add photo</span>
+                  <span>{t('composer.add_photo')}</span>
                 </button>
               )}
               <input ref={fileRef} type="file" accept="image/*" multiple
@@ -283,7 +283,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
             </Button>
             <Button onClick={() => (step.value = 2)}
                     disabled={!title.value.trim() || !spaceId.value}>
-              Next →
+              {t('bazaar.create.next')}
             </Button>
           </div>
         </div>
@@ -291,20 +291,20 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
       {step.value === 2 && (
         <div class="sh-form sh-bazaar-create">
           <label>
-            Mode
+            {t('bazaar.create.mode')}
             <select value={mode.value}
                     onChange={(e) =>
                       mode.value = (e.target as HTMLSelectElement).value as BazaarMode}>
-              <option value="fixed">Fixed price</option>
-              <option value="offer">Accept offers</option>
-              <option value="auction">Auction</option>
-              <option value="bid_from">Bid from (starting price)</option>
-              <option value="negotiable">Negotiable</option>
+              <option value="fixed">{t('bazaar.create.mode_fixed')}</option>
+              <option value="offer">{t('bazaar.create.mode_offer')}</option>
+              <option value="auction">{t('bazaar.create.mode_auction')}</option>
+              <option value="bid_from">{t('bazaar.create.mode_bid_from')}</option>
+              <option value="negotiable">{t('bazaar.create.mode_negotiable')}</option>
             </select>
           </label>
 
           <label>
-            Currency
+            {t('bazaar.create.currency')}
             <select value={currency.value}
                     onChange={(e) =>
                       currency.value = (e.target as HTMLSelectElement).value}>
@@ -314,7 +314,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
 
           {(mode.value === 'fixed' || mode.value === 'negotiable') && (
             <label>
-              Price
+              {t('bazaar.create.price')}
               <input type="number" step="0.01" min="0" value={price.value}
                 onInput={(e) => price.value = (e.target as HTMLInputElement).value} />
             </label>
@@ -323,30 +323,31 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
           {(mode.value === 'auction' || mode.value === 'bid_from') && (
             <>
               <label>
-                Starting price
+                {t('bazaar.create.start_price')}
                 <input type="number" step="0.01" min="0" value={startPrice.value}
                   onInput={(e) => startPrice.value = (e.target as HTMLInputElement).value} />
               </label>
               <label>
-                Bid increment (optional)
+                {t('bazaar.create.step_price')}
                 <input type="number" step="0.01" min="0" value={stepPrice.value}
-                  placeholder="e.g. 1.00"
+                  placeholder={t('bazaar.create.step_price_placeholder')}
                   onInput={(e) => stepPrice.value = (e.target as HTMLInputElement).value} />
               </label>
             </>
           )}
 
           <label>
-            Duration
+            {t('bazaar.create.duration')}
             <select value={String(durationDays.value)}
                     onChange={(e) =>
                       durationDays.value = parseInt(
                         (e.target as HTMLSelectElement).value,
                       ) || 7}>
-              <option value="1">1 day</option>
-              <option value="3">3 days</option>
-              <option value="5">5 days</option>
-              <option value="7">7 days</option>
+              {[1, 3, 5, 7].map(d => (
+                <option key={d} value={String(d)}>
+                  {t(isOne(d) ? 'bazaar.create.days_one' : 'bazaar.create.days', { n: String(d) })}
+                </option>
+              ))}
             </select>
           </label>
 
@@ -357,15 +358,15 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
               onChange={(e) =>
                 announceInFeed.value = (e.target as HTMLInputElement).checked}
             />
-            Also announce this listing in the space feed
+            {t('bazaar.create.announce')}
           </label>
 
           <div class="sh-form-actions">
             <Button variant="secondary" onClick={() => (step.value = 1)}>
-              ← Back
+              ← {t('common.back')}
             </Button>
             <Button onClick={submit} loading={submitting.value}>
-              Create listing
+              {t('bazaar.create.submit')}
             </Button>
           </div>
         </div>

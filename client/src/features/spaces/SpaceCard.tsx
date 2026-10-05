@@ -24,6 +24,7 @@
  */
 import { Button } from '@/components/Button'
 import { categoryLabel, SPACE_CATEGORIES } from '@/components/spaceModeOptions'
+import { isOne, t } from '@/i18n/i18n'
 import type { DirectoryEntry } from '@/types'
 
 export type SpaceCardAction =
@@ -55,11 +56,11 @@ export interface SpaceCardProps {
 function scopeChip(scope: DirectoryEntry['scope']) {
   switch (scope) {
     case 'household':
-      return { cls: 'sh-scope-chip sh-scope-chip--household', icon: '🏠', label: 'Household' }
+      return { cls: 'sh-scope-chip sh-scope-chip--household', icon: '🏠', label: t('space.visibility.household') }
     case 'public':
-      return { cls: 'sh-scope-chip sh-scope-chip--public', icon: '🤝', label: 'Public' }
+      return { cls: 'sh-scope-chip sh-scope-chip--public', icon: '🤝', label: t('space.visibility.public') }
     case 'global':
-      return { cls: 'sh-scope-chip sh-scope-chip--global', icon: '🌐', label: 'Global' }
+      return { cls: 'sh-scope-chip sh-scope-chip--global', icon: '🌐', label: t('space.visibility.global') }
   }
 }
 
@@ -94,11 +95,12 @@ export function contentIsGated(entry: DirectoryEntry): boolean {
   return entry.scope !== 'household' && entry.allow_subscribers === false
 }
 
-/** The 🔒 chip that says so, rendered only when {@link contentIsGated}. */
+/** The 🔒 chip that says so, rendered only when {@link contentIsGated}.
+ *  ``label`` is a getter so it follows the current UI language. */
 export const GATED_CHIP = {
   cls:   'sh-join-mode-chip sh-join-mode-chip--private',
   icon:  '🔒',
-  label: 'Content is private',
+  get label(): string { return t('space.card.content_private') },
 }
 
 /**
@@ -109,18 +111,18 @@ export const GATED_CHIP = {
 export function joinModeChip(mode: DirectoryEntry['join_mode']) {
   switch (mode) {
     case 'open':
-      return { cls: 'sh-join-mode-chip sh-join-mode-chip--open', icon: '🔓', label: 'Open to join' }
+      return { cls: 'sh-join-mode-chip sh-join-mode-chip--open', icon: '🔓', label: t('space.card.open_to_join') }
     case 'request':
       return {
         cls: 'sh-join-mode-chip sh-join-mode-chip--request',
         icon: '✉',
-        label: 'Approval required',
+        label: t('space.card.approval_required'),
       }
     case 'invite_only':
       return {
         cls: 'sh-join-mode-chip sh-join-mode-chip--invite',
         icon: '🎟',
-        label: 'Invite-only',
+        label: t('space.card.invite_only'),
       }
   }
 }
@@ -194,12 +196,12 @@ export function hostLabel(entry: DirectoryEntry): string {
 
 function primaryLabel(action: SpaceCardAction, entry: DirectoryEntry): string {
   switch (action.kind) {
-    case 'open':        return 'Open space'
-    case 'pending':     return 'Request pending'
-    case 'invite-only': return 'Invite required'
-    case 'join':        return 'Join'
-    case 'request':     return 'Request to join'
-    case 'pair-first':  return `Connect with ${hostLabel(entry)} first`
+    case 'open':        return t('space.card.open_space')
+    case 'pending':     return t('space.card.request_pending')
+    case 'invite-only': return t('space.card.invite_required')
+    case 'join':        return t('space.card.join')
+    case 'request':     return t('space.join.request')
+    case 'pair-first':  return t('space.card.connect_first', { name: hostLabel(entry) })
     // Subscribe/unsubscribe never appear as the primary action.
     case 'subscribe':
     case 'unsubscribe': return ''
@@ -239,23 +241,23 @@ export function SpaceCard({
       onKeyDown={tappable ? (e: KeyboardEvent) => {
         if (e.key === 'Enter' || e.key === ' ') tap(e)
       } : undefined}
-      aria-label={tappable ? `Open ${entry.name} details` : undefined}
+      aria-label={tappable ? t('space.card.open_details_aria', { name: entry.name }) : undefined}
     >
       <div class="sh-browser-card__hd">
         <span class="sh-space-emoji" aria-hidden="true">{entry.emoji || '🗂'}</span>
         <div class="sh-browser-card__title">
           <strong>{entry.name}</strong>
           <span class="sh-muted sh-browser-card__count">
-            {entry.member_count} {entry.member_count === 1 ? 'member' : 'members'}
+            {t(isOne(entry.member_count) ? 'space.members.count_one' : 'space.members.count', { n: String(entry.member_count) })}
           </span>
         </div>
         {entry.already_subscribed && (
           <span
             class="sh-subscribed-pill"
-            title="You receive this space's updates (read-only)"
-            aria-label="Subscribed"
+            title={t('spaces.list.subscribed_pill_title')}
+            aria-label={t('spaces.list.subscribed_pill')}
           >
-            🔔 Subscribed
+            🔔 {t('spaces.list.subscribed_pill')}
           </span>
         )}
       </div>
@@ -272,13 +274,13 @@ export function SpaceCard({
         {contentIsGated(entry) && (
           <span
             class={GATED_CHIP.cls}
-            title="Only members can read this space — nothing posted here is published"
+            title={t('space.card.content_private_title')}
           >
             <span aria-hidden="true">{GATED_CHIP.icon}</span> {GATED_CHIP.label}
           </span>
         )}
         {entry.min_age > 0 && (
-          <span class="sh-age-chip" title={`Minimum age ${entry.min_age}`}>
+          <span class="sh-age-chip" title={t('space.card.min_age_title', { n: String(entry.min_age) })}>
             {entry.min_age}+
           </span>
         )}
@@ -291,9 +293,9 @@ export function SpaceCard({
       </div>
       {entry.scope !== 'household' && (
         <p class="sh-host-callout sh-muted">
-          Hosted by <strong>{hostLabel(entry)}</strong>
+          {t('space.card.hosted_by')} <strong>{hostLabel(entry)}</strong>
           {!entry.host_is_paired && (
-            <span class="sh-muted"> · not yet connected</span>
+            <span class="sh-muted"> · {t('space.card.not_connected')}</span>
           )}
         </p>
       )}
@@ -321,21 +323,21 @@ export function SpaceCard({
             aria-pressed={subscribeButton.kind === 'unsubscribe'}
             aria-label={
               subscribeButton.kind === 'subscribe'
-                ? `Subscribe to ${entry.name} (read-only updates)`
-                : `Unsubscribe from ${entry.name}`
+                ? t('space.card.follow_aria', { name: entry.name })
+                : t('spaces.list.unsubscribe_aria', { name: entry.name })
             }
             title={
               subscribeButton.kind === 'subscribe'
-                ? 'Get this space\'s updates without joining. You won\'t be able to post.'
-                : 'Stop receiving this space\'s updates.'
+                ? t('space.card.follow_title')
+                : t('space.subscriber.unsubscribe_title')
             }
             onClick={() => onAction(entry, subscribeButton)}
           >
             {subscribeBusy
               ? <span class="sh-spinner-sm" aria-hidden="true" />
               : subscribeButton.kind === 'subscribe'
-                ? <><span aria-hidden="true">🔔</span> Subscribe</>
-                : <><span aria-hidden="true">🔕</span> Unsubscribe</>}
+                ? <><span aria-hidden="true">🔔</span> {t('space.card.follow')}</>
+                : <><span aria-hidden="true">🔕</span> {t('space.subscriber.unsubscribe')}</>}
           </button>
         )}
       </div>

@@ -16,6 +16,7 @@ import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import type { Highlight, HighlightFrame } from '@/types'
+import { t, isOne } from '@/i18n/i18n'
 
 interface HighlightDetailResponse {
   highlight: Highlight
@@ -64,7 +65,7 @@ export function HighlightShareCard({ highlightId, note }: HighlightShareCardProp
           ⏳
         </span>
         <div class="sh-highlight-share-card-body">
-          <strong>Highlight has ended</strong>
+          <strong>{t('highlight.share_card.ended')}</strong>
           {note && <p class="sh-muted">{note}</p>}
         </div>
       </div>
@@ -77,7 +78,7 @@ export function HighlightShareCard({ highlightId, note }: HighlightShareCardProp
       <div class="sh-highlight-share-card sh-highlight-share-card--loading">
         <span class="sh-highlight-share-card-thumb sh-highlight-share-card-thumb--loading" />
         <div class="sh-highlight-share-card-body">
-          <strong>Loading highlight…</strong>
+          <strong>{t('highlight.share_card.loading')}</strong>
         </div>
       </div>
     )
@@ -89,7 +90,7 @@ export function HighlightShareCard({ highlightId, note }: HighlightShareCardProp
           ⏳
         </span>
         <div class="sh-highlight-share-card-body">
-          <strong>Highlight has ended</strong>
+          <strong>{t('highlight.share_card.ended')}</strong>
           {note && <p class="sh-muted">{note}</p>}
         </div>
       </div>
@@ -102,7 +103,7 @@ export function HighlightShareCard({ highlightId, note }: HighlightShareCardProp
       type="button"
       class="sh-highlight-share-card"
       onClick={() => loc.route(`/highlights/${detail.highlight.id}`)}
-      aria-label={`Watch ${detail.highlight.author_user_id}'s highlight`}
+      aria-label={t('highlight.share_card.watch_aria', { name: detail.highlight.author_user_id })}
     >
       {first && first.frame_type === 'image' ? (
         <img
@@ -119,10 +120,10 @@ export function HighlightShareCard({ highlightId, note }: HighlightShareCardProp
       <div class="sh-highlight-share-card-body">
         <strong>{detail.highlight.author_user_id}</strong>
         <span class="sh-muted">
-          {detail.highlight.highlight_date} · {detail.frames.length} frame{detail.frames.length === 1 ? '' : 's'}
+          {detail.highlight.highlight_date} · {t(isOne(detail.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(detail.frames.length) })}
         </span>
         {note && <p>{note}</p>}
-        <span class="sh-highlight-share-card-cta">Tap to watch →</span>
+        <span class="sh-highlight-share-card-cta">{t('highlight.share_card.cta')}</span>
       </div>
     </button>
   )

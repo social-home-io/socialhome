@@ -34,13 +34,13 @@ interface PresenceEntry {
  *  or in the future (clock skew). */
 function humanizeAgo(iso: string | null | undefined): string | null {
   if (!iso) return null
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return null
-  const sec = Math.max(0, Math.round((Date.now() - t) / 1000))
-  if (sec < 60)        return 'just now'
-  if (sec < 60 * 60)   return `${Math.floor(sec / 60)} min ago`
-  if (sec < 86400)     return `${Math.floor(sec / 3600)} h ago`
-  return `${Math.floor(sec / 86400)} d ago`
+  const ts = Date.parse(iso)
+  if (Number.isNaN(ts)) return null
+  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (sec < 60)        return t('time.just_now')
+  if (sec < 60 * 60)   return t('time.minutes_ago', { n: String(Math.floor(sec / 60)) })
+  if (sec < 86400)     return t('time.hours_ago', { n: String(Math.floor(sec / 3600)) })
+  return t('time.days_ago', { n: String(Math.floor(sec / 86400)) })
 }
 
 const presenceList = signal<PresenceEntry[]>([])
@@ -65,9 +65,9 @@ function presenceDot(state: string): string {
 
 function presenceLabel(state: string): string {
   switch (state) {
-    case 'home': return 'Home'
-    case 'away': return 'Away'
-    case 'not_home': return 'Not home'
+    case 'home': return t('presence.state.home')
+    case 'away': return t('presence.state.away')
+    case 'not_home': return t('presence.state.not_home')
     default: return state
   }
 }
@@ -129,24 +129,24 @@ export default function PresencePage() {
           />
         ) : (
           <div class="sh-my-status">
-            <span class="sh-my-status__label">Your status</span>
+            <span class="sh-my-status__label">{t('presence.your_status')}</span>
             <span class={myLine ? 'sh-my-status__value' : 'sh-my-status__value sh-muted'}>
-              {myLine ?? 'No status set'}
+              {myLine ?? t('presence.no_status')}
               {myLine && myStatus?.expires_at && (
                 <span class="sh-muted">
-                  {` · clears ${formatClearsAt(myStatus.expires_at)}`}
+                  {` · ${t('presence.clears', { time: formatClearsAt(myStatus.expires_at) })}`}
                 </span>
               )}
             </span>
             <Button variant="secondary" onClick={() => { showStatusEditor.value = true }}>
-              {myLine ? 'Edit status' : 'Set status'}
+              {myLine ? t('presence.edit_status') : t('presence.set_status')}
             </Button>
           </div>
         )}
       </div>
 
       <div class="sh-presence-map">
-        <h2>Who is where</h2>
+        <h2>{t('presence.who_is_where')}</h2>
         <LocationMap
           markers={presenceList.value
             .filter((p) =>
@@ -163,28 +163,27 @@ export default function PresencePage() {
               state: p.state,
             }))}
           height={360}
-          emptyLabel="No one is sharing their location right now."
+          emptyLabel={t('presence.no_location')}
         />
         <div class="sh-location-map-footer sh-muted">
           <span>
-            {presenceList.value.filter((p) =>
-              typeof p.latitude === 'number' && typeof p.longitude === 'number',
-            ).length}
-            {' '}of {presenceList.value.length} sharing their location
+            {t('presence.sharing_count', {
+              n: String(presenceList.value.filter((p) =>
+                typeof p.latitude === 'number' && typeof p.longitude === 'number',
+              ).length),
+              total: String(presenceList.value.length),
+            })}
           </span>
-          <span>GPS rounded to ~10 m (§GPS truncation)</span>
+          <span>{t('presence.gps_rounded')}</span>
         </div>
       </div>
 
-      <h2>Members</h2>
+      <h2>{t('presence.members')}</h2>
       {presenceList.value.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🏠</div>
-          <h3>Just you here</h3>
-          <p>
-            Once other household members sign in, you'll see them
-            with their current state and zone.
-          </p>
+          <h3>{t('presence.empty_title')}</h3>
+          <p>{t('presence.empty_body')}</p>
         </div>
       )}
       <div class="sh-presence-list">
@@ -202,15 +201,15 @@ export default function PresencePage() {
             />
             <div>
               <strong>{p.display_name}</strong>
-              {p.dnd && <span class="sh-badge sh-badge--dnd">DND</span>}
+              {p.dnd && <span class="sh-badge sh-badge--dnd">{t('presence.dnd_badge')}</span>}
               <span class={`sh-presence-state sh-presence-state--${p.state}`}>
                 {p.zone_name || presenceLabel(p.state)}
               </span>
               <span class="sh-presence-online sh-muted">
-                {online === 'online' && '· Online'}
-                {online === 'idle'   && '· Idle'}
-                {!online && lastSeen && `· Last seen ${lastSeen}`}
-                {!online && !lastSeen && '· Offline'}
+                {online === 'online' && `· ${t('dms.status.online')}`}
+                {online === 'idle'   && `· ${t('dms.status.idle')}`}
+                {!online && lastSeen && `· ${t('dms.status.last_seen', { ago: lastSeen })}`}
+                {!online && !lastSeen && `· ${t('dms.status.offline')}`}
               </span>
               {statusLine(p.status) && (
                 <span class="sh-presence-status">{statusLine(p.status)}</span>

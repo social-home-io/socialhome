@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 interface Props {
   postId: string
@@ -39,15 +40,15 @@ export function SaveListingButton({ postId, size = 22 }: Props) {
     try {
       if (next) {
         await api.post(`/api/bazaar/${postId}/save`, {})
-        showToast('Saved to your bookmarks.', 'success')
+        showToast(t('bazaar.save.saved'), 'success')
       } else {
         await api.delete(`/api/bazaar/${postId}/save`)
-        showToast('Removed from bookmarks.', 'info')
+        showToast(t('bazaar.save.removed'), 'info')
       }
     } catch (err: unknown) {
       setSaved(!next)  // revert
       showToast(
-        `Could not ${next ? 'save' : 'unsave'}: ${(err as Error)?.message ?? err}`,
+        t(next ? 'bazaar.save.save_failed' : 'bazaar.save.unsave_failed', { error: String((err as Error)?.message ?? err) }),
         'error',
       )
     } finally {
@@ -56,8 +57,8 @@ export function SaveListingButton({ postId, size = 22 }: Props) {
   }
 
   const label = saved
-    ? 'Remove from saved listings'
-    : 'Save listing to bookmarks'
+    ? t('bazaar.save.remove_label')
+    : t('bazaar.save.add_label')
   return (
     <button type="button"
             class={`sh-save-listing-btn ${saved ? 'sh-save-listing-btn--on' : ''}`}

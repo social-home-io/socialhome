@@ -12,15 +12,16 @@
  * insertion point based on the ``unreadAnchor`` signal.
  */
 import type { JSX } from 'preact'
+import { t } from '@/i18n/i18n'
 
 export function UnreadDivider(): JSX.Element {
   return (
     <div
       class="sh-dm-unread-divider"
       role="separator"
-      aria-label="New messages below"
+      aria-label={t('dms.unread_divider_aria')}
     >
-      <span class="sh-dm-unread-divider__pill">New messages</span>
+      <span class="sh-dm-unread-divider__pill">{t('dms.unread_divider')}</span>
     </div>
   )
 }

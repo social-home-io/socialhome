@@ -30,6 +30,7 @@ import { openReport } from '@/components/ReportDialog'
 import { openUserActions } from '@/components/UserActionsMenu'
 import { ws } from '@/ws'
 import { openPublishMenu } from './HighlightPublishMenu'
+import { t, isOne } from '@/i18n/i18n'
 
 interface HighlightDetail {
   highlight: Highlight
@@ -82,7 +83,7 @@ export default function HighlightViewerPage() {
         .catch((err: unknown) => {
           if (initial) {
             showToast(
-              `Couldn't load highlight: ${(err as Error)?.message ?? err}`,
+              t('highlight.viewer.load_failed', { error: String((err as Error)?.message ?? err) }),
               'error',
             )
             loc.route('/highlights')
@@ -204,8 +205,8 @@ export default function HighlightViewerPage() {
   if (!frame) {
     return (
       <div class="sh-highlight-viewer">
-        <p class="sh-muted">This highlight has no frames.</p>
-        <Button onClick={() => loc.route('/highlights')}>Back</Button>
+        <p class="sh-muted">{t('highlight.viewer.no_frames')}</p>
+        <Button onClick={() => loc.route('/highlights')}>{t('common.back')}</Button>
       </div>
     )
   }
@@ -218,9 +219,9 @@ export default function HighlightViewerPage() {
     try {
       await api.put(`/api/highlights/frames/${frame.id}/reaction`, { emoji })
       reactionsOpen.value = false
-      showToast('Reaction sent', 'success')
+      showToast(t('highlight.viewer.reaction_sent'), 'success')
     } catch (err: unknown) {
-      showToast(`Reaction failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.viewer.reaction_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
@@ -231,10 +232,10 @@ export default function HighlightViewerPage() {
   }
 
   const deleteFrame = async () => {
-    if (!await confirmDialog('Delete this frame?', { destructive: true })) return
+    if (!await confirmDialog(t('highlight.viewer.delete_confirm'), { destructive: true })) return
     try {
       await api.delete(`/api/highlights/frames/${frame.id}`)
-      showToast('Frame removed', 'info')
+      showToast(t('highlight.viewer.frame_removed'), 'info')
       // Drop the frame from local state and re-index.
       const next = frames.filter(f => f.id !== frame.id)
       detail.value = { ...detail.value!, frames: next }
@@ -243,7 +244,7 @@ export default function HighlightViewerPage() {
       }
       if (next.length === 0) loc.route('/highlights')
     } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.viewer.delete_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
@@ -296,7 +297,7 @@ export default function HighlightViewerPage() {
         ))}
       </div>
       <span class="sr-only" aria-live="polite">
-        Frame {currentIndex.value + 1} of {frames.length}
+        {t('highlight.composer.frame_of', { n: String(currentIndex.value + 1), total: String(frames.length) })}
       </span>
 
       <header class="sh-highlight-viewer-header">
@@ -311,13 +312,13 @@ export default function HighlightViewerPage() {
           <button
             type="button"
             class="sh-highlight-viewer-overflow"
-            aria-label={`More actions for ${householdDisplayName(highlight.author_user_id)}`}
+            aria-label={t('highlight.more_actions', { name: householdDisplayName(highlight.author_user_id) })}
             onClick={() => openUserActions(highlight.author_user_id)}
           >
             ⋯
           </button>
         )}
-        <Button variant="ghost" onClick={() => loc.route('/highlights')}>Close</Button>
+        <Button variant="ghost" onClick={() => loc.route('/highlights')}>{t('common.close')}</Button>
       </header>
 
       <div
@@ -331,8 +332,8 @@ export default function HighlightViewerPage() {
         onPointerLeave={() => { paused.value = false }}
         onPointerCancel={() => { paused.value = false }}
       >
-        <button class="sh-highlight-tap-left"  onClick={onTapLeft}  aria-label="Previous frame" />
-        <button class="sh-highlight-tap-right" onClick={onTapRight} aria-label="Next frame" />
+        <button class="sh-highlight-tap-left"  onClick={onTapLeft}  aria-label={t('highlight.viewer.prev_frame')} />
+        <button class="sh-highlight-tap-right" onClick={onTapRight} aria-label={t('highlight.viewer.next_frame')} />
         {frame.frame_type === 'image' ? (
           <img src={frame.media_url} alt={frame.caption_text ?? ''} class="sh-highlight-frame-media" />
         ) : (
@@ -365,8 +366,8 @@ export default function HighlightViewerPage() {
             class="sh-highlight-mute-btn"
             onClick={(ev) => { ev.stopPropagation(); setMuted(m => !m) }}
             aria-pressed={muted}
-            aria-label={muted ? 'Unmute video' : 'Mute video'}
-            title={muted ? 'Unmute' : 'Mute'}
+            aria-label={muted ? t('highlight.viewer.unmute_aria') : t('highlight.viewer.mute_aria')}
+            title={muted ? t('highlight.viewer.unmute') : t('highlight.viewer.mute')}
           >
             {muted ? '🔇' : '🔊'}
           </button>
@@ -386,7 +387,7 @@ export default function HighlightViewerPage() {
          *  first-time users that hold-to-pause is a thing. */}
         {paused.value && (
           <span class="sh-highlight-paused-hint" aria-hidden="true">
-            ⏸ Paused
+            ⏸ {t('highlight.viewer.paused')}
           </span>
         )}
       </div>
@@ -398,25 +399,25 @@ export default function HighlightViewerPage() {
               type="button"
               class="sh-highlight-react-btn"
               onClick={() => { reactionsOpen.value = !reactionsOpen.value }}
-              aria-label="React"
+              aria-label={t('highlight.viewer.react')}
             >
-              😊 React
+              😊 {t('highlight.viewer.react')}
             </button>
             <button
               type="button"
               class="sh-highlight-reply-btn"
               onClick={dmReply}
-              aria-label="Reply to this frame"
+              aria-label={t('highlight.viewer.reply_aria')}
             >
-              💬 Reply
+              💬 {t('highlight.viewer.reply')}
             </button>
             <button
               type="button"
               class="sh-highlight-report-btn"
               onClick={() => openReport('highlight', highlight.id)}
-              aria-label="Report this highlight"
+              aria-label={t('highlight.viewer.report_aria')}
             >
-              🚩 Report
+              🚩 {t('report.action')}
             </button>
           </>
         )}
@@ -428,11 +429,11 @@ export default function HighlightViewerPage() {
               onClick={() => { seenBySheetFrameId.value = frame.id }}
               aria-label={
                 myViews.length === 0 && myReactions.length === 0
-                  ? 'No views yet'
-                  : `Seen by ${myViews.length} · ${myReactions.length} reactions — open list`
+                  ? t('highlight.viewer.no_views')
+                  : t('highlight.viewer.seen_by_aria', { views: String(myViews.length), reactions: reactionsLabel(myReactions.length) })
               }
             >
-              👁 {myViews.length} · {myReactions.length} reactions
+              👁 {myViews.length} · {reactionsLabel(myReactions.length)}
             </button>
             {/* §CP.R: a protected account can't mint a public link; it
              *  keeps the button only to unpublish one made before. */}
@@ -441,10 +442,10 @@ export default function HighlightViewerPage() {
                 variant="ghost"
                 onClick={() => openPublishMenu(highlight.id, !!highlight.public_gfs_id)}
               >
-                🔗 Publish public link
+                🔗 {t('highlight.viewer.publish')}
               </Button>
             )}
-            <Button variant="danger" onClick={deleteFrame}>Delete frame</Button>
+            <Button variant="danger" onClick={deleteFrame}>{t('highlight.viewer.delete_frame')}</Button>
           </>
         )}
       </footer>
@@ -458,7 +459,7 @@ export default function HighlightViewerPage() {
       )}
 
       {reactionsOpen.value && (
-        <div class="sh-highlight-react-tray" role="group" aria-label="Quick reactions">
+        <div class="sh-highlight-react-tray" role="group" aria-label={t('highlight.viewer.quick_reactions')}>
           {QUICK_REACTIONS.map(emoji => (
             <button
               key={emoji}
@@ -476,6 +477,11 @@ export default function HighlightViewerPage() {
 }
 
 
+/** "3 reactions" / "1 reaction" in the UI language. */
+function reactionsLabel(n: number): string {
+  return t(isOne(n) ? 'highlight.reactions_one' : 'highlight.reactions', { n: String(n) })
+}
+
 /**
  * HighlightSeenBySheet — modal-backed list of who has viewed this frame
  * and who has dropped a reaction. Author-only; opens from the viewer
@@ -491,19 +497,17 @@ function HighlightSeenBySheet({
 }) {
   const totalActivity = views.length + reactions.length
   return (
-    <Modal open={true} onClose={onClose} title="Seen by">
+    <Modal open={true} onClose={onClose} title={t('highlight.seen_by.title')}>
       {totalActivity === 0 && (
         <p class="sh-muted" style={{ marginTop: 0 }}>
-          Nobody has watched this frame yet. As soon as someone in your
-          household or a paired friend opens the highlight, you'll see
-          them listed here.
+          {t('highlight.seen_by.empty')}
         </p>
       )}
 
       {views.length > 0 && (
-        <section class="sh-seenby-section" aria-label="Viewers">
+        <section class="sh-seenby-section" aria-label={t('highlight.seen_by.viewers')}>
           <h3 class="sh-seenby-heading">
-            Viewers <span class="sh-muted">({views.length})</span>
+            {t('highlight.seen_by.viewers')} <span class="sh-muted">({views.length})</span>
           </h3>
           <ul class="sh-seenby-list">
             {views.map(v => (
@@ -524,9 +528,9 @@ function HighlightSeenBySheet({
       )}
 
       {reactions.length > 0 && (
-        <section class="sh-seenby-section" aria-label="Reactions">
+        <section class="sh-seenby-section" aria-label={t('highlight.seen_by.reactions')}>
           <h3 class="sh-seenby-heading">
-            Reactions <span class="sh-muted">({reactions.length})</span>
+            {t('highlight.seen_by.reactions')} <span class="sh-muted">({reactions.length})</span>
           </h3>
           <ul class="sh-seenby-list">
             {reactions.map(r => (

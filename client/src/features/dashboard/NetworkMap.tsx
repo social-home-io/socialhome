@@ -15,6 +15,7 @@ import { useEffect } from 'preact/hooks'
 import { signal, computed } from '@preact/signals'
 import { api } from '@/api'
 import { Spinner } from '@/components/Spinner'
+import { t } from '@/i18n/i18n'
 import { connections, type Connection as StoreConnection } from '@/store/connections'
 
 interface Connection extends StoreConnection {
@@ -43,27 +44,29 @@ export default function NetworkMap() {
   return (
     <div class="sh-network-map">
       <header class="sh-row sh-justify-between">
-        <h2>Network</h2>
+        <h2>{t('network_map.title')}</h2>
         <span class="sh-muted">
-          {stats.value.confirmed} paired · {stats.value.reachable} reachable
-          · {stats.value.pending} pending
+          {t('network_map.stats', {
+            paired: String(stats.value.confirmed),
+            reachable: String(stats.value.reachable),
+            pending: String(stats.value.pending),
+          })}
         </span>
       </header>
 
       {connections.value.length === 0 ? (
         <p class="sh-muted">
-          No paired instances yet — visit Settings → Connections to pair
-          with another household.
+          {t('network_map.empty')}
         </p>
       ) : (
         <svg
           class="sh-network-map-svg"
           viewBox="-160 -160 320 320"
-          aria-label={`Network map showing ${stats.value.total} paired instances`}
+          aria-label={t('network_map.aria', { n: String(stats.value.total) })}
         >
           {/* Self in the centre. */}
           <circle cx={0} cy={0} r={18} class="sh-network-self" />
-          <text x={0} y={4} text-anchor="middle">You</text>
+          <text x={0} y={4} text-anchor="middle">{t('network_map.you')}</text>
 
           {(connections.value as Connection[]).map((c, i) => {
             const list = connections.value as Connection[]

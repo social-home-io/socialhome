@@ -21,6 +21,7 @@ import { Button } from '@/components/Button'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { showToast } from '@/components/Toast'
 import { addBase } from '@/baseUrl'
+import { t } from '@/i18n/i18n'
 
 interface GfsConnection {
   id: string
@@ -73,9 +74,9 @@ export function HighlightPublishMenu() {
       )
       lastIssued.value = res
       isPublished.value = true
-      showToast('Public link minted', 'success')
+      showToast(t('highlight.publish.created'), 'success')
     } catch (err: unknown) {
-      showToast(`Couldn't publish: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.publish.failed', { error: String((err as Error)?.message ?? err) }), 'error')
     } finally {
       submitting.value = false
     }
@@ -85,9 +86,9 @@ export function HighlightPublishMenu() {
     if (!lastIssued.value) return
     try {
       await navigator.clipboard.writeText(lastIssued.value.url)
-      showToast('Link copied', 'success')
+      showToast(t('highlight.publish.copied'), 'success')
     } catch {
-      showToast('Copy failed — long-press the link to copy manually', 'info')
+      showToast(t('highlight.publish.copy_failed'), 'info')
     }
   }
 
@@ -98,9 +99,9 @@ export function HighlightPublishMenu() {
       await api.delete(`/api/highlights/${highlightId.value}/publish`)
       isPublished.value = false
       lastIssued.value = null
-      showToast('Public link removed', 'info')
+      showToast(t('highlight.publish.removed'), 'info')
     } catch (err: unknown) {
-      showToast(`Couldn't unpublish: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.publish.remove_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     } finally {
       submitting.value = false
     }
@@ -110,13 +111,10 @@ export function HighlightPublishMenu() {
     <Modal
       open={open.value}
       onClose={() => { open.value = false }}
-      title="Share this highlight publicly"
+      title={t('highlight.publish.title')}
     >
       <p class="sh-muted">
-        Mint a link anyone can open in a browser. The highlight streams
-        directly from your home server — the relay only brokers the
-        handshake. The link stops working when the highlight expires, or
-        if you tap unpublish.
+        {t('highlight.publish.intro')}
       </p>
 
       {isRestricted('public_links') && (
@@ -125,8 +123,8 @@ export function HighlightPublishMenu() {
 
       {!isRestricted('public_links') && connections.value.length === 0 && (
         <p class="sh-muted">
-          You're not connected to any Global Federation Server yet.
-          Connect one in <a href={addBase('/settings/connections')}>Settings → Connections</a>.
+          {t('highlight.publish.no_gfs_before')}{' '}
+          <a href={addBase('/settings/connections')}>{t('highlight.publish.no_gfs_link')}</a>{t('highlight.publish.no_gfs_after')}
         </p>
       )}
 
@@ -136,7 +134,7 @@ export function HighlightPublishMenu() {
           onSubmit={(e) => { e.preventDefault(); void submit() }}
         >
           <label class="sh-form-row">
-            <span>Relay</span>
+            <span>{t('highlight.publish.gfs_label')}</span>
             {connections.value.length === 1 ? (
               <input
                 type="text"
@@ -150,7 +148,7 @@ export function HighlightPublishMenu() {
                   selectedGfs.value = (e.currentTarget as HTMLSelectElement).value
                 }}
               >
-                <option value="">Pick a relay…</option>
+                <option value="">{t('highlight.publish.gfs_pick')}</option>
                 {connections.value.map(c => (
                   <option key={c.id} value={c.id}>{c.display_name}</option>
                 ))}
@@ -158,11 +156,11 @@ export function HighlightPublishMenu() {
             )}
           </label>
           <label class="sh-form-row">
-            <span>Label (optional)</span>
+            <span>{t('highlight.publish.label')}</span>
             <input
               type="text"
               maxLength={64}
-              placeholder="e.g. twitter"
+              placeholder={t('highlight.publish.label_placeholder')}
               value={label.value}
               onInput={(e) => {
                 label.value = (e.currentTarget as HTMLInputElement).value
@@ -174,7 +172,7 @@ export function HighlightPublishMenu() {
               type="submit"
               disabled={submitting.value || !selectedGfs.value}
             >
-              {submitting.value ? 'Publishing…' : 'Mint link'}
+              {submitting.value ? t('highlight.publish.creating') : t('highlight.publish.create')}
             </Button>
           </div>
         </form>
@@ -182,10 +180,10 @@ export function HighlightPublishMenu() {
 
       {lastIssued.value && (
         <div class="sh-highlight-publish-issued">
-          <p><strong>Your link:</strong></p>
+          <p><strong>{t('highlight.publish.your_link')}</strong></p>
           <code class="sh-highlight-publish-url">{lastIssued.value.url}</code>
           <div class="sh-modal-actions">
-            <Button onClick={copy}>Copy</Button>
+            <Button onClick={copy}>{t('highlight.publish.copy')}</Button>
           </div>
         </div>
       )}
@@ -197,7 +195,7 @@ export function HighlightPublishMenu() {
             onClick={unpublishAll}
             disabled={submitting.value}
           >
-            Unpublish all links for this highlight
+            {t('highlight.publish.remove_all')}
           </Button>
         </div>
       )}

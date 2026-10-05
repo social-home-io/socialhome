@@ -11,7 +11,7 @@ import { showToast } from '@/components/Toast'
 import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { theme, type Theme } from '@/store/theme'
 import { HouseholdThemeStudio } from '@/components/HouseholdThemeStudio'
-import { locale, setLocale, t } from '@/i18n/i18n'
+import { formatLocale, isOne, locale, setLocale, t } from '@/i18n/i18n'
 import localeMeta from '@/i18n/locales/_meta.json'
 import {
   detectLocaleWeekStart, getWeekStartPref, type WeekStartPref,
@@ -55,6 +55,16 @@ type SettingsTab = 'profile' | 'privacy' | 'notifications' | 'appearance' | 'sec
 const SETTINGS_TABS: SettingsTab[] = [
   'profile', 'privacy', 'notifications', 'appearance', 'security',
 ]
+
+const TAB_LABEL_KEYS: Record<SettingsTab, string> = {
+  profile: 'settings.tab.profile',
+  privacy: 'settings.tab.privacy',
+  notifications: 'settings.tab.notifications',
+  appearance: 'settings.tab.appearance',
+  security: 'settings.tab.security',
+}
+
+const errText = (err: unknown): string => String((err as Error)?.message ?? err)
 
 const activeTab = signal<SettingsTab>('profile')
 const displayName = signal('')
@@ -106,8 +116,8 @@ export default function SettingsPage() {
     }
   }, [])
 
-  const panelId = (t: SettingsTab) => `sh-settings-panel-${t}`
-  const tabId   = (t: SettingsTab) => `sh-settings-tab-${t}`
+  const panelId = (tab: SettingsTab) => `sh-settings-panel-${tab}`
+  const tabId   = (tab: SettingsTab) => `sh-settings-tab-${tab}`
 
   // Roving tabindex: only the active tab is in the Tab order, so the
   // others must be reachable with the arrow keys (WAI-ARIA tabs pattern)
@@ -130,19 +140,19 @@ export default function SettingsPage() {
   return (
     <div class="sh-settings">
       <nav class="sh-settings-tabs" role="tablist" onKeyDown={onTabKeyDown}>
-        {SETTINGS_TABS.map(t => (
+        {SETTINGS_TABS.map(tab => (
           <button
-            key={t}
+            key={tab}
             type="button"
             role="tab"
-            id={tabId(t)}
-            aria-selected={activeTab.value === t}
-            aria-controls={panelId(t)}
-            tabIndex={activeTab.value === t ? 0 : -1}
-            class={activeTab.value === t ? 'sh-tab sh-tab--active' : 'sh-tab'}
-            onClick={() => { activeTab.value = t }}
+            id={tabId(tab)}
+            aria-selected={activeTab.value === tab}
+            aria-controls={panelId(tab)}
+            tabIndex={activeTab.value === tab ? 0 : -1}
+            class={activeTab.value === tab ? 'sh-tab sh-tab--active' : 'sh-tab'}
+            onClick={() => { activeTab.value = tab }}
           >
-            {t.charAt(0).toUpperCase() + t.slice(1)}
+            {t(TAB_LABEL_KEYS[tab])}
           </button>
         ))}
       </nav>
@@ -191,11 +201,9 @@ function ProfileTab() {
         display_name: displayName.value,
         bio: bio.value || null,
       })
-      showToast('Settings saved', 'success')
+      showToast(t('settings.saved'), 'success')
     } catch (err: unknown) {
-      showToast(
-        `Save failed: ${(err as Error).message ?? err}`, 'error',
-      )
+      showToast(t('settings.profile.save_failed', { error: errText(err) }), 'error')
     }
   }
 
@@ -208,25 +216,21 @@ function ProfileTab() {
     try {
       await api.upload('/api/me/picture', fd)
       await refresh()
-      showToast('Avatar updated', 'success')
+      showToast(t('settings.profile.avatar_updated'), 'success')
     } catch (err: unknown) {
-      showToast(
-        `Avatar upload failed: ${(err as Error).message ?? err}`, 'error',
-      )
+      showToast(t('settings.profile.avatar_upload_failed', { error: errText(err) }), 'error')
     }
     input.value = ''
   }
 
   const handleAvatarClear = async () => {
-    if (!await confirmDialog('Remove your profile picture?', { destructive: true })) return
+    if (!await confirmDialog(t('settings.profile.remove_confirm'), { destructive: true })) return
     try {
       await api.delete('/api/me/picture')
       await refresh()
-      showToast('Avatar removed', 'info')
+      showToast(t('settings.profile.avatar_removed'), 'info')
     } catch (err: unknown) {
-      showToast(
-        `Clear failed: ${(err as Error).message ?? err}`, 'error',
-      )
+      showToast(t('settings.profile.clear_failed', { error: errText(err) }), 'error')
     }
   }
 
@@ -234,33 +238,25 @@ function ProfileTab() {
     try {
       await api.post('/api/me/picture/refresh-from-ha', {})
       await refresh()
-      showToast('Synced picture from Home Assistant', 'success')
+      showToast(t('settings.profile.ha_synced'), 'success')
     } catch (err: unknown) {
       // 422 with the body the route returns when HA has no
       // entity_picture for this person — the friendliest copy says
       // "go set one in HA first", not the raw backend detail.
       if (err instanceof ApiError && err.status === 422) {
-        showToast(
-          'Home Assistant has no profile picture for you yet. '
-          + 'Set one on your person entity in HA, then try again.',
-          'info',
-        )
+        showToast(t('settings.profile.ha_no_picture'), 'info')
         return
       }
       // 501 — adapter doesn't expose HA pictures (standalone mode).
       if (err instanceof ApiError && err.status === 501) {
-        showToast(
-          'This Social Home isn’t running in Home Assistant mode, '
-          + 'so there’s no HA picture to sync.',
-          'info',
-        )
+        showToast(t('settings.profile.ha_not_ha_mode'), 'info')
         return
       }
       // Generic fallthrough — ``err.message`` now carries the
       // backend's ``detail`` field (or a helpful network-error
       // string), so the toast already reads cleanly without us
       // prefixing "Could not fetch from HA:".
-      showToast((err as Error).message || 'Couldn’t sync from HA', 'error')
+      showToast((err as Error).message || t('settings.profile.ha_sync_failed'), 'error')
     }
   }
 
@@ -271,10 +267,10 @@ function ProfileTab() {
     <>
     <ProtectedAccountSection />
     <section class="sh-settings-section">
-      <h2>Profile</h2>
+      <h2>{t('settings.profile.title')}</h2>
       <div class="sh-profile-card">
         <label class="sh-profile-avatar-slot"
-               title="Click or drop an image to change your avatar">
+               title={t('settings.profile.avatar_slot_title')}>
           <Avatar name={displayName.value || '?'} src={avatarUrl.value}
                   size={112} />
           {/* Persistent corner badge — the avatar is clickable, but
@@ -283,7 +279,7 @@ function ProfileTab() {
            *  The hover overlay below remains for quick desktop tap. */}
           <span class="sh-profile-avatar-badge" aria-hidden="true">📷</span>
           <span class="sh-profile-avatar-hint" aria-hidden="true">
-            📷 Change
+            📷 {t('settings.profile.change')}
           </span>
           <input type="file" accept="image/*"
                  onChange={handleAvatarUpload} class="sr-only" />
@@ -302,17 +298,17 @@ function ProfileTab() {
            *  manually" parsed as an imperative call-to-action; "Edited
            *  here" makes it clear this is just describing the source. */}
           <span class={`sh-profile-source sh-profile-source--${isHaUser ? 'ha' : 'manual'}`}>
-            {isHaUser ? '🏠 Synced from Home Assistant' : '✏️ Edited here'}
+            {isHaUser ? `🏠 ${t('settings.profile.source_ha')}` : `✏️ ${t('settings.profile.source_manual')}`}
           </span>
           <div class="sh-row" style={{ gap: 'var(--sh-space-xs)', flexWrap: 'wrap' }}>
             {avatarUrl.value && (
               <Button variant="secondary" onClick={handleAvatarClear}>
-                Remove picture
+                {t('settings.profile.remove_picture')}
               </Button>
             )}
             {isHaUser && (
               <Button variant="secondary" onClick={handleUseHaPicture}>
-                Use Home Assistant picture
+                {t('settings.profile.use_ha_picture')}
               </Button>
             )}
           </div>
@@ -320,20 +316,21 @@ function ProfileTab() {
       </div>
       <form class="sh-form" onSubmit={handleSave}>
         <label>
-          Display name
+          {t('settings.profile.display_name')}
           <input value={displayName.value} maxLength={64}
                  onInput={(e) => displayName.value = (e.target as HTMLInputElement).value} />
         </label>
         <label>
-          Bio
+          {t('settings.profile.bio')}
           <textarea value={bio.value} maxLength={300} rows={3}
                     onInput={(e) => bio.value = (e.target as HTMLTextAreaElement).value} />
           <span class="sh-char-count">
-            {bioRemaining} characters left
+            {t(isOne(bioRemaining) ? 'settings.profile.chars_left_one' : 'settings.profile.chars_left',
+              { n: String(bioRemaining) })}
           </span>
         </label>
         <div class="sh-form-actions">
-          <Button type="submit">Save profile</Button>
+          <Button type="submit">{t('settings.profile.save_profile')}</Button>
         </div>
       </form>
 
@@ -355,36 +352,34 @@ function LandingPicker() {
       await setPreference('landing_path', choice)
       showToast(
         choice === '/dashboard'
-          ? 'Landing page set to My Corner'
+          ? t('settings.landing.set_corner')
           : choice === '/feed'
-            ? 'Landing page set to the feed'
-            : 'Landing page set to Welcome',
+            ? t('settings.landing.set_feed')
+            : t('settings.landing.set_welcome'),
         'success',
       )
     } catch (err: unknown) {
       landingPath.value = prev
-      showToast(
-        `Could not save: ${(err as Error).message ?? err}`, 'error',
-      )
+      showToast(t('settings.could_not_save', { error: errText(err) }), 'error')
     }
   }
 
   return (
     <div class="sh-landing-picker">
-      <h3>Home page</h3>
+      <h3>{t('settings.landing.title')}</h3>
       <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-        Which page opens when you tap the Social Home logo.
+        {t('settings.landing.hint')}
       </p>
       <div class="sh-landing-picker-options" role="radiogroup"
-           aria-label="Landing page">
+           aria-label={t('settings.landing.aria')}>
         <label class={`sh-landing-option ${landingPath.value === '/' ? 'sh-landing-option--active' : ''}`}>
           <input type="radio" name="landing" value="/"
                  checked={landingPath.value === '/'}
                  onChange={() => void handleChange('/')} />
           <span class="sh-landing-option-icon">☀️</span>
           <span class="sh-landing-option-body">
-            <strong>Welcome</strong>
-            <span class="sh-muted">Today's events, pending tasks, catch-up</span>
+            <strong>{t('settings.landing.welcome')}</strong>
+            <span class="sh-muted">{t('settings.landing.welcome_hint')}</span>
           </span>
         </label>
         <label class={`sh-landing-option ${landingPath.value === '/feed' ? 'sh-landing-option--active' : ''}`}>
@@ -393,8 +388,8 @@ function LandingPicker() {
                  onChange={() => void handleChange('/feed')} />
           <span class="sh-landing-option-icon">📰</span>
           <span class="sh-landing-option-body">
-            <strong>Household feed</strong>
-            <span class="sh-muted">Posts, photos, conversations</span>
+            <strong>{t('settings.landing.feed')}</strong>
+            <span class="sh-muted">{t('settings.landing.feed_hint')}</span>
           </span>
         </label>
         <label class={`sh-landing-option ${landingPath.value === '/dashboard' ? 'sh-landing-option--active' : ''}`}>
@@ -403,8 +398,8 @@ function LandingPicker() {
                  onChange={() => void handleChange('/dashboard')} />
           <span class="sh-landing-option-icon">🏠</span>
           <span class="sh-landing-option-body">
-            <strong>My Corner</strong>
-            <span class="sh-muted">Full dashboard with bazaar, presence map, more</span>
+            <strong>{t('settings.landing.corner')}</strong>
+            <span class="sh-muted">{t('settings.landing.corner_hint')}</span>
           </span>
         </label>
       </div>
@@ -432,23 +427,23 @@ function PrivacyTab() {
           preferences_json: updated.preferences_json,
         } as User
       }
-      showToast('Privacy updated', 'success')
+      showToast(t('settings.privacy.updated'), 'success')
     } catch {
       onlineStatusVisible.value = !onlineStatusVisible.value
-      showToast('Failed to update privacy', 'error')
+      showToast(t('settings.privacy.update_failed'), 'error')
     }
   }
 
   return (
     <section class="sh-settings-section">
-      <h2>Privacy</h2>
+      <h2>{t('settings.privacy.title')}</h2>
       <label class="sh-toggle-row">
         <input
           type="checkbox"
           checked={onlineStatusVisible.value}
           onChange={toggleOnlineStatus}
         />
-        Show online status to other household members
+        {t('settings.privacy.online_status')}
       </label>
       <SidebarVisibilityPanel />
       <SpaceLocationSharingPanel />
@@ -484,16 +479,15 @@ function SidebarVisibilityPanel() {
     } catch (e: unknown) {
       // Revert on error
       userPreferences.value = { ...userPreferences.value, [field]: prev }
-      showToast((e as Error).message || 'Failed to update sidebar visibility', 'error')
+      showToast((e as Error).message || t('settings.sidebar.update_failed'), 'error')
     }
   }
 
   return (
     <div class="sh-settings-subcard sh-sidebar-visibility-panel" id="sidebar-visibility">
-      <h3 class="sh-settings-panel-heading">Show in my sidebar</h3>
+      <h3 class="sh-settings-panel-heading">{t('settings.sidebar.title')}</h3>
       <p class="sh-muted sh-settings-panel-blurb">
-        Choose which sections appear in your sidebar. These are personal
-        preferences — other household members are not affected.
+        {t('settings.sidebar.blurb')}
       </p>
       <label class="sh-toggle-row">
         <input
@@ -501,9 +495,9 @@ function SidebarVisibilityPanel() {
           checked={!prefs.hide_highlights}
           onChange={() => void toggle('hide_highlights')}
         />
-        Highlights
+        {t('nav.highlights')}
         <span class="sh-toggle-row-hint sh-muted">
-          Your curated photo and moment archive.
+          {t('settings.sidebar.highlights_hint')}
         </span>
       </label>
       <label class="sh-toggle-row">
@@ -512,9 +506,9 @@ function SidebarVisibilityPanel() {
           checked={!prefs.hide_momentum}
           onChange={() => void toggle('hide_momentum')}
         />
-        Momentum
+        {t('nav.momentum')}
         <span class="sh-toggle-row-hint sh-muted">
-          Federated moments from people you follow across households.
+          {t('settings.sidebar.momentum_hint')}
         </span>
       </label>
       <label class="sh-toggle-row">
@@ -523,9 +517,9 @@ function SidebarVisibilityPanel() {
           checked={!prefs.hide_bazaar}
           onChange={() => void toggle('hide_bazaar')}
         />
-        Bazaar
+        {t('nav.bazaar')}
         <span class="sh-toggle-row-hint sh-muted">
-          Browse listings shared across connected households.
+          {t('settings.sidebar.bazaar_hint')}
         </span>
       </label>
     </div>
@@ -567,7 +561,7 @@ function SpaceLocationSharingPanel() {
     } catch (e: unknown) {
       // Revert on error
       spaceLocationRows.value = rows
-      showToast((e as Error).message || 'Failed to update location sharing', 'error')
+      showToast((e as Error).message || t('settings.location.update_failed'), 'error')
     }
   }
 
@@ -576,15 +570,13 @@ function SpaceLocationSharingPanel() {
       class="sh-settings-subcard sh-space-location-panel"
       id="space-location-sharing"
     >
-      <h3 class="sh-settings-panel-heading">Space location sharing</h3>
+      <h3 class="sh-settings-panel-heading">{t('settings.location.title')}</h3>
       <p class="sh-muted sh-settings-panel-blurb">
-        Choose which spaces see your live location. Admins enable the
-        feature per-space; you decide whether to opt in.
+        {t('settings.location.blurb')}
       </p>
       {!spaceLocationLoading.value && spaceLocationRows.value.length === 0 && (
         <p class="sh-muted sh-settings-panel-blurb">
-          No spaces with location sharing turned on. Ask an admin to
-          enable Location in a space's settings.
+          {t('settings.location.empty')}
         </p>
       )}
       {spaceLocationRows.value.map(row => (
@@ -611,33 +603,30 @@ function FollowingPanel() {
   const onUnfollow = async (userId: string) => {
     const name = householdDisplayName(userId)
     if (!await confirmDialog(
-      `Unfollow ${name}? Their moments older than 24 hours will stop `
-      + `surfacing in your inbox.`,
-      { confirmLabel: 'Unfollow' },
+      t('settings.following.confirm', { name }),
+      { confirmLabel: t('settings.following.unfollow') },
     )) return
     try {
       await unfollowUser(userId)
-      showToast('Unfollowed', 'success')
+      showToast(t('settings.following.unfollowed'), 'success')
     } catch (e: unknown) {
-      showToast(`Couldn't unfollow: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('settings.following.unfollow_failed', { error: errText(e) }), 'error')
     }
   }
 
   return (
     <div class="sh-following sh-settings-subcard">
-      <h3 class="sh-settings-panel-heading">Following</h3>
+      <h3 class="sh-settings-panel-heading">{t('settings.following.title')}</h3>
       <p class="sh-muted sh-settings-panel-blurb">
-        Following someone extends the moments retention window from 24
-        hours to 7 days for their posts in your inbox.
+        {t('settings.following.blurb')}
       </p>
       {rows.length === 0 && (
         <p class="sh-muted sh-settings-panel-blurb">
-          You aren't following anyone. Tap a moment author's name and
-          choose Follow to start.
+          {t('settings.following.empty')}
         </p>
       )}
       {rows.length > 0 && (
-        <ul class="sh-following-list" aria-label="Following">
+        <ul class="sh-following-list" aria-label={t('settings.following.title')}>
           {rows.map(f => {
             const name = householdDisplayName(f.user_id)
             return (
@@ -650,10 +639,10 @@ function FollowingPanel() {
                 <span class="sh-following-meta">
                   <strong>{name}</strong>
                   <span class="sh-muted">
-                    Following since{' '}
+                    {t('settings.following.since')}{' '}
                     <time
                       dateTime={f.created_at}
-                      title={new Date(f.created_at).toLocaleString()}
+                      title={new Date(f.created_at).toLocaleString(formatLocale())}
                     >
                       {relativeDocsTime(f.created_at)}
                     </time>
@@ -663,7 +652,7 @@ function FollowingPanel() {
                   variant="secondary"
                   onClick={() => void onUnfollow(f.user_id)}
                 >
-                  Unfollow
+                  {t('settings.following.unfollow')}
                 </Button>
               </li>
             )
@@ -685,29 +674,27 @@ function BlockedAccountsPanel() {
   const onUnblock = async (userId: string) => {
     const name = householdDisplayName(userId)
     if (!await confirmDialog(
-      `Unblock ${name}? Their highlights, posts, presence and DMs will be `
-      + `visible to you again.`,
-      { confirmLabel: 'Unblock' },
+      t('settings.blocked.confirm', { name }),
+      { confirmLabel: t('settings.blocked.unblock') },
     )) return
     try {
       await unblockUser(userId)
-      showToast('Unblocked', 'success')
+      showToast(t('settings.blocked.unblocked'), 'success')
     } catch (e: unknown) {
-      showToast(`Couldn't unblock: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('settings.blocked.unblock_failed', { error: errText(e) }), 'error')
     }
   }
 
   return (
     <div class="sh-blocked-accounts sh-settings-subcard">
-      <h3 class="sh-settings-panel-heading">Blocked accounts</h3>
+      <h3 class="sh-settings-panel-heading">{t('settings.blocked.title')}</h3>
       {rows.length === 0 && (
         <p class="sh-muted sh-settings-panel-blurb">
-          You haven't blocked anyone. Open a highlight or profile and tap
-          the ⋯ menu to block someone.
+          {t('settings.blocked.empty')}
         </p>
       )}
       {rows.length > 0 && (
-        <ul class="sh-blocked-accounts-list" aria-label="Blocked accounts">
+        <ul class="sh-blocked-accounts-list" aria-label={t('settings.blocked.title')}>
           {rows.map(b => {
             const name = householdDisplayName(b.user_id)
             return (
@@ -720,10 +707,10 @@ function BlockedAccountsPanel() {
                 <span class="sh-blocked-accounts-meta">
                   <strong>{name}</strong>
                   <span class="sh-muted">
-                    Blocked{' '}
+                    {t('settings.blocked.since')}{' '}
                     <time
                       dateTime={b.blocked_at}
-                      title={new Date(b.blocked_at).toLocaleString()}
+                      title={new Date(b.blocked_at).toLocaleString(formatLocale())}
                     >
                       {relativeDocsTime(b.blocked_at)}
                     </time>
@@ -733,7 +720,7 @@ function BlockedAccountsPanel() {
                   variant="secondary"
                   onClick={() => void onUnblock(b.user_id)}
                 >
-                  Unblock
+                  {t('settings.blocked.unblock')}
                 </Button>
               </li>
             )
@@ -776,20 +763,20 @@ function HighlightsPreferencesPanel() {
         max_count: maxCount.value,
         default_audience: { kind: audienceKind.value },
       })
-      showToast('Highlights settings saved', 'success')
+      showToast(t('settings.highlights.saved'), 'success')
     } catch {
-      showToast('Failed to save highlights settings', 'error')
+      showToast(t('settings.highlights.save_failed'), 'error')
     }
   }
 
   return (
     <div id="highlights" class="sh-settings-highlights-panel sh-settings-subcard">
-      <h3>Highlights</h3>
+      <h3>{t('nav.highlights')}</h3>
       <p class="sh-muted">
-        Control how long your highlights stay listed and who sees them by default.
+        {t('settings.highlights.blurb')}
       </p>
       <label class="sh-form-row">
-        Retention (days)
+        {t('settings.highlights.retention')}
         <input
           type="number"
           min={1}
@@ -802,7 +789,7 @@ function HighlightsPreferencesPanel() {
         />
       </label>
       <label class="sh-form-row">
-        Max highlights to keep
+        {t('settings.highlights.max_count')}
         <input
           type="number"
           min={10}
@@ -815,7 +802,7 @@ function HighlightsPreferencesPanel() {
         />
       </label>
       <label class="sh-form-row">
-        Default audience
+        {t('settings.highlights.audience')}
         <select
           value={audienceKind.value}
           onChange={e => {
@@ -824,13 +811,13 @@ function HighlightsPreferencesPanel() {
             audienceKind.value = v
           }}
         >
-          <option value="all_paired">All connected households</option>
-          <option value="households">Pick households per highlight</option>
-          <option value="users">Pick people per highlight (advanced)</option>
+          <option value="all_paired">{t('settings.highlights.audience_all')}</option>
+          <option value="households">{t('settings.highlights.audience_households')}</option>
+          <option value="users">{t('settings.highlights.audience_users')}</option>
         </select>
       </label>
       <div class="sh-form-actions">
-        <Button onClick={save}>Save</Button>
+        <Button onClick={save}>{t('common.save')}</Button>
       </div>
     </div>
   )
@@ -842,21 +829,19 @@ function MomentumPanel() {
   const save = async () => {
     try {
       await setPreference('moments', { max_hops: maxHops.value })
-      showToast('Momentum visibility saved', 'success')
+      showToast(t('settings.momentum.saved'), 'success')
     } catch {
-      showToast('Failed to save Momentum settings', 'error')
+      showToast(t('settings.momentum.save_failed'), 'error')
     }
   }
   return (
     <div id="momentum" class="sh-settings-momentum-panel sh-settings-subcard">
-      <h3>Momentum visibility</h3>
+      <h3>{t('settings.momentum.title')}</h3>
       <p class="sh-muted">
-        Federated moments hop up to 3 instances. Pick how many hops
-        deep you want your inbox to surface — your instance still
-        relays farther so other households can see them.
+        {t('settings.momentum.blurb')}
       </p>
       <label class="sh-form-row">
-        Show moments up to
+        {t('settings.momentum.show_up_to')}
         <select
           value={String(maxHops.value)}
           onChange={e => {
@@ -866,13 +851,13 @@ function MomentumPanel() {
             maxHops.value = v
           }}
         >
-          <option value="1">1 hop (only direct peers)</option>
-          <option value="2">2 hops</option>
-          <option value="3">3 hops (default — every relayed moment)</option>
+          <option value="1">{t('settings.momentum.hop_1')}</option>
+          <option value="2">{t('settings.momentum.hop_2')}</option>
+          <option value="3">{t('settings.momentum.hop_3')}</option>
         </select>
       </label>
       <div class="sh-form-actions">
-        <Button onClick={save}>Save</Button>
+        <Button onClick={save}>{t('common.save')}</Button>
       </div>
     </div>
   )
@@ -892,12 +877,12 @@ function NotificationsTab() {
     try {
       if (await enableWebPush()) {
         pushEnabled.value = true
-        showToast('Push notifications enabled', 'success')
+        showToast(t('settings.notifications.push_enabled'), 'success')
       } else {
-        showToast('Notifications are blocked for this site in your browser', 'info')
+        showToast(t('settings.notifications.blocked'), 'info')
       }
     } catch (err: unknown) {
-      showToast(`Couldn't enable push: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('settings.notifications.enable_failed', { error: errText(err) }), 'error')
     } finally {
       pushBusy.value = false
     }
@@ -908,9 +893,9 @@ function NotificationsTab() {
     try {
       await disableWebPush()
       pushEnabled.value = false
-      showToast('Push notifications disabled', 'info')
+      showToast(t('settings.notifications.push_disabled'), 'info')
     } catch {
-      showToast('Failed to disable push', 'error')
+      showToast(t('settings.notifications.disable_failed'), 'error')
     } finally {
       pushBusy.value = false
     }
@@ -918,21 +903,21 @@ function NotificationsTab() {
 
   return (
     <section class="sh-settings-section">
-      <h2>Notifications</h2>
+      <h2>{t('settings.notifications.title')}</h2>
       <div class="sh-settings-row">
-        <span>Push notifications</span>
+        <span>{t('settings.notifications.push')}</span>
         {pushEnabled.value ? (
-          <Button variant="secondary" loading={pushBusy.value} onClick={disablePush}>Disable</Button>
+          <Button variant="secondary" loading={pushBusy.value} onClick={disablePush}>{t('settings.notifications.disable')}</Button>
         ) : (
-          <Button loading={pushBusy.value} disabled={!webPushSupported()} onClick={requestPush}>Enable</Button>
+          <Button loading={pushBusy.value} disabled={!webPushSupported()} onClick={requestPush}>{t('settings.notifications.enable')}</Button>
         )}
       </div>
       <p class="sh-muted">
         {pushEnabled.value
-          ? 'You will receive push notifications for new messages and mentions.'
+          ? t('notifications.push_enabled')
           : webPushSupported()
-            ? 'Enable push notifications to stay updated when you are away.'
-            : 'This browser does not support push notifications.'}
+            ? t('notifications.push_disabled')
+            : t('settings.notifications.unsupported')}
       </p>
       {isHomeAssistant() && <HaNotifyServiceRow />}
     </section>
@@ -978,7 +963,7 @@ function HaNotifyServiceRow() {
       // saved value isn't a currently-discoverable target (legacy bare names
       // or entities not listed right now) so it's never silently lost.
       const saved = haNotifyService.value.trim()
-      const known = fetched.some((t) => t.entity_id === saved)
+      const known = fetched.some((target) => target.entity_id === saved)
       if (fetched.length === 0 || (saved !== '' && !known)) {
         setManual(true)
       }
@@ -998,11 +983,11 @@ function HaNotifyServiceRow() {
       // push provider treats blank as "no target" and skips).
       await setPreference('ha_notify_service', v)
       showToast(
-        v ? 'HA notification target saved' : 'HA notification target cleared',
+        v ? t('settings.ha_notify.saved') : t('settings.ha_notify.cleared'),
         'success',
       )
     } catch {
-      showToast('Failed to save', 'error')
+      showToast(t('settings.ha_notify.save_failed'), 'error')
     } finally {
       haNotifySaving.value = false
     }
@@ -1018,30 +1003,31 @@ function HaNotifyServiceRow() {
     haNotifyService.value = v
   }
 
+  const [helpBefore, helpAfter = ''] = t('settings.ha_notify.help').split('{code}')
   const showSelect = !manual && targets.length > 0
   const emptyDiscovery = !loading && targets.length === 0
 
   return (
     <div class="sh-settings-subsection">
-      <h3>Home Assistant app</h3>
+      <h3>{t('settings.ha_notify.title')}</h3>
       {loading ? (
-        <p class="sh-muted">Loading…</p>
+        <p class="sh-muted">{t('settings.ha_notify.loading')}</p>
       ) : showSelect ? (
         <label class="sh-form-row">
-          Notify target
+          {t('settings.ha_notify.target')}
           <select value={haNotifyService.value} onChange={onSelectChange}>
-            <option value="">— No HA notifications —</option>
-            {targets.map((t) => (
-              <option key={t.entity_id} value={t.entity_id}>
-                {t.name}
+            <option value="">{t('settings.ha_notify.none')}</option>
+            {targets.map((target) => (
+              <option key={target.entity_id} value={target.entity_id}>
+                {target.name}
               </option>
             ))}
-            <option value={MANUAL_SENTINEL}>Enter manually…</option>
+            <option value={MANUAL_SENTINEL}>{t('settings.ha_notify.manual')}</option>
           </select>
         </label>
       ) : (
         <label class="sh-field">
-          <span>Notify service</span>
+          <span>{t('settings.ha_notify.service')}</span>
           <input
             type="text"
             placeholder="notify.mobile_app_my_phone"
@@ -1053,25 +1039,21 @@ function HaNotifyServiceRow() {
       )}
       {emptyDiscovery && (
         <p class="sh-muted">
-          Couldn't list notify targets from Home Assistant — enter the service
-          name manually.
+          {t('settings.ha_notify.discovery_failed')}
         </p>
       )}
       {manual && targets.length > 0 && (
         <div class="sh-settings-row">
           <Button variant="ghost" onClick={() => setManual(false)}>
-            Choose from list
+            {t('settings.ha_notify.choose_list')}
           </Button>
         </div>
       )}
       <p class="sh-muted">
-        The Home Assistant notify service for your phone — find it under
-        Developer Tools → Actions as <code>notify.mobile_app_…</code> (named
-        after your device, not your username). Leave empty to disable HA-app
-        notifications for your account.
+        {helpBefore}<code>notify.mobile_app_…</code>{helpAfter}
       </p>
       <div class="sh-settings-row">
-        <Button onClick={save} loading={haNotifySaving.value}>Save</Button>
+        <Button onClick={save} loading={haNotifySaving.value}>{t('common.save')}</Button>
       </div>
     </div>
   )
@@ -1080,43 +1062,46 @@ function HaNotifyServiceRow() {
 function SecurityTab() {
   return (
     <section class="sh-settings-section">
-      <h2>Security</h2>
+      <h2>{t('settings.tab.security')}</h2>
       <SecuritySettings />
     </section>
   )
 }
 
 function AppearanceTab() {
-  const setTheme = (t: Theme) => { theme.value = t }
+  const setTheme = (next: Theme) => { theme.value = next }
+  const [langBefore, langAfter = ''] = t('settings.language.help').split('{link}')
 
   return (
     <section class="sh-settings-section">
-      <h2>Appearance</h2>
+      <h2>{t('settings.appearance.title')}</h2>
       <div class="sh-theme-picker">
-        <h3>Theme</h3>
+        <h3>{t('settings.appearance.theme')}</h3>
         <div class="sh-theme-options">
-          {(['light', 'dark', 'auto'] as Theme[]).map(t => (
+          {(['light', 'dark', 'auto'] as Theme[]).map(opt => (
             <button
-              key={t}
+              key={opt}
               type="button"
-              class={theme.value === t ? 'sh-theme-option sh-theme-option--active' : 'sh-theme-option'}
-              onClick={() => setTheme(t)}
+              class={theme.value === opt ? 'sh-theme-option sh-theme-option--active' : 'sh-theme-option'}
+              onClick={() => setTheme(opt)}
             >
-              {t === 'light' ? 'Light' : t === 'dark' ? 'Dark' : 'Auto'}
+              {t(`settings.appearance.${opt}`)}
             </button>
           ))}
         </div>
         <p class="sh-muted">
           {theme.value === 'auto'
-            ? 'Follows your system preference.'
-            : `Currently using ${theme.value} mode.`}
+            ? t('settings.appearance.follows_system')
+            : theme.value === 'dark'
+              ? t('settings.appearance.current_dark')
+              : t('settings.appearance.current_light')}
         </p>
       </div>
 
       <div class="sh-locale-picker">
-        <h3>Language</h3>
+        <h3>{t('settings.language.title')}</h3>
         <ChipRadioGroup
-          ariaLabel="Language"
+          ariaLabel={t('settings.language.title')}
           value={locale.value}
           onChange={code => { void chooseLocale(code) }}
           options={Object.entries(localeMeta.locales).map(([code, info]) => ({
@@ -1126,9 +1111,8 @@ function AppearanceTab() {
           }))}
         />
         <p class="sh-muted">
-          Translations are contributed by the community. Missing or awkward
-          text? <a href={localeMeta.weblate_url} target="_blank" rel="noopener noreferrer">
-          Contribute translations on Weblate</a>.
+          {langBefore}<a href={localeMeta.weblate_url} target="_blank" rel="noopener noreferrer">
+          {t('settings.language.contribute')}</a>{langAfter}
         </p>
       </div>
       <WeekStartPicker />

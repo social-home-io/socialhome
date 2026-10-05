@@ -30,6 +30,7 @@ import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { ZoneLegend } from './ZoneLegend'
 import type { SpaceZone } from '@/types'
+import { isOne, t } from '@/i18n/i18n'
 
 const _ZONE_PALETTE = [
   '#3b82f6', '#f97316', '#10b981', '#a855f7', '#ec4899',
@@ -229,15 +230,15 @@ export function SpaceLocationCard({
         { enabled },
       )
       setSharingMe(enabled)
-      const what = data?.location_mode === 'zone_only' ? 'zone' : 'location'
+      const zone = data?.location_mode === 'zone_only'
       showToast(
         enabled
-          ? `Now sharing your ${what} with this space`
-          : `You stopped sharing your ${what} with this space`,
+          ? t(zone ? 'location.card.now_sharing_zone' : 'location.card.now_sharing_location')
+          : t(zone ? 'location.card.stopped_zone' : 'location.card.stopped_location'),
         'success',
       )
     } catch (e: any) {
-      showToast(e.message || 'Failed to update', 'error')
+      showToast(e.message || t('location.card.update_failed'), 'error')
     }
   }
 
@@ -250,7 +251,7 @@ export function SpaceLocationCard({
   if (loading) return <Spinner />
   if (error) return (
     <div class="sh-error-state" role="alert">
-      Could not load space presence: {error}
+      {t('location.card.load_failed', { error })}
     </div>
   )
   if (!data) return null
@@ -259,12 +260,10 @@ export function SpaceLocationCard({
     return (
       <div class="sh-space-location sh-muted">
         <p>
-          <strong>Location sharing is off for this space.</strong>
+          <strong>{t('location.card.off_title')}</strong>
         </p>
         <p>
-          An admin can turn it on in Space Settings → Location sharing.
-          When enabled, each member also opts in individually so their
-          GPS reaches the space.
+          {t('location.card.off_body')}
         </p>
       </div>
     )
@@ -310,15 +309,15 @@ export function SpaceLocationCard({
             <strong>
               {sharingMe
                 ? (isZoneOnly
-                    ? '📍 You are sharing your zone with this space'
-                    : '📍 You are sharing your location with this space')
-                : '📵 Your location is private here'}
+                    ? `📍 ${t('location.card.sharing_zone')}`
+                    : `📍 ${t('location.card.sharing_location')}`)
+                : `📵 ${t('location.card.private')}`}
             </strong>
             {sharingMe && (
               <span class="sh-muted">
                 {isZoneOnly
-                  ? 'Only the matched zone label is shared — never your exact GPS.'
-                  : 'Your 4-decimal GPS is shared with members who have the map open.'}
+                  ? t('location.card.zone_hint')
+                  : t('location.card.gps_hint')}
               </span>
             )}
           </div>
@@ -326,7 +325,7 @@ export function SpaceLocationCard({
             variant={sharingMe ? 'danger' : 'primary'}
             onClick={() => setMyOptIn(!sharingMe)}
           >
-            {sharingMe ? 'Stop sharing' : 'Share my location'}
+            {sharingMe ? t('location.card.stop') : t('location.card.share_location')}
           </Button>
         </div>
       )}
@@ -334,7 +333,7 @@ export function SpaceLocationCard({
         <ul class="sh-zone-only-list" data-testid="zone-only-list">
           {data.entries.length === 0 && (
             <li class="sh-zone-only-list__empty sh-muted">
-              No one in this space is in any zone right now.
+              {t('location.card.no_one_in_zone')}
             </li>
           )}
           {data.entries.map((p) => {
@@ -353,13 +352,13 @@ export function SpaceLocationCard({
                 <span
                   class="sh-zone-only-list__chip"
                   style={`--zone-colour: ${colour}`}
-                  title={`Zone: ${p.zone_name ?? 'unknown'}`}
+                  title={t('location.card.zone_title', { zone: p.zone_name ?? t('location.card.unknown') })}
                 >
                   <span
                     class="sh-zone-only-list__swatch"
                     aria-hidden="true"
                   />
-                  {p.zone_name ?? 'unknown zone'}
+                  {p.zone_name ?? t('location.card.unknown_zone')}
                 </span>
               </li>
             )
@@ -373,8 +372,8 @@ export function SpaceLocationCard({
             height={380}
             emptyLabel={
               total === 0
-                ? 'No one in this space is sharing GPS yet.'
-                : 'No one in this space is sharing GPS right now.'
+                ? t('location.card.no_gps_yet')
+                : t('location.card.no_gps_now')
             }
           />
           {zones.length > 0 && <ZoneLegend zones={zones} />}
@@ -383,53 +382,43 @@ export function SpaceLocationCard({
       <div class="sh-location-map-footer sh-muted">
         <span>
           {isZoneOnly
-            ? `${sharing} of ${total} in a zone`
-            : `${sharing} of ${total} sharing GPS`}
+            ? t('location.card.in_zone_count', { n: String(sharing), total: String(total) })
+            : t('location.card.sharing_count', { n: String(sharing), total: String(total) })}
         </span>
-        <span>{zones.length} zone{zones.length === 1 ? '' : 's'} configured</span>
+        <span>{t(isOne(zones.length) ? 'location.card.zones_configured_one' : 'location.card.zones_configured', { n: String(zones.length) })}</span>
       </div>
       <Modal
         open={showOnboarding}
         onClose={() => dismissOnboarding(null)}
         title={isZoneOnly
-          ? '📍 Share your zone with this space?'
-          : '📍 Share your location with this space?'}
+          ? `📍 ${t('location.card.ask_zone_title')}`
+          : `📍 ${t('location.card.ask_location_title')}`}
       >
         <div class="sh-modal-body">
           {isZoneOnly ? (
             <>
-              <p>
-                This space tracks members by <strong>zone</strong>, not by
-                exact GPS. If you opt in, your home server will match your
-                location to one of this space's zones (e.g. "Office",
-                "Home") and share <strong>only the zone name</strong>.
-              </p>
+              <p>{t('location.card.ask_zone_body')}</p>
               <ul>
-                <li>Your GPS coordinates never leave your home server.</li>
-                <li>If you're not in any of this space's zones, nothing is shared.</li>
-                <li>You can stop sharing at any time from the map tab.</li>
+                <li>{t('location.card.ask_zone_point_gps')}</li>
+                <li>{t('location.card.ask_zone_point_none')}</li>
+                <li>{t('location.card.ask_point_stop')}</li>
               </ul>
             </>
           ) : (
             <>
-              <p>
-                This space shows members on a map. If you opt in, your
-                GPS coordinates (rounded to ~10 m) will be visible to
-                other members of this space — but never to other spaces
-                or other households outside this space.
-              </p>
+              <p>{t('location.card.ask_location_body')}</p>
               <ul>
-                <li>You can stop sharing at any time from the map tab.</li>
-                <li>Your home assistant zones never reach this space.</li>
+                <li>{t('location.card.ask_point_stop')}</li>
+                <li>{t('location.card.ask_location_point_zones')}</li>
               </ul>
             </>
           )}
           <div class="sh-modal-actions">
             <Button variant="secondary" onClick={() => dismissOnboarding(null)}>
-              Not now
+              {t('common.not_now')}
             </Button>
             <Button variant="primary" onClick={() => dismissOnboarding(true)}>
-              {isZoneOnly ? 'Share my zone' : 'Share my location'}
+              {isZoneOnly ? t('location.card.share_zone') : t('location.card.share_location')}
             </Button>
           </div>
         </div>

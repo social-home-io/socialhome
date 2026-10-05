@@ -36,7 +36,6 @@ import {
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { relativeDocsTime } from '@/utils/relativeTime'
-import { t } from '@/i18n/i18n'
 import {
   actionLabel,
   expiryLabel,
@@ -49,6 +48,7 @@ import {
   sameValue,
   type ModerationItem,
 } from '@/features/spaces/moderationItems'
+import { formatLocale, t } from '@/i18n/i18n'
 
 export type { ModerationItem } from '@/features/spaces/moderationItems'
 
@@ -553,12 +553,12 @@ export function ModerationQueue({ spaceId, canApprove = true }: {
                 <time
                   class="sh-muted"
                   dateTime={item.submitted_at}
-                  title={new Date(item.submitted_at).toLocaleString()}
+                  title={new Date(item.submitted_at).toLocaleString(formatLocale())}
                 >
                   {relativeDocsTime(item.submitted_at)}
                 </time>
                 {expiry && (
-                  <span class="sh-badge sh-moderation-meta__expiry" title={new Date(item.expires_at).toLocaleString()}>
+                  <span class="sh-badge sh-moderation-meta__expiry" title={new Date(item.expires_at).toLocaleString(formatLocale())}>
                     {expiry}
                   </span>
                 )}
@@ -666,7 +666,7 @@ export function ContentReportsList() {
         if (!cancelled) reports.value = data
       })
       .catch((e: Error) => {
-        if (!cancelled) reportsError.value = e.message || 'Failed to load reports'
+        if (!cancelled) reportsError.value = e.message || t('reports.load_failed')
       })
       .finally(() => {
         if (!cancelled) reportsLoading.value = false
@@ -681,10 +681,10 @@ export function ContentReportsList() {
     reports.value = reports.value.filter(r => r.id !== id)
     try {
       await api.post(`/api/admin/reports/${id}/resolve`, { dismissed })
-      showToast(dismissed ? 'Report dismissed' : 'Report resolved', 'success')
+      showToast(dismissed ? t('reports.dismissed') : t('reports.resolved'), 'success')
     } catch (e: any) {
       reports.value = prev
-      showToast(e.message || 'Resolve failed', 'error')
+      showToast(e.message || t('admin.reports.resolve_failed'), 'error')
     }
   }
 
@@ -692,7 +692,7 @@ export function ContentReportsList() {
   if (reportsError.value) {
     return (
       <div class="sh-reports" role="alert">
-        <h3>Content reports</h3>
+        <h3>{t('admin.reports.title')}</h3>
         <p class="sh-error">{reportsError.value}</p>
       </div>
     )
@@ -700,20 +700,20 @@ export function ContentReportsList() {
 
   return (
     <div class="sh-reports">
-      <h3>Content reports</h3>
+      <h3>{t('admin.reports.title')}</h3>
       {reports.value.length === 0 && (
-        <p class="sh-muted">No pending reports.</p>
+        <p class="sh-muted">{t('admin.reports.empty')}</p>
       )}
       {reports.value.map(r => {
         // Friendly category labels — the wire enum is uppercase
         // snake_case but admins want sentence-cased categories.
         const categoryLabel = ((c: string) => {
           switch (c) {
-            case 'spam':           return 'Spam'
-            case 'harassment':     return 'Harassment'
-            case 'inappropriate':  return 'Inappropriate content'
-            case 'misinformation': return 'Misinformation'
-            case 'other':          return 'Other'
+            case 'spam':           return t('report.category.spam')
+            case 'harassment':     return t('report.category.harassment')
+            case 'inappropriate':  return t('report.category.inappropriate')
+            case 'misinformation': return t('report.category.misinformation')
+            case 'other':          return t('report.category.other')
             default:               return c
           }
         })(r.category)
@@ -723,28 +723,30 @@ export function ContentReportsList() {
             <div class="sh-report-meta">
               <strong>{categoryLabel}</strong>
               <span class="sh-muted">
-                {' · '}{r.target_type === 'user' ? 'on a user' : 'on a post'}
-                {' · reported by '}{reporterName}
+                {' · '}{r.target_type === 'user'
+                  ? t('admin.reports.on_user')
+                  : t('admin.reports.on_post')}
+                {' · '}{t('admin.reports.reported_by', { name: reporterName })}
               </span>
               {r.reporter_instance_id && (
                 <span class="sh-badge sh-badge--peer"
-                      title={`Report mirrored from peer ${r.reporter_instance_id}`}>
-                  from peer
+                      title={t('admin.reports.from_other_title')}>
+                  {t('admin.reports.from_other')}
                 </span>
               )}
               <time
                 class="sh-muted"
                 dateTime={r.created_at}
-                title={new Date(r.created_at).toLocaleString()}
+                title={new Date(r.created_at).toLocaleString(formatLocale())}
               >
                 {relativeDocsTime(r.created_at)}
               </time>
             </div>
             {r.notes && <p class="sh-muted">“{r.notes}”</p>}
             <div class="sh-form-actions">
-              <Button onClick={() => resolve(r.id)}>Resolve</Button>
+              <Button onClick={() => resolve(r.id)}>{t('reports.resolve')}</Button>
               <Button variant="secondary" onClick={() => resolve(r.id, true)}>
-                Dismiss
+                {t('reports.dismiss')}
               </Button>
             </div>
           </div>

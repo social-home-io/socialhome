@@ -18,7 +18,7 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
-import { t } from '@/i18n/i18n'
+import { t, formatLocale, isOne } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
 import { Avatar } from '@/components/Avatar'
@@ -87,18 +87,23 @@ interface FriendsPayload {
 /** "5 min ago" / "3 d ago" — enough precision for a paired-since hint. */
 function humanizeAgo(iso: string | null | undefined): string | null {
   if (!iso) return null
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return null
-  const sec = Math.max(0, Math.round((Date.now() - t) / 1000))
-  if (sec < 60)         return 'just now'
-  if (sec < 3600)       return `${Math.floor(sec / 60)} min ago`
-  if (sec < 86400)      return `${Math.floor(sec / 3600)} h ago`
-  if (sec < 86400 * 30) return `${Math.floor(sec / 86400)} d ago`
-  return new Date(t).toLocaleDateString()
+  const ts = Date.parse(iso)
+  if (Number.isNaN(ts)) return null
+  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (sec < 60)         return t('time.just_now')
+  if (sec < 3600)       return t('time.minutes_ago', { n: String(Math.floor(sec / 60)) })
+  if (sec < 86400)      return t('time.hours_ago', { n: String(Math.floor(sec / 3600)) })
+  if (sec < 86400 * 30) return t('time.days_ago', { n: String(Math.floor(sec / 86400)) })
+  return new Date(ts).toLocaleDateString(formatLocale())
 }
 
 /** Earliest paired_at across all households — used in the hero
  *  sub-line to give a sense of how long the network has existed. */
+/** "3 members" / "1 member" for a map pin's sub-label. */
+function memberCount(n: number): string {
+  return t(isOne(n) ? 'friends.members_one' : 'friends.members', { n: String(n) })
+}
+
 function earliestPairedAt(households: Household[]): string | null {
   let earliest: number | null = null
   for (const h of households) {
@@ -143,7 +148,7 @@ export default function FriendsPage() {
       }
       location.route(`/dms/${conv.id}`)
     } catch (e: any) {
-      showToast(e?.message || 'Couldn’t start the DM', 'error')
+      showToast(e?.message || t('friends.dm_failed'), 'error')
     } finally {
       setDmBusy(b => {
         const n = new Set(b)
@@ -179,8 +184,7 @@ export default function FriendsPage() {
       lat: instance.home_lat,
       lon: instance.home_lon,
       label: instance.display_name,
-      sub_label: `${instance.member_count} member${
-        instance.member_count === 1 ? '' : 's'} · your household`,
+      sub_label: `${memberCount(instance.member_count)} · ${t('friends.your_household')}`,
       state: 'home',
     })
   }
@@ -192,8 +196,8 @@ export default function FriendsPage() {
       lat: h.home_lat,
       lon: h.home_lon,
       label: h.display_name,
-      sub_label: `${h.member_count} member${
-        h.member_count === 1 ? '' : 's'}${ago ? ` · paired ${ago}` : ''}`,
+      sub_label: memberCount(h.member_count)
+        + (ago ? ` · ${t('friends.paired_ago', { ago })}` : ''),
       state: h.reachable ? 'zone' : 'away',
     })
   }
@@ -205,17 +209,18 @@ export default function FriendsPage() {
       <header class="sh-friends-hero">
         <div class="sh-friends-hero-headline">
           <strong>{totals.people}</strong>{' '}
-          {totals.people === 1 ? 'person' : 'people'} across{' '}
+          {t(isOne(totals.people) ? 'friends.hero.people_one' : 'friends.hero.people')}{' '}
+          {t('friends.hero.across')}{' '}
           <strong>{totals.households}</strong>{' '}
-          {totals.households === 1 ? 'household' : 'households'}
+          {t(isOne(totals.households) ? 'friends.hero.households_one' : 'friends.hero.households')}
         </div>
         <div class="sh-friends-hero-sub sh-muted">
           {households.length === 0
-            ? 'Just your household for now — pair another to grow your network.'
+            ? t('friends.hero.alone')
             : (
               <>
-                {oldest && <>Connected since {humanizeAgo(oldest)} · </>}
-                {reachableCount} of {households.length} reachable now
+                {oldest && <>{t('friends.hero.connected_since', { ago: humanizeAgo(oldest) ?? '' })} · </>}
+                {t('friends.hero.reachable', { n: String(reachableCount), total: String(households.length) })}
               </>
             )}
         </div>
@@ -226,7 +231,7 @@ export default function FriendsPage() {
         {isAdmin && (
           <div class="sh-friends-hero-actions">
             <Button onClick={() => openPairing('household')}>
-              + Pair a household
+              + {t('friends.pair_household')}
             </Button>
           </div>
         )}
@@ -245,7 +250,7 @@ export default function FriendsPage() {
         <header class="sh-friends-household-head">
           <span class="sh-friends-house-icon" aria-hidden="true">🏠</span>
           <strong>{instance.display_name}</strong>
-          <span class="sh-friends-tag sh-muted">your household</span>
+          <span class="sh-friends-tag sh-muted">{t('friends.your_household')}</span>
         </header>
         <div class="sh-friends-members">
           {instance.members.map(m => {
@@ -259,7 +264,7 @@ export default function FriendsPage() {
                 <div
                   key={m.user_id}
                   class="sh-friends-member-chip sh-friends-member-chip--self"
-                  title={`${m.display_name} (you)`}
+                  title={`${m.display_name} ${t('dms.group.you')}`}
                 >
                   <Avatar
                     name={m.display_name}
@@ -268,7 +273,7 @@ export default function FriendsPage() {
                     online={m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
                   />
                   <span class="sh-friends-member-name">{m.display_name}</span>
-                  <span class="sh-friends-tag sh-muted">you</span>
+                  <span class="sh-friends-tag sh-muted">{t('friends.you')}</span>
                 </div>
               )
             }
@@ -280,8 +285,8 @@ export default function FriendsPage() {
                 key={m.user_id}
                 type="button"
                 class="sh-friends-member-chip sh-friends-member-chip--button"
-                title={`Open actions for ${shown}`}
-                aria-label={`Open actions for ${shown}`}
+                title={t('friends.open_actions', { name: shown })}
+                aria-label={t('friends.open_actions', { name: shown })}
                 disabled={dmBusy.has(m.user_id)}
                 onClick={() => openFriendActions({
                   user_id: m.user_id,
@@ -303,8 +308,8 @@ export default function FriendsPage() {
                 {isAliased && (
                   <span
                     class="sh-friends-member-chip__alias-hint"
-                    aria-label="Your nickname"
-                    title={`Your nickname · their name: ${m.display_name}`}
+                    aria-label={t('alias.label')}
+                    title={t('friends.nickname_hint', { name: m.display_name })}
                   >
                     ✏
                   </span>
@@ -318,15 +323,15 @@ export default function FriendsPage() {
       {households.length === 0 ? (
         <div class="sh-empty-state">
           <div aria-hidden="true">🤝</div>
-          <h3>No connected households yet</h3>
-          <p>Pair with another household to see them here.</p>
+          <h3>{t('friends.empty_title')}</h3>
+          <p>{t('friends.empty_body')}</p>
           {isAdmin ? (
             <Button onClick={() => openPairing('household')}>
-              + Pair a household
+              + {t('friends.pair_household')}
             </Button>
           ) : (
             <p class="sh-muted">
-              Ask a household admin to pair with another household.
+              {t('friends.empty_ask_admin')}
             </p>
           )}
         </div>
@@ -343,7 +348,7 @@ export default function FriendsPage() {
                 <strong>{h.display_name}</strong>
                 {pairedAgo && (
                   <span class="sh-friends-tag sh-muted">
-                    paired {pairedAgo}
+                    {t('friends.paired_ago', { ago: pairedAgo })}
                   </span>
                 )}
                 {/* Reachable is the default expectation — only paint a
@@ -353,14 +358,14 @@ export default function FriendsPage() {
                 {!h.reachable && (
                   <span
                     class="sh-friends-status-dot sh-friends-status-dot--unreachable"
-                    aria-label="Unreachable"
-                    title="Unreachable"
+                    aria-label={t('friends.unreachable')}
+                    title={t('friends.unreachable')}
                   />
                 )}
               </header>
               {h.members.length === 0 ? (
                 <p class="sh-muted sh-friends-empty-members">
-                  We haven't synced their members yet.
+                  {t('friends.members_not_synced')}
                 </p>
               ) : (
                 <div class="sh-friends-members">
@@ -373,8 +378,8 @@ export default function FriendsPage() {
                         key={m.user_id}
                         type="button"
                         class="sh-friends-member-chip sh-friends-member-chip--button"
-                        title={`Open actions for ${shown}`}
-                        aria-label={`Open actions for ${shown}`}
+                        title={t('friends.open_actions', { name: shown })}
+                        aria-label={t('friends.open_actions', { name: shown })}
                         disabled={dmBusy.has(m.user_id)}
                         onClick={() => openFriendActions({
                           user_id: m.user_id,
@@ -398,8 +403,8 @@ export default function FriendsPage() {
                         {isAliased && (
                           <span
                             class="sh-friends-member-chip__alias-hint"
-                            aria-label="Your nickname"
-                            title={`Your nickname · their name: ${m.display_name}`}
+                            aria-label={t('alias.label')}
+                            title={t('friends.nickname_hint', { name: m.display_name })}
                           >
                             ✏
                           </span>

@@ -293,7 +293,7 @@ function CalendarAgenda() {
       // appointment directly on Pascal's calendar).
       openEventDialog(id, calendars.value)
     } catch (e) {
-      showToast(`Couldn't open new-event dialog: ${(e as Error).message}`, 'error')
+      showToast(t('calendar.page.new_event_failed', { error: String((e as Error).message) }), 'error')
     }
   }
 
@@ -329,14 +329,14 @@ function CalendarAgenda() {
   }
 
   const handleDelete = async (eventId: string) => {
-    if (!await confirmDialog('Delete this event?', { destructive: true })) return
+    if (!await confirmDialog(t('calendar.page.delete_confirm'), { destructive: true })) return
     try {
       await api.delete(`/api/calendars/events/${eventId}`)
-      showToast('Event deleted', 'success')
+      showToast(t('calendar.page.deleted'), 'success')
       selectedRow.value = null
       await loadEvents()
     } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error).message ?? err}`, 'error')
+      showToast(t('calendar.page.delete_failed', { error: String((err as Error).message ?? err) }), 'error')
     }
   }
 
@@ -456,7 +456,7 @@ function CalendarAgenda() {
         primaryAction={
           <div class="sh-cal-strip-actions__buttons">
             <Button variant="secondary" onClick={openCalendarImport}>
-              Import
+              {t('calendar.page.import')}
             </Button>
             <Button onClick={handleNewEvent}>+ {t('calendar.new_event')}</Button>
           </div>
@@ -497,16 +497,13 @@ function CalendarAgenda() {
           <div aria-hidden="true">📅</div>
           {/* Keys: calendar.empty_{month,week,day} */}
           <h3>{t(`calendar.empty_${viewMode.value}`)}</h3>
-          <p>
-            Birthdays, school runs, vet visits, the trip you're planning —
-            anything the household needs to keep track of.
-          </p>
+          <p>{t('calendar.page.empty_body')}</p>
           <div class="sh-empty-state__cta-row">
             <Button onClick={handleNewEvent}>
-              + Create your first event
+              + {t('calendar.page.first_event')}
             </Button>
             <Button variant="secondary" onClick={openCalendarImport}>
-              Import a calendar file
+              {t('calendar.page.import_file')}
             </Button>
           </div>
         </div>
@@ -584,7 +581,7 @@ function CalendarAgenda() {
                 ? resolveCalendarColor(cal)
                 : 'var(--sh-text-muted)'
               if (owner === me) {
-                ownerChips.push({ name: 'You', color })
+                ownerChips.push({ name: t('calendar.page.owner_you'), color })
                 continue
               }
               let name: string = owner
@@ -641,8 +638,8 @@ function CalendarAgenda() {
                     class="sh-event-owner-chips"
                     aria-label={
                       shownChips.length === 1
-                        ? `On ${shownChips[0].name}'s calendar`
-                        : `Shared with ${shownChips.map(c => c.name).join(', ')}`
+                        ? t('calendar.page.on_calendar', { name: shownChips[0].name })
+                        : t('calendar.page.shared_with', { names: shownChips.map(c => c.name).join(', ') })
                     }
                   >
                     {shownChips.map(chip => (
@@ -663,7 +660,7 @@ function CalendarAgenda() {
                     // detail to keep the row visually quiet.
                     <span
                       class="sh-event-row-locpin"
-                      aria-label={`Location: ${e.location}`}
+                      aria-label={t('calendar.page.location_aria', { location: e.location })}
                       title={e.location}
                     >
                       📍

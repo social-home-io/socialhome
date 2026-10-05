@@ -29,6 +29,7 @@ import { CommentThreadSkeleton } from './Skeleton'
 import { CommentThread } from './CommentThread'
 import { OnlinePill } from './OnlinePill'
 import { showToast } from './Toast'
+import { t, isOne } from '@/i18n/i18n'
 import { posts as feedPosts } from '@/store/feed'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { Comment, FeedPost } from '@/types'
@@ -80,23 +81,23 @@ function previewLine(post: FeedPost): string {
   // an attached location or image (text + pin is a common pattern).
   switch (post.type) {
     case 'video':
-      return flat ? `🎥 ${truncate(flat)}` : '🎥 Video'
+      return flat ? `🎥 ${truncate(flat)}` : `🎥 ${t('comments.preview.video')}`
     case 'file':
       return post.file_meta?.original_name
         ? `📎 ${truncate(post.file_meta.original_name)}`
-        : '📎 File'
+        : `📎 ${t('comments.preview.file')}`
     case 'poll':
-      return flat ? `🗳 ${truncate(flat)}` : '🗳 Poll'
+      return flat ? `🗳 ${truncate(flat)}` : `🗳 ${t('comments.preview.poll')}`
     case 'event':
-      return flat ? `📅 ${truncate(flat)}` : '📅 Calendar event'
+      return flat ? `📅 ${truncate(flat)}` : `📅 ${t('comments.preview.event')}`
     case 'highlight_share':
-      return flat ? `✨ ${truncate(flat)}` : '✨ Shared a highlight'
+      return flat ? `✨ ${truncate(flat)}` : `✨ ${t('comments.preview.highlight')}`
     case 'transcript':
-      return flat ? `📝 ${truncate(flat)}` : '📝 Transcript'
+      return flat ? `📝 ${truncate(flat)}` : `📝 ${t('comments.preview.transcript')}`
     case 'schedule':
-      return flat ? `🗓 ${truncate(flat)}` : '🗓 Schedule'
+      return flat ? `🗓 ${truncate(flat)}` : `🗓 ${t('comments.preview.schedule')}`
     case 'bazaar':
-      return flat ? `🛒 ${truncate(flat)}` : '🛒 Bazaar listing'
+      return flat ? `🛒 ${truncate(flat)}` : `🛒 ${t('comments.preview.bazaar')}`
   }
 
   // Fall-through for ``text``, ``image``, ``location`` and any future
@@ -107,10 +108,10 @@ function previewLine(post: FeedPost): string {
     if (where && flat) return `📍 ${truncate(`${where} — ${flat}`)}`
     if (where)         return `📍 ${truncate(where)}`
     if (flat)          return `📍 ${truncate(flat)}`
-    return '📍 Location'
+    return `📍 ${t('comments.preview.location')}`
   }
   if (post.type === 'image' || (post.image_urls && post.image_urls.length > 0)) {
-    return flat ? `🖼️ ${truncate(flat)}` : '🖼️ Photo'
+    return flat ? `🖼️ ${truncate(flat)}` : `🖼️ ${t('comments.preview.photo')}`
   }
   return flat ? truncate(flat) : ''
 }
@@ -214,7 +215,7 @@ export function CommentOverlay() {
       )
     } catch (err: unknown) {
       showToast(
-        `Comment failed: ${(err as Error)?.message ?? err}`, 'error',
+        t('comments.error.post', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     }
   }
@@ -225,10 +226,10 @@ export function CommentOverlay() {
         `${commentsUrl(state)}/${commentId}`, { content },
       )
       await refresh()
-      showToast('Comment updated', 'success')
+      showToast(t('comments.updated'), 'success')
     } catch (err: unknown) {
       showToast(
-        `Edit failed: ${(err as Error)?.message ?? err}`, 'error',
+        t('comments.error.edit', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     }
   }
@@ -242,17 +243,20 @@ export function CommentOverlay() {
           ? { ...p, comment_count: Math.max(0, p.comment_count - 1) }
           : p,
       )
-      showToast('Comment deleted', 'info')
+      showToast(t('comments.deleted'), 'info')
     } catch (err: unknown) {
       showToast(
-        `Delete failed: ${(err as Error)?.message ?? err}`, 'error',
+        t('comments.error.delete', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     }
   }
 
-  const heading = post.comment_count === 1
-    ? '1 comment'
-    : `${comments.length || post.comment_count} comments`
+  const headingCount = post.comment_count === 1
+    ? 1
+    : (comments.length || post.comment_count)
+  const heading = t(isOne(headingCount) ? 'comments.count_one' : 'comments.count', {
+    n: String(headingCount),
+  })
 
   return (
     <div
@@ -265,7 +269,7 @@ export function CommentOverlay() {
         class="sh-comment-overlay"
         role="dialog"
         aria-modal="true"
-        aria-label={`Comments on ${authorName}'s post`}
+        aria-label={t('comments.dialog_aria', { name: authorName })}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
@@ -274,7 +278,7 @@ export function CommentOverlay() {
         <button
           type="button"
           class="sh-comment-overlay-handle"
-          aria-label="Close comments"
+          aria-label={t('comments.close_aria')}
           onClick={closeCommentOverlay}
         />
         <header class="sh-comment-overlay-header">
@@ -293,7 +297,7 @@ export function CommentOverlay() {
           <button
             type="button"
             class="sh-comment-overlay-close"
-            aria-label="Close"
+            aria-label={t('common.close')}
             onClick={closeCommentOverlay}
           >×</button>
         </header>

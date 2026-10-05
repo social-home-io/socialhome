@@ -39,7 +39,7 @@ function shareUrl(conn: GfsConnection): string | null {
 async function copyShareUrl(url: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(url)
-    showToast('Share link copied', 'success')
+    showToast(t('moment.sharing.link_copied'), 'success')
   } catch {
     showToast(url, 'info')
   }
@@ -60,7 +60,7 @@ async function reload(): Promise<void> {
     await loadRegistrations()
   } catch (err) {
     showToast(
-      `Couldn't load GFS connections: ${(err as Error)?.message ?? err}`,
+      t('moment.sharing.load_failed', { error: String((err as Error)?.message ?? err) }),
       'error',
     )
   } finally {
@@ -77,7 +77,7 @@ export default function PublicSharingSettings() {
   if (isRestricted('public_moments')) {
     return (
       <section class="sh-settings-section">
-        <h2>Share Moments via a GFS</h2>
+        <h2>{t('moment.sharing.title')}</h2>
         <ProtectedNotice capability="public_moments" />
       </section>
     )
@@ -89,10 +89,9 @@ export default function PublicSharingSettings() {
     return (
       <div class="sh-empty-state">
         <div aria-hidden="true">🌐</div>
-        <h3>No GFS pairings yet</h3>
+        <h3>{t('moment.discover.no_gfs_title')}</h3>
         <p>
-          Pair a Global Federation Server first — then come back here to
-          choose which ones can fan your Moments to a wider audience.
+          {t('moment.sharing.empty_body')}
         </p>
       </div>
     )
@@ -106,10 +105,10 @@ export default function PublicSharingSettings() {
   const onRegister = async (gfsId: string) => {
     try {
       await registerOnGfs(gfsId, true)
-      showToast('Registered. Future moments will fan via this GFS.', 'success')
+      showToast(t('moment.sharing.registered'), 'success')
     } catch (err) {
       showToast(
-        `Register failed: ${(err as Error)?.message ?? err}`,
+        t('moment.sharing.register_failed', { error: String((err as Error)?.message ?? err) }),
         'error',
       )
     }
@@ -117,10 +116,10 @@ export default function PublicSharingSettings() {
   const onDeregister = async (gfsId: string) => {
     try {
       await deregisterFromGfs(gfsId)
-      showToast('Unregistered. Future moments stay household-only.', 'success')
+      showToast(t('moment.sharing.unregistered'), 'success')
     } catch (err) {
       showToast(
-        `Unregister failed: ${(err as Error)?.message ?? err}`,
+        t('moment.sharing.unregister_failed', { error: String((err as Error)?.message ?? err) }),
         'error',
       )
     }
@@ -130,7 +129,7 @@ export default function PublicSharingSettings() {
       await setDefaultShare(gfsId, next)
     } catch (err) {
       showToast(
-        `Toggle failed: ${(err as Error)?.message ?? err}`,
+        t('moment.sharing.toggle_failed', { error: String((err as Error)?.message ?? err) }),
         'error',
       )
     }
@@ -138,11 +137,9 @@ export default function PublicSharingSettings() {
 
   return (
     <div class="sh-public-sharing">
-      <h2>Share Moments via a GFS</h2>
+      <h2>{t('moment.sharing.title')}</h2>
       <p class="sh-muted">
-        Registering on a GFS lets people outside your paired households
-        follow you and receive your moments. You can still opt out per
-        moment in the composer.
+        {t('moment.sharing.intro')}
       </p>
       <ul class="sh-public-sharing-list">
         {gfses.value.map((g) => {
@@ -166,26 +163,26 @@ export default function PublicSharingSettings() {
                         )
                       }
                     />
-                    Default ON
+                    {t('moment.sharing.default_on')}
                   </label>
                   <Button
                     variant="secondary"
                     onClick={() => void onDeregister(g.id)}
                   >
-                    Unregister
+                    {t('moment.sharing.unregister')}
                   </Button>
                   {shareUrl(g) && (
                     <Button
                       variant="secondary"
                       onClick={() => void copyShareUrl(shareUrl(g)!)}
-                      title="Copy a public link anyone can open to read your current public moments"
+                      title={t('moment.sharing.copy_link_title')}
                     >
-                      Copy share link
+                      {t('moment.sharing.copy_link')}
                     </Button>
                   )}
                 </>
               ) : (
-                <Button onClick={() => void onRegister(g.id)}>Register</Button>
+                <Button onClick={() => void onRegister(g.id)}>{t('moment.sharing.register')}</Button>
               )}
             </li>
           )

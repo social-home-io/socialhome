@@ -16,6 +16,7 @@ import {
   householdDisplayName,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
+import { t, tValue, formatLocale } from '@/i18n/i18n'
 
 interface CallRow {
   call_id: string
@@ -33,6 +34,8 @@ interface CallRow {
   avg_loss_pct: number | null
 }
 
+// Status labels: t(`calls.state.${status}`) — calls.state.ringing / .active /
+// .ended / .declined / .missed (CallsTab adds .in_progress).
 const calls = signal<CallRow[]>([])
 const loading = signal(true)
 
@@ -40,11 +43,15 @@ function formatDuration(sec: number | null): string {
   if (sec == null || sec <= 0) return ''
   const m = Math.floor(sec / 60)
   const s = sec % 60
-  return m > 0 ? `${m}m ${s}s` : `${s}s`
+  return m > 0
+    ? t('calls.history.duration_min_sec', { m: String(m), s: String(s) })
+    : t('calls.history.duration_sec', { s: String(s) })
 }
 
 function dayKey(iso: string): string {
-  return new Date(iso).toDateString()
+  return new Date(iso).toLocaleDateString(formatLocale(), {
+    weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
+  })
 }
 
 function statusIcon(status: string): string {
@@ -75,8 +82,8 @@ export default function CallHistoryPane() {
   if (calls.value.length === 0) {
     return (
       <div class="sh-call-history-empty">
-        <p class="sh-muted">No calls yet in this conversation.</p>
-        <Button onClick={() => loc.route(`/dms/${convId}`)}>Back</Button>
+        <p class="sh-muted">{t('calls.history.empty')}</p>
+        <Button onClick={() => loc.route(`/dms/${convId}`)}>{t('common.back')}</Button>
       </div>
     )
   }
@@ -93,8 +100,8 @@ export default function CallHistoryPane() {
   return (
     <div class="sh-call-history">
       <header class="sh-call-history-header">
-        <Button onClick={() => loc.route(`/dms/${convId}`)}>← Back</Button>
-        <h2>Call history</h2>
+        <Button onClick={() => loc.route(`/dms/${convId}`)}>← {t('common.back')}</Button>
+        <h2>{t('calls.history.title')}</h2>
       </header>
       {[...groups.entries()].map(([day, rows]) => (
         <section key={day}>
@@ -106,11 +113,12 @@ export default function CallHistoryPane() {
               </span>
               <span class="sh-call-who">{householdDisplayName(c.initiator_user_id)}</span>
               <span class="sh-call-dur">{formatDuration(c.duration_seconds)}</span>
-              <span class="sh-call-status">{c.status}</span>
+              <span class="sh-call-status">{tValue('calls.state', c.status)}</span>
               {c.avg_rtt_ms != null && (
                 <span class={`sh-call-quality ${qBadge(c.avg_rtt_ms, c.avg_loss_pct)}`}>
                   {Math.round(c.avg_rtt_ms)}ms
-                  {c.avg_loss_pct != null && ` · ${c.avg_loss_pct.toFixed(1)}% loss`}
+                  {c.avg_loss_pct != null
+                    && ` · ${t('calls.history.loss', { pct: c.avg_loss_pct.toFixed(1) })}`}
                 </span>
               )}
             </div>

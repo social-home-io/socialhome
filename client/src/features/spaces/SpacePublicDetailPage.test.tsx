@@ -215,12 +215,12 @@ describe('SpacePublicDetailPage — unpaired host guidance follows the role', ()
     } as unknown as typeof currentUser.value
   }
 
-  it('an admin is pointed at the Federation settings', async () => {
+  it('an admin is pointed at the Connections page', async () => {
     asAdmin(true)
     cacheDirectoryEntries([unpaired()])
     const { container, getByText } = await renderPage()
     await waitFor(() => getByText(/lives on another household/i))
-    expect(container.textContent).toContain('Settings → Federation')
+    expect(container.textContent).toContain('Connect with Far Household on the Connections page')
     expect(container.textContent).not.toContain('Ask a household admin')
   })
 
@@ -229,7 +229,7 @@ describe('SpacePublicDetailPage — unpaired host guidance follows the role', ()
     cacheDirectoryEntries([unpaired()])
     const { container, getByText } = await renderPage()
     await waitFor(() => getByText(/lives on another household/i))
-    expect(container.textContent).toContain('Ask a household admin')
-    expect(container.textContent).not.toContain('Settings →')
+    expect(container.textContent).toContain('Ask a household admin to connect with Far Household')
+    expect(container.textContent).not.toContain('Connections page')
   })
 })

@@ -20,6 +20,7 @@
 import { signal } from '@preact/signals'
 import { ws } from '@/ws'
 import { householdDisplayName } from '@/store/householdUsers'
+import { t } from '@/i18n/i18n'
 
 interface TypingState {
   scope: string
@@ -132,9 +133,9 @@ export function TypingIndicator({ scope, bubble }: TypingIndicatorProps) {
     // isn't cached; prefer the WS-provided username in that case.
     return friendly && friendly !== s.userId ? friendly : s.fallbackName
   })
-  const label = names.length === 1 ? `${names[0]} is typing`
-    : names.length === 2 ? `${names[0]} and ${names[1]} are typing`
-    : `${names.length} people are typing`
+  const label = names.length === 1 ? t('typing.one', { name: names[0] })
+    : names.length === 2 ? t('typing.two', { a: names[0], b: names[1] })
+    : t('typing.many', { n: String(names.length) })
   const cls = bubble ? 'sh-typing sh-typing--bubble' : 'sh-typing'
   return (
     <div class={cls} aria-live="polite">

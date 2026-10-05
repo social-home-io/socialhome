@@ -22,6 +22,7 @@ import { startCall } from '@/features/calls/callSession'
 import { showCallError } from '@/features/calls/CallEmbedBlockedDialog'
 import { CallEmbedBlockedError } from '@/features/calls/embedPolicy'
 import { Modal } from './Modal'
+import { t } from '@/i18n/i18n'
 
 const open = signal(false)
 const conversationId = signal<string | null>(null)
@@ -49,7 +50,7 @@ export function CallTypePickerDialog() {
       // An embed that denies the mic can't be retried from here — swap the
       // picker for the "open in its own tab" dialog.
       if (err instanceof CallEmbedBlockedError) open.value = false
-      showCallError("Couldn't start the call", err)
+      showCallError(t('calls.start_failed'), err)
       submitting.value = false
     }
   }
@@ -59,30 +60,30 @@ export function CallTypePickerDialog() {
     <Modal
       open={open.value}
       onClose={() => { open.value = false }}
-      title="Start a call"
+      title={t('calls.picker.title')}
     >
-      <div class="sh-call-picker" role="group" aria-label="Choose call type">
+      <div class="sh-call-picker" role="group" aria-label={t('calls.picker.aria')}>
         <button
           type="button"
           class="sh-call-picker-tile"
           onClick={() => void start('audio')}
           disabled={submitting.value}
-          aria-label="Start audio call"
+          aria-label={t('calls.picker.audio_aria')}
         >
           <span class="sh-call-picker-icon" aria-hidden="true">📞</span>
-          <span class="sh-call-picker-label">Audio</span>
-          <span class="sh-call-picker-meta">Voice only — the camera stays off.</span>
+          <span class="sh-call-picker-label">{t('calls.picker.audio')}</span>
+          <span class="sh-call-picker-meta">{t('calls.picker.audio_hint')}</span>
         </button>
         <button
           type="button"
           class="sh-call-picker-tile"
           onClick={() => void start('video')}
           disabled={submitting.value}
-          aria-label="Start video call"
+          aria-label={t('calls.picker.video_aria')}
         >
           <span class="sh-call-picker-icon" aria-hidden="true">📹</span>
-          <span class="sh-call-picker-label">Video</span>
-          <span class="sh-call-picker-meta">Camera on from the start.</span>
+          <span class="sh-call-picker-label">{t('calls.picker.video')}</span>
+          <span class="sh-call-picker-meta">{t('calls.picker.video_hint')}</span>
         </button>
       </div>
     </Modal>

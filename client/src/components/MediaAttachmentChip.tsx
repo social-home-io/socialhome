@@ -24,6 +24,7 @@
  * page-bottom fixture).
  */
 import type preact from 'preact'
+import { t } from '@/i18n/i18n'
 
 export type AttachmentChipPhase = 'uploading' | 'processing' | 'ready' | 'failed'
 export type AttachmentChipKind = 'image' | 'video' | 'file' | 'audio'
@@ -65,11 +66,11 @@ export function MediaAttachmentChip({
 }: Props): preact.JSX.Element {
   const labelForPhase =
     phase === 'uploading'
-      ? `Uploading… ${Math.min(99, percent)}%`
+      ? t('media.uploading_percent', { n: String(Math.min(99, percent)) })
       : phase === 'processing'
         ? _processingCopy(kind)
         : phase === 'failed'
-          ? 'Upload failed'
+          ? t('media.upload_failed')
           : null
   const inFlight = phase === 'uploading' || phase === 'processing'
 
@@ -137,15 +138,15 @@ export function MediaAttachmentChip({
           class="sh-attach-chip__retry"
           onClick={onRetry}
         >
-          Retry
+          {t('common.retry')}
         </button>
       )}
       {onClear && (
         <button
           type="button"
           class="sh-attach-chip__clear"
-          aria-label={inFlight ? 'Cancel upload' : 'Remove attachment'}
-          title={inFlight ? 'Cancel upload' : 'Remove attachment'}
+          aria-label={inFlight ? t('media.cancel_upload') : t('composer.remove_attachment')}
+          title={inFlight ? t('media.cancel_upload') : t('composer.remove_attachment')}
           onClick={onClear}
         >×</button>
       )}
@@ -159,10 +160,10 @@ export function MediaAttachmentChip({
  *  user sees the right expectation in each case. */
 function _processingCopy(kind: AttachmentChipKind): string {
   switch (kind) {
-    case 'image': return 'Processing image…'
-    case 'video': return 'Processing video — this may take a moment…'
-    case 'audio': return 'Validating audio…'
-    default: return 'Processing…'
+    case 'image': return t('media.processing_image')
+    case 'video': return t('media.processing_video')
+    case 'audio': return t('media.checking_audio')
+    default: return t('media.processing')
   }
 }
 

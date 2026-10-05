@@ -47,7 +47,7 @@ async function loadDirectory(gfsId: string): Promise<void> {
     directory.value = await fetchGfsDirectory(gfsId)
   } catch (err) {
     showToast(
-      `Directory fetch failed: ${(err as Error)?.message ?? err}`,
+      t('moment.discover.load_failed', { error: String((err as Error)?.message ?? err) }),
       'error',
     )
     directory.value = []
@@ -93,10 +93,10 @@ export default function PublicDiscoveryPage() {
     if (!selectedGfs.value) return
     try {
       await followUser(selectedGfs.value, user.user_id)
-      showToast(`Following ${user.display_name}`, 'success')
+      showToast(t('user_actions.followed', { name: user.display_name }), 'success')
     } catch (err) {
       showToast(
-        `Follow failed: ${(err as Error)?.message ?? err}`,
+        t('user_actions.follow_failed', { error: String((err as Error)?.message ?? err) }),
         'error',
       )
     }
@@ -108,7 +108,7 @@ export default function PublicDiscoveryPage() {
       await unfollowUser(selectedGfs.value, user.user_id)
     } catch (err) {
       showToast(
-        `Unfollow failed: ${(err as Error)?.message ?? err}`,
+        t('user_actions.unfollow_failed', { error: String((err as Error)?.message ?? err) }),
         'error',
       )
     }
@@ -117,7 +117,7 @@ export default function PublicDiscoveryPage() {
   if (isRestricted('public_moments')) {
     return (
       <div class="sh-momentum-discover">
-        <header class="sh-page-header"><h2>Discover Momentum</h2></header>
+        <header class="sh-page-header"><h2>{t('page_title.discover_momentum')}</h2></header>
         <ProtectedNotice capability="public_moments" />
       </div>
     )
@@ -126,8 +126,8 @@ export default function PublicDiscoveryPage() {
   if (gfses.value.length === 0) {
     return (
       <div class="sh-empty-state">
-        <h3 style={{ margin: 0 }}>No GFS pairings yet</h3>
-        <p>Pair a GFS first to discover other users.</p>
+        <h3 style={{ margin: 0 }}>{t('moment.discover.no_gfs_title')}</h3>
+        <p>{t('moment.discover.no_gfs_body')}</p>
       </div>
     )
   }
@@ -135,7 +135,7 @@ export default function PublicDiscoveryPage() {
   return (
     <div class="sh-momentum-discover">
       <header class="sh-page-header">
-        <h2>Discover Momentum</h2>
+        <h2>{t('page_title.discover_momentum')}</h2>
         {gfses.value.length > 1 && (
           <select
             value={selectedGfs.value ?? ''}
@@ -155,7 +155,7 @@ export default function PublicDiscoveryPage() {
       <input
         type="search"
         class="sh-momentum-discover-search"
-        placeholder="Search by name, handle, or bio…"
+        placeholder={t('moment.discover.search')}
         value={searchQuery.value}
         onInput={(ev) =>
           (searchQuery.value = (ev.currentTarget as HTMLInputElement).value)
@@ -166,8 +166,8 @@ export default function PublicDiscoveryPage() {
       {!loading.value && filtered.value.length === 0 && (
         <p class="sh-muted">
           {searchQuery.value
-            ? 'No users match your search.'
-            : 'No registered users on this GFS yet.'}
+            ? t('moment.discover.no_match')
+            : t('moment.discover.empty')}
         </p>
       )}
 
@@ -186,10 +186,10 @@ export default function PublicDiscoveryPage() {
             </div>
             {isFollowing(u.user_id) ? (
               <Button variant="secondary" onClick={() => void onUnfollow(u)}>
-                Following
+                {t('moment.discover.following')}
               </Button>
             ) : (
-              <Button onClick={() => void onFollow(u)}>Follow</Button>
+              <Button onClick={() => void onFollow(u)}>{t('user_actions.follow')}</Button>
             )}
           </li>
         ))}

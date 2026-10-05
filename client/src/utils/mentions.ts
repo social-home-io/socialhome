@@ -12,6 +12,8 @@
  * server resolves and highlights only tokens it knows.
  */
 
+import { t } from '@/i18n/i18n'
+
 /** What the helpers need from a member row — satisfied by both a space
  *  member (``GET /api/spaces/{id}/members``) and a conversation member
  *  (``GET /api/conversations/{id}/members``). */
@@ -70,7 +72,8 @@ export const HERE_TOKEN = 'here'
 const HERE_CANDIDATE: MentionCandidate = {
   userId: '@here',
   token: HERE_TOKEN,
-  name: 'Everyone in this space',
+  // Filled in the UI language where it is offered (mentions.everyone).
+  name: '',
   pictureUrl: null,
   household: null,
   here: true,
@@ -103,7 +106,7 @@ export function mentionCandidates(
   // ``@here`` first — only for a viewer allowed to use it in a space that
   // allows it (the caller decides; the server re-checks on every household).
   if (opts.includeHere && HERE_TOKEN.startsWith(q)) {
-    ranked.push({ rank: -1, c: HERE_CANDIDATE })
+    ranked.push({ rank: -1, c: { ...HERE_CANDIDATE, name: t('mentions.everyone') } })
   }
   for (const m of members) {
     if (!m.mention || m.user_id === excludeUserId) continue
@@ -123,7 +126,7 @@ export function mentionCandidates(
         token: m.mention,
         name,
         pictureUrl: m.picture_url ?? null,
-        household: m.instance_id ? (m.household_name || 'Other household') : null,
+        household: m.instance_id ? (m.household_name || t('mentions.other_household')) : null,
       },
     })
   }

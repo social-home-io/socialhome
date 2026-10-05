@@ -10,7 +10,7 @@
  * Everything takes ``now`` (epoch ms) so the card re-derives once a
  * minute and the tests pin a clock.
  */
-import { t } from '@/i18n/i18n'
+import { formatLocale, t } from '@/i18n/i18n'
 import { displayTitle } from '@/features/timetable/labels'
 import type { TodayLesson, TodayTimetable, WelcomeEvent } from './cards'
 
@@ -59,7 +59,7 @@ const ms = (iso: string): number => new Date(iso).getTime()
 /** "08:00" in the viewer's locale and zone — the same clock the
  *  calendar rows use, so lessons and events line up. */
 export function clock(at: number | string): string {
-  return new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  return new Date(at).toLocaleTimeString(formatLocale(), { hour: '2-digit', minute: '2-digit' })
 }
 
 export function clockRange(start: number, end: number): string {

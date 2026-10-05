@@ -14,6 +14,7 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { instanceConfig } from '@/store/instance'
+import { t } from '@/i18n/i18n'
 
 const MAX_LEN = 80
 
@@ -32,9 +33,9 @@ export function HomeNameSettings() {
     try {
       await api.patch('/api/admin/instance', { display_name: trimmed })
       instanceConfig.value = { ...instanceConfig.value!, instance_name: trimmed }
-      showToast('Home name updated', 'success')
+      showToast(t('home_name.updated'), 'success')
     } catch {
-      showToast('Failed to update home name', 'error')
+      showToast(t('home_name.update_failed'), 'error')
     } finally {
       setSaving(false)
     }
@@ -42,12 +43,12 @@ export function HomeNameSettings() {
 
   return (
     <div class="sh-settings-subcard" id="home-name">
-      <h3 class="sh-settings-panel-heading">Home name</h3>
+      <h3 class="sh-settings-panel-heading">{t('home_name.title')}</h3>
       <p class="sh-muted sh-settings-panel-blurb">
-        The name other households see when paired with yours.
+        {t('home_name.blurb')}
       </p>
       <label class="sh-form-row">
-        Home name
+        {t('home_name.title')}
         <input
           type="text"
           maxLength={MAX_LEN}
@@ -57,7 +58,7 @@ export function HomeNameSettings() {
       </label>
       <div class="sh-form-actions">
         <Button onClick={() => void save()} loading={saving} disabled={invalid}>
-          Save
+          {t('common.save')}
         </Button>
       </div>
     </div>
