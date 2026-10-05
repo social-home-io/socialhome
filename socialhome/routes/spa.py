@@ -25,8 +25,11 @@ in front of every request. Supervisor stamps the prefix into
 ``X-Ingress-Path``. :class:`SpaIndexView` substitutes that into the
 ``<base href>`` tag inside ``index.html`` at request time so every
 relative URL the SPA constructs (fetch, WebSocket, navigation)
-resolves against the ingress-prefixed document URL. When the header
-is absent (standalone / HA-Core-direct mode), the base stays ``/``.
+resolves against the ingress-prefixed document URL. The header is
+honoured only when the platform adapter advertises
+``Capability.INGRESS`` (a Supervisor sits in front and sets it) and it
+matches :data:`_INGRESS_PATH_RE`; otherwise — standalone / HA-Core-direct,
+where any client could forge it — the base stays ``/``.
 """
 
 from __future__ import annotations
@@ -40,7 +43,9 @@ import aiofiles
 import aiofiles.os
 from aiohttp import web
 
+from ..app_keys import platform_adapter_key
 from ..csp import build_spa_csp
+from ..platform.adapter import Capability
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -49,6 +54,15 @@ log = logging.getLogger(__name__)
 # ``client/index.html``. The trailing ``/`` is required — relative URLs
 # in HTML resolve against ``<base>`` as a directory, not as a file.
 _BASE_HREF_RE = re.compile(r'<base href="[^"]*"\s*/?>')
+
+#: The only ``X-Ingress-Path`` shape honoured. HA Core's hassio ingress
+#: proxy stamps ``f"/api/hassio_ingress/{token}"``
+#: (``homeassistant/components/hassio/ingress.py``), and Supervisor mints
+#: the token with ``secrets.token_urlsafe()``
+#: (``supervisor/apps/validate.py``) — base64url, so ``[A-Za-z0-9_-]``.
+#: A trailing ``/`` is tolerated. Used with ``fullmatch`` so a trailing
+#: newline can't slip past ``$``.
+_INGRESS_PATH_RE = re.compile(r"/api/hassio_ingress/[A-Za-z0-9_-]+/?")
 
 #: Vite content-hashes the entry bundle as ``assets/index-{hash}.js``.
 #: We surface ``{hash}`` so the SPA's open tabs can poll for changes
@@ -129,8 +143,10 @@ class SpaIndexView(_SpaFileView):
     the request is proxied through the ingress integration) and
     rewrites the ``<base href>`` element inside ``index.html`` so
     the SPA's relative URLs (``./api/me``, ``./api/ws``, …) resolve
-    against the ingress-prefixed document URL. When the header is
-    absent the base stays ``/``.
+    against the ingress-prefixed document URL. The header is honoured
+    only under ``Capability.INGRESS`` and only in the
+    ``/api/hassio_ingress/<token>`` shape; otherwise the base stays
+    ``/``. The response carries ``Vary: X-Ingress-Path``.
 
     Served with the SPA ``Content-Security-Policy``
     (:func:`socialhome.csp.build_spa_csp`) — the same in every mode.
@@ -143,9 +159,10 @@ class SpaIndexView(_SpaFileView):
         target = static_dir / self._filename
         if not await aiofiles.os.path.isfile(target):
             raise web.HTTPNotFound()
-        ingress_path = self.request.headers.get("X-Ingress-Path", "").rstrip("/")
-        # Attribute-escape the header: it is request-controlled, and an
-        # unescaped ``"`` would let it break out of ``<base href>``.
+        ingress_path = self._ingress_path()
+        # Attribute-escape anyway (defence in depth — the regex already
+        # rules out ``"``): an unescaped ``"`` would break out of
+        # ``<base href>``.
         base_href = html_lib.escape(f"{ingress_path}/" if ingress_path else "/")
         # ``index.html`` is small (a few KiB) — reading + substituting
         # in-memory per request is cheaper than maintaining two copies
@@ -183,8 +200,29 @@ class SpaIndexView(_SpaFileView):
                 # ``X-Frame-Options: SAMEORIGIN`` comes from the global
                 # hardening middleware and agrees with ``frame-ancestors``.
                 "Content-Security-Policy": build_spa_csp(),
+                # The body depends on the header (under ingress), so a
+                # shared cache must key on it.
+                "Vary": "X-Ingress-Path",
             },
         )
+
+    def _ingress_path(self) -> str:
+        """The validated ingress prefix without trailing ``/``, or ``""``.
+
+        Only behind an adapter advertising ``Capability.INGRESS`` (the
+        Supervisor proxy sets the header); elsewhere it is any client's
+        to forge, so it is ignored. A value not shaped like
+        :data:`_INGRESS_PATH_RE` is ignored too.
+        """
+        adapter = self.request.app.get(platform_adapter_key)
+        if adapter is None or Capability.INGRESS not in adapter.capabilities:
+            return ""
+        header = self.request.headers.get("X-Ingress-Path", "")
+        if not _INGRESS_PATH_RE.fullmatch(header):
+            if header:
+                log.debug("ignoring malformed X-Ingress-Path header")
+            return ""
+        return header.rstrip("/")
 
 
 class SpaManifestView(_SpaFileView):

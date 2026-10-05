@@ -57,8 +57,10 @@ Directive notes (what each allowance is for):
   refused. The legacy ``X-Frame-Options: SAMEORIGIN`` that agrees with
   it is the global default in ``hardening.py`` — no SPA override.
 * ``base-uri 'self'`` — ``SpaIndexView`` rewrites ``<base href>`` to
-  the ingress prefix, which is a same-origin path. A header smuggling
-  ``//evil.example`` into the base is refused by the browser.
+  the ingress prefix, which is a same-origin path. ``SpaIndexView``
+  only accepts the ``/api/hassio_ingress/<token>`` shape under
+  ``Capability.INGRESS``; a base smuggling ``//evil.example`` past it
+  would still be refused by the browser.
 """
 
 from __future__ import annotations

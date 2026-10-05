@@ -1031,6 +1031,16 @@ script.
   middleware, so streamed responses that `prepare()` themselves
   (`/api/media/*`, app bundles) carry them too; a header a handler sets
   explicitly wins.
+- **`<base href>` from `X-Ingress-Path` only behind ingress:** the shell's
+  `<base href>` is rewritten from `X-Ingress-Path` only when the adapter
+  advertises `Capability.INGRESS` (`haos`, where Supervisor sets the
+  header), and only when the value is HA Core's exact shape
+  `/api/hassio_ingress/<token>` (`^/api/hassio_ingress/[A-Za-z0-9_-]+/?$`;
+  Supervisor mints the token with `secrets.token_urlsafe()`). Anything
+  else — every standalone / `ha` request, `//evil`, `javascript:`, other
+  paths — leaves the base at `/`. The shell carries
+  `Vary: X-Ingress-Path` so a shared cache never serves one prefix's
+  shell for another.
 - **Stored media is sandboxed:** a stored `.svg` / `.html` opened directly
   would otherwise run as a document on our origin.
   `csp.media_response_headers()` shapes every stored-file response

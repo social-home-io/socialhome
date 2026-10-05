@@ -201,12 +201,12 @@ async def test_root_base_href_defaults_to_slash(spa_client):
     assert '<base href="/">' in body
 
 
-async def test_root_base_href_rewritten_from_ingress_path(spa_client):
+async def test_root_base_href_rewritten_from_ingress_path(ingress_spa_client):
     """Supervisor stamps the prefix into ``X-Ingress-Path``; the SPA's
     ``<base href>`` reflects it (trailing slash forced) so the SPA's
     relative URLs (``./api/me``, ``./api/ws``, …) resolve under the
     ingress-prefixed document URL."""
-    resp = await spa_client.get(
+    resp = await ingress_spa_client.get(
         "/",
         headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"},
     )
@@ -216,9 +216,21 @@ async def test_root_base_href_rewritten_from_ingress_path(spa_client):
     assert '<base href="/">' not in body
 
 
-async def test_root_base_href_strips_trailing_slash_from_header(spa_client):
+async def test_real_supervisor_token_shape_is_accepted(ingress_spa_client):
+    """Supervisor mints the token with ``secrets.token_urlsafe()``
+    (``supervisor/apps/validate.py``) — base64url, so ``-`` and ``_``
+    occur; HA Core stamps ``/api/hassio_ingress/{token}`` (no slash)."""
+    token = "Xy-9_kQ2" * 5 + "a-_"
+    resp = await ingress_spa_client.get(
+        "/feed",
+        headers={"X-Ingress-Path": f"/api/hassio_ingress/{token}"},
+    )
+    assert f'<base href="/api/hassio_ingress/{token}/">' in await resp.text()
+
+
+async def test_root_base_href_strips_trailing_slash_from_header(ingress_spa_client):
     """If the header arrives with a trailing slash, we don't double up."""
-    resp = await spa_client.get(
+    resp = await ingress_spa_client.get(
         "/",
         headers={"X-Ingress-Path": "/api/hassio_ingress/abc123/"},
     )
@@ -228,16 +240,16 @@ async def test_root_base_href_strips_trailing_slash_from_header(spa_client):
 
 
 async def test_root_substitution_logs_warning_when_placeholder_missing(
-    spa_client, monkeypatch, caplog
+    ingress_spa_client, monkeypatch, caplog
 ):
     """If a future build drops the ``<base href>`` placeholder we log a
     warning and serve the HTML untouched — the SPA will still load."""
-    static_dir = spa_client.app[spa_module._static_dir_key]
+    static_dir = ingress_spa_client.app[spa_module._static_dir_key]
     (static_dir / "index.html").write_text(
         "<!doctype html><title>no placeholder</title>"
     )
     with caplog.at_level("WARNING", logger=spa_module.__name__):
-        resp = await spa_client.get(
+        resp = await ingress_spa_client.get(
             "/",
             headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"},
         )
@@ -247,25 +259,63 @@ async def test_root_substitution_logs_warning_when_placeholder_missing(
     assert any("no <base href> placeholder" in r.message for r in caplog.records)
 
 
-async def test_ingress_path_is_attribute_escaped(spa_client):
-    """``X-Ingress-Path`` is request-controlled: a ``"`` must not break
-    out of ``<base href>`` and inject markup into the shell."""
+@pytest.mark.parametrize("path", ["/", "/feed"], ids=["root", "deep"])
+async def test_standalone_ignores_ingress_path(spa_client, path):
+    """Without ``Capability.INGRESS`` no Supervisor sits in front, so the
+    header is any client's to forge — it never reaches ``<base href>``."""
     resp = await spa_client.get(
-        "/",
-        headers={"X-Ingress-Path": '/x"><script>alert(1)</script>'},
+        path,
+        headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"},
     )
     body = await resp.text()
     assert resp.status == 200
-    assert "<script>alert(1)</script>" not in body
-    assert '<base href="/x&quot;&gt;&lt;script&gt;' in body
+    assert '<base href="/">' in body
+    assert "hassio_ingress" not in body
 
 
-async def test_ingress_path_backslash_is_not_a_regex_group(spa_client):
-    """A backslash in the header used to reach ``re.subn`` as a template
-    (``\\1`` → group reference → 500). It is now literal text."""
-    resp = await spa_client.get("/", headers={"X-Ingress-Path": "/a\\1b"})
+@pytest.mark.parametrize(
+    "header",
+    [
+        "//evil.example",
+        "//evil.example/api/hassio_ingress/abc",
+        "javascript:alert(1)",
+        '"><script>alert(1)</script>',
+        '/api/hassio_ingress/x"><script>alert(1)</script>',
+        "/other/path",
+        "/api/hassio_ingress/",
+        "/api/hassio_ingress/abc/def",
+        "/api/hassio_ingress/abc//",
+        "/api/hassio_ingress/a.b",
+        "/api/hassio_ingress/a\\1b",
+        "https://evil.example/api/hassio_ingress/abc",
+    ],
+)
+async def test_ingress_ignores_invalid_ingress_path(ingress_spa_client, header):
+    """Only ``/api/hassio_ingress/<token>`` (HA Core's exact shape) is
+    honoured; anything else leaves the base at ``/``."""
+    resp = await ingress_spa_client.get("/", headers={"X-Ingress-Path": header})
+    body = await resp.text()
     assert resp.status == 200
-    assert '<base href="/a\\1b/">' in await resp.text()
+    assert '<base href="/">' in body
+    assert "<script>alert" not in body
+    assert "evil.example" not in body
+
+
+def test_ingress_path_regex_rejects_trailing_newline():
+    """aiohttp refuses a header with a control character on the wire;
+    ``fullmatch`` keeps the regex from trusting one regardless (``$``
+    alone would match before a trailing ``\\n``)."""
+    assert spa_module._INGRESS_PATH_RE.fullmatch("/api/hassio_ingress/abc\n") is None
+    assert spa_module._INGRESS_PATH_RE.fullmatch("/api/hassio_ingress/abc/")
+
+
+@pytest.mark.parametrize("path", ["/", "/feed"], ids=["root", "deep"])
+async def test_shell_varies_on_ingress_path(spa_client, ingress_spa_client, path):
+    """The shell body depends on ``X-Ingress-Path``, so a shared cache
+    must key on it."""
+    for client in (spa_client, ingress_spa_client):
+        resp = await client.get(path)
+        assert "X-Ingress-Path" in resp.headers.getall("Vary", [""])[0]
 
 
 # ── Content-Security-Policy ───────────────────────────────────────────────
