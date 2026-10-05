@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, screen, cleanup, waitFor } from '@testing-library/preact'
+import { setLocale } from '@/i18n/i18n'
 
 const apiGet = vi.fn()
 const apiPatch = vi.fn()
@@ -28,8 +29,8 @@ const loadFederationCompat = vi.fn().mockResolvedValue(undefined)
 vi.mock('@/store/federationCompat', () => ({
   resyncPeerCapabilities: (...a: unknown[]) => resyncPeerCapabilities(...a),
   loadFederationCompat: (...a: unknown[]) => loadFederationCompat(...a),
-  peerSupportsResync: (p: { capabilities_known: boolean; lacking_features: string[] }) =>
-    p.capabilities_known && !p.lacking_features.includes('Asking a household to send updates again'),
+  peerSupportsResync: (p: { capabilities_known: boolean; lacking_feature_keys?: string[] }) =>
+    p.capabilities_known && !(p.lacking_feature_keys ?? []).includes('household_resync'),
 }))
 
 vi.mock('./ShareHomeToggle', () => ({
@@ -257,6 +258,36 @@ describe('Federation compatibility row + re-check', () => {
     expect(screen.getByText('Bids and offers in the bazaar, Calendar overrides')).toBeTruthy()
   })
 
+  describe('in German', () => {
+    beforeEach(async () => { await setLocale('de') })
+    afterEach(async () => { await setLocale('en') })
+
+    it('lists the missing features in German, by their stable keys', async () => {
+      const { ConnectionDetail } = await import('./ConnectionDetail')
+      render(
+        <ConnectionDetail
+          conn={_conn({ proto_version: 12 }) as any}
+          compat={_compat({
+            proto_version: 12,
+            lacking_features: [
+              'Syncing when a direct link fails',
+              'Space moderators',
+              'A feature from a newer server',
+            ],
+            lacking_feature_keys: ['sync_https_fallback', 'space_moderators', 'from_the_future'],
+          }) as any}
+          onClose={() => {}}
+          onRevoke={() => {}}
+        />,
+      )
+      expect(await screen.findByText('Fehlende Funktionen')).toBeTruthy()
+      // A slug this build doesn't know yet keeps the server's English label.
+      expect(screen.getByText(
+        'Abgleich, wenn die direkte Verbindung ausfällt, Moderatoren in Räumen, A feature from a newer server',
+      )).toBeTruthy()
+    })
+  })
+
   it('shows "up to date ✓" when caps known and nothing lacking', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
@@ -292,7 +323,10 @@ describe('Federation compatibility row + re-check', () => {
     render(
       <ConnectionDetail
         conn={_conn() as any}
-        compat={_compat({ lacking_features: ['Asking a household to send updates again'] }) as any}
+        compat={_compat({
+          lacking_features: ['Asking a household to send updates again'],
+          lacking_feature_keys: ['household_resync'],
+        }) as any}
         onClose={() => {}}
         onRevoke={() => {}}
       />,

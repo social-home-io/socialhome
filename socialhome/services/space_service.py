@@ -110,6 +110,7 @@ from ..domain.federation import (
 from ..domain.federation_capabilities import (
     OURS,
     FederationCapability,
+    space_feature_keys_missing_below,
     space_features_missing_below,
 )
 from ..media.cleanup import unlink_unreferenced
@@ -1961,6 +1962,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                             display_name=m.effective_display_name,
                             proto_version=m.proto_version,
                             lacking_features=tuple(lacking),
+                            lacking_feature_keys=tuple(
+                                space_feature_keys_missing_below(m.proto_version)
+                            ),
                         )
                     )
         lagging = (
@@ -1973,6 +1977,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             min_member_proto_version=min_known,
             lagging_features=lagging,
             behind_members=tuple(behind),
+            lagging_feature_keys=(
+                tuple(space_feature_keys_missing_below(min_known))
+                if min_known is not None
+                else ()
+            ),
         )
 
     async def config_edits_forward(self, space_id: str) -> bool:

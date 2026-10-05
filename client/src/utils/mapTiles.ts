@@ -25,6 +25,7 @@
  */
 import L from 'leaflet'
 import { api } from '@/api'
+import { t } from '@/i18n/i18n'
 
 /**
  * Copy for the tile-failure overlay. Lives here so the four map
@@ -32,8 +33,9 @@ import { api } from '@/api'
  * actually has — a reload re-signs the tile URL and refetches the
  * config.
  */
-export const TILE_ERROR_MESSAGE =
-  "Map unavailable — couldn't load map tiles. Reload to try again."
+export function tileErrorMessage(): string {
+  return t('map.tile_error')
+}
 
 /** Shape of ``GET /api/map/config``. */
 export interface MapTileConfig {

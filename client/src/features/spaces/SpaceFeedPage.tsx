@@ -748,7 +748,7 @@ export default function SpaceFeedPage() {
               </Button>
               {canWrite('calendar') && (
                 <Button onClick={() => openSpaceEventDialog(spaceId)}>
-                  + New event
+                  + {t('calendar.new_event')}
                 </Button>
               )}
             </div>
@@ -765,7 +765,8 @@ export default function SpaceFeedPage() {
             <div class="sh-calendar-controls">
               <div class="sh-calendar-nav">
                 <Button variant="secondary"
-                        aria-label={`Previous ${spaceCalView.value}`}
+                        // Keys: calendar.prev_{month,week,day}
+                        aria-label={t(`calendar.prev_${spaceCalView.value}`)}
                         onClick={() => navigateSpaceCalendar(-1, spaceId)}>
                   &#8249;
                 </Button>
@@ -773,13 +774,14 @@ export default function SpaceFeedPage() {
                   {formatRangeHeading(spaceCalCursor.value, spaceCalView.value)}
                 </span>
                 <Button variant="secondary"
-                        aria-label={`Next ${spaceCalView.value}`}
+                        // Keys: calendar.next_{month,week,day}
+                        aria-label={t(`calendar.next_${spaceCalView.value}`)}
                         onClick={() => navigateSpaceCalendar(1, spaceId)}>
                   &#8250;
                 </Button>
                 <Button variant="secondary"
                         onClick={() => jumpToSpaceToday(spaceId)}>
-                  Today
+                  {t('calendar.today')}
                 </Button>
               </div>
               <div class="sh-calendar-views" role="tablist">
@@ -796,7 +798,7 @@ export default function SpaceFeedPage() {
                     }
                     onClick={() => setSpaceCalendarView(mode, spaceId)}
                   >
-                    {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                    {t(`calendar.${mode}`)}
                   </button>
                 ))}
               </div>
@@ -805,12 +807,10 @@ export default function SpaceFeedPage() {
             {shown.length === 0 && (
               <div class="sh-empty-state">
                 <div aria-hidden="true">📅</div>
-                <h3>No events in this {spaceCalView.value}</h3>
+                {/* Keys: calendar.empty_{month,week,day} */}
+                <h3>{t(`calendar.empty_${spaceCalView.value}`)}</h3>
                 {canWrite('calendar') && (
-                  <p>
-                    Click <strong>+ New event</strong> to schedule something
-                    in this space.
-                  </p>
+                  <p>{t('calendar.empty_space_hint')}</p>
                 )}
               </div>
             )}

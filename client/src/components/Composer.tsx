@@ -41,7 +41,7 @@ import { UploadProgressBar, uploadProgress, uploadWithProgress } from './UploadP
 import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
 import { useLinkPreview } from '@/hooks/useLinkPreview'
-import { t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
 
 const MAX_LENGTH = 5000
 const MAX_IMAGES = 5
@@ -295,7 +295,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
         setMediaPreviewUrl(result.signed_url)
         setMediaName(file.name)
       }
-      showToast(`Attached: ${file.name}`, 'success')
+      showToast(t('composer.attached', { name: file.name }), 'success')
     } catch (err: unknown) {
       showToast(describeUploadError(err, { file }), 'error')
     }
@@ -333,11 +333,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
       // picker but the WebChromeClient didn't propagate the URI back
       // into ``input.files``. Toast it so they know to retry rather
       // than staring at silent failure.
-      showToast(
-        'The file picker didn\'t return a photo. Tap "Add photo" again, '
-        + 'or drag a file in.',
-        'error',
-      )
+      showToast(t('composer.drop.picker_empty'), 'error')
       return
     }
     await acceptFiles(files)
@@ -446,7 +442,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
           })
         } catch (err: unknown) {
           showToast(
-            `Schedule poll failed: ${(err as Error)?.message ?? err}`,
+            t('composer.schedule_failed', { error: String((err as Error)?.message ?? err) }),
             'error',
           )
         }
@@ -462,7 +458,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
           })
         } catch (err: unknown) {
           showToast(
-            `Poll creation failed: ${(err as Error)?.message ?? err}`,
+            t('composer.poll_failed', { error: String((err as Error)?.message ?? err) }),
             'error',
           )
         }
@@ -594,7 +590,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
               aria-live="polite"
             >
               {charCount}/{MAX_LENGTH}
-              {overLimit && <span class="sh-char-count-over-label"> (over limit)</span>}
+              {overLimit && <span class="sh-char-count-over-label"> {t('composer.over_limit')}</span>}
             </div>
           )}
           {postType.value === 'text' && linkPreview.url && (
@@ -625,7 +621,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
             <div key={img.url} class="sh-composer-image-tile">
               <img src={img.preview} alt={img.name} />
               <button type="button" class="sh-composer-remove-attach"
-                      aria-label={`Remove ${img.name}`}
+                      aria-label={t('composer.remove_image', { name: img.name })}
                       onClick={() => removeImage(img.url)}>✕</button>
             </div>
           ))}
@@ -673,7 +669,7 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
             <span class="sh-composer-file-pill">📄 {mediaName}</span>
           )}
           <button type="button" class="sh-composer-remove-attach"
-                  aria-label="Remove attachment"
+                  aria-label={t('composer.remove_attachment')}
                   onClick={resetAttached}>✕</button>
         </div>
       )}
@@ -708,23 +704,25 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
           accept={postType.value === 'image'
             ? 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif'
             : postType.value === 'video' ? 'video/*' : undefined}
-          hint={postType.value === 'image'
-            ? 'Drag photos here, or'
-            : `Drag a ${postType.value} here, or`}
-          pickLabel={postType.value === 'image' ? 'choose a photo…' : 'choose a file…'}
-          draggingHint={`Drop to attach ${postType.value}`}
+          // Keys: composer.drop.{hint,dragging}_{image,video,file}
+          hint={t(`composer.drop.hint_${postType.value}`)}
+          pickLabel={postType.value === 'image'
+            ? t('composer.drop.pick_photo')
+            : t('composer.drop.pick_file')}
+          draggingHint={t(`composer.drop.dragging_${postType.value}`)}
           onFiles={acceptFiles}
         />
       )}
       <UploadProgressBar />
       {postType.value === 'schedule' && pendingSchedule && (
         <div class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-          📅 {pendingSchedule.slots.length} time
-          {pendingSchedule.slots.length === 1 ? '' : 's'} proposed
+          📅 {t(isOne(pendingSchedule.slots.length)
+            ? 'composer.schedule_summary_one'
+            : 'composer.schedule_summary', { n: String(pendingSchedule.slots.length) })}
           {' — '}
           <button type="button" class="sh-link-button"
                   onClick={() => setScheduleOpen(true)}>
-            edit
+            {t('composer.edit')}
           </button>
         </div>
       )}
@@ -736,17 +734,19 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
           {' — '}
           <button type="button" class="sh-link-button"
                   onClick={() => setLocationOpen(true)}>
-            edit
+            {t('composer.edit')}
           </button>
         </div>
       )}
       {postType.value === 'poll' && pendingPoll && (
         <div class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-          📊 "{pendingPoll.question}" · {pendingPoll.options.length} options
+          📊 "{pendingPoll.question}" · {t(isOne(pendingPoll.options.length)
+            ? 'composer.poll_options_one'
+            : 'composer.poll_options', { n: String(pendingPoll.options.length) })}
           {' — '}
           <button type="button" class="sh-link-button"
                   onClick={() => setPollOpen(true)}>
-            edit
+            {t('composer.edit')}
           </button>
         </div>
       )}
@@ -767,8 +767,8 @@ export function Composer({ onSubmit, context, placeholder, spaceId, allowedTypes
                 : 'sh-composer-format'
             }
             aria-pressed={formatOpen}
-            aria-label="Toggle Markdown formatting bar"
-            title="Toggle Markdown formatting bar"
+            aria-label={t('composer.format_toggle')}
+            title={t('composer.format_toggle')}
             onClick={() => setFormatOpen((v) => !v)}
           >
             Aa

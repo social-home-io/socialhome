@@ -288,5 +288,34 @@
   "connections.global_servers": "Section heading on the connections page. 'GFS (Global Federation Server)' is a product term: keep it untranslated.",
 
   "composer.context.space": "Small badge in the post box: the post goes to this space. One word.",
-  "composer.context.household": "Small badge in the post box: the post goes to the household feed. One word."
+  "composer.context.household": "Small badge in the post box: the post goes to the household feed. One word.",
+
+  "calendar.prev_month": "Screen-reader label of the ‹ button in the calendar header. The other prev_/next_ keys work the same for week and day views.",
+  "calendar.empty_space_hint": "Empty space calendar. Quote the 'New event' button label (calendar.new_event) as it reads in your language.",
+  "composer.drop.hint_image": "Dropzone text, followed directly by a link 'choose a photo…'. Together they read 'Drag photos here, or choose a photo…'. Lowercase link.",
+  "composer.drop.hint_video": "Followed by the link 'choose a file…'.",
+  "composer.drop.hint_file": "Followed by the link 'choose a file…'.",
+  "composer.edit": "Small lowercase link after a summary line like '3 times proposed — edit'.",
+  "composer.schedule_summary": "Date poll draft in the composer. {n} = number of proposed date/time slots. Followed by ' — edit'.",
+  "composer.poll_options": "Poll draft in the composer, after the question. {n} = number of answer options.",
+  "composer.over_limit": "After the character counter '520/500' when the post is too long. Keep very short, in brackets.",
+  "map.tile_error": "Shown over a map when its tiles fail to load. Reloading the page is the fix.",
+  "modal.close": "Screen-reader label for the ✕ button of every dialog.",
+  "search.bar_placeholder": "Placeholder in the top-bar search box. A 🔍 is put in front.",
+  "page_title.welcome": "Top-bar title of the home page.",
+  "spaces.list.subscribed": "Section heading for spaces the user follows read-only (subscriber role). Followed by ' · ' and spaces.list.subscribed_hint.",
+  "spaces.list.subscribed_pill": "Short badge on a followed space. Keep short (≤ 12 chars). A 🔔 goes in front.",
+  "spaces.list.remote_chip": "Badge on a space hosted by another household. Keep short.",
+  "time.hours_ago_short": "Compact 'hours ago' in byline rows (Pages, notifications). {n} = whole hours.",
+  "time.yesterday": "Lowercase; stands alone in a byline row.",
+  "time.days_ago_long": "Plural; time.days_ago_long_one is the singular (French also uses it for 0).",
+  "welcome.greet.morning_named": "Home-page greeting. {name} = the user's first name. The other welcome.greet.* keys work the same (night is before 5:00 and after 22:00).",
+  "welcome.shape.to_read": "{items} is a list like '2 messages · 3 alerts'. Lowercase; it follows the date: 'Sunday, October 4 · 2 messages to read'.",
+  "welcome.shape.next_day": "{day} is a weekday ('Monday') or a short date ('Oct 12'). Lowercase start; it follows the date after ' · '.",
+  "welcome.sub.all_clear": "Lowercase; follows the date: 'Sunday, October 4 · all clear'.",
+  "welcome.ago.minutes": "Very short age of a post in a list ('5m'). Keep ≤ 6 chars. Same for hours and days.",
+  "welcome.chip.messages": "Word after a bold number in a chip ('3 messages'). welcome.chip.messages_one is the singular.",
+  "welcome.card.catch_up": "Card heading on the home page with unread messages, alerts and new space posts.",
+
+  "capability.calendar_time_zones": "One of the 'Missing features' a household on an older Social Home version lacks (connection details, space banner). Every capability.* key is a short noun phrase, under ~50 characters, joined with ', ' in a list."
 }

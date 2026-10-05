@@ -1091,6 +1091,9 @@ class BehindMember:
     display_name: str
     proto_version: int
     lacking_features: tuple[str, ...]
+    #: Stable slugs of ``lacking_features``, same order
+    #: (``CAPABILITY_FEATURE_KEYS``) — what the SPA translates.
+    lacking_feature_keys: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1110,6 +1113,8 @@ class SpaceVersionCompat:
     #: Space features unavailable because the weakest known member lacks them.
     lagging_features: tuple[str, ...]
     behind_members: tuple[BehindMember, ...]
+    #: Stable slugs of ``lagging_features``, same order.
+    lagging_feature_keys: tuple[str, ...] = ()
 
 
 # ─── Wire envelope (§24.11) ───────────────────────────────────────────────

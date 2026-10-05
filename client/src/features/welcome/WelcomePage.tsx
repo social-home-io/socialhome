@@ -18,6 +18,7 @@
  * read as the same surface, just with more rooms.
  */
 import { useEffect, useState } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { api } from '@/api'
 import { ws } from '@/ws'
@@ -51,7 +52,7 @@ const EMPTY: WelcomeBundle = {
 }
 
 export default function WelcomePage() {
-  useTitle('Welcome')
+  useTitle(t('page_title.welcome'))
   const [bundle, setBundle] = useState<WelcomeBundle | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -62,7 +63,7 @@ export default function WelcomePage() {
       setBundle(data)
       setError(null)
     } catch (err: unknown) {
-      setError((err as Error).message ?? 'Could not load.')
+      setError((err as Error).message ?? t('welcome.load_failed'))
     } finally {
       setLoading(false)
     }
@@ -107,9 +108,9 @@ export default function WelcomePage() {
     return (
       <div class="sh-welcome">
         <header class="sh-welcome-hero">
-          <h1 class="sh-welcome-hero__greeting">Welcome back</h1>
+          <h1 class="sh-welcome-hero__greeting">{t('welcome.back')}</h1>
           <p class="sh-welcome-hero__sub">
-            {longDate(new Date())} · we couldn't load your day just now
+            {longDate(new Date())} · {t('welcome.sub.load_failed')}
           </p>
         </header>
       </div>
@@ -136,11 +137,9 @@ export default function WelcomePage() {
     && b.unread_conversations === 0
 
   const greetee = firstName(currentUser.value?.display_name)
-  const heroGreeting = greetee
-    ? `${timeOfDayGreeting()}, ${greetee}`
-    : timeOfDayGreeting()
+  const heroGreeting = timeOfDayGreeting(greetee)
   const heroSub = allClear
-    ? `${longDate(new Date())} · all clear`
+    ? `${longDate(new Date())} · ${t('welcome.sub.all_clear')}`
     : `${longDate(new Date())} · ${dayShape(today, tasks, upNext, b, lessons)}`
 
   return (

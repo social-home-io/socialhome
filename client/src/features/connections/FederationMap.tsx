@@ -20,7 +20,7 @@ import 'leaflet/dist/leaflet.css'
 import './FederationMap.css'
 import { connections, selfLat, selfLon, type TransportState } from '@/store/connections'
 import { t } from '@/i18n/i18n'
-import { addTileLayer, TILE_ERROR_MESSAGE } from '@/utils/mapTiles'
+import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 import { haversineKm, bearing8, roundKm } from './_mapMath'
 
 function _initial(name: string | undefined): string {
@@ -187,7 +187,7 @@ export default function FederationMap() {
         <div ref={containerRef} class="sh-federation-map__canvas" />
         {tileError && (
           <div class="sh-map-error">
-            {TILE_ERROR_MESSAGE}
+            {tileErrorMessage()}
           </div>
         )}
       </div>

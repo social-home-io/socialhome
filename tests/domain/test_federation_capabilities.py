@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from socialhome.domain import federation_capabilities as fc
 
 
@@ -631,3 +633,92 @@ def test_private_channels_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(51) == ["Invite links from member households"]
+
+
+#: The pinned slug set. These are an API contract (``lacking_feature_keys`` /
+#: ``lagging_feature_keys``) and SPA translation keys (``capability.<slug>``):
+#: never rename one. A new feature appends a slug here AND in the module.
+_PINNED_FEATURE_KEYS = {
+    2: "calendar_time_zones",
+    3: "photos_in_dms",
+    5: "home_location_sharing",
+    6: "invite_links_other_households",
+    7: "space_rekey_on_leave",
+    8: "remote_member_roles",
+    9: "remote_member_removal",
+    10: "bazaar_listings",
+    11: "bazaar_sold_status",
+    12: "bazaar_bids",
+    13: "sync_https_fallback",
+    14: "fast_media_transfer",
+    15: "remote_admin_actions",
+    16: "admin_proposals",
+    17: "cross_household_apps",
+    18: "app_user_routing",
+    19: "household_resync",
+    20: "space_sync_repair",
+    21: "safe_route_discovery",
+    22: "admin_key_share",
+    23: "roster_gossip",
+    24: "admin_ops_without_owner",
+    25: "user_identity_keys",
+    26: "identity_anchor",
+    27: "user_move",
+    28: "route_break_notice",
+    29: "invite_link_bootstrap",
+    30: "remote_followers",
+    31: "routed_origin_check",
+    32: "roster_snapshot",
+    33: "gallery_albums",
+    34: "album_owner_binding",
+    35: "moment_origin_check",
+    36: "content_owner_binding",
+    37: "cross_household_group_chats",
+    38: "moment_no_relay",
+    39: "space_timetables",
+    40: "task_priority_labels",
+    41: "space_moderators",
+    42: "admin_only_features",
+    43: "federated_moderation",
+    44: "removed_admin_lockout",
+    45: "space_reports",
+    46: "security_update_catch_up",
+    47: "forwarded_role_changes",
+    48: "shared_pages_no_lost_edits",
+    49: "member_publish",
+    50: "anonymous_gfs_posting",
+    51: "private_gfs_spaces",
+    52: "forwarded_invite_links",
+}
+
+
+def test_every_feature_has_exactly_one_stable_key():
+    """Each ``CAPABILITY_FEATURES`` entry carries a slug, and the slugs are
+    the pinned set — renaming one breaks the SPA's translations and any
+    client matching on it."""
+    versions = {ver for ver, _label in fc.CAPABILITY_FEATURES}
+    assert set(fc.CAPABILITY_FEATURE_KEYS) == versions
+    assert fc.CAPABILITY_FEATURE_KEYS == _PINNED_FEATURE_KEYS
+
+
+def test_feature_keys_are_unique_snake_case():
+    keys = list(fc.CAPABILITY_FEATURE_KEYS.values())
+    assert len(keys) == len(set(keys))
+    for key in keys:
+        assert re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", key), key
+
+
+def test_feature_keys_missing_below_parallels_the_labels():
+    """Same order and length as the English labels, at every version."""
+    labels_by_key = {
+        fc.CAPABILITY_FEATURE_KEYS[ver]: label for ver, label in fc.CAPABILITY_FEATURES
+    }
+    for version in range(0, fc.OURS + 2):
+        keys = fc.feature_keys_missing_below(version)
+        assert [labels_by_key[k] for k in keys] == fc.features_missing_below(version)
+        space_keys = fc.space_feature_keys_missing_below(version)
+        assert [labels_by_key[k] for k in space_keys] == (
+            fc.space_features_missing_below(version)
+        )
+    assert fc.feature_keys_missing_below(fc.OURS) == []
+    assert fc.feature_keys_missing_below(18)[0] == "household_resync"

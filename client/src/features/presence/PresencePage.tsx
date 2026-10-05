@@ -1,4 +1,5 @@
 import { useEffect } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -83,7 +84,7 @@ function loadPresenceList(): Promise<void> {
 }
 
 export default function PresencePage() {
-  useTitle('Presence')
+  useTitle(t('nav.presence'))
   useEffect(() => {
     void loadPresenceList()
     // Live refresh: presence frames (physical state + GPS) and the

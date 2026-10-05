@@ -5,13 +5,14 @@ import { signal } from '@preact/signals'
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { normaliseTimestamp, relativeDocsTime } from '@/utils/relativeTime'
+import { featureLabels } from '@/utils/capabilityLabels'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Spinner } from './Spinner'
 import { showToast } from './Toast'
 import { ShareHomeToggle } from './ShareHomeToggle'
-import { t, isOne } from '@/i18n/i18n'
+import { t, isOne, formatLocale } from '@/i18n/i18n'
 import {
   peerSupportsResync,
   resyncPeerCapabilities,
@@ -287,7 +288,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
           {inboxUrl && (
             <><dt>{t('connections.detail.address')}</dt><dd class="sh-mono sh-muted">{inboxUrl}</dd></>
           )}
-          {conn.paired_at && <><dt>{t('connections.detail.paired')}</dt><dd>{new Date(conn.paired_at).toLocaleString()}</dd></>}
+          {conn.paired_at && <><dt>{t('connections.detail.paired')}</dt><dd>{new Date(conn.paired_at).toLocaleString(formatLocale())}</dd></>}
           {conn.proto_version != null && (
             <><dt>{t('connections.detail.app_version')}</dt><dd>v{conn.proto_version}</dd></>
           )}
@@ -295,7 +296,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             compat.lacking_features.length === 0 ? (
               <><dt>{t('connections.detail.compatibility')}</dt><dd><span class="sh-chip sh-chip--success">{t('connections.compat.up_to_date')}</span></dd></>
             ) : (
-              <><dt>{t('connections.detail.missing_features')}</dt><dd>{compat.lacking_features.join(', ')}</dd></>
+              <><dt>{t('connections.detail.missing_features')}</dt><dd>{featureLabels(compat.lacking_features, compat.lacking_feature_keys).join(', ')}</dd></>
             )
           )}
           {/* Absolute timestamp AND a relative hint: the absolute one is
@@ -306,7 +307,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
           <dd>
             {conn.last_reachable_at ? (
               <>
-                {new Date(normaliseTimestamp(conn.last_reachable_at)).toLocaleString()}
+                {new Date(normaliseTimestamp(conn.last_reachable_at)).toLocaleString(formatLocale())}
                 <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
                   ({relativeDocsTime(conn.last_reachable_at)})
                 </span>
@@ -325,7 +326,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
                   {t('connections.detail.gfs_only')}
                 </span>
               )}
-              {t('connections.detail.gfs_last_handed', { time: new Date(normaliseTimestamp(conn.last_relay_accepted_at)).toLocaleString() })}
+              {t('connections.detail.gfs_last_handed', { time: new Date(normaliseTimestamp(conn.last_relay_accepted_at)).toLocaleString(formatLocale()) })}
               <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
                 ({relativeDocsTime(conn.last_relay_accepted_at)})
               </span>
@@ -338,7 +339,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
           )}
           {conn.unreachable_since && (
             <><dt>{t('connections.detail.unreachable_since')}</dt><dd class="sh-text-warning">
-              {new Date(normaliseTimestamp(conn.unreachable_since)).toLocaleString()}
+              {new Date(normaliseTimestamp(conn.unreachable_since)).toLocaleString(formatLocale())}
               <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
                 ({relativeDocsTime(conn.unreachable_since)})
               </span>

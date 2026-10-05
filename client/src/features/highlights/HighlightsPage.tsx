@@ -12,6 +12,7 @@ import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { HighlightQuickShareDialog } from '@/components/HighlightQuickShareDialog'
 import { TabHeader } from '@/components/TabHeader'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import HighlightsInboxTab from './HighlightsInboxTab'
 import HighlightArchiveTab from './HighlightArchiveTab'
@@ -36,7 +37,7 @@ function tabFromUrl(url: string): HighlightsTab {
 
 
 export default function HighlightsPage() {
-  useTitle(activeTab.value === 'archive' ? 'Highlight archive' : 'Highlights')
+  useTitle(activeTab.value === 'archive' ? t('page_title.highlight_archive') : t('nav.highlights'))
   const loc = useLocation()
 
   useEffect(() => {

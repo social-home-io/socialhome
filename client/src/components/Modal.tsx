@@ -1,5 +1,6 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 
 interface ModalProps {
   open: boolean
@@ -123,7 +124,7 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
         <div class="sh-modal-grabber" aria-hidden="true" />
         <div class="sh-modal-header">
           <h2 id={titleId.current}>{title}</h2>
-          <button class="sh-modal-close" onClick={onClose} aria-label="Close dialog">
+          <button class="sh-modal-close" onClick={onClose} aria-label={t('modal.close')}>
             &times;
           </button>
         </div>

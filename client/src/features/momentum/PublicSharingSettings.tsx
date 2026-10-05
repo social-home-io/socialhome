@@ -17,6 +17,7 @@ import { Button } from '@/components/Button'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
 import {
@@ -68,7 +69,7 @@ async function reload(): Promise<void> {
 }
 
 export default function PublicSharingSettings() {
-  useTitle('Public sharing')
+  useTitle(t('page_title.public_sharing'))
   useEffect(() => {
     void reload()
   }, [])

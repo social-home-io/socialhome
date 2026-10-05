@@ -127,9 +127,25 @@ describe('federationCompat store', () => {
   })
 
   it('peerSupportsResync: false when the peer still lacks the resync feature', () => {
+    expect(RESYNC_FEATURE).toBe('household_resync')
     expect(
-      peerSupportsResync(peer({ capabilities_known: true, lacking_features: [RESYNC_FEATURE] })),
+      peerSupportsResync(peer({
+        capabilities_known: true,
+        lacking_features: ['Asking a household to send updates again'],
+        lacking_feature_keys: [RESYNC_FEATURE],
+      })),
     ).toBe(false)
+  })
+
+  it('peerSupportsResync: matches by slug, not by the English label', () => {
+    // The label alone (wording can change) no longer hides Re-check.
+    expect(
+      peerSupportsResync(peer({
+        capabilities_known: true,
+        lacking_features: ['Asking a household to send updates again'],
+        lacking_feature_keys: ['bazaar_bids'],
+      })),
+    ).toBe(true)
   })
 
   it('resyncPeerCapabilities POSTs the capabilities scope to the resync endpoint', async () => {

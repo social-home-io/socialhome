@@ -25,6 +25,7 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
@@ -99,7 +100,7 @@ export default function SpacePublicDetailPage() {
   const spaceId = params.id
   const [activeModal, setActiveModal] = useState<DirectoryEntry | null>(null)
 
-  useTitle(detail.value?.name ?? 'Space')
+  useTitle(detail.value?.name ?? t('spaces.space_title'))
 
   useEffect(() => {
     loading.value = true

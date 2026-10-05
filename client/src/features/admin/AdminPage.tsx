@@ -69,7 +69,7 @@ const loading       = signal(true)
 const tab           = signal<TabId>('members')
 
 export default function AdminPage() {
-  useTitle('Admin')
+  useTitle(t('nav.admin'))
   const user = currentUser.value
   // Every hook must run before any early return so hook call-order stays stable
   // across renders (react-hooks/rules-of-hooks). loadAll is gated on admin

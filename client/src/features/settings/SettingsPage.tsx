@@ -89,7 +89,7 @@ function syncOnlineStatusFromUser(): void {
 }
 
 export default function SettingsPage() {
-  useTitle('Settings')
+  useTitle(t('nav.settings'))
   useEffect(() => {
     if (currentUser.value) {
       displayName.value = currentUser.value.display_name

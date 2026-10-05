@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { currentUser } from '@/store/auth'
+import { setLocale } from '@/i18n/i18n'
 import {
   dateRangeForMode,
   formatRangeHeading,
@@ -930,5 +931,18 @@ describe('dateRangeForMode / formatRangeHeading — week start', () => {
     expect(sun).toBe(formatRangeHeading(sunday, 'week', 6))
     expect(mon).toBe(formatRangeHeading(sunday, 'week', 0))
     expect(sun).not.toBe(mon)
+  })
+})
+
+describe('calendar headings in the UI language', () => {
+  it('formats the month and day headings in German', async () => {
+    await setLocale('de')
+    try {
+      const d = new Date(2026, 9, 4, 12, 0, 0)
+      expect(formatRangeHeading(d, 'month')).toBe('Oktober 2026')
+      expect(formatRangeHeading(d, 'day')).toBe('Sonntag, 4. Oktober 2026')
+    } finally {
+      await setLocale('en')
+    }
   })
 })

@@ -18,6 +18,7 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
 import { Avatar } from '@/components/Avatar'
@@ -110,7 +111,7 @@ function earliestPairedAt(households: Household[]): string | null {
 }
 
 export default function FriendsPage() {
-  useTitle('Friends')
+  useTitle(t('nav.friends'))
   const [data, setData] = useState<FriendsPayload | null>(null)
   const [loading, setLoading] = useState(true)
   /** Per-user "starting DM" tracking so a double-click can't spawn

@@ -26,6 +26,19 @@ export function t(key: string, params?: Record<string, string>): string {
   return text
 }
 
+/** The locale for dates, times and numbers: the browser's regional
+ *  variant when its language matches the UI language (``en-GB`` keeps
+ *  day-first dates under English, ``de-CH`` its own format), else the
+ *  UI language itself — never a region from another language. */
+export function formatLocale(): string {
+  const ui = locale.value || 'en'
+  const prefs = typeof navigator === 'undefined' ? [] : (navigator.languages ?? [navigator.language])
+  for (const tag of prefs) {
+    if (tag && tag.split('-')[0].toLowerCase() === ui.split('-')[0].toLowerCase()) return tag
+  }
+  return ui
+}
+
 /** The UI language's "one" plural category (French counts 0 as one).
  *  Pick a ``_one`` key with it: ``t(isOne(n) ? 'k_one' : 'k', …)``. */
 export function isOne(n: number): boolean {

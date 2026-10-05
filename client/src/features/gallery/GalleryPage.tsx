@@ -9,6 +9,7 @@
  * Used both for household-level (no space_id) and per-space galleries.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -66,7 +67,7 @@ export interface GalleryPageProps {
 }
 
 export default function GalleryPage({ spaceId }: GalleryPageProps) {
-  useTitle('Gallery')
+  useTitle(t('nav.gallery'))
   useEffect(() => { void loadAlbums(spaceId) }, [spaceId])
 
   // Live cross-device updates: refetch on gallery WS frames, scoped to

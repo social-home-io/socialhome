@@ -40,7 +40,7 @@ function pageUrl(tt: string | null, week: string | null): string {
 }
 
 export default function TimetablePage() {
-  useTitle('Timetable')
+  useTitle(t('nav.timetable'))
   const loc = useLocation()
 
   useEffect(() => { selectedId.value = ttFromUrl(loc.url) }, [loc.url])

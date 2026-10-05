@@ -31,7 +31,10 @@ from socialhome.domain.federation import (
     DeliveryResult,
     FederationEventType,
 )
-from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.federation_capabilities import (
+    FederationCapability,
+    space_feature_keys_missing_below,
+)
 from socialhome.domain.post import PostType
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -3893,6 +3896,23 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Role changes from member households",
         "Shared pages without lost edits",
     )
+
+
+async def test_space_version_compat_carries_feature_keys(stack):
+    """Each label list has a parallel list of stable slugs, same order."""
+    await stack.provision_user("anna", is_admin=True)
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    stack.space_svc._federation_repo = _FakeFedRepo(
+        [_member("peer-13", 13, seen=True, name="Brother's house")]
+    )
+
+    c = await stack.space_svc.space_version_compat(space.id, actor_username="anna")
+    assert c.lagging_feature_keys == tuple(space_feature_keys_missing_below(13))
+    assert c.lagging_feature_keys[0] == "fast_media_transfer"
+    assert len(c.lagging_feature_keys) == len(c.lagging_features)
+    bm = c.behind_members[0]
+    assert bm.lacking_feature_keys == tuple(space_feature_keys_missing_below(13))
+    assert len(bm.lacking_feature_keys) == len(bm.lacking_features)
 
 
 async def test_space_version_compat_excludes_mid_handshake_member(stack):

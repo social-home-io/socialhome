@@ -60,7 +60,7 @@ function tabFromUrl(url: string): ChatsTab {
 
 
 export default function DmInboxPage() {
-  useTitle('Chats')
+  useTitle(t('nav.chats'))
   const loc = useLocation()
 
   // Sync tab state from the URL on mount and any subsequent route

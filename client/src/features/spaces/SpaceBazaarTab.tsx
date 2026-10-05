@@ -12,6 +12,7 @@
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { api } from '@/api'
+import { t } from '@/i18n/i18n'
 import { ws } from '@/ws'
 import { Button } from '@/components/Button'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
@@ -83,10 +84,10 @@ export function SpaceBazaarTab({ spaceId, canSell = true }: {
       {dialog}
       <div class="sh-space-bazaar-header">
         <p class="sh-muted" style={{ margin: 0 }}>
-          Items members are sharing or selling in this space.
+          {t('space.bazaar.intro')}
         </p>
         {canSell && !isRestricted('bazaar') && (
-          <Button onClick={() => openBazaarCreate(spaceId)}>+ New listing</Button>
+          <Button onClick={() => openBazaarCreate(spaceId)}>+ {t('space.bazaar.new_listing')}</Button>
         )}
       </div>
       {!canSell && <AccessNote feature="posts" />}
@@ -96,15 +97,14 @@ export function SpaceBazaarTab({ spaceId, canSell = true }: {
       ) : listings.value.length === 0 ? (
         <div class="sh-empty-state">
           <div aria-hidden="true">🛍</div>
-          <h3>Nothing listed yet</h3>
+          <h3>{t('space.bazaar.empty_title')}</h3>
           {canSell && (
             <p class="sh-muted">
-              Be the first to list something. New listings stay in this tab —
-              tick “Also announce in the space feed” if you want a feed post too.
+              {t('space.bazaar.empty_body')}
             </p>
           )}
           {canSell && !isRestricted('bazaar') && (
-            <Button onClick={() => openBazaarCreate(spaceId)}>+ New listing</Button>
+            <Button onClick={() => openBazaarCreate(spaceId)}>+ {t('space.bazaar.new_listing')}</Button>
           )}
         </div>
       ) : (

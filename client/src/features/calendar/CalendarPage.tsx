@@ -221,7 +221,7 @@ export default function CalendarPage() {
 
 /** The calendar tab — household agenda, filters, event dialog. */
 function CalendarAgenda() {
-  useTitle('Calendar')
+  useTitle(t('nav.calendar'))
   useEffect(() => {
     // Drop any rows the WS handler accreted while we were on a
     // different surface — we'll re-fetch the right ones below.
@@ -458,7 +458,7 @@ function CalendarAgenda() {
             <Button variant="secondary" onClick={openCalendarImport}>
               Import
             </Button>
-            <Button onClick={handleNewEvent}>+ New event</Button>
+            <Button onClick={handleNewEvent}>+ {t('calendar.new_event')}</Button>
           </div>
         }
       />
@@ -466,13 +466,15 @@ function CalendarAgenda() {
       <div class="sh-calendar-controls">
         <div class="sh-calendar-nav">
           <Button variant="secondary"
-                  aria-label={`Previous ${viewMode.value}`}
+                  // Keys: calendar.prev_{month,week,day}
+                  aria-label={t(`calendar.prev_${viewMode.value}`)}
                   onClick={() => navigateDate(-1)}>&#8249;</Button>
           <span class="sh-calendar-heading">{formatRangeHeading(currentDate.value, viewMode.value)}</span>
           <Button variant="secondary"
-                  aria-label={`Next ${viewMode.value}`}
+                  // Keys: calendar.next_{month,week,day}
+                  aria-label={t(`calendar.next_${viewMode.value}`)}
                   onClick={() => navigateDate(1)}>&#8250;</Button>
-          <Button variant="secondary" onClick={() => { currentDate.value = new Date() }}>Today</Button>
+          <Button variant="secondary" onClick={() => { currentDate.value = new Date() }}>{t('calendar.today')}</Button>
         </div>
         <div class="sh-calendar-views" role="tablist">
           {(['month', 'week', 'day'] as CalendarViewMode[]).map(mode => (
@@ -484,7 +486,7 @@ function CalendarAgenda() {
               class={viewMode.value === mode ? 'sh-tab sh-tab--active' : 'sh-tab'}
               onClick={() => { viewMode.value = mode }}
             >
-              {mode.charAt(0).toUpperCase() + mode.slice(1)}
+              {t(`calendar.${mode}`)}
             </button>
           ))}
         </div>
@@ -493,7 +495,8 @@ function CalendarAgenda() {
       {events.value.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">📅</div>
-          <h3>No events in this {viewMode.value}</h3>
+          {/* Keys: calendar.empty_{month,week,day} */}
+          <h3>{t(`calendar.empty_${viewMode.value}`)}</h3>
           <p>
             Birthdays, school runs, vet visits, the trip you're planning —
             anything the household needs to keep track of.

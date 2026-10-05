@@ -2,6 +2,7 @@
  * NotificationsPage — notification centre (§23.3).
  */
 import { useEffect } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -27,7 +28,7 @@ function loadNotifications(): Promise<void> {
 }
 
 export default function NotificationsPage() {
-  useTitle('Notifications')
+  useTitle(t('nav.notifications'))
   useEffect(() => {
     void loadNotifications()
     // Live refresh on inbound notifications — refetch-on-frame keeps the

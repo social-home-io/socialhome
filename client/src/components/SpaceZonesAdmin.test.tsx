@@ -218,7 +218,8 @@ describe('SpaceZonesAdmin', () => {
     addTileLayer.mockRejectedValue(new Error('API 502: /api/map/config'))
     mockApi.get.mockResolvedValue({ zones: [] })
     const { findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
-    await findByText(/Map unavailable/)
+    // The i18n mock echoes keys: the overlay renders the map.tile_error copy.
+    await findByText('map.tile_error')
   })
   it('surfaces a tile-load failure on the preview map too', async () => {
     let report: (() => void) | undefined
@@ -232,6 +233,7 @@ describe('SpaceZonesAdmin', () => {
     await waitFor(() => { expect(report).toBeTypeOf('function') })
     act(() => { report!() })
 
-    await findByText(/Map unavailable/)
+    // The i18n mock echoes keys: the overlay renders the map.tile_error copy.
+    await findByText('map.tile_error')
   })
 })

@@ -11,7 +11,7 @@
  * own data fetching, hero copy, and section orchestration.
  */
 import { Avatar } from '@/components/Avatar'
-import { t } from '@/i18n/i18n'
+import { isOne, formatLocale, t } from '@/i18n/i18n'
 import type { EffectiveLesson, TimetableColor } from '@/types'
 import { addBase } from '@/baseUrl'
 
@@ -74,16 +74,21 @@ export interface WelcomeBundle {
 
 // ─── Time / formatting helpers ─────────────────────────────────────
 
-/** Pick a time-of-day-aware greeting.  Uses device-local hour because
+/** Pick a time-of-day-aware greeting, with the first name when there
+ *  is one ("Good morning, Pascal").  Uses device-local hour because
  *  the welcome line is anchored to "what the user is doing now", not
  *  to server UTC. */
-export function timeOfDayGreeting(): string {
+export function timeOfDayGreeting(name = ''): string {
   const h = new Date().getHours()
-  if (h < 5)  return 'Good night'
-  if (h < 12) return 'Good morning'
-  if (h < 17) return 'Good afternoon'
-  if (h < 22) return 'Good evening'
-  return 'Good night'
+  const part = h < 5 ? 'night'
+    : h < 12 ? 'morning'
+      : h < 17 ? 'afternoon'
+        : h < 22 ? 'evening'
+          : 'night'
+  // Keys: welcome.greet.{night,morning,afternoon,evening}[_named]
+  return name
+    ? t(`welcome.greet.${part}_named`, { name })
+    : t(`welcome.greet.${part}`)
 }
 
 /** "Pascal Vizeli" → "Pascal".  Single-word names pass through. */
@@ -94,19 +99,29 @@ export function firstName(displayName: string | undefined | null): string {
   return sp === -1 ? trimmed : trimmed.slice(0, sp)
 }
 
-/** Long-form date — "Friday, May 8".  No year (shouting "2026" at
- *  the user every morning isn't warm). */
+/** The UI language for ``Intl`` formatters (browser default when unset). */
+function lang(): string | undefined {
+  return formatLocale()
+}
+
+/** Long-form date in the UI language — "Friday, May 8" /
+ *  "Freitag, 8. Mai".  No year (shouting "2026" at the user every
+ *  morning isn't warm). */
 export function longDate(d: Date): string {
-  return d.toLocaleDateString(undefined, {
-    weekday: 'long', month: 'long', day: 'numeric',
-  })
+  try {
+    return new Intl.DateTimeFormat(lang(), {
+      weekday: 'long', month: 'long', day: 'numeric',
+    }).format(d)
+  } catch {
+    return d.toDateString()
+  }
 }
 
 /** "08:30" — local time, 24h-aware via the locale.  Returns "" for
  *  all-day events; the caller handles the all-day formatting. */
 export function eventTime(e: WelcomeEvent): string {
   if (e.all_day) return ''
-  return new Date(e.start).toLocaleTimeString(undefined, {
+  return new Date(e.start).toLocaleTimeString(lang(), {
     hour: '2-digit', minute: '2-digit',
   })
 }
@@ -132,14 +147,14 @@ export function dayLabel(iso: string): string {
   const today = new Date()
   const tomorrow = new Date(today)
   tomorrow.setDate(today.getDate() + 1)
-  if (d.toDateString() === tomorrow.toDateString()) return 'Tomorrow'
+  if (d.toDateString() === tomorrow.toDateString()) return t('welcome.tomorrow')
   const diffDays = Math.floor(
     (d.setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86_400_000,
   )
   if (diffDays > 0 && diffDays < 7) {
-    return new Date(iso).toLocaleDateString(undefined, { weekday: 'long' })
+    return new Date(iso).toLocaleDateString(lang(), { weekday: 'long' })
   }
-  return new Date(iso).toLocaleDateString(undefined, {
+  return new Date(iso).toLocaleDateString(lang(), {
     month: 'short', day: 'numeric',
   })
 }
@@ -153,23 +168,23 @@ export function taskDueLabel(
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   const days = Math.floor((due.getTime() - today.getTime()) / 86_400_000)
-  if (days < 0)  return { text: `Overdue · ${-days}d`, tone: 'overdue' }
-  if (days === 0) return { text: 'Today', tone: 'today' }
-  if (days === 1) return { text: 'Tomorrow', tone: 'normal' }
-  return { text: `In ${days}d`, tone: 'normal' }
+  if (days < 0)  return { text: t('welcome.due.overdue', { n: String(-days) }), tone: 'overdue' }
+  if (days === 0) return { text: t('welcome.due.today'), tone: 'today' }
+  if (days === 1) return { text: t('welcome.tomorrow'), tone: 'normal' }
+  return { text: t('welcome.due.in_days', { n: String(days) }), tone: 'normal' }
 }
 
 /** "5m" / "2h" / "Mon" — relative-short for catch-up rows. */
 export function shortRelative(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
   const mins = Math.floor(diff / 60_000)
-  if (mins < 1)   return 'now'
-  if (mins < 60)  return `${mins}m`
+  if (mins < 1)   return t('welcome.ago.now')
+  if (mins < 60)  return t('welcome.ago.minutes', { n: String(mins) })
   const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h`
+  if (hours < 24) return t('welcome.ago.hours', { n: String(hours) })
   const days = Math.floor(hours / 24)
-  if (days < 7)   return `${days}d`
-  return new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
+  if (days < 7)   return t('welcome.ago.days', { n: String(days) })
+  return new Date(iso).toLocaleDateString(lang(), { weekday: 'short' })
 }
 
 /** Replace empty post bodies with a typed placeholder ("📷 Image").
@@ -177,13 +192,13 @@ export function shortRelative(iso: string): string {
 export function postSnippet(content: string | null, type: string): string {
   if (!content || !content.trim()) {
     switch (type) {
-      case 'image':    return '📷 Image'
-      case 'video':    return '🎬 Video'
-      case 'file':     return '📄 File'
-      case 'poll':     return '📊 Poll'
-      case 'schedule': return '📅 Schedule'
-      case 'bazaar':   return '🛍 Listing'
-      case 'location': return '📍 Location'
+      case 'image':    return `📷 ${t('welcome.snippet.image')}`
+      case 'video':    return `🎬 ${t('welcome.snippet.video')}`
+      case 'file':     return `📄 ${t('welcome.snippet.file')}`
+      case 'poll':     return `📊 ${t('welcome.snippet.poll')}`
+      case 'schedule': return `📅 ${t('welcome.snippet.schedule')}`
+      case 'bazaar':   return `🛍 ${t('welcome.snippet.bazaar')}`
+      case 'location': return `📍 ${t('welcome.snippet.location')}`
       default:         return ''
     }
   }
@@ -208,33 +223,32 @@ export function dayShape(
       n: String(lessons),
     }))
   }
-  if (events.length > 0) {
-    parts.push(events.length === 1 ? '1 event' : `${events.length} events`)
-  }
-  if (tasks.length > 0) {
-    parts.push(tasks.length === 1 ? '1 task' : `${tasks.length} tasks`)
-  }
+  const count = (key: string, n: number) =>
+    t(isOne(n) ? `${key}_one` : key, { n: String(n) })
+  // Keys: welcome.shape.{events,tasks,messages,alerts}[_one]
+  if (events.length > 0) parts.push(count('welcome.shape.events', events.length))
+  if (tasks.length > 0) parts.push(count('welcome.shape.tasks', tasks.length))
   if (parts.length > 0) return parts.join(' · ')
 
   if (upNext.length > 0) {
-    const next = upNext[0]
-    return `nothing today · next up ${dayLabel(next.start).toLowerCase()}`
+    const label = dayLabel(upNext[0].start)
+    return label === t('welcome.tomorrow')
+      ? t('welcome.shape.next_tomorrow')
+      : t('welcome.shape.next_day', { day: label })
   }
 
   const inboxParts: string[] = []
   if (b.unread_conversations > 0) {
-    inboxParts.push(b.unread_conversations === 1
-      ? '1 message'
-      : `${b.unread_conversations} messages`)
+    inboxParts.push(count('welcome.shape.messages', b.unread_conversations))
   }
   if (b.unread_notifications > 0) {
-    inboxParts.push(b.unread_notifications === 1
-      ? '1 alert'
-      : `${b.unread_notifications} alerts`)
+    inboxParts.push(count('welcome.shape.alerts', b.unread_notifications))
   }
-  if (inboxParts.length > 0) return `${inboxParts.join(' · ')} to read`
+  if (inboxParts.length > 0) {
+    return t('welcome.shape.to_read', { items: inboxParts.join(' · ') })
+  }
 
-  return 'a few things waiting'
+  return t('welcome.shape.waiting')
 }
 
 // ─── Cards ─────────────────────────────────────────────────────────
@@ -243,19 +257,19 @@ export function TodayCard({ events }: { events: WelcomeEvent[] }) {
   return (
     <a class="sh-welcome-card" href={addBase('/calendar')}>
       <h2 class="sh-welcome-card__title">
-        <span aria-hidden="true">📅</span> Today
+        <span aria-hidden="true">📅</span> {t('welcome.schedule.title')}
       </h2>
       <ul class="sh-welcome-card__list">
         {events.map(e => (
           <li key={e.id} class="sh-welcome-card__row">
             <time class="sh-welcome-card__time">
-              {e.all_day ? 'All day' : eventTime(e)}
+              {e.all_day ? t('welcome.schedule.all_day') : eventTime(e)}
             </time>
             <span class="sh-welcome-card__line">{e.summary}</span>
           </li>
         ))}
       </ul>
-      <span class="sh-welcome-card__more">Open calendar →</span>
+      <span class="sh-welcome-card__more">{t('welcome.schedule.open_calendar')} →</span>
     </a>
   )
 }
@@ -264,7 +278,7 @@ export function UpNextCard({ events }: { events: WelcomeEvent[] }) {
   return (
     <a class="sh-welcome-card" href={addBase('/calendar')}>
       <h2 class="sh-welcome-card__title">
-        <span aria-hidden="true">🗓</span> Up next
+        <span aria-hidden="true">🗓</span> {t('welcome.card.up_next')}
       </h2>
       <ul class="sh-welcome-card__list">
         {events.map(e => (
@@ -283,7 +297,7 @@ export function UpNextCard({ events }: { events: WelcomeEvent[] }) {
           </li>
         ))}
       </ul>
-      <span class="sh-welcome-card__more">Open calendar →</span>
+      <span class="sh-welcome-card__more">{t('welcome.schedule.open_calendar')} →</span>
     </a>
   )
 }
@@ -294,15 +308,15 @@ export function PendingCard({ tasks }: { tasks: WelcomeTask[] }) {
   return (
     <a class="sh-welcome-card" href={addBase('/organize')}>
       <h2 class="sh-welcome-card__title">
-        <span aria-hidden="true">✅</span> Pending
+        <span aria-hidden="true">✅</span> {t('welcome.card.pending')}
       </h2>
       <ul class="sh-welcome-card__list">
-        {visible.map(t => {
-          const due = taskDueLabel(t.due_date)
+        {visible.map(task => {
+          const due = taskDueLabel(task.due_date)
           return (
-            <li key={t.id} class="sh-welcome-card__row">
+            <li key={task.id} class="sh-welcome-card__row">
               <span class="sh-welcome-card__bullet" aria-hidden="true">⬜</span>
-              <span class="sh-welcome-card__line">{t.title}</span>
+              <span class="sh-welcome-card__line">{task.title}</span>
               {due.text && (
                 <span class={`sh-welcome-card__chip sh-welcome-card__chip--${due.tone}`}>
                   {due.text}
@@ -313,11 +327,11 @@ export function PendingCard({ tasks }: { tasks: WelcomeTask[] }) {
         })}
         {overflow > 0 && (
           <li class="sh-welcome-card__row sh-welcome-card__row--more">
-            +{overflow} more
+            {t('welcome.card.more', { n: String(overflow) })}
           </li>
         )}
       </ul>
-      <span class="sh-welcome-card__more">Open tasks →</span>
+      <span class="sh-welcome-card__more">{t('welcome.card.open_tasks')} →</span>
     </a>
   )
 }
@@ -336,21 +350,21 @@ export function CatchUpCard({
   return (
     <section class="sh-welcome-card sh-welcome-card--catchup">
       <h2 class="sh-welcome-card__title">
-        <span aria-hidden="true">✨</span> Catch up
+        <span aria-hidden="true">✨</span> {t('welcome.card.catch_up')}
       </h2>
       <div class="sh-welcome-chips">
         {unreadConversations > 0 && (
           <a class="sh-welcome-chip" href={addBase('/dms')}>
             <span aria-hidden="true">💬</span>
             <strong>{unreadConversations}</strong>
-            <span>{unreadConversations === 1 ? 'message' : 'messages'}</span>
+            <span>{t(isOne(unreadConversations) ? 'welcome.chip.messages_one' : 'welcome.chip.messages')}</span>
           </a>
         )}
         {unreadNotifications > 0 && (
           <a class="sh-welcome-chip" href={addBase('/notifications')}>
             <span aria-hidden="true">🔔</span>
             <strong>{unreadNotifications}</strong>
-            <span>{unreadNotifications === 1 ? 'alert' : 'alerts'}</span>
+            <span>{t(isOne(unreadNotifications) ? 'welcome.chip.alerts_one' : 'welcome.chip.alerts')}</span>
           </a>
         )}
       </div>
@@ -370,7 +384,7 @@ export function CatchUpCard({
                       size={18}
                     />
                     <strong>{p.author}</strong>
-                    <span class="sh-muted">in {p.space_name}</span>
+                    <span class="sh-muted">{t('welcome.catchup.in_space', { space: p.space_name })}</span>
                   </span>
                   <span class="sh-welcome-catchup-snippet">
                     {postSnippet(p.content, p.type)}
@@ -392,9 +406,9 @@ export function AllClearCard() {
   return (
     <div class="sh-welcome-allclear">
       <span class="sh-welcome-allclear__sun" aria-hidden="true">☀️</span>
-      <h2 class="sh-welcome-allclear__title">All clear</h2>
+      <h2 class="sh-welcome-allclear__title">{t('welcome.all_clear.title')}</h2>
       <p class="sh-welcome-allclear__sub sh-muted">
-        Nothing on your plate today. Enjoy the quiet.
+        {t('welcome.all_clear.body')}
       </p>
     </div>
   )
