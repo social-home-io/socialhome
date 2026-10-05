@@ -107,7 +107,7 @@ describe('AppHostInner', () => {
 
   it('shows generic error and no iframe for non-403 rejections', async () => {
     vi.mocked(getRuntime).mockRejectedValueOnce(
-      new ApiError(500, '/api/apps/broken/runtime', { code: 'SERVER_ERROR', detail: 'Unexpected error' }),
+      new ApiError(500, '/api/apps/broken/runtime', { code: 'INTERNAL_ERROR', detail: 'Unexpected error' }),
     )
     const { container, getByText } = render(<AppHostInner appId="broken" />)
 
