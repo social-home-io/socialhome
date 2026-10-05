@@ -678,6 +678,11 @@ function isSpaceOnly(c: Connection): boolean {
   return c.source === 'space_session'
 }
 
+/** Same rule as the list's "Manage" button: confirmed household peers. */
+function canManagePeer(c: Connection): boolean {
+  return c.status === 'confirmed' && !isSpaceOnly(c)
+}
+
 export default function ConnectionsPage() {
   useTitle(t('connections.title'))
   const [autoPairBusy, setAutoPairBusy] = useState(false)
@@ -747,7 +752,10 @@ export default function ConnectionsPage() {
       {/* ── Federation Map ────────────────────────────────────────── */}
       {view.value === 'map' && (
         <Suspense fallback={<div class="sh-federation-map__loading">{t('connections.loading_map')}</div>}>
-          <FederationMap />
+          <FederationMap
+            onManage={isAdmin ? setDetail : undefined}
+            canManage={canManagePeer}
+          />
         </Suspense>
       )}
 
