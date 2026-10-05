@@ -26,6 +26,7 @@ import 'leaflet/dist/leaflet.css'
 import { api } from '@/api'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 import { escapeHtml } from '@/utils/html'
+import { ZONE_PALETTE, safeZoneHex, zoneColor } from '@/utils/zoneColor'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Modal } from './Modal'
@@ -37,10 +38,7 @@ interface ZonesResponse {
   zones: SpaceZone[]
 }
 
-const PALETTE = [
-  '#3b82f6', '#f97316', '#10b981', '#a855f7', '#ec4899',
-  '#facc15', '#14b8a6', '#ef4444', '#6366f1', '#84cc16',
-]
+const PALETTE = ZONE_PALETTE
 
 const MIN_RADIUS_M = 25
 const MAX_RADIUS_M = 50_000
@@ -119,7 +117,7 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
     latitude: z.latitude,
     longitude: z.longitude,
     radius_m: z.radius_m,
-    color: z.color ?? PALETTE[0],
+    color: safeZoneHex(z.color) ?? PALETTE[0],
   })
 
   const closeDraft = () => setDraft(null)
@@ -206,7 +204,7 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
             <li key={z.id} class="sh-zones-admin__item">
               <span
                 class="sh-zones-admin__swatch"
-                style={`background: ${z.color || PALETTE[0]}`}
+                style={{ background: zoneColor(z) }}
                 aria-hidden="true"
               />
               <div class="sh-zones-admin__meta">
@@ -311,7 +309,7 @@ function ZonesPreviewMap({
     if (!map || !layer) return
     layer.clearLayers()
     for (const z of zones) {
-      const colour = z.color || PALETTE[0]
+      const colour = zoneColor(z)
       // Circle is the only on-map mark for the zone — the name +
       // radius + coords live in the left-pane list (the admin's
       // legend). A hover tooltip surfaces the name without
@@ -345,7 +343,7 @@ function ZonesPreviewMap({
     if (draft && draft.latitude != null && draft.longitude != null) {
       L.circle([draft.latitude, draft.longitude], {
         radius: draft.radius_m,
-        color: draft.color || PALETTE[0],
+        color: safeZoneHex(draft.color) ?? PALETTE[0],
         opacity: 0.9,
         fillOpacity: 0.15,
         weight: 2,
@@ -479,7 +477,7 @@ function ZoneEditDialog({
     layer.clearLayers()
     for (const z of existingZones) {
       if (z.id === draft.id) continue
-      const colour = z.color || PALETTE[0]
+      const colour = zoneColor(z)
       L.circle([z.latitude, z.longitude], {
         radius: z.radius_m,
         color: colour,
@@ -505,7 +503,7 @@ function ZoneEditDialog({
         [draft.latitude, draft.longitude],
         {
           radius: draft.radius_m,
-          color: draft.color || PALETTE[0],
+          color: safeZoneHex(draft.color) ?? PALETTE[0],
           opacity: 0.9,
           fillOpacity: 0.18,
           weight: 2,
@@ -541,7 +539,7 @@ function ZoneEditDialog({
               key={c}
               type="button"
               class={`sh-zone-swatch ${draft.color === c ? 'sh-zone-swatch--selected' : ''}`}
-              style={`background: ${c}`}
+              style={{ background: c }}
               aria-label={t('zones.use_colour', { colour: c })}
               aria-pressed={draft.color === c}
               onClick={() => onChange({ ...draft, color: c })}

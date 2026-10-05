@@ -260,4 +260,14 @@ describe('SpaceZonesAdmin', () => {
       expect(el.textContent).toBe(name)
     }
   })
+
+  it('never lets a hostile zone colour inject extra CSS into the list swatch', async () => {
+    mockApi.get.mockResolvedValue({ zones: [_zone({ color: 'red;position:fixed;inset:0;background-image:url(https://evil.example/b)' })] })
+    const { container, findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
+    await findByText('Office')
+    const sw = container.querySelector('.sh-zones-admin__swatch') as HTMLElement
+    expect(sw.style.position).toBe('')
+    expect(sw.style.backgroundImage).not.toContain('url')
+    expect(sw.getAttribute('style') ?? '').not.toContain('evil')
+  })
 })

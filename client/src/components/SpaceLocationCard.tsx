@@ -29,20 +29,9 @@ import { LocationMap, type LocationMarker } from './LocationMap'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { ZoneLegend } from './ZoneLegend'
+import { zoneColor } from '@/utils/zoneColor'
 import type { SpaceZone } from '@/types'
 import { isOne, t } from '@/i18n/i18n'
-
-const _ZONE_PALETTE = [
-  '#3b82f6', '#f97316', '#10b981', '#a855f7', '#ec4899',
-  '#facc15', '#14b8a6', '#ef4444', '#6366f1', '#84cc16',
-]
-function _zoneColor(zone: SpaceZone | undefined): string {
-  if (!zone) return _ZONE_PALETTE[0]
-  if (zone.color) return zone.color
-  let hash = 0
-  for (const ch of zone.id) hash = (hash * 31 + ch.charCodeAt(0)) | 0
-  return _ZONE_PALETTE[Math.abs(hash) % _ZONE_PALETTE.length]
-}
 
 function _stateDotClass(state: string | undefined): string {
   switch (state) {
@@ -338,7 +327,7 @@ export function SpaceLocationCard({
           )}
           {data.entries.map((p) => {
             const zone = zones.find((z) => z.id === p.zone_id)
-            const colour = _zoneColor(zone)
+            const colour = zoneColor(zone)
             return (
               <li key={p.user_id} class="sh-zone-only-list__row">
                 <span class="sh-zone-only-list__avatar">
@@ -351,7 +340,7 @@ export function SpaceLocationCard({
                 </div>
                 <span
                   class="sh-zone-only-list__chip"
-                  style={`--zone-colour: ${colour}`}
+                  style={{ '--zone-colour': colour }}
                   title={t('location.card.zone_title', { zone: p.zone_name ?? t('location.card.unknown') })}
                 >
                   <span

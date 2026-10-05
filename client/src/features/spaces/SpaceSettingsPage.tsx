@@ -32,6 +32,7 @@ import { SpaceAgeGating } from '@/features/child-protection/SpaceAgeGating'
 import { confirmDialog } from '@/components/confirm'
 import { useSpaceConfigWs } from '@/hooks/useSpaceConfigWs'
 import { t } from '@/i18n/i18n'
+import { cssUrl } from '@/utils/cssUrl'
 
 type SettingsTab = 'general' | 'about' | 'theme' | 'links' | 'age' | 'bots'
 
@@ -344,7 +345,7 @@ function AboutTab({
           {t('space.about.cover_hint')}
         </p>
         <div class="sh-about-cover-preview"
-             style={coverUrl ? { backgroundImage: `url(${coverUrl})` } : {}}>
+             style={coverUrl ? { backgroundImage: cssUrl(coverUrl) } : {}}>
           {!coverUrl && (
             <span class="sh-muted">{t('space.about.cover_empty')}</span>
           )}
@@ -372,7 +373,7 @@ function AboutTab({
         <div class="sh-row" style={{ gap: 'var(--sh-space-sm)', alignItems: 'center' }}>
           <span
             class="sh-about-icon-preview"
-            style={iconUrl ? { backgroundImage: `url(${iconUrl})` } : {}}
+            style={iconUrl ? { backgroundImage: cssUrl(iconUrl) } : {}}
           >
             {!iconUrl && (space.emoji || '🏠')}
           </span>

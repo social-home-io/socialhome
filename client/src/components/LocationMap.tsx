@@ -17,6 +17,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 import { escapeHtml } from '@/utils/html'
+import { zoneColor } from '@/utils/zoneColor'
 import { t } from '@/i18n/i18n'
 
 export interface LocationMarker {
@@ -68,20 +69,6 @@ export interface LocationMapProps {
   onPick?: (lat: number, lon: number) => void
   /** Accessible name for the map region. */
   ariaLabel?: string
-}
-
-/** Deterministic palette colour from a string id, used when a zone
- *  has no explicit ``color``. Chosen for legible contrast against the
- *  default OSM tile layer. */
-const _ZONE_PALETTE = [
-  '#3b82f6', '#f97316', '#10b981', '#a855f7', '#ec4899',
-  '#facc15', '#14b8a6', '#ef4444', '#6366f1', '#84cc16',
-]
-function _zoneColor(zone: LocationZoneOverlay): string {
-  if (zone.color) return zone.color
-  let hash = 0
-  for (const ch of zone.id) hash = (hash * 31 + ch.charCodeAt(0)) | 0
-  return _ZONE_PALETTE[Math.abs(hash) % _ZONE_PALETTE.length]
 }
 
 function _initials(name: string): string {
@@ -193,7 +180,7 @@ export function LocationMap({
     if (!zones) return
     const circles: L.Circle[] = []
     for (const z of zones) {
-      const colour = _zoneColor(z)
+      const colour = zoneColor(z)
       // Filled, slightly more opaque so the zone reads at a glance
       // without a permanent white label box on top of it. The name
       // appears in a hover tooltip and in the colour-coded legend
