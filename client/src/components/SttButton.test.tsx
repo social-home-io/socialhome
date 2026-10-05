@@ -31,8 +31,10 @@ class FakeWebSocket {
 }
 
 class FakeAudioContext {
+  static last: FakeAudioContext | null = null
   sampleRate = 48000
   audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) }
+  constructor() { FakeAudioContext.last = this }
   createMediaStreamSource = vi.fn().mockReturnValue({
     connect: vi.fn(), disconnect: vi.fn(),
   })
@@ -56,7 +58,7 @@ beforeEach(() => {
   ;(globalThis as any).WebSocket = FakeWebSocket
   ;(globalThis as any).AudioContext = FakeAudioContext
   ;(globalThis as any).AudioWorkletNode = FakeAudioWorkletNode
-  ;(globalThis as any).URL.createObjectURL = vi.fn().mockReturnValue('blob:worklet')
+  FakeAudioContext.last = null
   Object.defineProperty(navigator, 'mediaDevices', {
     configurable: true,
     value: { getUserMedia: vi.fn().mockResolvedValue(fakeStream) },
@@ -104,6 +106,18 @@ describe('SttButton', () => {
     expect(start).toMatchObject({
       type: 'start', language: 'de', sample_rate: 16000, channels: 1,
     })
+  })
+
+  it('loads the worklet from a same-origin asset, never a blob: URL (CSP script-src)', async () => {
+    const { SttButton } = await import('./SttButton')
+    const { getByRole } = render(<SttButton onText={() => {}} />)
+    fireEvent.mouseDown(getByRole('button'))
+    await waitFor(() => expect(FakeAudioContext.last).not.toBeNull())
+    const addModule = FakeAudioContext.last!.audioWorklet.addModule
+    await waitFor(() => expect(addModule).toHaveBeenCalledTimes(1))
+    const url = String(addModule.mock.calls[0][0])
+    expect(url).toMatch(/sttPcm16Worklet\.js$/)
+    expect(url.startsWith('blob:')).toBe(false)
   })
 
   it('forwards a final transcript to onText and returns to idle', async () => {

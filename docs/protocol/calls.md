@@ -83,7 +83,10 @@ never touches media. The steps below are for one leg.
 
 The security headers allow `camera=(self), microphone=(self)` in
 `Permissions-Policy`; with `()` the browser rejects `getUserMedia` before
-the user is even prompted. `X-Frame-Options` is `SAMEORIGIN`.
+the user is even prompted. The SPA shell's framing headers come from the
+platform adapter (`socialhome/csp.py`): with `Capability.INGRESS` they are
+`frame-ancestors 'self'` + `X-Frame-Options: SAMEORIGIN`; in every other
+mode `frame-ancestors 'none'` + `X-Frame-Options: DENY`.
 
 Under `haos` the SPA runs inside Home Assistant's add-on ingress panel
 (home-assistant/frontend `src/panels/app/ha-panel-app.ts`, checked at
@@ -102,8 +105,8 @@ So:
 HA's Webpage dashboard / `panel_iframe`
 (`src/panels/iframe/ha-panel-iframe.ts`) and the iframe card
 (`hui-iframe-card.ts`, default) set `allow="fullscreen"` only. Pointed at
-Social Home's direct URL they are cross-origin, and `SAMEORIGIN` keeps
-Social Home out of them entirely (it was already `DENY`). So the only
+Social Home's direct URL they are cross-origin, and the non-ingress
+`frame-ancestors 'none'` keeps Social Home out of them entirely. So the only
 frames that can render Social Home have all-same-origin ancestors, and
 the microphone is only denied there when a same-origin ancestor narrows
 the policy (e.g. `allow="microphone 'none'"`). For that case the SPA

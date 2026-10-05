@@ -31,12 +31,17 @@ is absent (standalone / HA-Core-direct mode), the base stays ``/``.
 
 from __future__ import annotations
 
+import html as html_lib
 import logging
 import re
 from pathlib import Path
 
+import aiofiles
+import aiofiles.os
 from aiohttp import web
 
+from ..app_keys import platform_adapter_key
+from ..csp import build_spa_csp, spa_frame_options
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -127,6 +132,10 @@ class SpaIndexView(_SpaFileView):
     the SPA's relative URLs (``./api/me``, ``./api/ws``, …) resolve
     against the ingress-prefixed document URL. When the header is
     absent the base stays ``/``.
+
+    Served with the SPA ``Content-Security-Policy``
+    (:func:`socialhome.csp.build_spa_csp`), shaped by the platform
+    adapter's capabilities — never by ``config.mode``.
     """
 
     _filename = "index.html"
@@ -134,18 +143,24 @@ class SpaIndexView(_SpaFileView):
     async def get(self) -> web.StreamResponse:
         static_dir = self.request.app[_static_dir_key]
         target = static_dir / self._filename
-        if not target.is_file():
+        if not await aiofiles.os.path.isfile(target):
             raise web.HTTPNotFound()
         ingress_path = self.request.headers.get("X-Ingress-Path", "").rstrip("/")
-        base_href = f"{ingress_path}/" if ingress_path else "/"
+        # Attribute-escape the header: it is request-controlled, and an
+        # unescaped ``"`` would let it break out of ``<base href>``.
+        base_href = html_lib.escape(f"{ingress_path}/" if ingress_path else "/")
         # ``index.html`` is small (a few KiB) — reading + substituting
         # in-memory per request is cheaper than maintaining two copies
         # on disk or a per-prefix cache that invalidates on every token
         # rotation. ``Cache-Control: no-cache`` was already required
         # (the bundle is content-hashed but the shell isn't).
-        html = target.read_text(encoding="utf-8")
+        async with aiofiles.open(target, encoding="utf-8") as fh:
+            html = await fh.read()
+        # Callable replacement: a template string would treat a backslash in the
+        # (request-controlled) header as a regex group reference.
+        base_tag = f'<base href="{base_href}">'
         substituted, count = _BASE_HREF_RE.subn(
-            f'<base href="{base_href}">',
+            lambda _m: base_tag,
             html,
             count=1,
         )
@@ -160,10 +175,21 @@ class SpaIndexView(_SpaFileView):
                 "ingress prefix injection skipped"
             )
             substituted = html
+        adapter = self.request.app.get(platform_adapter_key)
+        caps = adapter.capabilities if adapter is not None else frozenset()
         return web.Response(
             text=substituted,
             content_type="text/html",
-            headers={"Cache-Control": self._cache_control},
+            headers={
+                "Cache-Control": self._cache_control,
+                # See ``socialhome/csp.py`` — every external host and
+                # every relaxation is declared there, not here.
+                "Content-Security-Policy": build_spa_csp(caps),
+                # Overrides the global ``SAMEORIGIN`` default
+                # (``hardening.py``) so the legacy header agrees with
+                # ``frame-ancestors``.
+                "X-Frame-Options": spa_frame_options(caps),
+            },
         )
 
 

@@ -84,7 +84,7 @@ export function SttButton({ onText, language = 'en', disabled, className }: SttB
 
     const ctx = new AudioContext()
     try {
-      await ctx.audioWorklet.addModule(workletBlobUrl())
+      await ctx.audioWorklet.addModule(workletUrl())
     } catch {
       stream.getTracks().forEach(t => t.stop())
       await ctx.close()
@@ -226,49 +226,10 @@ export function SttButton({ onText, language = 'en', disabled, className }: SttB
 }
 
 // ── AudioWorklet processor ─────────────────────────────────────────────
-// Inlined as a Blob URL so we don't need a separate asset. The processor
-// downsamples Float32 mono frames to 16 kHz PCM16 LE and posts each
-// ~20 ms buffer back to the main thread, which forwards to the WS.
-
-const WORKLET_SOURCE = `
-class Pcm16Downsampler extends AudioWorkletProcessor {
-  constructor(opts) {
-    super();
-    const po = (opts && opts.processorOptions) || {};
-    this.sourceRate = po.sourceRate || sampleRate;
-    this.targetRate = po.targetRate || 16000;
-    this.ratio = this.sourceRate / this.targetRate;
-    this.buffer = [];
-    this.acc = 0;
-    this.chunkSize = Math.round(this.targetRate * 0.02); // 20ms frames
-  }
-  process(inputs) {
-    const input = inputs[0];
-    if (!input || !input[0]) return true;
-    const ch = input[0];
-    for (let i = 0; i < ch.length; i++) {
-      this.acc += 1;
-      if (this.acc >= this.ratio) {
-        this.acc -= this.ratio;
-        const s = Math.max(-1, Math.min(1, ch[i]));
-        this.buffer.push(s < 0 ? s * 0x8000 : s * 0x7fff);
-        if (this.buffer.length >= this.chunkSize) {
-          const out = new Int16Array(this.buffer);
-          this.buffer = [];
-          this.port.postMessage(out.buffer, [out.buffer]);
-        }
-      }
-    }
-    return true;
-  }
-}
-registerProcessor('stt-pcm16-downsampler', Pcm16Downsampler);
-`
-
-let _workletUrl: string | null = null
-function workletBlobUrl(): string {
-  if (_workletUrl) return _workletUrl
-  const blob = new Blob([WORKLET_SOURCE], { type: 'application/javascript' })
-  _workletUrl = URL.createObjectURL(blob)
-  return _workletUrl
+// ``sttPcm16Worklet.js`` — emitted by Vite as a same-origin asset (the
+// ``new URL(…, import.meta.url)`` pattern) so ``script-src 'self'``
+// covers it. Resolved against this module's URL, so it follows the
+// ingress prefix like every other bundle chunk.
+function workletUrl(): string {
+  return new URL('./sttPcm16Worklet.js', import.meta.url).href
 }

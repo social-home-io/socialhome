@@ -29,26 +29,15 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <title>Social Home</title>
   <!--
-    Pre-paint theme bootstrap. Runs synchronously before any module
-    bundle, so the `<html>` class matches the user's stored or
-    system preference on the very first paint — no light→dark flash
-    on reload. The matching effect in @/store/theme.ts takes over
-    once the SPA mounts.
+    Pre-paint theme bootstrap (public/assets/theme-boot.js). A classic,
+    synchronous script so the `<html>` class matches the stored or system
+    theme on the very first paint — no light→dark flash on reload. It is a
+    file, not inline: the Content-Security-Policy (socialhome/csp.py) is
+    `script-src 'self'` with no 'unsafe-inline', and
+    tests/routes/test_spa.py fails on any inline
+    <script>. Relative src so it resolves against <base href> (ingress).
   -->
-  <script>
-    (function () {
-      try {
-        var t = localStorage.getItem('sh_theme') || 'auto';
-        var dark = t === 'dark' ||
-          (t === 'auto' &&
-            window.matchMedia &&
-            window.matchMedia('(prefers-color-scheme: dark)').matches);
-        document.documentElement.classList.add(
-          dark ? 'sh-theme-dark' : 'sh-theme-light'
-        );
-      } catch (e) { /* sandboxed / no-storage — silently fall back */ }
-    })();
-  </script>
+  <script src="assets/theme-boot.js"></script>
 </head>
 <body>
   <div id="root"></div>

@@ -8,6 +8,7 @@ fresh ``pnpm --dir client run build``.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import MappingProxyType
 
@@ -16,7 +17,13 @@ from aiohttp import web
 
 from socialhome.app import create_app
 from socialhome.config import Config
+from socialhome.app_keys import platform_adapter_key
+from socialhome.csp import build_spa_csp
+from socialhome.platform.adapter import Capability
 from socialhome.routes import spa as spa_module
+
+#: Repo root — the inline-script guard reads the real SPA template.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
@@ -238,6 +245,180 @@ async def test_root_substitution_logs_warning_when_placeholder_missing(
     assert resp.status == 200
     assert "<title>no placeholder</title>" in body
     assert any("no <base href> placeholder" in r.message for r in caplog.records)
+
+
+async def test_ingress_path_is_attribute_escaped(spa_client):
+    """``X-Ingress-Path`` is request-controlled: a ``"`` must not break
+    out of ``<base href>`` and inject markup into the shell."""
+    resp = await spa_client.get(
+        "/",
+        headers={"X-Ingress-Path": '/x"><script>alert(1)</script>'},
+    )
+    body = await resp.text()
+    assert resp.status == 200
+    assert "<script>alert(1)</script>" not in body
+    assert '<base href="/x&quot;&gt;&lt;script&gt;' in body
+
+
+async def test_ingress_path_backslash_is_not_a_regex_group(spa_client):
+    """A backslash in the header used to reach ``re.subn`` as a template
+    (``\\1`` → group reference → 500). It is now literal text."""
+    resp = await spa_client.get("/", headers={"X-Ingress-Path": "/a\\1b"})
+    assert resp.status == 200
+    assert '<base href="/a\\1b/">' in await resp.text()
+
+
+# ── Content-Security-Policy ───────────────────────────────────────────────
+
+#: The HA Supervisor ingress handshake headers (see ``HaIngressStrategy``
+#: in ``socialhome/auth.py``) plus the prefix Supervisor stamps.
+_INGRESS_HEADERS = {
+    "X-Ingress-Path": "/api/hassio_ingress/tok123",
+    "X-Hass-Source": "core.ingress",
+    "X-Remote-User-Name": "owner",
+}
+
+
+def _csp_directives(header: str) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for part in header.split(";"):
+        name, *sources = part.split()
+        out[name] = sources
+    return out
+
+
+@pytest.fixture
+async def ingress_spa_client(aiohttp_client, tmp_dir, fake_spa, monkeypatch):
+    """The SPA mount behind an adapter advertising ``Capability.INGRESS``
+    (the ``haos`` shape), with a non-default ``map_tile_url``.
+
+    The capability is patched in *after* ``create_app`` so only the
+    per-request CSP lookup sees it — the ingress auth strategy (which
+    needs a real Supervisor) stays unwired."""
+    monkeypatch.setattr(spa_module, "DEFAULT_STATIC_DIR", fake_spa)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
+        map_tile_url="https://tiles.example.net/{z}/{x}/{y}.png",
+        platform_options=MappingProxyType(
+            {
+                "standalone": MappingProxyType(
+                    {"external_url": "https://test.example"},
+                ),
+            },
+        ),
+    )
+    app = create_app(cfg)
+    adapter = app[platform_adapter_key]
+    monkeypatch.setattr(
+        type(adapter),
+        "capabilities",
+        property(lambda _self: frozenset({Capability.INGRESS})),
+    )
+    return await aiohttp_client(app)
+
+
+@pytest.mark.parametrize("path", ["/", "/feed"], ids=["root", "deep"])
+async def test_standalone_shell_carries_csp(spa_client, path):
+    """The SPA shell — root and the deep-link catchall — carries the
+    enforced (not report-only) CSP, and refuses every framer."""
+    resp = await spa_client.get(path)
+    assert resp.status == 200
+    csp = resp.headers["Content-Security-Policy"]
+    assert csp == build_spa_csp(frozenset())
+    assert "Content-Security-Policy-Report-Only" not in resp.headers
+    d = _csp_directives(csp)
+    assert d["default-src"] == ["'self'"]
+    assert d["script-src"] == ["'self'"]
+    assert d["object-src"] == ["'none'"]
+    assert d["base-uri"] == ["'self'"]
+    assert d["form-action"] == ["'self'"]
+    assert d["frame-ancestors"] == ["'none'"]
+    assert resp.headers["X-Frame-Options"] == "DENY"
+
+
+@pytest.mark.parametrize("path", ["/", "/spaces/abc"], ids=["root", "deep"])
+async def test_ingress_shell_carries_csp_frameable_by_ha(ingress_spa_client, path):
+    """HA's add-on panel frames ``/api/hassio_ingress/<token>/`` on HA's
+    own origin, so the frame is same-origin with its parent:
+    ``frame-ancestors 'self'`` admits it and still refuses foreign
+    embedders. ``X-Frame-Options`` agrees."""
+    resp = await ingress_spa_client.get(path, headers=_INGRESS_HEADERS)
+    assert resp.status == 200
+    csp = resp.headers["Content-Security-Policy"]
+    assert csp == build_spa_csp(frozenset({Capability.INGRESS}))
+    d = _csp_directives(csp)
+    assert d["script-src"] == ["'self'"]
+    assert d["frame-ancestors"] == ["'self'"]
+    assert resp.headers["X-Frame-Options"] == "SAMEORIGIN"
+    # The ingress <base href> rewrite is a same-origin path, which
+    # ``base-uri 'self'`` permits.
+    assert '<base href="/api/hassio_ingress/tok123/">' in await resp.text()
+
+
+async def test_configured_tile_host_needs_no_csp_entry(ingress_spa_client):
+    """Tiles go through the backend proxy whatever ``map_tile_url`` is
+    configured, and the URL handed to Leaflet is relative — so
+    ``img-src 'self'`` covers it and no tile host joins the policy."""
+    resp = await ingress_spa_client.get("/", headers=_INGRESS_HEADERS)
+    csp = resp.headers["Content-Security-Policy"]
+    assert "tiles.example.net" not in csp
+    assert "'self'" in _csp_directives(csp)["img-src"]
+
+
+async def test_api_responses_do_not_carry_the_spa_csp(spa_client):
+    resp = await spa_client.get("/healthz")
+    assert "Content-Security-Policy" not in resp.headers
+
+
+# ── Inline-script guard ──────────────────────────────────────────────────
+
+_SCRIPT_TAG_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)
+
+
+def _inline_scripts(html: str) -> list[str]:
+    """Return the bodies of ``<script>`` tags without a ``src``.
+
+    The CSP is ``script-src 'self'`` with no hashes or nonces, so any
+    inline script would be blocked in the browser — fail here instead.
+    """
+    no_comments = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    return [
+        body
+        for attrs, body in _SCRIPT_TAG_RE.findall(no_comments)
+        if not re.search(r"\bsrc\s*=", attrs)
+    ]
+
+
+def test_inline_script_detector_catches_inline_and_ignores_src():
+    html = (
+        "<!-- <script>commented()</script> -->"
+        '<script src="assets/a.js"></script>'
+        "<script>boot()</script>"
+        '<script type="module">x()</script>'
+    )
+    assert _inline_scripts(html) == ["boot()", "x()"]
+
+
+def test_spa_template_has_no_inline_script():
+    """``client/index.html`` must not grow an inline ``<script>`` — move
+    it to a file under ``client/public/assets/`` (see
+    ``assets/theme-boot.js``)."""
+    html = (_REPO_ROOT / "client" / "index.html").read_text(encoding="utf-8")
+    assert _inline_scripts(html) == []
+    assert 'src="assets/theme-boot.js"' in html
+
+
+def test_built_spa_index_has_no_inline_script():
+    """Same guard over the built shell, when a build is present."""
+    built = spa_module.DEFAULT_STATIC_DIR / "index.html"
+    if not built.is_file():
+        pytest.skip("SPA not built")
+    assert _inline_scripts(built.read_text(encoding="utf-8")) == []
 
 
 # ── SPA bundle hash extraction ───────────────────────────────────────────

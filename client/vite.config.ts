@@ -13,6 +13,10 @@ export default defineConfig({
   build: {
     outDir:   '../socialhome/static',
     emptyOutDir: true,
+    // Never inline a script asset as a ``data:`` URL (the STT AudioWorklet
+    // is one): the SPA's CSP is ``script-src 'self'`` with no ``data:``
+    // (socialhome/csp.py). Other assets keep Vite's default limit.
+    assetsInlineLimit: (file) => (/\.[cm]?js$/.test(file) ? false : undefined),
   },
   server: {
     proxy: {

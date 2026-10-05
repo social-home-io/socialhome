@@ -992,6 +992,56 @@ user typed"):
 - no cookies, no `Authorization`, no proxy from the environment, a generic
   `User-Agent`.
 
+## Security headers and Content-Security-Policy
+
+The SPA's bearer token lives in `localStorage`, so a single injected script
+is an account takeover. DOMPurify and Preact's escaping are the first line;
+the Content-Security-Policy on the SPA shell is the second — even if markup
+lands in the DOM unsanitised, the browser refuses to run inline or foreign
+script.
+
+- **Where it is built:** `socialhome/csp.py`. `SPA_CSP_DIRECTIVES` is the
+  shared directive table; `build_spa_csp(adapter.capabilities)` adds
+  `frame-ancestors` and caches the result per capability shape.
+  `SpaIndexView` / `SpaCatchallView` (`routes/spa.py`) serve it, enforced
+  (not report-only), on every response that carries the shell.
+- **The policy:** `default-src 'self'`, `script-src 'self'` (no
+  `'unsafe-inline'`, no `'unsafe-eval'`, no hashes), `object-src 'none'`,
+  `base-uri 'self'`, `form-action 'self'`, `connect-src 'self'` (fetch +
+  same-host WebSocket), `worker-src 'self'` (push service worker),
+  `frame-src 'self'` (sandboxed app bundles, which carry their own stricter
+  CSP from `routes/app_bundle.py`), `media-src 'self' blob:`. Relaxations,
+  each for one reason: `img-src` adds `data:` (QR codes, Leaflet sprites),
+  `blob:` (local upload previews) and `https:` (external images in Pages /
+  event markdown); `style-src-attr 'unsafe-inline'` for the `style="…"`
+  attributes in Leaflet pin / popup HTML (`<style>` elements stay blocked);
+  `fonts.googleapis.com` / `fonts.gstatic.com` for the Google Fonts
+  stylesheet. Map tiles and link-preview images are proxied/stored locally,
+  so no tile host is ever needed, whatever `map_tile_url` says.
+- **Framing comes from the adapter, never `config.mode`:** with
+  `Capability.INGRESS` (`haos`) the shell is `frame-ancestors 'self'` +
+  `X-Frame-Options: SAMEORIGIN`, because HA's add-on panel frames
+  `/api/hassio_ingress/<token>/` on HA's own origin. Every other mode is
+  `frame-ancestors 'none'` + `X-Frame-Options: DENY`. Other responses keep
+  the global headers from `hardening.py` (`X-Frame-Options: SAMEORIGIN`,
+  `Permissions-Policy`, `nosniff`, `Referrer-Policy`).
+
+Rules:
+
+- **No inline scripts.** `client/index.html` loads the pre-paint theme
+  bootstrap from `public/assets/theme-boot.js`; the STT AudioWorklet is a
+  Vite-emitted file, not a Blob URL (and `vite.config.ts` never inlines a
+  script asset as `data:`). `tests/routes/test_spa.py` fails on any inline
+  `<script>` in the template or the built shell. Don't add `eval` /
+  `new Function` either.
+- **New external hosts go through the builder.** A new CDN, font host,
+  embed or API origin is a reviewed edit to `SPA_CSP_DIRECTIVES` with a
+  one-line reason in the `csp.py` docstring — never a header string in a
+  route, never a meta tag. Prefer proxying through the backend (like map
+  tiles) over adding a host.
+- **GFS pages are separate:** the GFS (`global_server/`) serves its own
+  public HTML and does not use this policy.
+
 ## Where things live
 
 | Concern | Path |
