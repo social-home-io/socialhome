@@ -1,12 +1,15 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, fireEvent, waitFor } from '@testing-library/preact'
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
 vi.mock('preact-iso', () => ({ useLocation: () => ({ route: vi.fn() }) }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
+vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
 
-import { buildMonthGrid } from './HighlightArchiveTab'
+import { api } from '@/api'
+import HighlightArchiveTab, { buildMonthGrid } from './HighlightArchiveTab'
 
 describe('buildMonthGrid', () => {
   // October 2026 opens on a Thursday and has 31 days.
@@ -39,5 +42,39 @@ describe('buildMonthGrid', () => {
     expect(g.cells.filter(c => c !== null).length).toBe(30)
     // Feb 2027 under Monday start: Mon 1 Feb, 28 days → pad to 35.
     expect(buildMonthGrid(2027, 1, 0).cells.length).toBe(35)
+  })
+})
+
+
+describe('HighlightArchiveTab day keys west of UTC', () => {
+  const prevTz = process.env.TZ
+  afterEach(() => {
+    process.env.TZ = prevTz
+    vi.useRealTimers()
+  })
+
+  it('labels the month and the selected day with the day key, not the day before', async () => {
+    // ``highlight_date`` is a UTC ``YYYY-MM-DD`` key. Read as UTC
+    // midnight in Los Angeles that instant is still the previous
+    // evening — the header must not show 3 May / April.
+    process.env.TZ = 'America/Los_Angeles'
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-05-15T12:00:00Z'))
+    vi.mocked(api.get).mockResolvedValue([{
+      highlight: {
+        id: 'h1', author_user_id: 'u1', highlight_date: '2026-05-04',
+        audience_kind: 'all_paired', audience: [],
+        created_at: '2026-05-04T08:00:00Z', expires_at: '2026-06-04T08:00:00Z',
+      },
+      frames: [],
+      unseen_count: 0,
+    }])
+    const { container, findByRole } = render(<HighlightArchiveTab />)
+    const day = await findByRole('button', { name: /May 4, 2026/ })
+    expect(container.querySelector('h2')!.textContent).toBe('May 2026')
+    fireEvent.click(day)
+    await waitFor(() => expect(
+      container.querySelector('.sh-highlight-archive-day-panel h3')!.textContent,
+    ).toBe('Monday, May 4, 2026'))
   })
 })

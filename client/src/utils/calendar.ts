@@ -147,6 +147,22 @@ function keyOrdinal(key: string): number {
   return Math.round(Date.UTC(y, m - 1, d) / 86_400_000)
 }
 
+/** Format a ``YYYY-MM-DD`` day key as that calendar date in the UI's
+ *  locale (``formatLocale()``), e.g. ``{ weekday: 'long', … }``.
+ *
+ *  A day key is a date, not an instant. The ordinal's midnight is read
+ *  back pinned to ``timeZone: 'UTC'`` so the rendered day is the key's
+ *  own day for every viewer — formatting it in the viewer's zone would
+ *  show the previous day (and, on the 1st, the previous month) west of
+ *  UTC. Any ``timeZone`` in ``options`` is overridden for that reason. */
+export function formatDayKey(
+  dayKey: string, options: Intl.DateTimeFormatOptions,
+): string {
+  return new Date(keyOrdinal(dayKey) * 86_400_000).toLocaleDateString(
+    formatLocale(), { ...options, timeZone: 'UTC' },
+  )
+}
+
 /** Inverse of :func:`keyOrdinal`. */
 function keyFromOrdinal(ordinal: number): string {
   const d = new Date(ordinal * 86_400_000)

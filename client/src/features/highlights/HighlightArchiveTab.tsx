@@ -23,6 +23,7 @@ import { Button } from '@/components/Button'
 import { CalendarSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
 import { resolveDisplayName } from '@/utils/avatar'
+import { formatDayKey } from '@/utils/calendar'
 import { currentWeekStart, weekdayOrder, type WeekStart } from '@/utils/week'
 import { ws } from '@/ws'
 import type { HighlightInboxItem } from '@/types'
@@ -67,9 +68,7 @@ function dowLabel(iso: number): string {
 
 /** A ``YYYY-MM-DD`` day key as a short date in the UI's locale. */
 function dayLabel(day: DayKey): string {
-  return new Date(day + 'T00:00:00Z').toLocaleDateString(formatLocale(), {
-    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
-  })
+  return formatDayKey(day, { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
 type GridCell = { date: DayKey; inMonth: boolean } | null
@@ -136,10 +135,10 @@ export default function HighlightArchiveTab() {
   const monthStart = startOfMonth(year, month)
   const { weekdayLabels, cells } = buildMonthGrid(year, month, currentWeekStart())
 
-  const monthLabel = monthStart.toLocaleDateString(formatLocale(), {
-    year:  'numeric',
-    month: 'long',
-  })
+  // Every date on this tab is a UTC ``YYYY-MM-DD`` key (``highlight_date``
+  // is stamped in UTC server-side) — label through ``formatDayKey`` so a
+  // viewer west of UTC doesn't see the 1st's midnight as last month.
+  const monthLabel = formatDayKey(ymd(monthStart), { year: 'numeric', month: 'long' })
 
   const goPrev = () => {
     setSelectedDay(null)
@@ -250,7 +249,7 @@ export default function HighlightArchiveTab() {
           aria-label={t('highlight.archive.panel_aria', { date: dayLabel(selectedDay) })}
         >
           <h3 style={{ margin: 0 }}>
-            {new Date(selectedDay + 'T00:00:00Z').toLocaleDateString(formatLocale(), {
+            {formatDayKey(selectedDay, {
               weekday: 'long', month: 'short', day: 'numeric', year: 'numeric',
             })}
           </h3>

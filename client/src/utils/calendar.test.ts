@@ -13,6 +13,7 @@ import {
   lastInclusiveMoment,
   monthRange,
   type DayEventEntry,
+  formatDayKey,
 } from './calendar'
 import type { CalendarEvent } from '@/types'
 
@@ -154,6 +155,30 @@ describe('calendar utils', () => {
     // Last day of April is the 30th.
     expect(new Date(end).getDate()).toBe(30)
     expect(new Date(end).getMonth()).toBe(3)
+  })
+})
+
+describe('formatDayKey', () => {
+  it.each(['America/Los_Angeles', 'UTC', 'Pacific/Kiritimati'])(
+    'renders the key\'s own day and month in %s',
+    (tz) => {
+      const prevTz = process.env.TZ
+      process.env.TZ = tz
+      try {
+        expect(formatDayKey('2026-05-01', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+        })).toBe('Friday, May 1, 2026')
+        expect(formatDayKey('2026-05-01', { month: 'long', year: 'numeric' }))
+          .toBe('May 2026')
+      } finally {
+        process.env.TZ = prevTz
+      }
+    },
+  )
+
+  it('ignores a caller-supplied timeZone', () => {
+    expect(formatDayKey('2026-01-01', { year: 'numeric', timeZone: 'Pacific/Pago_Pago' }))
+      .toBe('2026')
   })
 })
 
