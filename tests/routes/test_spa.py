@@ -301,14 +301,6 @@ async def test_ingress_ignores_invalid_ingress_path(ingress_spa_client, header):
     assert "evil.example" not in body
 
 
-def test_ingress_path_regex_rejects_trailing_newline():
-    """aiohttp refuses a header with a control character on the wire;
-    ``fullmatch`` keeps the regex from trusting one regardless (``$``
-    alone would match before a trailing ``\\n``)."""
-    assert spa_module._INGRESS_PATH_RE.fullmatch("/api/hassio_ingress/abc\n") is None
-    assert spa_module._INGRESS_PATH_RE.fullmatch("/api/hassio_ingress/abc/")
-
-
 @pytest.mark.parametrize("path", ["/", "/feed"], ids=["root", "deep"])
 async def test_shell_varies_on_ingress_path(spa_client, ingress_spa_client, path):
     """The shell body depends on ``X-Ingress-Path``, so a shared cache

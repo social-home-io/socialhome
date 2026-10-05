@@ -44,6 +44,7 @@ from aiohttp import web
 from ..app_keys import app_service_key, config_key, media_signer_key
 from ..security import error_response
 from .base import BaseView
+from .ingress_path import trusted_ingress_path
 
 log = logging.getLogger(__name__)
 
@@ -237,13 +238,14 @@ class AppBundleView(BaseView):
         if from_query:
             # Under HA Supervisor Ingress the browser sees all URLs
             # prefixed with the ingress path (e.g.
-            # ``/api/hassio_ingress/TOKEN/api/apps/…``).  The Supervisor
-            # injects ``X-Ingress-Path`` on every request so the app can
-            # reconstruct the full prefix.  Without this adjustment the
-            # cookie's ``Path`` would not match the sub-resource URLs the
-            # browser actually sees, causing multi-file bundle loads to
-            # fail in haos mode.
-            ingress_prefix = self.request.headers.get("X-Ingress-Path", "").rstrip("/")
+            # ``/api/hassio_ingress/TOKEN/api/apps/…``).  Without the
+            # prefix the cookie's ``Path`` would not match the
+            # sub-resource URLs the browser actually sees, breaking
+            # multi-file bundle loads in haos mode. The header is trusted
+            # only under ``Capability.INGRESS`` and only in the
+            # ``/api/hassio_ingress/<token>`` shape — elsewhere any client
+            # could forge it (see ``routes/ingress_path.py``).
+            ingress_prefix = trusted_ingress_path(self.request)
             cookie_path = f"{ingress_prefix}{prefix}" if ingress_prefix else prefix
             response.set_cookie(
                 f"{BUNDLE_COOKIE_PREFIX}{app_id}",

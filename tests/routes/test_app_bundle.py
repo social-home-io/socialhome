@@ -22,8 +22,11 @@ import urllib.parse
 
 from unittest.mock import AsyncMock
 
-from socialhome.app_keys import media_signer_key
+import pytest
+
+from socialhome.app_keys import config_key, media_signer_key, platform_adapter_key
 from socialhome.domain.apps import AppAgeRestrictedError, AppManifest, InstalledApp
+from socialhome.platform.adapter import Capability
 from socialhome.repositories.app_repo import SqliteAppRepo
 from socialhome.routes.app_bundle import BUNDLE_COOKIE_PREFIX, BUNDLE_TTL_SECONDS
 from socialhome.services.app_service import AppService
@@ -167,7 +170,6 @@ async def test_bundle_entry_served_with_valid_sig(client):
     - X-Frame-Options: SAMEORIGIN (set explicitly on the bundle)
     - Set-Cookie with sh_app_bundle_{id} is present
     """
-    from socialhome.app_keys import config_key
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
@@ -202,7 +204,6 @@ async def test_bundle_entry_served_with_valid_sig(client):
 
 async def test_bundle_rejects_without_sig_or_cookie(client):
     """GET a bundle file with no query sig and no cookie → 403 FORBIDDEN."""
-    from socialhome.app_keys import config_key
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
@@ -221,7 +222,6 @@ async def test_bundle_subresource_via_cookie(client):
     cookie from the entry response is automatically sent on subsequent requests
     to the same path prefix.
     """
-    from socialhome.app_keys import config_key
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
@@ -260,7 +260,6 @@ async def test_bundle_path_traversal_blocked(client):
        the handler; our ``pathlib.Path.resolve() + is_relative_to()`` guard blocks
        it with 403 FORBIDDEN before any file is opened.
     """
-    from socialhome.app_keys import config_key
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
@@ -295,7 +294,6 @@ async def test_bundle_path_traversal_blocked(client):
 
 async def test_bundle_expired_sig_rejected(client):
     """A sig with a TTL in the past is rejected with 403."""
-    from socialhome.app_keys import config_key
     import time
 
     config_obj = client.app[config_key]
@@ -325,8 +323,6 @@ async def test_bundle_403_when_app_disabled_even_with_sig(client):
     sig TTL expires.  This validates that AppBundleView re-checks ``enabled``
     after the auth check rather than trusting the signed URL alone.
     """
-    from socialhome.app_keys import config_key
-    from socialhome.repositories.app_repo import SqliteAppRepo
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
@@ -356,7 +352,6 @@ async def test_bundle_cross_app_sig_rejected(client):
     signature for one app must never authorize access to a different app's
     files.
     """
-    from socialhome.app_keys import config_key
 
     _APP_B_ID = "com.example.checkers"
 
@@ -388,7 +383,6 @@ async def test_bundle_absolute_path_tail_blocked(client):
     %2e%2e sequences) to confirm the pathlib.resolve() + is_relative_to()
     guard catches them all.
     """
-    from socialhome.app_keys import config_key
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
@@ -418,72 +412,79 @@ async def test_bundle_absolute_path_tail_blocked(client):
 # ── Ingress-prefix cookie path tests ─────────────────────────────────────
 
 
-async def test_bundle_cookie_path_prefixed_under_haos_ingress(client):
-    """When X-Ingress-Path is present the Set-Cookie Path includes the prefix.
+_INGRESS_PREFIX = "/api/hassio_ingress/TESTTOKEN123"
 
-    Under HA Supervisor Ingress the browser sees all bundle sub-resource
-    URLs prefixed with the ingress path (e.g.
-    ``/api/hassio_ingress/TOKEN/api/apps/…``). Without the prefix on the
-    cookie's Path attribute the browser would not send the cookie on those
-    sub-resource requests, breaking multi-file bundles in haos mode.
-    """
-    from socialhome.app_keys import config_key
 
+def _advertise_ingress(client, monkeypatch) -> None:
+    """Make the running adapter advertise ``Capability.INGRESS`` (haos)."""
+    adapter = client.app[platform_adapter_key]
+    monkeypatch.setattr(
+        type(adapter),
+        "capabilities",
+        property(lambda _self: frozenset({Capability.INGRESS})),
+    )
+
+
+async def _bundle_set_cookie(client, headers: dict[str, str] | None = None) -> str:
+    """Request the bundle entry with a fresh sig; return its Set-Cookie."""
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
     await _seed_app(client._db)
-
-    # Mint a valid sig directly so we control the headers on the bundle request.
     signer = client.app[media_signer_key]
-    prefix = f"/api/apps/{_APP_ID}/bundle/"
-    signed = signer.sign(prefix, ttl=BUNDLE_TTL_SECONDS)
+    signed = signer.sign(_BUNDLE_PREFIX, ttl=BUNDLE_TTL_SECONDS)
     exp, sig = _parse_sig_from_url(signed)
-
-    ingress_token = "TESTTOKEN123"
-    ingress_prefix = f"/api/hassio_ingress/{ingress_token}"
-
     r = await client.get(
-        f"{prefix}index.html?exp={exp}&sig={sig}",
-        headers={"X-Ingress-Path": ingress_prefix},
+        f"{_BUNDLE_PREFIX}index.html?exp={exp}&sig={sig}",
+        headers=headers or {},
     )
     assert r.status == 200
+    return r.headers.get("Set-Cookie", "")
 
-    set_cookie = r.headers.get("Set-Cookie", "")
-    # The Path directive must start with the ingress prefix so the
-    # browser sends the cookie on sub-resource requests.
-    assert f"Path={ingress_prefix}{prefix}" in set_cookie, (
-        f"Expected cookie Path to include ingress prefix; got: {set_cookie!r}"
+
+_BUNDLE_PREFIX = f"/api/apps/{_APP_ID}/bundle/"
+
+
+async def test_bundle_cookie_path_prefixed_under_ingress(client, monkeypatch):
+    """Behind ``Capability.INGRESS`` a well-formed X-Ingress-Path prefixes
+    the cookie Path, so the browser sends the cookie on the ingress-prefixed
+    sub-resource URLs (multi-file bundles under haos)."""
+    _advertise_ingress(client, monkeypatch)
+    set_cookie = await _bundle_set_cookie(
+        client, headers={"X-Ingress-Path": _INGRESS_PREFIX}
     )
+    assert f"Path={_INGRESS_PREFIX}{_BUNDLE_PREFIX}" in set_cookie, set_cookie
+
+
+async def test_bundle_cookie_path_standalone_ignores_ingress_header(client):
+    """Without ``Capability.INGRESS`` any client can forge X-Ingress-Path —
+    the cookie Path stays the bare bundle prefix."""
+    set_cookie = await _bundle_set_cookie(
+        client, headers={"X-Ingress-Path": _INGRESS_PREFIX}
+    )
+    assert f"Path={_BUNDLE_PREFIX}" in set_cookie, set_cookie
+    assert "hassio_ingress" not in set_cookie
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["/evil", "/api/hassio_ingress/a;b", "/api/hassio_ingress/a/../../x", "/x/../y"],
+)
+async def test_bundle_cookie_path_ingress_ignores_invalid_header(
+    client, monkeypatch, header
+):
+    """Under ingress a header not shaped like ``/api/hassio_ingress/<token>``
+    is ignored — it can't inject cookie attributes or widen the Path."""
+    _advertise_ingress(client, monkeypatch)
+    set_cookie = await _bundle_set_cookie(client, headers={"X-Ingress-Path": header})
+    assert f"Path={_BUNDLE_PREFIX}" in set_cookie, set_cookie
+    assert "evil" not in set_cookie
+    assert "hassio_ingress" not in set_cookie
 
 
 async def test_bundle_cookie_path_unprefixed_without_ingress_header(client):
-    """Without X-Ingress-Path the cookie Path is the bare bundle prefix.
-
-    Standalone and ha modes don't receive the ingress header, so the
-    cookie must use the unprefixed ``/api/apps/{id}/bundle/`` path as
-    before.
-    """
-    from socialhome.app_keys import config_key
-
-    config_obj = client.app[config_key]
-    _write_bundle(config_obj.apps_path)
-    await _seed_app(client._db)
-
-    signer = client.app[media_signer_key]
-    prefix = f"/api/apps/{_APP_ID}/bundle/"
-    signed = signer.sign(prefix, ttl=BUNDLE_TTL_SECONDS)
-    exp, sig = _parse_sig_from_url(signed)
-
-    # No X-Ingress-Path header.
-    r = await client.get(f"{prefix}index.html?exp={exp}&sig={sig}")
-    assert r.status == 200
-
-    set_cookie = r.headers.get("Set-Cookie", "")
-    # Path must be the bare prefix — no ingress segment prepended.
-    assert f"Path={prefix}" in set_cookie, (
-        f"Expected unprefixed cookie Path; got: {set_cookie!r}"
-    )
-    # And must NOT accidentally include a stale ingress prefix.
+    """Without X-Ingress-Path the cookie Path is the bare bundle prefix."""
+    set_cookie = await _bundle_set_cookie(client)
+    assert f"Path={_BUNDLE_PREFIX}" in set_cookie, set_cookie
     assert "hassio_ingress" not in set_cookie
 
 
@@ -495,8 +496,6 @@ async def test_bundle_tampered_bundle_path_returns_403(client):
     must detect that the resolved ``base`` directory escapes ``apps_root``
     and return 403 before attempting any file I/O.
     """
-    from socialhome.app_keys import config_key
-    from socialhome.repositories.app_repo import SqliteAppRepo
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
@@ -544,7 +543,6 @@ async def test_runtime_403_for_age_restricted_minor(client, monkeypatch):
     declared_age < app.min_age.  BaseView._iter maps it to 403 FORBIDDEN.
     A blocked minor must never receive the signed entry URL.
     """
-    from socialhome.app_keys import config_key
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
@@ -575,7 +573,6 @@ async def test_runtime_200_for_unprotected_user_with_age_gate(client, monkeypatc
     When assert_age_allowed does NOT raise (unprotected user), the runtime
     endpoint must proceed normally and return the signed entry URL.
     """
-    from socialhome.app_keys import config_key
 
     config_obj = client.app[config_key]
     _write_bundle(config_obj.apps_path)
