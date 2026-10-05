@@ -52,6 +52,14 @@ MESSAGE_TYPES: frozenset[str] = frozenset(
 )
 
 
+class InvalidMediaRefError(ValueError):
+    """A DM ``media_url`` that is not a local upload (422
+    ``INVALID_MEDIA_URL``). Only ``api/media/<name>`` — the shape
+    ``POST /api/media/upload`` returns — is stored: anything else would
+    render as a link / ``window.open`` target for every member of the
+    chat. The message names the rule, never the submitted value."""
+
+
 @dataclass(slots=True, frozen=True)
 class Conversation:
     id: str

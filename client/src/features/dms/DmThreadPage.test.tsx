@@ -1115,6 +1115,39 @@ describe('DmThreadPage — location messages', () => {
     expect(fine?.getAttribute('href')).toBe('api/media/f1.pdf')
   })
 
+  it('"Open in new tab" is hidden for a javascript: media_url and never calls window.open with it', async () => {
+    const fileRow = (id: string, media_url: string, file_name: string) => ({
+      ...locRow(''), id, type: 'file', media_url, file_name,
+      mime_type: 'application/pdf', file_size_bytes: 10,
+    })
+    wireApiMock({
+      conversations: [conv],
+      messages: [
+        fileRow('msg-js', 'javascript:alert(document.domain)', 'evil.pdf'),
+        fileRow('msg-ok', 'api/media/f1.pdf', 'fine.pdf'),
+      ],
+    })
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+    const { render, fireEvent } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { findByText, queryByRole, findByRole } = render(<DmThreadPage />)
+    const evilBubble = (await findByText('evil.pdf', {}, { timeout: RENDER_WAIT }))
+      .closest('.sh-message') as HTMLElement
+    fireEvent.click(evilBubble.querySelector('.sh-message-react-btn') as HTMLElement)
+    await findByRole('dialog')
+    expect(queryByRole('button', { name: /Open in new tab/ })).toBeNull()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    // The local file still offers the action, and opens its own URL.
+    const fineBubble = (await findByText('fine.pdf')).closest('.sh-message') as HTMLElement
+    fireEvent.click(fineBubble.querySelector('.sh-message-react-btn') as HTMLElement)
+    fireEvent.click(await findByRole('button', { name: /Open in new tab/ }))
+    expect(openSpy).toHaveBeenCalledWith('api/media/f1.pdf', '_blank', 'noopener,noreferrer')
+    expect(openSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('javascript:'), expect.anything(), expect.anything(),
+    )
+    openSpy.mockRestore()
+  })
+
   it('shares a location picked on the map from the attach menu', async () => {
     wireApiMock({ conversations: [conv], messages: [] })
     apiPost.mockResolvedValue({ id: 'srv-loc' })

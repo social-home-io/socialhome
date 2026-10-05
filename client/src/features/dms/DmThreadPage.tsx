@@ -2711,6 +2711,9 @@ export default function DmThreadPage() {
       {contextSheetFor.value && (() => {
         const target = contextSheetFor.value!
         const isMine = target.sender_user_id === myUserId
+        // Same gate as the file chip: a peer-supplied ``javascript:`` URL
+        // must never reach ``window.open`` — the action is hidden instead.
+        const openUrl = safeHref(target.media_url)
         const actions = [
           {
             label: t('dms.reply.action'),
@@ -2731,13 +2734,11 @@ export default function DmThreadPage() {
                 onClick: () => { editing.value = { id: target.id, draft: target.content } },
               }]
             : []),
-          ...(target.media_url
+          ...(openUrl !== undefined
             ? [{
                 label: t('dms.open_new_tab'),
                 glyph: '↗',
-                onClick: () => {
-                  window.open(target.media_url ?? '', '_blank', 'noopener,noreferrer')
-                },
+                onClick: () => { window.open(openUrl, '_blank', 'noopener,noreferrer') },
               }]
             : []),
         ]

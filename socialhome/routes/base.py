@@ -24,6 +24,7 @@ from aiohttp import web
 
 from ..app_keys import preferences_service_key, space_repo_key
 from ..auth import current_user
+from ..domain.conversation import InvalidMediaRefError
 from ..domain.child_protection import AccountProtectedError
 from ..domain.errors import CodedError
 from ..domain.preferences import FeatureDisabledError
@@ -530,6 +531,10 @@ class BaseView(web.View):
             # Subclasses ValueError — must precede it. The message names
             # the rule (never the URL), so the links editor can show it.
             return error_response(422, "INVALID_LINK", str(exc))
+        except InvalidMediaRefError as exc:
+            # Subclasses ValueError — must precede it. The message names
+            # the rule (never the submitted URL).
+            return error_response(422, "INVALID_MEDIA_URL", str(exc))
         except ThemeValidationError as exc:
             # Subclasses ValueError — must precede it. The message names
             # the field + the allowed values (never the submitted value),

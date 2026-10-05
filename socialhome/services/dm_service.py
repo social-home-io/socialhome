@@ -34,6 +34,7 @@ from ..domain.conversation import (
     ConversationMessage,
     CONVERSATION_NOTIF_LEVELS,
     ConversationType,
+    InvalidMediaRefError,
     MESSAGE_TYPES,
     RemoteConversationMember,
     mute_until_for,
@@ -55,6 +56,7 @@ from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .dm_group_service import DmGroupService, clean_group_name
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
+from .inbound_media_store import local_media_ref
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
@@ -695,6 +697,17 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             raise DmTooLongError(MAX_DM_LENGTH)
         if is_media and not media_url:
             raise ValueError(f"{type!r} messages require ``media_url``")
+        if media_url:
+            # Only a local upload is ever stored: the SPA renders this as
+            # a link / "Open in new tab" target for every member, so a
+            # ``javascript:`` or remote URL would be stored XSS / an IP
+            # leak. Normalised to ``api/media/<name>``.
+            ref = local_media_ref(media_url)
+            if ref is None:
+                raise InvalidMediaRefError(
+                    "media_url must be a file uploaded via /api/media/upload"
+                )
+            media_url = ref
         if type == "location":
             # Structured pin — validated and rounded (4-dp coords, coarse
             # accuracy bucket) here, before it is stored, published on the
