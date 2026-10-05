@@ -992,6 +992,103 @@ user typed"):
 - no cookies, no `Authorization`, no proxy from the environment, a generic
   `User-Agent`.
 
+## Security headers and Content-Security-Policy
+
+The SPA's bearer token lives in `localStorage`, so a single injected script
+is an account takeover. DOMPurify and Preact's escaping are the first line;
+the Content-Security-Policy on the SPA shell is the second — even if markup
+lands in the DOM unsanitised, the browser refuses to run inline or foreign
+script.
+
+- **Where it is built:** `socialhome/csp.py`. `SPA_CSP_DIRECTIVES` is the
+  directive table; `build_spa_csp()` renders it once (cached) — the policy
+  is the same in every platform mode.
+  `SpaIndexView` / `SpaCatchallView` (`routes/spa.py`) serve it, enforced
+  (not report-only), on every response that carries the shell.
+- **The policy:** `default-src 'self'`, `script-src 'self'` (no
+  `'unsafe-inline'`, no `'unsafe-eval'`, no hashes), `object-src 'none'`,
+  `base-uri 'self'`, `form-action 'self'`, `connect-src 'self'` (fetch +
+  same-host WebSocket), `worker-src 'self'` (push service worker),
+  `frame-src 'self'` (sandboxed app bundles, which carry their own stricter
+  CSP from `routes/app_bundle.py`), `media-src 'self' blob:`. Relaxations,
+  each for one reason: `img-src` adds `data:` (QR codes, Leaflet sprites),
+  `blob:` (local upload previews) and `https:` (external images in Pages /
+  event markdown); `style-src-attr 'unsafe-inline'` for the `style="…"`
+  attributes in Leaflet pin / popup HTML (`<style>` elements stay blocked);
+  `fonts.googleapis.com` / `fonts.gstatic.com` for the Google Fonts
+  stylesheet. Map tiles and link-preview images are proxied/stored locally,
+  so no tile host is ever needed, whatever `map_tile_url` says.
+- **Same-origin framing in every mode:** the shell is
+  `frame-ancestors 'self'`, and the global `X-Frame-Options: SAMEORIGIN`
+  from `hardening.py` agrees with it (the SPA sets no override). HA's
+  add-on panel frames `/api/hassio_ingress/<token>/` on HA's own origin
+  (`haos`), and an `ha` install may sit behind a same-origin path-prefix
+  proxy framed by an HA `panel_iframe`; a same-origin framer gives an
+  attacker nothing, and every other origin is refused. All responses keep
+  the global headers from `hardening.py` (`X-Frame-Options: SAMEORIGIN`,
+  `Permissions-Policy`, `nosniff`, `Referrer-Policy`). Those go on in an
+  `on_response_prepare` hook (`install_security_headers`), not a
+  middleware, so streamed responses that `prepare()` themselves
+  (`/api/media/*`, app bundles) carry them too; a header a handler sets
+  explicitly wins. The GFS app (`global_server/server.py`) installs the
+  same hook, so its JSON APIs, public pages and picture proxy send
+  `nosniff` and friends too. The GFS public pages (landing, space,
+  invite, highlight / moment viewers) carry **no** CSP: they are
+  server-rendered with inline `<style>` and an inline copy-to-clipboard
+  `<script>`, and the SPA policy does not fit them; the GFS picture
+  proxy keeps its own `MEDIA_CSP`.
+- **`<base href>` from `X-Ingress-Path` only behind ingress:** the shell's
+  `<base href>` is rewritten from `X-Ingress-Path` only when the adapter
+  advertises `Capability.INGRESS` (`haos`, where Supervisor sets the
+  header), and only when the value is HA Core's exact shape
+  `/api/hassio_ingress/<token>` (`^/api/hassio_ingress/[A-Za-z0-9_-]+/?$`;
+  Supervisor mints the token with `secrets.token_urlsafe()`). Anything
+  else — every standalone / `ha` request, `//evil`, `javascript:`, other
+  paths — leaves the base at `/`. The shell carries
+  `Vary: X-Ingress-Path` so a shared cache never serves one prefix's
+  shell for another.
+- **Stored media is sandboxed:** a stored `.svg` / `.html` opened directly
+  would otherwise run as a document on our origin.
+  `csp.media_response_headers()` shapes every stored-file response
+  (`/api/media/{filename}`, which serves feed / DM / gallery / link-preview
+  files; the GFS picture proxy `/api/gfs/{gfs_id}/moments/users/{user_id}/picture`;
+  the GFS's own `/gfs/moments/users/{user_id}/picture`). Only
+  `image/jpeg|png|webp|gif|avif`, `application/pdf`, `text/plain`,
+  `text/csv` and the audio / video the server writes itself
+  (`PLAYABLE_MEDIA_TYPES`: `video/webm` from the transcoder, voice notes
+  as `audio/ogg` / `.webm` / `audio/mp4` (`.m4a`), and `audio/webm`) are
+  served inline. Anything else (SVG, HTML, XML, JS, `.mp3` / `.mov` /
+  playlists stored through the file passthrough, unknown) becomes
+  `Content-Type: application/octet-stream` +
+  `Content-Disposition: attachment`, so it downloads. Every response
+  carries `default-src 'none'; img-src 'self' data:; media-src 'self';
+  style-src 'unsafe-inline'; form-action 'none'; sandbox` (`MEDIA_CSP`;
+  `form-action` is spelled out because it does not fall back to
+  `default-src`). The exception is `PLAYABLE_MEDIA_TYPES`, which drop
+  `sandbox` (`PLAYABLE_MEDIA_CSP`):
+  Chromium's sandboxed (opaque-origin) media document re-fetches its own
+  `src` cross-origin and fails CORS, so the file would not play. A media
+  document runs no page script, and `default-src 'none'` still refuses
+  any. PDFs preview under `sandbox` in Chromium's PDF viewer. Profile /
+  space pictures (always re-encoded `image/webp`) carry `MEDIA_CSP` as
+  well. App bundles (`routes/app_bundle.py`) keep their own policy.
+
+Rules:
+
+- **No inline scripts.** `client/index.html` loads the pre-paint theme
+  bootstrap from `public/assets/theme-boot.js`; the STT AudioWorklet is a
+  Vite-emitted file, not a Blob URL (and `vite.config.ts` never inlines a
+  script asset as `data:`). `tests/routes/test_spa.py` fails on any inline
+  `<script>` in the template or the built shell. Don't add `eval` /
+  `new Function` either.
+- **New external hosts go through the builder.** A new CDN, font host,
+  embed or API origin is a reviewed edit to `SPA_CSP_DIRECTIVES` with a
+  one-line reason in the `csp.py` docstring — never a header string in a
+  route, never a meta tag. Prefer proxying through the backend (like map
+  tiles) over adding a host.
+- **GFS pages are separate:** the GFS (`global_server/`) serves its own
+  public HTML and does not use this policy.
+
 ## Where things live
 
 | Concern | Path |

@@ -4,7 +4,12 @@ import pathlib
 
 import pytest
 
-from socialhome.app_keys import config_key, media_signer_key
+from socialhome.app_keys import (
+    config_key,
+    media_signer_key,
+    profile_picture_repo_key,
+)
+from socialhome.csp import MEDIA_CSP, PLAYABLE_MEDIA_CSP
 
 from .conftest import _auth
 
@@ -350,3 +355,129 @@ async def test_signed_url_for_user_picture(client):
     r = await client.get(signed)
     # 404 (no picture set) or 200 (rare) both prove auth passed.
     assert r.status != 401
+
+
+# ── Sandboxed media responses ────────────────────────────────────────────
+
+_SVG_WITH_SCRIPT = (
+    b'<svg xmlns="http://www.w3.org/2000/svg">'
+    b"<script>localStorage.getItem('sh_token')</script></svg>"
+)
+
+
+def _store(client, name: str, data: bytes) -> str:
+    media_dir = pathlib.Path(client.app[config_key].media_path)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    (media_dir / name).write_bytes(data)
+    return f"/api/media/{name}"
+
+
+async def test_media_response_carries_sandbox_csp(client, media_file):
+    r = await client.get(media_file, headers=_auth(client._tok))
+    assert r.status == 200
+    assert r.headers["Content-Security-Policy"] == MEDIA_CSP
+    assert "sandbox" in r.headers["Content-Security-Policy"]
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+
+
+async def test_jpeg_still_served_inline_as_image(client):
+    url = _store(client, "photo.jpg", b"\xff\xd8\xff\xe0fakejpeg")
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.status == 200
+    assert r.headers["Content-Type"] == "image/jpeg"
+    assert r.headers["Content-Disposition"] == 'inline; filename="photo.jpg"'
+    assert r.headers["Content-Security-Policy"] == MEDIA_CSP
+
+
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        ("x.svg", _SVG_WITH_SCRIPT),
+        ("x.html", b"<script>alert(document.domain)</script>"),
+        ("x.xml", b"<?xml version='1.0'?><a/>"),
+        ("x.js", b"alert(1)"),
+        ("x.unknownext", b"??"),
+    ],
+)
+async def test_script_capable_files_download_as_octet_stream(client, name, data):
+    """A stored ``.svg`` / ``.html`` / … opened directly must never
+    render on the app origin (the bearer token is in localStorage)."""
+    url = _store(client, name, data)
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.status == 200
+    assert r.headers["Content-Type"] == "application/octet-stream"
+    assert r.headers["Content-Disposition"] == f'attachment; filename="{name}"'
+    assert r.headers["Content-Security-Policy"] == MEDIA_CSP
+    assert await r.read() == data
+
+
+async def test_video_is_inline_without_sandbox_so_it_plays(client):
+    url = _store(client, "clip.webm", b"\x1a\x45\xdf\xa3")
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.headers["Content-Type"] == "video/webm"
+    assert r.headers["Content-Disposition"].startswith("inline;")
+    assert r.headers["Content-Security-Policy"] == PLAYABLE_MEDIA_CSP
+
+
+@pytest.mark.parametrize(
+    ("name", "data", "mime"),
+    [
+        # Voice notes — ``AudioProcessor`` keeps the container extension.
+        ("0a1b.ogg", b"OggS\x00\x02", "audio/ogg"),  # Firefox
+        ("0a1c.webm", b"\x1a\x45\xdf\xa3", "video/webm"),  # Chromium
+        ("0a1d.m4a", b"\x00\x00\x00\x20ftypM4A ", "audio/mp4"),  # Safari
+        # Video post — ``MediaTranscodeService`` writes ``<stem>.webm``.
+        ("0b2c.webm", b"\x1a\x45\xdf\xa3", "video/webm"),
+        # DM video / voice note received over federation —
+        # ``<message_id><ext>`` from ``_mime_to_ext``.
+        ("msg-123.webm", b"\x1a\x45\xdf\xa3", "video/webm"),
+        ("msg-124.ogg", b"OggS\x00\x02", "audio/ogg"),
+        ("msg-125.m4a", b"\x00\x00\x00\x20ftypM4A ", "audio/mp4"),
+    ],
+)
+async def test_server_written_audio_and_video_play_inline(client, name, data, mime):
+    url = _store(client, name, data)
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.status == 200
+    assert r.headers["Content-Type"] == mime
+    assert r.headers["Content-Disposition"] == f'inline; filename="{name}"'
+    assert r.headers["Content-Security-Policy"] == PLAYABLE_MEDIA_CSP
+    assert "form-action 'none'" in r.headers["Content-Security-Policy"]
+    assert await r.read() == data
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["song.mp3", "clip.mov", "clip.mp4", "list.m3u8", "list.m3u", "a.flac"],
+)
+async def test_foreign_audio_and_video_download_sandboxed(client, name):
+    """The file passthrough can store any extension; only the types
+    the server itself writes play unsandboxed."""
+    url = _store(client, name, b"\x00\x01")
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.status == 200
+    assert r.headers["Content-Type"] == "application/octet-stream"
+    assert r.headers["Content-Disposition"] == f'attachment; filename="{name}"'
+    assert r.headers["Content-Security-Policy"] == MEDIA_CSP
+
+
+async def test_pdf_and_text_are_inline(client):
+    for name, mime in (("doc.pdf", "application/pdf"), ("notes.txt", "text/plain")):
+        url = _store(client, name, b"%PDF-1.4" if name.endswith("pdf") else b"hi")
+        r = await client.get(url, headers=_auth(client._tok))
+        assert r.headers["Content-Type"] == mime
+        assert r.headers["Content-Disposition"].startswith("inline;")
+        assert r.headers["Content-Security-Policy"] == MEDIA_CSP
+
+
+async def test_user_picture_carries_sandbox_csp(client):
+    repo = client.app[profile_picture_repo_key]
+    await repo.set_user_picture(
+        client._uid, bytes_webp=b"RIFF....WEBP", hash="h1", width=1, height=1
+    )
+    r = await client.get(
+        f"/api/users/{client._uid}/picture", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert r.headers["Content-Type"] == "image/webp"
+    assert r.headers["Content-Security-Policy"] == MEDIA_CSP

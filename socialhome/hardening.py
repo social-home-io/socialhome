@@ -10,6 +10,11 @@
   household app — the frontend is served from the same origin.
 
 Both middlewares slot into the global stack via :func:`create_app`.
+
+* :func:`install_security_headers` — ``X-Frame-Options``,
+  ``nosniff``, ``Referrer-Policy`` and ``Permissions-Policy`` on every
+  response (an ``on_response_prepare`` hook, so streamed responses get
+  them too).
 """
 
 from __future__ import annotations
@@ -191,8 +196,16 @@ _SECURITY_HEADERS: dict[str, str] = {
 }
 
 
-def build_security_headers_middleware():
-    """Inject standard security headers on every HTTP response.
+async def _apply_security_headers(
+    _request: web.BaseRequest,
+    response: web.StreamResponse,
+) -> None:
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+
+
+def install_security_headers(app: web.Application) -> None:
+    """Add the standard security headers to every HTTP response of ``app``.
 
     These defend against click-jacking (``X-Frame-Options``),
     MIME-sniffing (``X-Content-Type-Options``), and information
@@ -200,13 +213,11 @@ def build_security_headers_middleware():
     intentionally omitted — the TLS terminator (HA Ingress or the
     operator's reverse proxy) should set it since only it knows
     whether HTTPS is enforced end-to-end.
+
+    Hooked on ``on_response_prepare``, not a middleware: a handler that
+    ``prepare()``s its own ``StreamResponse`` (``/api/media/*``, app
+    bundles) has already sent its headers when a middleware gets the
+    response back. ``setdefault`` keeps a header the handler set
+    explicitly.
     """
-
-    @web.middleware
-    async def middleware(request: web.Request, handler):
-        response = await handler(request)
-        for name, value in _SECURITY_HEADERS.items():
-            response.headers.setdefault(name, value)
-        return response
-
-    return middleware
+    app.on_response_prepare.append(_apply_security_headers)

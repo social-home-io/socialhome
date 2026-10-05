@@ -9,6 +9,7 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from socialhome.csp import MEDIA_CSP
 from socialhome.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
 from socialhome.global_server.app_keys import gfs_fed_repo_key
 from socialhome.global_server.config import GfsConfig
@@ -227,6 +228,10 @@ async def test_picture_upload_and_fetch_round_trip(client, author):
     assert pic.status == 200
     assert pic.headers["Cache-Control"].startswith("public")
     assert pic.headers["ETag"] == f'"{out["digest"]}"'
+    assert pic.headers["Content-Type"] == "image/png"
+    assert pic.headers["Content-Security-Policy"] == MEDIA_CSP
+    # The GFS hardening hook pairs the media CSP with ``nosniff``.
+    assert pic.headers["X-Content-Type-Options"] == "nosniff"
     assert (await pic.read()) == raw
 
 

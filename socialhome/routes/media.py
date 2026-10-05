@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import mimetypes
 import pathlib
 import uuid
 
@@ -19,6 +18,7 @@ from ..app_keys import (
     media_transcode_service_key,
     storage_quota_service_key,
 )
+from ..csp import media_response_headers, media_type_for
 from ..domain.errors import CodedError
 from ..domain.media_constraints import (
     AUDIO_ACCEPTED_MIMES,
@@ -109,21 +109,19 @@ class MediaServeView(BaseView):
         if not await aiofiles.os.path.isfile(file_path):
             return error_response(404, "NOT_FOUND", "Media file not found.")
 
-        content_type, _ = mimetypes.guess_type(str(file_path))
-        if not content_type:
-            content_type = "application/octet-stream"
-
+        # The type is guessed from the stored name, so a stored ``.svg`` /
+        # ``.html`` would otherwise render as a document on our origin.
+        # ``media_response_headers`` downgrades every script-capable or
+        # unknown type to an octet-stream attachment and sandboxes the rest.
+        content_type = media_type_for(filename)
         stat_result = await aiofiles.os.stat(file_path)
         headers = {
-            "Content-Disposition": f'inline; filename="{filename}"',
+            **media_response_headers(content_type, filename),
             "Content-Length": str(stat_result.st_size),
             "Cache-Control": "private, max-age=86400",
         }
 
-        response = web.StreamResponse(
-            status=200,
-            headers={**headers, "Content-Type": content_type},
-        )
+        response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(self.request)
 
         async with aiofiles.open(file_path, "rb") as fh:

@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from ..db import AsyncDatabase
+from ..hardening import install_security_headers
 from . import app_keys as K
 from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
@@ -426,7 +427,15 @@ class GfsApp:
             build_member_publish_rate_limit(self.client_ip),
             build_channel_rate_limit(self.client_ip),
         ]
-        return web.Application(middlewares=middlewares)
+        app = web.Application(middlewares=middlewares)
+        # ``nosniff``, ``X-Frame-Options: SAMEORIGIN``, ``Referrer-Policy``
+        # and ``Permissions-Policy`` on every response — the same hook as
+        # the household app. It sets no Content-Security-Policy, so the
+        # public pages' inline ``<style>`` / ``<script>`` keep working;
+        # ``setdefault`` keeps the stricter policy the picture proxy sets
+        # (``csp.media_response_headers``).
+        install_security_headers(app)
+        return app
 
     # ─── Wiring ────────────────────────────────────────────────────
 

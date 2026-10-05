@@ -38,6 +38,7 @@ from ..app_keys import (
     user_repo_key,
     user_service_key,
 )
+from ..csp import MEDIA_CSP
 from ..domain.errors import ImageTooLargeError
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.user import User, UserStatus, _picture_url
@@ -357,6 +358,7 @@ class UserPictureView(BaseView):
             body=bytes_webp,
             content_type="image/webp",
             headers={
+                "Content-Security-Policy": MEDIA_CSP,
                 # The URL carries ?v=<hash>, so the content is immutable
                 # for that version — aggressive caching is safe.
                 "Cache-Control": "private, max-age=31536000, immutable",
