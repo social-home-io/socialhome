@@ -11,7 +11,9 @@ What we mount:
 * ``GET /``               → ``static/index.html``
 * ``GET /manifest.json``  → ``static/manifest.json``
 * ``GET /sw.js``          → ``static/sw.js``
-* ``GET /assets/{file}``  → ``static/assets/{file}`` (content-hashed)
+* ``GET /assets/{file}``  → ``static/assets/{file}`` (content-hashed bundle,
+  plus the unhashed ``client/public/assets/`` files: the manifest's install
+  icons and ``theme-boot.js`` — public, so they load before login)
 
 The SPA's own router (preact-iso) handles every in-app route, so the
 backend doesn't need a catchall for ``/feed`` / ``/spaces/abc`` /

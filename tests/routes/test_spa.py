@@ -8,9 +8,12 @@ fresh ``pnpm --dir client run build``.
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
 from pathlib import Path
 from types import MappingProxyType
+from urllib.parse import urljoin
 
 import pytest
 from aiohttp import web
@@ -524,3 +527,87 @@ def test_get_spa_bundle_hash_is_cached_by_mtime(tmp_path, monkeypatch):
     # Bump the mtime → cache invalidates + new value returned.
     os.utime(target, (mtime + 1, mtime + 1))
     assert spa_module.get_spa_bundle_hash(static) == "BBBB"
+
+
+# ── Pre-login assets: manifest icons + index.html references ──────────────
+
+
+@pytest.fixture
+async def real_public_client(aiohttp_client, tmp_dir, tmp_path, monkeypatch):
+    """The SPA mount over the REAL ``client/public`` tree + ``client/index.html``
+    — exactly what Vite copies verbatim into ``socialhome/static/``. Lets the
+    tests prove every asset the shell and the manifest reference ships and is
+    served before login (no bearer token)."""
+    static = tmp_path / "real_static"
+    shutil.copytree(_REPO_ROOT / "client" / "public", static)
+    shutil.copy(_REPO_ROOT / "client" / "index.html", static / "index.html")
+    monkeypatch.setattr(spa_module, "DEFAULT_STATIC_DIR", static)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
+        platform_options=MappingProxyType(
+            {
+                "standalone": MappingProxyType(
+                    {"external_url": "https://test.example"},
+                ),
+            },
+        ),
+    )
+    return await aiohttp_client(create_app(cfg))
+
+
+def _manifest_icon_srcs() -> list[str]:
+    manifest = json.loads(
+        (_REPO_ROOT / "client" / "public" / "manifest.json").read_text("utf-8")
+    )
+    return [icon["src"] for icon in manifest["icons"]]
+
+
+def _index_local_refs() -> list[str]:
+    """Same-origin ``href`` / ``src`` refs in the SPA template, minus the
+    Vite source entry (``/src/main.tsx``) that the build rewrites into the
+    content-hashed ``assets/index-*.js``."""
+    html = (_REPO_ROOT / "client" / "index.html").read_text("utf-8")
+    html = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    refs = re.findall(r'<(?:link|script)\b[^>]*\b(?:href|src)="([^"]+)"', html)
+    return [
+        r
+        for r in refs
+        if not r.startswith(("http:", "https:", "//", "/src/")) and r != "/"
+    ]
+
+
+def test_manifest_declares_icons():
+    assert _manifest_icon_srcs(), "manifest.json must declare install icons"
+
+
+@pytest.mark.parametrize("src", _manifest_icon_srcs())
+async def test_manifest_icon_served_without_auth(real_public_client, src):
+    """Every manifest icon resolves (against ``/manifest.json``) to a 200
+    image with no bearer token — the browser fetches it before login."""
+    resp = await real_public_client.get(urljoin("/manifest.json", src))
+    assert resp.status == 200, f"{src} -> {resp.status}"
+    assert resp.content_type.startswith("image/")
+
+
+@pytest.mark.parametrize("src", _manifest_icon_srcs())
+def test_manifest_icon_is_relative_for_ingress(src):
+    """A root-absolute ``src`` would skip the HA-ingress prefix and hit HA
+    Core instead; a relative one resolves against the manifest URL, which
+    already sits under ``/api/hassio_ingress/<token>/``."""
+    assert not src.startswith("/") and "://" not in src
+    assert urljoin("/api/hassio_ingress/tok/manifest.json", src).startswith(
+        "/api/hassio_ingress/tok/"
+    )
+
+
+@pytest.mark.parametrize("ref", _index_local_refs())
+async def test_index_html_reference_served_without_auth(real_public_client, ref):
+    """Every same-origin asset the shell links (manifest, favicon, the
+    pre-paint theme script) is served with no bearer token."""
+    resp = await real_public_client.get(urljoin("/", ref))
+    assert resp.status == 200, f"{ref} -> {resp.status}"
