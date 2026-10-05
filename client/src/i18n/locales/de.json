@@ -4133,6 +4133,7 @@
   "dms.media.open_picture": "Bild im Vollbild öffnen",
   "dms.media.picture": "Bild",
   "dms.media.attachment": "Anhang",
+  "dms.media.file_unavailable": "Datei nicht verfügbar",
   "dms.media.delivery_failed": "Das konnte an einen oder mehrere Haushalte nicht zugestellt werden – die Datei ist noch auf deinem Gerät.",
   "dms.edit.aria": "Nachricht bearbeiten",
   "dms.edit.own_aria": "Deine Nachricht bearbeiten",

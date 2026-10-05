@@ -11,6 +11,13 @@ describe('FileRenderer', () => {
     expect(container.querySelector('a')?.getAttribute('href')).toBe('/f.pdf')
   })
 
+  it('drops a javascript: url instead of linking it', () => {
+    const { container } = render(
+      <FileRenderer file={{ url: 'javascript:alert(1)', mime_type: 'application/pdf', original_name: 'x.pdf', size_bytes: 1 }} />
+    )
+    expect(container.querySelector('a')?.hasAttribute('href')).toBe(false)
+  })
+
   it('formats file size correctly', () => {
     const { getByText } = render(
       <FileRenderer file={{ url: '/f', mime_type: 'text/plain', original_name: 'x', size_bytes: 1536 }} />

@@ -1117,21 +1117,30 @@ class FederationInboundService(ProtectionGateMixin):
           flags the bubble for the brightness-pulse overlay until
           the matching ``DM_MEDIA_BLOB`` lands.
         * For a v_3 media message *without* a preview (video / file
-          today): no local bytes yet, ``media_url`` carries the
-          sender's URL untouched and the SPA renders a placeholder
-          glyph; ``media_sync_status='pending'`` keeps the row in
+          today): no local bytes yet, ``media_url`` is ``None`` and
+          the SPA renders a placeholder glyph; ``media_sync_status='pending'`` keeps the row in
           the "waiting on blob" state.
         * For a text / transcript / location message, or a media
           message from a sub-v_3 sender (which fell back to text via
-          the compat shim): no media to persist, the existing
-          payload's ``media_url`` flows through.
+          the compat shim): no media to persist; the payload's
+          ``media_url`` is kept only in the local upload shape
+          (:func:`local_media_ref`) — anything else is ``None`` plus a
+          WARNING, since the SPA puts it in an ``href``.
         """
         is_media = msg_type in ("image", "video", "file")
-        media_url_in = payload.get("media_url")
         if not is_media or payload.get("media_blob_id") is None:
-            # Same-household DM where the sender's URL is reachable,
-            # or a non-media message — nothing for the receiver to
-            # build locally.
+            # A non-media message, or media without a blob to sync —
+            # nothing for the receiver to build locally. The peer's
+            # ``media_url`` lands in an ``href`` / ``src`` on the SPA,
+            # so only the local upload shape (``api/media/<name>``)
+            # survives; a ``javascript:`` or remote URL is dropped.
+            raw = payload.get("media_url")
+            media_url_in = local_media_ref(raw)
+            if raw is not None and media_url_in is None:
+                log.warning(
+                    "DM_MESSAGE %s: dropped non-local media_url from peer",
+                    message_id,
+                )
             return media_url_in, None
         # Reordering guard: ``DM_MEDIA_BLOB`` may have arrived
         # *before* this ``DM_MESSAGE`` (federation transport doesn't

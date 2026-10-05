@@ -14,6 +14,7 @@ from ....domain.conversation import (
 from ....domain.dm_location import normalise_location_content
 from ....domain.events import DmHistorySyncComplete
 from ....domain.federation import FederationEventType
+from ....services.inbound_media_store import local_media_ref
 from ....services.protection_gate import ProtectionGateMixin
 from ...dm_scope import DmScope, refuse
 
@@ -234,6 +235,14 @@ def _dict_to_message(raw: dict, conversation_id: str) -> ConversationMessage | N
                 "DM_HISTORY_CHUNK: malformed location %s skipped: %s", msg_id, exc
             )
             return None
+    # Same rule as a live ``DM_MESSAGE``: the SPA puts ``media_url`` in an
+    # ``href`` / ``src``, so only the local upload shape survives.
+    raw_media = raw.get("media_url")
+    media_url = local_media_ref(raw_media)
+    if raw_media is not None and media_url is None:
+        log.warning(
+            "DM_HISTORY_CHUNK %s: dropped non-local media_url from peer", msg_id
+        )
     return ConversationMessage(
         id=msg_id,
         conversation_id=conversation_id,
@@ -241,7 +250,7 @@ def _dict_to_message(raw: dict, conversation_id: str) -> ConversationMessage | N
         content=content,
         created_at=_parse_iso(raw.get("created_at")),
         type=msg_type,
-        media_url=raw.get("media_url"),
+        media_url=media_url,
         reply_to_id=raw.get("reply_to_id"),
         deleted=deleted,
         edited_at=_parse_iso(raw.get("edited_at")) if raw.get("edited_at") else None,

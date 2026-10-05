@@ -113,6 +113,29 @@ describe('ImageLightbox', () => {
     })
   })
 
+  it('the download link drops a javascript: url but keeps a blob: one', async () => {
+    closeLightbox()
+    openLightbox({
+      items: [{ url: 'javascript:alert(1)', caption: null, item_type: 'photo' }],
+      index: 0,
+    })
+    const first = render(<ImageLightbox />)
+    const dl = first.container.querySelector('a.sh-lightbox-download')
+    expect(dl?.hasAttribute('href')).toBe(false)
+    first.unmount()
+    closeLightbox()
+    openLightbox({
+      items: [{ url: 'blob:http://localhost/abc', caption: null, item_type: 'photo' }],
+      index: 0,
+    })
+    const second = render(<ImageLightbox />)
+    expect(
+      second.container.querySelector('a.sh-lightbox-download')?.getAttribute('href'),
+    ).toBe('blob:http://localhost/abc')
+    second.unmount()
+    closeLightbox()
+  })
+
   it('an item with onReport shows Report, which closes the viewer first', async () => {
     closeLightbox()
     const onReport = vi.fn()

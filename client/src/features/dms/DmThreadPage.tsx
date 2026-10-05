@@ -53,6 +53,7 @@ import { currentUser } from '@/store/auth'
 import { useTitle, useTitleAvatar } from '@/store/pageTitle'
 import { normaliseTimestamp } from '@/utils/relativeTime'
 import { addBase } from '@/baseUrl'
+import { safeHref } from '@/utils/safeHref'
 
 const messages = signal<Message[]>([])
 const loading = signal(true)
@@ -2261,25 +2262,47 @@ export default function DmThreadPage() {
                   }
                 />
               )}
-              {!m.deleted && m.type === 'file' && m.media_url && (
-                <a
-                  class="sh-message-file"
-                  href={m.media_url}
-                  download={m.file_name ?? 'attachment'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <span class="sh-message-file__glyph" aria-hidden="true">📎</span>
-                  <span class="sh-message-file__meta">
-                    <span class="sh-message-file__name">
-                      {m.file_name ?? t('dms.media.attachment')}
-                    </span>
-                    <span class="sh-message-file__size">
-                      {formatFileSize(m.file_size_bytes)}
-                    </span>
+              {!m.deleted && m.type === 'file' && (() => {
+                const fileHref = safeHref(m.media_url)
+                const name = (
+                  <span class="sh-message-file__name">
+                    {m.file_name ?? t('dms.media.attachment')}
                   </span>
-                </a>
-              )}
+                )
+                // No usable link (the server dropped a non-local URL, or
+                // it isn't one we open): show the file as plain text so
+                // the message never renders as an empty bubble.
+                if (fileHref === undefined) {
+                  return (
+                    <span class="sh-message-file sh-message-file--unavailable">
+                      <span class="sh-message-file__glyph" aria-hidden="true">📎</span>
+                      <span class="sh-message-file__meta">
+                        {name}
+                        <span class="sh-message-file__size">
+                          {t('dms.media.file_unavailable')}
+                        </span>
+                      </span>
+                    </span>
+                  )
+                }
+                return (
+                  <a
+                    class="sh-message-file"
+                    href={fileHref}
+                    download={m.file_name ?? 'attachment'}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <span class="sh-message-file__glyph" aria-hidden="true">📎</span>
+                    <span class="sh-message-file__meta">
+                      {name}
+                      <span class="sh-message-file__size">
+                        {formatFileSize(m.file_size_bytes)}
+                      </span>
+                    </span>
+                  </a>
+                )
+              })()}
               {!m.deleted && m.type === 'location' && (
                 <DmLocationMessage content={m.content} />
               )}

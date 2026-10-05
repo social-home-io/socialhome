@@ -209,6 +209,14 @@ A handful of paths beyond the happy flow above:
 - The receiver's `_on_dm_message` upserts on
   `conversation_messages.id` so a v_3 message arriving twice (the
   envelope + a redelivery) produces a single row.
+- A peer-supplied `media_url` (on `DM_MESSAGE` without a
+  `media_blob_id`, and on every `DM_HISTORY_CHUNK` row) is kept only in
+  the local upload shape `api/media/<name>` (`local_media_ref` in
+  `services/inbound_media_store.py`; a leading `/` and `?query` are
+  dropped). Anything else — a remote URL, `javascript:` / `data:`, a
+  path escape — is stored as `null` with a WARNING log. The SPA puts
+  `media_url` in the file pill's `href`, so a raw value would be a
+  click-to-run script.
 
 ## SPA render
 
@@ -221,7 +229,9 @@ explicit `type` when `mime_type` is `null`):
 - everything else → file pill (`a.sh-message-file`) with a `📎`
   glyph + filename + size, the anchor's `href` is the signed media
   URL with `download={file_name}` so the user gets a real save
-  prompt.
+  prompt. The `href` passes `safeHref` (`client/src/utils/safeHref.ts`)
+  — anything but http(s), an app path, `api/…` or `mailto:` renders
+  no link.
 
 When `media_sync_status === 'pending'`, the media gets a `--pending`
 modifier class that adds a subtle brightness pulse — the visual cue

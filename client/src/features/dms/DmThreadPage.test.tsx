@@ -1088,6 +1088,33 @@ describe('DmThreadPage — location messages', () => {
     expect(link.href).toContain('mlat=52.3702')
   })
 
+  it('a DM file whose media_url is javascript: or dropped renders as plain text, not a link', async () => {
+    const fileRow = (id: string, media_url: string | null, file_name: string) => ({
+      ...locRow(''), id, type: 'file', media_url, file_name,
+      mime_type: 'application/pdf', file_size_bytes: 10,
+    })
+    wireApiMock({
+      conversations: [conv],
+      messages: [
+        fileRow('msg-js', 'javascript:alert(document.domain)', 'evil.pdf'),
+        fileRow('msg-null', null, 'dropped.pdf'),
+        fileRow('msg-ok', 'api/media/f1.pdf', 'fine.pdf'),
+      ],
+    })
+    const { render } = await import('@testing-library/preact')
+    const { default: DmThreadPage } = await import('./DmThreadPage')
+    const { findByText } = render(<DmThreadPage />)
+    for (const name of ['evil.pdf', 'dropped.pdf']) {
+      const chip = (await findByText(name, {}, { timeout: RENDER_WAIT }))
+        .closest('.sh-message-file') as HTMLElement
+      expect(chip.tagName).toBe('SPAN')
+      expect(chip.closest('a')).toBeNull()
+      expect(chip.textContent).toContain('File not available')
+    }
+    const fine = (await findByText('fine.pdf')).closest('a.sh-message-file')
+    expect(fine?.getAttribute('href')).toBe('api/media/f1.pdf')
+  })
+
   it('shares a location picked on the map from the attach menu', async () => {
     wireApiMock({ conversations: [conv], messages: [] })
     apiPost.mockResolvedValue({ id: 'srv-loc' })

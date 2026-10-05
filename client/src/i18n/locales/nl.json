@@ -4133,6 +4133,7 @@
   "dms.media.open_picture": "Foto schermvullend openen",
   "dms.media.picture": "Foto",
   "dms.media.attachment": "Bijlage",
+  "dms.media.file_unavailable": "Bestand niet beschikbaar",
   "dms.media.delivery_failed": "Kon dit niet bezorgen bij een of meer huishoudens — het bestand staat nog op je apparaat.",
   "dms.edit.aria": "Bericht bewerken",
   "dms.edit.own_aria": "Je bericht bewerken",

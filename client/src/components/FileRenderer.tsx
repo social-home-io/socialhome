@@ -15,6 +15,7 @@
 import { openLightbox } from './ImageLightbox'
 import { VideoMedia } from './VideoMedia'
 import { t } from '@/i18n/i18n'
+import { safeHref } from '@/utils/safeHref'
 
 interface FileAttachment {
   url: string
@@ -28,7 +29,7 @@ export function FileRenderer({ file }: { file: FileAttachment }) {
   const icon = iconFor(file.mime_type, file.original_name)
 
   return (
-    <a href={file.url} download={file.original_name}
+    <a href={safeHref(file.url)} download={file.original_name}
        class="sh-file-attachment" target="_blank" rel="noopener">
       <span class="sh-file-icon" aria-hidden="true">{icon}</span>
       <div class="sh-file-info">

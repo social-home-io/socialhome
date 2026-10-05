@@ -10,6 +10,7 @@ without dropping the file.
 from __future__ import annotations
 
 import base64
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -106,16 +107,64 @@ async def inbound_with_media(db, bus, tmp_path):
 # ── _receive_media_preview branches ───────────────────────────────────
 
 
-async def test_receive_media_preview_non_media_passes_through(inbound_with_media):
-    """Text / transcript / location messages flow through unchanged."""
+async def test_receive_media_preview_non_media_keeps_a_local_ref(inbound_with_media):
+    """A message without a blob id keeps a ``media_url`` that has the
+    local upload shape (normalised to ``api/media/<name>``)."""
     svc, _media_dir, _db = inbound_with_media
     url, status = await svc._receive_media_preview(
-        payload={"media_url": "https://elsewhere/foo.jpg"},
+        payload={"media_url": "/api/media/abc123.webp?exp=1&sig=x"},
         message_id="m-1",
         msg_type="text",
     )
-    assert url == "https://elsewhere/foo.jpg"
+    assert url == "api/media/abc123.webp"
     assert status is None
+
+
+@pytest.mark.parametrize("msg_type", ["text", "file", "image", "video"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "javascript:alert(document.domain)",
+        "JavaScript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "https://elsewhere.example/foo.jpg",
+        "//elsewhere.example/foo.jpg",
+        "api/media/../../etc/passwd",
+        "api/media/.hidden",
+        "api/media/",
+        "media/abc.webp",
+        42,
+    ],
+)
+async def test_receive_media_preview_drops_a_non_local_media_url(
+    inbound_with_media, caplog, msg_type, bad
+):
+    """A peer-supplied ``media_url`` that is not a local media reference
+    (a ``javascript:`` URL for a DM file chip's ``href``, a remote
+    tracker, a path escape) is stored as ``None`` and logged at WARNING."""
+    svc, _media_dir, _db = inbound_with_media
+    with caplog.at_level(logging.WARNING):
+        url, status = await svc._receive_media_preview(
+            payload={"media_url": bad},
+            message_id="m-x",
+            msg_type=msg_type,
+        )
+    assert url is None
+    assert status is None
+    assert "non-local media_url" in caplog.text
+
+
+async def test_receive_media_preview_absent_media_url_is_quiet(
+    inbound_with_media, caplog
+):
+    """A plain text message carries no ``media_url`` — no warning."""
+    svc, _media_dir, _db = inbound_with_media
+    with caplog.at_level(logging.WARNING):
+        url, status = await svc._receive_media_preview(
+            payload={"content": "hi"}, message_id="m-t", msg_type="text"
+        )
+    assert (url, status) == (None, None)
+    assert "media_url" not in caplog.text
 
 
 async def test_receive_media_preview_pre_arrived_full_file(inbound_with_media):

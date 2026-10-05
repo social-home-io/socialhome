@@ -4169,6 +4169,7 @@
   "dms.media.open_picture": "Open picture full-screen",
   "dms.media.picture": "Picture",
   "dms.media.attachment": "Attachment",
+  "dms.media.file_unavailable": "File not available",
   "dms.media.delivery_failed": "Couldn't deliver this to one or more households — the file is still on your device.",
   "dms.edit.aria": "Edit message",
   "dms.edit.own_aria": "Edit your message",

@@ -4133,6 +4133,7 @@
   "dms.media.open_picture": "Ouvrir la photo en plein écran",
   "dms.media.picture": "Photo",
   "dms.media.attachment": "Pièce jointe",
+  "dms.media.file_unavailable": "Fichier indisponible",
   "dms.media.delivery_failed": "Impossible de livrer ceci à un ou plusieurs foyers — le fichier est toujours sur votre appareil.",
   "dms.edit.aria": "Modifier le message",
   "dms.edit.own_aria": "Modifier votre message",
