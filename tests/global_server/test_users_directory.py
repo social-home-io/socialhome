@@ -230,6 +230,8 @@ async def test_picture_upload_and_fetch_round_trip(client, author):
     assert pic.headers["ETag"] == f'"{out["digest"]}"'
     assert pic.headers["Content-Type"] == "image/png"
     assert pic.headers["Content-Security-Policy"] == MEDIA_CSP
+    # The GFS hardening hook pairs the media CSP with ``nosniff``.
+    assert pic.headers["X-Content-Type-Options"] == "nosniff"
     assert (await pic.read()) == raw
 
 

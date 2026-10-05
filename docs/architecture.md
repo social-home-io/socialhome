@@ -1030,7 +1030,13 @@ script.
   `on_response_prepare` hook (`install_security_headers`), not a
   middleware, so streamed responses that `prepare()` themselves
   (`/api/media/*`, app bundles) carry them too; a header a handler sets
-  explicitly wins.
+  explicitly wins. The GFS app (`global_server/server.py`) installs the
+  same hook, so its JSON APIs, public pages and picture proxy send
+  `nosniff` and friends too. The GFS public pages (landing, space,
+  invite, highlight / moment viewers) carry **no** CSP: they are
+  server-rendered with inline `<style>` and an inline copy-to-clipboard
+  `<script>`, and the SPA policy does not fit them; the GFS picture
+  proxy keeps its own `MEDIA_CSP`.
 - **`<base href>` from `X-Ingress-Path` only behind ingress:** the shell's
   `<base href>` is rewritten from `X-Ingress-Path` only when the adapter
   advertises `Capability.INGRESS` (`haos`, where Supervisor sets the

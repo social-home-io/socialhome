@@ -1035,3 +1035,30 @@ async def test_gfs_database_runs_the_configured_write_window(tmp_path):
     cfg = GfsConfig(data_dir=str(tmp_path), write_batch_window_ms=37)
     gfs = server.GfsApp(cfg, db_path_override=tmp_path / "gfs.db")
     assert gfs.db.batch_window_ms == 37
+
+
+# ── Security headers ──────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("path", ["/healthz", "/gfs/spaces", "/"])
+async def test_gfs_responses_carry_security_headers(gfs_client, path):
+    """The GFS app installs the same ``on_response_prepare`` hardening
+    hook as the household app — JSON APIs and public HTML alike."""
+    r = await gfs_client.get(path)
+    assert r.status == 200
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["X-Frame-Options"] == "SAMEORIGIN"
+    assert r.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert "Permissions-Policy" in r.headers
+
+
+async def test_gfs_public_page_still_renders_without_spa_csp(gfs_client):
+    """The landing page keeps its inline ``<style>`` / ``<script>``: the
+    hook adds no Content-Security-Policy, so nothing blocks them."""
+    r = await gfs_client.get("/")
+    assert r.status == 200
+    assert r.headers["Content-Type"].startswith("text/html")
+    body = await r.text()
+    assert "<style>" in body
+    assert "<script>" in body
+    assert "Content-Security-Policy" not in r.headers
