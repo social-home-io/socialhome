@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from socialhome.auth import sha256_token_hash
 
 from .conftest import _auth
@@ -87,6 +89,60 @@ async def test_create_link_empty_label_422(client):
         headers=_auth(client._tok),
     )
     assert r.status == 422
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "javascript:alert(document.domain)",
+        " JavaScript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "vbscript:msgbox(1)",
+        "ftp://files.example/x",
+        "mailto:a@b.example",
+        "/spaces/sp-cust",
+        "wiki.example",
+        "https://",
+        "https://user:pw@wiki.example/",
+        "https://wiki.example/a b",
+    ],
+)
+async def test_create_link_rejects_a_non_http_url(client, bad):
+    """Quick links render as ``<a href>`` for every member — only
+    absolute http(s) URLs are stored; the refusal says why."""
+    await _seed_space(client)
+    r = await client.post(
+        "/api/spaces/sp-cust/links",
+        json={"label": "Wiki", "url": bad},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "INVALID_LINK"
+    r2 = await client.get("/api/spaces/sp-cust/links", headers=_auth(client._tok))
+    assert (await r2.json())["links"] == []
+
+
+async def test_patch_link_rejects_a_non_http_url(client):
+    await _seed_space(client)
+    r = await client.post(
+        "/api/spaces/sp-cust/links",
+        json={"label": "Wiki", "url": "http://wiki.example/"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    link_id = (await r.json())["id"]
+    r2 = await client.patch(
+        f"/api/spaces/sp-cust/links/{link_id}",
+        json={"url": "javascript:alert(1)"},
+        headers=_auth(client._tok),
+    )
+    assert r2.status == 422
+    assert (await r2.json())["error"]["code"] == "INVALID_LINK"
+    r3 = await client.get("/api/spaces/sp-cust/links", headers=_auth(client._tok))
+    assert [link["url"] for link in (await r3.json())["links"]] == [
+        "http://wiki.example/"
+    ]
 
 
 async def test_patch_link_updates(client):

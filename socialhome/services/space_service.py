@@ -133,6 +133,8 @@ from ..domain.mention import Mention
 from ..domain.presence import truncate_coord
 from ..domain.space import (
     ACCESS_FEATURES,
+    InvalidSpaceLinkError,
+    validate_space_link_url,
     INVITE_VIA_GFS,
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
@@ -7308,11 +7310,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         label = label.strip()
-        url = url.strip()
         if not label:
-            raise ValueError("label must not be empty")
-        if not url:
-            raise ValueError("url must not be empty")
+            raise InvalidSpaceLinkError("label must not be empty")
+        url = validate_space_link_url(url)
         link_id = link_id or uuid.uuid4().hex
         await self._spaces.upsert_link(
             link_id=link_id,

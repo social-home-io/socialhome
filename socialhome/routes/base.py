@@ -37,6 +37,7 @@ from ..domain.space import (
     ModerationInProgressError,
     HostTooOldError,
     HostUnreachableError,
+    InvalidSpaceLinkError,
     ModerationPayloadTooLargeError,
     ModerationQueueFullError,
     ModerationStaleError,
@@ -525,6 +526,10 @@ class BaseView(web.View):
             # the field + the failed rule (never the URL), so the admin who
             # scanned a bad pairing code learns why it was refused.
             return error_response(422, "INVALID_PEER_URL", str(exc))
+        except InvalidSpaceLinkError as exc:
+            # Subclasses ValueError — must precede it. The message names
+            # the rule (never the URL), so the links editor can show it.
+            return error_response(422, "INVALID_LINK", str(exc))
         except ThemeValidationError as exc:
             # Subclasses ValueError — must precede it. The message names
             # the field + the allowed values (never the submitted value),

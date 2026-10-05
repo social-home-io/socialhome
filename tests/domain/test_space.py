@@ -31,6 +31,8 @@ from socialhome.domain.space import (
     MAX_ZONE_NAME_LENGTH,
     validate_zone_color,
     validate_zone_name,
+    InvalidSpaceLinkError,
+    validate_space_link_url,
 )
 from socialhome.domain.post import PostType
 
@@ -685,3 +687,50 @@ def test_validate_zone_color_normalises_hex_and_passes_none():
 def test_validate_zone_color_rejects(bad):
     with pytest.raises(ValueError, match="color"):
         validate_zone_color(bad)
+
+
+# ─── Space quick links ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("https://wiki.example/a?b=1#c", "https://wiki.example/a?b=1#c"),
+        ("  http://wiki  ", "http://wiki"),
+        ("HTTPS://Wiki.Example/", "HTTPS://Wiki.Example/"),
+    ],
+)
+def test_validate_space_link_url_keeps_http(raw, want):
+    assert validate_space_link_url(raw) == want
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "   ",
+        "javascript:alert(1)",
+        "java\tscript:alert(1)",
+        "data:text/html,x",
+        "ftp://x.example/",
+        "mailto:a@b.example",
+        "/spaces/x",
+        "//wiki.example/",
+        "wiki.example",
+        "https://",
+        "https:///path",
+        "https://user:pw@wiki.example/",
+        "https://wiki.example/a b",
+        "https://wiki.example/\x00",
+        "https://wiki.example/" + "a" * 2048,
+        None,
+        7,
+    ],
+)
+def test_validate_space_link_url_rejects(bad):
+    with pytest.raises(InvalidSpaceLinkError):
+        validate_space_link_url(bad)
+
+
+def test_invalid_space_link_error_is_a_value_error():
+    assert issubclass(InvalidSpaceLinkError, ValueError)

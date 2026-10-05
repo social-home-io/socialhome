@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal, TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from .errors import CodedError
 
@@ -1564,6 +1565,48 @@ def validate_zone_color(color: object) -> str | None:
     if not isinstance(color, str) or not _ZONE_COLOR_RE.fullmatch(color):
         raise ValueError("color must be a #RRGGBB hex string or None")
     return color.lower()
+
+
+#: Longest quick-link URL a space admin may store.
+MAX_SPACE_LINK_URL_LENGTH: int = 2048
+
+_LINK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+
+class InvalidSpaceLinkError(ValueError):
+    """A space quick link was refused (422 ``INVALID_LINK``). The message
+    names the rule, never the submitted value, so the settings form can
+    show it verbatim."""
+
+
+def validate_space_link_url(url: object) -> str:
+    """Return the stripped quick-link URL, or raise
+    :class:`InvalidSpaceLinkError`.
+
+    Quick links render as ``<a href>`` for every member, so only an
+    absolute ``http(s)://host/…`` URL is stored — never ``javascript:``,
+    ``data:``, an app-relative path or embedded credentials. Whitespace and
+    control characters anywhere are refused (a browser drops tabs inside a
+    scheme, so ``java\tscript:`` must not slip past the scheme check).
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise InvalidSpaceLinkError("url must not be empty")
+    url = url.strip()
+    if len(url) > MAX_SPACE_LINK_URL_LENGTH:
+        raise InvalidSpaceLinkError(
+            f"url must be at most {MAX_SPACE_LINK_URL_LENGTH} characters"
+        )
+    if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        raise InvalidSpaceLinkError("url must not contain spaces or control characters")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise InvalidSpaceLinkError("url must be an http(s) web address") from None
+    if parts.scheme.lower() not in _LINK_SCHEMES or not parts.hostname:
+        raise InvalidSpaceLinkError("url must be an http(s) web address")
+    if parts.username is not None or parts.password is not None:
+        raise InvalidSpaceLinkError("url must not contain a user name or password")
+    return url
 
 
 @dataclass(slots=True, frozen=True)
