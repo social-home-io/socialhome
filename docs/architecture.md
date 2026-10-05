@@ -1032,11 +1032,35 @@ script.
   (`/api/media/*`, app bundles) carry them too; a header a handler sets
   explicitly wins. The GFS app (`global_server/server.py`) installs the
   same hook, so its JSON APIs, public pages and picture proxy send
-  `nosniff` and friends too. The GFS public pages (landing, space,
-  invite, highlight / moment viewers) carry **no** CSP: they are
-  server-rendered with inline `<style>` and an inline copy-to-clipboard
-  `<script>`, and the SPA policy does not fit them; the GFS picture
-  proxy keeps its own `MEDIA_CSP`.
+  `nosniff` and friends too. The GFS picture proxy keeps its own
+  `MEDIA_CSP`.
+- **GFS public pages have their own strict policy:** the anonymous,
+  server-rendered pages — landing `/`, `/spaces/{id}`, `/join/{token}`
+  (live and dead), the highlight viewer `/highlight/…` and its 410 / 503
+  pages, and the Momentum directory `/moments` + `/moments/{user}` — all
+  go out through `global_server/html_page.py:html_response`, which sets
+  `csp.build_public_page_csp()`:
+  `default-src 'self'; script-src 'self'; style-src 'self'
+  https://fonts.googleapis.com 'sha256-…'; font-src
+  https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self'
+  blob:; connect-src 'self'; object-src 'none'; base-uri 'self';
+  form-action 'self'; frame-ancestors 'none'`. No `'unsafe-inline'`
+  anywhere: the copy-code button is the file
+  `global_server/static/copy_button.js` (it wires every
+  `button[data-copy-target]`), each page's one inline `<style>` is
+  admitted by the sha256 of its exact text (computed per response — the
+  space / invite pages theme it with the owner's colours), and the
+  landing's per-space accent stripe is a class + rule in that `<style>`
+  rather than a `style=` attribute. Owner colours pass `css_color()`
+  (plain hex only) before they reach the stylesheet, so a hash never
+  admits attacker CSS. `img-src` names no third-party host: space cover /
+  icon are `data:` URIs the household publishes, the operator header image
+  is a root-relative `/media/…`, and the viewers render WebRTC bytes as
+  `blob:`. `<script type="application/json">` boot blocks are inert data.
+  `tests/global_server/conftest.py:assert_strict_public_page` checks every
+  page and status for the header, no inline executable script, no
+  `on*=` / `style=` attributes, and a hash for every `<style>`. Core
+  serves no public HTML besides the SPA shell.
 - **`<base href>` from `X-Ingress-Path` only behind ingress:** the shell's
   `<base href>` is rewritten from `X-Ingress-Path` only when the adapter
   advertises `Capability.INGRESS` (`haos`, where Supervisor sets the
@@ -1046,7 +1070,17 @@ script.
   else — every standalone / `ha` request, `//evil`, `javascript:`, other
   paths — leaves the base at `/`. The shell carries
   `Vary: X-Ingress-Path` so a shared cache never serves one prefix's
-  shell for another.
+  shell for another. The app-bundle cookie `Path`
+  (`routes/app_bundle.py`) follows the same rule; both call
+  `routes/ingress_path.py:trusted_ingress_path`.
+- **No Referer to third parties from markdown:** Pages / space-about
+  markdown (`client/src/utils/markdown.ts`) may embed external images and
+  links. A DOMPurify `afterSanitizeAttributes` hook gives every `<img>`
+  `referrerpolicy="no-referrer"` + `loading="lazy"` and every link that is
+  not an in-app path `rel="noopener noreferrer"`, after the attribute
+  allow-list, so an author can't override them. The post renderer
+  (`client/src/components/markdown.ts`) has no image grammar and marks its
+  `target=_blank` links `noreferrer`.
 - **Stored media is sandboxed:** a stored `.svg` / `.html` opened directly
   would otherwise run as a document on our origin.
   `csp.media_response_headers()` shapes every stored-file response
@@ -1087,7 +1121,10 @@ Rules:
   route, never a meta tag. Prefer proxying through the backend (like map
   tiles) over adding a host.
 - **GFS pages are separate:** the GFS (`global_server/`) serves its own
-  public HTML and does not use this policy.
+  public HTML under `build_public_page_csp()`, not this policy. No inline
+  `<script>` there either (ship a file in `global_server/static/`), no
+  `style=` attributes, and an inline `<style>` only via
+  `html_response(..., inline_styles=[css])`.
 
 ## Where things live
 
