@@ -131,7 +131,12 @@ entitled to send:
 
 - `message_id` must be a single safe file-name component and
   `chunk_index` / `chunk_count` must be in range, else the chunk is
-  dropped.
+  dropped. The same rule applies to the `DM_MESSAGE` itself: its
+  `message_id` names the `<msg_id>.preview.webp` and `<msg_id>.<ext>`
+  files, so a `DM_MESSAGE` whose id is absolute, contains a separator or
+  starts with `.` is dropped with a WARNING before anything is stored.
+  Every media path built from a peer id is also checked to sit directly
+  in the media root (`inbound_media_store.media_file_path`).
 - If the `conversation_messages` row is already here, the blob must
   carry the `media_blob_id` that message announced and come from the
   household the message was sent from (the sender's

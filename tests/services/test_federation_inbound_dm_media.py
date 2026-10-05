@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.user import User
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
@@ -653,3 +654,110 @@ async def test_dm_media_blob_out_of_range_chunk_meta_is_refused(
         )
     )
     assert list(media_dir.iterdir()) == []
+
+
+# ── F6: peer-supplied message ids never become paths outside media ────
+
+
+def _unsafe_ids(media_dir):
+    """``../`` and absolute message ids — each would name a file
+    outside ``media_dir`` if joined as-is."""
+    return ["../escape", str(media_dir.parent / "abs-escape"), "sub/escape"]
+
+
+def _outside_files(media_dir):
+    root = media_dir.parent
+    return sorted(
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if p.is_file() and media_dir not in p.parents
+    )
+
+
+async def test_receive_media_preview_refuses_unsafe_message_id(inbound_with_media):
+    """The helper itself never writes (or deletes) outside ``media_dir``,
+    whatever id it is handed — defence in depth behind the early
+    ``DM_MESSAGE`` check."""
+    svc, media_dir, _db = inbound_with_media
+    for bad in _unsafe_ids(media_dir):
+        url, status = await svc._receive_media_preview(
+            payload={
+                "media_blob_id": "blob",
+                "mime_type": "image/webp",
+                "preview_bytes_b64": base64.b64encode(_WEBP_HEADER).decode(),
+            },
+            message_id=bad,
+            msg_type="image",
+        )
+        assert (url, status) == (None, None), bad
+    assert _outside_files(media_dir) == []
+    assert list(media_dir.iterdir()) == []
+
+
+async def test_receive_media_preview_unsafe_id_never_deletes_outside(
+    inbound_with_media,
+):
+    """The reorder guard removes ``<id>.preview.webp`` when ``<id>.<ext>``
+    exists — with a ``../`` id that would delete a file outside media."""
+    svc, media_dir, _db = inbound_with_media
+    victim = media_dir.parent / "escape.preview.webp"
+    victim.write_bytes(b"keep")
+    (media_dir.parent / "escape.webp").write_bytes(b"x")
+    url, status = await svc._receive_media_preview(
+        payload={"media_blob_id": "b", "mime_type": "image/webp"},
+        message_id="../escape",
+        msg_type="image",
+    )
+    assert (url, status) == (None, None)
+    assert victim.read_bytes() == b"keep"
+
+
+def _dm_message_event(message_id: str) -> FederationEvent:
+    return _event(
+        FederationEventType.DM_MESSAGE,
+        {
+            "conversation_id": "conv-new",
+            "message_id": message_id,
+            "sender_user_id": "user-remote",
+            "sender_display_name": "Remote",
+            "type": "image",
+            "content": "",
+            "media_blob_id": message_id,
+            "mime_type": "image/webp",
+            "preview_bytes_b64": base64.b64encode(_WEBP_HEADER).decode(),
+            "recipient_user_ids": ["uid-carol"],
+        },
+    )
+
+
+async def test_dm_message_with_safe_id_writes_its_preview(inbound_with_media):
+    """Control for the refusal below: the same envelope with a normal id
+    is accepted and its preview lands inside ``media_dir``."""
+    svc, media_dir, db = inbound_with_media
+    await SqliteUserRepo(db).save(
+        User(user_id="uid-carol", username="carol", display_name="Carol")
+    )
+    await svc._on_dm_message(_dm_message_event("m-safe"))
+    assert (media_dir / "m-safe.preview.webp").is_file()
+    msgs = await SqliteConversationRepo(db).list_messages("conv-new", limit=10)
+    assert [m.id for m in msgs] == ["m-safe"]
+
+
+async def test_dm_message_with_unsafe_id_is_refused(inbound_with_media, caplog):
+    """F6: a ``DM_MESSAGE`` whose ``message_id`` is ``../x`` or an absolute
+    path is dropped before anything is stored or written, with a WARNING
+    that does not echo the raw id."""
+    svc, media_dir, db = inbound_with_media
+    await SqliteUserRepo(db).save(
+        User(user_id="uid-carol", username="carol", display_name="Carol")
+    )
+    for bad in _unsafe_ids(media_dir):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            await svc._on_dm_message(_dm_message_event(bad))
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings, bad
+        assert all(bad not in r.getMessage() for r in warnings), bad
+    assert _outside_files(media_dir) == []
+    assert list(media_dir.iterdir()) == []
+    assert await SqliteConversationRepo(db).list_messages("conv-new", limit=10) == []

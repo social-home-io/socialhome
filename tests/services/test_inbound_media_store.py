@@ -156,3 +156,31 @@ def test_local_media_refs_keeps_only_canonical_strings_capped():
     )
     assert store.local_media_refs("api/media/a.webp", limit=4) == ()
     assert store.local_media_refs(None, limit=4) == ()
+
+
+@pytest.mark.parametrize("name", ["m-1.preview.webp", "abc123.webp", "m:1.bin"])
+def test_media_file_path_accepts_a_child_name(tmp_path, name):
+    assert store.media_file_path(tmp_path, name) == tmp_path / name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../x",
+        "../x.preview.webp",
+        "sub/x",
+        "/etc/passwd",
+        ".hidden",
+        "",
+        "..",
+        "a\x00b",
+    ],
+)
+def test_media_file_path_refuses_escapes(tmp_path, name):
+    """F6: a peer-supplied name never resolves outside ``media_dir``."""
+    assert store.media_file_path(tmp_path, name) is None
+
+
+def test_media_file_path_refuses_absolute_path_under_another_root(tmp_path):
+    outside = str(tmp_path.parent / "outside.preview.webp")
+    assert store.media_file_path(tmp_path, outside) is None

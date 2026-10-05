@@ -119,6 +119,7 @@ from .inbound_media_store import (
     is_safe_media_name,
     local_media_ref,
     local_media_refs,
+    media_file_path,
     media_basename,
     note_existing,
     parse_chunk_meta,
@@ -558,6 +559,15 @@ class FederationInboundService(ProtectionGateMixin):
         msg_type = str(p.get("type") or "text")
         if not conv_id or not message_id or not sender_user_id:
             log.debug("DM_MESSAGE missing required field: %s", p)
+            return
+        if not is_safe_media_name(message_id):
+            # The id names the preview / blob files under media_dir — an
+            # absolute or ``../`` id would write outside it. The raw value
+            # is not logged (it is attacker-chosen).
+            log.warning(
+                "DM_MESSAGE from %s: rejecting unsafe message id",
+                event.from_instance,
+            )
             return
         if msg_type not in MESSAGE_TYPES:
             msg_type = "text"
@@ -1153,12 +1163,23 @@ class FederationInboundService(ProtectionGateMixin):
         # first save.
         if self._media_dir is not None:
             mime_in = str(payload.get("mime_type") or "")
-            full_path = self._media_dir / f"{message_id}{_mime_to_ext(mime_in)}"
+            # Every file name below is built from the peer's message id:
+            # resolve each through ``media_file_path`` so nothing outside
+            # media_dir is ever read, written or removed (the caller
+            # already refused an unsafe id; this is defence in depth).
+            full_path = media_file_path(
+                self._media_dir, f"{message_id}{_mime_to_ext(mime_in)}"
+            )
+            preview_path = media_file_path(
+                self._media_dir, f"{message_id}.preview.webp"
+            )
+            if full_path is None or preview_path is None:
+                log.warning("DM_MESSAGE: unsafe message id — media not stored")
+                return None, None
             if await aiofiles.os.path.isfile(full_path):
                 # Drop any stale preview from a previous attempt.
-                preview_old = self._media_dir / f"{message_id}.preview.webp"
                 try:
-                    await aiofiles.os.remove(preview_old)
+                    await aiofiles.os.remove(preview_path)
                 except FileNotFoundError:
                     pass
                 except OSError:  # pragma: no cover
@@ -1185,9 +1206,12 @@ class FederationInboundService(ProtectionGateMixin):
         # keeps the replace operation atomic on the receiver: the
         # full bytes land at the same filename and the SPA's
         # ``media_url`` doesn't have to change at all.
+        dest = media_file_path(self._media_dir, f"{message_id}.preview.webp")
+        if dest is None:
+            log.warning("DM_MESSAGE: unsafe message id — preview not stored")
+            return None, None
         try:
             await aiofiles.os.makedirs(self._media_dir, exist_ok=True)
-            dest = self._media_dir / f"{message_id}.preview.webp"
             async with aiofiles.open(dest, "wb") as f:
                 await f.write(preview_bytes)
         except OSError as exc:  # pragma: no cover

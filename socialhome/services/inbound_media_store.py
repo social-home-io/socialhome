@@ -53,6 +53,23 @@ def is_safe_media_name(name: str) -> bool:
     return bool(name) and SAFE_MEDIA_NAME.fullmatch(name) is not None
 
 
+def media_file_path(media_dir: pathlib.Path, name: str) -> pathlib.Path | None:
+    """``media_dir / name`` when ``name`` is one safe component, else ``None``.
+
+    For any path built from a peer-supplied id (``<message_id>.preview.webp``
+    …): the name must pass :func:`is_safe_media_name` *and* the joined path
+    must sit directly in ``media_dir`` — a pure check (no filesystem I/O),
+    so an absolute name or a ``..`` component can never select a file
+    outside the media directory even if the name rule is loosened later.
+    """
+    if not is_safe_media_name(name):
+        return None
+    path = media_dir / name
+    if path.parent != media_dir or path.name != name:
+        return None
+    return path
+
+
 def local_media_ref(value: object) -> str | None:
     """A peer-supplied media reference in the canonical local shape.
 
