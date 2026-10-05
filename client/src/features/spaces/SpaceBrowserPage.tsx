@@ -228,7 +228,7 @@ function filterBy(entries: DirectoryEntry[], term: string): DirectoryEntry[] {
 }
 
 export default function SpaceBrowserPage() {
-  useTitle(t('spaces.list.browse'))
+  useTitle(t('page_title.browse'))
   const loc = useLocation()
   // Refreshing the global directory and pairing with another household
   // are both household-admin actions.

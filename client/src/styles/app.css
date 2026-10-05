@@ -13978,6 +13978,9 @@ a.sh-welcome-card:hover {
 
 @media (max-width: 640px) {
   .sh-bazaar-filters { flex-direction: column; align-items: stretch; }
+  /* The tab strip scrolls on its own; without min-width:0 its
+   * intrinsic width (long German tab labels) widens the whole column. */
+  .sh-bazaar-filters > * { min-width: 0; max-width: 100%; }
   .sh-bazaar-search, .sh-bazaar-status-filter { max-width: 100%; }
   .sh-bazaar-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
 }
