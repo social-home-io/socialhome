@@ -91,7 +91,7 @@ from ..domain.presence import truncate_coord
 from ..federation.space_scope import resolve_space_id
 from ..repositories.base import dump_json
 from ..utils.datetime import parse_iso8601_optional
-from .inbound_media_store import local_media_ref
+from .inbound_media_store import verbatim_local_media_ref
 from .space_post_moderation import post_from_queue_payload
 from .space_public_author import (
     build_signed_author_inner,
@@ -762,16 +762,10 @@ def _signed_copy(
     return dict(raw)
 
 
-def _local_ref_or_none(value: object) -> str | None:
-    """``value`` unchanged when it is a local media reference, else ``None``
-    (kept verbatim so an honest submitter's own copy still matches it)."""
-    return value if isinstance(value, str) and local_media_ref(value) else None
-
-
 def _local_refs(values: object, *, limit: int) -> list[str]:
     if not isinstance(values, list):
         return []
-    return [v for v in values if _local_ref_or_none(v)][:limit]
+    return [v for v in values if verbatim_local_media_ref(v)][:limit]
 
 
 def sanitize_remote_payload(feature: str, payload: dict) -> dict:
@@ -781,14 +775,14 @@ def sanitize_remote_payload(feature: str, payload: dict) -> dict:
     out = dict(payload)
     match feature:
         case "posts":
-            out["media_url"] = _local_ref_or_none(out.get("media_url"))
+            out["media_url"] = verbatim_local_media_ref(out.get("media_url"))
             out["image_urls"] = _local_refs(
                 out.get("image_urls"), limit=FEED_POST_MAX_IMAGES
             )
             fm = out.get("file_meta")
             out["file_meta"] = (
                 dict(fm)
-                if isinstance(fm, dict) and _local_ref_or_none(fm.get("url"))
+                if isinstance(fm, dict) and verbatim_local_media_ref(fm.get("url"))
                 else None
             )
             loc = out.get("location")
@@ -805,7 +799,7 @@ def sanitize_remote_payload(feature: str, payload: dict) -> dict:
                 out["location"] = None
             lp = out.get("link_preview")
             if isinstance(lp, dict) and lp.get("thumbnail_url"):
-                if not _local_ref_or_none(lp.get("thumbnail_url")):
+                if not verbatim_local_media_ref(lp.get("thumbnail_url")):
                     out["link_preview"] = {**lp, "thumbnail_url": None}
             attachments = out.get("attachments")
             if isinstance(attachments, dict) and isinstance(
@@ -818,21 +812,25 @@ def sanitize_remote_payload(feature: str, payload: dict) -> dict:
                 out["attachments"] = {**attachments, "bazaar": bazaar}
         case "pages":
             if "cover_image_url" in out:
-                out["cover_image_url"] = _local_ref_or_none(out["cover_image_url"])
+                out["cover_image_url"] = verbatim_local_media_ref(
+                    out["cover_image_url"]
+                )
             patch = out.get("patch")
             if isinstance(patch, dict) and "cover_image_url" in patch:
                 out["patch"] = {
                     **patch,
-                    "cover_image_url": _local_ref_or_none(patch["cover_image_url"]),
+                    "cover_image_url": verbatim_local_media_ref(
+                        patch["cover_image_url"]
+                    ),
                 }
         case "calendar":
             if "cover_url" in out:
-                out["cover_url"] = _local_ref_or_none(out["cover_url"])
+                out["cover_url"] = verbatim_local_media_ref(out["cover_url"])
             patch = out.get("patch")
             if isinstance(patch, dict) and "cover_url" in patch:
                 out["patch"] = {
                     **patch,
-                    "cover_url": _local_ref_or_none(patch["cover_url"]),
+                    "cover_url": verbatim_local_media_ref(patch["cover_url"]),
                 }
     return out
 

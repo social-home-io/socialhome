@@ -4969,3 +4969,36 @@ async def test_the_archived_listener_answers_writers_only(bus, repos):
     )
     await listener(ev, None)
     assert engine.archived == ["peer-a"]
+
+
+@pytest.mark.parametrize(
+    ("cover", "expected"),
+    [
+        ("https://tracker.example/pixel.png", None),
+        ("//tracker.example/p.png", None),
+        ("javascript:alert(1)", None),
+        ("api/media/cover.webp", "api/media/cover.webp"),
+    ],
+)
+async def test_calendar_event_keeps_only_a_local_cover(
+    repos, handlers, cover, expected
+):
+    """F7: a space event's ``cover_url`` renders as ``<img src>`` for every
+    member — a third-party URL would leak their IPs, so it is dropped."""
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "ev-1",
+                "calendar_id": "cal-1",
+                "summary": "Picnic",
+                "created_by": "u-1",
+                "start": "2026-06-10T17:00:00+00:00",
+                "end": "2026-06-10T19:00:00+00:00",
+                "cover_url": cover,
+            },
+            space_id="sp-1",
+        )
+    )
+    assert len(repos["calendar"].saved) == 1
+    assert repos["calendar"].saved[0][1].cover_url == expected

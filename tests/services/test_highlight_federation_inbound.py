@@ -389,3 +389,26 @@ async def test_handlers_skipped_when_highlight_repo_missing(db, bus):
     svc.attach_to(fake_fed)
     registered = set(fake_fed._event_registry._handlers.keys())
     assert FederationEventType.HIGHLIGHT_CREATED not in registered
+
+
+@pytest.mark.parametrize(
+    "remote",
+    ["https://tracker.example/pixel.png", "//tracker.example/p.png", "javascript:x"],
+)
+async def test_highlight_frame_with_a_remote_media_url_is_not_stored(
+    db, bus, inbound, remote
+):
+    """F7: a frame whose ``media_url`` is not a local media reference is
+    dropped — it would be an ``<img>`` / ``<video>`` src on a third party."""
+    await inbound._on_highlight_created(
+        _event(
+            FederationEventType.HIGHLIGHT_CREATED, _create_payload(media_url=remote)
+        ),
+    )
+    await inbound._on_highlight_frame_appended(
+        _event(
+            FederationEventType.HIGHLIGHT_FRAME_APPENDED,
+            _create_payload(frame_id="f-fed-2", sequence=2, media_url=remote),
+        ),
+    )
+    assert await inbound._highlight_repo.list_frames("s-fed-1") == []

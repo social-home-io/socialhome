@@ -184,3 +184,23 @@ def test_media_file_path_refuses_escapes(tmp_path, name):
 def test_media_file_path_refuses_absolute_path_under_another_root(tmp_path):
     outside = str(tmp_path.parent / "outside.preview.webp")
     assert store.media_file_path(tmp_path, outside) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("api/media/0f3a9c.webp", "api/media/0f3a9c.webp"),
+        ("/api/media/0f3a9c.webp", "/api/media/0f3a9c.webp"),
+        ("https://tracker.example/pixel.png", None),
+        ("//tracker.example/pixel.png", None),
+        ("javascript:alert(1)", None),
+        ("api/media/../secret", None),
+        ("", None),
+        (None, None),
+        (7, None),
+    ],
+)
+def test_verbatim_local_media_ref(value, expected):
+    """F7: a peer value is kept byte-for-byte when it is a local media
+    reference (so hashes / signatures over it still match), else ``None``."""
+    assert store.verbatim_local_media_ref(value) == expected

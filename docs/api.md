@@ -377,7 +377,9 @@ echoed back before the body lands in the DB. Same treatment applies
 to the scalar `cover_image_url`. Clients should paste canonical
 `/api/media/{filename}` paths and let the server handle signing —
 saving a stale signed URL is safe (the strip is idempotent) but
-unnecessary.
+unnecessary. A `cover_image_url` that is not a local media reference
+(`api/media/<name>`) is served as `null` (page, version and conflict
+side dicts) so a third-party cover never reaches an `<img>`.
 
 ### Tasks
 

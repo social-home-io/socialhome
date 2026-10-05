@@ -92,6 +92,10 @@ receiver drops the event with a WARNING when:
   that is not part of that highlight here or not authored by one of our
   users. The published author is the stored one, never the payload's.
 
+A frame whose `media_url` is not a local media reference
+(`api/media/<name>`, kept verbatim) is not stored: it would be an
+`<img>` / `<video>` source on a third party, leaking every viewer's IP.
+
 `tests/protocol/test_highlight_scope.py`.
 
 ## Implementation pointers

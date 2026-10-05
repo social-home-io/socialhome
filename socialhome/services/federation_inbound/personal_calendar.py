@@ -26,6 +26,7 @@ from ...domain.federation import FederationEventType
 from ...infrastructure.event_bus import EventBus
 from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
+from ..inbound_media_store import verbatim_local_media_ref
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -250,7 +251,7 @@ class PersonalCalendarInboundHandlers:
                 attendees=tuple(attendee_ids),
                 rrule=p.get("rrule"),
                 rsvp_enabled=bool(p.get("rsvp_enabled", False)),
-                cover_url=p.get("cover_url"),
+                cover_url=verbatim_local_media_ref(p.get("cover_url")),
                 location=p.get("location"),
                 origin="remote_invite",
                 remote_event_id=remote_event_id,
@@ -271,7 +272,7 @@ class PersonalCalendarInboundHandlers:
                     attendees=tuple(attendee_ids),
                     rrule=p.get("rrule"),
                     rsvp_enabled=bool(p.get("rsvp_enabled", False)),
-                    cover_url=p.get("cover_url"),
+                    cover_url=verbatim_local_media_ref(p.get("cover_url")),
                     location=p.get("location"),
                     tz=event_tz,
                     client_event_uuid=client_event_uuid,

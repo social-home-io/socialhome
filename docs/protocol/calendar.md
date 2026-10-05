@@ -363,6 +363,13 @@ coordinate via the calendar selector, not the invite picker), unknown
 user_ids, and remote user_ids whose home instance isn't a confirmed
 pair.
 
+### Covers from other households
+
+A received event's `cover_url` (space events and personal-calendar
+invites) is kept only when it is a local media reference
+(`api/media/<name>`, verbatim); a third-party URL is stored as no cover,
+so it never becomes an `<img src>` that leaks members' IPs.
+
 ## Implementation
 
 - `socialhome/services/calendar_service.py`,

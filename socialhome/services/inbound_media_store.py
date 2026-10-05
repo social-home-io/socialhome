@@ -89,6 +89,18 @@ def local_media_ref(value: object) -> str | None:
     return MEDIA_REF_PREFIX + name
 
 
+def verbatim_local_media_ref(value: object) -> str | None:
+    """``value`` unchanged when it is a local media reference, else ``None``.
+
+    For peer fields rendered as an ``<img>`` / ``<video>`` source (moment
+    and highlight media, event / page covers): a third-party URL there
+    would load from every viewer's browser and leak their IP. Kept
+    byte-for-byte rather than normalised so a hash or signature computed
+    over the sender's own copy still matches.
+    """
+    return value if isinstance(value, str) and local_media_ref(value) else None
+
+
 def local_media_refs(values: object, *, limit: int) -> tuple[str, ...]:
     """:func:`local_media_ref` over a peer-supplied list: the canonical
     references it holds, in order, at most ``limit``. A non-list is empty."""

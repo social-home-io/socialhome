@@ -116,7 +116,11 @@ from ...media.cleanup import unlink_unreferenced
 from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
-from ..inbound_media_store import local_media_ref, local_media_refs
+from ..inbound_media_store import (
+    local_media_ref,
+    local_media_refs,
+    verbatim_local_media_ref,
+)
 from ..page_conflict_service import (
     PageMode,
     canonical_from_wire,
@@ -1370,7 +1374,9 @@ class SpaceContentInboundHandlers:
         ):
             log.debug("SPACE_CALENDAR_EVENT_* missing required field")
             return
-        cover = p.get("cover_url")
+        # Rendered as ``<img src>`` for every member: only a local media
+        # reference — a third-party URL would leak their IPs.
+        cover = verbatim_local_media_ref(p.get("cover_url"))
         location = p.get("location")
         ev = CalendarEvent(
             id=event_id,
@@ -1384,7 +1390,7 @@ class SpaceContentInboundHandlers:
             attendees=tuple(str(a) for a in (p.get("attendees") or ())),
             mirrored_from=p.get("mirrored_from"),
             rrule=p.get("rrule"),
-            cover_url=cover if isinstance(cover, str) and cover else None,
+            cover_url=cover,
             location=location if isinstance(location, str) and location else None,
             # IANA wall-clock anchor. Old peers omit; default ``"UTC"``.
             # Peer-supplied, so validated here: an unknown zone name

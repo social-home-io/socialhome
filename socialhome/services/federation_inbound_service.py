@@ -121,6 +121,7 @@ from .inbound_media_store import (
     local_media_refs,
     media_file_path,
     media_basename,
+    verbatim_local_media_ref,
     note_existing,
     parse_chunk_meta,
     partial_key,
@@ -3585,7 +3586,10 @@ class FederationInboundService(ProtectionGateMixin):
                 moment_id,
             )
             return
-        media_type = p.get("media_type")
+        # Only a local media reference is stored — a peer's third-party
+        # URL would be an ``<img src>`` leaking every viewer's IP.
+        moment_media_url = verbatim_local_media_ref(p.get("media_url"))
+        media_type = p.get("media_type") if moment_media_url is not None else None
         if media_type not in ("image", "video", None):
             media_type = None
         try:
@@ -3596,7 +3600,7 @@ class FederationInboundService(ProtectionGateMixin):
             id=moment_id,
             author_user_id=author_user_id,
             content=str(p.get("content") or ""),
-            media_url=p.get("media_url"),
+            media_url=moment_media_url,
             media_type=media_type,
             duration_ms=(
                 int(p["duration_ms"]) if p.get("duration_ms") is not None else None
@@ -4048,7 +4052,9 @@ class FederationInboundService(ProtectionGateMixin):
             )
         except TypeError, ValueError:
             duration = None
-        media_url = str(payload.get("media_url") or "")
+        # Only a local media reference — a third-party URL would be an
+        # ``<img>`` / ``<video>`` src leaking every viewer's IP.
+        media_url = verbatim_local_media_ref(payload.get("media_url"))
         if not media_url:
             return None
         return HighlightFrame(

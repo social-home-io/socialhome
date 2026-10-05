@@ -485,3 +485,25 @@ async def test_cover_image_url_signed_on_read(client):
     detail = await r2.json()
     assert detail["cover_image_url"].startswith("/api/media/cover.webp?exp=")
     assert "sig=stale" not in detail["cover_image_url"]
+
+
+async def test_cover_image_url_that_is_not_local_media_is_never_served(client):
+    """F7: a page cover that is not a local media reference — set over the
+    API or mirrored from another household before inbound filtering — is
+    served as ``null``: the stored value stays (it is part of the page
+    version hash members and host agree on) but never reaches an ``<img>``."""
+    h = _auth(client._tok)
+    r = await client.post(
+        "/api/pages", json={"title": "Cover", "content": "x"}, headers=h
+    )
+    pid = (await r.json())["id"]
+    await client.patch(
+        f"/api/pages/{pid}",
+        json={"cover_image_url": "https://tracker.example/pixel.png"},
+        headers=h,
+    )
+    detail = await (await client.get(f"/api/pages/{pid}", headers=h)).json()
+    assert detail["cover_image_url"] is None
+    versions = await (await client.get(f"/api/pages/{pid}/versions", headers=h)).json()
+    assert versions, "the cover edit leaves a version snapshot"
+    assert all(v["cover_image_url"] in (None,) for v in versions)
