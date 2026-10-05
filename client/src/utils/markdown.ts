@@ -11,7 +11,9 @@
  * `javascript:` URLs. Never pass ``USE_PROFILES`` here — DOMPurify then
  * replaces ``ALLOWED_TAGS``/``ALLOWED_ATTR`` with its whole HTML profile.
  * Images + links resolve only `http:` / `https:` / `mailto:` / local
- * (`/…`, `#…`, `api/…`); anything else is stripped before rendering.
+ * (`/…`, `#…`, `api/…`); anything else — including `data:` (which
+ * DOMPurify would otherwise allow on `<img>`) and protocol-relative
+ * `//host` / `\\host` — is stripped before rendering.
  * The one `<input>` kept is the GFM task-list checkbox, forced disabled.
  *
  * Wikilinks: `[[Page Title]]` rewrites to an anchor pointing at
@@ -44,12 +46,36 @@ marked.use({
 // ingress + Vite dev). Registered once at module load; DOMPurify
 // hooks are global so this runs for every ``DOMPurify.sanitize``
 // call across the app, which is what we want.
+//
+// The same hook also refuses two URL shapes the allow-list regex below
+// would let through, read the way a browser reads them (tabs / newlines
+// dropped anywhere, edge controls / spaces trimmed — as ``safeHref``):
+//   * ``data:`` — DOMPurify admits it on ``<img src>`` regardless of
+//     ``ALLOWED_URI_REGEXP``. Pages never need it (pictures are uploads,
+//     ``api/media/…``), and a peer-written data: SVG has no business in
+//     a federated body.
+//   * ``//host`` and its backslash spellings (``\\host``, ``/\host``) —
+//     protocol-relative, so they leave for another host. ``safeHref``
+//     refuses them; so does the markdown renderer.
+// eslint-disable-next-line no-control-regex
+const _URL_STRIPPED = /[\t\n\r]/g
+// eslint-disable-next-line no-control-regex
+const _URL_EDGE = /^[\u0000- ]+|[\u0000- ]+$/g
+const _PROTOCOL_RELATIVE = /^[/\\]{2}/
+
 DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
   if (
-    (data.attrName === 'src' || data.attrName === 'href') &&
-    typeof data.attrValue === 'string' &&
-    data.attrValue.startsWith('/api/')
+    (data.attrName !== 'src' && data.attrName !== 'href') ||
+    typeof data.attrValue !== 'string'
   ) {
+    return
+  }
+  const read = data.attrValue.replace(_URL_STRIPPED, '').replace(_URL_EDGE, '')
+  if (/^data:/i.test(read) || _PROTOCOL_RELATIVE.test(read)) {
+    data.keepAttr = false
+    return
+  }
+  if (data.attrValue.startsWith('/api/')) {
     data.attrValue = data.attrValue.slice(1)
   }
 })

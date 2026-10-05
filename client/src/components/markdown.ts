@@ -4,8 +4,9 @@
  * Covers bold, italic, inline code, code blocks, links, line breaks.
  * No raw HTML passes through — every produced tag originates here, so
  * the output is XSS-safe by construction. Link hrefs are filtered to
- * ``http:`` / ``https:`` / ``mailto:`` — ``javascript:`` and data URLs
- * are stripped.
+ * ``http:`` / ``https:`` / ``mailto:`` / an app path (``/…``) —
+ * ``javascript:``, data URLs and protocol-relative ``//host`` are
+ * stripped.
  *
  * This is deliberately tiny (no dep). When we need tables, footnotes,
  * or embed syntax we'll swap for ``marked`` + ``DOMPurify``.
@@ -64,9 +65,13 @@ function _escape(raw: string): string {
     .replace(/'/g, '&#39;')
 }
 
+// ``//host`` / ``/\host`` are protocol-relative — they leave for another
+// host. Refused, as ``utils/safeHref`` does.
+const _PROTOCOL_RELATIVE = /^[/\\]{2}/
+
 function _safeHref(href: string): string | null {
   const trimmed = href.trim()
-  if (!_SAFE_SCHEMES.test(trimmed)) return null
+  if (!_SAFE_SCHEMES.test(trimmed) || _PROTOCOL_RELATIVE.test(trimmed)) return null
   return trimmed
 }
 

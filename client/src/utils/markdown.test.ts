@@ -134,6 +134,42 @@ describe('renderMarkdown', () => {
       }
     })
 
+    it.each([
+      ['data:image/png;base64,iVBORw0KGgo='],
+      ['data:image/svg+xml;base64,PHN2Zz48L3N2Zz4='],
+      [' DATA:image/gif;base64,R0lGOD=='],
+    ])('drops a data: image src %s (raw and markdown)', (bad) => {
+      // DOMPurify lets ``data:`` through on <img> by default; Pages never
+      // need it (uploads become api/media/…), and a peer-supplied data:
+      // SVG / tracking blob has no place in a federated body.
+      const d = host(renderMarkdown(`![md](${bad.trim()})\n\n<img src="${bad}" alt="raw">`))
+      const imgs = Array.from(d.querySelectorAll('img'))
+      expect(imgs.length).toBe(2)
+      for (const img of imgs) expect(img.hasAttribute('src')).toBe(false)
+    })
+
+    it.each([
+      ['//evil.example/x'],
+      ['\\\\evil.example/x'],
+      ['/\\evil.example/x'],
+      ['\\/evil.example/x'],
+      [' //evil.example/x'],
+    ])('drops protocol-relative %s on links and images, like safeHref', (bad) => {
+      // ``//host`` and its backslash spellings resolve to another host —
+      // safeHref refuses them, so the markdown renderer does too.
+      const d = host(renderMarkdown(
+        `<a href="${bad}">raw</a>\n\n<img src="${bad}" alt="i">`,
+      ))
+      expect(d.querySelector('a')?.hasAttribute('href')).toBe(false)
+      expect(d.querySelector('img')?.hasAttribute('src')).toBe(false)
+    })
+
+    it('drops a protocol-relative markdown link', () => {
+      const d = host(renderMarkdown('[x](//evil.example/x) [y](/feed)'))
+      const hrefs = Array.from(d.querySelectorAll('a')).map((a) => a.getAttribute('href'))
+      expect(hrefs).toEqual([null, '/feed'])
+    })
+
     it('keeps scheme-less attribute values (table align, image size, api/ src)', () => {
       const d = host(renderMarkdown(
         '| a |\n|:-:|\n| 1 |\n\n<img src="/api/media/x" width="120" alt="pic">',
