@@ -20,6 +20,9 @@ beforeAll(() => {
   } as unknown as typeof ResizeObserver
 })
 
+/** Every popup / tooltip content handed to a zone circle, in order. */
+const overlays = vi.hoisted(() => [] as unknown[])
+
 vi.mock('leaflet', () => {
   const noop = () => undefined
   const fluentSelf = (target: any) => new Proxy(target, {
@@ -30,7 +33,8 @@ vi.mock('leaflet', () => {
   })
   const layer = fluentSelf({
     addTo: () => layer,
-    bindTooltip: () => layer,
+    bindTooltip: (c: unknown) => { overlays.push(c); return layer },
+    bindPopup: (c: unknown) => { overlays.push(c); return layer },
     remove: noop,
     clearLayers: noop,
   })
@@ -97,8 +101,18 @@ const _zone = (over: Partial<any> = {}) => ({
 })
 
 
+/** Mount overlay content the way Leaflet's ``DivOverlay._updateContent``
+ *  does: a string goes through ``innerHTML``, a node is appended. */
+function leafletMount(content: unknown): HTMLElement {
+  const el = document.createElement('div')
+  if (typeof content === 'string') el.innerHTML = content
+  else el.appendChild(content as Node)
+  return el
+}
+
 describe('SpaceZonesAdmin', () => {
   beforeEach(() => {
+    overlays.length = 0
     mockApi.get.mockReset()
     mockApi.post.mockReset()
     mockApi.patch.mockReset()
@@ -231,5 +245,29 @@ describe('SpaceZonesAdmin', () => {
 
     // The overlay renders the translated map.tile_error copy.
     await findByText(t('map.tile_error'))
+  })
+
+  it('shows a hostile zone name literally in the map popup and tooltip', async () => {
+    const name = '<img src=x onerror="window.__xss=1"> & <b>Bold</b>'
+    mockApi.get.mockResolvedValue({ zones: [_zone({ name })] })
+    const { findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
+    await findByText(name)
+    await waitFor(() => expect(overlays.length).toBe(2))
+    for (const content of overlays) {
+      const el = leafletMount(content)
+      expect(el.querySelector('img')).toBeNull()
+      expect(el.querySelector('b')).toBeNull()
+      expect(el.textContent).toBe(name)
+    }
+  })
+
+  it('never lets a hostile zone colour inject extra CSS into the list swatch', async () => {
+    mockApi.get.mockResolvedValue({ zones: [_zone({ color: 'red;position:fixed;inset:0;background-image:url(https://evil.example/b)' })] })
+    const { container, findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
+    await findByText('Office')
+    const sw = container.querySelector('.sh-zones-admin__swatch') as HTMLElement
+    expect(sw.style.position).toBe('')
+    expect(sw.style.backgroundImage).not.toContain('url')
+    expect(sw.getAttribute('style') ?? '').not.toContain('evil')
   })
 })

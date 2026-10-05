@@ -20,6 +20,15 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('This space is for people aged 16 and up.')
   })
 
+  it('translates a refused space link and DM attachment instead of the English rule', () => {
+    expect(apiErrorMessage(422, '/api/spaces/s1/links', {
+      code: 'INVALID_LINK', detail: 'url must be an http(s) web address',
+    })).toBe('Use a full web address that starts with https://.')
+    expect(apiErrorMessage(422, '/api/conversations/c1/messages', {
+      code: 'INVALID_MEDIA_URL', detail: 'media_url must be a file uploaded via /api/media/upload',
+    })).toBe("That file can't be sent. Attach it again and resend.")
+  })
+
   it('formats the bid floor as money in the listing currency', () => {
     const msg = apiErrorMessage(422, '/api/bazaar/p1/bids', {
       code: 'BID_TOO_LOW',

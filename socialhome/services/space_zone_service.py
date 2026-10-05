@@ -12,8 +12,8 @@ Service responsibilities:
   :mod:`space_service`.
 * validation — radius range (25 m – 50 km), color hex shape, name
   uniqueness within a space, 50-zones-per-space cap.
-* GPS truncation — every persisted coordinate goes through
-  :func:`truncate_coord` (§25 / CLAUDE.md).
+* coordinates — finite, in range and truncated to 4 dp via
+  :func:`~socialhome.domain.space.validate_zone_coord` (§25 / CLAUDE.md).
 * domain events — emit :class:`SpaceZoneUpserted` /
   :class:`SpaceZoneDeleted` after a successful write so federation +
   realtime fan-outs can pick them up via the bus.
@@ -25,13 +25,20 @@ plus an :class:`EventBus` for fan-out.
 
 from __future__ import annotations
 
-import re
 import secrets
 from datetime import datetime, timezone
 
 from ..domain.events import SpaceZoneDeleted, SpaceZoneUpserted
-from ..domain.presence import truncate_coord
-from ..domain.space import SETTINGS_AUTHORITY_ROLES, SpaceZone
+from ..domain.space import (
+    MAX_ZONE_RADIUS_M,
+    MIN_ZONE_RADIUS_M,
+    SETTINGS_AUTHORITY_ROLES,
+    SpaceZone,
+    validate_zone_color,
+    validate_zone_coord,
+    validate_zone_name,
+    validate_zone_radius,
+)
 from ..infrastructure.event_bus import EventBus
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.space_zone_repo import AbstractSpaceZoneRepo
@@ -39,21 +46,15 @@ from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
 from .space_member_guard import SpaceMemberGuardMixin
 
-#: §23.8.7: 25 m floor (just above the 4-dp ~11 m precision); 50 km
-#: ceiling (a "city-wide" zone is the largest meaningful display
-#: bucket on a per-space map).
-MIN_RADIUS_M = 25
-MAX_RADIUS_M = 50_000
+#: §23.8.7 radius bounds — defined in :mod:`socialhome.domain.space` so
+#: the inbound federation / sync paths apply the same rule.
+MIN_RADIUS_M = MIN_ZONE_RADIUS_M
+MAX_RADIUS_M = MAX_ZONE_RADIUS_M
 
 #: §23.8.7: cap enforced at the service layer so we can adjust without
 #: a schema migration. With this cap the client-side zone-match per
 #: pin is trivially fast.
 MAX_ZONES_PER_SPACE = 50
-
-#: ``"#RRGGBB"`` (case-insensitive) or ``None``. Matches the spec's
-#: documented shape; the client picks a deterministic palette colour
-#: when a zone has ``color is None``.
-_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 #: Sentinel for "argument omitted" so PATCH callers can distinguish
 #: "don't change colour" (omit) from "clear the colour, fall back to
@@ -130,11 +131,11 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         actor = await self._users.get(actor_username)
         if actor is None:
             raise KeyError(f"actor {actor_username!r} not found")
-        clean_name = _validate_name(name)
+        clean_name = validate_zone_name(name)
         clean_radius = _validate_radius(radius_m)
-        clean_color = _validate_color(color)
-        clean_lat = truncate_coord(float(latitude))
-        clean_lon = truncate_coord(float(longitude))
+        clean_color = validate_zone_color(color)
+        clean_lat = validate_zone_coord(latitude, name="latitude", limit=90)
+        clean_lon = validate_zone_coord(longitude, name="longitude", limit=180)
         assert clean_lat is not None and clean_lon is not None  # noqa: S101
 
         existing = await self._zones.count_for_space(space_id)
@@ -188,20 +189,20 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         if existing is None or existing.space_id != space_id:
             raise SpaceZoneNotFoundError(zone_id)
 
-        new_name = existing.name if name is None else _validate_name(name)
+        new_name = existing.name if name is None else validate_zone_name(name)
         new_radius = (
             existing.radius_m if radius_m is None else _validate_radius(radius_m)
         )
-        new_color = (
-            existing.color if color is _UNSET else _validate_color(color)  # type: ignore[arg-type]
-        )
+        new_color = existing.color if color is _UNSET else validate_zone_color(color)
         new_lat = (
-            existing.latitude if latitude is None else truncate_coord(float(latitude))
+            existing.latitude
+            if latitude is None
+            else validate_zone_coord(latitude, name="latitude", limit=90)
         )
         new_lon = (
             existing.longitude
             if longitude is None
-            else truncate_coord(float(longitude))
+            else validate_zone_coord(longitude, name="longitude", limit=180)
         )
         assert new_lat is not None and new_lon is not None  # noqa: S101
 
@@ -294,33 +295,8 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
 # ─── Validation helpers ───────────────────────────────────────────────────
 
 
-def _validate_name(name: str) -> str:
-    cleaned = (name or "").strip()
-    if not cleaned:
-        raise ValueError("zone name must not be empty")
-    if len(cleaned) > 64:
-        raise ValueError("zone name must be 64 characters or fewer")
-    return cleaned
-
-
 def _validate_radius(radius_m: int) -> int:
-    try:
-        coerced = int(radius_m)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("radius_m must be an integer") from exc
-    if not (MIN_RADIUS_M <= coerced <= MAX_RADIUS_M):
-        raise ValueError(
-            f"radius_m must be between {MIN_RADIUS_M} and {MAX_RADIUS_M}",
-        )
-    return coerced
-
-
-def _validate_color(color: str | None) -> str | None:
-    if color is None:
-        return None
-    if not isinstance(color, str) or not _COLOR_RE.match(color):
-        raise ValueError("color must be a #RRGGBB hex string or None")
-    return color.lower()
+    return validate_zone_radius(radius_m)
 
 
 def _now_iso() -> str:

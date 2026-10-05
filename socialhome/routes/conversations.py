@@ -20,6 +20,7 @@ from ..app_keys import (
 from ..domain.conversation import ConversationType, mute_active
 from ..domain.user import _picture_url
 from ..media_signer import sign_media_urls_in, strip_signature_query
+from ..services.inbound_media_store import local_media_ref
 from ..security import error_response, sanitise_for_api
 from .base import BaseView
 from .media_status import READY, media_filename, video_poster_path
@@ -354,6 +355,11 @@ class ConversationMessageView(BaseView):
         statuses = await self.svc(media_transcode_repo_key).status_for(video_fns)
         payload = []
         for m in msgs:
+            # Read-side gate for rows stored before ``send_message`` /
+            # ``DM_MESSAGE`` inbound only accepted local uploads: a
+            # ``javascript:`` or remote ``media_url`` is served as null,
+            # never as a link target.
+            media_url = local_media_ref(m.media_url)
             # ``list_reactions`` is a small per-message read; the page
             # size is capped at 100 so the worst case is 100 queries —
             # cheap on SQLite WAL. A bulk-by-conversation read can come
@@ -365,7 +371,7 @@ class ConversationMessageView(BaseView):
                 "sender_user_id": m.sender_user_id,
                 "content": m.content,
                 "type": m.type,
-                "media_url": m.media_url,
+                "media_url": media_url,
                 "file_name": m.file_name,
                 "mime_type": m.mime_type,
                 "file_size_bytes": m.file_size_bytes,
@@ -377,12 +383,12 @@ class ConversationMessageView(BaseView):
                 "edited_at": m.edited_at.isoformat() if m.edited_at else None,
             }
             if m.type == "video":
-                fn = media_filename(m.media_url)
+                fn = media_filename(media_url)
                 row["media_status"] = statuses.get(fn, READY) if fn else READY
                 # Signed poster — set the unsigned ``.webp`` sibling path
                 # so the ``sign_media_urls_in`` pass below signs it
                 # alongside ``media_url``.
-                poster = video_poster_path(m.media_url)
+                poster = video_poster_path(media_url)
                 if poster is not None:
                     row["media_thumbnail_url"] = poster
             payload.append(sanitise_for_api(row))

@@ -35,6 +35,25 @@ describe('renderMarkdown', () => {
     expect(out).toContain('target="_blank"')
   })
 
+  test.each([['//evil.example/x'], ['/\\evil.example/x'], ['\\\\evil.example/x']])(
+    'drops protocol-relative link %s (like safeHref), keeps /app paths',
+    (bad) => {
+      const out = renderMarkdown(`[x](${bad}) [y](/feed)`)
+      expect(out).not.toContain('evil.example/x"')
+      expect(out).not.toMatch(/href="[/\\]{2}/)
+      expect(out).toContain('href="/feed"')
+    },
+  )
+
+  test.each([['/\t/evil.example/x'], ['/\r/evil.example/x'], ['\u0001//evil.example/x']])(
+    'drops %j: browsers strip TAB/CR and edge controls, so it is protocol-relative',
+    (bad) => {
+      const out = renderMarkdown(`[x](${bad}) [y](/feed)`)
+      expect(out).not.toContain('evil.example')
+      expect(out).toContain('href="/feed"')
+    },
+  )
+
   test('strips javascript: URLs as a security measure', () => {
     const out = renderMarkdown('[click](javascript:alert(1))')
     expect(out).not.toContain('javascript:')

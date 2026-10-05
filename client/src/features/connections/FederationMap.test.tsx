@@ -68,6 +68,7 @@ vi.mock('@/utils/mapTiles', async (importOriginal) => ({
   get addTileLayer() { return addTileLayer },
 }))
 
+import L from 'leaflet'
 import { connections, selfLat, selfLon } from '@/store/connections'
 import FederationMap from './FederationMap'
 
@@ -194,5 +195,72 @@ describe('FederationMap', () => {
     await waitFor(() => {
       expect(screen.getByText(/Map unavailable/)).toBeDefined()
     })
+  })
+
+  test('peer-supplied name and instance id stay inert in the pin and popup HTML', () => {
+    const marker = L.marker([0, 0])
+    vi.mocked(marker.bindPopup).mockClear()
+    vi.mocked(L.divIcon).mockClear()
+    const hostileId = '"><img src=x onerror="window.__xss=1">'
+    connections.value = [
+      {
+        instance_id: hostileId,
+        display_name: '<img src=x>',
+        reachable: true,
+        home_lat: 52.52,
+        home_lon: 13.40,
+      },
+    ]
+    render(<FederationMap onManage={() => {}} />)
+    const pinHtml = vi.mocked(L.divIcon).mock.calls[0][0]!.html as string
+    // Mount the pin the way Leaflet does: ``innerHTML`` on the overlay node.
+    const pin = document.createElement('div')
+    pin.innerHTML = pinHtml
+    expect(pin.querySelector('img')).toBeNull()
+    expect(pin.querySelector('.sh-fed-pin')!.textContent).toBe('<')
+    // The popup is a DOM node built from text, never an HTML string.
+    const popup = vi.mocked(marker.bindPopup).mock.calls[0][0] as HTMLElement
+    expect(popup).toBeInstanceOf(HTMLElement)
+    expect(popup.querySelector('img')).toBeNull()
+    expect(popup.querySelector('strong')!.textContent).toBe('<img src=x>')
+  })
+
+  test('Manage in a peer popup is a real button that opens that peer', () => {
+    const marker = L.marker([0, 0])
+    vi.mocked(marker.bindPopup).mockClear()
+    const peer = {
+      instance_id: 'peer-1', display_name: 'Bob', reachable: true,
+      status: 'confirmed', home_lat: 52.52, home_lon: 13.40,
+    }
+    connections.value = [peer]
+    const onManage = vi.fn()
+    render(<FederationMap onManage={onManage} />)
+    const popup = vi.mocked(marker.bindPopup).mock.calls[0][0] as HTMLElement
+    // No ``href="#"`` — under ingress it resolves against <base href>
+    // and navigates the iframe away.
+    expect(popup.querySelector('a')).toBeNull()
+    const btn = popup.querySelector('button') as HTMLButtonElement
+    expect(btn.type).toBe('button')
+    expect(btn.textContent).toBe('Manage')
+    btn.click()
+    expect(onManage).toHaveBeenCalledOnce()
+    expect(onManage.mock.calls[0][0].instance_id).toBe('peer-1')
+  })
+
+  test('no Manage control without a handler or when the peer is not manageable', () => {
+    const marker = L.marker([0, 0])
+    connections.value = [{
+      instance_id: 'peer-1', display_name: 'Bob', reachable: true,
+      home_lat: 52.52, home_lon: 13.40,
+    }]
+    vi.mocked(marker.bindPopup).mockClear()
+    render(<FederationMap />)
+    let popup = vi.mocked(marker.bindPopup).mock.calls[0][0] as HTMLElement
+    expect(popup.querySelector('button, a')).toBeNull()
+
+    vi.mocked(marker.bindPopup).mockClear()
+    render(<FederationMap onManage={vi.fn()} canManage={() => false} />)
+    popup = vi.mocked(marker.bindPopup).mock.calls[0][0] as HTMLElement
+    expect(popup.querySelector('button, a')).toBeNull()
   })
 })

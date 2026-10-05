@@ -204,6 +204,37 @@ describe('SpaceLocationCard', () => {
     await findByText(/2 of 2 in a zone/i)
   })
 
+  it('never lets a hostile zone colour inject extra CSS into the zone chip', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'zone_only',
+          entries: [{
+            user_id: 'u_pascal', username: 'pascal', display_name: 'Pascal',
+            state: 'zone', zone_id: 'z_office', zone_name: 'Office', picture_url: null,
+          }],
+        })
+      }
+      return Promise.resolve({
+        zones: [{
+          id: 'z_office', space_id: 'sp_test', name: 'Office',
+          latitude: 47.3769, longitude: 8.5417, radius_m: 200,
+          color: 'red;position:fixed;inset:0;background-image:url(https://evil.example/b)',
+          created_by: 'u_admin', created_at: '2026-04-28T00:00:00Z',
+          updated_at: '2026-04-28T00:00:00Z',
+        }],
+      })
+    })
+    const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByText('Pascal')
+    const chip = container.querySelector('.sh-zone-only-list__chip') as HTMLElement
+    expect(chip.style.position).toBe('')
+    expect(chip.style.backgroundImage).not.toContain('url')
+    expect(chip.getAttribute('style') ?? '').not.toContain('evil')
+    expect(chip.style.getPropertyValue('--zone-colour')).toMatch(/^#[0-9a-f]{6}$/i)
+  })
+
   it('hydrates the sharing chip from /members on cold load', async () => {
     // Regression for "I shared my location, came back, and the map
     // page rendered as if it was reset" — the chip's ``sharingMe``

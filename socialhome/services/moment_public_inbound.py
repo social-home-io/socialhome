@@ -29,6 +29,7 @@ from ..federation.owner_bound_id import MOMENT_KIND, owner_bound_id_refused
 from ..domain.events import MomentCreated, MomentDeleted
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..infrastructure.event_bus import EventBus
+from .inbound_media_store import verbatim_local_media_ref
 
 if TYPE_CHECKING:
     from ..repositories.moment_public_repo import (
@@ -91,12 +92,15 @@ class MomentPublicInbound:
                 env.get("moment_id"),
             )
             return
+        media_url = verbatim_local_media_ref(env.get("media_url"))
         moment = Moment(
             id=str(env["moment_id"]),
             author_user_id=str(env["author_user_id"]),
             content=str(env.get("content") or ""),
-            media_url=env.get("media_url"),
-            media_type=env.get("media_type"),
+            # Only a local media reference — a third-party URL would load
+            # from every follower's browser (IP leak).
+            media_url=media_url,
+            media_type=env.get("media_type") if media_url is not None else None,
             duration_ms=env.get("duration_ms"),
             parent_moment_id=env.get("parent_moment_id"),
             origin_instance_id=str(env.get("origin_instance_id") or ""),

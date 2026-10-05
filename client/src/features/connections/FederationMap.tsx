@@ -18,9 +18,12 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import './FederationMap.css'
-import { connections, selfLat, selfLon, type TransportState } from '@/store/connections'
+import {
+  connections, selfLat, selfLon, type Connection, type TransportState,
+} from '@/store/connections'
 import { t } from '@/i18n/i18n'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
+import { escapeHtml } from '@/utils/html'
 import { haversineKm, bearing8, roundKm } from './_mapMath'
 
 function _initial(name: string | undefined): string {
@@ -41,26 +44,61 @@ function _peerPinHtml(name: string | undefined, transport: TransportState | unde
       : ''
   return (
     `<div class="sh-fed-pin${modifier}">`
-    + _initial(name)
+    + escapeHtml(_initial(name))
     + badge
     + `</div>`
   )
 }
 
-function _transportLabel(transport: TransportState | undefined): string {
+function _transportLabel(transport: TransportState | null | undefined): string {
   if (transport === 'rtc') return `⚡ ${t('connections.transport.direct')}`
   if (transport === 'https') return `☁ ${t('connections.transport.internet')}`
   if (transport === 'gfs_relay') return `🔁 ${t('connections.transport.gfs')}`
   return t('connections.transport.unknown')
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => (
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]!
-  ))
+/** Build a peer's popup as DOM nodes — every peer-supplied value goes in
+ *  as text, and "Manage" is a real ``<button>`` (an ``<a href="#">``
+ *  would resolve against ``<base href>`` under ingress and navigate the
+ *  iframe away). */
+function _peerPopup(
+  peer: Connection,
+  transport: TransportState | null | undefined,
+  distance: string | null,
+  onManage: ((peer: Connection) => void) | null,
+): HTMLElement {
+  const root = document.createElement('div')
+  root.className = 'sh-fed-popup'
+  const name = document.createElement('strong')
+  name.textContent = peer.display_name ?? peer.instance_id
+  const tx = document.createElement('div')
+  tx.textContent = _transportLabel(transport)
+  root.append(name, tx)
+  if (distance) {
+    const d = document.createElement('div')
+    d.className = 'sh-fed-popup__muted'
+    d.textContent = distance
+    root.append(d)
+  }
+  if (onManage) {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'sh-fed-popup__manage'
+    btn.textContent = t('connections.manage')
+    btn.addEventListener('click', () => onManage(peer))
+    root.append(btn)
+  }
+  return root
 }
 
-export default function FederationMap() {
+interface Props {
+  /** Open the manage dialog for a peer. Omitted (non-admin) → no control. */
+  onManage?: (peer: Connection) => void
+  /** Which peers get the control; defaults to all. */
+  canManage?: (peer: Connection) => boolean
+}
+
+export default function FederationMap({ onManage, canManage }: Props = {}) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
@@ -151,19 +189,13 @@ export default function FederationMap() {
         iconAnchor: [14, 14],
       })
       const marker = L.marker([peer.home_lat, peer.home_lon], { icon }).addTo(layer)
-      const manageId = `sh-map-manage-${peer.instance_id}`
-      const distanceRow =
+      const distance =
         lat != null && lon != null
-          ? `<div style="color:#6b7280">~${roundKm(
-              haversineKm(lat, lon, peer.home_lat, peer.home_lon),
-            )} km · ${bearing8(lat, lon, peer.home_lat, peer.home_lon)}</div>`
-          : ''
-      marker.bindPopup(
-        `<strong>${escapeHtml(peer.display_name ?? peer.instance_id)}</strong><br/>`
-        + `<span>${escapeHtml(_transportLabel(transport))}</span><br/>`
-        + distanceRow
-        + `<a id="${manageId}" href="#" style="font-size:13px">${escapeHtml(t('connections.manage'))}</a>`,
-      )
+          ? `~${roundKm(haversineKm(lat, lon, peer.home_lat, peer.home_lon))} km · `
+            + bearing8(lat, lon, peer.home_lat, peer.home_lon)
+          : null
+      const manage = onManage && (!canManage || canManage(peer)) ? onManage : null
+      marker.bindPopup(_peerPopup(peer, transport, distance, manage))
       allMarkers.push(marker)
     }
 
@@ -175,7 +207,7 @@ export default function FederationMap() {
       const group = L.featureGroup(allMarkers)
       map.fitBounds(group.getBounds().pad(0.2))
     }
-  }, [lat, lon, peers])
+  }, [lat, lon, peers, onManage, canManage])
 
   const offMap = peers.filter(
     (p) => p.home_lat == null || p.home_lon == null,

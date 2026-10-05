@@ -28,8 +28,16 @@ from socialhome.domain.space import (
     normalize_min_age,
     normalize_retention_exempt_types,
     restricted_access_changes,
+    MAX_ZONE_NAME_LENGTH,
+    validate_zone_color,
+    validate_zone_coord,
+    validate_zone_name,
+    validate_zone_radius,
+    InvalidSpaceLinkError,
+    validate_space_link_url,
 )
 from socialhome.domain.post import PostType
+from socialhome.domain.errors import CodedError
 
 
 def test_remote_admin_outcome_values():
@@ -615,3 +623,175 @@ def test_owner_seat_from_roster_takes_only_the_hosts_own_owner_entry():
     assert owner_seat_from_roster(roster, "") is None
     assert owner_seat_from_roster(None, "host") is None
     assert owner_seat_from_roster(["junk", {"role": "owner"}], "host") is None
+
+
+# ─── Zone display-data validation (§23.8.7) ──────────────────────────────
+
+
+def test_validate_zone_name_strips_and_accepts_unicode():
+    assert validate_zone_name("  Grandma's 🏡 Zürich  ") == "Grandma's 🏡 Zürich"
+    # ZWJ emoji sequences are format characters, not control characters.
+    assert validate_zone_name("👨\u200d👩\u200d👧") == "👨\u200d👩\u200d👧"
+
+
+def test_validate_zone_name_accepts_exactly_the_cap():
+    assert validate_zone_name("x" * MAX_ZONE_NAME_LENGTH) == "x" * 64
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "   ",
+        None,
+        42,
+        "x" * (MAX_ZONE_NAME_LENGTH + 1),
+        "x" * 10_240,
+        "Home\x00",
+        "Ho\nme",
+        "Ho\tme",
+        "Home\x1b[31m",
+        "Home\x7f",
+        "Ho\x85me",
+        "Ho\u2028me",
+        "Ho\u2029me",
+    ],
+)
+def test_validate_zone_name_rejects(bad):
+    with pytest.raises(ValueError, match="zone name"):
+        validate_zone_name(bad)
+
+
+def test_validate_zone_name_error_never_echoes_the_name():
+    with pytest.raises(ValueError) as exc:
+        validate_zone_name("secret\x00<img src=x>")
+    assert "secret" not in str(exc.value)
+
+
+def test_validate_zone_color_normalises_hex_and_passes_none():
+    assert validate_zone_color("#3B82F6") == "#3b82f6"
+    assert validate_zone_color(None) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "red;background:url(x)",
+        "#3b82f6;background:url(x)",
+        "#3b82f6\n",
+        "#fff",
+        "3b82f6",
+        "pink",
+        "",
+        123,
+        ["#3b82f6"],
+    ],
+)
+def test_validate_zone_color_rejects(bad):
+    with pytest.raises(ValueError, match="color"):
+        validate_zone_color(bad)
+
+
+# ─── Space quick links ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("https://wiki.example/a?b=1#c", "https://wiki.example/a?b=1#c"),
+        ("  http://wiki  ", "http://wiki"),
+        ("HTTPS://Wiki.Example/", "HTTPS://Wiki.Example/"),
+    ],
+)
+def test_validate_space_link_url_keeps_http(raw, want):
+    assert validate_space_link_url(raw) == want
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "   ",
+        "javascript:alert(1)",
+        "java\tscript:alert(1)",
+        "data:text/html,x",
+        "ftp://x.example/",
+        "mailto:a@b.example",
+        "/spaces/x",
+        "//wiki.example/",
+        "wiki.example",
+        "https://",
+        "https:///path",
+        "https://user:pw@wiki.example/",
+        "https://wiki.example/a b",
+        "https://wiki.example/\x00",
+        "https://wiki.example/" + "a" * 2048,
+        None,
+        7,
+    ],
+)
+def test_validate_space_link_url_rejects(bad):
+    with pytest.raises(InvalidSpaceLinkError):
+        validate_space_link_url(bad)
+
+
+def test_invalid_space_link_error_is_a_coded_value_error():
+    """Coded (422 ``INVALID_LINK``) for the SPA's translated line, and
+    still a ``ValueError`` for existing callers."""
+    assert issubclass(InvalidSpaceLinkError, ValueError)
+    assert issubclass(InvalidSpaceLinkError, CodedError)
+    exc = InvalidSpaceLinkError("url must be an http(s) web address")
+    assert (exc.status, exc.code) == (422, "INVALID_LINK")
+    assert exc.detail == "url must be an http(s) web address"
+    assert exc.params == {}
+    assert InvalidSpaceLinkError().detail.startswith("A link needs")
+
+
+@pytest.mark.parametrize(
+    ("value", "limit", "expected"),
+    [
+        (47.376912345, 90, 47.3769),
+        (-8.541789, 180, -8.5418),
+        ("12.5", 90, 12.5),
+        (90, 90, 90.0),
+        (-180, 180, -180.0),
+        (-0.00001, 90, 0.0),
+    ],
+)
+def test_validate_zone_coord_truncates_to_4dp(value, limit, expected):
+    assert validate_zone_coord(value, name="latitude", limit=limit) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "limit"),
+    [
+        (float("nan"), 90),
+        ("nan", 90),
+        (float("inf"), 180),
+        ("-inf", 180),
+        (90.0001, 90),
+        (-180.5, 180),
+        (True, 90),
+        (None, 90),
+        ("north", 90),
+        (10**400, 90),
+    ],
+)
+def test_validate_zone_coord_refuses(value, limit):
+    with pytest.raises(ValueError):
+        validate_zone_coord(value, name="latitude", limit=limit)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(25, 25), (50_000, 50_000), ("100", 100), (30.7, 30)]
+)
+def test_validate_zone_radius_accepts(value, expected):
+    assert validate_zone_radius(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value", [-1, 0, 24, 50_001, 10**12, float("nan"), float("inf"), True, None, "x"]
+)
+def test_validate_zone_radius_refuses(value):
+    with pytest.raises(ValueError):
+        validate_zone_radius(value)

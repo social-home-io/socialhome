@@ -1046,6 +1046,59 @@ async def test_space_zones_malformed_record_dropped(setup):
     assert [z.id for z in c.zones] == ["z_ok"]
 
 
+_GOOD_ZONE_RECORD = {
+    "id": "z_ok",
+    "name": "Office",
+    "latitude": 47.0,
+    "longitude": 8.0,
+    "radius_m": 200,
+    "created_by": "u-1",
+    "created_at": "2026-04-27T00:00:00+00:00",
+    "updated_at": "2026-04-27T00:00:00+00:00",
+}
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"name": "x" * 10_240},
+        {"name": "Of\x1bfice<img src=x>"},
+        {"name": " "},
+        {"color": "red;background:url(x)"},
+    ],
+    ids=["10kb-name", "control-char-name", "blank-name", "css-color"],
+)
+async def test_space_zones_invalid_display_data_dropped(setup, caplog, over):
+    """A synced zone with a hostile name or colour is dropped (WARNING with
+    space id + provider, never the name); the rest of the chunk applies."""
+    r, c, kp = setup
+    with caplog.at_level("WARNING"):
+        await _send(
+            r,
+            kp,
+            "space_zones",
+            [dict(_GOOD_ZONE_RECORD, id="z_bad", **over), dict(_GOOD_ZONE_RECORD)],
+        )
+    assert [z.id for z in c.zones] == ["z_ok"]
+    warnings = [x for x in caplog.records if x.levelname == "WARNING"]
+    text = " ".join(x.getMessage() for x in warnings)
+    assert "z_bad" in text and "sp-1" in text and "peer-a" in text
+    assert "<img" not in text and "xxxxxxxx" not in text
+    assert "background" not in text
+
+
+async def test_space_zones_normalises_valid_display_data(setup):
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "space_zones",
+        [dict(_GOOD_ZONE_RECORD, name="  Office ", color="#ABCDEF")],
+    )
+    assert c.zones[0].name == "Office"
+    assert c.zones[0].color == "#abcdef"
+
+
 async def test_space_zones_skipped_when_repo_not_wired(bus, peer):
     """An older deployment without a zone repo wired silently skips
     inbound zone chunks rather than erroring."""
@@ -1652,3 +1705,54 @@ async def test_relayed_reactions_survive_a_sync_end_to_end(setup, tmp_dir):
         assert "u-2" in (await repo.get("p-1"))[1].reactions["👍"]
     finally:
         await db.shutdown()
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"latitude": "nan"},
+        {"longitude": "inf"},
+        {"latitude": float("-inf")},
+        {"latitude": 90.5},
+        {"longitude": -180.01},
+        {"radius_m": -5},
+        {"radius_m": 0},
+        {"radius_m": 10**12},
+        {"radius_m": True},
+    ],
+    ids=[
+        "nan-lat",
+        "inf-lon",
+        "neg-inf-lat",
+        "lat-91",
+        "lon-181",
+        "neg-radius",
+        "zero-radius",
+        "huge-radius",
+        "bool-radius",
+    ],
+)
+async def test_space_zones_invalid_geometry_dropped(setup, over):
+    """F8: a synced zone must pass the same coordinate / radius rules as a
+    local one — NaN, ±inf, out-of-range lat/lon and a radius outside
+    25 m – 50 km are dropped; the rest of the chunk applies."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "space_zones",
+        [dict(_GOOD_ZONE_RECORD, id="z_bad", **over), dict(_GOOD_ZONE_RECORD)],
+    )
+    assert [z.id for z in c.zones] == ["z_ok"]
+
+
+async def test_space_zones_coordinates_truncated_to_4dp(setup):
+    """F8 / CLAUDE.md GPS rule: synced zone coords are stored at 4 dp."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "space_zones",
+        [dict(_GOOD_ZONE_RECORD, latitude=47.376912345, longitude=-8.541789)],
+    )
+    assert (c.zones[0].latitude, c.zones[0].longitude) == (47.3769, -8.5418)

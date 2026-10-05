@@ -46,6 +46,7 @@ from ..repositories.page_repo import (
 )
 from ..security import error_response
 from ..domain.page_version import PageConflictSide, version_hash
+from ..services.inbound_media_store import verbatim_local_media_ref
 from ..services.page_conflict_service import RESOLUTIONS
 from ..services.space_page_service import PageStaleError, snapshot_page_version
 from .base import BaseView
@@ -78,7 +79,11 @@ def _page_dict(page, *, signer: MediaUrlSigner | None = None) -> dict:
     canonical — the PATCH/POST handlers strip the signature on save.
     """
     content = page.content
-    cover = page.cover_image_url
+    # Never serve a cover that is not a local upload (a third-party URL
+    # would leak every viewer's IP). Filtered here rather than on ingest:
+    # the stored value is part of the page version hash host and members
+    # agree on.
+    cover = verbatim_local_media_ref(page.cover_image_url)
     if signer is not None:
         if content:
             content = sign_media_urls_in_markdown(content, signer)
@@ -128,7 +133,7 @@ def _conflict_dict(
                 "hash": s.hash,
                 "title": s.title,
                 "content": _signed(s.content),
-                "cover_image_url": s.cover_image_url,
+                "cover_image_url": verbatim_local_media_ref(s.cover_image_url),
                 "by": s.by,
                 "at": s.at,
                 "base_seq": s.base_seq,
@@ -149,7 +154,7 @@ def _version_dict(v: PageVersion) -> dict:
         "edited_by": v.edited_by,
         "edited_at": v.edited_at,
         "space_id": v.space_id,
-        "cover_image_url": v.cover_image_url,
+        "cover_image_url": verbatim_local_media_ref(v.cover_image_url),
     }
 
 

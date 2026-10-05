@@ -74,4 +74,15 @@ describe('ZoneLegend', () => {
     )
     expect(getByText('No zones configured yet.')).toBeTruthy()
   })
+
+  it('never lets a hostile zone colour inject extra CSS into the swatch', () => {
+    const { container } = render(
+      <ZoneLegend zones={[zone({ color: 'red;position:fixed;inset:0;background-image:url(https://evil.example/b)' })]} />,
+    )
+    const sw = container.querySelector('.sh-zone-legend__swatch') as HTMLElement
+    expect(sw.style.position).toBe('')
+    expect(sw.style.backgroundImage).not.toContain('url')
+    expect(sw.getAttribute('style') ?? '').not.toContain('evil')
+    expect(sw.style.background).not.toBe('')
+  })
 })

@@ -119,6 +119,21 @@ const { wsHandlers, wsMock } = vi.hoisted(() => {
 })
 vi.mock('@/ws', () => ({ ws: wsMock }))
 
+// The map view is lazy + Leaflet-backed; a stub records the props the page
+// hands it so tests can drive its "Manage" hook directly.
+const { mapProps } = vi.hoisted(() => ({
+  mapProps: [] as Array<{
+    onManage?: (c: Record<string, unknown>) => void
+    canManage?: (c: Record<string, unknown>) => boolean
+  }>,
+}))
+vi.mock('./FederationMap', () => ({
+  default: (props: (typeof mapProps)[number]) => {
+    mapProps.push(props)
+    return <div data-testid="map-stub" />
+  },
+}))
+
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
 import ConnectionsPage from './ConnectionsPage'
@@ -1272,5 +1287,52 @@ describe('ConnectionsPage — managing household connections is admin-only', () 
     })
     expect(buttonTexts(container)).not.toContain('connections.start_pairing')
     expect(buttonTexts(container)).not.toContain('+ gfs.add')
+  })
+})
+
+
+describe('Map view "Manage"', () => {
+  beforeEach(() => {
+    detailConns.length = 0
+    mapProps.length = 0
+  })
+
+  async function openMap(conns: Record<string, unknown>[]) {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') return Promise.resolve(conns)
+      return Promise.resolve([])
+    })
+    const r = render(<ConnectionsPage />)
+    const chip = await waitFor(() => {
+      const b = Array.from(r.container.querySelectorAll('button')).find(
+        (x) => x.textContent?.trim() === 'connections.view_map',
+      )
+      expect(b).toBeTruthy()
+      return b!
+    })
+    fireEvent.click(chip)
+    await waitFor(() => expect(r.getByTestId('map-stub')).toBeTruthy())
+    return mapProps[mapProps.length - 1]
+  }
+
+  it('opens the same manage dialog as the list for a household peer', async () => {
+    const peer = makeConnection()
+    const props = await openMap([peer])
+    expect(props.canManage!(peer)).toBe(true)
+    props.onManage!(peer)
+    await waitFor(() => expect(detailConns.length).toBeGreaterThan(0))
+    expect(detailConns[detailConns.length - 1].instance_id).toBe('inst-1')
+  })
+
+  it('offers no Manage for a space-only or pending peer', async () => {
+    const props = await openMap([makeConnection()])
+    expect(props.canManage!(makeConnection({ source: 'space_session' }))).toBe(false)
+    expect(props.canManage!(makeConnection({ status: 'pending_sent' }))).toBe(false)
+  })
+
+  it('a member (not admin) gets no Manage hook at all', async () => {
+    ;(currentUser as { value: { is_admin: boolean } }).value.is_admin = false
+    const props = await openMap([makeConnection()])
+    expect(props.onManage).toBeUndefined()
   })
 })

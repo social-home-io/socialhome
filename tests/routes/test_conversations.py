@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
+from socialhome.app_keys import conversation_repo_key
 from socialhome.app_keys import db_key as _db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id, generate_identity_keypair
+from socialhome.domain.conversation import ConversationMessage
 from socialhome.services.dm_service import DmService
 
 
@@ -563,6 +566,70 @@ async def test_send_empty_message_422(client):
         headers=_auth(client._admin_token),
     )
     assert resp.status == 422
+
+
+async def test_send_message_non_local_media_url_422(client):
+    """F5: a ``javascript:`` / remote ``media_url`` is refused with the
+    coded 422 ``INVALID_MEDIA_URL``; nothing is stored."""
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    for bad in ("javascript:alert(document.domain)", "https://tracker.example/p.png"):
+        resp = await client.post(
+            f"/api/conversations/{conv_id}/messages",
+            json={"type": "file", "media_url": bad, "file_name": "x.pdf"},
+            headers=_auth(client._admin_token),
+        )
+        assert resp.status == 422
+        body = await resp.json()
+        assert body["error"]["code"] == "INVALID_MEDIA_URL"
+        assert bad not in json.dumps(body)
+    resp = await client.get(
+        f"/api/conversations/{conv_id}/messages",
+        headers=_auth(client._admin_token),
+    )
+    assert await resp.json() == []
+
+
+async def test_list_messages_drops_stored_non_local_media_url(client):
+    """F5 existing rows: a ``media_url`` stored before the send / inbound
+    gates (``javascript:``, a remote tracker) is never served — the list
+    answers ``media_url: null`` for it, while a local ref still comes back."""
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    repo = client.app[conversation_repo_key]
+    for mid, url in (
+        ("m-js", "javascript:alert(document.domain)"),
+        ("m-remote", "https://tracker.example/p.png"),
+        ("m-ok", "api/media/ok.pdf"),
+    ):
+        await repo.save_message(
+            ConversationMessage(
+                id=mid,
+                conversation_id=conv_id,
+                sender_user_id=client._admin_uid,
+                content="",
+                type="file",
+                media_url=url,
+                file_name=f"{mid}.pdf",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+    resp = await client.get(
+        f"/api/conversations/{conv_id}/messages",
+        headers=_auth(client._admin_token),
+    )
+    by_id = {m["id"]: m for m in await resp.json()}
+    assert by_id["m-js"]["media_url"] is None
+    assert by_id["m-remote"]["media_url"] is None
+    assert by_id["m-ok"]["media_url"].split("?", 1)[0] == "api/media/ok.pdf"
 
 
 async def test_send_location_message_is_rounded_and_malformed_422(client):

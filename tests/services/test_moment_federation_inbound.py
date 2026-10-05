@@ -462,3 +462,36 @@ async def test_handlers_registered(db, bus):
         FederationEventType.MOMENT_REACTION_REMOVED
         in fake_fed._event_registry._handlers
     )
+
+
+@pytest.mark.parametrize(
+    "remote",
+    ["https://tracker.example/pixel.png", "//tracker.example/p.png", "javascript:x"],
+)
+async def test_moment_created_drops_a_remote_media_url(db, bus, inbound, remote):
+    """F7: a peer's moment never stores a third-party URL — it would be an
+    ``<img src>`` that leaks every viewer's IP. Media is dropped, the text
+    moment still lands."""
+    svc, _relay = inbound
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            _create_payload(media_url=remote, media_type="image"),
+        ),
+    )
+    m = await svc._moment_repo.get("m-fed-1")
+    assert m is not None
+    assert m.media_url is None and m.media_type is None
+
+
+async def test_moment_created_keeps_a_local_media_ref(db, bus, inbound):
+    svc, _relay = inbound
+    await svc._on_moment_created(
+        _event(
+            FederationEventType.MOMENT_CREATED,
+            _create_payload(media_url="api/media/abc.webp", media_type="image"),
+        ),
+    )
+    m = await svc._moment_repo.get("m-fed-1")
+    assert m is not None
+    assert (m.media_url, m.media_type) == ("api/media/abc.webp", "image")

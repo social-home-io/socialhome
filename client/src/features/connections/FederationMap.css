@@ -141,3 +141,35 @@
     font-size: 10px;
   }
 }
+
+/* ── Peer popup (built as DOM nodes in _peerPopup) ───────────────── */
+.sh-fed-popup {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.sh-fed-popup__muted {
+  color: var(--sh-text-muted, #6b7280);
+}
+
+/* Link-styled button: opens the connection's manage dialog in place. */
+.sh-fed-popup__manage {
+  margin-top: 4px;
+  padding: 6px 0;
+  min-height: 36px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--sh-primary, #0e7490);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.sh-fed-popup__manage:focus-visible {
+  outline: 2px solid var(--sh-primary, #0e7490);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

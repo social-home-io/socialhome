@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { t } from '@/i18n/i18n'
+import { safeHref } from '@/utils/safeHref'
 
 interface SpaceLink {
   id: string
@@ -44,15 +45,21 @@ export function SpaceLinksStrip({ spaceId }: Props) {
 
   return (
     <div class="sh-space-links-strip" role="navigation" aria-label={t('space.links.title')}>
-      {links.map(link => (
+      {links.flatMap(link => {
+        // Quick links are http(s)-only server-side; a row that predates
+        // that check (or any other scheme) is skipped, not linked.
+        const href = safeHref(link.url)
+        if (!href || !/^https?:/i.test(href)) return []
+        return [(
         <a key={link.id}
-           href={link.url}
+           href={href}
            target="_blank"
            rel="noopener noreferrer"
            class="sh-space-links-strip__link">
           {link.label}
         </a>
-      ))}
+        )]
+      })}
     </div>
   )
 }

@@ -100,12 +100,12 @@ async def test_pages_patch_cover_image_url_succeeds(client):
     pid = (await r.json())["id"]
     r2 = await client.patch(
         f"/api/pages/{pid}",
-        json={"cover_image_url": "/media/x.webp"},
+        json={"cover_image_url": "/api/media/x.webp"},
         headers=_auth(client._tok),
     )
     assert r2.status == 200
     body = await r2.json()
-    assert body["cover_image_url"] == "/media/x.webp"
+    assert body["cover_image_url"].split("?", 1)[0] == "/api/media/x.webp"
 
 
 async def test_pages_lock_taken_409(client):

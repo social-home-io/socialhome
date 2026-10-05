@@ -1019,3 +1019,47 @@ async def test_inbound_invite_for_remote_attendee_creates_nothing(env):
     )
     assert cal_repo.events == {}
     assert cal_repo.rsvps == {}
+
+
+@pytest.mark.parametrize(
+    ("cover", "expected"),
+    [
+        ("https://tracker.example/pixel.png", None),
+        ("javascript:alert(1)", None),
+        ("/api/media/cover.webp", "/api/media/cover.webp"),
+    ],
+)
+async def test_inbound_invite_keeps_only_a_local_cover(env, cover, expected):
+    """F7: a mirrored invite's ``cover_url`` is an ``<img src>`` — a remote
+    URL would leak the viewer's IP, so only a local media ref is kept,
+    on create and on update."""
+    fed, cal_repo, _ = env
+    create = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED
+    ]
+    update = fed._event_registry.handlers[
+        FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED
+    ]
+    now = datetime.now(timezone.utc)
+    base = {
+        "event_id": "remote-evt-1",
+        "summary": "BBQ",
+        "start": now.isoformat(),
+        "end": (now + timedelta(hours=1)).isoformat(),
+        "organizer_user_id": "u-bob",
+        "attendee_user_ids": ["u-anna"],
+    }
+    await create(
+        _envelope(
+            FederationEventType.PERSONAL_CALENDAR_EVENT_CREATED,
+            {**base, "cover_url": cover},
+        )
+    )
+    assert next(iter(cal_repo.events.values())).cover_url == expected
+    await update(
+        _envelope(
+            FederationEventType.PERSONAL_CALENDAR_EVENT_UPDATED,
+            {**base, "cover_url": cover},
+        )
+    )
+    assert next(iter(cal_repo.events.values())).cover_url == expected

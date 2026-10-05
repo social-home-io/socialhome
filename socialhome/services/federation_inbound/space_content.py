@@ -93,7 +93,15 @@ from ...domain.post import (
     BazaarStatus,
     Post,
 )
-from ...domain.space import MODERATION_BLOCK_KEY, ContentAction, SpaceZone
+from ...domain.space import (
+    MODERATION_BLOCK_KEY,
+    ContentAction,
+    SpaceZone,
+    validate_zone_color,
+    validate_zone_coord,
+    validate_zone_name,
+    validate_zone_radius,
+)
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
@@ -110,7 +118,11 @@ from ...media.cleanup import unlink_unreferenced
 from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
-from ..inbound_media_store import local_media_ref, local_media_refs
+from ..inbound_media_store import (
+    local_media_ref,
+    local_media_refs,
+    verbatim_local_media_ref,
+)
 from ..page_conflict_service import (
     PageMode,
     canonical_from_wire,
@@ -1364,7 +1376,9 @@ class SpaceContentInboundHandlers:
         ):
             log.debug("SPACE_CALENDAR_EVENT_* missing required field")
             return
-        cover = p.get("cover_url")
+        # Rendered as ``<img src>`` for every member: only a local media
+        # reference — a third-party URL would leak their IPs.
+        cover = verbatim_local_media_ref(p.get("cover_url"))
         location = p.get("location")
         ev = CalendarEvent(
             id=event_id,
@@ -1378,7 +1392,7 @@ class SpaceContentInboundHandlers:
             attendees=tuple(str(a) for a in (p.get("attendees") or ())),
             mirrored_from=p.get("mirrored_from"),
             rrule=p.get("rrule"),
-            cover_url=cover if isinstance(cover, str) and cover else None,
+            cover_url=cover,
             location=location if isinstance(location, str) and location else None,
             # IANA wall-clock anchor. Old peers omit; default ``"UTC"``.
             # Peer-supplied, so validated here: an unknown zone name
@@ -2209,18 +2223,28 @@ class SpaceContentInboundHandlers:
             return
         p = event.payload
         zone_id = str(p.get("zone_id") or p.get("id") or "")
-        name = str(p.get("name") or "")
-        if not zone_id or not name:
+        if not zone_id or not p.get("name"):
             log.debug("SPACE_ZONE_UPSERTED missing required field")
             return
+        # Same display-data rules as the local API (§23.8.7): the name and
+        # colour reach every member's map. Never log the name itself.
+        # Coordinates and radius pass the same rules too: finite, in
+        # range, truncated to 4 dp (CLAUDE.md GPS rule), 25 m – 50 km.
         try:
-            latitude = float(p["latitude"])
-            longitude = float(p["longitude"])
-            radius_m = int(p["radius_m"])
-        except KeyError, TypeError, ValueError:
-            log.debug(
-                "SPACE_ZONE_UPSERTED malformed coords/radius: %r",
-                p,
+            name = validate_zone_name(p.get("name"))
+            color = validate_zone_color(p.get("color"))
+            latitude = validate_zone_coord(p.get("latitude"), name="latitude", limit=90)
+            longitude = validate_zone_coord(
+                p.get("longitude"), name="longitude", limit=180
+            )
+            radius_m = validate_zone_radius(p.get("radius_m"))
+        except ValueError as exc:
+            log.warning(
+                "SPACE_ZONE_UPSERTED from %s: zone %s in space %s refused — %s",
+                event.from_instance,
+                zone_id[:64],
+                space_id,
+                exc,
             )
             return
         if not await self._zone_write_allowed(event, space_id, zone_id):
@@ -2246,7 +2270,7 @@ class SpaceContentInboundHandlers:
             latitude=latitude,
             longitude=longitude,
             radius_m=radius_m,
-            color=p.get("color"),
+            color=color,
             created_by=created_by,
             created_at=str(
                 p.get("created_at") or p.get("updated_at") or "",

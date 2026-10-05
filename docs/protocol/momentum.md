@@ -219,6 +219,16 @@ forgotten until the moment could no longer be shown anyway:
 * Tombstones live in SQLite and survive a restart
   (`tests/protocol/test_moment_delete_tombstone.py`).
 
+### Media references
+
+A received moment keeps its `media_url` only when it is a local media
+reference (`api/media/<name>`, kept verbatim —
+`inbound_media_store.verbatim_local_media_ref`). Anything else (a
+third-party URL, `javascript:`) is dropped with its `media_type`, so a
+peer can't make every viewer's browser load a tracker; the text of the
+moment still lands. The relay forwards the original payload unchanged.
+The same rule applies to public moments received through the GFS.
+
 ## Mermaid sequence — local author posts a moment
 
 ```mermaid

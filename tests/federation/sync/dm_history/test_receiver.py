@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 
 
@@ -132,6 +133,42 @@ async def test_chunk_rounds_location_and_skips_malformed():
         "accuracy_m": 25,
     }
     assert by_id["m-gone"].deleted is True
+
+
+async def test_chunk_keeps_only_local_media_urls(caplog):
+    """History catch-up applies the live DM rule to ``media_url``: only
+    the local upload shape survives — a ``javascript:`` or remote URL
+    would otherwise reach the file chip's ``href``."""
+    repo = _FakeConvRepo()
+    r = DmHistoryReceiver(
+        conversation_repo=repo, user_repo=_FakeUserRepo(), bus=EventBus()
+    )
+    base = {"sender_user_id": "u-x", "type": "file", "content": ""}
+    with caplog.at_level(logging.WARNING):
+        await r.handle_chunk(
+            _event(
+                FederationEventType.DM_HISTORY_CHUNK,
+                "peer-a",
+                {
+                    "conversation_id": "c-1",
+                    "messages": [
+                        {**base, "id": "m-ok", "media_url": "/api/media/f1.pdf"},
+                        {**base, "id": "m-js", "media_url": "javascript:alert(1)"},
+                        {**base, "id": "m-far", "media_url": "https://x.example/a"},
+                        {**base, "id": "m-none"},
+                    ],
+                    "is_last": True,
+                },
+            )
+        )
+    by_id = {m.id: m.media_url for m in repo.saved}
+    assert by_id == {
+        "m-ok": "api/media/f1.pdf",
+        "m-js": None,
+        "m-far": None,
+        "m-none": None,
+    }
+    assert caplog.text.count("non-local media_url") == 2
 
 
 async def test_duplicate_chunk_is_idempotent():

@@ -2840,17 +2840,14 @@ class SpaceLinkCollectionView(BaseView):
         space_id = self.match("id")
         body = await self.body()
         svc = self.svc(space_service_key)
-        try:
-            link = await svc.upsert_link(
-                space_id=space_id,
-                actor_username=ctx.username,
-                link_id=None,
-                label=str(body.get("label") or ""),
-                url=str(body.get("url") or ""),
-                position=int(body.get("position", 0) or 0),
-            )
-        except ValueError as exc:
-            return error_response(422, "UNPROCESSABLE", str(exc))
+        link = await svc.upsert_link(
+            space_id=space_id,
+            actor_username=ctx.username,
+            link_id=None,
+            label=str(body.get("label") or ""),
+            url=str(body.get("url") or ""),
+            position=int(body.get("position", 0) or 0),
+        )
         return web.json_response(link, status=201)
 
 
@@ -2871,19 +2868,16 @@ class SpaceLinkDetailView(BaseView):
         if existing is None or existing["space_id"] != space_id:
             return error_response(404, "NOT_FOUND", "Link not found.")
         svc = self.svc(space_service_key)
-        try:
-            link = await svc.upsert_link(
-                space_id=space_id,
-                actor_username=ctx.username,
-                link_id=link_id,
-                label=str(body.get("label") or existing["label"]),
-                url=str(body.get("url") or existing["url"]),
-                position=int(
-                    body.get("position", existing["position"]) or 0,
-                ),
-            )
-        except ValueError as exc:
-            return error_response(422, "UNPROCESSABLE", str(exc))
+        link = await svc.upsert_link(
+            space_id=space_id,
+            actor_username=ctx.username,
+            link_id=link_id,
+            label=str(body.get("label") or existing["label"]),
+            url=str(body.get("url") or existing["url"]),
+            position=int(
+                body.get("position", existing["position"]) or 0,
+            ),
+        )
         return web.json_response(link)
 
     async def delete(self) -> web.Response:

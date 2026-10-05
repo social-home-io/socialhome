@@ -8,6 +8,8 @@ shape all stay covered.
 
 from __future__ import annotations
 
+import pytest
+
 from .conftest import _auth
 
 
@@ -78,6 +80,79 @@ async def test_create_zone_invalid_radius_422(client):
         headers=_auth(client._tok),
     )
     assert r.status == 422
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"name": "Office\x00"},
+        {"name": "Off\u2028ice"},
+        {"name": "x" * 10_240},
+        {"color": "red;background:url(x)"},
+    ],
+)
+async def test_create_zone_hostile_name_or_color_422(client, over):
+    space_id = await _create_space(client)
+    body = {
+        "name": "Office",
+        "latitude": 47.0,
+        "longitude": 8.0,
+        "radius_m": 150,
+        **over,
+    }
+    r = await client.post(
+        f"/api/spaces/{space_id}/zones",
+        json=body,
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422, await r.text()
+    r = await client.get(f"/api/spaces/{space_id}/zones", headers=_auth(client._tok))
+    assert (await r.json()) == {"zones": []}
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"latitude": True},
+        {"latitude": 10**400},
+        {"longitude": float("inf")},
+        {"radius_m": float("inf")},
+        {"radius_m": 10**400},
+    ],
+)
+async def test_create_zone_bad_number_422_not_500(client, over):
+    """The route hands raw values to the domain validators: a bool is not a
+    coordinate, and a huge or infinite number is a 422, never a 500."""
+    space_id = await _create_space(client)
+    body = {
+        "name": "Office",
+        "latitude": 47.0,
+        "longitude": 8.0,
+        "radius_m": 150,
+        **over,
+    }
+    r = await client.post(
+        f"/api/spaces/{space_id}/zones", json=body, headers=_auth(client._tok)
+    )
+    assert r.status == 422, await r.text()
+
+
+@pytest.mark.parametrize(
+    "over",
+    [{"latitude": True}, {"latitude": 10**400}, {"radius_m": float("inf")}],
+)
+async def test_patch_zone_bad_number_422_not_500(client, over):
+    space_id = await _create_space(client)
+    r = await client.post(
+        f"/api/spaces/{space_id}/zones",
+        json={"name": "Office", "latitude": 47.0, "longitude": 8.0, "radius_m": 150},
+        headers=_auth(client._tok),
+    )
+    zone_id = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/{space_id}/zones/{zone_id}", json=over, headers=_auth(client._tok)
+    )
+    assert r.status == 422, await r.text()
 
 
 async def test_create_zone_duplicate_name_409(client):

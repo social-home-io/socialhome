@@ -9,7 +9,11 @@ import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.conversation import MUTED_FOREVER, ConversationType
+from socialhome.domain.conversation import (
+    MUTED_FOREVER,
+    ConversationType,
+    InvalidMediaRefError,
+)
 from socialhome.domain.events import DmMessageCreated, DmMessageUpdated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
@@ -387,13 +391,13 @@ async def test_send_image_same_household(stack):
         sender_username="anna",
         content="",
         type="image",
-        media_url="media/cat.webp",
+        media_url="api/media/cat.webp",
         file_name="cat.jpg",
         mime_type="image/jpeg",
         file_size_bytes=1234,
     )
     assert msg.type == "image"
-    assert msg.media_url == "media/cat.webp"
+    assert msg.media_url == "api/media/cat.webp"
     assert msg.file_name == "cat.jpg"
     assert msg.mime_type == "image/jpeg"
     assert msg.file_size_bytes == 1234
@@ -409,7 +413,7 @@ async def test_send_file_same_household(stack):
         sender_username="anna",
         content="",
         type="file",
-        media_url="media/invoice.pdf",
+        media_url="api/media/invoice.pdf",
         file_name="invoice.pdf",
         mime_type="application/pdf",
         file_size_bytes=99_000,
@@ -447,10 +451,58 @@ async def test_send_image_allows_empty_caption(stack):
         sender_username="anna",
         content="",
         type="image",
-        media_url="media/cat.webp",
+        media_url="api/media/cat.webp",
     )
     assert msg.content == ""
     assert msg.type == "image"
+
+
+@pytest.mark.parametrize(
+    "media_url",
+    [
+        "javascript:alert(document.domain)",
+        "https://tracker.example/pixel.png",
+        "//evil.example/x.png",
+        "media/cat.webp",
+        "api/media/../../etc/passwd",
+        "api/media/",
+    ],
+)
+async def test_send_message_rejects_non_local_media_url(stack, media_url):
+    """F5: ``media_url`` is only ever a local upload (``api/media/<name>``).
+
+    A ``javascript:`` URL here became an "Open in new tab" XSS for every
+    member of the chat; a remote URL leaks their IPs. Refused with the
+    coded :class:`InvalidMediaRefError` (422 ``INVALID_MEDIA_URL``).
+    """
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    with pytest.raises(InvalidMediaRefError):
+        await stack.dm_svc.send_message(
+            dm.id,
+            sender_username="anna",
+            content="",
+            type="file",
+            media_url=media_url,
+            file_name="evil.pdf",
+        )
+    assert await stack.dm_svc.list_messages(dm.id, reader_username="anna") == []
+
+
+async def test_send_message_normalises_local_media_url(stack):
+    """A leading ``/`` on a local ref is stored in the canonical shape."""
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    msg = await stack.dm_svc.send_message(
+        dm.id,
+        sender_username="anna",
+        content="",
+        type="image",
+        media_url="/api/media/cat.webp",
+    )
+    assert msg.media_url == "api/media/cat.webp"
 
 
 async def test_add_to_1on1_rejected(stack):

@@ -10,11 +10,13 @@ without dropping the file.
 from __future__ import annotations
 
 import base64
+import logging
 from datetime import datetime, timezone
 
 import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.user import User
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
@@ -106,16 +108,64 @@ async def inbound_with_media(db, bus, tmp_path):
 # ── _receive_media_preview branches ───────────────────────────────────
 
 
-async def test_receive_media_preview_non_media_passes_through(inbound_with_media):
-    """Text / transcript / location messages flow through unchanged."""
+async def test_receive_media_preview_non_media_keeps_a_local_ref(inbound_with_media):
+    """A message without a blob id keeps a ``media_url`` that has the
+    local upload shape (normalised to ``api/media/<name>``)."""
     svc, _media_dir, _db = inbound_with_media
     url, status = await svc._receive_media_preview(
-        payload={"media_url": "https://elsewhere/foo.jpg"},
+        payload={"media_url": "/api/media/abc123.webp?exp=1&sig=x"},
         message_id="m-1",
         msg_type="text",
     )
-    assert url == "https://elsewhere/foo.jpg"
+    assert url == "api/media/abc123.webp"
     assert status is None
+
+
+@pytest.mark.parametrize("msg_type", ["text", "file", "image", "video"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "javascript:alert(document.domain)",
+        "JavaScript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "https://elsewhere.example/foo.jpg",
+        "//elsewhere.example/foo.jpg",
+        "api/media/../../etc/passwd",
+        "api/media/.hidden",
+        "api/media/",
+        "media/abc.webp",
+        42,
+    ],
+)
+async def test_receive_media_preview_drops_a_non_local_media_url(
+    inbound_with_media, caplog, msg_type, bad
+):
+    """A peer-supplied ``media_url`` that is not a local media reference
+    (a ``javascript:`` URL for a DM file chip's ``href``, a remote
+    tracker, a path escape) is stored as ``None`` and logged at WARNING."""
+    svc, _media_dir, _db = inbound_with_media
+    with caplog.at_level(logging.WARNING):
+        url, status = await svc._receive_media_preview(
+            payload={"media_url": bad},
+            message_id="m-x",
+            msg_type=msg_type,
+        )
+    assert url is None
+    assert status is None
+    assert "non-local media_url" in caplog.text
+
+
+async def test_receive_media_preview_absent_media_url_is_quiet(
+    inbound_with_media, caplog
+):
+    """A plain text message carries no ``media_url`` — no warning."""
+    svc, _media_dir, _db = inbound_with_media
+    with caplog.at_level(logging.WARNING):
+        url, status = await svc._receive_media_preview(
+            payload={"content": "hi"}, message_id="m-t", msg_type="text"
+        )
+    assert (url, status) == (None, None)
+    assert "media_url" not in caplog.text
 
 
 async def test_receive_media_preview_pre_arrived_full_file(inbound_with_media):
@@ -604,3 +654,110 @@ async def test_dm_media_blob_out_of_range_chunk_meta_is_refused(
         )
     )
     assert list(media_dir.iterdir()) == []
+
+
+# ── F6: peer-supplied message ids never become paths outside media ────
+
+
+def _unsafe_ids(media_dir):
+    """``../`` and absolute message ids — each would name a file
+    outside ``media_dir`` if joined as-is."""
+    return ["../escape", str(media_dir.parent / "abs-escape"), "sub/escape"]
+
+
+def _outside_files(media_dir):
+    root = media_dir.parent
+    return sorted(
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if p.is_file() and media_dir not in p.parents
+    )
+
+
+async def test_receive_media_preview_refuses_unsafe_message_id(inbound_with_media):
+    """The helper itself never writes (or deletes) outside ``media_dir``,
+    whatever id it is handed — defence in depth behind the early
+    ``DM_MESSAGE`` check."""
+    svc, media_dir, _db = inbound_with_media
+    for bad in _unsafe_ids(media_dir):
+        url, status = await svc._receive_media_preview(
+            payload={
+                "media_blob_id": "blob",
+                "mime_type": "image/webp",
+                "preview_bytes_b64": base64.b64encode(_WEBP_HEADER).decode(),
+            },
+            message_id=bad,
+            msg_type="image",
+        )
+        assert (url, status) == (None, None), bad
+    assert _outside_files(media_dir) == []
+    assert list(media_dir.iterdir()) == []
+
+
+async def test_receive_media_preview_unsafe_id_never_deletes_outside(
+    inbound_with_media,
+):
+    """The reorder guard removes ``<id>.preview.webp`` when ``<id>.<ext>``
+    exists — with a ``../`` id that would delete a file outside media."""
+    svc, media_dir, _db = inbound_with_media
+    victim = media_dir.parent / "escape.preview.webp"
+    victim.write_bytes(b"keep")
+    (media_dir.parent / "escape.webp").write_bytes(b"x")
+    url, status = await svc._receive_media_preview(
+        payload={"media_blob_id": "b", "mime_type": "image/webp"},
+        message_id="../escape",
+        msg_type="image",
+    )
+    assert (url, status) == (None, None)
+    assert victim.read_bytes() == b"keep"
+
+
+def _dm_message_event(message_id: str) -> FederationEvent:
+    return _event(
+        FederationEventType.DM_MESSAGE,
+        {
+            "conversation_id": "conv-new",
+            "message_id": message_id,
+            "sender_user_id": "user-remote",
+            "sender_display_name": "Remote",
+            "type": "image",
+            "content": "",
+            "media_blob_id": message_id,
+            "mime_type": "image/webp",
+            "preview_bytes_b64": base64.b64encode(_WEBP_HEADER).decode(),
+            "recipient_user_ids": ["uid-carol"],
+        },
+    )
+
+
+async def test_dm_message_with_safe_id_writes_its_preview(inbound_with_media):
+    """Control for the refusal below: the same envelope with a normal id
+    is accepted and its preview lands inside ``media_dir``."""
+    svc, media_dir, db = inbound_with_media
+    await SqliteUserRepo(db).save(
+        User(user_id="uid-carol", username="carol", display_name="Carol")
+    )
+    await svc._on_dm_message(_dm_message_event("m-safe"))
+    assert (media_dir / "m-safe.preview.webp").is_file()
+    msgs = await SqliteConversationRepo(db).list_messages("conv-new", limit=10)
+    assert [m.id for m in msgs] == ["m-safe"]
+
+
+async def test_dm_message_with_unsafe_id_is_refused(inbound_with_media, caplog):
+    """F6: a ``DM_MESSAGE`` whose ``message_id`` is ``../x`` or an absolute
+    path is dropped before anything is stored or written, with a WARNING
+    that does not echo the raw id."""
+    svc, media_dir, db = inbound_with_media
+    await SqliteUserRepo(db).save(
+        User(user_id="uid-carol", username="carol", display_name="Carol")
+    )
+    for bad in _unsafe_ids(media_dir):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            await svc._on_dm_message(_dm_message_event(bad))
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings, bad
+        assert all(bad not in r.getMessage() for r in warnings), bad
+    assert _outside_files(media_dir) == []
+    assert list(media_dir.iterdir()) == []
+    assert await SqliteConversationRepo(db).list_messages("conv-new", limit=10) == []

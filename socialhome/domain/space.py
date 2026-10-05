@@ -17,12 +17,17 @@ Defines:
 from __future__ import annotations
 
 import copy
+import math
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal, TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from .errors import CodedError
+from .presence import truncate_coord
 
 if TYPE_CHECKING:
     from .post import PostType
@@ -1514,6 +1519,145 @@ class SpaceMember:
     # Per-space picture hash (bytes live in
     # ``space_member_profile_pictures``). NULL means inherit household.
     picture_hash: str | None = None
+
+
+#: §23.8.7: a zone name is a short map label — longer than this is not
+#: a label, and from a peer it's a payload-size abuse.
+MAX_ZONE_NAME_LENGTH = 64
+
+#: Unicode categories a zone name may not contain: C0/C1 controls
+#: (``Cc`` — NUL, ESC, newline, tab, DEL, NEL…) and the line / paragraph
+#: separators (``Zl`` / ``Zp``). Format characters (``Cf``) stay allowed
+#: so ZWJ emoji sequences keep working.
+_ZONE_NAME_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+
+#: ``#RRGGBB`` only — the colour reaches inline styles and SVG attributes
+#: on every member's map, so nothing else may get through.
+_ZONE_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def validate_zone_name(name: object) -> str:
+    """Return the stripped zone name, or raise :class:`ValueError`.
+
+    Applied to every zone write — the local API, ``SPACE_ZONE_UPSERTED``
+    and the space-sync ``space_zones`` resource — so a peer can't store
+    what a local admin couldn't. The error never echoes the name.
+    """
+    if not isinstance(name, str):
+        raise ValueError("zone name must be a string")
+    cleaned = name.strip()
+    if not cleaned:
+        raise ValueError("zone name must not be empty")
+    if len(cleaned) > MAX_ZONE_NAME_LENGTH:
+        raise ValueError(
+            f"zone name must be {MAX_ZONE_NAME_LENGTH} characters or fewer",
+        )
+    if any(
+        unicodedata.category(ch) in _ZONE_NAME_FORBIDDEN_CATEGORIES for ch in cleaned
+    ):
+        raise ValueError("zone name must not contain control characters")
+    return cleaned
+
+
+def validate_zone_color(color: object) -> str | None:
+    """Return the lower-cased ``#RRGGBB`` colour (``None`` passes through),
+    or raise :class:`ValueError`."""
+    if color is None:
+        return None
+    if not isinstance(color, str) or not _ZONE_COLOR_RE.fullmatch(color):
+        raise ValueError("color must be a #RRGGBB hex string or None")
+    return color.lower()
+
+
+#: §23.8.7: 25 m floor (just above the 4-dp ~11 m precision); 50 km
+#: ceiling (a "city-wide" zone is the largest meaningful display bucket
+#: on a per-space map).
+MIN_ZONE_RADIUS_M: int = 25
+MAX_ZONE_RADIUS_M: int = 50_000
+
+
+def validate_zone_coord(value: object, *, name: str, limit: float) -> float:
+    """Return a zone centre coordinate rounded to 4 dp, or raise
+    :class:`ValueError`.
+
+    ``limit`` is 90 for latitude, 180 for longitude. NaN, ±inf, booleans
+    and out-of-range values are refused; the 4-dp truncation is the
+    CLAUDE.md GPS rule. Applied to the local API, ``SPACE_ZONE_UPSERTED``
+    and the ``space_zones`` sync resource alike.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number")
+    try:
+        coerced = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not math.isfinite(coerced) or not -limit <= coerced <= limit:
+        raise ValueError(f"{name} out of range")
+    # ``+ 0.0`` folds a rounded ``-0.0`` into ``0.0``.
+    return truncate_coord(coerced) + 0.0  # type: ignore[operator]
+
+
+def validate_zone_radius(value: object) -> int:
+    """Return the zone radius in whole metres, or raise :class:`ValueError`
+    when it is not a finite number between :data:`MIN_ZONE_RADIUS_M` and
+    :data:`MAX_ZONE_RADIUS_M`."""
+    if isinstance(value, bool):
+        raise ValueError("radius_m must be an integer")
+    try:
+        coerced = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("radius_m must be an integer") from exc
+    if not (MIN_ZONE_RADIUS_M <= coerced <= MAX_ZONE_RADIUS_M):
+        raise ValueError(
+            f"radius_m must be between {MIN_ZONE_RADIUS_M} and {MAX_ZONE_RADIUS_M}",
+        )
+    return coerced
+
+
+#: Longest quick-link URL a space admin may store.
+MAX_SPACE_LINK_URL_LENGTH: int = 2048
+
+_LINK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+
+class InvalidSpaceLinkError(CodedError, ValueError):
+    """A space quick link was refused (422 ``INVALID_LINK``). Each raise
+    site passes a fixed English detail naming the rule, never the
+    submitted value; the SPA shows its own translated line."""
+
+    status = 422
+    code = "INVALID_LINK"
+    detail = "A link needs a name and an http(s) web address."
+
+
+def validate_space_link_url(url: object) -> str:
+    """Return the stripped quick-link URL, or raise
+    :class:`InvalidSpaceLinkError`.
+
+    Quick links render as ``<a href>`` for every member, so only an
+    absolute ``http(s)://host/…`` URL is stored — never ``javascript:``,
+    ``data:``, an app-relative path or embedded credentials. Whitespace and
+    control characters anywhere are refused (a browser drops tabs inside a
+    scheme, so ``java\tscript:`` must not slip past the scheme check).
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise InvalidSpaceLinkError("url must not be empty")
+    url = url.strip()
+    if len(url) > MAX_SPACE_LINK_URL_LENGTH:
+        raise InvalidSpaceLinkError(
+            f"url must be at most {MAX_SPACE_LINK_URL_LENGTH} characters"
+        )
+    if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        raise InvalidSpaceLinkError("url must not contain spaces or control characters")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise InvalidSpaceLinkError("url must be an http(s) web address") from None
+    if parts.scheme.lower() not in _LINK_SCHEMES or not parts.hostname:
+        raise InvalidSpaceLinkError("url must be an http(s) web address")
+    if parts.username is not None or parts.password is not None:
+        raise InvalidSpaceLinkError("url must not contain a user name or password")
+    return url
 
 
 @dataclass(slots=True, frozen=True)

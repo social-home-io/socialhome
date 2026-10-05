@@ -119,7 +119,9 @@ from .inbound_media_store import (
     is_safe_media_name,
     local_media_ref,
     local_media_refs,
+    media_file_path,
     media_basename,
+    verbatim_local_media_ref,
     note_existing,
     parse_chunk_meta,
     partial_key,
@@ -558,6 +560,15 @@ class FederationInboundService(ProtectionGateMixin):
         msg_type = str(p.get("type") or "text")
         if not conv_id or not message_id or not sender_user_id:
             log.debug("DM_MESSAGE missing required field: %s", p)
+            return
+        if not is_safe_media_name(message_id):
+            # The id names the preview / blob files under media_dir — an
+            # absolute or ``../`` id would write outside it. The raw value
+            # is not logged (it is attacker-chosen).
+            log.warning(
+                "DM_MESSAGE from %s: rejecting unsafe message id",
+                event.from_instance,
+            )
             return
         if msg_type not in MESSAGE_TYPES:
             msg_type = "text"
@@ -1117,21 +1128,30 @@ class FederationInboundService(ProtectionGateMixin):
           flags the bubble for the brightness-pulse overlay until
           the matching ``DM_MEDIA_BLOB`` lands.
         * For a v_3 media message *without* a preview (video / file
-          today): no local bytes yet, ``media_url`` carries the
-          sender's URL untouched and the SPA renders a placeholder
-          glyph; ``media_sync_status='pending'`` keeps the row in
+          today): no local bytes yet, ``media_url`` is ``None`` and
+          the SPA renders a placeholder glyph; ``media_sync_status='pending'`` keeps the row in
           the "waiting on blob" state.
         * For a text / transcript / location message, or a media
           message from a sub-v_3 sender (which fell back to text via
-          the compat shim): no media to persist, the existing
-          payload's ``media_url`` flows through.
+          the compat shim): no media to persist; the payload's
+          ``media_url`` is kept only in the local upload shape
+          (:func:`local_media_ref`) — anything else is ``None`` plus a
+          WARNING, since the SPA puts it in an ``href``.
         """
         is_media = msg_type in ("image", "video", "file")
-        media_url_in = payload.get("media_url")
         if not is_media or payload.get("media_blob_id") is None:
-            # Same-household DM where the sender's URL is reachable,
-            # or a non-media message — nothing for the receiver to
-            # build locally.
+            # A non-media message, or media without a blob to sync —
+            # nothing for the receiver to build locally. The peer's
+            # ``media_url`` lands in an ``href`` / ``src`` on the SPA,
+            # so only the local upload shape (``api/media/<name>``)
+            # survives; a ``javascript:`` or remote URL is dropped.
+            raw = payload.get("media_url")
+            media_url_in = local_media_ref(raw)
+            if raw is not None and media_url_in is None:
+                log.warning(
+                    "DM_MESSAGE %s: dropped non-local media_url from peer",
+                    message_id,
+                )
             return media_url_in, None
         # Reordering guard: ``DM_MEDIA_BLOB`` may have arrived
         # *before* this ``DM_MESSAGE`` (federation transport doesn't
@@ -1144,12 +1164,23 @@ class FederationInboundService(ProtectionGateMixin):
         # first save.
         if self._media_dir is not None:
             mime_in = str(payload.get("mime_type") or "")
-            full_path = self._media_dir / f"{message_id}{_mime_to_ext(mime_in)}"
+            # Every file name below is built from the peer's message id:
+            # resolve each through ``media_file_path`` so nothing outside
+            # media_dir is ever read, written or removed (the caller
+            # already refused an unsafe id; this is defence in depth).
+            full_path = media_file_path(
+                self._media_dir, f"{message_id}{_mime_to_ext(mime_in)}"
+            )
+            preview_path = media_file_path(
+                self._media_dir, f"{message_id}.preview.webp"
+            )
+            if full_path is None or preview_path is None:
+                log.warning("DM_MESSAGE: unsafe message id — media not stored")
+                return None, None
             if await aiofiles.os.path.isfile(full_path):
                 # Drop any stale preview from a previous attempt.
-                preview_old = self._media_dir / f"{message_id}.preview.webp"
                 try:
-                    await aiofiles.os.remove(preview_old)
+                    await aiofiles.os.remove(preview_path)
                 except FileNotFoundError:
                     pass
                 except OSError:  # pragma: no cover
@@ -1176,9 +1207,12 @@ class FederationInboundService(ProtectionGateMixin):
         # keeps the replace operation atomic on the receiver: the
         # full bytes land at the same filename and the SPA's
         # ``media_url`` doesn't have to change at all.
+        dest = media_file_path(self._media_dir, f"{message_id}.preview.webp")
+        if dest is None:
+            log.warning("DM_MESSAGE: unsafe message id — preview not stored")
+            return None, None
         try:
             await aiofiles.os.makedirs(self._media_dir, exist_ok=True)
-            dest = self._media_dir / f"{message_id}.preview.webp"
             async with aiofiles.open(dest, "wb") as f:
                 await f.write(preview_bytes)
         except OSError as exc:  # pragma: no cover
@@ -3552,7 +3586,10 @@ class FederationInboundService(ProtectionGateMixin):
                 moment_id,
             )
             return
-        media_type = p.get("media_type")
+        # Only a local media reference is stored — a peer's third-party
+        # URL would be an ``<img src>`` leaking every viewer's IP.
+        moment_media_url = verbatim_local_media_ref(p.get("media_url"))
+        media_type = p.get("media_type") if moment_media_url is not None else None
         if media_type not in ("image", "video", None):
             media_type = None
         try:
@@ -3563,7 +3600,7 @@ class FederationInboundService(ProtectionGateMixin):
             id=moment_id,
             author_user_id=author_user_id,
             content=str(p.get("content") or ""),
-            media_url=p.get("media_url"),
+            media_url=moment_media_url,
             media_type=media_type,
             duration_ms=(
                 int(p["duration_ms"]) if p.get("duration_ms") is not None else None
@@ -4015,7 +4052,9 @@ class FederationInboundService(ProtectionGateMixin):
             )
         except TypeError, ValueError:
             duration = None
-        media_url = str(payload.get("media_url") or "")
+        # Only a local media reference — a third-party URL would be an
+        # ``<img>`` / ``<video>`` src leaking every viewer's IP.
+        media_url = verbatim_local_media_ref(payload.get("media_url"))
         if not media_url:
             return None
         return HighlightFrame(

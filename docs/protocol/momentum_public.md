@@ -143,6 +143,10 @@ pair), B receives the same ``moment_id`` twice — once via federation,
 once via GFS. The recipient dedupes on the row's PRIMARY KEY; the
 second save is a no-op.
 
+A received public moment keeps `media_url` only when it is a local media
+reference (`api/media/<name>`); a third-party URL is dropped with its
+`media_type` so followers' browsers never load it.
+
 ## Creator-bound moment ids (v_36)
 
 A moment's id commits to its author (`federation/owner_bound_id.py`,

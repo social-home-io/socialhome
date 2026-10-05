@@ -11,21 +11,7 @@
  */
 import type { SpaceZone } from '@/types'
 import { t } from '@/i18n/i18n'
-
-const _ZONE_PALETTE = [
-  '#3b82f6', '#f97316', '#10b981', '#a855f7', '#ec4899',
-  '#facc15', '#14b8a6', '#ef4444', '#6366f1', '#84cc16',
-]
-
-function _zoneColor(zone: SpaceZone): string {
-  if (zone.color) return zone.color
-  // Stable hash fallback so a zone whose color is null still gets
-  // the same colour render-to-render — matches the rule used by
-  // ``SpaceLocationCard`` and ``LocationMap``.
-  let hash = 0
-  for (const ch of zone.id) hash = (hash * 31 + ch.charCodeAt(0)) | 0
-  return _ZONE_PALETTE[Math.abs(hash) % _ZONE_PALETTE.length]
-}
+import { zoneColor } from '@/utils/zoneColor'
 
 function _fmtRadius(m: number): string {
   if (m < 1000) return `${m} m`
@@ -53,7 +39,7 @@ export function ZoneLegend({ zones, emptyLabel }: ZoneLegendProps) {
         <div key={z.id} class="sh-zone-legend__row" role="listitem">
           <span
             class="sh-zone-legend__swatch"
-            style={`background: ${_zoneColor(z)}`}
+            style={{ background: zoneColor(z) }}
             aria-hidden="true"
           />
           <div class="sh-zone-legend__text">

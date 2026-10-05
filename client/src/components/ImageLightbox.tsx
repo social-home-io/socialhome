@@ -16,6 +16,7 @@ import { signal } from '@preact/signals'
 
 import { showToast } from './Toast'
 import { t, formatLocale } from '@/i18n/i18n'
+import { safeHref } from '@/utils/safeHref'
 
 export interface LightboxItem {
   id?:            string
@@ -215,7 +216,7 @@ export function ImageLightbox() {
           >📋 {t('lightbox.copy_reference')}</button>
           <a
             class="sh-lightbox-download"
-            href={item.url}
+            href={safeHref(item.url, { blob: true })}
             download
             aria-label={t('lightbox.download_aria')}
           >↓ {t('media.download')}</a>

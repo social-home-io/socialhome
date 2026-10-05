@@ -303,6 +303,11 @@ current version and **never merges** it, keeping the approval bound to
 exactly that patch. A resolution whose sides changed is `STALE` even when
 forced. See [`moderation.md`](./moderation.md).
 
+A page `cover_image_url` is stored as received (it is part of the
+version identity above, so host and members must keep the same bytes),
+but the API serves it as `null` unless it is a local media reference
+(`api/media/<name>`) — a third-party cover never reaches an `<img>`.
+
 ## Mixed fleets
 
 - **Host below v_48**: last write wins everywhere, exactly as before.

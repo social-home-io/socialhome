@@ -4518,6 +4518,13 @@ body.sh-dm-thread-open .sh-messages {
   background: var(--sh-primary-fill-hover);
   border-color: color-mix(in srgb, var(--sh-on-primary-fill) 32%, transparent);
 }
+/* A file whose link was refused or dropped — same pill, not clickable. */
+.sh-message-file--unavailable {
+  cursor: default;
+}
+.sh-message-file--unavailable .sh-message-file__glyph {
+  opacity: 0.5;
+}
 .sh-message-file__glyph {
   font-size: 1.4rem;
   flex: 0 0 auto;
@@ -8228,6 +8235,10 @@ button.sh-shopping-item__text:focus-visible {
 .sh-markdown p { margin: 0 0 var(--sh-space-sm); }
 .sh-markdown a { color: var(--sh-primary-text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .sh-markdown a:hover { color: var(--sh-primary-hover); }
+/* A link the sanitiser stripped (``javascript:``, ``data:``, ``//host``)
+ * keeps its text but must not look clickable. */
+.sh-markdown a:not([href]),
+.sh-markdown a:not([href]):hover { color: inherit; text-decoration: none; cursor: text; }
 .sh-markdown ul, .sh-markdown ol { margin: 0 0 var(--sh-space-sm); padding-left: var(--sh-space-lg); }
 .sh-markdown ul ul, .sh-markdown ol ol, .sh-markdown ul ol, .sh-markdown ol ul { margin-bottom: 0; }
 .sh-markdown li + li { margin-top: 2px; }
