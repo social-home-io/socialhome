@@ -94,9 +94,19 @@ describe('apiErrorMessage — fallbacks', () => {
       .toBe('amount is required.')
   })
 
-  it('any 5xx is the server line, even with a detail', () => {
+  it('a 5xx outage the user can act on is translated', () => {
     expect(apiErrorMessage(502, '/x', { code: 'GFS_UNAVAILABLE', detail: 'upstream said no' }))
-      .toBe('Something went wrong on the server. Try again in a moment.')
+      .toBe("Couldn't reach the GFS. Try again in a moment.")
+    expect(apiErrorMessage(507, '/x', { code: 'STORAGE_FULL', detail: 'disk' }))
+      .toBe('Your Social Home is out of storage space. Free up space or ask your admin.')
+  })
+
+  it('a 5xx with a specific code keeps its detail; a generic one gets the server line', () => {
+    expect(apiErrorMessage(504, '/x', { code: 'ISSUER_TIMEOUT', detail: 'The issuer did not answer.' }))
+      .toBe('The issuer did not answer.')
+    for (const body of [{ code: 'INTERNAL_ERROR', detail: 'boom' }, { detail: 'boom' }, null]) {
+      expect(apiErrorMessage(500, '/x', body)).toBe('Something went wrong on the server. Try again in a moment.')
+    }
   })
 
   it('a body-less error with no per-status line keeps "API <status>: <path>"', () => {

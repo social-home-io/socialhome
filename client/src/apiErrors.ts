@@ -9,7 +9,7 @@
  * 1. ``t('error.<code>', params)`` when the code is in the table below;
  * 2. else, a generic per-status line (404 / 422 / 429 / 5xx) when the
  *    server's answer was itself generic — no detail, a catch-all code, or
- *    any 5xx;
+ *    a 5xx without a code;
  * 3. else the server's ``detail`` (an unknown, specific code);
  * 4. else ``"API <status>: <path>"``.
  *
@@ -38,7 +38,7 @@ function paramsOf(body: ApiErrorBody): Params {
 
 /** Codes whose ``detail`` is a catch-all — the per-status line says the
  *  same thing, translated. */
-const GENERIC_CODES = new Set(['NOT_FOUND', 'RATE_LIMITED', 'INTERNAL_ERROR'])
+const GENERIC_CODES = new Set(['NOT_FOUND', 'RATE_LIMITED', 'INTERNAL_ERROR', 'SERVICE_UNAVAILABLE'])
 
 /** The fixed detail of the server's blanket ``ValueError`` mapping
  *  (``BaseView._iter``) — generic, so it gets the translated 422 line. */
@@ -110,6 +110,10 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   // Pictures.
   IMAGE_TOO_LARGE: (_b, p) => t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
   IMAGE_UNREADABLE: () => t('error.image_unreadable'),
+  // Server-side outages the user can act on or wait out.
+  GFS_UNAVAILABLE: () => t('error.gfs_unavailable'),
+  STORAGE_FULL: () => t('error.storage_full'),
+  AI_AGENT_UNAVAILABLE: () => t('error.ai_unavailable'),
 }
 
 /** The generic line for a status, or ``null`` when there is none. */
@@ -131,7 +135,9 @@ export function apiErrorMessage(
     const translated = MESSAGES[code](body, paramsOf(body))
     if (translated !== null) return translated
   }
-  const generic = status >= 500
+  // A 5xx with a specific code (GFS_APPEAL_FAILED, ISSUER_TIMEOUT…) keeps
+  // its detail: it says more than "something went wrong".
+  const generic = (status >= 500 && code === null)
     || !detail
     || (code !== null && GENERIC_CODES.has(code))
     || (code === 'UNPROCESSABLE' && detail === GENERIC_UNPROCESSABLE_DETAIL)
