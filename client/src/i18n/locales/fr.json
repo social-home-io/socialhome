@@ -607,7 +607,7 @@
   "connections.title": "Connexions",
   "connections.pair": "Coupler un nouveau foyer",
   "connections.no_connections": "Aucun foyer connecté pour le moment.",
-  "connections.no_connections_hint": "Couplez-vous avec une autre instance Social Home pour partager des espaces, envoyer des messages et voir la présence.",
+  "connections.no_connections_hint": "Couplez-vous avec un autre foyer sur Social Home pour partager des espaces, échanger des messages et voir qui est à la maison.",
   "connections.start_pairing": "Démarrer le couplage",
   "connections.households": "Foyers",
   "connections.global_servers": "GFS (Global Federation Server)",

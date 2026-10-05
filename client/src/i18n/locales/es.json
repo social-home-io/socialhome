@@ -625,7 +625,7 @@
   "connections.title": "Conexiones",
   "connections.pair": "Emparejar nuevo hogar",
   "connections.no_connections": "A\u00fan no hay hogares conectados.",
-  "connections.no_connections_hint": "Empareja con otra instancia de Social Home para compartir espacios, enviar mensajes y ver la presencia del otro.",
+  "connections.no_connections_hint": "Empareja con otro hogar de Social Home para compartir espacios, enviar mensajes y ver quién está en casa.",
   "connections.start_pairing": "Iniciar emparejamiento",
   "connections.households": "Hogares",
   "connections.global_servers": "GFS (Global Federation Server)",

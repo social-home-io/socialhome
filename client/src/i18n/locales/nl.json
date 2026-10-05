@@ -607,7 +607,7 @@
   "connections.title": "Verbindingen",
   "connections.pair": "Nieuw gezin koppelen",
   "connections.no_connections": "Nog geen verbonden gezinnen.",
-  "connections.no_connections_hint": "Koppel met een ander Social Home-gezin om ruimtes te delen, berichten te sturen en elkaars aanwezigheid te zien.",
+  "connections.no_connections_hint": "Koppel met een ander huishouden op Social Home om ruimtes te delen, berichten te sturen en te zien wie er thuis is.",
   "connections.start_pairing": "Koppelen starten",
   "connections.households": "Gezinnen",
   "connections.global_servers": "GFS (Global Federation Server)",

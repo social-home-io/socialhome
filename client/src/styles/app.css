@@ -16402,7 +16402,7 @@ a.sh-link-preview-link:focus-visible {
   transition: width 200ms ease-out;
 }
 .sh-admin-actions {
-  display: flex; gap: var(--sh-space-sm);
+  display: flex; flex-wrap: wrap; gap: var(--sh-space-sm);
   margin: var(--sh-space-sm) 0;
 }
 .sh-btn--file {

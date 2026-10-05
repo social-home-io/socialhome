@@ -695,7 +695,7 @@
   "connections.title": "Connections",
   "connections.pair": "Pair new household",
   "connections.no_connections": "No connected households yet.",
-  "connections.no_connections_hint": "Pair with another Social Home instance to share spaces, send messages, and see each other\u2019s presence.",
+  "connections.no_connections_hint": "Pair with another household on Social Home to share spaces, send messages and see who's home.",
   "connections.start_pairing": "Start pairing",
   "connections.households": "Households",
   "connections.global_servers": "GFS (Global Federation Server)",

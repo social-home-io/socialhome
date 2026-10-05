@@ -607,7 +607,7 @@
   "connections.title": "Verbindungen",
   "connections.pair": "Neuen Haushalt koppeln",
   "connections.no_connections": "Noch keine verbundenen Haushalte.",
-  "connections.no_connections_hint": "Koppele dich mit einer anderen Social-Home-Instanz, um Räume zu teilen, Nachrichten zu senden und Anwesenheit zu sehen.",
+  "connections.no_connections_hint": "Koppel dich mit einem anderen Haushalt auf Social Home, um Räume zu teilen, Nachrichten zu schicken und zu sehen, wer zu Hause ist.",
   "connections.start_pairing": "Kopplung starten",
   "connections.households": "Haushalte",
   "connections.global_servers": "GFS (Global Federation Server)",
