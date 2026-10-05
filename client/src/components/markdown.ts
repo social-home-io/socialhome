@@ -69,10 +69,16 @@ function _escape(raw: string): string {
 // host. Refused, as ``utils/safeHref`` does.
 const _PROTOCOL_RELATIVE = /^[/\\]{2}/
 
+// Read the URL the way a browser does: TAB / CR / LF are removed anywhere
+// and C0 controls + space at the edges, so ``/<TAB>/evil`` is ``//evil``.
+const _URL_STRIPPED = /[\t\n\r]/g
+// eslint-disable-next-line no-control-regex
+const _URL_EDGE = /^[\u0000- ]+|[\u0000- ]+$/g
+
 function _safeHref(href: string): string | null {
-  const trimmed = href.trim()
-  if (!_SAFE_SCHEMES.test(trimmed) || _PROTOCOL_RELATIVE.test(trimmed)) return null
-  return trimmed
+  const read = href.replace(_URL_STRIPPED, '').replace(_URL_EDGE, '')
+  if (!_SAFE_SCHEMES.test(read) || _PROTOCOL_RELATIVE.test(read)) return null
+  return read
 }
 
 /** Render a markdown-ish string to safe HTML. */

@@ -45,6 +45,15 @@ describe('renderMarkdown', () => {
     },
   )
 
+  test.each([['/\t/evil.example/x'], ['/\r/evil.example/x'], ['\u0001//evil.example/x']])(
+    'drops %j: browsers strip TAB/CR and edge controls, so it is protocol-relative',
+    (bad) => {
+      const out = renderMarkdown(`[x](${bad}) [y](/feed)`)
+      expect(out).not.toContain('evil.example')
+      expect(out).toContain('href="/feed"')
+    },
+  )
+
   test('strips javascript: URLs as a security measure', () => {
     const out = renderMarkdown('[click](javascript:alert(1))')
     expect(out).not.toContain('javascript:')
