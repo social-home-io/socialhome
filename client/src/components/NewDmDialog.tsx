@@ -32,6 +32,7 @@ import { Avatar } from './Avatar'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 /** A row in the DM picker — local or remote household member. ``username``
  *  is only meaningful for local rows; remote rows carry their
@@ -167,9 +168,9 @@ export function flattenFriends(payload: FriendsResponse): Pickable[] {
  *  devices have no hover tooltip). */
 function disabledReason(row: Pickable): string {
   if (!row.supports_group) {
-    return `${row.household_name ?? 'Their household'} needs a Social Home update for group chats — 1:1 only`
+    return t('dms.new_dialog.needs_update', { household: row.household_name ?? t('dms.new_dialog.their_household') })
   }
-  return 'Can’t share a group with the person picked above — their household needs an update'
+  return t('dms.new_dialog.blocked_by_pick')
 }
 
 export function openNewDm() {
@@ -199,7 +200,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
           ? { user_id: target.user_id }
           : { username: target.username }
         conv = await api.post('/api/conversations/dm', body)
-        showToast('Conversation started', 'success')
+        showToast(t('dms.new_dialog.started'), 'success')
       } else {
         // Local people by username, people from other households by
         // ``user_id`` — the backend seats them and ships the member list
@@ -213,7 +214,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
         if (trimmedName) body.name = trimmedName
         conv = await api.post('/api/conversations/group', body)
         showToast(
-          trimmedName ? `Group "${trimmedName}" created` : 'Group created',
+          trimmedName ? t('dms.new_dialog.group_created_named', { name: trimmedName }) : t('dms.new_dialog.group_created'),
           'success',
         )
       }
@@ -225,7 +226,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
         location.route(`/dms/${conv.id}`)
       }
     } catch (e: any) {
-      showToast(e.message || 'Failed to start conversation', 'error')
+      showToast(e.message || t('dms.new_dialog.start_failed'), 'error')
     } finally {
       loading.value = false
     }
@@ -252,19 +253,19 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
     <Modal
       open={open.value}
       onClose={() => { open.value = false; reset() }}
-      title={isGroup.value ? 'New group message' : 'New message'}
+      title={isGroup.value ? t('dms.new_dialog.title_group') : t('dms.new')}
     >
       <div class="sh-form sh-newdm">
         {/* Selected-chip strip — only renders when at least one is
             picked, so the dialog stays compact for quick 1:1s. */}
         {picked.value.size > 0 && (
-          <div class="sh-newdm-chips" aria-label="Selected recipients">
+          <div class="sh-newdm-chips" aria-label={t('dms.new_dialog.selected')}>
             {pickedUsers.value.map(u => (
               <button
                 key={u.user_id}
                 type="button"
                 class="sh-newdm-chip"
-                aria-label={`Remove ${u.display_name}`}
+                aria-label={t('dms.new_dialog.remove', { name: u.display_name })}
                 onClick={() => togglePick(u.user_id)}
               >
                 <Avatar name={u.display_name} src={u.picture_url} size={20} />
@@ -272,7 +273,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
                 {u.household_name && (
                   <span
                     class="sh-newdm-chip-household sh-muted"
-                    aria-label={`at ${u.household_name}`}
+                    aria-label={t('dms.new_dialog.at_household', { household: u.household_name })}
                   >
                     · {u.household_name}
                   </span>
@@ -287,7 +288,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
             actually be a group. Optional — backend allows null. */}
         {isGroup.value && (
           <label class="sh-newdm-name">
-            Group name <span class="sh-muted">(optional)</span>
+            {t('dms.group_name')} <span class="sh-muted">{t('dms.optional')}</span>
             <input
               type="text"
               maxLength={80}
@@ -295,16 +296,16 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
               onInput={(e) => {
                 groupName.value = (e.target as HTMLInputElement).value
               }}
-              placeholder="e.g. Sunday lunch crew"
+              placeholder={t('dms.group_name_placeholder')}
             />
           </label>
         )}
 
         <label class="sh-newdm-search">
-          {picked.value.size === 0 ? 'To:' : 'Add more:'}
+          {picked.value.size === 0 ? t('dms.new_dialog.to') : t('dms.new_dialog.add_more')}
           <input
             type="search"
-            placeholder="Search people…"
+            placeholder={t('dms.new_dialog.search')}
             value={search.value}
             onInput={(e) => {
               search.value = (e.target as HTMLInputElement).value
@@ -317,8 +318,8 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
           {filtered.value.length === 0 && (
             <p class="sh-muted" style={{ padding: 'var(--sh-space-sm)' }}>
               {search.value
-                ? 'No matches.'
-                : 'No people available yet — pair a household to start.'}
+                ? t('dms.new_dialog.no_matches')
+                : t('dms.new_dialog.no_people')}
             </p>
           )}
           {filtered.value.map(u => {
@@ -351,7 +352,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
                   <strong>{u.display_name}</strong>
                   <span class="sh-muted">
                     {u.household_name
-                      ? `at ${u.household_name}`
+                      ? t('dms.new_dialog.at_household', { household: u.household_name })
                       : `@${u.username}`}
                   </span>
                   {disabled && (
@@ -371,7 +372,7 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
             variant="secondary"
             onClick={() => { open.value = false; reset() }}
           >
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button
             onClick={handleCreate}
@@ -379,8 +380,8 @@ export function NewDmDialog({ onCreated }: { onCreated?: (convId: string) => voi
             disabled={startDisabled || groupBlocked}
           >
             {isGroup.value
-              ? `Start group (${picked.value.size})`
-              : 'Start'}
+              ? t('dms.new_dialog.start_group', { n: String(picked.value.size) })
+              : t('dms.new_dialog.start')}
           </Button>
         </div>
       </div>

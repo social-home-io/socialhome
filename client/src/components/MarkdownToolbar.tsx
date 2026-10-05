@@ -18,6 +18,7 @@
  * restored so selection feels natural after a bold/italic wrap.
  */
 import { useEffect } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 
 interface MarkdownToolbarProps {
   textareaRef: { current: HTMLTextAreaElement | null }
@@ -118,9 +119,9 @@ export function useMarkdownShortcuts(
       if (!mod) return
       const key = e.key.toLowerCase()
       const handlers: Record<string, () => void> = {
-        b: () => applyFormat(ta, onUpdate, { before: '**', placeholder: 'bold' }),
-        i: () => applyFormat(ta, onUpdate, { before: '*',  placeholder: 'italic' }),
-        k: () => applyFormat(ta, onUpdate, { before: '[', after: '](url)', placeholder: 'link text' }),
+        b: () => applyFormat(ta, onUpdate, { before: '**', placeholder: t('md.ph.bold') }),
+        i: () => applyFormat(ta, onUpdate, { before: '*',  placeholder: t('md.ph.italic') }),
+        k: () => applyFormat(ta, onUpdate, { before: '[', after: '](url)', placeholder: t('md.ph.link_text') }),
       }
       const handler = handlers[key]
       if (handler) {
@@ -131,11 +132,11 @@ export function useMarkdownShortcuts(
       // Cmd/Ctrl+Shift+8 → bullet list, +9 → numbered list.
       if (e.shiftKey && key === '8') {
         e.preventDefault()
-        applyFormat(ta, onUpdate, { before: '', linePrefix: '- ', placeholder: 'item' })
+        applyFormat(ta, onUpdate, { before: '', linePrefix: '- ', placeholder: t('md.ph.item') })
       }
       if (e.shiftKey && key === '9') {
         e.preventDefault()
-        applyFormat(ta, onUpdate, { before: '', linePrefix: '1. ', placeholder: 'item' })
+        applyFormat(ta, onUpdate, { before: '', linePrefix: '1. ', placeholder: t('md.ph.item') })
       }
     }
     ta.addEventListener('keydown', onKey)
@@ -156,28 +157,28 @@ export function MarkdownToolbar(
     ? '⌘' : 'Ctrl'
 
   return (
-    <div class="sh-md-toolbar" role="toolbar" aria-label="Markdown formatting">
-      <div class="sh-md-toolbar-row" role="group" aria-label="Headings and emphasis">
-        <Btn label="Heading 1" onClick={() => apply({ before: '', linePrefix: '# ', placeholder: 'Heading' })}>H1</Btn>
-        <Btn label="Heading 2" onClick={() => apply({ before: '', linePrefix: '## ', placeholder: 'Heading' })}>H2</Btn>
-        <Btn label="Heading 3" onClick={() => apply({ before: '', linePrefix: '### ', placeholder: 'Heading' })}>H3</Btn>
+    <div class="sh-md-toolbar" role="toolbar" aria-label={t('md.toolbar')}>
+      <div class="sh-md-toolbar-row" role="group" aria-label={t('md.group.headings')}>
+        <Btn label={t('md.btn.h1')} onClick={() => apply({ before: '', linePrefix: '# ', placeholder: t('md.ph.heading') })}>H1</Btn>
+        <Btn label={t('md.btn.h2')} onClick={() => apply({ before: '', linePrefix: '## ', placeholder: t('md.ph.heading') })}>H2</Btn>
+        <Btn label={t('md.btn.h3')} onClick={() => apply({ before: '', linePrefix: '### ', placeholder: t('md.ph.heading') })}>H3</Btn>
         <span class="sh-md-sep" aria-hidden="true" />
-        <Btn label="Bold"          shortcut={`${cmd}+B`} onClick={() => apply({ before: '**', placeholder: 'bold' })}>B</Btn>
-        <Btn label="Italic"        shortcut={`${cmd}+I`} onClick={() => apply({ before: '*',  placeholder: 'italic' })}><i>I</i></Btn>
-        <Btn label="Strikethrough" onClick={() => apply({ before: '~~', placeholder: 'text' })}><s>S</s></Btn>
+        <Btn label={t('md.btn.bold')}          shortcut={`${cmd}+B`} onClick={() => apply({ before: '**', placeholder: t('md.ph.bold') })}>B</Btn>
+        <Btn label={t('md.btn.italic')}        shortcut={`${cmd}+I`} onClick={() => apply({ before: '*',  placeholder: t('md.ph.italic') })}><i>I</i></Btn>
+        <Btn label={t('md.btn.strike')} onClick={() => apply({ before: '~~', placeholder: t('md.ph.text') })}><s>S</s></Btn>
       </div>
-      <div class="sh-md-toolbar-row" role="group" aria-label="Blocks and lists">
-        <Btn label="Inline code"  onClick={() => apply({ before: '`', placeholder: 'code' })}>{'<>'}</Btn>
-        <Btn label="Code block"   onClick={() => apply({ before: '\n```\n', after: '\n```\n', placeholder: 'code' })}>{'{ }'}</Btn>
-        <Btn label="Link"         shortcut={`${cmd}+K`} onClick={() => apply({ before: '[', after: '](url)', placeholder: 'link text' })}>🔗</Btn>
+      <div class="sh-md-toolbar-row" role="group" aria-label={t('md.group.blocks')}>
+        <Btn label={t('md.btn.inline_code')}  onClick={() => apply({ before: '`', placeholder: t('md.ph.code') })}>{'<>'}</Btn>
+        <Btn label={t('md.btn.code_block')}   onClick={() => apply({ before: '\n```\n', after: '\n```\n', placeholder: t('md.ph.code') })}>{'{ }'}</Btn>
+        <Btn label={t('md.btn.link')}         shortcut={`${cmd}+K`} onClick={() => apply({ before: '[', after: '](url)', placeholder: t('md.ph.link_text') })}>🔗</Btn>
         {onPickImage && (
-          <Btn label="Image" onClick={onPickImage}>📷</Btn>
+          <Btn label={t('md.btn.image')} onClick={onPickImage}>📷</Btn>
         )}
         <span class="sh-md-sep" aria-hidden="true" />
-        <Btn label="Bullet list"  shortcut={`${cmd}+⇧+8`} onClick={() => apply({ before: '', linePrefix: '- ',  placeholder: 'item' })}>≡</Btn>
-        <Btn label="Numbered list" shortcut={`${cmd}+⇧+9`} onClick={() => apply({ before: '', linePrefix: '1. ', placeholder: 'item' })}>1.</Btn>
-        <Btn label="Task list"    onClick={() => apply({ before: '', linePrefix: '- [ ] ', placeholder: 'task' })}>☐</Btn>
-        <Btn label="Blockquote"   onClick={() => apply({ before: '', linePrefix: '> ', placeholder: 'quote' })}>&quot;</Btn>
+        <Btn label={t('md.btn.bullets')}  shortcut={`${cmd}+⇧+8`} onClick={() => apply({ before: '', linePrefix: '- ',  placeholder: t('md.ph.item') })}>≡</Btn>
+        <Btn label={t('md.btn.numbered')} shortcut={`${cmd}+⇧+9`} onClick={() => apply({ before: '', linePrefix: '1. ', placeholder: t('md.ph.item') })}>1.</Btn>
+        <Btn label={t('md.btn.tasks')}    onClick={() => apply({ before: '', linePrefix: '- [ ] ', placeholder: t('md.ph.task') })}>☐</Btn>
+        <Btn label={t('md.btn.quote')}   onClick={() => apply({ before: '', linePrefix: '> ', placeholder: t('md.ph.quote') })}>&quot;</Btn>
       </div>
     </div>
   )

@@ -26,7 +26,7 @@ export default function FeedPage() {
   // single source of truth (set in admin Settings; what peers also
   // see). Falls back to "Home" while the cold-start config fetch is in
   // flight, matching the default the backend ships with on first boot.
-  const householdName = instanceConfig.value?.instance_name ?? 'Home'
+  const householdName = instanceConfig.value?.instance_name ?? t('nav.home')
   useTitle(householdName)
   useEffect(() => {
     void loadHouseholdUsers()
@@ -56,7 +56,7 @@ export default function FeedPage() {
     if (extras?.location) body.location = extras.location
     if (extras?.noLinkPreview) body.no_link_preview = true
     const post = await api.post('/api/feed/posts', body) as FeedPost
-    showToast('Post shared', 'success')
+    showToast(t('feed.post_shared'), 'success')
     // No local prepend here — wireFeedWs() handles `post.created` and
     // dedupes by id, so the new post lands at the top exactly once.
     return post?.id
@@ -70,9 +70,9 @@ export default function FeedPage() {
   }
 
   const handleDelete = async (postId: string) => {
-    if (!await confirmDialog('Delete this post?', { destructive: true })) return
+    if (!await confirmDialog(t('feed.delete_confirm'), { destructive: true })) return
     await api.delete(`/api/feed/posts/${postId}`)
-    showToast('Post deleted', 'info')
+    showToast(t('feed.post_deleted'), 'info')
     // wireFeedWs() removes the row on `post.deleted`. No reload.
   }
 
@@ -124,18 +124,13 @@ export default function FeedPage() {
       {!feedLoading.value && posts.value.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">📝</div>
-          <h3>No posts yet</h3>
-          <p>
-            Share what's on your mind with your household — text, photo,
-            poll, location, anything that should land in the feed.
-          </p>
-          <p class="sh-muted">
-            Use the composer above ↑ to write your first post.
-          </p>
+          <h3>{t('feed.empty.title')}</h3>
+          <p>{t('feed.empty.body')}</p>
+          <p class="sh-muted">{t('feed.empty.hint')}</p>
         </div>
       )}
       {feedHasMore.value && !feedLoading.value && posts.value.length > 0 && (
-        <Button variant="secondary" onClick={handleLoadMore}>Load more</Button>
+        <Button variant="secondary" onClick={handleLoadMore}>{t('feed.load_more')}</Button>
       )}
     </div>
     </PullToRefresh>

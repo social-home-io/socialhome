@@ -1,4 +1,5 @@
 import { LogoMark } from './LogoMark'
+import { t } from '@/i18n/i18n'
 
 /**
  * Spinner — the brand mark itself, animating. The chat-notch
@@ -11,7 +12,7 @@ import { LogoMark } from './LogoMark'
  * proportional fallback so the visual weight stays roughly the
  * same — the multiplier matches the dots-to-logo perceived area.
  */
-export function Spinner({ size = 8, label = 'Loading…' }: {
+export function Spinner({ size = 8, label: labelProp }: {
   size?: number
   label?: string
 }) {
@@ -20,6 +21,7 @@ export function Spinner({ size = 8, label = 'Loading…' }: {
   // scale up to a comparable logo size; for callers that already
   // pass logo-sized values (>=24) honour them as-is.
   const logoSize = size < 24 ? Math.max(24, size * 4) : size
+  const label = labelProp ?? t('spinner.loading')
   return (
     <span
       class="sh-spinner"

@@ -28,6 +28,7 @@ import { showToast } from './Toast'
 import { UploadProgressBar, uploadWithProgress } from './UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
 import { addBase } from '@/baseUrl'
+import { t, isOne } from '@/i18n/i18n'
 
 const CAPTION_MAX = 140
 
@@ -83,7 +84,7 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
     const isVideo = f.type.startsWith('video/')
     const isImage = f.type.startsWith('image/')
     if (!isVideo && !isImage) {
-      showToast('Pick an image or video.', 'error')
+      showToast(t('highlight.quick.pick_media'), 'error')
       return
     }
     try {
@@ -120,11 +121,11 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
         audience_kind: 'all_paired',
         audience:      [],
       }) as { highlight: { id: string }; frame: { id: string } }
-      showToast('Highlight shared', 'success')
+      showToast(t('highlight.shared'), 'success')
       open.value = false
       onShared?.(r.highlight.id)
     } catch (err: unknown) {
-      showToast(`Couldn't share: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.share_failed', { error: String((err as Error)?.message ?? err) }), 'error')
       submitting.value = false
     }
   }
@@ -132,14 +133,14 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
   const remaining = CAPTION_MAX - caption.value.length
 
   return (
-    <Modal open={open.value} onClose={closeDialog} title="Share a highlight">
+    <Modal open={open.value} onClose={closeDialog} title={t('composer.share_highlight')}>
       <form class="sh-highlight-quick-share" onSubmit={submit}>
         {!mediaUrl.value && (
           <MediaDropzone
             accept="image/*,video/*"
-            hint="Drag a photo or video here, or"
-            pickLabel="choose media…"
-            draggingHint="Drop to attach"
+            hint={t('highlight.quick.drop_hint')}
+            pickLabel={t('highlight.quick.pick_label')}
+            draggingHint={t('composer.drop.dragging')}
             onFiles={acceptFiles}
           />
         )}
@@ -153,7 +154,7 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
             <button
               type="button"
               class="sh-composer-remove-attach"
-              aria-label="Remove media"
+              aria-label={t('highlight.quick.remove_media')}
               onClick={clearMedia}
             >✕</button>
           </div>
@@ -170,7 +171,7 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
             <button
               type="button"
               class="sh-composer-remove-attach"
-              aria-label="Remove media"
+              aria-label={t('highlight.quick.remove_media')}
               onClick={clearMedia}
             >✕</button>
           </div>
@@ -178,24 +179,24 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
         <UploadProgressBar />
 
         <label class="sh-highlight-quick-caption">
-          Caption
+          {t('highlight.quick.caption')}
           <textarea
             ref={captionRef}
             rows={2}
             maxLength={CAPTION_MAX}
-            placeholder="A line for this moment…"
+            placeholder={t('highlight.quick.caption_placeholder')}
             value={caption.value}
             onInput={(e) => {
               caption.value = (e.target as HTMLTextAreaElement).value
             }}
           />
           <span class={remaining < 0 ? 'sh-error' : 'sh-muted'}>
-            {remaining} characters left
+            {t(isOne(remaining) ? 'highlight.quick.chars_left_one' : 'highlight.quick.chars_left', { n: String(remaining) })}
           </span>
         </label>
 
         <p class="sh-muted sh-highlight-quick-audience-note">
-          Visible to all your connected households for the rest of today.
+          {t('highlight.quick.audience_note')}
         </p>
 
         <div class="sh-form-actions">
@@ -204,15 +205,15 @@ export function HighlightQuickShareDialog({ onShared }: Props = {}) {
             href={addBase('/highlights/new')}
             onClick={closeDialog}
           >
-            Build a multi-frame story →
+            {t('highlight.quick.escalate')}
           </a>
-          <Button variant="secondary" onClick={closeDialog}>Cancel</Button>
+          <Button variant="secondary" onClick={closeDialog}>{t('common.cancel')}</Button>
           <Button
             type="submit"
             loading={submitting.value}
             disabled={!mediaUrl.value}
           >
-            Share
+            {t('highlight.quick.share')}
           </Button>
         </div>
       </form>

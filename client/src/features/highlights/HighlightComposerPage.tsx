@@ -27,6 +27,7 @@ import { describeUploadError } from '@/utils/uploadErrors'
 import { currentUser } from '@/store/auth'
 import type { HighlightAudienceKind, HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
+import { t, isOne } from '@/i18n/i18n'
 
 /** A household the audience picker offers — a confirmed social peer. */
 interface RemoteHousehold {
@@ -143,10 +144,10 @@ function AudienceLoadError() {
   return (
     <div role="alert">
       <p class="sh-muted">
-        Couldn't load your connections ({audienceError.value}).
+        {t('highlight.composer.audience_failed', { error: audienceError.value ?? '' })}
       </p>
       <Button type="button" variant="secondary" onClick={() => void loadAudience()}>
-        Retry
+        {t('common.retry')}
       </Button>
     </div>
   )
@@ -212,7 +213,7 @@ export default function HighlightComposerPage() {
     const left = framesLeft()
     if (left <= 0) {
       showToast(
-        `You've reached today's limit of ${MAX_FRAMES_PER_HIGHLIGHT} highlight frames.`,
+        t('highlight.composer.limit_reached', { n: String(MAX_FRAMES_PER_HIGHLIGHT) }),
         'error',
       )
       return
@@ -220,7 +221,7 @@ export default function HighlightComposerPage() {
     const accepted = files.slice(0, left)
     if (files.length > accepted.length) {
       showToast(
-        `You can add ${left} more frame${left === 1 ? '' : 's'} to today's highlight.`,
+        t(isOne(left) ? 'highlight.composer.more_left_one' : 'highlight.composer.more_left', { n: String(left) }),
         'info',
       )
     }
@@ -291,7 +292,7 @@ export default function HighlightComposerPage() {
         lastHighlightId = r.highlight.id
       } catch (err: unknown) {
         showToast(
-          `Frame ${i + 1} failed: ${(err as Error)?.message ?? err}`,
+          t('highlight.composer.frame_failed', { n: String(i + 1), error: String((err as Error)?.message ?? err) }),
           'error',
         )
         // Stop the loop with already-posted frames intact; the user
@@ -301,7 +302,7 @@ export default function HighlightComposerPage() {
     }
     if (lastHighlightId) {
       showToast(
-        frames.length === 1 ? 'Highlight posted' : `Posted ${frames.length} frames`,
+        frames.length === 1 ? t('highlight.composer.posted_one') : t('highlight.composer.posted', { n: String(frames.length) }),
         'success',
       )
       loc.route(`/highlights/${lastHighlightId}`)
@@ -316,24 +317,24 @@ export default function HighlightComposerPage() {
   return (
     <form class="sh-form sh-highlight-composer" onSubmit={submit}>
       <header class="sh-highlights-header">
-        <h2>New highlight</h2>
-        <a href={addBase('/highlights')} class="sh-link">Cancel</a>
+        <h2>{t('highlight.composer.title')}</h2>
+        <a href={addBase('/highlights')} class="sh-link">{t('common.cancel')}</a>
       </header>
 
       <MediaDropzone
         multiple
         accept="image/*,video/*"
         disabled={!canPickMore}
-        hint="Drag photos or videos here, or"
-        pickLabel="choose media…"
-        draggingHint="Drop to add frames"
+        hint={t('highlight.composer.drop_hint')}
+        pickLabel={t('highlight.quick.pick_label')}
+        draggingHint={t('highlight.composer.dragging')}
         onFiles={acceptFiles}
       />
       <UploadProgressBar />
       <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
         {canPickMore
-          ? `You can add up to ${left} more frame${left === 1 ? '' : 's'} to today's highlight.`
-          : `You've reached today's limit of ${MAX_FRAMES_PER_HIGHLIGHT} frames.`}
+          ? t(isOne(left) ? 'highlight.composer.up_to_left_one' : 'highlight.composer.up_to_left', { n: String(left) })
+          : t('highlight.composer.limit_reached', { n: String(MAX_FRAMES_PER_HIGHLIGHT) })}
       </p>
 
       {stagedFrames.value.length > 0 && (
@@ -349,11 +350,11 @@ export default function HighlightComposerPage() {
               </div>
               <div class="sh-highlight-frame-body">
                 <div class="sh-highlight-frame-meta">
-                  <strong>Frame {i + 1} of {stagedFrames.value.length}</strong>
+                  <strong>{t('highlight.composer.frame_of', { n: String(i + 1), total: String(stagedFrames.value.length) })}</strong>
                   <button
                     type="button"
                     class="sh-link sh-highlight-frame-remove"
-                    aria-label={`Remove ${f.name}`}
+                    aria-label={t('composer.remove_image', { name: f.name })}
                     onClick={() => removeFrame(f.id)}
                   >✕</button>
                 </div>
@@ -365,7 +366,7 @@ export default function HighlightComposerPage() {
                     }}
                     rows={2}
                     maxLength={CAPTION_MAX}
-                    placeholder="A line for this moment…"
+                    placeholder={t('highlight.quick.caption_placeholder')}
                     value={f.caption}
                     onInput={e => updateCaption(
                       f.id, (e.target as HTMLTextAreaElement).value,
@@ -373,7 +374,7 @@ export default function HighlightComposerPage() {
                   />
                   <EmojiPickButton
                     openKey={`highlight-frame-${f.id}`}
-                    ariaLabel={`Add emoji to frame ${i + 1}`}
+                    ariaLabel={t('highlight.composer.emoji_aria', { n: String(i + 1) })}
                     onInsert={(emoji) => spliceEmojiIntoFrame(f.id, emoji)}
                   />
                 </div>
@@ -384,7 +385,7 @@ export default function HighlightComposerPage() {
       )}
 
       <fieldset class="sh-highlight-composer-audience">
-        <legend class="sh-muted">Audience</legend>
+        <legend class="sh-muted">{t('highlight.composer.audience')}</legend>
         <label class="sh-highlight-composer-audience-row">
           <input
             type="radio"
@@ -395,7 +396,7 @@ export default function HighlightComposerPage() {
               audienceIds.value = []
             }}
           />
-          All connected households (default)
+          {t('highlight.composer.audience_all')}
         </label>
         <label class="sh-highlight-composer-audience-row">
           <input
@@ -407,13 +408,13 @@ export default function HighlightComposerPage() {
               audienceIds.value = []
             }}
           />
-          Pick households
+          {t('highlight.composer.audience_households')}
         </label>
         {audienceKind.value === 'households' && (
           <div class="sh-highlight-composer-audience-list">
             {audienceError.value && <AudienceLoadError />}
             {!audienceError.value && households.value.length === 0 && (
-              <p class="sh-muted">No connected households yet.</p>
+              <p class="sh-muted">{t('highlight.composer.no_households')}</p>
             )}
             {households.value.map(h => (
               <label key={h.instance_id} class="sh-highlight-composer-audience-row">
@@ -432,7 +433,7 @@ export default function HighlightComposerPage() {
           class="sh-link sh-highlight-composer-advanced-toggle"
           onClick={() => { advanced.value = !advanced.value }}
         >
-          {advanced.value ? 'Hide' : 'Show'} per-person picker (advanced)
+          {advanced.value ? t('highlight.composer.hide_people') : t('highlight.composer.show_people')}
         </button>
         {advanced.value && (
           <>
@@ -446,13 +447,13 @@ export default function HighlightComposerPage() {
                   audienceIds.value = []
                 }}
               />
-              Pick people
+              {t('highlight.composer.audience_people')}
             </label>
             {audienceKind.value === 'users' && (
               <div class="sh-highlight-composer-audience-list">
                 {audienceError.value && <AudienceLoadError />}
                 {!audienceError.value && people.value.length === 0 && (
-                  <p class="sh-muted">No connected people yet.</p>
+                  <p class="sh-muted">{t('highlight.composer.no_people')}</p>
                 )}
                 {people.value.map(p => (
                   <label key={p.user_id} class="sh-highlight-composer-audience-row">
@@ -480,8 +481,8 @@ export default function HighlightComposerPage() {
           disabled={stagedFrames.value.length === 0 || submitting.value}
         >
           {stagedFrames.value.length > 1
-            ? `Post ${stagedFrames.value.length} frames`
-            : 'Post highlight'}
+            ? t('highlight.composer.post_frames', { n: String(stagedFrames.value.length) })
+            : t('highlight.composer.post')}
         </Button>
       </div>
     </form>

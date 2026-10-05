@@ -25,6 +25,8 @@
  * resolves to the correct wall clock on either side of a DST shift.
  */
 
+import { formatLocale, t } from '@/i18n/i18n'
+
 /** The viewer's current browser timezone (IANA name). Cached at
  *  module load — `Intl` returns a stable resolution per process. */
 export function detectBrowserTz(): string {
@@ -135,7 +137,7 @@ export function formatEventTime(
   viewerTz: string = detectBrowserTz(),
 ): FormattedEventTime {
   const d = new Date(utcIso)
-  const primary = d.toLocaleTimeString(undefined, {
+  const primary = d.toLocaleTimeString(formatLocale(), {
     timeZone: eventTz,
     hour: 'numeric',
     minute: '2-digit',
@@ -143,7 +145,7 @@ export function formatEventTime(
   if (eventTz === viewerTz || !eventTz) {
     return { primary, primaryTz: eventTz, secondary: null }
   }
-  const viewerLocal = d.toLocaleTimeString(undefined, {
+  const viewerLocal = d.toLocaleTimeString(formatLocale(), {
     timeZone: viewerTz,
     hour: 'numeric',
     minute: '2-digit',
@@ -151,6 +153,6 @@ export function formatEventTime(
   return {
     primary,
     primaryTz: eventTz,
-    secondary: `≈ ${viewerLocal} your time`,
+    secondary: t('time.your_time', { time: viewerLocal }),
   }
 }

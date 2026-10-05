@@ -479,10 +479,10 @@ export function formatEventBounds(event: CalendarEvent): EventBounds {
     return { starts: event.start, ends: event.start }
   }
   if (event.all_day !== true) {
-    const starts = startDate.toLocaleString()
+    const starts = startDate.toLocaleString(formatLocale())
     const endDate = event.end ? new Date(event.end) : null
     const ends = endDate && !Number.isNaN(endDate.getTime())
-      ? endDate.toLocaleString()
+      ? endDate.toLocaleString(formatLocale())
       : starts
     return { starts, ends }
   }

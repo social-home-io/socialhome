@@ -18,6 +18,7 @@ import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
 import { requiresHaUserPassword } from '@/platform'
+import { t } from '@/i18n/i18n'
 
 interface HaUser {
   username:     string
@@ -54,7 +55,7 @@ export function HaUsersPanel() {
         if ((e as { status?: number })?.status === 501) {
           notAvailable.value = true
         } else {
-          error.value = (e as Error)?.message || 'Failed to load HA users'
+          error.value = (e as Error)?.message || t('ha_users.load_failed')
         }
       })
       .finally(() => {
@@ -79,19 +80,19 @@ export function HaUsersPanel() {
     try {
       if (wasSynced) {
         await api.delete(`/api/admin/ha-users/${row.username}/provision`)
-        showToast(`${row.display_name} removed`, 'info')
+        showToast(t('ha_users.removed', { name: row.display_name }), 'info')
       } else {
         await api.post(
           `/api/admin/ha-users/${row.username}/provision`,
           body,
         )
-        showToast(`${row.display_name} added`, 'success')
+        showToast(t('ha_users.added', { name: row.display_name }), 'success')
       }
     } catch (e: unknown) {
       users.value = users.value.map(u =>
         u.username === row.username ? { ...u, synced: wasSynced } : u,
       )
-      showToast((e as Error)?.message || 'Toggle failed', 'error')
+      showToast((e as Error)?.message || t('ha_users.toggle_failed'), 'error')
     }
   }
 
@@ -111,19 +112,15 @@ export function HaUsersPanel() {
   if (notAvailable.value) {
     return (
       <section class="sh-admin-section">
-        <h2>Home Assistant users</h2>
-        <p class="sh-muted">
-          This instance isn't running as a Home Assistant add-on, so there
-          are no HA users to sync. Invite members in the standalone user
-          management instead.
-        </p>
+        <h2>{t('ha_users.heading')}</h2>
+        <p class="sh-muted">{t('ha_users.not_available')}</p>
       </section>
     )
   }
   if (error.value) {
     return (
       <section class="sh-admin-section" role="alert">
-        <h2>Home Assistant users</h2>
+        <h2>{t('ha_users.heading')}</h2>
         <p class="sh-error">{error.value}</p>
       </section>
     )
@@ -132,24 +129,16 @@ export function HaUsersPanel() {
   if (users.value.length === 0) {
     return (
       <section class="sh-admin-section">
-        <h2>Home Assistant users</h2>
-        <p class="sh-muted">
-          No Home Assistant users found. Make sure the
-          <code> person.*</code> integration in HA has at least one
-          user configured, then come back here.
-        </p>
+        <h2>{t('ha_users.heading')}</h2>
+        <p class="sh-muted">{t('ha_users.empty')}</p>
       </section>
     )
   }
 
   return (
     <section class="sh-admin-section">
-      <h2>Home Assistant users</h2>
-      <p class="sh-muted">
-        Pick which Home Assistant users should also be Social Home
-        members.  Turning one off soft-removes them; you can switch
-        them back on later.
-      </p>
+      <h2>{t('ha_users.heading')}</h2>
+      <p class="sh-muted">{t('ha_users.intro')}</p>
       <ul class="sh-ha-users">
         {users.value.map(u => (
           <li key={u.username} class="sh-ha-user-row">
@@ -158,19 +147,19 @@ export function HaUsersPanel() {
               <span class="sh-ha-user-name">{u.display_name}</span>
               <span class="sh-muted">@{u.handle ?? u.username}</span>
               {u.is_admin && (
-                <span class="sh-badge sh-badge--admin">Admin</span>
+                <span class="sh-badge sh-badge--admin">{t('admin.members.admin')}</span>
               )}
             </div>
             <label class="sh-switch">
               <input
                 type="checkbox"
                 checked={u.synced}
-                aria-label={`Sync ${u.display_name}`}
+                aria-label={t('ha_users.sync_aria', { name: u.display_name })}
                 onChange={() => toggle(u)}
               />
               <span class="sh-switch-track" />
               <span class="sh-muted">
-                {u.synced ? 'Active' : 'Not added'}
+                {u.synced ? t('ha_users.active') : t('ha_users.not_added')}
               </span>
             </label>
           </li>
@@ -219,15 +208,13 @@ function HaUserPasswordPromptModal({
     onSubmit(state.user, pw)
   }
   return (
-    <Modal open={true} onClose={onClose} title="Set a Social Home password">
+    <Modal open={true} onClose={onClose} title={t('ha_users.pw_title')}>
       <div class="sh-form">
         <p class="sh-muted" style={{ marginTop: 0 }}>
-          {state.user.display_name} will use this password to sign in to
-          Social Home from the web app or mobile.  HA-side credentials
-          stay separate.
+          {t('ha_users.pw_intro', { name: state.user.display_name })}
         </p>
         <label>
-          New password
+          {t('ha_users.pw_new')}
           <input
             type="password"
             autoComplete="new-password"
@@ -237,12 +224,12 @@ function HaUserPasswordPromptModal({
           />
           {tooShort && (
             <span class="sh-form-hint sh-form-hint--error">
-              At least 8 characters.
+              {t('ha_users.pw_too_short')}
             </span>
           )}
         </label>
         <label>
-          Confirm
+          {t('ha_users.pw_confirm')}
           <input
             type="password"
             autoComplete="new-password"
@@ -255,14 +242,14 @@ function HaUserPasswordPromptModal({
           />
           {mismatch && (
             <span class="sh-form-hint sh-form-hint--error">
-              Doesn't match.
+              {t('ha_users.pw_mismatch')}
             </span>
           )}
         </label>
         <div class="sh-form-actions">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
           <Button onClick={submit} disabled={!canSubmit}>
-            Add {state.user.display_name}
+            {t('ha_users.add', { name: state.user.display_name })}
           </Button>
         </div>
       </div>

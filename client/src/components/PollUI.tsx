@@ -22,6 +22,7 @@ import { Button } from './Button'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { confirmDialog } from '@/components/confirm'
+import { isOne, t } from '@/i18n/i18n'
 
 interface PollOption {
   id: string
@@ -104,19 +105,19 @@ export function PollUI({
 
   if (loadState === 'loading') return (
     <div class="sh-poll">
-      <p class="sh-muted">Loading poll…</p>
+      <p class="sh-muted">{t('poll.loading')}</p>
     </div>
   )
   if (loadState === 'missing') return (
     <div class="sh-poll sh-poll--missing">
       <p class="sh-muted">
-        🗳 Poll options haven't been attached to this post yet.
+        {t('poll.missing')}
       </p>
     </div>
   )
   if (loadState === 'error' || !data) return (
     <div class="sh-poll sh-poll--error">
-      <p class="sh-muted">Couldn't load this poll. Try again later.</p>
+      <p class="sh-muted">{t('poll.load_failed')}</p>
     </div>
   )
   if (data.options.length === 0) {
@@ -124,7 +125,7 @@ export function PollUI({
     return (
       <div class="sh-poll sh-poll--missing">
         <p class="sh-muted">
-          🗳 Poll options haven't been attached to this post yet.
+          {t('poll.missing')}
         </p>
       </div>
     )
@@ -141,7 +142,7 @@ export function PollUI({
       setData(next)
     } catch (err: unknown) {
       showToast(
-        `Vote failed: ${(err as Error)?.message ?? err}`, 'error',
+        t('poll.vote_failed', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -149,7 +150,7 @@ export function PollUI({
   }
 
   const closePoll = async () => {
-    if (!await confirmDialog('Close this poll? No more votes will be accepted.', { destructive: true })) return
+    if (!await confirmDialog(t('poll.close_confirm'), { destructive: true })) return
     setBusy(true)
     try {
       const next = await api.post(
@@ -158,7 +159,7 @@ export function PollUI({
       setData(next)
     } catch (err: unknown) {
       showToast(
-        `Could not close: ${(err as Error)?.message ?? err}`, 'error',
+        t('poll.close_failed', { error: String((err as Error)?.message ?? err) }), 'error',
       )
     } finally {
       setBusy(false)
@@ -170,11 +171,11 @@ export function PollUI({
   const closesIn = _formatCountdown(data.closes_at)
 
   return (
-    <div class="sh-poll" role="region" aria-label="Poll">
+    <div class="sh-poll" role="region" aria-label={t('poll.region')}>
       <h4 class="sh-poll-question">{data.question}</h4>
       {data.allow_multiple && (
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-          Pick any that apply.
+          {t('poll.pick_any')}
         </p>
       )}
       <div class="sh-poll-options">
@@ -190,7 +191,7 @@ export function PollUI({
               onClick={() => void vote(opt.id)}
               disabled={data.closed || busy}
               aria-pressed={voted}
-              aria-label={`${opt.text} — ${opt.vote_count} vote${opt.vote_count === 1 ? '' : 's'}`}
+              aria-label={`${opt.text} — ${t(isOne(opt.vote_count) ? 'poll.votes_one' : 'poll.votes', { n: String(opt.vote_count) })}`}
             >
               <span class="sh-poll-option-bar" style={{ width: `${pct}%` }} />
               <span class="sh-poll-option-row">
@@ -208,18 +209,18 @@ export function PollUI({
       </div>
       <div class="sh-poll-footer">
         <span class="sh-muted">
-          {total} vote{total === 1 ? '' : 's'}
+          {t(isOne(total) ? 'poll.votes_one' : 'poll.votes', { n: String(total) })}
           {closesIn && ` · ${closesIn}`}
         </span>
         <div class="sh-row">
-          {data.closed && <span class="sh-badge">Closed</span>}
+          {data.closed && <span class="sh-badge">{t('poll.closed')}</span>}
           {!data.closed && isAuthor && (
             <Button
               variant="secondary"
               loading={busy}
               onClick={() => void closePoll()}
             >
-              Close poll
+              {t('poll.close')}
             </Button>
           )}
         </div>
@@ -234,13 +235,13 @@ function _formatCountdown(iso: string | null): string | null {
   const end = Date.parse(iso)
   if (Number.isNaN(end)) return null
   const diff = end - Date.now()
-  if (diff <= 0) return 'voting ended'
+  if (diff <= 0) return t('poll.voting_ended')
   const mins = Math.floor(diff / 60_000)
-  if (mins < 60)   return `closes in ${mins}m`
+  if (mins < 60)   return t('poll.closes_in_min', { n: String(mins) })
   const hours = Math.floor(mins / 60)
-  if (hours < 24)  return `closes in ${hours}h`
+  if (hours < 24)  return t('poll.closes_in_hours', { n: String(hours) })
   const days = Math.floor(hours / 24)
-  return `closes in ${days}d`
+  return t('poll.closes_in_days', { n: String(days) })
 }
 
 
@@ -299,62 +300,62 @@ export function PollBuilder({ open, onSubmit, onClose }: BuilderProps) {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Create a poll">
+    <Modal open={open} onClose={onClose} title={t('poll.create_title')}>
       <form class="sh-form sh-poll-builder" onSubmit={submit}>
         <label>
-          Question
+          {t('poll.question')}
           <input class="sh-poll-question-input"
                  type="text" maxLength={200}
-                 placeholder="e.g. Pizza or tacos tonight?"
+                 placeholder={t('poll.question_placeholder')}
                  value={question} autoFocus
                  onInput={(e) =>
                    setQuestion((e.target as HTMLInputElement).value)} />
         </label>
 
         <div>
-          <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>Options</strong>
+          <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>{t('poll.options')}</strong>
           {options.map((opt, i) => (
             <div key={i} class="sh-poll-option-row">
               <input type="text" maxLength={80}
-                     placeholder={`Option ${i + 1}`}
+                     placeholder={t('poll.option_n', { n: String(i + 1) })}
                      value={opt}
                      onInput={(e) =>
                        setOption(i, (e.target as HTMLInputElement).value)} />
               <button type="button" class="sh-poll-remove"
-                      aria-label={`Remove option ${i + 1}`}
+                      aria-label={t('poll.remove_option', { n: String(i + 1) })}
                       disabled={options.length <= 2}
                       onClick={() => removeOption(i)}>✕</button>
             </div>
           ))}
           <button type="button" class="sh-link" onClick={addOption}
                   disabled={options.length >= 10}>
-            + Add option
+            {t('poll.add_option')}
           </button>
         </div>
 
         <label class="sh-toggle-row" style={{ borderBottom: 'none' }}>
-          <span>Allow multiple selections</span>
+          <span>{t('poll.allow_multiple')}</span>
           <input type="checkbox" checked={allowMulti}
                  onChange={() => setAllowMulti(v => !v)} />
         </label>
 
         <label>
-          Closes after
+          {t('poll.closes_after')}
           <select value={duration}
                   onChange={(e) =>
                     setDuration((e.target as HTMLSelectElement).value as typeof duration)}>
-            <option value="">Stay open (author can close manually)</option>
-            <option value="1h">1 hour</option>
-            <option value="24h">24 hours</option>
-            <option value="7d">7 days</option>
+            <option value="">{t('poll.stay_open')}</option>
+            <option value="1h">{t('poll.dur_1h')}</option>
+            <option value="24h">{t('poll.dur_24h')}</option>
+            <option value="7d">{t('poll.dur_7d')}</option>
           </select>
         </label>
 
         <div class="sh-form-actions">
           <Button variant="secondary" type="button" onClick={onClose}>
-            Cancel
+            {t('common.cancel')}
           </Button>
-          <Button type="submit" disabled={!canSubmit}>Create</Button>
+          <Button type="submit" disabled={!canSubmit}>{t('poll.create')}</Button>
         </div>
       </form>
     </Modal>

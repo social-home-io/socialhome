@@ -9,6 +9,7 @@
  */
 import { formatBazaarAmount } from './BazaarPostBody'
 import type { BazaarListing } from '@/types'
+import { t } from '@/i18n/i18n'
 
 interface Props {
   listings: BazaarListing[]
@@ -34,20 +35,20 @@ export function BazaarSellerDashboard({ listings, onChanged }: Props) {
   )
 
   return (
-    <section class="sh-seller-dashboard" aria-label="Seller dashboard">
+    <section class="sh-seller-dashboard" aria-label={t('bazaar.dashboard.aria')}>
       <div class="sh-seller-stats">
-        <Stat label="Active" value={active.length} />
-        <Stat label="Sold" value={sold.length} />
-        <Stat label="Closed" value={closed.length} />
+        <Stat label={t('bazaar.dashboard.active')} value={active.length} />
+        <Stat label={t('bazaar.dashboard.sold')} value={sold.length} />
+        <Stat label={t('bazaar.dashboard.closed')} value={closed.length} />
         {grossLabels.length > 0 && (
-          <Stat label="Gross"
+          <Stat label={t('bazaar.dashboard.gross')}
                 value={grossLabels.join(' · ')}
                 emphasis />
         )}
       </div>
       {listings.length === 0 && (
         <p class="sh-muted">
-          Nothing yet — tap <strong>+ New listing</strong> above.
+          {t('bazaar.dashboard.empty', { button: t('bazaar.new_listing') })}
         </p>
       )}
     </section>

@@ -11,6 +11,7 @@ import type { ComponentChildren } from 'preact'
 import { useState } from 'preact/hooks'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 interface Props {
   /** Short heading, e.g. "Your new token". */
@@ -34,23 +35,23 @@ export function SecretReveal({
     try {
       await navigator.clipboard.writeText(secret)
       setCopied(true)
-      showToast('Copied to clipboard', 'success')
+      showToast(t('secret.copied_toast'), 'success')
     } catch {
       // Clipboard API is blocked in insecure contexts (plain-http LAN
       // installs) and some iframes — the text stays selectable.
-      showToast('Could not copy — select the text and copy it manually', 'error')
+      showToast(t('secret.copy_failed'), 'error')
     }
   }
   return (
     <div class="sh-secret-reveal" role="status">
       <div class="sh-secret-reveal__title">{title}</div>
       <p class="sh-secret-reveal__warning">
-        <strong>Copy it now — you won't see it again.</strong>{' '}
-        Only a fingerprint is kept, so if you lose it you'll need to make a new one.
+        <strong>{t('secret.warning_strong')}</strong>{' '}
+        {t('secret.warning_body')}
       </p>
       <div class="sh-secret-reveal__value">
         <code aria-label={secretLabel} tabIndex={0}>{secret}</code>
-        <Button onClick={copy}>{copied ? 'Copied ✓' : 'Copy'}</Button>
+        <Button onClick={copy}>{copied ? t('secret.copied') : t('secret.copy')}</Button>
       </div>
       {children}
       {dismissLabel && onDismiss && (

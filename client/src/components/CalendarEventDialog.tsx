@@ -13,7 +13,7 @@ import { Button } from './Button'
 import { Avatar } from './Avatar'
 import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
-import { t } from '@/i18n/i18n'
+import { t, isOne } from '@/i18n/i18n'
 import { announceSuppressedMessage } from '@/features/spaces/spaceAccess'
 import { currentUser } from '@/store/auth'
 import { householdUsers } from '@/store/householdUsers'
@@ -444,11 +444,10 @@ export function CalendarEventDialog({ onCreated }: {
       // that consequence before writing anything. Cancel = no writes.
       if (isEditingSeriesOccurrence() && datesChanged) {
         const ok = await confirmDialog(
-          'This repeats. Changing the date moves the whole series, '
-          + 'including past occurrences.',
+          t('event.dialog.move_series_body'),
           {
-            title: 'Move the whole series?',
-            confirmLabel: 'Move the series',
+            title: t('event.dialog.move_series_title'),
+            confirmLabel: t('event.dialog.move_series_confirm'),
             destructive: true,
           },
         )
@@ -653,11 +652,13 @@ export function CalendarEventDialog({ onCreated }: {
         }
         if (failed > 0) {
           showToast(
-            `Created on ${ok} calendar${ok === 1 ? '' : 's'}, ${failed} failed`,
+            t(isOne(ok) ? 'event.dialog.created_partial_one' : 'event.dialog.created_partial', {
+              ok: String(ok), failed: String(failed),
+            }),
             'error',
           )
         } else if (ok > 1) {
-          showToast(`Event created on ${ok} calendars`, 'success')
+          showToast(t('event.dialog.created_many', { n: String(ok) }), 'success')
         } else {
           showToast(t('event.dialog.created'), 'success')
         }
@@ -682,7 +683,7 @@ export function CalendarEventDialog({ onCreated }: {
 
   return (
     <Modal open={open.value} onClose={() => (open.value = false)}
-           title={editingEventId.value ? 'Edit event' : t('event.dialog.title')}>
+           title={editingEventId.value ? t('event.dialog.edit_title') : t('event.dialog.title')}>
       <div class="sh-form">
         {!isSpace && householdCalendars.value.length > 1 && (
           <CreateCalendarPicker />
@@ -785,14 +786,12 @@ export function CalendarEventDialog({ onCreated }: {
           }
           return (
             <div class="sh-attendee-block">
-              <span class="sh-form-label">Invite from connected households</span>
+              <span class="sh-form-label">{t('event.dialog.invite_heading')}</span>
               {instances.length === 0 ? (
                 <p class="sh-form-help">
-                  No paired households yet. Pair a household from{' '}
-                  <a href={addBase('/settings/connections')}>Settings → Connections</a>{' '}
-                  to invite friends from another home. (Household members
-                  don't need invites — drop the event on their calendar
-                  via the picker above.)
+                  {t('event.dialog.invite_none_before')}{' '}
+                  <a href={addBase('/settings/connections')}>{t('event.dialog.invite_none_link')}</a>{' '}
+                  {t('event.dialog.invite_none_after')}
                 </p>
               ) : (
                 instances.map(inst => (
@@ -832,10 +831,9 @@ export function CalendarEventDialog({ onCreated }: {
                     checked={rsvpEnabled.value}
                     onChange={() => (rsvpEnabled.value = !rsvpEnabled.value)}
                   />{' '}
-                  Ask invitees to RSVP
+                  {t('event.dialog.ask_rsvp')}
                   <small class="sh-form-help" style={{ display: 'block', marginLeft: 24 }}>
-                    On by default for cross-household invites. Turn off to
-                    send the event without asking for a yes/no.
+                    {t('event.dialog.ask_rsvp_help')}
                   </small>
                 </label>
               )}
@@ -878,7 +876,7 @@ export function CalendarEventDialog({ onCreated }: {
                   onChange={() =>
                     (announceInFeed.value = !announceInFeed.value)}
                 />{' '}
-                Also announce this event in the space feed
+                {t('event.dialog.announce')}
               </label>
             )}
           </>
@@ -897,7 +895,7 @@ export function CalendarEventDialog({ onCreated }: {
             disabled={!summary.value.trim()}
           >
             {editingEventId.value
-              ? 'Save changes'
+              ? t('event.dialog.save_changes')
               : t('event.dialog.create')}
           </Button>
         </div>
@@ -1015,18 +1013,18 @@ function CreateCalendarPicker() {
   const pickedCount = picked.size
   return (
     <div>
-      <span class="sh-form-label">Add to calendar</span>
+      <span class="sh-form-label">{t('event.dialog.target_heading')}</span>
       <p class="sh-cal-target-help">
         {pickedCount > 1
-          ? `Lands on ${pickedCount} calendars — tap a chip to deselect.`
-          : 'Tap another household member to drop the event on their calendar too.'}
+          ? t('event.dialog.target_many', { n: String(pickedCount) })
+          : t('event.dialog.target_hint')}
       </p>
       <div class="sh-cal-target-picker">
         {sorted.map(c => {
           const mine = c.owner_username === me
           const ambiguous = (ownerCount.get(c.owner_username) ?? 1) > 1
           const ownerLabel = ownerDisplayName(c.owner_username)
-          const headline = mine ? 'You' : ownerLabel
+          const headline = mine ? t('calendar.page.owner_you') : ownerLabel
           const isPicked = picked.has(c.id)
           const hue = resolveCalendarColor(c)
           return (
@@ -1088,7 +1086,7 @@ function CoverPicker() {
       coverUrl.value = data.url
       coverPreview.value = data.signed_url || data.url
     } catch (err) {
-      showToast(`Cover upload failed: ${(err as Error).message}`, 'error')
+      showToast(t('event.dialog.cover_failed', { error: (err as Error).message }), 'error')
     } finally {
       coverUploading.value = false
       input.value = ''
@@ -1102,7 +1100,7 @@ function CoverPicker() {
 
   return (
     <div class="sh-event-cover-picker">
-      <span class="sh-form-label">Cover image (optional)</span>
+      <span class="sh-form-label">{t('event.dialog.cover_label')}</span>
       {coverPreview.value ? (
         <div class="sh-event-cover-picker-preview-wrap">
           <img
@@ -1113,7 +1111,7 @@ function CoverPicker() {
           <button
             type="button"
             class="sh-event-cover-remove"
-            aria-label="Remove cover"
+            aria-label={t('event.dialog.cover_remove')}
             onClick={removeCover}
           >×</button>
         </div>
@@ -1127,8 +1125,8 @@ function CoverPicker() {
           />
           <span>
             {coverUploading.value
-              ? 'Uploading…'
-              : '📷 Choose cover image'}
+              ? t('space.about.uploading')
+              : `📷 ${t('event.dialog.cover_choose')}`}
           </span>
         </label>
       )}

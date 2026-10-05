@@ -25,6 +25,7 @@ import {
   householdDisplayName,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
+import { t } from '@/i18n/i18n'
 
 const RING_TTL_MS = 90_000
 
@@ -106,7 +107,7 @@ export default function IncomingCallDialog() {
     const timer = setTimeout(() => {
       if (incoming.value) {
         const fromName = householdDisplayName(incoming.value.from_user)
-        showToast(`You missed a call from ${fromName}`, 'info')
+        showToast(t('calls.missed_from', { name: fromName }), 'info')
         incoming.value = null
       }
     }, RING_TTL_MS)
@@ -156,7 +157,7 @@ export default function IncomingCallDialog() {
       // device of this user may still pick up — so no decline) and say
       // where calls do work.
       if (err instanceof CallEmbedBlockedError) incoming.value = null
-      showCallError("Couldn't answer the call", err)
+      showCallError(t('calls.answer_failed'), err)
       setAccepting(false)
     }
   }
@@ -174,19 +175,19 @@ export default function IncomingCallDialog() {
       class="sh-incoming-overlay"
       role="dialog"
       aria-modal="true"
-      aria-label="Incoming call"
+      aria-label={t('calls.incoming_aria')}
     >
       <div class="sh-incoming-card">
         <div class="sh-incoming-avatar" aria-hidden="true">
           {call.call_type === 'video' ? '📹' : '📞'}
         </div>
-        <strong class="sh-incoming-name">{fromName} is calling</strong>
-        <span class="sh-incoming-type">{call.call_type === 'video' ? 'Video call' : 'Audio call'}</span>
+        <strong class="sh-incoming-name">{t('calls.is_calling', { name: fromName })}</strong>
+        <span class="sh-incoming-type">{call.call_type === 'video' ? t('calls.video_call') : t('calls.audio_call')}</span>
         <div class="sh-incoming-actions">
           <Button class="sh-accept" onClick={accept}
-                  loading={accepting} disabled={declining}>Accept</Button>
+                  loading={accepting} disabled={declining}>{t('calls.accept')}</Button>
           <Button class="sh-decline" variant="danger" onClick={decline}
-                  loading={declining} disabled={accepting}>Decline</Button>
+                  loading={declining} disabled={accepting}>{t('calls.decline')}</Button>
         </div>
       </div>
     </div>

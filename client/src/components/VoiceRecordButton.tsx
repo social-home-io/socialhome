@@ -21,6 +21,7 @@ import type preact from 'preact'
 import { useRef } from 'preact/hooks'
 import { useSignal } from '@preact/signals'
 import { showToast } from '@/components/Toast'
+import { t } from '@/i18n/i18n'
 
 const AUDIO_MAX_DURATION_SECONDS = 300
 const LOCK_SLIDE_PX = 60
@@ -106,7 +107,7 @@ export function VoiceRecordButton({
       /* already stopped */
     }
     try {
-      stream.getTracks().forEach(t => t.stop())
+      stream.getTracks().forEach(tr => tr.stop())
     } catch {
       /* tracks already gone */
     }
@@ -156,8 +157,8 @@ export function VoiceRecordButton({
     // user a real explanation instead of "the mic button does nothing".
     if (!navigator.mediaDevices?.getUserMedia) {
       const msg = window.isSecureContext
-        ? "This browser doesn't support microphone capture."
-        : 'Voice notes need HTTPS. Open this site over https:// (or use the HA add-on ingress).'
+        ? t('voice.no_mic_support')
+        : t('voice.needs_https')
       error.value = msg
       showToast(msg, 'error')
       return
@@ -180,10 +181,10 @@ export function VoiceRecordButton({
       const name = (err as DOMException)?.name ?? ''
       const msg =
         name === 'NotAllowedError'
-          ? 'Microphone permission denied. Enable it in your browser settings to record voice notes.'
+          ? t('voice.mic_denied')
           : name === 'NotFoundError'
-            ? 'No microphone found on this device.'
-            : 'Microphone access failed.'
+            ? t('voice.no_mic')
+            : t('voice.mic_failed')
       error.value = msg
       showToast(msg, 'error')
       return
@@ -191,8 +192,8 @@ export function VoiceRecordButton({
 
     const pickedMime = pickRecorderMime()
     if (pickedMime === null) {
-      stream.getTracks().forEach(t => t.stop())
-      const msg = 'Audio recording unavailable in this browser.'
+      stream.getTracks().forEach(tr => tr.stop())
+      const msg = t('voice.recording_unavailable')
       error.value = msg
       showToast(msg, 'error')
       state.value = 'unsupported'
@@ -205,8 +206,8 @@ export function VoiceRecordButton({
         audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
       })
     } catch {
-      stream.getTracks().forEach(t => t.stop())
-      const msg = 'Audio recording unavailable in this browser.'
+      stream.getTracks().forEach(tr => tr.stop())
+      const msg = t('voice.recording_unavailable')
       error.value = msg
       showToast(msg, 'error')
       state.value = 'unsupported'
@@ -221,7 +222,7 @@ export function VoiceRecordButton({
     const capTimer = setTimeout(() => {
       // 5-min hard cap. Force-send whatever we have rather than
       // dropping — the user clearly meant for *something* to ship.
-      error.value = 'Voice note capped at 5 minutes.'
+      error.value = t('voice.capped')
       finalise(true)
     }, AUDIO_MAX_DURATION_SECONDS * 1000)
 
@@ -291,8 +292,8 @@ export function VoiceRecordButton({
       <button
         type="button"
         class={`sh-voice-btn sh-voice-btn--disabled ${className || ''}`}
-        title="Voice notes aren't supported on this browser"
-        aria-label="Voice notes unavailable"
+        title={t('voice.unsupported_title')}
+        aria-label={t('voice.unsupported_aria')}
         disabled
       >
         <MicIcon />
@@ -306,7 +307,7 @@ export function VoiceRecordButton({
 
   if (isLocked) {
     return (
-      <div class="sh-voice-locked" role="group" aria-label="Recording locked">
+      <div class="sh-voice-locked" role="group" aria-label={t('voice.locked_aria')}>
         <span class="sh-voice-locked__indicator" aria-hidden="true">●</span>
         <span class="sh-voice-locked__elapsed">{elapsedLabel}</span>
         <button
@@ -314,14 +315,14 @@ export function VoiceRecordButton({
           class="sh-voice-locked__btn sh-voice-locked__btn--cancel"
           onClick={() => finalise(false)}
         >
-          Cancel
+          {t('common.cancel')}
         </button>
         <button
           type="button"
           class="sh-voice-locked__btn sh-voice-locked__btn--send"
           onClick={() => finalise(true)}
         >
-          Send
+          {t('dms.send')}
         </button>
       </div>
     )
@@ -333,10 +334,10 @@ export function VoiceRecordButton({
       class={`sh-voice-btn ${isRecording ? 'sh-voice-btn--recording' : ''} ${className || ''}`}
       title={
         isRecording
-          ? 'Release to send · slide up to lock'
-          : 'Hold to record voice note'
+          ? t('voice.release_hint')
+          : t('voice.hold_to_record')
       }
-      aria-label={isRecording ? 'Recording — release to send' : 'Hold to record voice note'}
+      aria-label={isRecording ? t('voice.recording_aria') : t('voice.hold_to_record')}
       aria-pressed={isRecording}
       disabled={disabled}
       onPointerDown={onPointerDown}

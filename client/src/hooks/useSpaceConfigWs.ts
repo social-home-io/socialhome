@@ -18,9 +18,12 @@ import { useLocation } from 'preact-iso'
 import { ws } from '@/ws'
 import { showToast } from '@/components/Toast'
 import { isLocalDissolve } from '@/store/spaces'
+import { t } from '@/i18n/i18n'
 
-export const SPACE_DISSOLVED_TOAST =
-  'This space was dissolved and is no longer available.'
+/** The toast shown when the open space is dissolved, in the UI language. */
+export function spaceDissolvedToast(): string {
+  return t('space.dissolved_toast')
+}
 
 export function useSpaceConfigWs(spaceId: string, onChanged: () => void): void {
   const { route } = useLocation()
@@ -32,7 +35,7 @@ export function useSpaceConfigWs(spaceId: string, onChanged: () => void): void {
     if (d.space_id !== spaceId) return
     if (d.event_type === 'dissolved') {
       if (isLocalDissolve(spaceId)) return
-      showToast(SPACE_DISSOLVED_TOAST, 'info')
+      showToast(spaceDissolvedToast(), 'info')
       route('/spaces', true)
       return
     }

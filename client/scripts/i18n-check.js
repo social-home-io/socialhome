@@ -12,6 +12,18 @@
  *                   `t(\`presence.state.${state}\`)`) and can't be
  *                   statically detected.
  *
+ * It also checks every shipped locale (`_meta.json`) against en.json:
+ *
+ * Untranslated key → HARD FAIL, unless the key is listed for that locale
+ *                    in `scripts/i18n-untranslated.json` (the allow-list
+ *                    for strings deliberately left to Weblate). Keeps
+ *                    English fallbacks from piling up unseen.
+ * Placeholder drift → HARD FAIL. A translation must carry exactly the
+ *                    `{param}` names of its English source, or the
+ *                    value never gets substituted.
+ * Orphan key       → HARD FAIL. A locale key with no en.json source is
+ *                    dead weight nobody can see.
+ *
  * Runs in Node, no deps beyond what ships with the client bundle.
  */
 import { readFileSync } from 'node:fs'
@@ -20,7 +32,10 @@ import { join, extname } from 'node:path'
 
 const ROOT = new URL('..', import.meta.url).pathname
 const SRC_DIR = join(ROOT, 'src')
-const EN_FILE = join(SRC_DIR, 'i18n', 'locales', 'en.json')
+const LOCALES_DIR = join(SRC_DIR, 'i18n', 'locales')
+const EN_FILE = join(LOCALES_DIR, 'en.json')
+const META_FILE = join(LOCALES_DIR, '_meta.json')
+const ALLOW_FILE = join(ROOT, 'scripts', 'i18n-untranslated.json')
 
 function* walk(dir) {
   for (const entry of readdirSync(dir)) {
@@ -90,9 +105,59 @@ if (unused.length) {
   console.warn('If they are looked up dynamically, add a comment in src/ listing them so future greps hit.')
 }
 
+// ── Locale catalogs vs en.json ────────────────────────────────────
+const PLACEHOLDER = /\{(\w+)\}/g
+const paramSet = (s) => new Set([...s.matchAll(PLACEHOLDER)].map((m) => m[1]))
+const params = (s) => [...paramSet(s)].sort().join(',')
+// Exact match, except a `_one` plural may use the count its English
+// source spells out ("1 person …" vs French "{n} personne …", since 0 is
+// "one" there): it may add placeholders from its base key, and drop them.
+function placeholdersMatch(key, enText, text) {
+  if (params(enText) === params(text)) return true
+  if (!key.endsWith('_one')) return false
+  const base = en[key.slice(0, -4)]
+  if (base === undefined) return false
+  const own = paramSet(enText)
+  const allowed = new Set([...own, ...paramSet(base)])
+  const got = paramSet(text)
+  const baseOnly = paramSet(base)
+  return [...got].every((p) => allowed.has(p))
+    && [...own].every((p) => got.has(p) || baseOnly.has(p))
+}
+const meta = JSON.parse(readFileSync(META_FILE, 'utf8'))
+let allow = {}
+try { allow = JSON.parse(readFileSync(ALLOW_FILE, 'utf8')) } catch { /* no allow-list */ }
+
+const summary = []
+for (const [lang, info] of Object.entries(meta.locales)) {
+  if (info.source) continue
+  const cat = JSON.parse(readFileSync(join(LOCALES_DIR, `${lang}.json`), 'utf8'))
+  const allowed = new Set(allow[lang] ?? [])
+  const untranslated = [...enKeys].filter((k) => !(k in cat) && !allowed.has(k))
+  const orphans = Object.keys(cat).filter((k) => !enKeys.has(k))
+  const drift = [...enKeys].filter((k) => k in cat && !placeholdersMatch(k, en[k], cat[k]))
+  const report = (label, keys, show) => {
+    if (!keys.length) return
+    failed = true
+    console.error(`✗ i18n:check — ${lang}.json: ${keys.length} ${label}:`)
+    for (const k of keys.slice(0, 20)) console.error(`  ${show(k)}`)
+    if (keys.length > 20) console.error(`  … and ${keys.length - 20} more`)
+  }
+  report('untranslated key(s)', untranslated, (k) => k)
+  report('key(s) with no en.json source', orphans, (k) => k)
+  report('key(s) whose {placeholders} differ from en', drift,
+    (k) => `${k}: en {${params(en[k])}} vs ${lang} {${params(cat[k])}}`)
+  summary.push(`${lang} ${enKeys.size - untranslated.length - allowed.size}/${enKeys.size}`
+    + (allowed.size ? ` (+${allowed.size} allow-listed)` : ''))
+}
+if (failed && summary.length) {
+  console.error('\nTranslate the keys, or list them per locale in scripts/i18n-untranslated.json')
+  console.error('when they are deliberately left for Weblate.')
+}
+
 if (!failed) {
   const count = enKeys.size
-  console.log(`✓ i18n:check — ${count} keys, no missing strings.`)
+  console.log(`✓ i18n:check — ${count} keys, no missing strings. Locales: ${summary.join(', ')}.`)
 }
 
 process.exit(failed ? 1 : 0)

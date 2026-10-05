@@ -19,6 +19,7 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { active, type ActiveCall } from '@/store/calls'
+import { t } from '@/i18n/i18n'
 
 const loading = signal(true)
 const inProgress = computed(() =>
@@ -42,17 +43,14 @@ export default function CallsTab() {
       {nothingActive && (
         <div class="sh-empty-state">
           <div aria-hidden="true">📞</div>
-          <h3>No active calls</h3>
-          <p>
-            Start a call from a direct-message thread. Active + ringing
-            calls show up here so you can hop back to them.
-          </p>
+          <h3>{t('calls.tab.empty_title')}</h3>
+          <p>{t('calls.tab.empty_body')}</p>
         </div>
       )}
 
       {inProgress.value.length > 0 && (
         <section class="sh-card" style={{ marginBottom: '1rem' }}>
-          <h3 style={{ marginTop: 0 }}>In progress</h3>
+          <h3 style={{ marginTop: 0 }}>{t('calls.in_progress')}</h3>
           {inProgress.value.map((c) => (
             <ActiveCallRow
               key={c.call_id}
@@ -65,7 +63,7 @@ export default function CallsTab() {
 
       {ringingOut.value.length > 0 && (
         <section class="sh-card">
-          <h3 style={{ marginTop: 0 }}>Ringing out</h3>
+          <h3 style={{ marginTop: 0 }}>{t('calls.tab.ringing_out')}</h3>
           {ringingOut.value.map((c) => (
             <ActiveCallRow
               key={c.call_id}
@@ -90,11 +88,11 @@ function ActiveCallRow({
     <div class="sh-call-row sh-card">
       <span>{call.call_type === 'video' ? '📹' : '🔊'}</span>
       <span class="sh-call-peer">
-        {call.caller} → {call.callee || '(group)'}
+        {call.caller} → {call.callee || t('calls.tab.group')}
       </span>
-      <span class="sh-call-status">{call.status}</span>
-      <Button onClick={onReturn}>Return to call</Button>
-      <Button onClick={() => hangUp(call.call_id)}>Hang up</Button>
+      <span class="sh-call-status">{t(`calls.state.${call.status}`)}</span>
+      <Button onClick={onReturn}>{t('calls.tab.return')}</Button>
+      <Button onClick={() => hangUp(call.call_id)}>{t('calls.hang_up')}</Button>
     </div>
   )
 }
@@ -105,7 +103,7 @@ async function loadActiveCalls() {
     active.value = (await api.get('/api/calls/active')) as ActiveCall[]
   } catch (err: unknown) {
     showToast(
-      `Could not load calls: ${(err as Error)?.message ?? err}`,
+      t('calls.tab.load_failed', { reason: String((err as Error)?.message ?? err) }),
       'error',
     )
     active.value = []
@@ -118,7 +116,7 @@ async function hangUp(callId: string) {
   try {
     await api.post(`/api/calls/${callId}/hangup`, {})
   } catch (err: unknown) {
-    showToast(`Hang up failed: ${(err as Error)?.message ?? err}`, 'error')
+    showToast(t('calls.tab.hangup_failed', { reason: String((err as Error)?.message ?? err) }), 'error')
   }
   await loadActiveCalls()
 }

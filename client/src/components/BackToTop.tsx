@@ -20,6 +20,7 @@
  */
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
+import { t } from '@/i18n/i18n'
 
 const SHOW_AFTER_PX = 600
 
@@ -136,8 +137,8 @@ export function BackToTop() {
       class="sh-back-to-top"
       style={lift.value ? { '--sh-back-to-top-lift': `${lift.value}px` } : undefined}
       onClick={onClick}
-      aria-label="Back to top"
-      title="Back to top"
+      aria-label={t('common.back_to_top')}
+      title={t('common.back_to_top')}
     >
       ↑
     </button>

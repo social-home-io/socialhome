@@ -87,10 +87,8 @@ vi.mock('@/ws', () => {
 })
 
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
-vi.mock('@/i18n/i18n', () => ({
-  t: (k: string) => k,
-  locale: { value: 'en' },
-}))
+// Real i18n: the card's copy comes from the English catalog, so the
+// assertions below read the English text users see.
 
 import { SpaceLocationCard } from './SpaceLocationCard'
 import { ws as wsModule } from '@/ws'

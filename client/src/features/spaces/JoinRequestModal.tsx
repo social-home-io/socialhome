@@ -8,6 +8,7 @@
 import { useState } from 'preact/hooks'
 import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
+import { t } from '@/i18n/i18n'
 
 export interface JoinRequestModalProps {
   open: boolean
@@ -35,38 +36,39 @@ export function JoinRequestModal({
       setMessage('')
       onClose()
     } catch (exc) {
-      setError((exc as Error).message || 'Failed to send')
+      setError((exc as Error).message || t('space.join_request.failed'))
     } finally {
       setSubmitting(false)
     }
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={`Request to join ${spaceName}`}>
+    <Modal open={open} onClose={onClose} title={t('space.join_request.title', { name: spaceName })}>
       <p class="sh-muted">
-        Your request will be sent to the admins of <strong>{hostDisplayName}</strong>.
+        {t('space.join_request.sent_to', { host: hostDisplayName })}
+        {' '}
         {hostIsPaired
-          ? ' You\'ll be added automatically once they approve.'
-          : ' You\'ll need to be connected with their household for this to work.'}
+          ? t('space.join_request.auto_added')
+          : t('space.join_request.needs_connection')}
       </p>
       <label class="sh-form-field">
-        <span>Add a short message (optional)</span>
+        <span>{t('space.join_request.message_label')}</span>
         <textarea
           value={message}
           rows={4}
-          placeholder="Hi, I'd love to join because…"
+          placeholder={t('space.join_request.message_placeholder')}
           onInput={(e) => setMessage((e.target as HTMLTextAreaElement).value)}
         />
       </label>
       {error && <p class="sh-error">{error}</p>}
       <div class="sh-modal-actions">
         <Button variant="secondary" onClick={onClose} disabled={submitting}>
-          Cancel
+          {t('common.cancel')}
         </Button>
         <Button
           variant="primary" onClick={submit} loading={submitting}
         >
-          Send request
+          {t('space.join_request.send')}
         </Button>
       </div>
     </Modal>

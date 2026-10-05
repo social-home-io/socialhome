@@ -15,17 +15,18 @@ import { currentUser } from '@/store/auth'
 import type { User, UserStatus } from '@/types'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { formatLocale, t } from '@/i18n/i18n'
 
 /** ``keep`` = leave an existing deadline as it is (only offered while
  *  the current status has one). */
 export type ClearAfterChoice = 'none' | '30m' | '1h' | '4h' | 'today' | 'keep'
 
-const CHOICES: { id: Exclude<ClearAfterChoice, 'keep'>; label: string }[] = [
-  { id: 'none', label: 'Never' },
-  { id: '30m', label: '30 min' },
-  { id: '1h', label: '1 hour' },
-  { id: '4h', label: '4 hours' },
-  { id: 'today', label: 'Today' },
+const CHOICES: { id: Exclude<ClearAfterChoice, 'keep'>; labelKey: string }[] = [
+  { id: 'none', labelKey: 'status.clear_never' },
+  { id: '30m', labelKey: 'status.clear_30m' },
+  { id: '1h', labelKey: 'status.clear_1h' },
+  { id: '4h', labelKey: 'status.clear_4h' },
+  { id: 'today', labelKey: 'status.clear_today' },
 ]
 
 /** Matches the server caps in ``socialhome/domain/user.py``. */
@@ -39,7 +40,7 @@ export function formatClearsAt(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
   const sameDay = d.toDateString() === new Date().toDateString()
-  return d.toLocaleString(undefined, sameDay
+  return d.toLocaleString(formatLocale(), sameDay
     ? { hour: 'numeric', minute: '2-digit' }
     : { weekday: 'short', hour: 'numeric', minute: '2-digit' })
 }
@@ -63,16 +64,19 @@ export function StatusEditor({ onSave, onCancel }: {
   const [busy, setBusy] = useState(false)
   const empty = !emoji.trim() && !text.trim()
 
-  const submit = async (body: Record<string, string | null>, done: string) => {
+  const submit = async (body: Record<string, string | null>, cleared: boolean) => {
     setBusy(true)
     try {
       const user = await api.patch('/api/me', body) as User
       currentUser.value = user
-      showToast(done, done === 'Status cleared' ? 'info' : 'success')
+      showToast(
+        cleared ? t('status.cleared') : t('status.updated'),
+        cleared ? 'info' : 'success',
+      )
       onSave?.(user)
     } catch (err) {
       showToast(
-        err instanceof ApiError ? err.message : 'Could not save your status.',
+        err instanceof ApiError ? err.message : t('status.save_failed'),
         'error',
       )
     } finally {
@@ -89,12 +93,12 @@ export function StatusEditor({ onSave, onCancel }: {
       status_emoji: emoji.trim() || null,
       status_text: text.trim() || null,
       status_clear_after: clear_after,
-    }, 'Status updated')
+    }, false)
   }
 
   const clear = () => {
     setEmoji(''); setText(''); setClearAfter('none')
-    void submit({ status_emoji: null, status_text: null }, 'Status cleared')
+    void submit({ status_emoji: null, status_text: null }, true)
   }
 
   return (
@@ -105,7 +109,7 @@ export function StatusEditor({ onSave, onCancel }: {
       <div class="sh-status-row">
         <input
           class="sh-status-emoji"
-          aria-label="Status emoji"
+          aria-label={t('status.emoji_aria')}
           value={emoji}
           placeholder="😊"
           maxLength={STATUS_EMOJI_MAX_UNITS}
@@ -113,15 +117,15 @@ export function StatusEditor({ onSave, onCancel }: {
         />
         <input
           class="sh-input sh-status-text"
-          aria-label="Status text"
+          aria-label={t('status.text_aria')}
           value={text}
-          placeholder="What's your status?"
+          placeholder={t('status.placeholder_text')}
           maxLength={STATUS_TEXT_MAX}
           onInput={(e) => setText((e.target as HTMLInputElement).value)}
         />
       </div>
-      <div class="sh-status-expiry" role="radiogroup" aria-label="Clear status after">
-        <span class="sh-status-expiry__label">Clear after</span>
+      <div class="sh-status-expiry" role="radiogroup" aria-label={t('status.clear_after_aria')}>
+        <span class="sh-status-expiry__label">{t('status.clear_after')}</span>
         <div class="sh-expiry-options">
           {initial?.expires_at && (
             <button
@@ -131,7 +135,7 @@ export function StatusEditor({ onSave, onCancel }: {
               class={clearAfter === 'keep' ? 'sh-chip sh-chip--active' : 'sh-chip'}
               onClick={() => setClearAfter('keep')}
             >
-              {`Until ${formatClearsAt(initial.expires_at)}`}
+              {t('status.until', { time: formatClearsAt(initial.expires_at) })}
             </button>
           )}
           {CHOICES.map(c => (
@@ -143,7 +147,7 @@ export function StatusEditor({ onSave, onCancel }: {
               class={clearAfter === c.id ? 'sh-chip sh-chip--active' : 'sh-chip'}
               onClick={() => setClearAfter(c.id)}
             >
-              {c.label}
+              {t(c.labelKey)}
             </button>
           ))}
         </div>
@@ -151,15 +155,15 @@ export function StatusEditor({ onSave, onCancel }: {
       <div class="sh-status-actions">
         {onCancel && (
           <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>
-            Cancel
+            {t('common.cancel')}
           </Button>
         )}
         {initial && (
           <Button type="button" variant="secondary" onClick={clear} disabled={busy}>
-            Clear status
+            {t('status.clear_status')}
           </Button>
         )}
-        <Button type="submit" disabled={busy || empty}>Set status</Button>
+        <Button type="submit" disabled={busy || empty}>{t('status.set')}</Button>
       </div>
     </form>
   )

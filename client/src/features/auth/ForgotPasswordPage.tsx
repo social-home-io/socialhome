@@ -20,6 +20,7 @@ import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { showToast } from '@/components/Toast'
 import { Wordmark } from '@/components/Wordmark'
+import { t } from '@/i18n/i18n'
 
 interface Props {
   /** ``?token=`` from the current URL. ``null`` → instructions mode. */
@@ -38,18 +39,16 @@ function InstructionsCard() {
         <Wordmark size={48} />
       </div>
       <div class="sh-card sh-forgot-instructions">
-        <h2>Forgot your password?</h2>
+        <h2>{t('forgot.title')}</h2>
         <p>
-          Social Home recovers passwords through your household admin —
-          there's no email-based reset.
+          {t('forgot.intro')}
         </p>
         <ol style={{ paddingLeft: '1.25rem', lineHeight: '1.6' }}>
-          <li>Ask a household admin for a password-reset link.</li>
-          <li>The admin issues a one-time link from the Admin → Members
-              tab; it's valid for an hour.</li>
-          <li>Open the link they send you and pick a new password.</li>
+          <li>{t('forgot.step_1')}</li>
+          <li>{t('forgot.step_2')}</li>
+          <li>{t('forgot.step_3')}</li>
         </ol>
-        <a class="sh-link" href={addBase('/')}>← Back to sign-in</a>
+        <a class="sh-link" href={addBase('/')}>{t('forgot.back')}</a>
       </div>
     </div>
   )
@@ -64,11 +63,11 @@ function ResetForm({ token }: { token: string }) {
   const submit = async (e: Event) => {
     e.preventDefault()
     if (password.length < 8) {
-      setError('Password must be at least 8 characters.')
+      setError(t('forgot.too_short'))
       return
     }
     if (password !== confirm) {
-      setError('Passwords do not match.')
+      setError(t('forgot.mismatch'))
       return
     }
     setBusy(true)
@@ -85,7 +84,7 @@ function ResetForm({ token }: { token: string }) {
         body:    JSON.stringify({ token, new_password: password }),
       })
       if (res.status === 204) {
-        showToast('Password updated — please sign in.', 'success')
+        showToast(t('forgot.updated'), 'success')
         // Hard-reload so the SPA lands on LoginPage with a clean state
         // (no stale signals from the reset flow). ``basePath`` is the
         // document base — ``/`` here would skip the ingress prefix
@@ -94,18 +93,17 @@ function ResetForm({ token }: { token: string }) {
         return
       }
       if (res.status === 410) {
-        setError('This reset link has expired or has already been used. '
-          + 'Ask your household admin for a new one.')
+        setError(t('forgot.expired'))
       } else if (res.status === 422) {
-        setError('Password must be at least 8 characters.')
+        setError(t('forgot.too_short'))
       } else if (res.status === 429) {
-        setError('Too many attempts — wait a few minutes and try again.')
+        setError(t('forgot.rate_limited'))
       } else {
         const body = await res.json().catch(() => null)
-        setError(body?.error?.message ?? `Reset failed (${res.status}).`)
+        setError(body?.error?.message ?? t('forgot.failed_status', { status: String(res.status) }))
       }
     } catch (err: unknown) {
-      setError((err as Error)?.message ?? 'Reset failed.')
+      setError((err as Error)?.message ?? t('forgot.failed'))
     } finally {
       setBusy(false)
     }
@@ -117,13 +115,12 @@ function ResetForm({ token }: { token: string }) {
         <Wordmark size={48} />
       </div>
       <form onSubmit={submit} class="sh-login-form">
-        <h2 style={{ marginTop: 0 }}>Set a new password</h2>
+        <h2 style={{ marginTop: 0 }}>{t('forgot.reset_title')}</h2>
         <p class="sh-muted">
-          You're using a one-time reset link. Pick a new password to
-          finish signing in.
+          {t('forgot.reset_intro')}
         </p>
         <label>
-          New password
+          {t('forgot.new_password')}
           <input
             type="password"
             autoComplete="new-password"
@@ -135,7 +132,7 @@ function ResetForm({ token }: { token: string }) {
           />
         </label>
         <label>
-          Confirm password
+          {t('forgot.confirm_password')}
           <input
             type="password"
             autoComplete="new-password"
@@ -148,7 +145,7 @@ function ResetForm({ token }: { token: string }) {
         </label>
         <FormError id="reset-error" message={error} />
         <Button type="submit" disabled={busy}>
-          {busy ? 'Updating…' : 'Set new password'}
+          {busy ? t('forgot.updating') : t('forgot.submit')}
         </Button>
       </form>
     </div>

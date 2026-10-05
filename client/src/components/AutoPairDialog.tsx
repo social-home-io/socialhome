@@ -64,7 +64,7 @@ export function AutoPairDialog({ onPaired }: Props) {
       const d = e.data as { instance_id?: string }
       if (d.instance_id === targetId) {
         setStep('paired')
-        showToast(`Paired with ${targetName || d.instance_id}`, 'success')
+        showToast(t('connections.requests.paired', { name: targetName || d.instance_id }), 'success')
         onPairedCb?.()
       }
     })
@@ -104,30 +104,27 @@ export function AutoPairDialog({ onPaired }: Props) {
       }, 10_000)
     } catch (err: unknown) {
       setStep('failed')
-      setError((err as Error).message ?? 'Request failed')
+      setError((err as Error).message ?? t('autopair.request_failed'))
     }
   }
 
   return (
     <Modal open={open.value} onClose={close}
-           title="Pair via a trusted peer">
+           title={t('connections.pair_via_peer')}>
       <div class="sh-form sh-auto-pair-dialog">
         {step === 'form' && (
           <>
             <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)' }}>
-              Ask one of your already-paired households to vouch for
-              the introduction. If the target's household has
-              friend-of-friend pairing enabled, the connection
-              completes automatically — no scanning or codes needed.
+              {t('autopair.intro')}
             </p>
 
             <label>
-              Vouching peer
+              {t('autopair.via_label')}
               <select value={viaPeer}
                       required
                       onChange={(e) =>
                         setViaPeer((e.target as HTMLSelectElement).value)}>
-                <option value="" disabled>— Choose a paired household —</option>
+                <option value="" disabled>{t('autopair.via_placeholder')}</option>
                 {peers.value.map(p => (
                   <option key={p.instance_id} value={p.instance_id}>
                     {p.display_name}
@@ -137,7 +134,7 @@ export function AutoPairDialog({ onPaired }: Props) {
             </label>
 
             <label>
-              Target instance ID
+              {t('autopair.target_label')}
               <input type="text" value={targetId}
                      required maxLength={128}
                      placeholder="abcdef0123456789…"
@@ -145,26 +142,25 @@ export function AutoPairDialog({ onPaired }: Props) {
                        setTargetId((e.target as HTMLInputElement).value)} />
               <span class="sh-muted"
                     style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-                Ask the other household for their instance id — it's
-                shown on their Connections page.
+                {t('autopair.target_hint')}
               </span>
             </label>
 
             <label>
-              Friendly name (optional)
+              {t('autopair.name_label')}
               <input type="text" value={targetName} maxLength={80}
-                     placeholder="e.g. The Bakers"
+                     placeholder={t('autopair.name_placeholder')}
                      onInput={(e) =>
                        setTargetName((e.target as HTMLInputElement).value)} />
             </label>
 
             <div class="sh-form-actions">
               <Button variant="secondary" type="button" onClick={close}>
-                Cancel
+                {t('common.cancel')}
               </Button>
               <Button onClick={submit}
                       disabled={!viaPeer || !targetId.trim()}>
-                Send request
+                {t('autopair.send')}
               </Button>
             </div>
           </>
@@ -173,12 +169,12 @@ export function AutoPairDialog({ onPaired }: Props) {
         {step === 'pending' && (
           <div class="sh-auto-pair-pending">
             <div class="sh-pairing-pulse" aria-hidden="true" />
-            <h3 style={{ margin: 0 }}>Asking {peerName(viaPeer)} to vouch…</h3>
+            <h3 style={{ margin: 0 }}>{t('autopair.pending_title', { via: peerName(viaPeer) })}</h3>
             <p class="sh-muted">
-              We're routing your request through {peerName(viaPeer)}.
-              {targetName || 'The other household'}'s admin will see a
-              one-click "Approve" prompt — if they're online you'll be
-              paired in seconds, otherwise as soon as they open Connections.
+              {t('autopair.pending_body', {
+                via: peerName(viaPeer),
+                target: targetName || t('autopair.other_household'),
+              })}
             </p>
           </div>
         )}
@@ -188,22 +184,20 @@ export function AutoPairDialog({ onPaired }: Props) {
             <div class="sh-pairing-success-burst" aria-hidden="true">
               <span>✓</span>
             </div>
-            <h3 style={{ margin: 0 }}>Paired!</h3>
+            <h3 style={{ margin: 0 }}>{t('autopair.paired_title')}</h3>
             <p class="sh-muted">
-              You're now connected with {targetName || targetId}.
+              {t('autopair.paired_body', { name: targetName || targetId })}
             </p>
-            <Button onClick={close}>Done</Button>
+            <Button onClick={close}>{t('pairing.done')}</Button>
           </div>
         )}
 
         {step === 'queued' && (
           <div class="sh-auto-pair-queued">
             <div class="sh-pairing-hero" aria-hidden="true">⏳</div>
-            <h3 style={{ margin: 0 }}>Waiting for approval</h3>
+            <h3 style={{ margin: 0 }}>{t('autopair.queued_title')}</h3>
             <p class="sh-muted">
-              Your request is queued on {targetName || 'the other household'}'s
-              Connections page. You'll be notified as soon as their
-              admin approves.
+              {t('autopair.queued_body', { target: targetName || t('autopair.other_household') })}
             </p>
             <Button onClick={close}>{t('common.ok')}</Button>
           </div>
@@ -212,9 +206,9 @@ export function AutoPairDialog({ onPaired }: Props) {
         {step === 'failed' && (
           <div class="sh-pairing-failed">
             <div class="sh-pairing-fail-mark" aria-hidden="true">⚠</div>
-            <h3 style={{ margin: 0 }}>Couldn't send the request</h3>
-            <p class="sh-muted">{error ?? 'Unknown error'}</p>
-            <Button onClick={reset}>Try again</Button>
+            <h3 style={{ margin: 0 }}>{t('autopair.failed_title')}</h3>
+            <p class="sh-muted">{error ?? t('autopair.unknown_error')}</p>
+            <Button onClick={reset}>{t('common.try_again')}</Button>
           </div>
         )}
       </div>

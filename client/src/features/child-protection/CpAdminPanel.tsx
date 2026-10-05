@@ -14,6 +14,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import type { User } from '@/types'
+import { t } from '@/i18n/i18n'
 
 interface MinorFormState {
   username: string
@@ -52,7 +53,7 @@ async function load() {
       prot.users.map(p => [p.user_id, { is_minor: p.is_minor, declared_age: p.declared_age }]),
     )
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Failed to load users', 'error')
+    showToast((e as Error).message || t('cp.load_failed'), 'error')
   } finally {
     loading.value = false
   }
@@ -78,11 +79,11 @@ async function enableProtection(form: MinorFormState) {
     await api.post(
       `/api/cp/users/${form.username}/protection`, body,
     )
-    showToast('Protection enabled', 'success')
+    showToast(t('cp.enabled'), 'success')
     pendingEnable.value = null
     void load()
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Enable failed', 'error')
+    showToast((e as Error).message || t('cp.enable_failed'), 'error')
   }
 }
 
@@ -91,10 +92,10 @@ async function disableProtection(username: string) {
     await api.post(
       `/api/cp/users/${username}/protection`, { enabled: false },
     )
-    showToast('Protection removed', 'info')
+    showToast(t('cp.removed'), 'info')
     void load()
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Disable failed', 'error')
+    showToast((e as Error).message || t('cp.remove_failed'), 'error')
   }
   pendingDisable.value = null
 }
@@ -106,7 +107,7 @@ async function addGuardian(minorUserId: string, guardianUserId: string) {
     )
     await loadGuardians(minorUserId)
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Add guardian failed', 'error')
+    showToast((e as Error).message || t('cp.guardian_add_failed'), 'error')
   }
 }
 
@@ -115,7 +116,7 @@ async function removeGuardian(minorUserId: string, guardianUserId: string) {
     await api.delete(`/api/cp/users/${minorUserId}/guardians/${guardianUserId}`)
     await loadGuardians(minorUserId)
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Remove guardian failed', 'error')
+    showToast((e as Error).message || t('cp.guardian_remove_failed'), 'error')
   }
 }
 
@@ -132,18 +133,15 @@ export default function CpAdminPanel() {
 
   return (
     <section class="sh-cp-admin sh-admin-section">
-      <h2>Child protection</h2>
-      <p class="sh-muted">
-        Mark household members as protected minors and assign guardians.
-        A protected minor can't join a space whose minimum age is above
-        their declared age, can't open age-restricted apps, and their DMs
-        are limited to directly-connected households. Set a space's
-        minimum age from its settings → Age &amp; safety.
-      </p>
+      <h2>{t('admin.tab.child_protection')}</h2>
+      <p class="sh-muted">{t('cp.intro')}</p>
 
       <table class="sh-admin-table">
         <thead>
-          <tr><th>Name</th><th>Username</th><th>Protected</th><th>Actions</th></tr>
+          <tr>
+            <th>{t('admin.members.name')}</th><th>{t('admin.members.username')}</th>
+            <th>{t('cp.col.protected')}</th><th>{t('admin.members.actions')}</th>
+          </tr>
         </thead>
         <tbody>
           {users.value.map(u => {
@@ -156,7 +154,7 @@ export default function CpAdminPanel() {
                   <td>@{u.username}</td>
                   <td>
                     {protectedUser
-                      ? `🔒 Yes · age ${status!.declared_age}`
+                      ? `🔒 ${t('cp.protected_age', { age: String(status!.declared_age) })}`
                       : '—'}
                   </td>
                   <td>
@@ -168,11 +166,11 @@ export default function CpAdminPanel() {
                                     guardiansFor.value === u.user_id ? null : u.user_id
                                   if (guardiansFor.value) void loadGuardians(u.user_id)
                                 }}>
-                          Guardians
+                          {t('cp.guardians')}
                         </Button>
                         <Button variant="secondary"
                                 onClick={() => pendingDisable.value = u.username}>
-                          Remove protection
+                          {t('cp.remove')}
                         </Button>
                       </>
                     ) : (
@@ -183,7 +181,7 @@ export default function CpAdminPanel() {
                           declared_age: 12,
                           date_of_birth: '',
                         }}>
-                        Mark as minor
+                        {t('cp.mark_minor')}
                       </Button>
                     )}
                   </td>
@@ -210,8 +208,8 @@ export default function CpAdminPanel() {
 
       <ConfirmDialog
         open={pendingDisable.value !== null}
-        title="Remove child protection?"
-        message="This clears minor status and lifts DM + space restrictions."
+        title={t('cp.remove_title')}
+        message={t('cp.remove_body')}
         onConfirm={() => pendingDisable.value && disableProtection(pendingDisable.value)}
         onCancel={() => pendingDisable.value = null}
       />
@@ -239,9 +237,9 @@ function EnableForm({ state, onChange, onSubmit, onCancel }: {
 }) {
   return (
     <div class="sh-cp-enable-form sh-card">
-      <h3>Enable protection for @{state.username}</h3>
+      <h3>{t('cp.enable_title', { username: state.username })}</h3>
       <label>
-        Declared age (0–17)
+        {t('cp.declared_age')}
         <input type="number" min={0} max={17}
           value={state.declared_age}
           onInput={(e) => onChange({
@@ -252,7 +250,7 @@ function EnableForm({ state, onChange, onSubmit, onCancel }: {
           })} />
       </label>
       <label>
-        Date of birth (optional)
+        {t('cp.dob')}
         <input type="date"
           value={state.date_of_birth}
           onInput={(e) => {
@@ -270,8 +268,8 @@ function EnableForm({ state, onChange, onSubmit, onCancel }: {
           }} />
       </label>
       <div class="sh-row">
-        <Button onClick={onSubmit}>Enable</Button>
-        <Button variant="secondary" onClick={onCancel}>Cancel</Button>
+        <Button onClick={onSubmit}>{t('cp.enable')}</Button>
+        <Button variant="secondary" onClick={onCancel}>{t('common.cancel')}</Button>
       </div>
     </div>
   )
@@ -286,9 +284,9 @@ function GuardianList({ minorUserId, allUsers }: {
 
   return (
     <div class="sh-cp-guardian-list">
-      <strong>Guardians</strong>
+      <strong>{t('cp.guardians')}</strong>
       <ul>
-        {guardians.value.length === 0 && <li class="sh-muted">No guardians assigned</li>}
+        {guardians.value.length === 0 && <li class="sh-muted">{t('cp.no_guardians')}</li>}
         {guardians.value.map(gid => {
           const u = allUsers.find(x => x.user_id === gid)
           return (
@@ -296,7 +294,7 @@ function GuardianList({ minorUserId, allUsers }: {
               <span>{u ? u.display_name : gid}</span>
               <Button variant="secondary"
                       onClick={() => removeGuardian(minorUserId, gid)}>
-                Remove
+                {t('cp.guardian_remove')}
               </Button>
             </li>
           )
@@ -305,7 +303,7 @@ function GuardianList({ minorUserId, allUsers }: {
       <div class="sh-row">
         <select value={picker.value}
                 onChange={(e) => picker.value = (e.target as HTMLSelectElement).value}>
-          <option value="">— pick a guardian —</option>
+          <option value="">{t('cp.pick_guardian')}</option>
           {candidates.map(u => (
             <option key={u.user_id} value={u.user_id}>
               {u.display_name} (@{u.username})
@@ -317,7 +315,7 @@ function GuardianList({ minorUserId, allUsers }: {
             void addGuardian(minorUserId, picker.value)
             picker.value = ''
           }
-        }}>Add</Button>
+        }}>{t('cp.guardian_add')}</Button>
       </div>
     </div>
   )

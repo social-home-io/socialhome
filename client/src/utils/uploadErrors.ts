@@ -14,6 +14,8 @@
  * nothing matches.
  */
 
+import { t } from '@/i18n/i18n'
+
 export interface UploadErrorContext {
   /** Optional file the user picked — surfaces in size/type messages. */
   file?: File
@@ -28,12 +30,12 @@ export function describeUploadError(
   const sizeMb = ctx.file ? Math.round(ctx.file.size / (1024 * 1024)) : null
   // Prefer name+size in the lead so the user knows *which* upload
   // failed when they're picking several files in a row.
-  const lead = fileName ? `Couldn't upload ${fileName}` : 'Upload failed'
+  const lead = fileName ? t('upload.lead_file', { name: fileName }) : t('upload.lead')
 
   // Network failures: TypeError on Failed to fetch / NetworkError /
   // explicit "Network error" string from the gallery's xhr path.
   if (/network|failed to fetch|err_network|networkerror/i.test(raw)) {
-    return `${lead} — couldn't reach the server. Check your connection and try again.`
+    return t('upload.network', { lead })
   }
 
   // Status-coded errors. The gallery xhr throws "Upload failed
@@ -42,20 +44,20 @@ export function describeUploadError(
   const status = statusMatch ? Number(statusMatch[1]) : null
 
   if (status === 401 || status === 403) {
-    return `${lead} — you're not allowed to upload to this surface. Try signing in again.`
+    return t('upload.forbidden', { lead })
   }
   if (status === 413) {
     const detail = sizeMb != null ? ` (${sizeMb} MB)` : ''
-    return `${lead}${detail} — file is too large for this server's limit.`
+    return t('upload.too_large', { lead: lead + detail })
   }
   if (status === 415) {
-    return `${lead} — that file type isn't supported. Try JPEG, PNG, WebP, or MP4.`
+    return t('upload.bad_type', { lead })
   }
   if (status === 429) {
-    return `${lead} — you've uploaded a lot recently. Wait a minute and try again.`
+    return t('upload.rate_limited', { lead })
   }
   if (status && status >= 500) {
-    return `${lead} — the server hit an error. Try again in a moment.`
+    return t('upload.server', { lead })
   }
 
   // Last-ditch: include the raw message but trim noise.

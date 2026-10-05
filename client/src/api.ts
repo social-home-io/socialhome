@@ -140,7 +140,7 @@ class ApiClient {
     if (res.status === 401) {
       if (token.value !== null && !ApiClient._loggingOut) {
         ApiClient._loggingOut = true
-        showToast('Session expired — please sign in again', 'info')
+        showToast(t('api.session_expired'), 'info')
         // Call the registered logout (auth registers it at module load) rather
         // than importing '@/store/auth' here — that import would re-form the
         // api↔auth cycle (auth already imports api). DI keeps the graph acyclic.

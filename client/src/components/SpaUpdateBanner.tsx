@@ -30,6 +30,7 @@
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { instanceConfig, recheckInstanceConfig } from '@/store/instance'
+import { t } from '@/i18n/i18n'
 
 /** Five-minute heartbeat. Long enough that a busy tab isn't hammering
  *  the backend just to learn it's up-to-date; short enough that the
@@ -112,22 +113,22 @@ export function SpaUpdateBanner() {
   return (
     <div class="sh-update-banner" role="status" aria-live="polite">
       <span class="sh-update-banner__msg">
-        A newer version of Social Home is available.
+        {t('spa_update.message')}
       </span>
       <button
         type="button"
         class="sh-update-banner__btn sh-update-banner__btn--primary"
         onClick={() => window.location.reload()}
       >
-        Reload
+        {t('spa_update.reload')}
       </button>
       <button
         type="button"
         class="sh-update-banner__btn sh-update-banner__btn--ghost"
-        title="Dismiss until the next update"
+        title={t('spa_update.later_hint')}
         onClick={() => { dismissedFor.value = remote }}
       >
-        Later
+        {t('spa_update.later')}
       </button>
     </div>
   )

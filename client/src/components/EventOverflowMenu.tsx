@@ -44,7 +44,7 @@ export function EventOverflowMenu({
       <button
         type="button"
         class="sh-post-overflow"
-        aria-label={label ?? 'Event actions'}
+        aria-label={label ?? t('event.actions')}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}

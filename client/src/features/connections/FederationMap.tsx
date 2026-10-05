@@ -29,7 +29,7 @@ function _initial(name: string | undefined): string {
 }
 
 function _selfPinHtml(): string {
-  return '<div class="sh-fed-pin sh-fed-pin--self">You</div>'
+  return `<div class="sh-fed-pin sh-fed-pin--self">${escapeHtml(t('connections.map.you_pin'))}</div>`
 }
 
 function _peerPinHtml(name: string | undefined, transport: TransportState | undefined): string {

@@ -22,7 +22,7 @@ const showToast = vi.fn()
 vi.mock('@/components/Toast', () => ({ showToast: (...a: unknown[]) => showToast(...a) }))
 vi.mock('@/api', () => ({ api: { get: vi.fn() } }))
 
-import { useSpaceConfigWs, SPACE_DISSOLVED_TOAST } from './useSpaceConfigWs'
+import { useSpaceConfigWs, spaceDissolvedToast } from './useSpaceConfigWs'
 import { markLocalDissolve, clearLocalDissolve } from '@/store/spaces'
 
 function Probe({ spaceId, onChanged }: { spaceId: string; onChanged: () => void }) {
@@ -62,7 +62,8 @@ describe('useSpaceConfigWs', () => {
     const onChanged = vi.fn()
     render(<Probe spaceId="sp-1" onChanged={onChanged} />)
     emit('space.config.changed', { space_id: 'sp-1', event_type: 'dissolved' })
-    expect(showToast).toHaveBeenCalledWith(SPACE_DISSOLVED_TOAST, 'info')
+    expect(showToast).toHaveBeenCalledWith(spaceDissolvedToast(), 'info')
+    expect(spaceDissolvedToast()).toBe('This space was dissolved and is no longer available.')
     expect(route).toHaveBeenCalledWith('/spaces', true)
     expect(onChanged).not.toHaveBeenCalled()
   })

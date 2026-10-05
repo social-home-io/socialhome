@@ -12,6 +12,7 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
+import { t } from '@/i18n/i18n'
 
 interface Hit {
   scope: string
@@ -42,22 +43,24 @@ const PAGE_SIZE = 20
 const hasMore = signal(false)
 
 /** Filter chips per spec §23.2.3. */
+/** Filter chips; ``label`` is a translation key, looked up at render. */
 const FILTERS: { type: string, label: string }[] = [
-  { type: '',         label: 'All'    },
-  { type: 'posts',    label: 'Posts'  },
-  { type: 'people',   label: 'People' },
-  { type: 'spaces',   label: 'Spaces' },
-  { type: 'pages',    label: 'Pages'  },
-  { type: 'messages', label: 'DMs'    },
+  { type: '',         label: 'search.scope.all'      },
+  { type: 'posts',    label: 'search.filter.posts'   },
+  { type: 'people',   label: 'search.filter.people'  },
+  { type: 'spaces',   label: 'search.filter.spaces'  },
+  { type: 'pages',    label: 'search.scope.page'     },
+  { type: 'messages', label: 'search.filter.dms'     },
 ]
 
+/** Result-kind label keys, looked up at render. */
 const SCOPE_LABELS: Record<string, string> = {
-  post:       'Household feed',
-  space_post: 'Space post',
-  message:    'Direct message',
-  page:       'Page',
-  user:       'Person',
-  space:      'Space',
+  post:       'search.scope.post',
+  space_post: 'search.hit.space_post',
+  message:    'dms.direct_message',
+  page:       'search.hit.page',
+  user:       'search.hit.person',
+  space:      'search.hit.space',
 }
 
 /** Sum of the underlying scopes each filter covers (for chip counts). */
@@ -73,12 +76,12 @@ function countsFor(type: string, all: Record<string, number>): number {
 
 function emptyMessage(type: string, q: string): string {
   switch (type) {
-    case 'posts':    return `No posts matching "${q}"`
-    case 'people':   return `No people matching "${q}"`
-    case 'spaces':   return `No spaces matching "${q}"`
-    case 'pages':    return `No pages matching "${q}"`
-    case 'messages': return `No messages matching "${q}"`
-    default:         return `No results for "${q}"`
+    case 'posts':    return t('search.empty.posts', { query: q })
+    case 'people':   return t('search.empty.people', { query: q })
+    case 'spaces':   return t('search.empty.spaces', { query: q })
+    case 'pages':    return t('search.empty.pages', { query: q })
+    case 'messages': return t('search.empty.messages', { query: q })
+    default:         return t('search.empty.all', { query: q })
   }
 }
 
@@ -86,10 +89,10 @@ export default function SearchPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const q = params.get('q') || ''
-    const t = params.get('type') || ''
+    const type = params.get('type') || ''
     if (q) {
       query.value = q
-      activeType.value = t
+      activeType.value = type
       void runSearch()
     }
   }, [])
@@ -99,19 +102,19 @@ export default function SearchPage() {
 
   return (
     <div class="sh-search-page">
-      <h2>Search</h2>
+      <h2>{t('search.title')}</h2>
       <form
         onSubmit={(e) => { e.preventDefault(); void runSearch() }}
         class="sh-row"
       >
         <input
           type="search"
-          placeholder="Search posts, people, spaces, pages, DMs…"
+          placeholder={t('search.page_placeholder')}
           value={query.value}
           onInput={(e) => (query.value = (e.target as HTMLInputElement).value)}
           autoFocus
         />
-        <Button type="submit">Search</Button>
+        <Button type="submit">{t('search.submit')}</Button>
       </form>
 
       <div class="sh-filter-chips" role="tablist">
@@ -130,7 +133,7 @@ export default function SearchPage() {
                 void runSearch()
               }}
             >
-              {f.label}{c > 0 && <span class="sh-chip-count">{c}</span>}
+              {t(f.label)}{c > 0 && <span class="sh-chip-count">{c}</span>}
             </button>
           )
         })}
@@ -139,15 +142,14 @@ export default function SearchPage() {
       {loading.value && <Spinner />}
 
       {!loading.value && tooShort && (
-        <p class="sh-muted">Keep typing…</p>
+        <p class="sh-muted">{t('search.keep_typing')}</p>
       )}
 
       {!loading.value && !lastQuery.value && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🔎</div>
-          <h3>Find anything fast</h3>
-          <p>Search across posts, people, spaces, pages, and direct messages.
-             Use the filters above to narrow a search.</p>
+          <h3>{t('search.intro_title')}</h3>
+          <p>{t('search.intro_body')}</p>
         </div>
       )}
 
@@ -155,7 +157,7 @@ export default function SearchPage() {
         <div class="sh-empty-state">
           <div aria-hidden="true">🗂️</div>
           <h3>{emptyMessage(activeType.value, lastQuery.value)}</h3>
-          <p>Try a different word, remove the filter, or check the spelling.</p>
+          <p>{t('search.empty_hint')}</p>
         </div>
       )}
 
@@ -163,7 +165,7 @@ export default function SearchPage() {
         {hits.value.map(h => (
           <li key={`${h.scope}:${h.ref_id}`} class="sh-search-hit sh-card">
             <header class="sh-row sh-justify-between">
-              <strong>{SCOPE_LABELS[h.scope] || h.scope}</strong>
+              <strong>{SCOPE_LABELS[h.scope] ? t(SCOPE_LABELS[h.scope]) : h.scope}</strong>
               {h.space_id && <span class="sh-muted">{h.space_id}</span>}
             </header>
             {h.title && <h4>{h.title}</h4>}
@@ -180,7 +182,7 @@ export default function SearchPage() {
       {hasMore.value && hits.value.length > 0 && (
         <div class="sh-row sh-justify-center">
           <Button onClick={() => void loadMore()} loading={loadingMore.value}>
-            Load more
+            {t('feed.load_more')}
           </Button>
         </div>
       )}
@@ -207,7 +209,7 @@ async function runSearch() {
     counts.value = body.counts ?? {}
     hasMore.value = body.hits.length === PAGE_SIZE
   } catch (err: unknown) {
-    showToast(`Search failed: ${(err as Error)?.message ?? err}`, 'error')
+    showToast(t('search.failed', { error: String((err as Error)?.message ?? err) }), 'error')
     hits.value = []
     counts.value = {}
     hasMore.value = false
@@ -231,7 +233,7 @@ async function loadMore() {
     hits.value = [...hits.value, ...body.hits]
     hasMore.value = body.hits.length === PAGE_SIZE
   } catch (err: unknown) {
-    showToast(`Search failed: ${(err as Error)?.message ?? err}`, 'error')
+    showToast(t('search.failed', { error: String((err as Error)?.message ?? err) }), 'error')
   } finally {
     loadingMore.value = false
   }

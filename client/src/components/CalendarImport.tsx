@@ -31,6 +31,7 @@ import { Button } from './Button'
 import { FormError } from './FormError'
 import { Modal } from './Modal'
 import { Spinner } from './Spinner'
+import { t, isOne, formatLocale } from '@/i18n/i18n'
 
 export interface ImportCalendarOption {
   id: string
@@ -89,7 +90,7 @@ export function CalendarImport(props: Props) {
 }
 
 function ownerLabel(owner: string): string {
-  if (owner === currentUser.value?.username) return 'You'
+  if (owner === currentUser.value?.username) return t('calendar.page.owner_you')
   for (const u of householdUsers.value.values()) {
     if (u.username === owner) return u.display_name || u.username
   }
@@ -102,12 +103,12 @@ function calendarLabel(c: ImportCalendarOption, all: ImportCalendarOption[]): st
 }
 
 function formatWhen(ev: ImportedEvent): string {
-  const t = Date.parse(ev.start)
-  if (Number.isNaN(t)) return ''
+  const ts = Date.parse(ev.start)
+  if (Number.isNaN(ts)) return ''
   return ev.all_day
     // All-day imports are anchored to UTC midnight (floating date).
-    ? new Date(t).toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' })
-    : new Date(t).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    ? new Date(ts).toLocaleDateString(formatLocale(), { dateStyle: 'medium', timeZone: 'UTC' })
+    : new Date(ts).toLocaleString(formatLocale(), { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 function formatSize(bytes: number): string {
@@ -119,23 +120,23 @@ function formatSize(bytes: number): string {
 /** Map a failed import to a message that says what to do next. */
 export function importErrorMessage(e: unknown, source: Source): string {
   if (e instanceof ApiError) {
-    if (e.status === 413) return 'That file is too big to import (the limit is 1 MB).'
-    if (e.status === 503) return 'AI import isn\'t available right now. Try a calendar file instead.'
+    if (e.status === 413) return t('calendar.import.err_too_big')
+    if (e.status === 503) return t('calendar.import.err_ai_unavailable')
     if (e.code === 'ICS_PARSE_ERROR') {
-      return `We couldn't read this calendar file: ${e.detail ?? 'it isn\'t valid iCalendar'}. Nothing was imported.`
+      return t('calendar.import.err_parse', { detail: e.detail ?? t('calendar.import.err_parse_default') })
     }
     if (e.code === 'AI_PARSE_ERROR') {
       return source === 'photo'
-        ? 'No events could be read from this photo. Try a clearer picture or add a note.'
-        : 'No events could be read from that description. Try adding a date and time.'
+        ? t('calendar.import.err_ai_photo')
+        : t('calendar.import.err_ai_text')
     }
-    if (e.status === 404) return 'That calendar no longer exists. Pick another one.'
+    if (e.status === 404) return t('calendar.import.err_gone')
     if (e.detail) return e.detail
   }
   if (e instanceof TypeError) {
-    return 'Couldn\'t reach Social Home. Check your connection and try again.'
+    return t('calendar.import.err_network')
   }
-  return (e as Error)?.message || 'Import failed. Try again.'
+  return (e as Error)?.message || t('calendar.import.err_generic')
 }
 
 /** Downscale a photo that is over the upload ceiling. Returns the
@@ -172,16 +173,18 @@ interface ImportResponse {
   updated?: number
 }
 
-function eventsWord(n: number): string {
-  return n === 1 ? '1 event' : `${n} events`
-}
-
 /** The result headline. Plain "Added N" when nothing was updated; the
  *  added / updated split once a re-import touched existing events. */
 export function importHeadline(r: Pick<Result, 'events' | 'created' | 'updated'>, targetPhrase: string): string {
-  if (r.updated === 0) return `Added ${eventsWord(r.events.length)} to ${targetPhrase}.`
-  return `Imported ${eventsWord(r.events.length)} into ${targetPhrase}: `
-    + `${r.created} added, ${r.updated} updated.`
+  const n = r.events.length
+  if (r.updated === 0) {
+    return t(isOne(n) ? 'calendar.import.added_one' : 'calendar.import.added', {
+      n: String(n), target: targetPhrase,
+    })
+  }
+  return t(isOne(n) ? 'calendar.import.imported_one' : 'calendar.import.imported', {
+    n: String(n), target: targetPhrase, created: String(r.created), updated: String(r.updated),
+  })
 }
 
 function CalendarImportDialog({
@@ -212,7 +215,7 @@ function CalendarImportDialog({
     file.value = null
     if (!f) return
     if (f.size > MAX_UPLOAD_BYTES) {
-      error.value = `That file is ${formatSize(f.size)} — the limit is 1 MB. Export a shorter date range and try again.`
+      error.value = t('calendar.import.err_file_size', { size: formatSize(f.size) })
       return
     }
     // Cheap sniff so a wrong file (a PDF, a CSV) fails here with a clear
@@ -220,7 +223,7 @@ function CalendarImportDialog({
     // also drops a UTF-8 BOM (U+FEFF counts as whitespace).
     const head = (await f.slice(0, 4096).text()).trimStart()
     if (!/^BEGIN:VCALENDAR/i.test(head)) {
-      error.value = 'That doesn\'t look like a calendar file. Choose an .ics file exported from your calendar app.'
+      error.value = t('calendar.import.err_not_ics')
       return
     }
     file.value = f
@@ -236,13 +239,13 @@ function CalendarImportDialog({
       const base = `/api/calendars/${encodeURIComponent(calendarId)}`
       let res: ImportResponse
       if (src === 'file') {
-        if (!file.value) { error.value = 'Choose a calendar file first.'; return }
+        if (!file.value) { error.value = t('calendar.import.err_no_file'); return }
         res = await api.postRaw(`${base}/import_ics`, file.value, 'text/calendar')
       } else if (src === 'photo') {
-        if (!photo.value) { error.value = 'Choose a photo first.'; return }
+        if (!photo.value) { error.value = t('calendar.import.err_no_photo'); return }
         const blob = await preparePhoto(photo.value)
         if (blob.size > MAX_UPLOAD_BYTES) {
-          error.value = 'That photo is too big to send, even after shrinking it. Try a smaller one.'
+          error.value = t('calendar.import.err_photo_size')
           return
         }
         const note = caption.value.trim()
@@ -250,7 +253,7 @@ function CalendarImportDialog({
         res = await api.postRaw(`${base}/import_image${qs}`, blob, blob.type || 'image/jpeg')
       } else {
         const text = prompt.value.trim()
-        if (!text) { error.value = 'Describe the event(s) first.'; return }
+        if (!text) { error.value = t('calendar.import.err_no_text'); return }
         res = await api.post(`${base}/import_prompt`, { prompt: text })
       }
       const events = res?.events ?? []
@@ -270,8 +273,8 @@ function CalendarImportDialog({
   const done = result.value
   const targetCal = calendars.find(c => c.id === (done?.calendarId ?? target.value))
   const targetPhrase = !targetCal || targetCal.owner_username === currentUser.value?.username
-    ? 'your calendar'
-    : `${calendarLabel(targetCal, calendars)}'s calendar`
+    ? t('calendar.import.target_yours')
+    : t('calendar.import.target_other', { name: calendarLabel(targetCal, calendars) })
   const canSubmit = !busy.value && (
     source.value === 'file' ? file.value !== null
       : source.value === 'photo' ? photo.value !== null
@@ -279,7 +282,7 @@ function CalendarImportDialog({
   )
 
   return (
-    <Modal open onClose={onClose} title="Import events">
+    <Modal open onClose={onClose} title={t('calendar.import.title')}>
       {done ? (
         <div class="sh-cal-import-result" role="status">
           <p class="sh-cal-import-result__headline">
@@ -294,21 +297,21 @@ function CalendarImportDialog({
             ))}
           </ul>
           {done.events.length > SAMPLE_COUNT && (
-            <p class="sh-muted">…and {done.events.length - SAMPLE_COUNT} more.</p>
+            <p class="sh-muted">{t('calendar.import.more', { n: String(done.events.length - SAMPLE_COUNT) })}</p>
           )}
           {done.source === 'file' && (
             <p class="sh-muted sh-cal-import-result__note">
-              Re-importing the same file updates its events; events removed from the file stay on the calendar.
+              {t('calendar.import.reimport_note')}
             </p>
           )}
           <div class="sh-form-actions">
-            <Button variant="secondary" onClick={reset}>Import more</Button>
+            <Button variant="secondary" onClick={reset}>{t('calendar.import.more_button')}</Button>
             {onShow && done.events.length > 0 ? (
               <Button onClick={() => { onShow(done.events); onClose() }}>
-                Show in calendar
+                {t('calendar.import.show')}
               </Button>
             ) : (
-              <Button onClick={onClose}>Done</Button>
+              <Button onClick={onClose}>{t('pairing.done')}</Button>
             )}
           </div>
         </div>
@@ -316,7 +319,7 @@ function CalendarImportDialog({
         <form class="sh-form sh-cal-import" onSubmit={submit} noValidate>
           {calendars.length > 1 && (
             <label>
-              Add to
+              {t('calendar.import.add_to')}
               <select
                 value={target.value ?? ''}
                 onChange={(e) => { target.value = (e.target as HTMLSelectElement).value }}
@@ -329,11 +332,11 @@ function CalendarImportDialog({
           )}
 
           {aiAvailable && (
-            <div class="sh-cal-import-sources" role="radiogroup" aria-label="Import from">
+            <div class="sh-cal-import-sources" role="radiogroup" aria-label={t('calendar.import.from_aria')}>
               {([
-                ['file', 'Calendar file'],
-                ['photo', 'Photo (AI)'],
-                ['text', 'Description (AI)'],
+                ['file', t('calendar.import.src_file')],
+                ['photo', t('calendar.import.src_photo')],
+                ['text', t('calendar.import.src_text')],
               ] as [Source, string][]).map(([value, label]) => (
                 <label key={value} class={
                   'sh-cal-import-source'
@@ -354,10 +357,9 @@ function CalendarImportDialog({
 
           {source.value === 'file' && (
             <label class="sh-cal-import-file">
-              Calendar file
+              {t('calendar.import.src_file')}
               <span class="sh-form-help">
-                An .ics file exported from Google Calendar, Apple Calendar,
-                Outlook or similar. Up to 1 MB.
+                {t('calendar.import.file_help')}
               </span>
               <input
                 type="file"
@@ -378,10 +380,9 @@ function CalendarImportDialog({
           {source.value === 'photo' && (
             <>
               <label>
-                Photo
+                {t('calendar.import.photo_label')}
                 <span class="sh-form-help">
-                  A flyer, a school schedule, a screenshot — the AI reads the
-                  events off it.
+                  {t('calendar.import.photo_help')}
                 </span>
                 <input
                   type="file"
@@ -393,11 +394,11 @@ function CalendarImportDialog({
                 />
               </label>
               <label>
-                Note for the AI (optional)
+                {t('calendar.import.note_label')}
                 <input
                   type="text"
                   maxLength={200}
-                  placeholder="e.g. only the swimming lessons"
+                  placeholder={t('calendar.import.note_placeholder')}
                   value={caption.value}
                   onInput={(e) => { caption.value = (e.target as HTMLInputElement).value }}
                 />
@@ -407,11 +408,11 @@ function CalendarImportDialog({
 
           {source.value === 'text' && (
             <label>
-              Describe the event(s)
+              {t('calendar.import.text_label')}
               <textarea
                 rows={4}
                 maxLength={2000}
-                placeholder="e.g. dentist next Tuesday at 10am for an hour"
+                placeholder={t('calendar.import.text_placeholder')}
                 value={prompt.value}
                 onInput={(e) => { prompt.value = (e.target as HTMLTextAreaElement).value }}
               />
@@ -421,13 +422,13 @@ function CalendarImportDialog({
           <FormError id="sh-cal-import-error" message={error.value} />
           {busy.value && (
             <div class="sh-cal-import-busy" aria-live="polite">
-              <Spinner size={6} label="Importing" /> <span>Importing…</span>
+              <Spinner size={6} label={t('calendar.import.busy_aria')} /> <span>{t('calendar.import.busy')}</span>
             </div>
           )}
 
           <div class="sh-form-actions">
-            <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-            <Button type="submit" loading={busy.value} disabled={!canSubmit}>Import</Button>
+            <Button type="button" variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
+            <Button type="submit" loading={busy.value} disabled={!canSubmit}>{t('calendar.page.import')}</Button>
           </div>
         </form>
       )}

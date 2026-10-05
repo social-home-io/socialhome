@@ -20,6 +20,7 @@
  */
 import { signal, type Signal } from '@preact/signals'
 import { ReactionPicker } from './ReactionPicker'
+import { t } from '@/i18n/i18n'
 
 const openFor = signal<string | null>(null)
 
@@ -59,7 +60,7 @@ export function EmojiPickButton(props: EmojiPickButtonProps) {
       <button
         type="button"
         class={`sh-emoji-pick-btn ${props.className ?? ''}`}
-        aria-label={props.ariaLabel ?? 'Insert emoji'}
+        aria-label={props.ariaLabel ?? t('reaction.insert')}
         aria-haspopup="dialog"
         aria-expanded={isOpen}
         onClick={() => {

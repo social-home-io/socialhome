@@ -3,6 +3,7 @@
  */
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 import {
   ALL_EMOJI,
   ALL_EMOJI_WITH_KEYWORDS,
@@ -58,13 +59,13 @@ export function ReactionPicker({ onSelect, onClose, inline = false }: ReactionPi
     <div class={`sh-reaction-picker${inline ? ' sh-reaction-picker--inline' : ''}`}
       onClick={(e) => e.stopPropagation()}>
       <div class="sh-reaction-picker-header">
-        <input class="sh-reaction-search" placeholder="Search emoji..."
+        <input class="sh-reaction-search" placeholder={t('reaction.search')}
           value={search.value}
           onInput={(e) => search.value = (e.target as HTMLInputElement).value} />
         <button
           type="button"
           class="sh-reaction-close"
-          aria-label="Close emoji picker"
+          aria-label={t('reaction.close')}
           onClick={onClose}
         >✕</button>
       </div>

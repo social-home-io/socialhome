@@ -29,7 +29,7 @@ import {
   householdPictureUrl,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
-import { t } from '@/i18n/i18n'
+import { t, isOne, formatLocale } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { relativeChatTime } from '@/utils/relativeTime'
 import { ws } from '@/ws'
@@ -62,7 +62,7 @@ export default function MomentumDetailPage() {
         })
         .catch((err: unknown) => {
           if (initial) {
-            showToast(`Couldn't load: ${(err as Error)?.message ?? err}`,
+            showToast(t('moment.detail.load_failed', { error: String((err as Error)?.message ?? err) }),
               'error')
             loc.route('/momentum')
           }
@@ -93,7 +93,7 @@ export default function MomentumDetailPage() {
     try {
       await api.put(`/api/moments/${m.id}/reaction`, { emoji })
     } catch (err: unknown) {
-      showToast(`Reaction failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.viewer.reaction_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
@@ -101,18 +101,18 @@ export default function MomentumDetailPage() {
     try {
       await api.delete(`/api/moments/${m.id}/reaction`)
     } catch (err: unknown) {
-      showToast(`Couldn't clear: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('moment.detail.clear_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
   const remove = async () => {
-    if (!await confirmDialog('Delete this moment?', { destructive: true })) return
+    if (!await confirmDialog(t('moment.detail.delete_confirm'), { destructive: true })) return
     try {
       await api.delete(`/api/moments/${m.id}`)
-      showToast('Moment deleted', 'info')
+      showToast(t('moment.detail.deleted'), 'info')
       loc.route('/momentum')
     } catch (err: unknown) {
-      showToast(`Delete failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.viewer.delete_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
@@ -139,14 +139,14 @@ export default function MomentumDetailPage() {
         <div class="sh-momentum-row-body">
           <div class="sh-momentum-row-head">
             <strong class="sh-momentum-row-author">
-              {replyMine ? 'You' : householdDisplayName(mm.author_user_id)}
+              {replyMine ? t('highlight.inbox.you') : householdDisplayName(mm.author_user_id)}
             </strong>
             <span class="sh-muted">· {relativeChatTime(mm.created_at)}</span>
             {!replyMine && (
               <button
                 type="button"
                 class="sh-momentum-row-overflow"
-                aria-label={`More actions for ${householdDisplayName(mm.author_user_id)}`}
+                aria-label={t('highlight.more_actions', { name: householdDisplayName(mm.author_user_id) })}
                 onClick={(ev) => {
                   ev.preventDefault()
                   ev.stopPropagation()
@@ -170,7 +170,7 @@ export default function MomentumDetailPage() {
             <button
               type="button"
               class="sh-momentum-row-media-button"
-              aria-label="Open photo full-size"
+              aria-label={t('moment.open_photo')}
               onClick={(ev) => {
                 ev.preventDefault()
                 ev.stopPropagation()
@@ -194,7 +194,7 @@ export default function MomentumDetailPage() {
           {mm.reaction_count > 0 && (
             <div class="sh-momentum-row-chips">
               <span class="sh-momentum-chip sh-momentum-chip--readonly"
-                    aria-label={`${mm.reaction_count} reactions`}>
+                    aria-label={t(isOne(mm.reaction_count) ? 'highlight.reactions_one' : 'highlight.reactions', { n: String(mm.reaction_count) })}>
                 ❤️ {mm.reaction_count}
               </span>
             </div>
@@ -213,9 +213,9 @@ export default function MomentumDetailPage() {
           size={48}
         />
         <div class="sh-momentum-detail-meta">
-          <strong>{isAuthor ? 'You' : householdDisplayName(m.author_user_id)}</strong>
+          <strong>{isAuthor ? t('highlight.inbox.you') : householdDisplayName(m.author_user_id)}</strong>
           <span class="sh-muted">
-            {new Date(m.created_at).toLocaleString(undefined, {
+            {new Date(m.created_at).toLocaleString(formatLocale(), {
               dateStyle: 'medium',
               timeStyle: 'short',
             })}
@@ -225,14 +225,14 @@ export default function MomentumDetailPage() {
           <button
             type="button"
             class="sh-momentum-row-overflow"
-            aria-label={`More actions for ${householdDisplayName(m.author_user_id)}`}
+            aria-label={t('highlight.more_actions', { name: householdDisplayName(m.author_user_id) })}
             onClick={() => openUserActions(m.author_user_id)}
           >
             ⋯
           </button>
         )}
         <Button variant="ghost" onClick={() => loc.route('/momentum')}>
-          Close
+          {t('common.close')}
         </Button>
       </header>
 
@@ -249,7 +249,7 @@ export default function MomentumDetailPage() {
         <button
           type="button"
           class="sh-momentum-detail-media-button"
-          aria-label="Open photo full-size"
+          aria-label={t('moment.open_photo')}
           onClick={() => openLightbox({
             items: [{
               url:       m.media_url!,
@@ -260,7 +260,7 @@ export default function MomentumDetailPage() {
         >
           <img
             src={m.media_url}
-            alt={m.content ? '' : `Photo from ${householdDisplayName(m.author_user_id)}`}
+            alt={m.content ? '' : t('moment.photo_from', { name: householdDisplayName(m.author_user_id) })}
             class="sh-momentum-detail-media"
           />
         </button>
@@ -270,7 +270,7 @@ export default function MomentumDetailPage() {
           class="sh-momentum-detail-media" />
       )}
 
-      <section class="sh-momentum-reactions" aria-label="Reactions">
+      <section class="sh-momentum-reactions" aria-label={t('highlight.seen_by.reactions')}>
         <div class="sh-momentum-reaction-counts">
           {Object.entries(counts).map(([emoji, n]) => (
             <span key={emoji} class="sh-momentum-reaction-count">
@@ -291,14 +291,14 @@ export default function MomentumDetailPage() {
               onClick={() => void (myReaction === emoji
                 ? clearReaction()
                 : react(emoji))}
-              aria-label={`React ${emoji}`}
+              aria-label={t('moment.detail.react_aria', { emoji })}
             >
               {emoji}
             </button>
           ))}
           {myReaction && (
             <Button variant="ghost" onClick={clearReaction}>
-              Clear my reaction
+              {t('moment.detail.clear_reaction')}
             </Button>
           )}
         </div>
@@ -306,16 +306,16 @@ export default function MomentumDetailPage() {
 
       <footer class="sh-momentum-detail-actions">
         <Button onClick={() => openMomentumComposer(m.id)}>
-          💬 Reply
+          💬 {t('highlight.viewer.reply')}
         </Button>
         {!isAuthor && (
-          <Button variant="ghost" onClick={report}>🚩 Report</Button>
+          <Button variant="ghost" onClick={report}>🚩 {t('report.action')}</Button>
         )}
         {isAuthor && (
           // Ghost (not filled-danger) so the destructive action doesn't
           // compete with the primary Reply — the confirm dialog carries
           // the "are you sure" weight. Matches the ghost Report above.
-          <Button variant="ghost" onClick={remove}>Delete</Button>
+          <Button variant="ghost" onClick={remove}>{t('common.delete')}</Button>
         )}
       </footer>
 
@@ -325,11 +325,9 @@ export default function MomentumDetailPage() {
           r => !blocked.has(r.author_user_id),
         )
         return visibleReplies.length > 0 && (
-          <section class="sh-momentum-replies" aria-label="Replies">
+          <section class="sh-momentum-replies" aria-label={t('moment.detail.replies_aria')}>
             <h3>
-              {visibleReplies.length === 1
-                ? '1 reply'
-                : `${visibleReplies.length} replies`}
+              {t(isOne(visibleReplies.length) ? 'moment.detail.replies_one' : 'moment.detail.replies', { n: String(visibleReplies.length) })}
             </h3>
             <ul class="sh-momentum-list">
               {visibleReplies.map(renderRow)}
@@ -339,7 +337,7 @@ export default function MomentumDetailPage() {
                 variant="secondary"
                 onClick={() => openMomentumComposer(m.id)}
               >
-                💬 Add a reply
+                💬 {t('moment.detail.add_reply')}
               </Button>
             </div>
           </section>

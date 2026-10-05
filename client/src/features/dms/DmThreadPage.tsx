@@ -24,7 +24,7 @@ import { MediaAttachmentChip } from '@/components/MediaAttachmentChip'
 import { MessageContextSheet } from '@/components/MessageContextSheet'
 import { ReactionPicker } from '@/components/ReactionPicker'
 import { LocationPicker, type LocationDraft } from '@/components/LocationPicker'
-import { t } from '@/i18n/i18n'
+import { t, formatLocale, isOne } from '@/i18n/i18n'
 import { formatCoords, parseDmLocation, toDmLocationContent } from '@/utils/dmLocation'
 import { ComposerAttachMenu } from './ComposerAttachMenu'
 import { DmLocationMessage } from './DmLocationMessage'
@@ -234,18 +234,18 @@ type FlatItem =
  *  this year; ``14 May 2025`` for older. Resolves locale separators
  *  via ``toLocaleDateString`` so the formatter matches the rest of
  *  the SPA's relative-time vocabulary. */
-function dmDayLabel(t: number, now: number = Date.now()): string {
+function dmDayLabel(ts: number, now: number = Date.now()): string {
   const todayKey = new Date(now).toDateString()
   const yesterdayKey = new Date(now - 86_400_000).toDateString()
-  const tKey = new Date(t).toDateString()
-  if (tKey === todayKey) return 'Today'
-  if (tKey === yesterdayKey) return 'Yesterday'
-  const d = new Date(t)
-  if (now - t < 6 * 86_400_000) {
-    return d.toLocaleDateString(undefined, { weekday: 'long' })
+  const tKey = new Date(ts).toDateString()
+  if (tKey === todayKey) return t('dms.day.today')
+  if (tKey === yesterdayKey) return t('dms.day.yesterday')
+  const d = new Date(ts)
+  if (now - ts < 6 * 86_400_000) {
+    return d.toLocaleDateString(formatLocale(), { weekday: 'long' })
   }
   const sameYear = d.getFullYear() === new Date(now).getFullYear()
-  return d.toLocaleDateString(undefined, {
+  return d.toLocaleDateString(formatLocale(), {
     month: 'short',
     day: 'numeric',
     year: sameYear ? undefined : 'numeric',
@@ -272,10 +272,10 @@ function buildFlatItems(msgs: Message[]): FlatItem[] {
   let lastSender: string | null = null
   let lastTs: number | null = null
   for (const m of msgs) {
-    const t = Date.parse(normaliseTimestamp(m.created_at))
-    const dayKey = Number.isNaN(t) ? '?' : new Date(t).toDateString()
+    const ts = Date.parse(normaliseTimestamp(m.created_at))
+    const dayKey = Number.isNaN(ts) ? '?' : new Date(ts).toDateString()
     if (dayKey !== lastDayKey) {
-      const label = Number.isNaN(t) ? '' : dmDayLabel(t)
+      const label = Number.isNaN(ts) ? '' : dmDayLabel(ts)
       items.push({ kind: 'day', label, key: `day-${dayKey}` })
       lastDayKey = dayKey
       // Day change always starts a new cluster.
@@ -290,8 +290,8 @@ function buildFlatItems(msgs: Message[]): FlatItem[] {
     }
     const isContinuation =
       m.sender_user_id === lastSender &&
-      lastTs !== null && !Number.isNaN(t) &&
-      (t - lastTs) < GROUP_GAP_MS
+      lastTs !== null && !Number.isNaN(ts) &&
+      (ts - lastTs) < GROUP_GAP_MS
     if (isContinuation && items.length > 0) {
       // The previous message item (now the second-to-last after this
       // push) loses its footer — only the LAST bubble in a cluster
@@ -305,7 +305,7 @@ function buildFlatItems(msgs: Message[]): FlatItem[] {
       showFooter: true,
     })
     lastSender = m.sender_user_id
-    lastTs = Number.isNaN(t) ? lastTs : t
+    lastTs = Number.isNaN(ts) ? lastTs : ts
   }
   return items
 }
@@ -427,13 +427,13 @@ const reactionPickerFor = signal<Message | null>(null)
  *  module just for one consumer. */
 function humanizeAgo(iso: string | null | undefined): string | null {
   if (!iso) return null
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return null
-  const sec = Math.max(0, Math.round((Date.now() - t) / 1000))
-  if (sec < 60)      return 'just now'
-  if (sec < 3600)    return `${Math.floor(sec / 60)} min ago`
-  if (sec < 86400)   return `${Math.floor(sec / 3600)} h ago`
-  return `${Math.floor(sec / 86400)} d ago`
+  const ts = Date.parse(iso)
+  if (Number.isNaN(ts)) return null
+  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (sec < 60)      return t('time.just_now')
+  if (sec < 3600)    return t('time.minutes_ago', { n: String(Math.floor(sec / 60)) })
+  if (sec < 86400)   return t('time.hours_ago', { n: String(Math.floor(sec / 3600)) })
+  return t('time.days_ago', { n: String(Math.floor(sec / 86400)) })
 }
 
 /** Build the WhatsApp-style status line for the thread header.
@@ -445,14 +445,14 @@ function statusLine(members: ThreadMember[]): string | null {
   if (peers.length === 0) return null
   if (peers.length === 1) {
     const p = peers[0]
-    if (p.is_online && p.is_idle) return 'Idle'
-    if (p.is_online)              return 'Online'
+    if (p.is_online && p.is_idle) return t('dms.status.idle')
+    if (p.is_online)              return t('dms.status.online')
     const ago = humanizeAgo(p.last_seen_at)
-    return ago ? `Last seen ${ago}` : 'Offline'
+    return ago ? t('dms.status.last_seen', { ago }) : t('dms.status.offline')
   }
   const onlineCount = peers.filter(p => p.is_online).length
   if (onlineCount === 0) return null
-  return `${onlineCount} online`
+  return t('dms.status.n_online', { n: String(onlineCount) })
 }
 
 interface DeliveryState {
@@ -480,13 +480,13 @@ function CallEventRow({ m, onCallBack }: { m: Message, onCallBack: (type: 'audio
   let ev: { event?: string, call_type?: string, duration_seconds?: number | null } = {}
   try { ev = JSON.parse(m.content) } catch { /* noop */ }
   const ic = ev.call_type === 'video' ? '📹' : '📞'
-  const label = ev.event === 'missed' ? 'Missed call'
-    : ev.event === 'declined' ? 'Declined call'
-    : ev.event === 'ended'    ? 'Call'
-    : 'Call started'
+  const label = ev.event === 'missed' ? t('dms.call_event.missed')
+    : ev.event === 'declined' ? t('dms.call_event.declined')
+    : ev.event === 'ended'    ? t('dms.call_event.ended')
+    : t('dms.call_event.started')
   const dur = ev.duration_seconds && ev.duration_seconds > 0
     ? ` · ${formatDuration(ev.duration_seconds)}` : ''
-  const when = new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const when = new Date(m.created_at).toLocaleTimeString(formatLocale(), { hour: '2-digit', minute: '2-digit' })
   const showBack = ev.event === 'missed' || ev.event === 'declined'
   return (
     <div class="sh-call-event">
@@ -495,7 +495,7 @@ function CallEventRow({ m, onCallBack }: { m: Message, onCallBack: (type: 'audio
       <span class="sh-call-event-meta">{dur} · {when}</span>
       {showBack && (
         <Button onClick={() => onCallBack((ev.call_type as 'audio' | 'video') ?? 'audio')}>
-          Call back
+          {t('dms.call_event.call_back')}
         </Button>
       )}
     </div>
@@ -505,7 +505,9 @@ function CallEventRow({ m, onCallBack }: { m: Message, onCallBack: (type: 'audio
 function formatDuration(sec: number): string {
   const m = Math.floor(sec / 60)
   const s = sec % 60
-  return m > 0 ? `${m}m ${s}s` : `${s}s`
+  return m > 0
+    ? t('calls.history.duration_min_sec', { m: String(m), s: String(s) })
+    : t('calls.history.duration_sec', { s: String(s) })
 }
 
 /** Thread-header call button (§26.2).
@@ -521,9 +523,9 @@ function CallButton({ convId }: { convId: string }) {
   if (memberCount.value < 2) return null
   return (
     <div class="sh-thread-call-buttons">
-      <button type="button" class="sh-icon-btn" title="Start call"
+      <button type="button" class="sh-icon-btn" title={t('calls.picker.title')}
               onClick={() => openCallTypePicker(convId)}
-              aria-label={`Start call in conversation ${convId}`}>📞</button>
+              aria-label={t('calls.picker.title')}>📞</button>
     </div>
   )
 }
@@ -1070,7 +1072,7 @@ export default function DmThreadPage() {
       void fetchRoster(convId).then((stillIn) => {
         if (stillIn || cancelled) return
         groupInfoOpen.value = false
-        showToast('You are no longer in this group', 'info')
+        showToast(t('dms.removed_from_group'), 'info')
         locationRef.current.route('/dms')
       })
     })
@@ -1220,7 +1222,7 @@ export default function DmThreadPage() {
             errorMessage: message,
           }
         : null
-      attachmentError.value = `Couldn't upload ${file.name}: ${message}`
+      attachmentError.value = t('dms.upload_failed', { name: file.name, error: message })
     }
   }
 
@@ -1315,10 +1317,10 @@ export default function DmThreadPage() {
       const code = (err as { code?: string })?.code
       if (code === 'MEDIA_REQUIRES_DIRECT_PAIRING') {
         attachmentError.value =
-          'Voice notes can only be shared with directly-paired households.'
+          t('dms.voice_direct_only')
       } else {
         attachmentError.value =
-          `Couldn't send voice note: ${(err as Error)?.message ?? err}`
+          t('dms.voice_send_failed', { error: String((err as Error)?.message ?? err) })
       }
     } finally {
       try { URL.revokeObjectURL(previewUrl) } catch { /* already gone */ }
@@ -1615,18 +1617,17 @@ export default function DmThreadPage() {
               ...m,
               send_failed: true,
               send_failed_reason: isPairingError
-                ? 'Pictures, videos and files can only be sent to '
-                  + "households you've paired with directly."
-                : 'Send failed — tap to retry from a re-typed message.',
+                ? t('dms.media_direct_only')
+                : t('dms.send_failed_retry'),
             }
           : m,
       )
       showToast(
         isPairingError
-          ? 'Media only sends to directly-paired households.'
+          ? t('dms.media_direct_only_short')
           : body.type === 'location'
             ? t('dms.location.send_failed', { error: errMsg })
-            : `Send failed: ${errMsg}`,
+            : t('dms.send_failed', { error: errMsg }),
         'error',
       )
     }
@@ -1672,7 +1673,7 @@ export default function DmThreadPage() {
     const m = threadMembers.value.find(x => x.user_id === user_id)
     // Someone who has since left the group (or was removed) is no longer
     // on the roster — never show their raw id.
-    return m?.display_name ?? m?.username ?? 'Former member'
+    return m?.display_name ?? m?.username ?? t('dms.former_member')
   }
 
   /** One-line preview of a message's content for the quoted-reply card.
@@ -1729,7 +1730,7 @@ export default function DmThreadPage() {
       messages.value = messages.value.map(x =>
         x.id === m.id ? { ...x, reactions: m.reactions ?? [] } : x,
       )
-      showToast(`Could not ${had ? 'remove' : 'add'} reaction`, 'error')
+      showToast(t(had ? 'dms.reaction_remove_failed' : 'dms.reaction_add_failed'), 'error')
     }
   }
 
@@ -1740,7 +1741,7 @@ export default function DmThreadPage() {
     if (!cur || cur.id !== m.id) return
     const content = cur.draft.trim()
     if (!content) {
-      showToast("A message can't be empty — delete it instead", 'error')
+      showToast(t('dms.edit_empty'), 'error')
       return
     }
     if (content === m.content) {
@@ -1756,7 +1757,7 @@ export default function DmThreadPage() {
       )
       editing.value = null
     } catch {
-      showToast("Couldn't save your edit. Try again.", 'error')
+      showToast(t('dms.edit_failed'), 'error')
     }
   }
 
@@ -1773,9 +1774,9 @@ export default function DmThreadPage() {
       : m.content
     try {
       await navigator.clipboard.writeText(text)
-      showToast('Copied', 'success')
+      showToast(t('dms.copied'), 'success')
     } catch {
-      showToast("Couldn't copy — clipboard access denied", 'error')
+      showToast(t('dms.copy_failed'), 'error')
     }
   }
 
@@ -1874,7 +1875,7 @@ export default function DmThreadPage() {
       const callId = await startCall(convId, callType)
       location.route(`/calls/${callId}`)
     } catch (err) {
-      showCallError("Couldn't start the call", err)
+      showCallError(t('calls.start_failed'), err)
     }
   }
 
@@ -2032,7 +2033,7 @@ export default function DmThreadPage() {
         <a
           class="sh-thread-back"
           href={addBase('/dms')}
-          aria-label="Back to chats"
+          aria-label={t('calls.page.back_to_chats')}
         >‹</a>
         <div class="sh-thread-header-status" aria-live="polite">
           {headerDot && (
@@ -2045,8 +2046,8 @@ export default function DmThreadPage() {
           <button
             type="button"
             class="sh-icon-btn sh-thread-group-btn"
-            title="Group info"
-            aria-label="Group info — members, add people, leave"
+            title={t('dms.group_info')}
+            aria-label={t('dms.group_info_aria')}
             onClick={() => { groupInfoOpen.value = true }}
           >
             <span aria-hidden="true">👥</span>
@@ -2066,8 +2067,8 @@ export default function DmThreadPage() {
         <a
           class="sh-thread-history"
           href={addBase(`/dms/${convId}/calls`)}
-          title="Call history"
-          aria-label="Call history"
+          title={t('calls.history.title')}
+          aria-label={t('calls.history.title')}
         >
           <span aria-hidden="true">🕘</span>
         </a>
@@ -2077,9 +2078,9 @@ export default function DmThreadPage() {
           <span aria-hidden="true">⚠️</span>
           <span>
             {gaps.value.length === 1
-              ? 'A message may be missing from this conversation.'
-              : `${gaps.value.length} messages may be missing from this conversation.`}
-            {' '}Ask the sender to repost if it looks wrong.
+              ? t('dms.gap.one')
+              : t('dms.gap.many', { n: String(gaps.value.length) })}
+            {' '}{t('dms.gap.hint')}
           </span>
         </div>
       )}
@@ -2115,15 +2116,16 @@ export default function DmThreadPage() {
                 api.post(`/api/conversations/${convId}/read`).catch(() => {})
               }
             }}
-            aria-label={`Jump to latest, ${newSinceScrollUp.value} new ${
-              newSinceScrollUp.value === 1 ? 'message' : 'messages'
-            }`}
+            aria-label={t(
+              isOne(newSinceScrollUp.value) ? 'dms.jump_latest_one' : 'dms.jump_latest',
+              { n: String(newSinceScrollUp.value) },
+            )}
           >
             <span aria-hidden="true">↓</span>
             <span class="sh-dm-jump-down__count">
               {newSinceScrollUp.value > 99 ? '99+' : newSinceScrollUp.value}
             </span>
-            <span class="sh-dm-jump-down__label">new</span>
+            <span class="sh-dm-jump-down__label">{t('dms.jump_new')}</span>
           </button>
         )}
         {buildFlatItems(messages.value).slice().reverse().map((item) => {
@@ -2142,7 +2144,7 @@ export default function DmThreadPage() {
                 key={item.key}
                 class="sh-day-header"
                 role="separator"
-                aria-label={`Messages from ${item.label}`}
+                aria-label={t('dms.day.aria', { day: item.label })}
               >
                 {item.label}
               </div>
@@ -2200,14 +2202,14 @@ export default function DmThreadPage() {
                   class="sh-message-quote"
                   onClick={() => parent && scrollToMessage(parent.id)}
                   aria-label={parent
-                    ? `Reply to ${senderName(parent.sender_user_id)}: ${quotePreview(parent)}`
-                    : 'Reply to a message'}
+                    ? t('dms.reply.quote_aria', { name: senderName(parent.sender_user_id), text: quotePreview(parent) })
+                    : t('dms.reply.quote_missing_aria')}
                 >
                   <span class="sh-message-quote-author">
-                    {parent ? senderName(parent.sender_user_id) : 'Unknown'}
+                    {parent ? senderName(parent.sender_user_id) : t('presence.state.unknown')}
                   </span>
                   <span class="sh-message-quote-body">
-                    {parent ? quotePreview(parent) : '(message unavailable)'}
+                    {parent ? quotePreview(parent) : t('dms.reply.unavailable')}
                   </span>
                 </button>
               )}
@@ -2223,7 +2225,7 @@ export default function DmThreadPage() {
                 <button
                   type="button"
                   class="sh-message-media-tap"
-                  aria-label={`Open ${m.file_name ?? 'picture'} full-screen`}
+                  aria-label={m.file_name ? t('dms.media.open_named', { name: m.file_name }) : t('dms.media.open_picture')}
                   onClick={(e) => {
                     // Stop the click from bubbling to the bubble's
                     // own click handler (which toggles the reply
@@ -2241,7 +2243,7 @@ export default function DmThreadPage() {
                         : '')
                     }
                     src={m.media_url}
-                    alt={m.file_name ?? 'Picture'}
+                    alt={m.file_name ?? t('dms.media.picture')}
                     loading="lazy"
                   />
                 </button>
@@ -2270,7 +2272,7 @@ export default function DmThreadPage() {
                   <span class="sh-message-file__glyph" aria-hidden="true">📎</span>
                   <span class="sh-message-file__meta">
                     <span class="sh-message-file__name">
-                      {m.file_name ?? 'Attachment'}
+                      {m.file_name ?? t('dms.media.attachment')}
                     </span>
                     <span class="sh-message-file__size">
                       {formatFileSize(m.file_size_bytes)}
@@ -2303,8 +2305,7 @@ export default function DmThreadPage() {
                 <div class="sh-message-media-failed" role="status">
                   <span aria-hidden="true">⚠</span>
                   <span>
-                    Couldn't deliver this media to one or more paired
-                    households — the file is still on your device.
+                    {t('dms.media.delivery_failed')}
                   </span>
                 </div>
               )}
@@ -2321,7 +2322,7 @@ export default function DmThreadPage() {
                 >
                   <textarea
                     class="sh-message-edit__input"
-                    aria-label="Edit message"
+                    aria-label={t('dms.edit.aria')}
                     value={editing.value.draft}
                     rows={Math.min(6, Math.max(2, editing.value.draft.split('\n').length))}
                     ref={(el) => { if (el && document.activeElement !== el) el.focus() }}
@@ -2347,27 +2348,27 @@ export default function DmThreadPage() {
                       variant="secondary"
                       onClick={() => { editing.value = null }}
                     >
-                      Cancel
+                      {t('common.cancel')}
                     </Button>
-                    <Button type="submit">Save</Button>
+                    <Button type="submit">{t('common.save')}</Button>
                   </div>
                 </form>
               ) : (m.deleted
                 || (m.content && m.type !== 'audio' && m.type !== 'location')) && (
                 <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
                   {m.deleted
-                    ? '(message deleted)'
+                    ? t('dms.message_deleted')
                     : <MentionText text={m.content} {...mentionRender} />}
                 </p>
               )}
               {showFooter && (
                 <div class="sh-message-meta">
-                  <time>{new Date(m.created_at).toLocaleTimeString([],
+                  <time>{new Date(m.created_at).toLocaleTimeString(formatLocale(),
                     { hour: '2-digit', minute: '2-digit' })}</time>
                   {/* Voice notes stamp ``edited_at`` when the transcript
                    *  lands — that isn't the sender editing. */}
                   {m.edited_at && !m.deleted && m.type !== 'audio' && (
-                    <span class="sh-message-edited">edited</span>
+                    <span class="sh-message-edited">{t('dms.edited')}</span>
                   )}
                   {/* Per-bubble send-failure glyph. The optimistic
                    *  bubble keeps the user's content visible so they
@@ -2380,8 +2381,8 @@ export default function DmThreadPage() {
                   {mine && m.send_failed && (
                     <span
                       class="sh-message-send-failed"
-                      title={m.send_failed_reason ?? 'Send failed.'}
-                      aria-label={m.send_failed_reason ?? 'Send failed.'}
+                      title={m.send_failed_reason ?? t('dms.send_failed_short')}
+                      aria-label={m.send_failed_reason ?? t('dms.send_failed_short')}
                     >
                       ⚠
                     </span>
@@ -2411,7 +2412,7 @@ export default function DmThreadPage() {
                     counts.set(r.emoji, cur)
                   }
                   return (
-                    <div class="sh-reaction-strip" role="group" aria-label="Reactions">
+                    <div class="sh-reaction-strip" role="group" aria-label={t('dms.reactions')}>
                       {Array.from(counts.entries()).map(([emoji, info]) => (
                         <button
                           key={emoji}
@@ -2423,8 +2424,8 @@ export default function DmThreadPage() {
                           aria-pressed={info.mine}
                           aria-label={
                             info.mine
-                              ? `Remove ${emoji} reaction (${info.count})`
-                              : `Add ${emoji} reaction (${info.count})`
+                              ? t('dms.reaction_remove_aria', { emoji, n: String(info.count) })
+                              : t('dms.reaction_add_aria', { emoji, n: String(info.count) })
                           }
                           onClick={(e) => {
                             e.stopPropagation()
@@ -2444,10 +2445,8 @@ export default function DmThreadPage() {
                   <button
                     type="button"
                     class="sh-message-react-btn"
-                    title="Add reaction"
-                    aria-label={
-                      `Add reaction to ${senderName(m.sender_user_id)}'s message`
-                    }
+                    title={t('dms.add_reaction')}
+                    aria-label={t('dms.add_reaction_aria', { name: senderName(m.sender_user_id) })}
                     onClick={() => { contextSheetFor.value = m }}
                   >
                     😊
@@ -2456,8 +2455,8 @@ export default function DmThreadPage() {
                     <button
                       type="button"
                       class="sh-message-react-btn sh-message-edit-btn"
-                      title="Edit"
-                      aria-label="Edit your message"
+                      title={t('common.edit')}
+                      aria-label={t('dms.edit.own_aria')}
                       onClick={() => { editing.value = { id: m.id, draft: m.content } }}
                     >
                       ✎
@@ -2466,8 +2465,8 @@ export default function DmThreadPage() {
                   <button
                     type="button"
                     class="sh-message-reply-btn"
-                    title="Reply"
-                    aria-label={`Reply to ${senderName(m.sender_user_id)}`}
+                    title={t('dms.reply.action')}
+                    aria-label={t('dms.reply.to', { name: senderName(m.sender_user_id) })}
                     onClick={() => { replyTo.value = m }}
                   >
                     ↩
@@ -2484,14 +2483,14 @@ export default function DmThreadPage() {
          *  to fetch older history. Provides the "fetching older"
          *  affordance while the network round-trip is in flight. */}
         {isLoadingOlder.value && (
-          <div class="sh-dm-load-older" aria-live="polite">Loading older…</div>
+          <div class="sh-dm-load-older" aria-live="polite">{t('dms.loading_older')}</div>
         )}
       </div>
       {replyTo.value && (
         <div class="sh-composer-reply" role="status" aria-live="polite">
           <div class="sh-composer-reply-body">
             <span class="sh-composer-reply-author">
-              Replying to {senderName(replyTo.value.sender_user_id)}
+              {t('dms.reply.replying_to', { name: senderName(replyTo.value.sender_user_id) })}
             </span>
             <span class="sh-composer-reply-preview">
               {quotePreview(replyTo.value)}
@@ -2500,7 +2499,7 @@ export default function DmThreadPage() {
           <button
             type="button"
             class="sh-composer-reply-clear"
-            aria-label="Cancel reply"
+            aria-label={t('dms.reply.cancel')}
             onClick={() => { replyTo.value = null }}
           >×</button>
         </div>
@@ -2551,7 +2550,7 @@ export default function DmThreadPage() {
           <button
             type="button"
             class="sh-dm-attach-error__clear"
-            aria-label="Dismiss error"
+            aria-label={t('dms.dismiss_error')}
             onClick={() => { attachmentError.value = null }}
           >×</button>
         </div>
@@ -2593,7 +2592,7 @@ export default function DmThreadPage() {
             name="content"
             data-shortcut="composer"
             aria-keyshortcuts="n"
-            placeholder="Type a message..."
+            placeholder={t('dms.placeholder')}
             autocomplete="off"
             rows={1}
             onInput={handleInput}
@@ -2607,7 +2606,7 @@ export default function DmThreadPage() {
           <EmojiPickButton
             openKey="dm-composer"
             onInsert={insertEmojiAtCursor}
-            ariaLabel="Insert emoji into message"
+            ariaLabel={t('dms.insert_emoji')}
             className="sh-composer-emoji-inline"
           />
         </div>
@@ -2632,8 +2631,8 @@ export default function DmThreadPage() {
             disabled={!composerHasContent.value || uploadingAttachment.value !== null}
             aria-label={
               uploadingAttachment.value !== null
-                ? 'Wait for upload to finish'
-                : 'Send message'
+                ? t('dms.wait_upload')
+                : t('dms.send_message')
             }
           >
             {/* Compact paper-plane icon so the composer reads as a
@@ -2691,27 +2690,27 @@ export default function DmThreadPage() {
         const isMine = target.sender_user_id === myUserId
         const actions = [
           {
-            label: 'Reply',
+            label: t('dms.reply.action'),
             glyph: '↩',
             onClick: () => { replyTo.value = target },
           },
           ...(target.content
             ? [{
-                label: 'Copy text',
+                label: t('dms.copy_text'),
                 glyph: '⧉',
                 onClick: () => { void copyMessageText(target) },
               }]
             : []),
           ...(canEditMessage(target, myUserId)
             ? [{
-                label: 'Edit',
+                label: t('common.edit'),
                 glyph: '✎',
                 onClick: () => { editing.value = { id: target.id, draft: target.content } },
               }]
             : []),
           ...(target.media_url
             ? [{
-                label: 'Open in new tab',
+                label: t('dms.open_new_tab'),
                 glyph: '↗',
                 onClick: () => {
                   window.open(target.media_url ?? '', '_blank', 'noopener,noreferrer')

@@ -10,6 +10,7 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
+import { formatLocale, t } from '@/i18n/i18n'
 
 interface AuditEntry {
   id:          string
@@ -35,7 +36,7 @@ export async function loadAuditLog(minorId: string) {
     if (err?.status === 403) {
       forbidden.value = true
     } else {
-      showToast(`Could not load audit log: ${err?.message || err}`, 'error')
+      showToast(t('cp.audit.load_failed', { error: String(err?.message || err) }), 'error')
     }
     entries.value = []
   } finally {
@@ -64,24 +65,23 @@ export function GuardianAuditLog({ minorId }: { minorId: string }) {
   if (forbidden.value) {
     return (
       <p class="sh-muted sh-error">
-        You must be a guardian of this minor — or a household admin — to see
-        their audit log.
+        {t('cp.audit.forbidden')}
       </p>
     )
   }
   if (entries.value.length === 0) {
-    return <p class="sh-muted">No guardian actions recorded yet.</p>
+    return <p class="sh-muted">{t('cp.audit.empty')}</p>
   }
 
   return (
-    <ol class="sh-audit-log" aria-label="Guardian audit log">
+    <ol class="sh-audit-log" aria-label={t('cp.audit.aria')}>
       {entries.value.map((e) => (
         <li key={e.id} class="sh-audit-row">
           <time class="sh-muted">
-            {new Date(e.occurred_at).toLocaleString()}
+            {new Date(e.occurred_at).toLocaleString(formatLocale())}
           </time>
           <strong>{e.action.replace('_', ' ')}</strong>
-          <span class="sh-muted">by {e.guardian_id}</span>
+          <span class="sh-muted">{t('cp.audit.by', { name: e.guardian_id })}</span>
           {e.detail && (
             <span class="sh-audit-detail">{_parseDetail(e.detail)}</span>
           )}

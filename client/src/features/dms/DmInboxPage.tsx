@@ -24,18 +24,20 @@ import { PullToRefresh } from '@/components/PullToRefresh'
 import { useTitle } from '@/store/pageTitle'
 import { relativeChatTime } from '@/utils/relativeTime'
 import { isMuteActive, mutedLabel } from '@/utils/mute'
-import { t } from '@/i18n/i18n'
+import { t, formatLocale, isOne } from '@/i18n/i18n'
 import CallsTab from './CallsTab'
 import { addBase } from '@/baseUrl'
 
 type ChatsTab = 'dms' | 'groups' | 'calls'
 
 const TABS: readonly ChatsTab[] = ['dms', 'groups', 'calls'] as const
-const TAB_LABELS: Readonly<Record<ChatsTab, string>> = {
-  dms:    'DMs',
-  groups: 'Groups',
-  calls:  'Calls',
-}
+/** Tab labels in the UI language — a function so it reads the active
+ *  locale at render, not at import. */
+const tabLabels = (): Readonly<Record<ChatsTab, string>> => ({
+  dms:    t('dms.tab.dms'),
+  groups: t('dms.tab.groups'),
+  calls:  t('calls.title'),
+})
 
 const conversations = signal<Conversation[]>([])
 const loading = signal(true)
@@ -91,14 +93,14 @@ export default function DmInboxPage() {
   // sticky tabs, hiding the button behind the subheader's tinted
   // background.
   const newMessageBtn = (
-    <Button onClick={() => openNewDm()}>+ New message</Button>
+    <Button onClick={() => openNewDm()}>+ {t('dms.new')}</Button>
   )
   const tabHeader = (
     <TabHeader<ChatsTab>
       activeTab={activeTab.value}
       visibleTabs={TABS}
-      labels={TAB_LABELS}
-      ariaLabel="Chats sections"
+      labels={tabLabels()}
+      ariaLabel={t('dms.tab.aria')}
       onSelectTab={onSelectTab}
       actions={newMessageBtn}
     />
@@ -124,8 +126,8 @@ export default function DmInboxPage() {
 
   const list = activeTab.value === 'groups' ? groupsList.value : dmsList.value
   const emptyCopy = activeTab.value === 'groups'
-    ? 'Group conversations are 3+ people. Start one to see it here.'
-    : 'Direct messages are 1:1 chats with people in your household or connected households.'
+    ? t('dms.empty.groups_body')
+    : t('dms.empty.dms_body')
 
   return (
     <PullToRefresh onRefresh={reload}>
@@ -135,10 +137,10 @@ export default function DmInboxPage() {
           <div class="sh-empty-state">
             <div aria-hidden="true">💬</div>
             <h3>
-              {activeTab.value === 'groups' ? 'No groups yet' : 'No conversations yet'}
+              {activeTab.value === 'groups' ? t('dms.empty.groups_title') : t('dms.empty.dms_title')}
             </h3>
             <p>{emptyCopy}</p>
-            <Button onClick={() => openNewDm()}>+ Start a conversation</Button>
+            <Button onClick={() => openNewDm()}>+ {t('dms.empty.start')}</Button>
           </div>
         )}
         {list.map((c) => {
@@ -149,7 +151,7 @@ export default function DmInboxPage() {
           // "Anna · Bob · Carol" instead of an opaque "Direct message".
           const fallbackName = peers.length > 0
             ? peers.map((p) => p.display_name).join(' · ')
-            : 'Direct message'
+            : t('dms.direct_message')
           const displayName = c.name || fallbackName
           // Stack up to 3 avatars, then a "+N" overflow chip. Falls
           // back to a single avatar from the conversation name when
@@ -200,15 +202,15 @@ export default function DmInboxPage() {
                 </strong>
                 <span class="sh-badge">
                   {c.type === 'group_dm'
-                    ? `Group · ${c.member_count ?? peers.length + 1}`
-                    : 'DM'}
+                    ? t('dms.badge.group', { n: String(c.member_count ?? peers.length + 1) })
+                    : t('dms.badge.dm')}
                 </span>
               </div>
               {c.last_message_at && (
                 <time
                   class="sh-muted sh-dm-time"
                   dateTime={c.last_message_at}
-                  title={new Date(c.last_message_at).toLocaleString()}
+                  title={new Date(c.last_message_at).toLocaleString(formatLocale())}
                 >
                   {relativeChatTime(c.last_message_at)}
                 </time>
@@ -216,7 +218,7 @@ export default function DmInboxPage() {
               {c.unread && c.unread > 0 ? (
                 <span
                   class={muted ? 'sh-dm-unread sh-dm-unread--muted' : 'sh-dm-unread'}
-                  aria-label={`${c.unread} unread`}
+                  aria-label={t(isOne(c.unread) ? 'dms.unread_count_one' : 'dms.unread_count', { n: String(c.unread) })}
                 >
                   {c.unread > 99 ? '99+' : c.unread}
                 </span>

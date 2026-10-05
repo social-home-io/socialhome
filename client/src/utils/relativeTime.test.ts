@@ -41,6 +41,17 @@ describe('relativeChatTime', () => {
   it('echoes the input on a parse failure', () => {
     expect(relativeChatTime('not-a-date')).toBe('not-a-date')
   })
+  it('speaks the UI language', async () => {
+    await setLocale('de')
+    try {
+      expect(relativeChatTime(iso(15_000))).toBe('jetzt')
+      expect(relativeChatTime(iso(5 * 60_000))).toBe('5 Min.')
+      expect(relativeChatTime(iso(30 * 3_600_000))).toBe('Gestern')
+      expect(relativeChatTime(iso(14 * 86_400_000))).toMatch(/^\d+\. [A-Za-zä]{3,}\.?$/)
+    } finally {
+      await setLocale('en')
+    }
+  })
 })
 
 describe('relativeDocsTime', () => {

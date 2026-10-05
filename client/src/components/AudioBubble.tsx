@@ -16,6 +16,7 @@
  * passes ``content`` in as a prop.
  */
 import type preact from 'preact'
+import { t } from '@/i18n/i18n'
 
 interface AudioBubbleProps {
   src: string
@@ -44,7 +45,7 @@ export function AudioBubble({
         src={src}
         controls
         preload="metadata"
-        aria-label={fileName ?? 'Voice note'}
+        aria-label={fileName ?? t('media.voice_note')}
       />
       {transcript ? (
         <div class="sh-message-audio__transcript">
@@ -55,7 +56,7 @@ export function AudioBubble({
           class="sh-message-audio__transcript sh-message-audio__transcript--pending"
           aria-live="polite"
         >
-          Transcribing…
+          {t('media.transcribing')}
         </div>
       )}
     </div>

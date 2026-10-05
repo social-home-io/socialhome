@@ -21,6 +21,7 @@ import { api } from '@/api'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 interface DialogState {
   open: boolean
@@ -97,11 +98,11 @@ export function AliasDialog() {
         { alias: trimmed },
       )
       s.onSave?.(trimmed)
-      showToast(`Saved nickname "${trimmed}"`, 'success')
+      showToast(t('alias.saved', { name: trimmed }), 'success')
       closeDialog()
     } catch (e: any) {
       saving.value = false
-      showToast(e?.message || 'Failed to save nickname', 'error')
+      showToast(e?.message || t('alias.save_failed'), 'error')
     }
   }
 
@@ -112,29 +113,28 @@ export function AliasDialog() {
         `/api/aliases/users/${encodeURIComponent(s.targetUserId)}`,
       )
       s.onSave?.(null)
-      showToast('Nickname cleared', 'info')
+      showToast(t('alias.cleared'), 'info')
       closeDialog()
     } catch (e: any) {
       saving.value = false
-      showToast(e?.message || 'Failed to clear nickname', 'error')
+      showToast(e?.message || t('alias.clear_failed'), 'error')
     }
   }
 
   return (
-    <Modal open={s.open} onClose={closeDialog} title="Set a nickname">
+    <Modal open={s.open} onClose={closeDialog} title={t('alias.title')}>
       <div class="sh-alias-dialog">
         <p class="sh-alias-dialog-lead">
-          Rename <strong>{s.globalDisplayName || s.targetUserId}</strong> in
-          your view. Only you see the change — they keep their own name.
+          {t('alias.lead_before')}<strong>{s.globalDisplayName || s.targetUserId}</strong>{t('alias.lead_after')}
         </p>
         <label class="sh-alias-dialog-label" for="sh-alias-input">
-          Your nickname
+          {t('alias.label')}
         </label>
         <input
           id="sh-alias-input"
           class="sh-alias-dialog-input"
           type="text"
-          placeholder="e.g. Mom, Dr. Smith, Coach"
+          placeholder={t('alias.placeholder')}
           maxLength={ALIAS_MAX_LENGTH + 1}
           value={inputValue.value}
           onInput={(e) =>
@@ -150,8 +150,8 @@ export function AliasDialog() {
         />
         <p id="sh-alias-help" class="sh-alias-dialog-help">
           {tooLong
-            ? `Maximum ${ALIAS_MAX_LENGTH} characters.`
-            : 'When this person sets their own name in a space, that takes priority over your nickname.'}
+            ? t('alias.too_long', { n: String(ALIAS_MAX_LENGTH) })
+            : t('alias.help')}
         </p>
         <div class="sh-alias-dialog-actions">
           {s.currentAlias && (
@@ -160,15 +160,15 @@ export function AliasDialog() {
               onClick={clear}
               disabled={saving.value}
             >
-              Reset to default
+              {t('alias.reset')}
             </Button>
           )}
           <div class="sh-alias-dialog-actions-spacer" />
           <Button variant="secondary" onClick={closeDialog}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button onClick={save} disabled={saveDisabled}>
-            {saving.value ? 'Saving…' : 'Save nickname'}
+            {saving.value ? t('alias.saving') : t('alias.save')}
           </Button>
         </div>
       </div>

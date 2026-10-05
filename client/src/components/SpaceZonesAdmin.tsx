@@ -30,6 +30,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
 import type { SpaceZone } from '@/types'
+import { t } from '@/i18n/i18n'
 
 interface ZonesResponse {
   zones: SpaceZone[]
@@ -125,11 +126,11 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
   const saveDraft = async () => {
     if (!draft) return
     if (!draft.name.trim()) {
-      showToast('Zone name is required', 'error')
+      showToast(t('zones.name_required'), 'error')
       return
     }
     if (draft.latitude == null || draft.longitude == null) {
-      showToast('Click on the map to place the zone centre', 'error')
+      showToast(t('zones.place_required'), 'error')
       return
     }
     setBusy(true)
@@ -143,15 +144,15 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
       }
       if (draft.id) {
         await api.patch(`/api/spaces/${spaceId}/zones/${draft.id}`, body)
-        showToast('Zone updated', 'success')
+        showToast(t('zones.updated'), 'success')
       } else {
         await api.post(`/api/spaces/${spaceId}/zones`, body)
-        showToast('Zone created', 'success')
+        showToast(t('zones.created'), 'success')
       }
       setDraft(null)
       await reload()
     } catch (e: any) {
-      showToast(e.message || 'Failed to save zone', 'error')
+      showToast(e.message || t('zones.save_failed'), 'error')
     } finally {
       setBusy(false)
     }
@@ -162,21 +163,21 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
     setBusy(true)
     try {
       await api.delete(`/api/spaces/${spaceId}/zones/${pendingDelete.id}`)
-      showToast('Zone deleted', 'info')
+      showToast(t('zones.deleted'), 'info')
       setPendingDelete(null)
       await reload()
     } catch (e: any) {
-      showToast(e.message || 'Failed to delete zone', 'error')
+      showToast(e.message || t('zones.delete_failed'), 'error')
     } finally {
       setBusy(false)
     }
   }
 
-  if (loading) return <div class="sh-muted">Loading zones…</div>
+  if (loading) return <div class="sh-muted">{t('zones.loading')}</div>
   if (error) {
     return (
       <div class="sh-error-state" role="alert">
-        Could not load zones: {error}
+        {t('zones.load_failed', { error })}
       </div>
     )
   }
@@ -184,12 +185,12 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
   return (
     <div class="sh-zones-admin">
       <header class="sh-zones-admin__header">
-        <h3>Space zones</h3>
+        <h3>{t('zones.title')}</h3>
         <div class="sh-muted">
-          {zones.length} of 50 zones used
+          {t('zones.used', { n: String(zones.length), max: '50' })}
         </div>
         <Button variant="primary" onClick={startCreate} disabled={zones.length >= 50}>
-          + Add zone
+          + {t('zones.add')}
         </Button>
       </header>
 
@@ -197,8 +198,7 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
         <ul class="sh-zones-admin__list" data-testid="zone-list">
           {zones.length === 0 && (
             <li class="sh-muted">
-              No zones yet. Add a zone to label members on the map
-              (e.g. "The Workshop", "Coffee Shop").
+              {t('zones.empty')}
             </li>
           )}
           {zones.map((z) => (
@@ -216,8 +216,8 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
                 </span>
               </div>
               <div class="sh-zones-admin__actions">
-                <Button variant="secondary" onClick={() => startEdit(z)}>Edit</Button>
-                <Button variant="danger" onClick={() => setPendingDelete(z)}>Delete</Button>
+                <Button variant="secondary" onClick={() => startEdit(z)}>{t('common.edit')}</Button>
+                <Button variant="danger" onClick={() => setPendingDelete(z)}>{t('common.delete')}</Button>
               </div>
             </li>
           ))}
@@ -239,13 +239,13 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
 
       <ConfirmDialog
         open={pendingDelete !== null}
-        title="Delete zone?"
+        title={t('zones.delete_title')}
         message={
           pendingDelete
-            ? `Delete "${pendingDelete.name}"? Members' GPS pins will no longer carry this label.`
+            ? t('zones.delete_body', { name: pendingDelete.name })
             : ''
         }
-        confirmLabel="Delete"
+        confirmLabel={t('common.delete')}
         destructive
         onConfirm={() => void confirmDelete()}
         onCancel={() => setPendingDelete(null)}
@@ -514,11 +514,11 @@ function ZoneEditDialog({
     <Modal
       open
       onClose={onCancel}
-      title={draft.id ? 'Edit zone' : 'New zone'}
+      title={draft.id ? t('zones.edit_title') : t('zones.new_title')}
     >
       <div class="sh-zone-form">
         <label>
-          Name
+          {t('zones.name')}
           <input
             type="text"
             value={draft.name}
@@ -530,15 +530,15 @@ function ZoneEditDialog({
           />
         </label>
 
-        <fieldset class="sh-zone-form__palette" aria-label="Zone colour">
-          <legend>Colour</legend>
+        <fieldset class="sh-zone-form__palette" aria-label={t('zones.colour_aria')}>
+          <legend>{t('zones.colour')}</legend>
           {PALETTE.map((c) => (
             <button
               key={c}
               type="button"
               class={`sh-zone-swatch ${draft.color === c ? 'sh-zone-swatch--selected' : ''}`}
               style={`background: ${c}`}
-              aria-label={`Use colour ${c}`}
+              aria-label={t('zones.use_colour', { colour: c })}
               aria-pressed={draft.color === c}
               onClick={() => onChange({ ...draft, color: c })}
             />
@@ -546,7 +546,7 @@ function ZoneEditDialog({
         </fieldset>
 
         <label>
-          Radius
+          {t('zones.radius')}
           <input
             type="range"
             min={0}
@@ -564,14 +564,13 @@ function ZoneEditDialog({
 
         <div class="sh-zone-form__picker-row">
           <p class="sh-muted">
-            Click on the map to place the zone centre, or type the
-            coordinates directly below for keyboard-only access.
+            {t('zones.picker_hint')}
           </p>
           <Button
             variant="secondary"
             onClick={() => {
               if (!navigator.geolocation) {
-                showToast('Geolocation not available in this browser', 'error')
+                showToast(t('zones.geo_unavailable'), 'error')
                 return
               }
               navigator.geolocation.getCurrentPosition(
@@ -581,16 +580,16 @@ function ZoneEditDialog({
                     latitude: Math.round(pos.coords.latitude * 10_000) / 10_000,
                     longitude: Math.round(pos.coords.longitude * 10_000) / 10_000,
                   })
-                  showToast('Used your current location', 'info')
+                  showToast(t('zones.geo_used'), 'info')
                 },
                 () => {
-                  showToast('Could not read your current location', 'error')
+                  showToast(t('zones.geo_failed'), 'error')
                 },
                 { enableHighAccuracy: true, timeout: 8000 },
               )
             }}
           >
-            📍 Use my location
+            📍 {t('zones.use_location')}
           </Button>
         </div>
         <div class="sh-map-wrap">
@@ -604,7 +603,7 @@ function ZoneEditDialog({
 
         <div class="sh-zone-form__coords">
           <label>
-            Latitude
+            {t('zones.latitude')}
             <input
               type="number"
               step="0.0001"
@@ -618,7 +617,7 @@ function ZoneEditDialog({
             />
           </label>
           <label>
-            Longitude
+            {t('zones.longitude')}
             <input
               type="number"
               step="0.0001"
@@ -635,10 +634,10 @@ function ZoneEditDialog({
 
         <div class="sh-zone-form__actions">
           <Button variant="secondary" onClick={onCancel} disabled={busy}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button variant="primary" onClick={onSave} disabled={busy}>
-            {draft.id ? 'Save changes' : 'Create zone'}
+            {draft.id ? t('zones.save') : t('zones.create')}
           </Button>
         </div>
       </div>

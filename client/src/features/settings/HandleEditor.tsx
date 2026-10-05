@@ -5,6 +5,7 @@ import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { showToast } from '@/components/Toast'
 import type { User } from '@/types'
+import { t } from '@/i18n/i18n'
 
 const ERROR_ID = 'sh-handle-error'
 
@@ -61,16 +62,16 @@ export function HandleEditor() {
       if (currentUser.value) {
         currentUser.value = { ...currentUser.value, handle: next } as User
       }
-      showToast('Handle updated', 'success')
+      showToast(t('handle.updated'), 'success')
     } catch (err: unknown) {
       // 422 (taken / format / reserved) carries a friendly ``detail`` on the
       // ApiError — show it inline. A non-ApiError (network) falls back to its
       // message.
       if (err instanceof ApiError) {
         error.value =
-          err.detail || err.message || 'Could not change your handle.'
+          err.detail || err.message || t('handle.change_failed')
       } else {
-        error.value = (err as Error).message || 'Could not change your handle.'
+        error.value = (err as Error).message || t('handle.change_failed')
       }
     } finally {
       saving.value = false
@@ -79,7 +80,7 @@ export function HandleEditor() {
 
   return (
     <form class="sh-handle-editor sh-form" onSubmit={handleSave}>
-      <h3>Public @handle</h3>
+      <h3>{t('handle.title')}</h3>
       <label>
         @handle
         <input
@@ -96,13 +97,12 @@ export function HandleEditor() {
         />
       </label>
       <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-        Your public @-name — this is how others find you. Letters, numbers,
-        and underscores.
+        {t('handle.hint')}
       </p>
       <FormError id={ERROR_ID} message={error.value} />
       <div class="sh-form-actions">
         <Button type="submit" disabled={!canSave} loading={saving.value}>
-          Save
+          {t('common.save')}
         </Button>
       </div>
     </form>

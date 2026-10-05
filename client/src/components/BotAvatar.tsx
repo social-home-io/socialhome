@@ -15,6 +15,7 @@
  * has a visible provenance rather than an empty circle.
  */
 import type { SpaceBotSummary } from '@/types'
+import { t } from '@/i18n/i18n'
 
 interface BotAvatarProps {
   bot: SpaceBotSummary | null
@@ -33,7 +34,7 @@ export function BotAvatar({ bot, size = 40 }: BotAvatarProps) {
       <div
         class="sh-bot-avatar sh-bot-avatar--fallback"
         style={{ width: px, height: px, lineHeight: px, fontSize: `${size * 0.5}px` }}
-        title="Home Assistant (bot deleted)"
+        title={t('bot.deleted_title')}
         aria-label="Home Assistant"
       >
         🏠

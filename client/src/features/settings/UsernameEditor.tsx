@@ -5,6 +5,7 @@ import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
 import { showToast } from '@/components/Toast'
 import type { User } from '@/types'
+import { t } from '@/i18n/i18n'
 
 const ERROR_ID = 'sh-username-error'
 
@@ -46,10 +47,10 @@ export function UsernameEditor() {
   if (isHaUser) {
     return (
       <div class="sh-username-editor">
-        <h3>Login identifier</h3>
+        <h3>{t('username.title')}</h3>
         <p class="sh-profile-name" style={{ margin: 0 }}>{currentUsername}</p>
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-          The username you sign in with — managed by Home Assistant.
+          {t('username.ha_hint')}
         </p>
       </div>
     )
@@ -75,16 +76,16 @@ export function UsernameEditor() {
       if (currentUser.value) {
         currentUser.value = { ...currentUser.value, username: next } as User
       }
-      showToast('Username updated', 'success')
+      showToast(t('username.updated'), 'success')
     } catch (err: unknown) {
       // 422 (taken / format / reserved) and the 403 fallback both carry a
       // friendly ``detail`` on the ApiError — show it inline. A non-ApiError
       // (network) falls back to its message.
       if (err instanceof ApiError) {
         error.value =
-          err.detail || err.message || 'Could not change your username.'
+          err.detail || err.message || t('username.change_failed')
       } else {
-        error.value = (err as Error).message || 'Could not change your username.'
+        error.value = (err as Error).message || t('username.change_failed')
       }
     } finally {
       saving.value = false
@@ -93,9 +94,9 @@ export function UsernameEditor() {
 
   return (
     <form class="sh-username-editor sh-form" onSubmit={handleSave}>
-      <h3>Login identifier</h3>
+      <h3>{t('username.title')}</h3>
       <label>
-        Username
+        {t('username.label')}
         <input
           value={value.value}
           maxLength={32}
@@ -110,12 +111,12 @@ export function UsernameEditor() {
         />
       </label>
       <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
-        The username you sign in with. Letters, numbers, and underscores.
+        {t('username.hint')}
       </p>
       <FormError id={ERROR_ID} message={error.value} />
       <div class="sh-form-actions">
         <Button type="submit" disabled={!canSave} loading={saving.value}>
-          Save
+          {t('common.save')}
         </Button>
       </div>
     </form>

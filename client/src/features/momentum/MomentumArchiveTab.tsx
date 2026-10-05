@@ -24,6 +24,7 @@ import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { renderHashtagged } from './hashtags'
 import { addBase } from '@/baseUrl'
+import { t, formatLocale } from '@/i18n/i18n'
 
 const moments = signal<Moment[]>([])
 const loading = signal<boolean>(true)
@@ -58,7 +59,7 @@ export default function MomentumArchiveTab() {
         })
         .catch((err: unknown) => {
           if (initial) loading.value = false
-          showToast(`Failed to load archive: ${(err as Error)?.message ?? err}`,
+          showToast(t('moment.archive.load_failed', { error: String((err as Error)?.message ?? err) }),
             'error')
         })
     }
@@ -83,7 +84,7 @@ export default function MomentumArchiveTab() {
   const tag = activeTag.value
   const renderTrendingRow = trending.value.length > 0
     ? (
-      <nav class="sh-momentum-trending" aria-label="Trending hashtags">
+      <nav class="sh-momentum-trending" aria-label={t('moment.archive.trending_aria')}>
         {trending.value.map(t => (
           <a
             key={t.tag}
@@ -106,30 +107,29 @@ export default function MomentumArchiveTab() {
     // rather than an empty state.
     : days.length > 0 && (
       <p class="sh-muted sh-momentum-trending-hint">
-        💡 Start a hashtag with <code>#yourtag</code> to make it easy to
-        find later.
+        💡 {t('moment.archive.hashtag_hint_before')}<code>#{t('moment.archive.hashtag_example')}</code>{t('moment.archive.hashtag_hint_after')}
       </p>
     )
   const renderActiveBanner = tag && (
     <div class="sh-momentum-filter-banner" role="status">
-      <span>Filtering by <strong>#{tag}</strong></span>
+      <span>{t('moment.archive.filtering_by')} <strong>#{tag}</strong></span>
       <a
         href={addBase('/momentum?tab=archive')}
         onClick={(ev) => { ev.preventDefault(); loc.route('/momentum?tab=archive') }}
-      >Clear</a>
+      >{t('moment.archive.clear')}</a>
     </div>
   )
 
   if (days.length === 0) {
     return (
       <div class="sh-momentum-archive">
-        <h2>Moments archive</h2>
+        <h2>{t('page_title.moments_archive')}</h2>
         {renderActiveBanner}
         {renderTrendingRow}
         <div class="sh-empty-state">
           <p>{tag
-            ? `No moments tagged #${tag} in the retention window.`
-            : 'No moments in the retention window yet.'}</p>
+            ? t('moment.archive.empty_tag', { tag })
+            : t('moment.archive.empty')}</p>
         </div>
       </div>
     )
@@ -137,17 +137,17 @@ export default function MomentumArchiveTab() {
 
   return (
     <div class="sh-momentum-archive">
-      <h2>Moments archive</h2>
+      <h2>{t('page_title.moments_archive')}</h2>
       {!tag && (
         <p class="sh-muted">
-          Moments live 24 h by default; 7 d for people you follow.
+          {t('moment.archive.lifetime')}
         </p>
       )}
       {renderActiveBanner}
       {renderTrendingRow}
       {days.map(day => (
         <section key={day} class="sh-momentum-archive-day">
-          <h3>{new Date(day + 'T00:00:00Z').toLocaleDateString(undefined, {
+          <h3>{new Date(day + 'T00:00:00Z').toLocaleDateString(formatLocale(), {
             weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
           })}</h3>
           <ul class="sh-momentum-list">
@@ -182,7 +182,7 @@ export default function MomentumArchiveTab() {
                       <button
                         type="button"
                         class="sh-momentum-row-media-button"
-                        aria-label="Open photo full-size"
+                        aria-label={t('moment.open_photo')}
                         onClick={(ev) => {
                           ev.preventDefault()
                           ev.stopPropagation()
@@ -197,7 +197,7 @@ export default function MomentumArchiveTab() {
                       >
                         <img
                           src={m.media_url}
-                          alt={m.content ? '' : `Photo from ${householdDisplayName(m.author_user_id)}`}
+                          alt={m.content ? '' : t('moment.photo_from', { name: householdDisplayName(m.author_user_id) })}
                           loading="lazy"
                           class="sh-momentum-row-media"
                         />
@@ -205,7 +205,7 @@ export default function MomentumArchiveTab() {
                     )}
                     {m.media_type === 'video' && m.media_url && (
                       <span class="sh-momentum-row-media sh-momentum-row-media--video">
-                        🎬 video
+                        🎬 {t('moment.video')}
                       </span>
                     )}
                   </div>

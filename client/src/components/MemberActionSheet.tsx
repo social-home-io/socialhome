@@ -15,12 +15,12 @@
  */
 import { signal } from '@preact/signals'
 import { api, ApiError } from '@/api'
-import { t } from '@/i18n/i18n'
 import { parseSpaceRole, roleChangeOptions, type SpaceRole } from '@/features/spaces/spaceRoles'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 const open = signal(false)
 const memberUserId = signal('')
@@ -109,9 +109,9 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
   const ban = async () => {
     try {
       await api.post(`/api/spaces/${spaceId.value}/ban`, { user_id: memberUserId.value })
-      showToast('Member banned', 'info')
+      showToast(t('member_actions.banned'), 'info')
       showBanConfirm.value = false; open.value = false; onUpdate()
-    } catch (e: any) { showToast(e.message || 'Failed', 'error') }
+    } catch (e: any) { showToast(e.message || t('member_actions.failed'), 'error') }
   }
 
   const remove = async () => {
@@ -126,9 +126,9 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
         ? `/api/spaces/${spaceId.value}/remote-members/${memberInstanceId.value}/${memberUserId.value}`
         : `/api/spaces/${spaceId.value}/members/${memberUserId.value}`
       await api.delete(path)
-      showToast('Member removed', 'info')
+      showToast(t('member_actions.removed'), 'info')
       open.value = false; onUpdate()
-    } catch (e: any) { showToast(e.message || 'Failed', 'error') }
+    } catch (e: any) { showToast(e.message || t('member_actions.failed'), 'error') }
   }
 
   // Ban only meaningful on the host side, and only for local members.
@@ -137,7 +137,7 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
 
   return (
     <>
-      <Modal open={open.value} onClose={() => open.value = false} title="Member Actions">
+      <Modal open={open.value} onClose={() => open.value = false} title={t('member_actions.title')}>
         <div class="sh-member-actions">
           {roleOptions.length > 0 && (
             <div class="sh-member-actions-roles" role="group"
@@ -159,15 +159,15 @@ export function MemberActionSheet({ onUpdate }: { onUpdate: () => void }) {
               )}
             </div>
           )}
-          <Button variant="secondary" onClick={remove}>Remove from space</Button>
+          <Button variant="secondary" onClick={remove}>{t('member_actions.remove')}</Button>
           {canBan && (
-            <Button variant="danger" onClick={() => showBanConfirm.value = true}>Ban</Button>
+            <Button variant="danger" onClick={() => showBanConfirm.value = true}>{t('member_actions.ban')}</Button>
           )}
         </div>
       </Modal>
-      <ConfirmDialog open={showBanConfirm.value} title="Ban member?"
-        message="This member will be removed and cannot rejoin until unbanned."
-        confirmLabel="Ban" destructive onConfirm={ban}
+      <ConfirmDialog open={showBanConfirm.value} title={t('member_actions.ban_title')}
+        message={t('member_actions.ban_body')}
+        confirmLabel={t('member_actions.ban')} destructive onConfirm={ban}
         onCancel={() => showBanConfirm.value = false} />
     </>
   )

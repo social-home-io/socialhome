@@ -7,7 +7,7 @@
  * so a thread left open past the end stops showing the bell-slash on the
  * next render.
  */
-import { t } from '@/i18n/i18n'
+import { formatLocale, t } from '@/i18n/i18n'
 
 export type MuteDuration = '1h' | '8h' | '1w' | 'forever'
 
@@ -41,8 +41,8 @@ export function mutedLabel(
   if (isMutedForever(until)) return t('dms.mute.muted_forever')
   const end = new Date(until)
   const time = end.getTime() - now < 24 * 3600 * 1000
-    ? end.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-    : end.toLocaleString(undefined, {
+    ? end.toLocaleTimeString(formatLocale(), { hour: '2-digit', minute: '2-digit' })
+    : end.toLocaleString(formatLocale(), {
       weekday: 'short', day: 'numeric', month: 'short',
       hour: '2-digit', minute: '2-digit',
     })

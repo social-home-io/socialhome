@@ -96,7 +96,7 @@ export default function DashboardPage() {
       setBundle(data)
       setError(null)
     } catch (err: unknown) {
-      setError((err as Error).message ?? 'Could not load corner.')
+      setError((err as Error).message ?? t('dashboard.load_failed'))
     } finally {
       setLoading(false)
     }
@@ -145,12 +145,12 @@ export default function DashboardPage() {
     return (
       <div class="sh-welcome">
         <header class="sh-welcome-hero">
-          <h1 class="sh-welcome-hero__greeting">My Corner</h1>
+          <h1 class="sh-welcome-hero__greeting">{t('dashboard.title')}</h1>
           <p class="sh-welcome-hero__sub">{error}</p>
         </header>
         <div class="sh-welcome-stack">
           <Button onClick={() => { setLoading(true); void refresh() }}>
-            Retry
+            {t('common.retry')}
           </Button>
         </div>
       </div>
@@ -251,6 +251,13 @@ function presenceDotClass(state: string): string {
   }
 }
 
+/** A presence state in the UI language; unknown states show as sent. */
+function presenceStateLabel(state: string): string {
+  const key = `presence.state.${state}`
+  const label = t(key)
+  return label === key ? state : label
+}
+
 /** "Who's home" — household member presence + the GPS map underneath
  *  for members who opt in.  Wraps in the same paper-card chrome the
  *  Welcome cards use so the corner reads as one stack. */
@@ -261,7 +268,7 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
   return (
     <a class="sh-welcome-card" href={addBase('/presence')}>
       <h2 class="sh-welcome-card__title">
-        <span aria-hidden="true">🏠</span> Who's home
+        <span aria-hidden="true">🏠</span> {t('dashboard.whos_home')}
       </h2>
       <div class="sh-presence-overview">
         {presence.map(p => (
@@ -269,7 +276,7 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
             <span class={presenceDotClass(p.state)} />
             <Avatar name={p.display_name} src={p.picture_url} size={28} />
             <span>{p.display_name}</span>
-            <span class="sh-muted">{p.zone_name || p.state}</span>
+            <span class="sh-muted">{p.zone_name || presenceStateLabel(p.state)}</span>
           </div>
         ))}
       </div>
@@ -286,10 +293,10 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
             state: p.state,
           }))}
           height={220}
-          emptyLabel="No one is sharing GPS."
+          emptyLabel={t('dashboard.no_gps')}
         />
       )}
-      <span class="sh-welcome-card__more">Open presence →</span>
+      <span class="sh-welcome-card__more">{t('dashboard.open_presence')}</span>
     </a>
   )
 }
@@ -300,25 +307,25 @@ function BazaarCard({ bazaar }: { bazaar: BazaarCornerSummary }) {
   return (
     <a class="sh-welcome-card" href={addBase('/bazaar')}>
       <h2 class="sh-welcome-card__title">
-        <span aria-hidden="true">🛍</span> Bazaar
+        <span aria-hidden="true">🛍</span> {t('nav.bazaar')}
       </h2>
       <div class="sh-corner-bazaar">
         <div class="sh-corner-bazaar-stat">
           <span class="sh-corner-bazaar-value">{bazaar.active_listings}</span>
-          <span class="sh-muted">Active</span>
+          <span class="sh-muted">{t('dashboard.bazaar.active')}</span>
         </div>
         <div class="sh-corner-bazaar-stat">
           <span class="sh-corner-bazaar-value">{bazaar.pending_offers}</span>
-          <span class="sh-muted">Offers to review</span>
+          <span class="sh-muted">{t('dashboard.bazaar.offers')}</span>
         </div>
         {bazaar.ending_soon > 0 && (
           <div class="sh-corner-bazaar-stat sh-corner-bazaar-stat--warn">
             <span class="sh-corner-bazaar-value">{bazaar.ending_soon}</span>
-            <span class="sh-muted">Ending &lt; 24h</span>
+            <span class="sh-muted">{t('dashboard.bazaar.ending_soon')}</span>
           </div>
         )}
       </div>
-      <span class="sh-welcome-card__more">Open bazaar →</span>
+      <span class="sh-welcome-card__more">{t('dashboard.open_bazaar')}</span>
     </a>
   )
 }
@@ -337,25 +344,24 @@ function SpacesCard({
     <section class="sh-welcome-card sh-welcome-card--catchup">
       <div class="sh-welcome-card-header">
         <h2 class="sh-welcome-card__title">
-          <span aria-hidden="true">🛰</span> Spaces you follow
+          <span aria-hidden="true">🛰</span> {t('dashboard.followed.title')}
         </h2>
         <button type="button" class="sh-link-button"
-                onClick={onManage} aria-label="Manage followed spaces">
-          Manage →
+                onClick={onManage} aria-label={t('dashboard.followed.manage_aria')}>
+          {t('dashboard.followed.manage')}
         </button>
       </div>
       {followedCount === 0 ? (
         <div class="sh-welcome-card-empty">
           <span class="sh-muted">
-            Pin spaces here to keep an eye on their posts without
-            opening each one.
+            {t('dashboard.followed.empty')}
           </span>
-          <Button onClick={onManage}>Choose spaces</Button>
+          <Button onClick={onManage}>{t('dashboard.followed.choose')}</Button>
         </div>
       ) : posts.length === 0 ? (
         <div class="sh-welcome-card-empty">
           <span class="sh-muted">
-            No new posts in the spaces you follow.
+            {t('dashboard.followed.no_posts')}
           </span>
         </div>
       ) : (
@@ -374,7 +380,7 @@ function SpacesCard({
                       size={18}
                     />
                     <strong>{p.author}</strong>
-                    <span class="sh-muted">in {p.space_name}</span>
+                    <span class="sh-muted">{t('dashboard.followed.in_space', { space: p.space_name })}</span>
                   </span>
                   <span class="sh-welcome-catchup-snippet">
                     {postSnippet(p.content, p.type)}
@@ -398,15 +404,15 @@ function QuickActionsCard() {
   return (
     <section class="sh-welcome-card sh-welcome-card--quick">
       <h2 class="sh-welcome-card__title">
-        <span aria-hidden="true">⚡</span> Quick actions
+        <span aria-hidden="true">⚡</span> {t('dashboard.quick_actions_title')}
       </h2>
       <div class="sh-quick-actions">
-        <a href={addBase('/feed')} class="sh-btn sh-btn--secondary">Feed</a>
-        <a href={addBase('/dms')} class="sh-btn sh-btn--secondary">Messages</a>
-        <a href={addBase('/calendar')} class="sh-btn sh-btn--secondary">Calendar</a>
-        <a href={addBase('/organize')} class="sh-btn sh-btn--secondary">Tasks</a>
-        <a href={addBase('/organize?tab=shopping')} class="sh-btn sh-btn--secondary">Shopping</a>
-        <a href={addBase('/bazaar')} class="sh-btn sh-btn--secondary">Bazaar</a>
+        <a href={addBase('/feed')} class="sh-btn sh-btn--secondary">{t('nav.feed')}</a>
+        <a href={addBase('/dms')} class="sh-btn sh-btn--secondary">{t('nav.messages')}</a>
+        <a href={addBase('/calendar')} class="sh-btn sh-btn--secondary">{t('nav.calendar')}</a>
+        <a href={addBase('/organize')} class="sh-btn sh-btn--secondary">{t('nav.tasks')}</a>
+        <a href={addBase('/organize?tab=shopping')} class="sh-btn sh-btn--secondary">{t('nav.shopping')}</a>
+        <a href={addBase('/bazaar')} class="sh-btn sh-btn--secondary">{t('nav.bazaar')}</a>
       </div>
     </section>
   )
@@ -433,7 +439,7 @@ function AppsCard() {
   return (
     <a class="sh-welcome-card" href={addBase('/apps')}>
       <h2 class="sh-welcome-card__title">
-        <span aria-hidden="true">📦</span> Apps
+        <span aria-hidden="true">📦</span> {t('nav.apps')}
       </h2>
       <ul class="sh-welcome-card__list">
         {apps.map(app => (
@@ -448,7 +454,7 @@ function AppsCard() {
           </li>
         ))}
       </ul>
-      <span class="sh-welcome-card__more">Open Apps →</span>
+      <span class="sh-welcome-card__more">{t('dashboard.open_apps')}</span>
     </a>
   )
 }

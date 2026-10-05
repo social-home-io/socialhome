@@ -18,6 +18,7 @@ import { showToast } from './Toast'
 import { currentUser } from '@/store/auth'
 import type { HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
+import { t, isOne } from '@/i18n/i18n'
 
 const open = signal(false)
 const scope = signal<'household' | 'space'>('household')
@@ -84,10 +85,10 @@ export function HighlightPickerDialog() {
       )
       open.value = false
       if (res.queued) return
-      showToast('Highlight shared', 'success')
+      showToast(t('highlight.shared'), 'success')
       if (res.data?.post_id && onSharedCb) onSharedCb(res.data.post_id)
     } catch (err: unknown) {
-      showToast(`Share failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('highlight.share_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     } finally {
       submittingId.value = null
     }
@@ -95,24 +96,24 @@ export function HighlightPickerDialog() {
 
   if (!open.value) return null
   return (
-    <Modal open={open.value} onClose={() => { open.value = false }} title="Share a highlight">
+    <Modal open={open.value} onClose={() => { open.value = false }} title={t('composer.share_highlight')}>
       <div class="sh-highlight-picker">
-        {loading.value && <p class="sh-muted">Loading your highlights…</p>}
+        {loading.value && <p class="sh-muted">{t('highlight.picker.loading')}</p>}
         {!loading.value && items.value.length === 0 && (
           <p class="sh-muted">
-            You don't have any active highlights yet. Post one from{' '}
-            <a href={addBase('/highlights/new')} class="sh-link">Highlights → New</a> first.
+            {t('highlight.picker.empty_before')}{' '}
+            <a href={addBase('/highlights/new')} class="sh-link">{t('highlight.picker.empty_link')}</a>{t('highlight.picker.empty_after')}
           </p>
         )}
         {!loading.value && items.value.length > 0 && (
           <>
             <label class="sh-form-row">
-              Optional note
+              {t('highlight.picker.note_label')}
               <input
                 type="text"
                 value={note.value}
                 onInput={e => { note.value = (e.target as HTMLInputElement).value }}
-                placeholder="Why are you sharing this here?"
+                placeholder={t('highlight.picker.note_placeholder')}
                 maxLength={140}
               />
             </label>
@@ -142,7 +143,7 @@ export function HighlightPickerDialog() {
                     <span class="sh-highlight-picker-meta">
                       <strong>{item.highlight.highlight_date}</strong>
                       <span class="sh-muted">
-                        {item.frames.length} frame{item.frames.length === 1 ? '' : 's'}
+                        {t(isOne(item.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(item.frames.length) })}
                       </span>
                     </span>
                   </button>
@@ -153,7 +154,7 @@ export function HighlightPickerDialog() {
         )}
         <div class="sh-form-actions sh-highlight-picker-actions">
           <Button variant="secondary" onClick={() => { open.value = false }}>
-            Cancel
+            {t('common.cancel')}
           </Button>
         </div>
       </div>

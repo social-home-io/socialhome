@@ -27,6 +27,7 @@ import { currentWeekStart, weekdayOrder, type WeekStart } from '@/utils/week'
 import { ws } from '@/ws'
 import type { HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
+import { t, isOne, formatLocale } from '@/i18n/i18n'
 
 
 type DayKey = string  // 'YYYY-MM-DD'
@@ -60,8 +61,15 @@ function startOfMonth(year: number, month0: number): Date {
  *  2024-01-01 was a Monday. */
 function dowLabel(iso: number): string {
   return new Date(Date.UTC(2024, 0, 1 + iso)).toLocaleDateString(
-    undefined, { weekday: 'short', timeZone: 'UTC' },
+    formatLocale(), { weekday: 'short', timeZone: 'UTC' },
   )
+}
+
+/** A ``YYYY-MM-DD`` day key as a short date in the UI's locale. */
+function dayLabel(day: DayKey): string {
+  return new Date(day + 'T00:00:00Z').toLocaleDateString(formatLocale(), {
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+  })
 }
 
 type GridCell = { date: DayKey; inMonth: boolean } | null
@@ -108,9 +116,9 @@ export default function HighlightArchiveTab() {
           if (initial) loading.value = false
         })
         .catch((err: unknown) => {
-          loadError.value = (err as Error)?.message ?? 'Could not load'
+          loadError.value = (err as Error)?.message ?? t('highlight.archive.load_failed_short')
           if (initial) loading.value = false
-          showToast(`Failed to load highlight archive: ${loadError.value}`, 'error')
+          showToast(t('highlight.archive.load_failed', { error: loadError.value ?? '' }), 'error')
         })
     void fetchInbox(true)
     const dispose = [
@@ -128,7 +136,7 @@ export default function HighlightArchiveTab() {
   const monthStart = startOfMonth(year, month)
   const { weekdayLabels, cells } = buildMonthGrid(year, month, currentWeekStart())
 
-  const monthLabel = monthStart.toLocaleDateString(undefined, {
+  const monthLabel = monthStart.toLocaleDateString(formatLocale(), {
     year:  'numeric',
     month: 'long',
   })
@@ -162,15 +170,14 @@ export default function HighlightArchiveTab() {
   return (
     <div class="sh-highlight-archive">
       <header class="sh-highlight-archive-header">
-        <Button variant="secondary" onClick={goPrev}>‹ Prev</Button>
+        <Button variant="secondary" onClick={goPrev}>‹ {t('highlight.archive.prev')}</Button>
         <h2 style={{ margin: 0 }}>{monthLabel}</h2>
-        <Button variant="secondary" onClick={goNext}>Next ›</Button>
+        <Button variant="secondary" onClick={goNext}>{t('highlight.archive.next')} ›</Button>
       </header>
 
       {monthEntirelyBeforeRetention && (
         <p class="sh-muted" style={{ marginTop: 0 }}>
-          No highlights before {oldestHighlightDate} — older highlights are pruned by the
-          author's retention setting.
+          {t('highlight.archive.before_retention', { date: oldestHighlightDate ? dayLabel(oldestHighlightDate) : '' })}
         </p>
       )}
 
@@ -213,7 +220,7 @@ export default function HighlightArchiveTab() {
               type="button"
               class={cls}
               onClick={() => setSelectedDay(cell.date)}
-              aria-label={`${highlights.length} ${highlights.length === 1 ? 'highlight' : 'highlights'} on ${cell.date}`}
+              aria-label={t(isOne(highlights.length) ? 'highlight.archive.day_aria_one' : 'highlight.archive.day_aria', { n: String(highlights.length), date: dayLabel(cell.date) })}
             >
               <span class="sh-highlight-archive-day-num">{dayNum}</span>
               {firstFrame && firstFrame.frame_type === 'image' && (
@@ -240,10 +247,10 @@ export default function HighlightArchiveTab() {
       {selectedDay && (
         <section
           class="sh-highlight-archive-day-panel"
-          aria-label={`Highlights from ${selectedDay}`}
+          aria-label={t('highlight.archive.panel_aria', { date: dayLabel(selectedDay) })}
         >
           <h3 style={{ margin: 0 }}>
-            {new Date(selectedDay + 'T00:00:00Z').toLocaleDateString(undefined, {
+            {new Date(selectedDay + 'T00:00:00Z').toLocaleDateString(formatLocale(), {
               weekday: 'long', month: 'short', day: 'numeric', year: 'numeric',
             })}
           </h3>
@@ -276,7 +283,7 @@ export default function HighlightArchiveTab() {
                       <Avatar name={name} size={32} />
                       <strong>{name}</strong>
                       <span class="sh-muted">
-                        {s.frames.length} frame{s.frames.length === 1 ? '' : 's'}
+                        {t(isOne(s.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(s.frames.length) })}
                       </span>
                     </div>
                   </a>
@@ -290,11 +297,9 @@ export default function HighlightArchiveTab() {
       {inbox.value.length === 0 && !loading.value && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🌅</div>
-          <h3>No highlights in the archive yet</h3>
+          <h3>{t('highlight.archive.empty_title')}</h3>
           <p>
-            Once you or anyone in your household / connected peers post a
-            highlight, it'll show up here for as long as the author's retention
-            setting keeps it.
+            {t('highlight.archive.empty_body')}
           </p>
         </div>
       )}

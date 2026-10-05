@@ -2,7 +2,7 @@
  * NotificationsPage — notification centre (§23.3).
  */
 import { useEffect } from 'preact/hooks'
-import { t } from '@/i18n/i18n'
+import { t, formatLocale } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -44,7 +44,7 @@ export default function NotificationsPage() {
         ...n, read_at: n.read_at || new Date().toISOString(),
       }))
     } catch (err: unknown) {
-      showToast(`Mark-all-read failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('notifications.mark_all_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
@@ -55,7 +55,7 @@ export default function NotificationsPage() {
         n.id === id ? { ...n, read_at: new Date().toISOString() } : n
       )
     } catch (err: unknown) {
-      showToast(`Mark-read failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('notifications.mark_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
@@ -64,16 +64,13 @@ export default function NotificationsPage() {
   return (
     <div class="sh-notifications-page">
       <div class="sh-page-header">
-        <Button variant="secondary" onClick={markAllRead}>Mark all read</Button>
+        <Button variant="secondary" onClick={markAllRead}>{t('notifications.mark_all_read')}</Button>
       </div>
       {notifications.value.length === 0 && (
         <div class="sh-empty-state">
           <div aria-hidden="true">🔔</div>
-          <h3>You're all caught up</h3>
-          <p>
-            New notifications will land here when someone reacts to a post,
-            invites you to an event, or mentions you in a thread.
-          </p>
+          <h3>{t('notifications.empty_title')}</h3>
+          <p>{t('notifications.empty_body')}</p>
         </div>
       )}
       {notifications.value.map(n => (
@@ -87,7 +84,7 @@ export default function NotificationsPage() {
             <time
               class="sh-notif-time"
               dateTime={n.created_at}
-              title={new Date(n.created_at).toLocaleString()}
+              title={new Date(n.created_at).toLocaleString(formatLocale())}
             >
               {relativeDocsTime(n.created_at)}
             </time>

@@ -9,6 +9,7 @@
  * on chip can stay out of the way on phones.
  */
 import { useEffect, useRef } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 
 export interface ContextSheetAction {
   label: string
@@ -47,13 +48,13 @@ export function MessageContextSheet(props: Props) {
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
-        <div class="sh-context-sheet__quick" role="group" aria-label="Quick reactions">
+        <div class="sh-context-sheet__quick" role="group" aria-label={t('dms.context.quick_reactions')}>
           {QUICK_EMOJI.map(em => (
             <button
               key={em}
               type="button"
               class="sh-context-sheet__emoji"
-              aria-label={`React with ${em}`}
+              aria-label={t('dms.context.react_with', { emoji: em })}
               onClick={() => { props.onReact(em); props.onClose() }}
             >
               {em}
@@ -62,7 +63,7 @@ export function MessageContextSheet(props: Props) {
           <button
             type="button"
             class="sh-context-sheet__emoji sh-context-sheet__more"
-            aria-label="Pick another emoji"
+            aria-label={t('dms.context.more_emoji')}
             onClick={() => { props.onPickMore(); props.onClose() }}
           >
             +

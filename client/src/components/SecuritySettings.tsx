@@ -25,6 +25,7 @@ import { showToast } from './Toast'
 import { confirmDialog } from './confirm'
 import { normaliseTimestamp, relativeDocsTime } from '@/utils/relativeTime'
 import { isSupervisorAddon } from '@/platform'
+import { formatLocale, t } from '@/i18n/i18n'
 
 export interface ApiTokenRow {
   token_id: string
@@ -42,12 +43,13 @@ interface TokenListResponse {
 /** Label the login route stamps on a browser sign-in's token row. */
 const SIGN_IN_LABEL = 'web'
 
-/** Expiry choices. ``null`` days = never expires. */
-const EXPIRY_OPTIONS: { value: string; label: string; days: number | null }[] = [
-  { value: '30', label: '30 days', days: 30 },
-  { value: '90', label: '90 days', days: 90 },
-  { value: '365', label: '1 year', days: 365 },
-  { value: 'never', label: 'Never', days: null },
+/** Expiry choices. ``null`` days = never expires. ``labelKey`` is
+ *  resolved at render time so a language switch relabels the picker. */
+const EXPIRY_OPTIONS: { value: string; labelKey: string; days: number | null }[] = [
+  { value: '30', labelKey: 'security.expiry_30', days: 30 },
+  { value: '90', labelKey: 'security.expiry_90', days: 90 },
+  { value: '365', labelKey: 'security.expiry_365', days: 365 },
+  { value: 'never', labelKey: 'security.expiry_never', days: null },
 ]
 const DEFAULT_EXPIRY = '90'
 
@@ -59,21 +61,21 @@ function expiryIso(choice: string, now: Date = new Date()): string | null {
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—'
-  const t = Date.parse(normaliseTimestamp(iso))
-  if (Number.isNaN(t)) return iso
-  return new Date(t).toLocaleDateString(undefined, {
+  const ms = Date.parse(normaliseTimestamp(iso))
+  if (Number.isNaN(ms)) return iso
+  return new Date(ms).toLocaleDateString(formatLocale(), {
     year: 'numeric', month: 'short', day: 'numeric',
   })
 }
 
 function isExpired(iso: string | null): boolean {
   if (!iso) return false
-  const t = Date.parse(normaliseTimestamp(iso))
-  return !Number.isNaN(t) && t <= Date.now()
+  const ms = Date.parse(normaliseTimestamp(iso))
+  return !Number.isNaN(ms) && ms <= Date.now()
 }
 
 function displayLabel(row: ApiTokenRow): string {
-  return row.label === SIGN_IN_LABEL ? 'Browser sign-in' : (row.label || 'Unnamed token')
+  return row.label === SIGN_IN_LABEL ? t('security.browser_sign_in') : (row.label || t('security.unnamed'))
 }
 
 export function SecuritySettings() {
@@ -95,7 +97,7 @@ export function SecuritySettings() {
       tokens.value = data.tokens ?? []
       baseUrl.value = data.base_url ?? null
     } catch (e) {
-      loadError.value = (e as Error).message || 'Could not load your tokens.'
+      loadError.value = (e as Error).message || t('security.load_failed')
     } finally {
       loading.value = false
     }
@@ -107,7 +109,7 @@ export function SecuritySettings() {
     e.preventDefault()
     const name = label.value.trim()
     if (!name) {
-      createError.value = 'Give the token a name so you can recognise it later.'
+      createError.value = t('security.name_required')
       return
     }
     creating.value = true
@@ -124,7 +126,7 @@ export function SecuritySettings() {
     } catch (err) {
       createError.value = err instanceof ApiError && err.detail
         ? err.detail
-        : 'Could not create the token. Try again.'
+        : t('security.create_failed')
     } finally {
       creating.value = false
     }
@@ -134,23 +136,21 @@ export function SecuritySettings() {
     const signIn = row.label === SIGN_IN_LABEL
     const ok = await confirmDialog(
       signIn
-        ? 'This browser sign-in stops working immediately. If it is the '
-          + 'browser you are using now, you will be signed out.'
-        : `Anything using “${displayLabel(row)}” stops working immediately. `
-          + 'This cannot be undone — you would need to create a new token.',
+        ? t('security.confirm_sign_out')
+        : t('security.confirm_revoke', { name: displayLabel(row) }),
       {
-        title: signIn ? 'Sign out this browser?' : 'Revoke token?',
-        confirmLabel: signIn ? 'Sign out' : 'Revoke',
+        title: signIn ? t('security.sign_out_title') : t('security.revoke_title'),
+        confirmLabel: signIn ? t('security.sign_out') : t('security.revoke'),
         destructive: true,
       },
     )
     if (!ok) return
     try {
       await api.delete(`/api/me/tokens/${encodeURIComponent(row.token_id)}`)
-      tokens.value = tokens.value.filter(t => t.token_id !== row.token_id)
-      showToast(signIn ? 'Signed out' : 'Token revoked', 'info')
+      tokens.value = tokens.value.filter(tok => tok.token_id !== row.token_id)
+      showToast(signIn ? t('security.signed_out') : t('security.revoked'), 'info')
     } catch (err) {
-      showToast((err as Error).message || 'Could not revoke the token', 'error')
+      showToast((err as Error).message || t('security.revoke_failed'), 'error')
     }
   }
 
@@ -158,22 +158,21 @@ export function SecuritySettings() {
 
   return (
     <section class="sh-security" aria-labelledby="sh-security-tokens-heading">
-      <h3 id="sh-security-tokens-heading">API tokens</h3>
+      <h3 id="sh-security-tokens-heading">{t('security.title')}</h3>
       <p class="sh-muted">
-        A token lets a script or another app use Social Home as you — it can
-        do everything you can. Treat it like a password.
+        {t('security.intro')}
       </p>
 
       {revealed.value ? (
         <SecretReveal
-          title={`New token “${revealed.value.label}”`}
+          title={t('security.new_token_title', { name: revealed.value.label })}
           secret={revealed.value.token}
-          secretLabel="New API token"
-          dismissLabel="I've saved it"
+          secretLabel={t('security.new_token_label')}
+          dismissLabel={t('security.saved_it')}
           onDismiss={() => { revealed.value = null }}
         >
           <p class="sh-muted sh-secret-reveal__hint">
-            Send it as a bearer header, for example:
+            {t('security.bearer_hint')}
           </p>
           <pre class="sh-secret-reveal__snippet"><code>{
             `curl -H "Authorization: Bearer <token>" ${exampleBase}/api/me`
@@ -185,11 +184,11 @@ export function SecuritySettings() {
       ) : (
         <form class="sh-token-create" onSubmit={create} noValidate>
           <label class="sh-token-create__field">
-            Name
+            {t('security.name')}
             <input
               value={label.value}
               maxLength={64}
-              placeholder="e.g. Backup script"
+              placeholder={t('security.name_placeholder')}
               aria-invalid={createError.value ? true : undefined}
               aria-describedby={createError.value ? 'sh-token-create-error' : undefined}
               onInput={(e) => {
@@ -199,33 +198,32 @@ export function SecuritySettings() {
             />
           </label>
           <label class="sh-token-create__field sh-token-create__field--expiry">
-            Expires
+            {t('security.expires')}
             <select
               value={expiry.value}
               onChange={(e) => { expiry.value = (e.target as HTMLSelectElement).value }}
             >
               {EXPIRY_OPTIONS.map(o => (
-                <option key={o.value} value={o.value}>{o.label}</option>
+                <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
               ))}
             </select>
           </label>
-          <Button type="submit" loading={creating.value}>Create token</Button>
+          <Button type="submit" loading={creating.value}>{t('security.create')}</Button>
           <FormError id="sh-token-create-error" message={createError.value} />
         </form>
       )}
 
-      <h4 class="sh-security__list-heading">Signed-in browsers and tokens</h4>
-      {loading.value && <Spinner label="Loading tokens…" />}
+      <h4 class="sh-security__list-heading">{t('security.list_heading')}</h4>
+      {loading.value && <Spinner label={t('security.loading')} />}
       {!loading.value && loadError.value && (
         <div class="sh-security__error">
           <FormError id="sh-token-load-error" message={loadError.value} />
-          <Button variant="secondary" onClick={() => void load()}>Try again</Button>
+          <Button variant="secondary" onClick={() => void load()}>{t('common.try_again')}</Button>
         </div>
       )}
       {!loading.value && !loadError.value && tokens.value.length === 0 && (
         <p class="sh-muted sh-security__empty">
-          No tokens yet. Tokens you create — and browsers you sign in
-          with a password — show up here.
+          {t('security.empty')}
         </p>
       )}
       {!loading.value && !loadError.value && tokens.value.length > 0 && (
@@ -237,26 +235,28 @@ export function SecuritySettings() {
                 <div class="sh-token-row__info">
                   <span class="sh-token-label">
                     {displayLabel(row)}
-                    {expired && <span class="sh-token-row__badge">Expired</span>}
+                    {expired && <span class="sh-token-row__badge">{t('security.expired_badge')}</span>}
                   </span>
                   <span class="sh-muted sh-token-row__meta">
-                    Created {formatDate(row.created_at)}
+                    {t('security.created', { date: formatDate(row.created_at) })}
                     {' · '}
                     {row.last_used_at
-                      ? `Last used ${relativeDocsTime(row.last_used_at)}`
-                      : 'Never used'}
+                      ? t('security.last_used', { time: relativeDocsTime(row.last_used_at) })
+                      : t('security.never_used')}
                     {' · '}
                     {row.expires_at
-                      ? `${expired ? 'Expired' : 'Expires'} ${formatDate(row.expires_at)}`
-                      : 'No expiry'}
+                      ? t(expired ? 'security.expired_on' : 'security.expires_on',
+                        { date: formatDate(row.expires_at) })
+                      : t('security.no_expiry')}
                   </span>
                 </div>
                 <Button
                   variant="danger"
-                  aria-label={`${row.label === SIGN_IN_LABEL ? 'Sign out' : 'Revoke'} ${displayLabel(row)}`}
+                  aria-label={t(row.label === SIGN_IN_LABEL ? 'security.sign_out_aria' : 'security.revoke_aria',
+                    { name: displayLabel(row) })}
                   onClick={() => void revoke(row)}
                 >
-                  {row.label === SIGN_IN_LABEL ? 'Sign out' : 'Revoke'}
+                  {row.label === SIGN_IN_LABEL ? t('security.sign_out') : t('security.revoke')}
                 </Button>
               </li>
             )
@@ -271,13 +271,8 @@ function NoPublicAddressNote() {
   return (
     <p class="sh-muted sh-secret-reveal__hint">
       {isSupervisorAddon()
-        ? 'This Social Home runs as a Home Assistant add-on and has no public '
-          + 'web address of its own. The token works for apps that can reach '
-          + 'the add-on directly.'
-        : 'This Social Home has no public web address set, so we can\'t show '
-          + 'the exact URL. The token works for any app that can reach Social '
-          + 'Home directly; an admin can set the address on the Connections '
-          + 'page (External URL).'}
+        ? t('security.no_address_addon')
+        : t('security.no_address')}
     </p>
   )
 }

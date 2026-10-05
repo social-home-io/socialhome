@@ -20,7 +20,6 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { FormError } from '@/components/FormError'
 import { showToast } from '@/components/Toast'
-import { t } from '@/i18n/i18n'
 import { HouseholdToggles, loadToggles } from '@/components/HouseholdToggles'
 import { HomeNameSettings } from '@/components/HomeNameSettings'
 import { HaUsersPanel } from './HaUsersPanel'
@@ -29,6 +28,7 @@ import CpAdminPanel from '@/features/child-protection/CpAdminPanel'
 import type { User } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { addBase } from '@/baseUrl'
+import { formatLocale, t } from '@/i18n/i18n'
 
 type TabId =
   | 'members' | 'ha-users' | 'spaces' | 'moderation'
@@ -79,7 +79,7 @@ export default function AdminPage() {
   if (!user?.is_admin) {
     return (
       <div class="sh-admin">
-        <p>You must be an admin to view this page.</p>
+        <p>{t('admin.not_admin')}</p>
       </div>
     )
   }
@@ -108,16 +108,16 @@ export default function AdminPage() {
     <div class="sh-admin">
 
       <nav class="sh-admin-tabs" role="tablist">
-        {visibleTabs.map((t) => (
+        {visibleTabs.map((id) => (
           <button
-            key={t}
+            key={id}
             type="button"
             role="tab"
-            aria-selected={tab.value === t}
-            class={tab.value === t ? 'sh-tab sh-tab--active' : 'sh-tab'}
-            onClick={() => (tab.value = t)}
+            aria-selected={tab.value === id}
+            class={tab.value === id ? 'sh-tab sh-tab--active' : 'sh-tab'}
+            onClick={() => (tab.value = id)}
           >
-            {_tabLabel(t)}
+            {_tabLabel(id)}
           </button>
         ))}
       </nav>
@@ -135,12 +135,18 @@ export default function AdminPage() {
   )
 }
 
-function _tabLabel(t: TabId): string {
-  if (t === 'ha-users') return 'HA users'
-  if (t === 'child-protection') return 'Child protection'
-  if (t === 'storage') return 'Storage'
-  if (t === 'backup') return 'Backup'
-  return t.charAt(0).toUpperCase() + t.slice(1)
+function _tabLabel(id: TabId): string {
+  switch (id) {
+    case 'members':          return t('admin.tab.members')
+    case 'ha-users':         return t('admin.tab.ha_users')
+    case 'spaces':           return t('admin.tab.spaces')
+    case 'moderation':       return t('admin.tab.moderation')
+    case 'sessions':         return t('admin.tab.sessions')
+    case 'child-protection': return t('admin.tab.child_protection')
+    case 'storage':          return t('admin.tab.storage')
+    case 'backup':           return t('admin.tab.backup')
+    case 'settings':         return t('admin.tab.settings')
+  }
 }
 
 // ─── Tabs ──────────────────────────────────────────────────────────────────
@@ -155,11 +161,11 @@ function CreateStandaloneUserForm() {
   const submit = async (e: Event) => {
     e.preventDefault()
     if (!username || !password) {
-      showToast('Username and password are required.', 'error')
+      showToast(t('admin.create.required'), 'error')
       return
     }
     if (password.length < 8) {
-      showToast('Password must be at least 8 characters.', 'error')
+      showToast(t('admin.create.too_short'), 'error')
       return
     }
     setBusy(true)
@@ -169,11 +175,11 @@ function CreateStandaloneUserForm() {
         display_name: displayName || username,
         is_admin: isAdmin,
       })
-      showToast(`Created @${username}`, 'success')
+      showToast(t('admin.create.created', { username }), 'success')
       setUsername(''); setPassword(''); setDisplayName(''); setIsAdmin(false)
       await loadAll()  // refresh the users list below
     } catch (e: any) {
-      showToast(e?.message || 'Create failed', 'error')
+      showToast(e?.message || t('admin.create.failed'), 'error')
     } finally {
       setBusy(false)
     }
@@ -182,11 +188,11 @@ function CreateStandaloneUserForm() {
   return (
     <details class="sh-admin-section">
       <summary>
-        <span class="sh-admin-create-summary">+ Create new user</span>
+        <span class="sh-admin-create-summary">+ {t('admin.create.summary')}</span>
       </summary>
       <form onSubmit={submit} class="sh-admin-create-user">
         <label>
-          Username
+          {t('admin.members.username')}
           <input
             type="text"
             value={username}
@@ -195,7 +201,7 @@ function CreateStandaloneUserForm() {
           />
         </label>
         <label>
-          Password
+          {t('admin.create.password')}
           <input
             type="password"
             autoComplete="new-password"
@@ -205,12 +211,12 @@ function CreateStandaloneUserForm() {
           />
         </label>
         <label>
-          Display name
+          {t('admin.create.display_name')}
           <input
             type="text"
             value={displayName}
             onInput={(e) => setDisplayName((e.target as HTMLInputElement).value)}
-            placeholder={username || 'Optional'}
+            placeholder={username || t('admin.create.optional')}
           />
         </label>
         <label class="sh-admin-checkbox">
@@ -219,10 +225,10 @@ function CreateStandaloneUserForm() {
             checked={isAdmin}
             onChange={(e) => setIsAdmin((e.target as HTMLInputElement).checked)}
           />
-          {' '}Make this user an admin
+          {' '}{t('admin.create.make_admin')}
         </label>
         <Button type="submit" disabled={busy}>
-          {busy ? 'Creating…' : 'Create user'}
+          {busy ? t('admin.create.creating') : t('admin.create.submit')}
         </Button>
       </form>
     </details>
@@ -237,14 +243,11 @@ function MembersTab() {
         u.user_id === userId ? { ...u, is_admin: !isAdmin } : u,
       )
     } catch (e: unknown) {
-      showToast(`Admin toggle failed: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('admin.members.toggle_failed', { error: String((e as Error)?.message ?? e) }), 'error')
     }
   }
   const exportUserData = async (u: User) => {
-    if (!await confirmDialog(
-      `Export all data for @${u.username}? The browser will download a\n`
-      + 'JSON file containing their posts, comments, DMs, tasks, calendar\n'
-      + 'events, and media references. Use responsibly (§GDPR).')) return
+    if (!await confirmDialog(t('admin.members.export_confirm', { username: u.username }))) return
     try {
       const resp = await fetch(`api/users/${u.user_id}/export`, {
         headers: {
@@ -252,7 +255,7 @@ function MembersTab() {
         },
       })
       if (!resp.ok) {
-        throw new Error(`Export failed: HTTP ${resp.status}`)
+        throw new Error(`HTTP ${resp.status}`)
       }
       const blob = await resp.blob()
       const url = URL.createObjectURL(blob)
@@ -263,29 +266,30 @@ function MembersTab() {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      showToast(`Exported data for @${u.username}`, 'success')
+      showToast(t('admin.members.exported', { username: u.username }), 'success')
     } catch (e: unknown) {
-      showToast(`Export failed: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('admin.export_failed', { error: String((e as Error)?.message ?? e) }), 'error')
     }
   }
   const isStandalone = managesLocalUsers()
   if (users.value.length === 0) {
     return (
       <section class="sh-admin-section">
-        <h2>Household members</h2>
+        <h2>{t('admin.members.heading')}</h2>
         {isStandalone && <CreateStandaloneUserForm />}
-        <p class="sh-muted">No household members yet.</p>
+        <p class="sh-muted">{t('admin.members.empty')}</p>
       </section>
     )
   }
   return (
     <section class="sh-admin-section">
-      <h2>Household members</h2>
+      <h2>{t('admin.members.heading')}</h2>
       {isStandalone && <CreateStandaloneUserForm />}
       <table class="sh-admin-table">
         <thead>
           <tr>
-            <th>Name</th><th>Username</th><th>Admin</th><th>Actions</th>
+            <th>{t('admin.members.name')}</th><th>{t('admin.members.username')}</th>
+            <th>{t('admin.members.admin')}</th><th>{t('admin.members.actions')}</th>
           </tr>
         </thead>
         <tbody>
@@ -299,15 +303,15 @@ function MembersTab() {
                   variant="secondary"
                   onClick={() => toggleAdmin(u.user_id, u.is_admin)}
                 >
-                  {u.is_admin ? 'Revoke admin' : 'Make admin'}
+                  {u.is_admin ? t('admin.members.revoke_admin') : t('admin.members.make_admin')}
                 </Button>
                 {' '}
                 <button
                   type="button" class="sh-link"
                   onClick={() => void exportUserData(u)}
-                  title="Download all of this user's data as JSON (§GDPR)"
+                  title={t('admin.members.export_title')}
                 >
-                  Export data
+                  {t('admin.members.export')}
                 </button>
                 {isStandalone && (
                   <>
@@ -315,9 +319,9 @@ function MembersTab() {
                     <button
                       type="button" class="sh-link"
                       onClick={() => void issuePasswordReset(u)}
-                      title="Mint a one-time, 1h-TTL reset link to send to this user"
+                      title={t('admin.members.reset_title')}
                     >
-                      Issue reset
+                      {t('admin.members.reset')}
                     </button>
                   </>
                 )}
@@ -338,20 +342,14 @@ async function issuePasswordReset(u: User): Promise<void> {
     const url = `${window.location.origin}/reset-password?token=${encodeURIComponent(resp.token)}`
     try {
       await navigator.clipboard.writeText(url)
-      showToast(
-        `Reset link copied — paste to @${u.username} (expires in 1h, single-use).`,
-        'success',
-      )
+      showToast(t('admin.members.reset_copied', { username: u.username }), 'success')
     } catch {
       // Clipboard blocked (e.g. non-secure context). Fall back to a
       // prompt the admin can copy out of manually.
-      window.prompt(
-        `Send this link to @${u.username} — expires in 1 hour, single-use:`,
-        url,
-      )
+      window.prompt(t('admin.members.reset_prompt', { username: u.username }), url)
     }
   } catch (e: unknown) {
-    showToast(`Issue reset failed: ${(e as Error)?.message ?? e}`, 'error')
+    showToast(t('admin.members.reset_failed', { error: String((e as Error)?.message ?? e) }), 'error')
   }
 }
 
@@ -385,12 +383,12 @@ async function loadSpaces() {
 }
 
 async function dissolveSpace(id: string) {
-  if (!await confirmDialog(`Dissolve space ${id}? This cannot be undone.`, { destructive: true })) return
+  if (!await confirmDialog(t('admin.spaces.dissolve_confirm', { id }), { destructive: true })) return
   try {
     await api.delete(`/api/spaces/${id}`)
     await loadSpaces()
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Dissolve failed', 'error')
+    showToast((e as Error).message || t('admin.spaces.dissolve_failed'), 'error')
   }
 }
 
@@ -421,33 +419,27 @@ async function loadPublications() {
 }
 
 async function unpublishFromGfs(spaceId: string, gfsId: string) {
-  if (!await confirmDialog(
-    'Unpublish this space from the GFS? It will disappear from the '
-    + 'global directory. Existing members remain members — this only '
-    + 'affects discoverability.')) return
+  if (!await confirmDialog(t('admin.spaces.unpublish_confirm'))) return
   try {
     await api.delete(`/api/spaces/${spaceId}/publish/${gfsId}`)
-    showToast('Unpublished', 'success')
+    showToast(t('admin.spaces.unpublished'), 'success')
     await loadPublications()
   } catch (e: unknown) {
-    showToast(`Unpublish failed: ${(e as Error)?.message ?? e}`, 'error')
+    showToast(t('admin.spaces.unpublish_failed', { error: String((e as Error)?.message ?? e) }), 'error')
   }
 }
 
 async function transferSpaceOwnership(id: string, currentOwner: string) {
-  const newOwnerId = prompt(
-    `Transfer ownership away from @${currentOwner}.\n\n` +
-    `Enter the new owner's user_id (a current member of this space):`,
-  )
+  const newOwnerId = prompt(t('admin.spaces.transfer_prompt', { owner: currentOwner }))
   if (!newOwnerId) return
   try {
     await api.post(`/api/spaces/${id}/ownership`, {
       to_user_id: newOwnerId.trim(),
     })
-    showToast('Ownership transferred', 'success')
+    showToast(t('admin.spaces.transferred'), 'success')
     await loadSpaces()
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Transfer failed', 'error')
+    showToast((e as Error).message || t('admin.spaces.transfer_failed'), 'error')
   }
 }
 
@@ -460,18 +452,19 @@ function SpacesTab() {
   if (spaceRows.value.length === 0) {
     return (
       <section class="sh-admin-section">
-        <h2>All spaces</h2>
-        <p class="sh-muted">No active spaces on this household yet.</p>
+        <h2>{t('admin.spaces.heading')}</h2>
+        <p class="sh-muted">{t('admin.spaces.empty')}</p>
       </section>
     )
   }
   return (
     <section class="sh-admin-section">
-      <h2>All spaces</h2>
+      <h2>{t('admin.spaces.heading')}</h2>
       <table class="sh-admin-table">
         <thead><tr>
-          <th>Name</th><th>Type</th><th>Owner</th>
-          <th>Members</th><th>Join</th><th></th>
+          <th>{t('admin.spaces.col.name')}</th><th>{t('admin.spaces.col.type')}</th>
+          <th>{t('admin.spaces.col.owner')}</th><th>{t('admin.spaces.col.members')}</th>
+          <th>{t('admin.spaces.col.join')}</th><th></th>
         </tr></thead>
         <tbody>
           {spaceRows.value.map(s => (
@@ -482,39 +475,34 @@ function SpacesTab() {
               <td>{s.member_count}</td>
               <td><span class="sh-muted">{s.join_mode}</span></td>
               <td>
-                <a class="sh-link" href={addBase(`/spaces/${s.id}`)}>Open</a>
+                <a class="sh-link" href={addBase(`/spaces/${s.id}`)}>{t('admin.spaces.open')}</a>
                 {' · '}
                 <button type="button" class="sh-link"
                   onClick={() => void transferSpaceOwnership(s.id, s.owner_username)}>
-                  Transfer
+                  {t('admin.spaces.transfer')}
                 </button>
                 {' · '}
                 <button type="button" class="sh-danger-link"
-                  onClick={() => void dissolveSpace(s.id)}>Dissolve</button>
+                  onClick={() => void dissolveSpace(s.id)}>
+                  {t('admin.spaces.dissolve')}
+                </button>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
 
-      <h2>Global Federation publications</h2>
-      <p class="sh-muted">
-        Spaces currently advertised to a paired GFS. Spaces of
-        <code> type=global</code> auto-publish; this table lets you
-        manually withdraw any publication without changing the space
-        type.
-      </p>
+      <h2>{t('admin.publications.heading')}</h2>
+      <p class="sh-muted">{t('admin.publications.intro')}</p>
       {publicationsLoading.value ? (
         <Spinner />
       ) : publications.value.length === 0 ? (
-        <p class="sh-muted">
-          No active publications. Create a <code>type=global</code>
-          space (or publish manually) to populate this list.
-        </p>
+        <p class="sh-muted">{t('admin.publications.empty')}</p>
       ) : (
         <table class="sh-admin-table">
           <thead><tr>
-            <th>Space</th><th>GFS</th><th>Published at</th><th></th>
+            <th>{t('admin.publications.col.space')}</th><th>GFS</th>
+            <th>{t('admin.publications.col.published')}</th><th></th>
           </tr></thead>
           <tbody>
             {publications.value.map((p) => (
@@ -528,7 +516,7 @@ function SpacesTab() {
                 </td>
                 <td>
                   {p.published_at
-                    ? new Date(p.published_at).toLocaleString()
+                    ? new Date(p.published_at).toLocaleString(formatLocale())
                     : '—'}
                 </td>
                 <td>
@@ -538,7 +526,7 @@ function SpacesTab() {
                       () => void unpublishFromGfs(p.space_id, p.gfs_id)
                     }
                   >
-                    Unpublish
+                    {t('admin.publications.unpublish')}
                   </button>
                 </td>
               </tr>
@@ -555,29 +543,29 @@ async function resolveReport(id: string, dismissed: boolean) {
   try {
     await api.post(`/api/admin/reports/${id}/resolve`, { dismissed })
     reports.value = reports.value.filter((r) => r.id !== id)
-    showToast(dismissed ? 'Report dismissed' : 'Report resolved', 'success')
+    showToast(dismissed ? t('reports.dismissed') : t('reports.resolved'), 'success')
   } catch (e: unknown) {
-    showToast(`Action failed: ${(e as Error)?.message ?? e}`, 'error')
+    showToast(t('admin.action_failed', { error: String((e as Error)?.message ?? e) }), 'error')
   }
 }
 
 // Wire enums from ``socialhome/domain/report.py`` (ReportTargetType /
 // ReportCategory), sentence-cased for the queue row.
-const _REPORT_TARGET_LABELS: Record<string, string> = {
-  post:      'Post',
-  comment:   'Comment',
-  user:      'Member',
-  space:     'Space',
-  highlight: 'Highlight',
-  moment:    'Moment',
+const _REPORT_TARGET_KEYS: Record<string, string> = {
+  post:      'admin.queue.target.post',
+  comment:   'admin.queue.target.comment',
+  user:      'admin.queue.target.user',
+  space:     'admin.queue.target.space',
+  highlight: 'admin.queue.target.highlight',
+  moment:    'admin.queue.target.moment',
 }
 
-const _REPORT_CATEGORY_LABELS: Record<string, string> = {
-  spam:           'spam',
-  harassment:     'harassment',
-  inappropriate:  'inappropriate',
-  misinformation: 'misinformation',
-  other:          'other',
+const _REPORT_CATEGORY_KEYS: Record<string, string> = {
+  spam:           'admin.queue.category.spam',
+  harassment:     'admin.queue.category.harassment',
+  inappropriate:  'admin.queue.category.inappropriate',
+  misinformation: 'admin.queue.category.misinformation',
+  other:          'admin.queue.category.other',
 }
 
 /** In-app link to the reported content when the SPA has a page for it by
@@ -594,22 +582,22 @@ function _reportTargetHref(r: ContentReport): string | null {
 }
 
 function _reporterLabel(r: ContentReport): string {
-  if (r.reporter_instance_id) return 'someone from another household'
+  if (r.reporter_instance_id) return t('admin.queue.reporter_other')
   const u = users.value.find((x) => x.user_id === r.reporter_user_id)
-  return u ? (u.display_name || u.username) : 'a household member'
+  return u ? (u.display_name || u.username) : t('admin.queue.reporter_member')
 }
 
 function ModerationTab() {
   if (reportsError.value) {
     return (
       <section class="sh-admin-section">
-        <h2>Moderation queue</h2>
+        <h2>{t('admin.queue.heading')}</h2>
         <div role="alert">
           <p class="sh-muted">
-            Couldn't load the moderation queue ({reportsError.value}).
+            {t('admin.queue.load_failed', { error: reportsError.value })}
           </p>
           <Button variant="secondary" onClick={() => void loadReports()}>
-            Retry
+            {t('common.retry')}
           </Button>
         </div>
       </section>
@@ -618,26 +606,21 @@ function ModerationTab() {
   if (reports.value.length === 0) {
     return (
       <section class="sh-admin-section">
-        <h2>Moderation queue</h2>
-        <p class="sh-muted">
-          No pending reports. Items appear here when someone reports a
-          post, comment, member, space, highlight, or moment.
-        </p>
+        <h2>{t('admin.queue.heading')}</h2>
+        <p class="sh-muted">{t('admin.queue.empty')}</p>
       </section>
     )
   }
   return (
     <section class="sh-admin-section">
-      <h2>Moderation queue</h2>
-      <p class="sh-muted sh-admin-section__hint">
-        Reports filed by household members. <strong>Resolve</strong> when
-        you've acted (removed / edited the content);
-        <strong> Dismiss</strong> when the report is unfounded.
-      </p>
+      <h2>{t('admin.queue.heading')}</h2>
+      <p class="sh-muted sh-admin-section__hint">{t('admin.queue.hint')}</p>
       <ol class="sh-admin-queue">
         {reports.value.map((r) => {
-          const target = _REPORT_TARGET_LABELS[r.target_type] ?? r.target_type
-          const category = _REPORT_CATEGORY_LABELS[r.category] ?? r.category
+          const targetKey = _REPORT_TARGET_KEYS[r.target_type]
+          const target = targetKey ? t(targetKey) : r.target_type
+          const categoryKey = _REPORT_CATEGORY_KEYS[r.category]
+          const category = categoryKey ? t(categoryKey) : r.category
           const href = _reportTargetHref(r)
           return (
             <li key={r.id} class="sh-admin-row">
@@ -646,15 +629,15 @@ function ModerationTab() {
                   ? <a href={addBase(href)}><strong>{target}</strong></a>
                   : <strong>{target}</strong>}
                 <span class="sh-muted">
-                  reported as {category} by {_reporterLabel(r)}
+                  {t('admin.queue.reported_as', { category, reporter: _reporterLabel(r) })}
                 </span>
                 {r.created_at && (
                   <time
                     class="sh-muted"
                     dateTime={r.created_at}
-                    title={new Date(r.created_at).toLocaleString()}
+                    title={new Date(r.created_at).toLocaleString(formatLocale())}
                   >
-                    {new Date(r.created_at).toLocaleDateString(undefined, {
+                    {new Date(r.created_at).toLocaleDateString(formatLocale(), {
                       month: 'short', day: 'numeric',
                       hour: '2-digit', minute: '2-digit',
                     })}
@@ -667,13 +650,13 @@ function ModerationTab() {
                   variant="secondary"
                   onClick={() => void resolveReport(r.id, true)}
                 >
-                  Dismiss
+                  {t('reports.dismiss')}
                 </Button>
                 <Button
                   variant="primary"
                   onClick={() => void resolveReport(r.id, false)}
                 >
-                  Resolve
+                  {t('reports.resolve')}
                 </Button>
               </div>
             </li>
@@ -688,39 +671,37 @@ function SessionsTab() {
   if (tokens.value.length === 0) {
     return (
       <section class="sh-admin-section">
-        <h2>Sessions</h2>
-        <p class="sh-muted">No active API tokens across the household.</p>
+        <h2>{t('admin.sessions.title')}</h2>
+        <p class="sh-muted">{t('admin.sessions.empty_all')}</p>
       </section>
     )
   }
   return (
     <section class="sh-admin-section">
-      <h2>Sessions</h2>
-      <p class="sh-muted">
-        Every active session across the household. Each row is one
-        signed-in browser or app. Revoke anything unfamiliar.
-      </p>
+      <h2>{t('admin.sessions.title')}</h2>
+      <p class="sh-muted">{t('admin.sessions.intro_all')}</p>
       <table class="sh-admin-table">
         <thead>
           <tr>
-            <th>User</th>
-            <th>Label</th><th>Created</th><th>Last used</th><th></th>
+            <th>{t('admin.sessions.user')}</th>
+            <th>{t('admin.sessions.label')}</th><th>{t('admin.sessions.created')}</th>
+            <th>{t('admin.sessions.last_used')}</th><th></th>
           </tr>
         </thead>
         <tbody>
-          {tokens.value.map((t) => (
-            <tr key={t.token_id}>
+          {tokens.value.map((tok) => (
+            <tr key={tok.token_id}>
               <td>
-                {t.display_name || t.username || '—'}
-                {t.username && (
-                  <span class="sh-muted"> @{t.username}</span>
+                {tok.display_name || tok.username || '—'}
+                {tok.username && (
+                  <span class="sh-muted"> @{tok.username}</span>
                 )}
               </td>
-              <td>{t.label}</td>
-              <td>{new Date(t.created_at).toLocaleString()}</td>
+              <td>{tok.label}</td>
+              <td>{new Date(tok.created_at).toLocaleString(formatLocale())}</td>
               <td>
-                {t.last_used_at
-                  ? new Date(t.last_used_at).toLocaleString()
+                {tok.last_used_at
+                  ? new Date(tok.last_used_at).toLocaleString(formatLocale())
                   : '—'}
               </td>
               <td>
@@ -728,24 +709,25 @@ function SessionsTab() {
                   variant="danger"
                   onClick={async () => {
                     if (!await confirmDialog(
-                      `Revoke "${t.label}" (${t.username || 'unknown user'})? `
-                      + 'Any client signed in with this token will be '
-                      + 'logged out immediately.', { destructive: true })) return
+                      t('admin.sessions.revoke_confirm', {
+                        label: tok.label,
+                        user: tok.username || t('admin.sessions.unknown_user'),
+                      }), { destructive: true })) return
                     try {
-                      await api.delete(`/api/admin/tokens/${t.token_id}`)
+                      await api.delete(`/api/admin/tokens/${tok.token_id}`)
                       tokens.value = tokens.value.filter(
-                        (x) => x.token_id !== t.token_id,
+                        (x) => x.token_id !== tok.token_id,
                       )
-                      showToast('Token revoked', 'info')
+                      showToast(t('admin.sessions.revoked'), 'info')
                     } catch (e: unknown) {
                       showToast(
-                        `Revoke failed: ${(e as Error)?.message ?? e}`,
+                        t('admin.sessions.revoke_failed', { error: String((e as Error)?.message ?? e) }),
                         'error',
                       )
                     }
                   }}
                 >
-                  Revoke
+                  {t('admin.sessions.revoke')}
                 </Button>
               </td>
             </tr>
@@ -761,7 +743,7 @@ function SettingsTab() {
 
   return (
     <section class="sh-admin-section">
-      <h2>Household settings</h2>
+      <h2>{t('admin.settings.heading')}</h2>
       <HomeNameSettings />
       <HouseholdToggles />
     </section>
@@ -794,10 +776,10 @@ async function loadStorage() {
 async function setStorageQuota(bytes: number) {
   try {
     await api.put('/api/admin/storage/quota', { quota_bytes: bytes })
-    showToast('Quota updated', 'success')
+    showToast(t('admin.storage.quota_updated'), 'success')
     await loadStorage()
   } catch (e: unknown) {
-    showToast(`Quota update failed: ${(e as Error)?.message ?? e}`, 'error')
+    showToast(t('admin.storage.quota_failed', { error: String((e as Error)?.message ?? e) }), 'error')
   }
 }
 
@@ -816,40 +798,39 @@ function StorageTab() {
   if (!u) {
     return (
       <section class="sh-admin-section">
-        <h2>Storage</h2>
-        <p class="sh-muted">Failed to load storage usage.</p>
+        <h2>{t('admin.tab.storage')}</h2>
+        <p class="sh-muted">{t('admin.storage.load_failed')}</p>
       </section>
     )
   }
   const unlimited = u.quota_bytes <= 0
   const onSetQuota = () => {
     const raw = prompt(
-      'Household storage quota in gibibytes (GiB).\n'
-      + 'Enter 0 to remove the cap.',
+      t('admin.storage.quota_prompt'),
       unlimited ? '0' : String(Math.round(u.quota_bytes / (1024 ** 3))),
     )
     if (raw === null) return
     const gib = Number(raw)
     if (!Number.isFinite(gib) || gib < 0) {
-      showToast('Invalid quota', 'error')
+      showToast(t('admin.storage.quota_invalid'), 'error')
       return
     }
     void setStorageQuota(Math.round(gib * (1024 ** 3)))
   }
   return (
     <section class="sh-admin-section">
-      <h2>Storage</h2>
+      <h2>{t('admin.tab.storage')}</h2>
       <dl class="sh-admin-stats">
-        <dt>Used</dt><dd>{_fmtBytes(u.used_bytes)}</dd>
-        <dt>Quota</dt>
-        <dd>{unlimited ? 'Unlimited' : _fmtBytes(u.quota_bytes)}</dd>
-        <dt>Available</dt>
+        <dt>{t('admin.storage.used')}</dt><dd>{_fmtBytes(u.used_bytes)}</dd>
+        <dt>{t('admin.storage.quota')}</dt>
+        <dd>{unlimited ? t('admin.storage.unlimited') : _fmtBytes(u.quota_bytes)}</dd>
+        <dt>{t('admin.storage.available')}</dt>
         <dd>{unlimited ? '—' : _fmtBytes(u.available_bytes)}</dd>
-        <dt>Used %</dt>
+        <dt>{t('admin.storage.used_pct')}</dt>
         <dd>{unlimited ? '—' : `${u.percent_used.toFixed(1)}%`}</dd>
       </dl>
       {!unlimited && (
-        <div class="sh-admin-progress" aria-label="Storage usage">
+        <div class="sh-admin-progress" aria-label={t('admin.storage.usage_aria')}>
           <div
             class="sh-admin-progress__bar"
             style={`width: ${Math.min(100, u.percent_used).toFixed(1)}%`}
@@ -858,14 +839,10 @@ function StorageTab() {
       )}
       <div class="sh-admin-actions">
         <Button variant="secondary" onClick={onSetQuota}>
-          Set quota…
+          {t('admin.storage.set_quota')}
         </Button>
       </div>
-      <p class="sh-muted">
-        Uploads that would push the household over the cap are rejected
-        at ingest time. Removing the cap (quota = 0) disables the
-        check entirely.
-      </p>
+      <p class="sh-muted">{t('admin.storage.hint')}</p>
     </section>
   )
 }
@@ -894,18 +871,15 @@ function BackupTab() {
       document.body.appendChild(a); a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      showToast('Backup downloaded', 'success')
+      showToast(t('admin.backup.downloaded'), 'success')
     }).catch((e: unknown) => {
-      showToast(`Export failed: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('admin.export_failed', { error: String((e as Error)?.message ?? e) }), 'error')
     })
   }
 
   const onImport = async (file: File) => {
     if (!await confirmDialog(
-      `Restore from "${file.name}"?\n\n`
-      + 'This will only succeed on an empty database. Existing data\n'
-      + 'prevents the restore so you don\'t accidentally overwrite it.\n'
-      + 'Export first if you want to keep the current state.', { destructive: true })) return
+      t('admin.backup.restore_confirm', { name: file.name }), { destructive: true })) return
     setImporting(true)
     try {
       const body = await file.arrayBuffer()
@@ -921,9 +895,9 @@ function BackupTab() {
         const txt = await resp.text()
         throw new Error(`HTTP ${resp.status}: ${txt}`)
       }
-      showToast('Backup restored', 'success')
+      showToast(t('admin.backup.restored'), 'success')
     } catch (e: unknown) {
-      showToast(`Import failed: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('admin.backup.restore_failed', { error: String((e as Error)?.message ?? e) }), 'error')
     } finally {
       setImporting(false)
     }
@@ -931,19 +905,14 @@ function BackupTab() {
 
   return (
     <section class="sh-admin-section">
-      <h2>Backup &amp; restore</h2>
-      <p class="sh-muted">
-        Download a complete household backup (WAL-checkpointed SQLite
-        plus all media) or restore from one. Restore only works into an
-        empty instance — use it when migrating to a new host, not to
-        roll back routine changes.
-      </p>
+      <h2>{t('admin.backup.heading')}</h2>
+      <p class="sh-muted">{t('admin.backup.intro')}</p>
       <div class="sh-admin-actions">
         <Button variant="primary" onClick={onExport}>
-          ⬇ Download backup
+          ⬇ {t('admin.backup.download')}
         </Button>
         <label class="sh-btn sh-btn--secondary sh-btn--file">
-          {importing ? 'Restoring…' : '⬆ Restore from file…'}
+          {importing ? t('admin.backup.restoring') : `⬆ ${t('admin.backup.restore')}`}
           <input
             type="file"
             accept=".tar.gz,.tgz,application/gzip"

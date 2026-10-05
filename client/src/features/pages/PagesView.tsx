@@ -47,7 +47,7 @@ import { useSignal } from '@preact/signals'
 import type { ComponentChildren } from 'preact'
 import { api } from '@/api'
 import { ws } from '@/ws'
-import { t } from '@/i18n/i18n'
+import { formatLocale, t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import { openReport } from '@/components/ReportDialog'
 import { Button } from '@/components/Button'
@@ -93,7 +93,7 @@ function tsMs(iso: string): number {
 
 /** A server timestamp for a tooltip, in the viewer's locale. */
 function tsTitle(iso: string): string {
-  return new Date(tsMs(iso)).toLocaleString()
+  return new Date(tsMs(iso)).toLocaleString(formatLocale())
 }
 
 /** Autosave debounce after the last keystroke (title or body). */

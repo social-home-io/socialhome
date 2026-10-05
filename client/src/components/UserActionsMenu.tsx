@@ -24,6 +24,7 @@ import {
   isFollowing,
   loadFollows,
 } from '@/store/follows'
+import { t } from '@/i18n/i18n'
 
 const open = signal(false)
 const targetUserId = signal('')
@@ -50,41 +51,41 @@ export function UserActionsMenu() {
   const onBlock = async () => {
     try {
       await blockUser(targetUserId.value)
-      showToast(`Blocked ${targetDisplayName.value}`, 'success')
+      showToast(t('user_actions.blocked', { name: targetDisplayName.value }), 'success')
       showConfirmBlock.value = false
       open.value = false
     } catch (e: unknown) {
-      showToast(`Couldn't block: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('user_actions.block_failed', { error: String((e as Error)?.message ?? e) }), 'error')
     }
   }
 
   const onUnblock = async () => {
     try {
       await unblockUser(targetUserId.value)
-      showToast(`Unblocked ${targetDisplayName.value}`, 'success')
+      showToast(t('user_actions.unblocked', { name: targetDisplayName.value }), 'success')
       open.value = false
     } catch (e: unknown) {
-      showToast(`Couldn't unblock: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('user_actions.unblock_failed', { error: String((e as Error)?.message ?? e) }), 'error')
     }
   }
 
   const onFollow = async () => {
     try {
       await followUser(targetUserId.value)
-      showToast(`Following ${targetDisplayName.value}`, 'success')
+      showToast(t('user_actions.followed', { name: targetDisplayName.value }), 'success')
       open.value = false
     } catch (e: unknown) {
-      showToast(`Couldn't follow: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('user_actions.follow_failed', { error: String((e as Error)?.message ?? e) }), 'error')
     }
   }
 
   const onUnfollow = async () => {
     try {
       await unfollowUser(targetUserId.value)
-      showToast(`Unfollowed ${targetDisplayName.value}`, 'success')
+      showToast(t('user_actions.unfollowed', { name: targetDisplayName.value }), 'success')
       open.value = false
     } catch (e: unknown) {
-      showToast(`Couldn't unfollow: ${(e as Error)?.message ?? e}`, 'error')
+      showToast(t('user_actions.unfollow_failed', { error: String((e as Error)?.message ?? e) }), 'error')
     }
   }
 
@@ -98,12 +99,12 @@ export function UserActionsMenu() {
         <div class="sh-user-actions">
           {!alreadyBlocked && !alreadyFollowing && (
             <Button variant="primary" onClick={onFollow}>
-              ➕ Follow
+              ➕ {t('user_actions.follow')}
             </Button>
           )}
           {!alreadyBlocked && alreadyFollowing && (
             <Button variant="secondary" onClick={onUnfollow}>
-              ✓ Unfollow
+              ✓ {t('user_actions.unfollow')}
             </Button>
           )}
           {/* Report sits between Follow and Block — it's the
@@ -119,7 +120,7 @@ export function UserActionsMenu() {
                 openReport('user', targetUserId.value)
               }}
             >
-              🚩 Report this user
+              🚩 {t('user_actions.report')}
             </Button>
           )}
           {!alreadyBlocked && (
@@ -127,28 +128,24 @@ export function UserActionsMenu() {
               variant="danger"
               onClick={() => { showConfirmBlock.value = true }}
             >
-              🚫 Block this user
+              🚫 {t('user_actions.block')}
             </Button>
           )}
           {alreadyBlocked && (
             <Button variant="secondary" onClick={onUnblock}>
-              ✓ Unblock
+              ✓ {t('user_actions.unblock')}
             </Button>
           )}
           <Button variant="ghost" onClick={() => { open.value = false }}>
-            Cancel
+            {t('common.cancel')}
           </Button>
         </div>
       </Modal>
       <ConfirmDialog
         open={showConfirmBlock.value}
-        title={`Block ${targetDisplayName.value}?`}
-        message={
-          `You won't see their highlights, posts, presence, or friends-list `
-          + `entry, and neither of you can DM the other. You can unblock `
-          + `anytime in Settings → Privacy → Blocked accounts.`
-        }
-        confirmLabel="Block"
+        title={t('user_actions.block_title', { name: targetDisplayName.value })}
+        message={t('user_actions.block_body')}
+        confirmLabel={t('user_actions.block_confirm')}
         destructive
         onConfirm={onBlock}
         onCancel={() => { showConfirmBlock.value = false }}

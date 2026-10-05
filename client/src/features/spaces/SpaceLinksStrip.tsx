@@ -8,6 +8,7 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
+import { t } from '@/i18n/i18n'
 
 interface SpaceLink {
   id: string
@@ -42,7 +43,7 @@ export function SpaceLinksStrip({ spaceId }: Props) {
   if (links.length === 0) return null
 
   return (
-    <div class="sh-space-links-strip" role="navigation" aria-label="Quick links">
+    <div class="sh-space-links-strip" role="navigation" aria-label={t('space.links.title')}>
       {links.map(link => (
         <a key={link.id}
            href={link.url}

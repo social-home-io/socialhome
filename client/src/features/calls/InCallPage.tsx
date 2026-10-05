@@ -24,18 +24,21 @@ import {
   callPeers, callType, getPeerConnection, hangupCall, hasCamera, isCallLive,
   localStream, resetCall, type CallPeer, type CallPhase, type PeerState,
 } from './callSession'
+import { t } from '@/i18n/i18n'
 
 const durationSeconds  = signal<number>(0)
 const micMuted         = signal<boolean>(false)
 const cameraOff        = signal<boolean>(false)
 const speakerMuted     = signal<boolean>(false)
+// Shown via t(`calls.quality.${quality}`): calls.quality.good / .fair / .poor
 const quality          = signal<'good' | 'fair' | 'poor'>('good')
 
+/** Translation keys for the 1:1 status line, looked up at render. */
 const STATUS_COPY: Partial<Record<CallPhase, string>> = {
-  starting:     'Starting call…',
-  ringing:      'Calling…',
-  connecting:   'Connecting…',
-  reconnecting: 'Reconnecting…',
+  starting:     'calls.status.starting',
+  ringing:      'calls.status.calling',
+  connecting:   'calls.status.connecting',
+  reconnecting: 'calls.status.reconnecting',
 }
 
 function formatDuration(sec: number): string {
@@ -44,14 +47,15 @@ function formatDuration(sec: number): string {
   return `${m}:${s}`
 }
 
+/** Translation keys for a group-call tile's state, looked up at render. */
 const PEER_STATUS: Partial<Record<PeerState, string>> = {
-  ringing:      'Ringing…',
-  connecting:   'Connecting…',
-  reconnecting: 'Reconnecting…',
+  ringing:      'calls.status.ringing',
+  connecting:   'calls.status.connecting',
+  reconnecting: 'calls.status.reconnecting',
 }
 
 function videoOn(stream: MediaStream | null): boolean {
-  return stream?.getVideoTracks().some(t => t.enabled) ?? false
+  return stream?.getVideoTracks().some(tr => tr.enabled) ?? false
 }
 
 /** One remote participant of a group call: their video (or initial when
@@ -62,7 +66,8 @@ function PeerTile({ peer, muted }: { peer: CallPeer, muted: boolean }) {
     if (ref.current) ref.current.srcObject = peer.stream
   }, [peer.stream])
   const video = (peer.stream?.getVideoTracks().length ?? 0) > 0
-  const status = PEER_STATUS[peer.state]
+  const statusKey = PEER_STATUS[peer.state]
+  const status = statusKey ? t(statusKey) : undefined
   return (
     <div class="sh-incall-tile" data-state={peer.state}>
       <video ref={ref} class="sh-incall-tile-video" autoplay playsinline muted={muted}
@@ -162,13 +167,13 @@ export default function InCallPage() {
   const toggleMic = () => {
     const s = localStream.value
     if (!s) return
-    s.getAudioTracks().forEach(t => t.enabled = !t.enabled)
+    s.getAudioTracks().forEach(tr => tr.enabled = !tr.enabled)
     micMuted.value = !micMuted.value
   }
   const toggleCamera = () => {
     const s = localStream.value
     if (!s || !hasCamera.value) return
-    s.getVideoTracks().forEach(t => t.enabled = !t.enabled)
+    s.getVideoTracks().forEach(tr => tr.enabled = !tr.enabled)
     cameraOff.value = !videoOn(s)
   }
   const toggleSpeaker = () => {
@@ -194,37 +199,37 @@ export default function InCallPage() {
 
   if (phase === 'idle' || phase === 'failed') {
     const message = phase === 'failed'
-      ? (callEndReason.value ?? "The call couldn't be connected.")
-      : "This call isn't connected on this device — it may have ended, or "
-        + 'the page reloaded. Going back ends it, so nobody is left waiting.'
+      ? (callEndReason.value ?? t('calls.page.connect_failed'))
+      : t('calls.page.not_connected_body')
     return (
       <div class="sh-incall sh-incall--closed" role="alert">
         <div class="sh-incall-closed-card">
-          <strong>{phase === 'failed' ? 'Call failed' : 'Call not connected'}</strong>
+          <strong>{phase === 'failed' ? t('calls.page.failed') : t('calls.page.not_connected')}</strong>
           <p>{message}</p>
-          <Button onClick={phase === 'failed' ? leave : abandon}>Back to chats</Button>
+          <Button onClick={phase === 'failed' ? leave : abandon}>{t('calls.page.back_to_chats')}</Button>
         </div>
       </div>
     )
   }
 
   // A group call shows each participant's state on their own tile.
-  const status = group ? undefined : STATUS_COPY[phase]
+  const statusKey = group ? undefined : STATUS_COPY[phase]
+  const status = statusKey ? t(statusKey) : undefined
   return (
     <div class="sh-incall">
       <header class="sh-incall-header">
-        <span class="sh-incall-duration" aria-label="Call duration">
+        <span class="sh-incall-duration" aria-label={t('calls.page.duration')}>
           {live ? formatDuration(durationSeconds.value) : ''}
         </span>
         {live && (
           <span class={`sh-incall-quality sh-q-${quality.value}`}
-                aria-label="Connection quality">{quality.value}</span>
+                aria-label={t('calls.page.quality')}>{t(`calls.quality.${quality.value}`)}</span>
         )}
       </header>
 
       {group ? (
         <div class="sh-incall-grid" data-count={peers.length}
-             role="list" aria-label="Call participants">
+             role="list" aria-label={t('calls.page.participants')}>
           {peers.map(p => (
             <div role="listitem" key={p.userId} class="sh-incall-grid-cell">
               <PeerTile peer={p} muted={speakerMuted.value} />
@@ -244,7 +249,7 @@ export default function InCallPage() {
         <Button class={micMuted.value ? 'sh-ctrl-off' : ''}
                 onClick={toggleMic}
                 aria-pressed={micMuted.value}
-                aria-label={micMuted.value ? 'Unmute mic' : 'Mute mic'}>
+                aria-label={micMuted.value ? t('calls.ctrl.unmute_mic') : t('calls.ctrl.mute_mic')}>
           {micMuted.value ? '🎤🚫' : '🎤'}
         </Button>
         <Button class={cameraOff.value ? 'sh-ctrl-off' : ''}
@@ -252,17 +257,17 @@ export default function InCallPage() {
                 disabled={!hasCamera.value}
                 aria-pressed={cameraOff.value}
                 aria-label={!hasCamera.value
-                  ? (callType.value === 'audio' ? 'Camera is off in audio calls' : 'No camera available')
-                  : cameraOff.value ? 'Turn camera on' : 'Turn camera off'}>
+                  ? (callType.value === 'audio' ? t('calls.ctrl.camera_audio_call') : t('calls.ctrl.no_camera'))
+                  : cameraOff.value ? t('calls.ctrl.camera_on') : t('calls.ctrl.camera_off')}>
           {cameraOff.value ? '🎥🚫' : '🎥'}
         </Button>
         <Button class={speakerMuted.value ? 'sh-ctrl-off' : ''}
                 onClick={toggleSpeaker}
                 aria-pressed={speakerMuted.value}
-                aria-label={speakerMuted.value ? 'Unmute speaker' : 'Mute speaker'}>
+                aria-label={speakerMuted.value ? t('calls.ctrl.unmute_speaker') : t('calls.ctrl.mute_speaker')}>
           {speakerMuted.value ? '🔊🚫' : '🔊'}
         </Button>
-        <Button class="sh-hangup" onClick={hangup} aria-label="Hang up">🔴</Button>
+        <Button class="sh-hangup" onClick={hangup} aria-label={t('calls.hang_up')}>🔴</Button>
       </footer>
     </div>
   )

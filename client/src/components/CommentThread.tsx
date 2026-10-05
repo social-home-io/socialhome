@@ -35,7 +35,7 @@ import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { Comment } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { openReport } from './ReportDialog'
-import { t } from '@/i18n/i18n'
+import { t, formatLocale } from '@/i18n/i18n'
 
 interface CommentThreadProps {
   comments: Comment[]
@@ -149,13 +149,13 @@ export function CommentThread(
     return (
       <div class="sh-comments">
         <div class="sh-comment-empty sh-muted">
-          No comments yet — be the first to reply.
+          {t('comments.empty')}
         </div>
         {postId && (
           <TypingIndicator scope={`post:${postId}`} />
         )}
         <div class="sh-comment-new">
-          <input placeholder="Add a comment…" value={newCommentContent.value}
+          <input placeholder={t('comments.placeholder')} value={newCommentContent.value}
             id="sh-comment-new-input"
             {...mentionAria('sh-comment-new-input', spaceId)}
             onInput={(e) => {
@@ -167,11 +167,11 @@ export function CommentThread(
               if (e.key === 'Enter') handleSubmit(null)
             }}
             onBlur={closeAutocompletes}
-            aria-label="New comment" />
+            aria-label={t('comments.new_aria')} />
           <EmojiPickButton target={newCommentContent} openKey="comment-new" />
           <Button onClick={() => handleSubmit(null)} loading={submitting.value}
                   disabled={!newCommentContent.value.trim()}>
-            Post
+            {t('comments.post')}
           </Button>
         </div>
         <EmojiAutocomplete />
@@ -198,11 +198,11 @@ export function CommentThread(
           )}
           {replyTo.value === c.id && (
             <div class="sh-comment-reply-form">
-              <input placeholder={`Reply to ${c.author}…`}
+              <input placeholder={t('comments.reply_placeholder', { name: c.author })}
                 id="sh-comment-reply-input"
                 {...mentionAria('sh-comment-reply-input', spaceId)}
                 value={replyContent.value} autoFocus
-                aria-label={`Reply to ${c.author}`}
+                aria-label={t('comments.reply_aria', { name: c.author })}
                 onInput={(e) => {
                   bindEmojiAwareInput(replyContent, spaceId)(e)
                   fireTyping()
@@ -215,12 +215,12 @@ export function CommentThread(
               <EmojiPickButton target={replyContent} openKey={`reply-${c.id}`} />
               <Button variant="secondary"
                       onClick={() => { replyTo.value = null; replyContent.value = '' }}>
-                Cancel
+                {t('common.cancel')}
               </Button>
               <Button onClick={() => handleSubmit(c.id)}
                       loading={submitting.value}
                       disabled={!replyContent.value.trim()}>
-                Reply
+                {t('comments.reply')}
               </Button>
             </div>
           )}
@@ -230,7 +230,7 @@ export function CommentThread(
         <TypingIndicator scope={`post:${postId}`} />
       )}
       <div class="sh-comment-new">
-        <input placeholder="Add a comment…" value={newCommentContent.value}
+        <input placeholder={t('comments.placeholder')} value={newCommentContent.value}
           id="sh-comment-new-input"
           {...mentionAria('sh-comment-new-input', spaceId)}
           onInput={(e) => {
@@ -242,11 +242,11 @@ export function CommentThread(
             if (e.key === 'Enter') handleSubmit(null)
           }}
           onBlur={closeAutocompletes}
-          aria-label="New comment" />
+          aria-label={t('comments.new_aria')} />
         <EmojiPickButton target={newCommentContent} openKey="comment-new" />
         <Button onClick={() => handleSubmit(null)} loading={submitting.value}
                 disabled={!newCommentContent.value.trim()}>
-          Post
+          {t('comments.post')}
         </Button>
       </div>
       {/* Mounted once for the whole thread; module-level state keeps it
@@ -321,14 +321,14 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
             <button type="button" class="sh-link"
                     disabled={saving}
                     onClick={() => void save()}>
-              Save
+              {t('common.save')}
             </button>
             <button type="button" class="sh-link sh-link--muted"
                     onClick={() => {
                       setEditing(false)
                       setDraft(comment.content ?? '')
                     }}>
-              Cancel
+              {t('common.cancel')}
             </button>
           </div>
         </div>
@@ -356,13 +356,13 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
         <div class="sh-comment-actions">
           {onReplyClick && (
             <button class="sh-link" type="button"
-                    onClick={onReplyClick}>Reply</button>
+                    onClick={onReplyClick}>{t('comments.reply')}</button>
           )}
-          <time title={new Date(comment.created_at).toLocaleString()}>
+          <time title={new Date(comment.created_at).toLocaleString(formatLocale())}>
             {formatRelative(comment.created_at)}
           </time>
           {comment.edited_at && (
-            <span class="sh-comment-edited">edited</span>
+            <span class="sh-comment-edited">{t('comments.edited')}</span>
           )}
           {hasMenu && (
             <div class="sh-comment-overflow-wrap">
@@ -371,7 +371,7 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
                 class="sh-comment-overflow"
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
-                aria-label="Comment options"
+                aria-label={t('comments.options_aria')}
                 onClick={() => setMenuOpen((v) => !v)}
                 onBlur={() => setTimeout(closeMenu, 100)}>
                 ···
@@ -387,7 +387,7 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
                         setDraft(comment.content ?? '')
                         setEditing(true)
                       }}>
-                      Edit
+                      {t('common.edit')}
                     </button>
                   )}
                   {canDelete && (
@@ -397,11 +397,11 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={async () => {
                         closeMenu()
-                        if (await confirmDialog('Delete this comment?', { destructive: true })) {
+                        if (await confirmDialog(t('comments.confirm_delete'), { destructive: true })) {
                           void onDelete!(comment.id)
                         }
                       }}>
-                      Delete
+                      {t('common.delete')}
                     </button>
                   )}
                   {canReport && (
@@ -428,12 +428,12 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
 function formatRelative(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
   const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
+  if (mins < 1) return t('time.just_now')
+  if (mins < 60) return t('time.minutes_ago', { n: String(mins) })
   const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
+  if (hours < 24) return t('time.hours_ago_short', { n: String(hours) })
   const days = Math.floor(hours / 24)
-  return `${days}d ago`
+  return t('time.days_ago', { n: String(days) })
 }
 
 /** Plain comment text with the space's known @-mentions highlighted.

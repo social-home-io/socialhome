@@ -9,6 +9,7 @@
 import { useState } from 'preact/hooks'
 import { Button } from './Button'
 import { Modal } from './Modal'
+import { t } from '@/i18n/i18n'
 
 export interface SlotDraft {
   slot_date:   string
@@ -58,60 +59,59 @@ export function ScheduleBuilder({ open, onSubmit, onClose }: Props) {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="📅 Propose meeting times">
+    <Modal open={open} onClose={onClose} title={`📅 ${t('schedule.builder.title')}`}>
       <form class="sh-form sh-schedule-builder" onSubmit={handleSubmit}>
         <label>
-          Title
+          {t('schedule.builder.name')}
           <input type="text" value={title} maxLength={120}
                  onInput={(e) =>
                    setTitle((e.target as HTMLInputElement).value)}
-                 placeholder="e.g. Pizza night"
+                 placeholder={t('schedule.builder.name_placeholder')}
                  autoFocus required />
         </label>
 
         <div>
-          <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>Times</strong>
+          <strong style={{ fontSize: 'var(--sh-font-size-sm)' }}>{t('schedule.builder.times')}</strong>
           <p class="sh-muted" style={{
             fontSize: 'var(--sh-font-size-xs)',
             margin: '0 0 var(--sh-space-sm)',
           }}>
-            Add one row per possible time. Leave the time fields blank
-            for all-day options.
+            {t('schedule.builder.times_hint')}
           </p>
           {slots.map((s, i) => (
             <div key={i} class="sh-schedule-builder-row">
-              <input type="date" aria-label={`Slot ${i + 1} date`}
+              <input type="date" aria-label={t('schedule.builder.slot_date', { n: String(i + 1) })}
                      value={s.slot_date} required
                      onInput={(e) => updateSlot(i, {
                        slot_date: (e.target as HTMLInputElement).value,
                      })} />
-              <input type="time" aria-label={`Slot ${i + 1} start time`}
-                     value={s.start_time} placeholder="Start"
+              <input type="time" aria-label={t('schedule.builder.slot_start', { n: String(i + 1) })}
+                     value={s.start_time} placeholder={t('schedule.builder.start')}
                      onInput={(e) => updateSlot(i, {
                        start_time: (e.target as HTMLInputElement).value,
                      })} />
-              <input type="time" aria-label={`Slot ${i + 1} end time`}
-                     value={s.end_time} placeholder="End"
+              <input type="time" aria-label={t('schedule.builder.slot_end', { n: String(i + 1) })}
+                     value={s.end_time} placeholder={t('schedule.builder.end')}
                      onInput={(e) => updateSlot(i, {
                        end_time: (e.target as HTMLInputElement).value,
                      })} />
               <button type="button" class="sh-poll-remove"
-                      aria-label={`Remove slot ${i + 1}`}
+                      aria-label={t('schedule.builder.remove_slot', { n: String(i + 1) })}
                       disabled={slots.length === 1}
                       onClick={() => removeSlot(i)}>✕</button>
             </div>
           ))}
           <button type="button" class="sh-link" onClick={addSlot}>
-            + Add another time
+            {t('schedule.builder.add_time')}
           </button>
         </div>
 
         <div class="sh-form-actions">
           <Button variant="secondary" type="button" onClick={onClose}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button type="submit" disabled={!canSubmit}>
-            Propose
+            {t('schedule.builder.propose')}
           </Button>
         </div>
       </form>

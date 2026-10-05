@@ -23,6 +23,7 @@
  * callback events directly.
  */
 import { signal } from '@preact/signals'
+import { t } from '@/i18n/i18n'
 
 export type UploadPhase = 'uploading' | 'processing' | 'done' | 'failed'
 
@@ -116,7 +117,7 @@ export function UploadProgressBar() {
   // Title sits above the bar so the filename has room to breathe and
   // we can show a status word ("Uploading…" / "Processing…") without
   // fighting the percentage for space. Centred on mobile.
-  const status = processing ? 'Processing…' : 'Uploading…'
+  const status = processing ? t('media.processing') : t('media.uploading')
   return (
     <div
       class={

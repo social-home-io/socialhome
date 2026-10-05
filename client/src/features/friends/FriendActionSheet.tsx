@@ -19,6 +19,7 @@ import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
 import { Avatar } from '@/components/Avatar'
 import { openAliasDialog } from '@/components/AliasDialog'
+import { t } from '@/i18n/i18n'
 
 /** Identifies the friend the sheet is opened for. ``username`` is
  *  required for local members (the DM-create endpoint takes
@@ -54,14 +55,14 @@ export interface FriendActionSheetProps {
 export function FriendActionSheet(
   { onStartDm, onAliasChanged }: FriendActionSheetProps,
 ) {
-  const t = target.value
-  if (!t) return null
+  const ft = target.value
+  if (!ft) return null
 
   const close = () => { target.value = null }
   const onMessage = async () => {
-    dmBusyId.value = t.user_id
+    dmBusyId.value = ft.user_id
     try {
-      await onStartDm(t)
+      await onStartDm(ft)
       close()
     } finally {
       dmBusyId.value = null
@@ -72,38 +73,38 @@ export function FriendActionSheet(
     // an empty z-stack — Modal stacking works either way, but
     // sequential clicks read better visually.
     const args = {
-      targetUserId: t.user_id,
-      globalDisplayName: t.display_name,
-      currentAlias: t.personal_alias,
+      targetUserId: ft.user_id,
+      globalDisplayName: ft.display_name,
+      currentAlias: ft.personal_alias,
       onSave: (newAlias: string | null) => {
-        onAliasChanged?.(t.user_id, newAlias)
+        onAliasChanged?.(ft.user_id, newAlias)
       },
     }
     close()
     openAliasDialog(args)
   }
 
-  const aliasSet = !!t.personal_alias && t.personal_alias !== t.display_name
-  const renameLabel = aliasSet ? '✏ Edit nickname' : '✏ Set nickname'
+  const aliasSet = !!ft.personal_alias && ft.personal_alias !== ft.display_name
+  const renameLabel = `✏ ${aliasSet ? t('friends.edit_nickname') : t('friends.set_nickname')}`
 
   return (
-    <Modal open={true} onClose={close} title={t.personal_alias ?? t.display_name}>
+    <Modal open={true} onClose={close} title={ft.personal_alias ?? ft.display_name}>
       <div class="sh-friend-actions">
         <div class="sh-friend-actions__header">
           <Avatar
-            name={t.personal_alias ?? t.display_name}
-            src={t.picture_url}
+            name={ft.personal_alias ?? ft.display_name}
+            src={ft.picture_url}
             size={48}
           />
           <div class="sh-friend-actions__identity">
-            <strong>{t.personal_alias ?? t.display_name}</strong>
+            <strong>{ft.personal_alias ?? ft.display_name}</strong>
             {aliasSet && (
               <span class="sh-muted sh-friend-actions__real-name">
-                Their name: {t.display_name}
+                {t('friends.their_name', { name: ft.display_name })}
               </span>
             )}
             <span class="sh-muted sh-friend-actions__household">
-              {t.household}
+              {ft.household}
             </span>
           </div>
         </div>
@@ -117,10 +118,10 @@ export function FriendActionSheet(
           </Button>
           <Button
             onClick={onMessage}
-            loading={dmBusyId.value === t.user_id}
+            loading={dmBusyId.value === ft.user_id}
             data-testid="friend-action-message"
           >
-            💬 Message
+            💬 {t('friends.message')}
           </Button>
         </div>
       </div>

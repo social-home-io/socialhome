@@ -1,5 +1,6 @@
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { t } from '@/i18n/i18n'
 
 /**
  * Instance metadata fetched from `GET /api/instance/config`.
@@ -45,7 +46,7 @@ export async function loadInstanceConfig(): Promise<InstanceConfig> {
       return typed
     })
     .catch((err) => {
-      instanceConfigError.value = err?.message || 'Failed to load instance config.'
+      instanceConfigError.value = err?.message || t('instance.config_failed')
       throw err
     })
     .finally(() => { inflight = null })

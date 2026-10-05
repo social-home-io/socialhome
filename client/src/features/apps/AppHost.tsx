@@ -22,6 +22,7 @@ import { addBase } from '@/baseUrl'
 import { ApiError } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
+import { t } from '@/i18n/i18n'
 
 export default function AppHost() {
   const { params } = useRoute()
@@ -49,7 +50,7 @@ export function AppHostInner({ appId }: { appId: string }) {
       if (err instanceof ApiError && err.status === 403) {
         setAgeRestricted(true)
       } else {
-        setError((err as Error).message ?? 'Could not load app.')
+        setError((err as Error).message ?? t('apps.host.load_failed'))
       }
     })
     return () => { cancelled = true }
@@ -78,7 +79,7 @@ export function AppHostInner({ appId }: { appId: string }) {
     <div class="sh-app-host">
       <header class="sh-app-host__bar">
         <Button variant="secondary" onClick={handleBack}>
-          ← Back
+          ← {t('common.back')}
         </Button>
         {runtime && (
           <span class="sh-app-host__title">{runtime.name}</span>
@@ -87,15 +88,15 @@ export function AppHostInner({ appId }: { appId: string }) {
 
       {!runtime && !error && !ageRestricted && (
         <div class="sh-app-host__status" aria-live="polite">
-          <Spinner label="Loading app…" />
+          <Spinner label={t('apps.host.loading')} />
         </div>
       )}
 
       {ageRestricted && (
         <div class="sh-app-host__status sh-app-host__status--age-restricted" role="alert">
-          <p>This app isn't available for your account.</p>
+          <p>{t('apps.host.age_restricted')}</p>
           <Button onClick={() => { window.location.href = addBase('/apps') }}>
-            Back to Apps
+            {t('apps.host.back_to_apps')}
           </Button>
         </div>
       )}
@@ -104,7 +105,7 @@ export function AppHostInner({ appId }: { appId: string }) {
         <div class="sh-app-host__status sh-app-host__status--error" role="alert">
           <p>{error}</p>
           <Button onClick={() => { window.location.href = addBase('/apps') }}>
-            Back to Apps
+            {t('apps.host.back_to_apps')}
           </Button>
         </div>
       )}

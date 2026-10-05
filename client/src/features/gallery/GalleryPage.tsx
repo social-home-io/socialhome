@@ -9,7 +9,7 @@
  * Used both for household-level (no space_id) and per-space galleries.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { t } from '@/i18n/i18n'
+import { t, isOne } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -92,7 +92,7 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
       if (activeAlbum.value && e.data.album_id === activeAlbum.value.id) {
         activeAlbum.value = null
         items.value = []
-        showToast('This album was deleted.', 'info')
+        showToast(t('gallery.album_deleted'), 'info')
       }
       void loadAlbums(spaceId, { quiet: true })
     }
@@ -143,12 +143,12 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
       <header class="sh-gallery-hero">
         <div class="sh-gallery-hero-headline">
           <strong>{albumCount}</strong>{' '}
-          {albumCount === 1 ? 'album' : 'albums'} ·{' '}
+          {t(isOne(albumCount) ? 'gallery.albums_word_one' : 'gallery.albums_word')} ·{' '}
           <strong>{itemCount}</strong>{' '}
-          {itemCount === 1 ? 'photo or video' : 'photos and videos'}
+          {t(isOne(itemCount) ? 'gallery.media_word_one' : 'gallery.media_word')}
         </div>
         <div class="sh-gallery-hero-actions">
-          <Button onClick={() => (showCreate.value = true)}>+ New album</Button>
+          <Button onClick={() => (showCreate.value = true)}>{t('gallery.new_album_btn')}</Button>
         </div>
       </header>
 
@@ -163,11 +163,10 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
       {albums.value.length === 0 ? (
         <div class="sh-empty-state">
           <div aria-hidden="true">📸</div>
-          <h3>No albums yet</h3>
-          <p>Albums are shared photo collections — holidays, birthdays,
-             pet updates, anything you want {spaceId ? 'this space' : 'the household'} to see.</p>
+          <h3>{t('gallery.empty_title')}</h3>
+          <p>{spaceId ? t('gallery.empty_body_space') : t('gallery.empty_body_household')}</p>
           <Button onClick={() => (showCreate.value = true)}>
-            + Create your first album
+            {t('gallery.create_first')}
           </Button>
         </div>
       ) : (
@@ -177,7 +176,7 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
               key={a.id}
               type="button"
               class={`sh-album-card${a.is_system ? ' sh-album-card--system' : ''}`}
-              aria-label={`Open album ${a.name} — ${a.item_count} items`}
+              aria-label={t(isOne(a.item_count) ? 'gallery.open_album_aria_one' : 'gallery.open_album_aria', { name: a.name, n: String(a.item_count) })}
               onClick={() => void openAlbum(a)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
@@ -192,16 +191,16 @@ export default function GalleryPage({ spaceId }: GalleryPageProps) {
                   {a.name}
                   {a.is_system && (
                     <span class="sh-album-system-badge"
-                          title="Auto-managed: contains every photo and video shared via the feed">
-                      <span aria-hidden="true">🔒</span> Auto
+                          title={t('gallery.auto_title')}>
+                      <span aria-hidden="true">🔒</span> {t('gallery.auto')}
                     </span>
                   )}
                 </strong>
                 <span class="sh-muted">
-                  {a.item_count} {a.item_count === 1 ? 'item' : 'items'}
+                  {t(isOne(a.item_count) ? 'gallery.items_one' : 'gallery.items', { n: String(a.item_count) })}
                 </span>
                 {a.retention_exempt && !a.is_system && (
-                  <span class="sh-badge">Kept</span>
+                  <span class="sh-badge">{t('gallery.kept')}</span>
                 )}
               </div>
             </button>
@@ -299,7 +298,7 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
     setUploadPct(null)
     setProcessing(false)
     showToast(
-      files.length === 1 ? 'Uploaded' : `Uploaded ${files.length} items`,
+      files.length === 1 ? t('gallery.uploaded_one') : t('gallery.uploaded', { n: String(files.length) }),
       'success',
     )
     await loadItems(album.id)
@@ -339,19 +338,19 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
       {...dragHandlers}
     >
       <header class="sh-page-header">
-        <Button variant="secondary" onClick={onBack}>← Albums</Button>
+        <Button variant="secondary" onClick={onBack}>← {t('gallery.albums')}</Button>
         <h1 style={{ margin: 0 }}>
           {album.name}
           {album.is_system && (
             <span class="sh-album-system-badge"
                   style={{ marginLeft: 'var(--sh-space-xs)' }}>
-              <span aria-hidden="true">🔒</span> Auto
+              <span aria-hidden="true">🔒</span> {t('gallery.auto')}
             </span>
           )}
         </h1>
         {!album.is_system && (
           <div class="sh-row">
-            <Button onClick={() => inputRef.current?.click()}>+ Upload</Button>
+            <Button onClick={() => inputRef.current?.click()}>{t('gallery.upload_btn')}</Button>
             <input
               ref={inputRef}
               type="file"
@@ -372,9 +371,7 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
       {album.is_system && (
         <div class="sh-album-system-hint">
           <span aria-hidden="true">📸</span>{' '}
-          Photos and videos shared to the feed appear here automatically.
-          Post a photo to add one — items are removed when their source
-          post is deleted.
+          {t('gallery.system_hint')}
         </div>
       )}
 
@@ -384,13 +381,13 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
              aria-valuemin={0} aria-valuemax={100}>
           <div class="sh-upload-progress-bar"
                style={{ width: processing ? '100%' : `${uploadPct.toFixed(0)}%` }} />
-          <span>{processing ? 'Processing…' : `Uploading… ${uploadPct.toFixed(0)}%`}</span>
+          <span>{processing ? t('media.processing') : t('media.uploading_percent', { n: uploadPct.toFixed(0) })}</span>
         </div>
       )}
 
       {dragOver && !album.is_system && (
         <div class="sh-drop-overlay" aria-hidden="true">
-          Drop to upload
+          {t('gallery.drop_to_upload')}
         </div>
       )}
 
@@ -399,13 +396,13 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
           <div aria-hidden="true">🖼️</div>
           {album.is_system ? (
             <>
-              <h3>No posts with photos or videos yet</h3>
-              <p>Share a photo or video in the feed to see it here.</p>
+              <h3>{t('gallery.system_empty_title')}</h3>
+              <p>{t('gallery.system_empty_body')}</p>
             </>
           ) : (
             <>
-              <h3>This album is empty</h3>
-              <p>Drop photos or videos here, or click <strong>+ Upload</strong>.</p>
+              <h3>{t('gallery.album_empty_title')}</h3>
+              <p>{t('gallery.album_empty_body_before')}<strong>{t('gallery.upload_btn')}</strong>{t('gallery.album_empty_body_after')}</p>
             </>
           )}
         </div>
@@ -426,10 +423,10 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
                 }
                 aria-label={
                   processing
-                    ? `${item.item_type} item — processing`
+                    ? t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })
                     : item.caption
-                      ? `${item.item_type}: ${item.caption}`
-                      : `${item.item_type} item`
+                      ? t('gallery.item_caption_aria', { type: itemTypeLabel(item.item_type), caption: item.caption })
+                      : itemTypeLabel(item.item_type)
                 }
                 aria-disabled={processing ? 'true' : undefined}
                 onClick={() => {
@@ -448,8 +445,8 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
                 )}
                 {processing && (
                   <span class="sh-gallery-item-processing">
-                    <Spinner label="Processing video" />
-                    <span class="sh-gallery-item-processing-msg">Processing…</span>
+                    <Spinner label={t('media.video_processing')} />
+                    <span class="sh-gallery-item-processing-msg">{t('media.processing')}</span>
                   </span>
                 )}
               </button>
@@ -459,6 +456,11 @@ function AlbumDetail({ album, onBack }: { album: Album, onBack: () => void }) {
       )}
     </div>
   )
+}
+
+/** Spoken name of a gallery item kind, for screen-reader labels. */
+function itemTypeLabel(kind: 'photo' | 'video'): string {
+  return kind === 'video' ? t('gallery.item_video') : t('gallery.item_photo')
 }
 
 function CreateAlbumForm({
@@ -484,10 +486,10 @@ function CreateAlbumForm({
         name: name.trim(),
         description: description.trim() || null,
       })
-      showToast('Album created', 'success')
+      showToast(t('gallery.created'), 'success')
       onCreated()
     } catch (err: unknown) {
-      showToast(`Create failed: ${(err as Error)?.message ?? err}`, 'error')
+      showToast(t('gallery.create_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     } finally {
       setBusy(false)
     }
@@ -496,18 +498,18 @@ function CreateAlbumForm({
   return (
     <form onSubmit={submit} class="sh-card" style={{ marginBottom: '1rem' }}>
       <label>
-        Name
+        {t('gallery.form.name')}
         <input
           type="text"
           maxLength={80}
           value={name}
           onInput={(e) => setName((e.target as HTMLInputElement).value)}
-          placeholder="e.g. Summer 2026"
+          placeholder={t('gallery.form.name_placeholder')}
           required
         />
       </label>
       <label>
-        Description (optional)
+        {t('gallery.form.description')}
         <textarea
           maxLength={500}
           value={description}
@@ -515,8 +517,8 @@ function CreateAlbumForm({
         />
       </label>
       <div class="sh-form-actions">
-        <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
-        <Button type="submit" loading={busy} disabled={!name.trim()}>Create</Button>
+        <Button variant="secondary" type="button" onClick={onClose}>{t('common.cancel')}</Button>
+        <Button type="submit" loading={busy} disabled={!name.trim()}>{t('gallery.form.create')}</Button>
       </div>
     </form>
   )
@@ -539,7 +541,7 @@ async function loadAlbums(spaceId?: string, { quiet = false } = {}) {
   } catch (err: unknown) {
     if (quiet) return
     showToast(
-      `Could not load albums: ${(err as Error)?.message ?? err}`,
+      t('gallery.load_albums_failed', { error: String((err as Error)?.message ?? err) }),
       'error',
     )
     albums.value = []
@@ -555,7 +557,7 @@ async function loadItems(albumId: string) {
     ) as Item[]
   } catch (err: unknown) {
     showToast(
-      `Could not load items: ${(err as Error)?.message ?? err}`,
+      t('gallery.load_items_failed', { error: String((err as Error)?.message ?? err) }),
       'error',
     )
     items.value = []

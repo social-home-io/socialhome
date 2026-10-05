@@ -97,11 +97,9 @@ const justPairedDisplayName = signal<string | null>(null)
  * - **ha** — the URL can be configured directly, and the integration
  *   will also supply it, so offer both.
  * - **standalone** — the external-URL instruction, unchanged in
- *   substance. "Settings → Federation" is the sidebar's own label for
- *   the page that now carries the field
- *   (`features/connections/ConnectionsPage`); it used to read
- *   "Connections", which matched neither the label nor any existing
- *   control.
+ *   substance. "Settings → Connections" is the sidebar's own label for
+ *   the page that carries the External URL field
+ *   (`features/connections/ConnectionsPage`).
  *
  * Read through the `@/platform` accessors rather than comparing mode
  * strings, mirroring the backend's "consume capabilities, never branch on
@@ -112,24 +110,12 @@ const justPairedDisplayName = signal<string | null>(null)
  */
 function notConfiguredHint(): string {
   if (isSupervisorAddon()) {
-    return (
-      'Install the Social Home integration in Home Assistant before '
-      + 'pairing — it gives this add-on the reachable address the other '
-      + 'household needs.'
-    )
+    return t('pairing.error.no_url_haos')
   }
   if (isHomeAssistant()) {
-    return (
-      "Set this Social Home's external URL in Settings → Federation "
-      + 'before pairing — the other household needs a reachable inbox URL. '
-      + 'Or install the Social Home integration in Home Assistant to '
-      + 'supply it automatically.'
-    )
+    return t('pairing.error.no_url_ha')
   }
-  return (
-    "Set this Social Home's external URL in Settings → Federation "
-    + 'before pairing — the other household needs a reachable inbox URL.'
-  )
+  return t('pairing.error.no_url')
 }
 
 /**
@@ -150,30 +136,27 @@ function friendlyPairError(err: unknown, stage?: 'initiate'): string {
       return notConfiguredHint()
     }
     if (err.status === 401 || err.status === 403) {
-      return 'Only household admins can pair. Ask an admin to retry.'
+      return t('pairing.error.not_admin')
     }
     if (err.status === 404) {
-      return (
-        "That pairing token wasn't found — it may have expired or been "
-        + 'used already. Generate a fresh one and try again.'
-      )
+      return t('pairing.error.not_found')
     }
     if (err.status === 409) {
-      return 'You’re already paired with this household.'
+      return t('pairing.error.already_paired')
     }
     if (err.status === 422) {
-      return 'The pairing code looks malformed. Try copying it again.'
+      return t('pairing.error.malformed')
     }
     if (err.status >= 500) {
-      return 'The server hit an error. Wait a moment and retry.'
+      return t('pairing.error.server')
     }
-    return `Couldn’t pair (${err.status}). Retry, or check your network.`
+    return t('pairing.error.status', { status: String(err.status) })
   }
   if (err instanceof Error && err.message) {
     // Network / parse failure — keep the message but trim the prefix.
     return err.message.replace(/^Error:\s*/, '')
   }
-  return 'Couldn’t pair. Retry, or check your network.'
+  return t('pairing.error.generic')
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -316,7 +299,7 @@ function SasInput({ autofilled }: { autofilled?: boolean }) {
       </div>
       {autofilled && (
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
-          ✓ Auto-filled from the other device. Confirm to finish.
+          {t('pairing.sas_autofilled')}
         </p>
       )}
     </div>
@@ -510,7 +493,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
       // advanced past the timed state by the time the timer fires.
       if (step.value === 'waiting' || step.value === 'sas-display') {
         step.value = 'failed'
-        peerHint.value = 'Pairing timed out — try again.'
+        peerHint.value = t('pairing.error.timed_out')
       }
     }, PAIRING_STEP_TIMEOUT_MS)
     return () => clearTimeout(timer)
@@ -760,7 +743,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
             <div class="sh-pairing-share">
               <div class="sh-pairing-share-qr">
                 <p class="sh-muted">{t('pairing.show_qr')}</p>
-                <QrCodeImg data={qrPayload.value} size={220} alt="Pairing QR code" />
+                <QrCodeImg data={qrPayload.value} size={220} alt={t('pairing.qr_alt')} />
               </div>
               <div class="sh-pairing-or" aria-hidden="true">
                 <span>{t('pairing.or_divider')}</span>

@@ -46,6 +46,7 @@ import {
   type IncomingCall,
 } from '@/store/calls'
 import { CallEmbedBlockedError, embedBlocksMicrophone, isFramed } from './embedPolicy'
+import { t } from '@/i18n/i18n'
 
 export type CallType = 'audio' | 'video'
 export type CallPhase =
@@ -139,11 +140,11 @@ export async function startCall(conversationId: string, type: CallType): Promise
       openSession(type),
       api.get(`/api/conversations/${conversationId}/members`) as Promise<MemberRow[]>,
     ])
-    if (unsubs !== session) throw new Error('Call cancelled')
+    if (unsubs !== session) throw new Error(t('calls.err.cancelled'))
     const others = members.filter(m => !m.is_self && m.user_id !== me)
-    if (others.length === 0) throw new Error('There is nobody else in this conversation to call.')
+    if (others.length === 0) throw new Error(t('calls.err.nobody_to_call'))
     if (others.length + 1 > MAX_CALL_PARTICIPANTS) {
-      throw new Error(`Group calls are limited to ${MAX_CALL_PARTICIPANTS} people.`)
+      throw new Error(t('calls.err.group_limit', { n: String(MAX_CALL_PARTICIPANTS) }))
     }
     for (const m of others) names.set(m.user_id, m.display_name || m.username || m.user_id)
     order = others.map(m => m.user_id)
@@ -155,7 +156,7 @@ export async function startCall(conversationId: string, type: CallType): Promise
       offers[m.user_id] = leg.pc.localDescription?.sdp ?? offer.sdp ?? ''
     }
     publishPeers()
-    if (unsubs !== session) throw new Error('Call cancelled')
+    if (unsubs !== session) throw new Error(t('calls.err.cancelled'))
     // 1:1 keeps the single-offer body older households understand.
     const body = others.length === 1
       ? { conversation_id: conversationId, call_type: type, sdp_offer: offers[others[0].user_id] }
@@ -164,7 +165,7 @@ export async function startCall(conversationId: string, type: CallType): Promise
     if (unsubs !== session) {
       // Hung up while the POST was in flight — tell the backend too.
       void api.post(`/api/calls/${r.call_id}/hangup`, {}).catch(() => {})
-      throw new Error('Call cancelled')
+      throw new Error(t('calls.err.cancelled'))
     }
     callId.value = r.call_id
     // A callee the backend didn't ring (no offer reached it) has no leg.
@@ -190,7 +191,7 @@ export async function startCall(conversationId: string, type: CallType): Promise
 export async function acceptCall(call: IncomingCall): Promise<void> {
   const offerSdp = (call.signed_sdp as SignedSdp | undefined)?.sdp
   if (typeof offerSdp !== 'string' || !offerSdp.trim()) {
-    throw new Error('This call has no connection offer to answer.')
+    throw new Error(t('calls.err.no_offer'))
   }
   begin('callee', call.call_type, call.conversation_id ?? null)
   callId.value = call.call_id
@@ -208,7 +209,7 @@ export async function acceptCall(call: IncomingCall): Promise<void> {
     setTimeout(() => {
       if (unsubs !== session || pending.size === 0) return
       pending = new Set()
-      if (!maybeFinish('Nobody else joined.')) refresh()
+      if (!maybeFinish(t('calls.end.nobody_joined'))) refresh()
     }, RING_TIMEOUT_MS)
   }
   try {
@@ -218,7 +219,7 @@ export async function acceptCall(call: IncomingCall): Promise<void> {
     drainRemoteIce()
     const answer = await leg.pc.createAnswer()
     await leg.pc.setLocalDescription(answer)
-    if (unsubs !== session) throw new Error('Call cancelled')
+    if (unsubs !== session) throw new Error(t('calls.err.cancelled'))
     await api.post(`/api/calls/${call.call_id}/answer`, {
       sdp_answer: leg.pc.localDescription?.sdp ?? answer.sdp,
     })
@@ -255,7 +256,7 @@ export function resetCall(): void {
 // ─── internals ──────────────────────────────────────────────────────────
 
 function begin(r: 'caller' | 'callee', type: CallType, conversationId: string | null): void {
-  if (role !== null) throw new Error("You're already in a call.")
+  if (role !== null) throw new Error(t('calls.err.already_in_call'))
   role = r
   me = currentUser.value?.user_id ?? ''
   callType.value = type
@@ -271,8 +272,8 @@ function begin(r: 'caller' | 'callee', type: CallType, conversationId: string | 
   callPeers.value = []
   unsubs = [
     ws.on('call.answered', onAnswered),
-    ws.on('call.ended', (e) => onRemoteLeave(e, 'The call ended.')),
-    ws.on('call.declined', (e) => onRemoteLeave(e, 'The call was declined.')),
+    ws.on('call.ended', (e) => onRemoteLeave(e, t('calls.end.ended'))),
+    ws.on('call.declined', (e) => onRemoteLeave(e, t('calls.end.declined'))),
     // ``store/calls`` queues every candidate and mesh offer; apply them
     // as they land.
     effect(() => { void pendingIce.value; drainRemoteIce() }),
@@ -291,8 +292,8 @@ async function openSession(type: CallType): Promise<MediaStream> {
   ])
   if (role === null || unsubs !== session) {
     // Torn down while waiting on the permission prompt.
-    stream.getTracks().forEach(t => t.stop())
-    throw new Error('Call cancelled')
+    stream.getTracks().forEach(tr => tr.stop())
+    throw new Error(t('calls.err.cancelled'))
   }
   iceServers = servers
   // Audio calls never open the camera, so there is no track to switch on
@@ -319,7 +320,7 @@ function openLeg(userId: string, stream: MediaStream, state: PeerState): Leg {
   }
   legs.set(userId, leg)
   pending.delete(userId)
-  stream.getTracks().forEach(t => conn.addTrack(t, stream))
+  stream.getTracks().forEach(tr => conn.addTrack(tr, stream))
 
   conn.ontrack = (evt) => {
     const ms = leg.stream ?? evt.streams[0] ?? new MediaStream()
@@ -351,7 +352,7 @@ function openLeg(userId: string, stream: MediaStream, state: PeerState): Leg {
     // Nobody picked up within the ringing TTL — stop showing them.
     leg.timer = setTimeout(() => {
       if (legs.get(userId) === leg && !leg.pc.remoteDescription) closeLeg(userId)
-      maybeFinish('Nobody answered.')
+      maybeFinish(t('calls.end.no_answer'))
     }, RING_TIMEOUT_MS)
   }
   return leg
@@ -415,7 +416,7 @@ async function answerPeer(from: string, sdp: string): Promise<void> {
 async function acquireMedia(type: CallType): Promise<MediaStream> {
   const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined
   if (!md?.getUserMedia) {
-    throw new Error('Calls need a secure (HTTPS) connection to use the microphone.')
+    throw new Error(t('calls.err.needs_https'))
   }
   if (embedBlocksMicrophone()) throw new CallEmbedBlockedError()
   // An audio call asks for the microphone only — no camera prompt, no
@@ -435,13 +436,12 @@ async function acquireMedia(type: CallType): Promise<MediaStream> {
       // ``allow`` attribute rather than from the user — Firefox and
       // Safari have no API to tell the two apart.
       if (isFramed()) throw new CallEmbedBlockedError({ cause: err, certain: false })
-      throw new Error('Microphone access is blocked. Allow it in your browser\'s site '
-        + 'settings, then try again.', { cause: err })
+      throw new Error(t('calls.err.mic_blocked'), { cause: err })
     }
     if (name === 'NotFoundError') {
-      throw new Error('No microphone was found on this device.', { cause: err })
+      throw new Error(t('calls.err.no_mic'), { cause: err })
     }
-    throw new Error(`Couldn't start the microphone: ${(err as Error)?.message ?? err}`,
+    throw new Error(t('calls.err.mic_failed', { reason: String((err as Error)?.message ?? err) }),
       { cause: err })
   }
 }
@@ -608,7 +608,7 @@ function teardown(phase: 'ended' | 'failed', reason: string | null): void {
   role = null
   for (const uid of [...legs.keys()]) closeLeg(uid)
   pending = new Set()
-  localStream.value?.getTracks().forEach(t => t.stop())
+  localStream.value?.getTracks().forEach(tr => tr.stop())
   localStream.value = null
   callPeers.value = []
   callEndReason.value = reason

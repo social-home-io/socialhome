@@ -22,6 +22,7 @@ import {
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { relativeChatTime, relativeDocsTime } from '@/utils/relativeTime'
+import { formatLocale, t } from '@/i18n/i18n'
 
 interface BlockRow {
   blocked_user_id: string
@@ -107,7 +108,7 @@ async function retrySection(minorId: string, section: SectionKey): Promise<void>
     )
   } catch (err: unknown) {
     showToast(
-      `Retry failed: ${(err as Error)?.message ?? err}`, 'error',
+      t('cp.dash.retry_failed', { error: String((err as Error)?.message ?? err) }), 'error',
     )
   }
 }
@@ -168,7 +169,7 @@ async function loadMinors(): Promise<void> {
     }))
     minors.value = bundles
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Could not load dashboard', 'error')
+    showToast((e as Error).message || t('cp.dash.load_failed'), 'error')
     minors.value = []
   } finally {
     loading.value = false
@@ -178,25 +179,25 @@ async function loadMinors(): Promise<void> {
 async function unblock(minorUserId: string, blockedUserId: string) {
   try {
     await api.delete(`/api/cp/minors/${minorUserId}/blocks/${blockedUserId}`)
-    showToast('Block removed', 'info')
+    showToast(t('cp.dash.block_removed'), 'info')
     void loadMinors()
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Unblock failed', 'error')
+    showToast((e as Error).message || t('cp.dash.unblock_failed'), 'error')
   }
 }
 
 async function kickFromSpace(minorUserId: string, spaceId: string, spaceName: string) {
-  if (!await confirmDialog(`Kick this minor from "${spaceName}"? They can be re-added later.`, { destructive: true })) {
+  if (!await confirmDialog(t('cp.dash.kick_confirm', { space: spaceName }), { destructive: true })) {
     return
   }
   try {
     await api.post(
       `/api/cp/minors/${minorUserId}/spaces/${spaceId}/kick`, {},
     )
-    showToast(`Removed from ${spaceName}`, 'success')
+    showToast(t('cp.dash.kicked', { space: spaceName }), 'success')
     void loadMinors()
   } catch (e: unknown) {
-    showToast((e as Error).message || 'Kick failed', 'error')
+    showToast((e as Error).message || t('cp.dash.kick_failed'), 'error')
   }
 }
 
@@ -217,15 +218,13 @@ export default function ParentDashboard() {
 
   return (
     <div class="sh-parent-dashboard">
-      <h2>Parent dashboard</h2>
-      <p class="sh-muted">Monitor activity for minors in your household.</p>
+      <h2>{t('cp.dash.heading')}</h2>
+      <p class="sh-muted">{t('cp.dash.intro')}</p>
 
       {minors.value.length === 0 ? (
         <div class="sh-empty-state">
-          <p>No minors assigned to your guardianship.</p>
-          <p class="sh-muted">
-            Ask a household admin to assign you as a guardian.
-          </p>
+          <p>{t('cp.dash.empty')}</p>
+          <p class="sh-muted">{t('cp.dash.empty_hint')}</p>
         </div>
       ) : (
         <div class="sh-minor-cards">
@@ -240,28 +239,27 @@ export default function ParentDashboard() {
               </header>
 
               <section class="sh-cp-blocks">
-                <strong>Blocked users</strong>
+                <strong>{t('cp.dash.blocked')}</strong>
                 {m.errors.blocks ? (
                   <SectionError minorId={m.user_id} section="blocks" />
                 ) : m.blocks.length === 0 ? (
-                  <p class="sh-muted">No blocks set.</p>
+                  <p class="sh-muted">{t('cp.dash.no_blocks')}</p>
                 ) : (
                   <ul>
                     {m.blocks.map(b => (
                       <li key={b.blocked_user_id} class="sh-row">
                         <span>{householdDisplayName(b.blocked_user_id)}</span>
                         <span class="sh-muted">
-                          since{' '}
                           <time
                             dateTime={b.blocked_at}
-                            title={new Date(b.blocked_at).toLocaleString()}
+                            title={new Date(b.blocked_at).toLocaleString(formatLocale())}
                           >
-                            {relativeDocsTime(b.blocked_at)}
+                            {t('cp.dash.since', { when: relativeDocsTime(b.blocked_at) })}
                           </time>
                         </span>
                         <Button variant="secondary"
                                 onClick={() => unblock(m.user_id, b.blocked_user_id)}>
-                          Unblock
+                          {t('cp.dash.unblock')}
                         </Button>
                       </li>
                     ))}
@@ -270,11 +268,11 @@ export default function ParentDashboard() {
               </section>
 
               <section class="sh-cp-spaces">
-                <strong>Joined spaces</strong>
+                <strong>{t('cp.dash.spaces')}</strong>
                 {m.errors.spaces ? (
                   <SectionError minorId={m.user_id} section="spaces" />
                 ) : m.spaces.length === 0 ? (
-                  <p class="sh-muted">Not in any space.</p>
+                  <p class="sh-muted">{t('cp.dash.no_spaces')}</p>
                 ) : (
                   <ul>
                     {m.spaces.map(s => (
@@ -284,7 +282,7 @@ export default function ParentDashboard() {
                         <Button variant="danger"
                                 onClick={() =>
                                   kickFromSpace(m.user_id, s.id, s.name)}>
-                          Kick
+                          {t('cp.dash.kick')}
                         </Button>
                       </li>
                     ))}
@@ -293,21 +291,21 @@ export default function ParentDashboard() {
               </section>
 
               <section class="sh-cp-convs">
-                <strong>Active conversations</strong>
+                <strong>{t('cp.dash.conversations')}</strong>
                 {m.errors.conversations ? (
                   <SectionError minorId={m.user_id} section="conversations" />
                 ) : m.conversations.length === 0 ? (
-                  <p class="sh-muted">Not in any conversation.</p>
+                  <p class="sh-muted">{t('cp.dash.no_conversations')}</p>
                 ) : (
                   <ul>
                     {m.conversations.map(c => (
                       <li key={c.id} class="sh-row">
-                        <span>{c.name || (c.type === 'dm' ? 'Direct message' : 'Group')}</span>
+                        <span>{c.name || (c.type === 'dm' ? t('cp.dash.direct_message') : t('cp.dash.group'))}</span>
                         <span class="sh-muted">
                           {c.last_message_at ? (
                             <time
                               dateTime={c.last_message_at}
-                              title={new Date(c.last_message_at).toLocaleString()}
+                              title={new Date(c.last_message_at).toLocaleString(formatLocale())}
                             >
                               {relativeChatTime(c.last_message_at)}
                             </time>
@@ -320,11 +318,11 @@ export default function ParentDashboard() {
               </section>
 
               <section class="sh-cp-contacts">
-                <strong>Chats with</strong>
+                <strong>{t('cp.dash.contacts')}</strong>
                 {m.errors.contacts ? (
                   <SectionError minorId={m.user_id} section="contacts" />
                 ) : m.contacts.length === 0 ? (
-                  <p class="sh-muted">Not messaging anyone.</p>
+                  <p class="sh-muted">{t('cp.dash.no_contacts')}</p>
                 ) : (
                   <ul>
                     {m.contacts.map(c => (
@@ -339,7 +337,7 @@ export default function ParentDashboard() {
               <Button
                 variant="secondary"
                 onClick={() => openLog.value = openLog.value === m.user_id ? null : m.user_id}>
-                {openLog.value === m.user_id ? 'Hide audit log' : 'Audit log'}
+                {openLog.value === m.user_id ? t('cp.dash.hide_log') : t('cp.dash.show_log')}
               </Button>
               {openLog.value === m.user_id && (
                 <GuardianAuditLog minorId={m.user_id} />
@@ -358,13 +356,13 @@ function SectionError({
   return (
     <div class="sh-error" role="alert" style={{ marginTop: '0.25rem' }}>
       <p class="sh-muted" style={{ margin: 0 }}>
-        Couldn't load this section.
+        {t('cp.dash.section_failed')}
       </p>
       <Button
         variant="secondary"
         onClick={() => void retrySection(minorId, section)}
       >
-        Retry
+        {t('common.retry')}
       </Button>
     </div>
   )

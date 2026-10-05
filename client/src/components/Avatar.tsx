@@ -6,6 +6,7 @@
  *   • ``null`` / undefined → no dot (offline = absent signal, not grey clutter)
  */
 import { useEffect, useState } from 'preact/hooks'
+import { t } from '@/i18n/i18n'
 
 type OnlineStatus = 'online' | 'idle' | null
 
@@ -56,7 +57,7 @@ export function Avatar({ src, name, size = 40, onClick, online }: AvatarProps) {
 
   // Wrapper carries the dot. The inline label gives screen readers
   // context — sighted users get the colour cue from the dot itself.
-  const label = online === 'idle' ? `${name} is idle` : `${name} is online`
+  const label = t(online === 'idle' ? 'avatar.idle' : 'avatar.online', { name })
   return (
     <span class="sh-avatar-wrap" aria-label={label} role="img">
       {inner}

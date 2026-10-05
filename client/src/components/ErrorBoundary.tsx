@@ -5,6 +5,7 @@
 import { Component } from 'preact'
 import type { ComponentChildren } from 'preact'
 import { Button } from './Button'
+import { t } from '@/i18n/i18n'
 
 interface Props {
   children: ComponentChildren
@@ -30,10 +31,10 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.hasError) {
       return (
         <div class="sh-error-state">
-          <h2>Something went wrong</h2>
-          <p class="sh-muted">{this.state.error?.message || 'An unexpected error occurred.'}</p>
+          <h2>{t('error_boundary.title')}</h2>
+          <p class="sh-muted">{this.state.error?.message || t('error_boundary.unexpected')}</p>
           <Button onClick={() => this.setState({ hasError: false, error: null })}>
-            Try again
+            {t('common.try_again')}
           </Button>
         </div>
       )

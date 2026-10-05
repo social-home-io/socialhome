@@ -22,7 +22,7 @@ import { ScheduleUI } from './ScheduleUI'
 import { currentUser } from '@/store/auth'
 import { spaceMentionRender } from '@/store/spaceMembers'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
-import { t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
 import { Button } from './Button'
 import type { FeedPost } from '@/types'
 import { addBase } from '@/baseUrl'
@@ -86,7 +86,7 @@ export function PostCard({ post, onReact, onComment, onDelete, onEdit, spaceId, 
   if (post.pinned) {
     return (
       <article class="sh-post sh-post--pinned">
-        <div class="sh-post-pin-badge">📌 Pinned</div>
+        <div class="sh-post-pin-badge">📌 {t('post.pinned')}</div>
         <PostContent post={post} timeAgo={timeAgo} onReact={onReact}
           onComment={onComment} onDelete={onDelete} onEdit={onEdit}
           spaceId={spaceId} spaceName={spaceName} surface={surface} />
@@ -139,10 +139,10 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
   const botAttribution = !isBotPost(post)
     ? null
     : bot === null
-      ? 'via Home Assistant'
+      ? t('post.via', { name: 'Home Assistant' })
       : bot.scope === 'space'
-        ? 'via Home Assistant'
-        : `via ${bot.created_by_display_name}`
+        ? t('post.via', { name: 'Home Assistant' })
+        : t('post.via', { name: bot.created_by_display_name })
 
   return (
     <>
@@ -182,7 +182,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
               ref={menuButton}
               class="sh-post-overflow"
               type="button"
-              aria-label="Post actions"
+              aria-label={t('post.actions')}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen((v) => !v)}
@@ -208,7 +208,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => { closeMenu(); onDelete() }}
                   >
-                    Delete
+                    {t('common.delete')}
                   </button>
                 )}
                 <button
@@ -230,7 +230,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
       {/* Content */}
       <div class="sh-post-content">
         {post.content === null ? (
-          <em class="sh-muted">This post was deleted</em>
+          <em class="sh-muted">{t('post.deleted')}</em>
         ) : (
           <>
             {/* Event posts own their title rendering inside
@@ -319,7 +319,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
             <div class="sh-reaction-add-wrap">
               <button
                 class="sh-reaction-add"
-                aria-label="Add reaction"
+                aria-label={t('post.add_reaction')}
                 aria-haspopup="dialog"
                 aria-expanded={reactionPickerFor.value === post.id}
                 onClick={() => {
@@ -346,17 +346,13 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
             onClick={onComment}
             aria-label={
               post.comment_count === 0
-                ? 'Comment on this post'
-                : post.comment_count === 1
-                  ? '1 comment — open thread'
-                  : `${post.comment_count} comments — open thread`
+                ? t('post.comment_aria')
+                : t(isOne(post.comment_count) ? 'post.comments_open_one' : 'post.comments_open', { n: String(post.comment_count) })
             }
           >
             💬 {post.comment_count === 0
-              ? 'Comment'
-              : post.comment_count === 1
-                ? '1 comment'
-                : `${post.comment_count} comments`}
+              ? t('post.comment')
+              : t(isOne(post.comment_count) ? 'post.comments_one' : 'post.comments', { n: String(post.comment_count) })}
           </button>
         </div>
       )}
@@ -371,7 +367,7 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
           type="button"
           class="sh-post-latest-comment"
           onClick={onComment}
-          aria-label="Open comment thread"
+          aria-label={t('post.open_thread')}
         >
           <LatestCommentPreview
             scopedSpaceId={scopedSpaceId}
@@ -396,11 +392,11 @@ function LatestCommentPreview({
   const authorName = resolveDisplayName(scopedSpaceId, comment.author, comment.author)
   const avatarUrl = resolveAvatar(scopedSpaceId, comment.author, null)
   const body = comment.deleted
-    ? '(comment removed)'
+    ? t('post.comment_removed')
     : comment.content
       ? comment.content.replace(/\s+/g, ' ').trim()
       : comment.media_url
-        ? '🖼️ image'
+        ? `🖼️ ${t('post.image')}`
         : ''
   const truncated = body.length > 120 ? `${body.slice(0, 120)}…` : body
   return (
@@ -453,7 +449,7 @@ function PostImageGrid({ urls, alt }: { urls: string[]; alt?: string }) {
         <button
           type="button"
           class="sh-post-image-tile sh-post-image-tile--more"
-          aria-label={`Open ${urls.length} images`}
+          aria-label={t('post.open_images', { n: String(urls.length) })}
           onClick={() => open(visibleCount)}
         >
           <img src={urls[visibleCount]} alt="" loading="lazy" />
@@ -560,7 +556,7 @@ function PostBody({ content, spaceId, authorId }: {
           class="sh-post-body-more sh-link"
           onClick={() => setExpanded(true)}
         >
-          Show more
+          {t('post.show_more')}
         </button>
       )}
     </div>
@@ -571,10 +567,10 @@ function PostBody({ content, spaceId, authorId }: {
 function formatRelative(isoDate: string): string {
   const diff = Date.now() - new Date(isoDate).getTime()
   const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
+  if (mins < 1) return t('time.just_now')
+  if (mins < 60) return t('time.minutes_ago_short', { n: String(mins) })
   const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
+  if (hours < 24) return t('time.hours_ago_short', { n: String(hours) })
   const days = Math.floor(hours / 24)
-  return `${days}d ago`
+  return t('time.days_ago_short', { n: String(days) })
 }

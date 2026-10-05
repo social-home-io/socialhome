@@ -19,6 +19,7 @@
  */
 import { signal } from '@preact/signals'
 import { ConfirmDialog } from './ConfirmDialog'
+import { t } from '@/i18n/i18n'
 
 interface ConfirmOpts {
   /** Title shown at the top of the modal. Default: "Are you sure?". */
@@ -69,7 +70,7 @@ export function ConfirmDialogHost() {
   return (
     <ConfirmDialog
       open={true}
-      title={p.title ?? 'Are you sure?'}
+      title={p.title ?? t('confirm.default_title')}
       message={p.message}
       confirmLabel={p.confirmLabel}
       cancelLabel={p.cancelLabel}

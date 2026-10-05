@@ -22,6 +22,7 @@
  */
 import { Spinner } from './Spinner'
 import { readyMedia, failedMedia, mediaFilename } from '@/store/mediaReady'
+import { t } from '@/i18n/i18n'
 
 interface Props {
   src: string                 // api/media/<uuid>.webm (signed ok)
@@ -46,7 +47,7 @@ export function VideoMedia(props: Props) {
     return (
       <div class={'sh-video-wrapper sh-video-failed ' + (props.class || '')}>
         <span class="sh-video-failed-msg">
-          ⚠️ This video couldn’t be processed.
+          ⚠️ {t('media.video_failed')}
         </span>
       </div>
     )
@@ -60,9 +61,9 @@ export function VideoMedia(props: Props) {
                aria-hidden="true" />
         )}
         <div class="sh-video-processing-overlay">
-          <Spinner label="Processing video" />
+          <Spinner label={t('media.video_processing')} />
           <span class="sh-video-processing-msg">
-            Processing video… it’ll play here when ready.
+            {t('media.video_processing_hint')}
           </span>
         </div>
       </div>

@@ -20,6 +20,7 @@ import {
   invalidateSpaceMembers,
 } from '@/store/spaceMembers'
 import { confirmDialog } from '@/components/confirm'
+import { t } from '@/i18n/i18n'
 
 const open = signal(false)
 const activeSpaceId = signal<string | null>(null)
@@ -63,10 +64,10 @@ export function SpaceProfileDialog() {
       )
       invalidateSpaceMembers(spaceId)
       await loadSpaceMembers(spaceId)
-      showToast('Space name updated', 'success')
+      showToast(t('space_profile.name_updated'), 'success')
     } catch (err: unknown) {
       showToast(
-        `Save failed: ${(err as Error).message ?? err}`, 'error',
+        t('space_profile.save_failed', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setSaving(false)
@@ -87,10 +88,10 @@ export function SpaceProfileDialog() {
       setLocalPictureUrl(updated.picture_url)
       invalidateSpaceMembers(spaceId)
       await loadSpaceMembers(spaceId)
-      showToast('Space avatar updated', 'success')
+      showToast(t('space_profile.avatar_updated'), 'success')
     } catch (err: unknown) {
       showToast(
-        `Upload failed: ${(err as Error).message ?? err}`, 'error',
+        t('space_profile.upload_failed', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setSaving(false)
@@ -100,17 +101,17 @@ export function SpaceProfileDialog() {
 
   const clearPicture = async () => {
     if (!spaceId) return
-    if (!await confirmDialog('Reset your space avatar to your household picture?', { destructive: true })) return
+    if (!await confirmDialog(t('space_profile.reset_confirm'), { destructive: true })) return
     setSaving(true)
     try {
       await api.delete(`/api/spaces/${spaceId}/members/me/picture`)
       setLocalPictureUrl(null)
       invalidateSpaceMembers(spaceId)
       await loadSpaceMembers(spaceId)
-      showToast('Space avatar cleared', 'info')
+      showToast(t('space_profile.avatar_cleared'), 'info')
     } catch (err: unknown) {
       showToast(
-        `Reset failed: ${(err as Error).message ?? err}`, 'error',
+        t('space_profile.reset_failed', { error: String((err as Error).message ?? err) }), 'error',
       )
     } finally {
       setSaving(false)
@@ -124,22 +125,21 @@ export function SpaceProfileDialog() {
 
   return (
     <Modal open={open.value} onClose={close}
-           title="Your profile in this space">
+           title={t('space_profile.title')}>
       <div class="sh-form sh-space-profile-dialog">
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)' }}>
-          Set a different display name or avatar for this space. Leave
-          fields blank to inherit your household defaults.
+          {t('space_profile.intro')}
         </p>
 
         <div class="sh-profile-card">
           <label class="sh-profile-avatar-slot"
-                 title="Click to upload a new space avatar">
+                 title={t('space_profile.upload_hint')}>
             <Avatar
               name={displayName || inheritedName || '?'}
               src={localPictureUrl || householdPictureUrl}
               size={96} />
             <span class="sh-profile-avatar-hint" aria-hidden="true">
-              📷 Upload
+              📷 {t('space_profile.upload')}
             </span>
             <input ref={fileRef} type="file" accept="image/*"
                    onChange={uploadPicture} class="sr-only" />
@@ -150,39 +150,39 @@ export function SpaceProfileDialog() {
                 {displayName || inheritedName || '—'}
               </strong>
               <span class="sh-muted">
-                In this space
+                {t('space_profile.in_this_space')}
               </span>
             </div>
             <span class={`sh-profile-source ${usingInheritedPicture ? 'sh-profile-source--manual' : 'sh-profile-source--ha'}`}>
               {usingInheritedPicture
-                ? '⬇ Using household picture'
-                : '✨ Custom for this space'}
+                ? `⬇ ${t('space_profile.using_household_picture')}`
+                : `✨ ${t('space_profile.custom_picture')}`}
             </span>
             {localPictureUrl && (
               <Button variant="secondary" onClick={clearPicture}
                       loading={saving}>
-                Reset to household picture
+                {t('space_profile.reset_picture')}
               </Button>
             )}
           </div>
         </div>
 
         <label>
-          Display name in this space
+          {t('space_profile.name_label')}
           <input type="text" value={displayName} maxLength={64}
                  placeholder={inheritedName}
                  onInput={(e) =>
                    setDisplayName((e.target as HTMLInputElement).value)} />
           <span class="sh-char-count">
             {usingInheritedName
-              ? `Inheriting household name: ${inheritedName || '(unset)'}`
-              : `Override for this space`}
+              ? t('space_profile.inheriting_name', { name: inheritedName || t('space_profile.unset') })
+              : t('space_profile.override')}
           </span>
         </label>
 
         <div class="sh-form-actions">
-          <Button variant="secondary" onClick={close}>Cancel</Button>
-          <Button onClick={saveName} loading={saving}>Save</Button>
+          <Button variant="secondary" onClick={close}>{t('common.cancel')}</Button>
+          <Button onClick={saveName} loading={saving}>{t('common.save')}</Button>
         </div>
       </div>
     </Modal>

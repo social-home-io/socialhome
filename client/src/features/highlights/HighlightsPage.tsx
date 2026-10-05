@@ -21,10 +21,10 @@ import { addBase } from '@/baseUrl'
 type HighlightsTab = 'inbox' | 'archive'
 
 const TABS: readonly HighlightsTab[] = ['inbox', 'archive'] as const
-const TAB_LABELS: Readonly<Record<HighlightsTab, string>> = {
-  inbox:   'Highlights',
-  archive: 'Archive',
-}
+const tabLabels = (): Readonly<Record<HighlightsTab, string>> => ({
+  inbox:   t('nav.highlights'),
+  archive: t('highlight.tab.archive'),
+})
 
 const activeTab = signal<HighlightsTab>('inbox')
 
@@ -63,11 +63,11 @@ export default function HighlightsPage() {
       <TabHeader<HighlightsTab>
         activeTab={activeTab.value}
         visibleTabs={TABS}
-        labels={TAB_LABELS}
-        ariaLabel="Highlights sections"
+        labels={tabLabels()}
+        ariaLabel={t('highlight.sections_aria')}
         onSelectTab={onSelectTab}
         actions={
-          <a href={addBase('/settings#highlights')} class="sh-link">Settings</a>
+          <a href={addBase('/settings#highlights')} class="sh-link">{t('nav.settings')}</a>
         }
       />
       {activeTab.value === 'archive' ? <HighlightArchiveTab /> : <HighlightsInboxTab />}

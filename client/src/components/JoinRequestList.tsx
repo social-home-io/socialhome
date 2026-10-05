@@ -19,6 +19,7 @@ import {
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { relativeDocsTime } from '@/utils/relativeTime'
+import { formatLocale, t } from '@/i18n/i18n'
 
 interface JoinRequest {
   id:            string
@@ -86,7 +87,7 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
         `/api/spaces/${spaceId}/join-requests/${request.id}/${action}`, {},
       )
       showToast(
-        action === 'approve' ? 'Request approved' : 'Request denied',
+        action === 'approve' ? t('join_requests.approved') : t('join_requests.denied'),
         action === 'approve' ? 'success' : 'info',
       )
       // Optimistic drop — the WS listener refreshes either way.
@@ -95,15 +96,15 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
         [spaceId]: rows.filter(r => r.id !== request.id),
       }
     } catch (e: unknown) {
-      showToast((e as Error).message || 'Action failed', 'error')
+      showToast((e as Error).message || t('join_requests.failed'), 'error')
     }
   }
 
   if (rows.length === 0) return null
 
   return (
-    <div class="sh-join-requests sh-card" aria-label="Pending join requests">
-      <h4>Join requests ({rows.length})</h4>
+    <div class="sh-join-requests sh-card" aria-label={t('join_requests.aria')}>
+      <h4>{t('join_requests.title', { n: String(rows.length) })}</h4>
       {rows.map(r => {
         const name = r.display_name || householdDisplayName(r.user_id)
         return (
@@ -113,7 +114,7 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
               <strong>{name}</strong>
               {r.requested_role === 'admin' ? (
                 <p class="sh-join-elevation">
-                  Already a member — wants the <strong>admin</strong> role
+                  {t('join_requests.wants_admin')}
                 </p>
               ) : (
                 r.message && <p class="sh-muted">“{r.message}”</p>
@@ -122,18 +123,18 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
                 <time
                   class="sh-muted"
                   dateTime={r.requested_at}
-                  title={new Date(r.requested_at).toLocaleString()}
+                  title={new Date(r.requested_at).toLocaleString(formatLocale())}
                 >
-                  Asked {relativeDocsTime(r.requested_at)}
+                  {t('join_requests.asked', { when: relativeDocsTime(r.requested_at) })}
                 </time>
               )}
             </div>
             <div class="sh-join-actions">
               <Button onClick={() => act(r, 'approve')}>
-                {r.requested_role === 'admin' ? 'Make admin' : 'Approve'}
+                {r.requested_role === 'admin' ? t('admin.members.make_admin') : t('moderation.approve')}
               </Button>
               <Button variant="secondary" onClick={() => act(r, 'deny')}>
-                Decline
+                {t('join_requests.decline')}
               </Button>
             </div>
           </div>

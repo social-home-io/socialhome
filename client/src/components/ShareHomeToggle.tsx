@@ -8,6 +8,7 @@
 import { useState } from 'preact/hooks'
 import { api } from '@/api'
 import { showToast } from './Toast'
+import { t } from '@/i18n/i18n'
 
 export interface ShareHomeToggleProps {
   instanceId: string
@@ -34,13 +35,13 @@ export function ShareHomeToggle({
     } catch (e: any) {
       // Revert on error
       setEnabled(!next)
-      showToast(e.message || 'Failed to update home-sharing setting', 'error')
+      showToast(e.message || t('share_home.failed'), 'error')
     }
   }
 
   const helpText = enabled
-    ? `On — your "You" pin appears on ${peerName}'s Connections → Map.`
-    : `Off — your home stays hidden from ${peerName}'s map.`
+    ? t('share_home.on', { peer: peerName })
+    : t('share_home.off', { peer: peerName })
 
   return (
     <div class="sh-share-home-toggle">
@@ -50,7 +51,7 @@ export function ShareHomeToggle({
           checked={enabled}
           onChange={() => void toggle()}
         />
-        Share our home location with {peerName}
+        {t('share_home.label', { peer: peerName })}
       </label>
       <p class="sh-muted sh-share-home-toggle__help" style={{ marginTop: 'var(--sh-space-xs)', fontSize: 'var(--sh-font-size-sm)' }}>
         {helpText}

@@ -1,5 +1,6 @@
 import { LogoMark } from './LogoMark'
 import { appHref } from '@/baseUrl'
+import { t } from '@/i18n/i18n'
 
 /**
  * Wordmark — the canonical "Social Home" lockup, ported from the
@@ -45,7 +46,7 @@ export function Wordmark({
       <a
         class={`${classes} sh-wordmark--link`}
         href={appHref(href ?? '/')}
-        aria-label="Social Home — home"
+        aria-label={t('wordmark.home_link')}
       >
         {content}
       </a>

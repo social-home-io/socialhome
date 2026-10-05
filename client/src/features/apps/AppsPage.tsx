@@ -12,7 +12,7 @@
  * Non-admins see no tab chrome — just the enabled apps they can open.
  */
 import { useEffect, useState } from 'preact/hooks'
-import { t } from '@/i18n/i18n'
+import { t, isOne } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
 import {
@@ -58,10 +58,10 @@ export function safeIconSrc(icon: string | null | undefined): string | null {
 }
 
 type AppsTab = 'installed' | 'catalog'
-const TAB_LABELS: Record<AppsTab, string> = {
-  installed: 'Installed',
-  catalog: 'Catalog',
-}
+const tabLabels = (): Record<AppsTab, string> => ({
+  installed: t('apps.tab.installed'),
+  catalog: t('apps.tab.catalog'),
+})
 
 export default function AppsPage() {
   useTitle(t('nav.apps'))
@@ -82,7 +82,7 @@ export default function AppsPage() {
     return (
       <div class="sh-page sh-apps-page">
         <header class="sh-page-header">
-          <h1 class="sh-page-title">Apps</h1>
+          <h1 class="sh-page-title">{t('nav.apps')}</h1>
         </header>
         <InstalledSection isAdmin={false} onBrowse={() => {}} />
       </div>
@@ -92,19 +92,19 @@ export default function AppsPage() {
   return (
     <div class="sh-page sh-apps-page">
       <header class="sh-page-header">
-        <h1 class="sh-page-title">Apps</h1>
+        <h1 class="sh-page-title">{t('nav.apps')}</h1>
       </header>
 
       <TabHeader<AppsTab>
         activeTab={tab}
         visibleTabs={['installed', 'catalog']}
-        labels={TAB_LABELS}
+        labels={tabLabels()}
         onSelectTab={setTab}
-        ariaLabel="Apps sections"
+        ariaLabel={t('apps.sections_aria')}
         actions={tab === 'installed' ? <CheckUpdatesButton /> : undefined}
       />
 
-      <div role="tabpanel" aria-label={TAB_LABELS[tab]}>
+      <div role="tabpanel" aria-label={tabLabels()[tab]}>
         {tab === 'installed' ? (
           <InstalledSection isAdmin onBrowse={() => setTab('catalog')} />
         ) : (
@@ -124,8 +124,8 @@ function CheckUpdatesButton() {
     const count = updates.value.length
     showToast(
       count > 0
-        ? `${count} update${count === 1 ? '' : 's'} available`
-        : 'All apps are up to date',
+        ? t(isOne(count) ? 'apps.updates_available_one' : 'apps.updates_available', { n: String(count) })
+        : t('apps.up_to_date'),
       'info',
     )
   }
@@ -135,7 +135,7 @@ function CheckUpdatesButton() {
       loading={checking}
       onClick={() => { void handleCheckUpdates() }}
     >
-      Check for updates
+      {t('apps.check_updates')}
     </Button>
   )
 }
@@ -155,14 +155,14 @@ function InstalledSection({
   const updateList   = updates.value
 
   if (loading) {
-    return <div class="sh-apps-loading" aria-live="polite">Loading…</div>
+    return <div class="sh-apps-loading" aria-live="polite">{t('common.loading')}</div>
   }
 
   if (error) {
     return (
       <div class="sh-apps-error" role="alert">
         <p>{error}</p>
-        <Button onClick={() => { void loadInstalled() }}>Retry</Button>
+        <Button onClick={() => { void loadInstalled() }}>{t('common.retry')}</Button>
       </div>
     )
   }
@@ -173,10 +173,10 @@ function InstalledSection({
   if (visible.length === 0) {
     return (
       <div class="sh-apps-empty">
-        <p class="sh-muted">No apps installed yet.</p>
+        <p class="sh-muted">{t('apps.empty_installed')}</p>
         {isAdmin && (
           <Button variant="secondary" onClick={onBrowse}>
-            Browse the catalog
+            {t('apps.browse_catalog')}
           </Button>
         )}
       </div>
@@ -197,8 +197,8 @@ function InstalledSection({
   )
 }
 
-const MIN_AGE_OPTIONS: { value: number; label: string }[] = [
-  { value: 0,  label: 'Everyone' },
+const minAgeOptions = (): { value: number; label: string }[] => [
+  { value: 0,  label: t('apps.min_age.everyone') },
   { value: 13, label: '13+' },
   { value: 16, label: '16+' },
   { value: 18, label: '18+' },
@@ -224,7 +224,7 @@ function AppCard({
     try {
       await setEnabled(app.app_id, !app.enabled)
     } catch (err: unknown) {
-      showToast((err as Error).message ?? 'Could not update app.', 'error')
+      showToast((err as Error).message ?? t('apps.update_failed'), 'error')
     } finally {
       setTogglingEnabled(false)
     }
@@ -235,10 +235,9 @@ function AppCard({
     setSettingMinAge(true)
     try {
       await setMinAge(app.app_id, value)
-      const label = value === 0 ? 'removed' : `set to ${value}+`
-      showToast(`Minimum age ${label}`, 'success')
+      showToast(value === 0 ? t('apps.min_age.removed') : t('apps.min_age.set', { age: String(value) }), 'success')
     } catch (err: unknown) {
-      showToast((err as Error).message ?? 'Could not update minimum age.', 'error')
+      showToast((err as Error).message ?? t('apps.min_age.failed'), 'error')
     } finally {
       setSettingMinAge(false)
     }
@@ -248,10 +247,10 @@ function AppCard({
     setUninstalling(true)
     try {
       await uninstallApp(app.app_id)
-      showToast(`${app.name} uninstalled.`, 'info')
+      showToast(t('apps.uninstalled', { name: app.name }), 'info')
       setUninstallOpen(false)
     } catch (err: unknown) {
-      showToast((err as Error).message ?? 'Could not uninstall app.', 'error')
+      showToast((err as Error).message ?? t('apps.uninstall_failed'), 'error')
     } finally {
       setUninstalling(false)
     }
@@ -262,9 +261,9 @@ function AppCard({
     setUpdating(true)
     try {
       await updateApp(app.app_id)
-      showToast(`Updated ${app.name} to v${update.latest_version}`, 'success')
+      showToast(t('apps.updated', { name: app.name, version: update.latest_version }), 'success')
     } catch (err: unknown) {
-      showToast((err as Error).message ?? 'Could not update app.', 'error')
+      showToast((err as Error).message ?? t('apps.update_failed'), 'error')
     } finally {
       setUpdating(false)
     }
@@ -283,7 +282,7 @@ function AppCard({
           <span class="sh-muted sh-app-card__version">v{app.version}</span>
         </div>
         {isAdmin && !app.enabled && (
-          <span class="sh-chip sh-chip--muted sh-app-card__disabled-chip">Disabled</span>
+          <span class="sh-chip sh-chip--muted sh-app-card__disabled-chip">{t('apps.disabled')}</span>
         )}
         {isAdmin && (
           <AppCardMenu
@@ -303,7 +302,7 @@ function AppCard({
             <span key={cap} class="sh-chip sh-chip--muted">{cap}</span>
           ))}
           {app.min_age > 0 && (
-            <span class="sh-age-chip" title={`Minimum age ${app.min_age}`}>
+            <span class="sh-age-chip" title={t('apps.min_age.title', { age: String(app.min_age) })}>
               {app.min_age}+
             </span>
           )}
@@ -312,8 +311,8 @@ function AppCard({
 
       {update && (
         <div class="sh-app-card__update-row">
-          <span class="sh-chip sh-chip--update" aria-label={`Update available: v${update.latest_version}`}>
-            Update available → v{update.latest_version}
+          <span class="sh-chip sh-chip--update" aria-label={t('apps.update_available_aria', { version: update.latest_version })}>
+            {t('apps.update_available', { version: update.latest_version })}
           </span>
           {isAdmin && (
             <Button
@@ -321,7 +320,7 @@ function AppCard({
               loading={updating}
               onClick={() => { void handleUpdate() }}
             >
-              Update
+              {t('apps.update')}
             </Button>
           )}
         </div>
@@ -333,12 +332,12 @@ function AppCard({
             variant="primary"
             onClick={() => { window.location.href = addBase(`/apps/${encodeURIComponent(app.app_id)}`) }}
           >
-            Open
+            {t('apps.open')}
           </Button>
         ) : (
           isAdmin && (
             <span class="sh-muted sh-app-card__disabled-hint">
-              Enable from the ⋯ menu to open.
+              {t('apps.disabled_hint')}
             </span>
           )
         )}
@@ -347,21 +346,27 @@ function AppCard({
       <Modal
         open={uninstallOpen}
         onClose={() => setUninstallOpen(false)}
-        title={`Uninstall ${app.name}?`}
+        title={t('apps.uninstall_title', { name: app.name })}
       >
-        <p>This will remove <strong>{app.name}</strong> from your household.
-           This action cannot be undone.</p>
+        <p>{boldName(t('apps.uninstall_body', { name: '\u0000' }), app.name)}</p>
         <div class="sh-modal-actions">
           <Button variant="secondary" onClick={() => setUninstallOpen(false)}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button variant="danger" loading={uninstalling} onClick={() => { void handleUninstall() }}>
-            Uninstall
+            {t('apps.uninstall')}
           </Button>
         </div>
       </Modal>
     </div>
   )
+}
+
+/** Render a translated sentence with the ``\u0000`` placeholder swapped
+ *  for the bold app name, so word order stays the translator's. */
+function boldName(sentence: string, name: string) {
+  const [before, after = ''] = sentence.split('\u0000')
+  return <>{before}<strong>{name}</strong>{after}</>
 }
 
 // ─── Per-card admin overflow menu ─────────────────────────────────────────────
@@ -396,7 +401,7 @@ function AppCardMenu({
       <button
         type="button"
         class="sh-post-overflow"
-        aria-label={`${app.name} settings`}
+        aria-label={t('apps.settings_aria', { name: app.name })}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(v => !v)}
@@ -416,7 +421,7 @@ function AppCardMenu({
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => { onToggleEnabled(); close() }}
           >
-            {app.enabled ? 'Disable app' : 'Enable app'}
+            {app.enabled ? t('apps.disable') : t('apps.enable')}
           </button>
 
           {/* Age gate — only when the household actually has a protected
@@ -426,10 +431,10 @@ function AppCardMenu({
             <>
               <div class="sh-app-menu__sep" role="separator" />
               <div class="sh-app-menu__label" id={`minage-label-${app.app_id}`}>
-                Minimum age
+                {t('apps.min_age.label')}
               </div>
               <div role="group" aria-labelledby={`minage-label-${app.app_id}`}>
-                {MIN_AGE_OPTIONS.map(opt => (
+                {minAgeOptions().map(opt => (
                   <button
                     key={opt.value}
                     type="button"
@@ -458,7 +463,7 @@ function AppCardMenu({
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => { onUninstall(); close() }}
           >
-            Uninstall…
+            {t('apps.uninstall_menu')}
           </button>
         </div>
       )}
@@ -475,14 +480,14 @@ function CatalogSection() {
   const installed = installedApps.value
 
   if (loading) {
-    return <div class="sh-apps-loading" aria-live="polite">Loading catalog…</div>
+    return <div class="sh-apps-loading" aria-live="polite">{t('apps.catalog_loading')}</div>
   }
 
   if (error) {
     return (
       <div class="sh-apps-error" role="alert">
         <p>{error}</p>
-        <Button onClick={() => { void loadCatalog() }}>Retry</Button>
+        <Button onClick={() => { void loadCatalog() }}>{t('common.retry')}</Button>
       </div>
     )
   }
@@ -490,7 +495,7 @@ function CatalogSection() {
   if (entries.length === 0) {
     return (
       <div class="sh-apps-empty">
-        <p class="sh-muted">No apps available in the catalog.</p>
+        <p class="sh-muted">{t('apps.catalog_empty')}</p>
       </div>
     )
   }
@@ -524,7 +529,7 @@ function CatalogRow({
     } catch (err: unknown) {
       const msg = err instanceof ApiError && err.detail
         ? err.detail
-        : (err as Error).message ?? 'Could not install app.'
+        : (err as Error).message ?? t('apps.install_failed')
       showToast(msg, 'error')
     } finally {
       setInstalling(false)
@@ -544,14 +549,14 @@ function CatalogRow({
           <span class="sh-muted">v{entry.latest_version}</span>
         </div>
         {alreadyInstalled ? (
-          <span class="sh-chip sh-chip--success">Installed</span>
+          <span class="sh-chip sh-chip--success">{t('apps.installed')}</span>
         ) : (
           <Button
             variant="primary"
             loading={installing}
             onClick={() => { void handleInstall() }}
           >
-            Install
+            {t('apps.install')}
           </Button>
         )}
       </div>

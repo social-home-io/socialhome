@@ -25,7 +25,7 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
-import { t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
@@ -36,9 +36,9 @@ import { addBase } from '@/baseUrl'
 /** Shown when the space's owner has NOT opted into read-only followers
  *  (``SpaceFeatures.allow_subscribers`` off): the space is listed so people
  *  can find it and ask in, but none of its content is published. */
-const GATED_CONTENT_NOTE
-  = 'Only members can read this space. Nothing posted here is published '
-  + 'to the directory.'
+function gatedContentNote(): string {
+  return t('space.public.gated_note')
+}
 
 /** …paired with one sentence on how you actually get in. Independent of
  *  readability now: every join mode has its own way in, and any of them can
@@ -46,12 +46,11 @@ const GATED_CONTENT_NOTE
 function howToGetIn(mode: DirectoryEntry['join_mode']): string {
   switch (mode) {
     case 'open':
-      return 'Anyone can join this space and start posting.'
+      return t('space.public.how_open')
     case 'invite_only':
-      return 'A member has to invite you before you can join.'
+      return t('space.public.how_invite_only')
     case 'request':
-      return 'You can ask to join — a member decides, and you can post '
-        + 'once they let you in.'
+      return t('space.public.how_request')
   }
 }
 
@@ -75,7 +74,7 @@ async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
     return {
       space_id:           space.id,
       host_instance_id:   'local',
-      host_display_name:  'Your household',
+      host_display_name:  t('spaces.browse.your_household'),
       host_is_paired:     true,
       name:               space.name,
       description:        space.description,
@@ -117,9 +116,7 @@ export default function SpacePublicDetailPage() {
         if (d) {
           detail.value = d
         } else {
-          error.value =
-            "Couldn't load this space. It may not be public, or you may need "
-            + "to open Browse spaces first to refresh the directory."
+          error.value = t('space.public.load_failed')
         }
       })
       .finally(() => { loading.value = false })
@@ -135,7 +132,7 @@ export default function SpacePublicDetailPage() {
     // Remote (public peer or global GFS) — needs a paired host before
     // either the open send or the request modal can reach it.
     if (!isLocalEntry && !entry.host_is_paired) {
-      showToast(`Pair with ${hostLabel(entry)} first.`, 'info')
+      showToast(t('space.public.connect_first_toast', { host: hostLabel(entry) }), 'info')
       return
     }
     // Open spaces join immediately with no message — match the browser's
@@ -147,14 +144,14 @@ export default function SpacePublicDetailPage() {
           // Local open-to-join: the server auto-approves JoinMode.OPEN
           // through the join-request endpoint.
           await api.post(`/api/spaces/${entry.space_id}/join-requests`, {})
-          showToast(`Joined ${entry.name}`, 'success')
+          showToast(t('spaces.browse.joined_toast', { name: entry.name }), 'success')
           loc.route(`/spaces/${entry.space_id}`)
         } else {
           await api.post(
             `/api/public_spaces/${entry.space_id}/join-request`,
             { host_instance_id: entry.host_instance_id },
           )
-          showToast(`Request sent to ${entry.host_display_name}`, 'success')
+          showToast(t('spaces.browse.request_sent_to', { host: entry.host_display_name }), 'success')
           if (detail.value) {
             detail.value = { ...detail.value, request_pending: true }
           }
@@ -179,7 +176,7 @@ export default function SpacePublicDetailPage() {
         { host_instance_id: e.host_instance_id, message },
       )
     }
-    showToast(`Request sent for ${e.name}`, 'success')
+    showToast(t('spaces.browse.request_sent_for', { name: e.name }), 'success')
     if (detail.value) {
       detail.value = { ...detail.value, request_pending: true }
     }
@@ -191,9 +188,9 @@ export default function SpacePublicDetailPage() {
       <div class="sh-space-public" role="alert">
         <a class="sh-space-public__back" href={addBase('/spaces/browse')}
            onClick={(ev) => { ev.preventDefault(); loc.route('/spaces/browse') }}>
-          ← Browse spaces
+          ← {t('spaces.list.browse')}
         </a>
-        <p class="sh-error">{error.value ?? 'Space not found.'}</p>
+        <p class="sh-error">{error.value ?? t('space.public.not_found')}</p>
       </div>
     )
   }
@@ -201,9 +198,9 @@ export default function SpacePublicDetailPage() {
   const entry = detail.value
   const isLocal = entry.host_instance_id === 'local'
   const scopeLabel =
-    entry.scope === 'household' ? '🏠 Your household'
-      : entry.scope === 'public' ? '🤝 Public'
-      : '🌐 Global'
+    entry.scope === 'household' ? `🏠 ${t('spaces.browse.your_household')}`
+      : entry.scope === 'public' ? `🤝 ${t('space.public.scope_public')}`
+      : `🌐 ${t('space.public.scope_global')}`
   // Two independent statements, two chips — same as the browser card, so
   // both surfaces tell the same story. The join-mode chip says how you get
   // in; the 🔒 chip says whether there is anything to read before you do.
@@ -212,14 +209,14 @@ export default function SpacePublicDetailPage() {
   const gated = contentIsGated(entry)
 
   const primaryLabel =
-    entry.already_member ? 'Open space'
-      : entry.request_pending ? 'Request pending'
+    entry.already_member ? t('space.public.open')
+      : entry.request_pending ? t('space.public.request_pending')
       : entry.join_mode === 'invite_only'
-        ? 'Invite required'
+        ? t('space.public.invite_required')
       : entry.scope !== 'household' && !entry.host_is_paired
-        ? `Pair with ${hostLabel(entry)} first`
-      : entry.join_mode === 'open' ? 'Join space'
-      : 'Request to join'
+        ? t('space.public.connect_first', { host: hostLabel(entry) })
+      : entry.join_mode === 'open' ? t('space.public.join')
+      : t('space.public.request_join')
 
   const primaryDisabled =
     entry.request_pending
@@ -233,7 +230,7 @@ export default function SpacePublicDetailPage() {
         href={addBase('/spaces/browse')}
         onClick={(ev) => { ev.preventDefault(); loc.route('/spaces/browse') }}
       >
-        ← Browse spaces
+        ← {t('spaces.list.browse')}
       </a>
       <div class={`sh-space-public__hero sh-space-public__hero--${entry.scope}`}>
         <span class="sh-space-public__emoji" aria-hidden="true">
@@ -242,9 +239,10 @@ export default function SpacePublicDetailPage() {
         <div class="sh-space-public__title">
           <h1>{entry.name}</h1>
           <p class="sh-muted">
-            {entry.member_count} {entry.member_count === 1 ? 'member' : 'members'}
+            {t(isOne(entry.member_count) ? 'space.header.members_one' : 'space.header.members',
+              { count: String(entry.member_count) })}
             {!isLocal && (
-              <> · hosted by <strong>{hostLabel(entry)}</strong></>
+              <> · {t('space.public.hosted_by', { host: hostLabel(entry) })}</>
             )}
           </p>
         </div>
@@ -264,7 +262,7 @@ export default function SpacePublicDetailPage() {
           <span class="sh-age-chip">{entry.min_age}+</span>
         )}
         {entry.already_subscribed && (
-          <span class="sh-subscribed-pill">🔔 Subscribed</span>
+          <span class="sh-subscribed-pill">🔔 {t('spaces.list.subscribed_pill')}</span>
         )}
       </div>
 
@@ -276,7 +274,7 @@ export default function SpacePublicDetailPage() {
 
       {entry.description && (
         <section class="sh-space-public__section">
-          <h2>About</h2>
+          <h2>{t('space.public.about')}</h2>
           <p>{entry.description}</p>
         </section>
       )}
@@ -284,7 +282,7 @@ export default function SpacePublicDetailPage() {
       {gated && (
         <section class="sh-space-public__section sh-muted">
           <p>
-            {GATED_CONTENT_NOTE} {howToGetIn(entry.join_mode)}
+            {gatedContentNote()} {howToGetIn(entry.join_mode)}
           </p>
         </section>
       )}
@@ -294,17 +292,9 @@ export default function SpacePublicDetailPage() {
           {/* Pairing is a household-admin action — a member is pointed at
            *  an admin rather than at settings they cannot use. */}
           {currentUser.value?.is_admin ? (
-            <p>
-              This space lives on another household.  Pair with
-              <strong> {hostLabel(entry)}</strong> from
-              Settings → Federation to join, post, or read.
-            </p>
+            <p>{t('space.public.remote_admin', { host: hostLabel(entry) })}</p>
           ) : (
-            <p>
-              This space lives on another household.  Ask a household admin
-              to pair with <strong>{hostLabel(entry)}</strong> so you can
-              join, post, or read.
-            </p>
+            <p>{t('space.public.remote_member', { host: hostLabel(entry) })}</p>
           )}
         </section>
       )}

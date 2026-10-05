@@ -29,7 +29,7 @@ async function fetchHaPersons(): Promise<HaPerson[]> {
     haPersons.value = resp.persons
     return resp.persons
   } catch (err: any) {
-    haPersonsError.value = err?.message || 'Failed to load HA persons.'
+    haPersonsError.value = err?.message || t('setup.ha.persons_failed')
     throw err
   }
 }
@@ -77,7 +77,7 @@ function SetupShell({ step, children }: SetupShellProps) {
       <div class="sh-setup-card">
         <Wordmark size={32} className="sh-setup-brand" />
         {step && (
-          <ol class="sh-setup-steps" aria-label={`Step ${step.current} of ${step.total}`}>
+          <ol class="sh-setup-steps" aria-label={t('setup.step_aria', { current: String(step.current), total: String(step.total) })}>
             {Array.from({ length: step.total }, (_, i) => (
               <li
                 key={i}
@@ -108,7 +108,9 @@ function SetupSpinner({ label }: { label: string }) {
   )
 }
 
-const STRENGTH_LABELS = ['', 'Too short', 'Fair', 'Good', 'Strong']
+const STRENGTH_LABEL_KEYS = [
+  '', 'setup.strength.too_short', 'setup.strength.fair', 'setup.strength.good', 'setup.strength.strong',
+]
 
 function PasswordStrength({ value }: { value: string }) {
   const score = useMemo(() => {
@@ -120,11 +122,12 @@ function PasswordStrength({ value }: { value: string }) {
     return s
   }, [value])
   const filled = value.length === 0 ? 0 : Math.max(score, 1)
-  const label = STRENGTH_LABELS[filled] ?? ''
+  const labelKey = STRENGTH_LABEL_KEYS[filled] ?? ''
+  const label = labelKey ? t(labelKey) : ''
   return (
     <div
       class="sh-setup-strength-wrap"
-      aria-label={`Password strength: ${label || 'empty'}`}
+      aria-label={t('setup.strength.aria', { label: label || t('setup.strength.empty') })}
       role="status"
       aria-live="polite"
     >
@@ -176,8 +179,8 @@ function PasswordField({
           type="button"
           class="sh-setup-pw-toggle"
           aria-pressed={shown}
-          aria-label={shown ? 'Hide password' : 'Show password'}
-          title={shown ? 'Hide password' : 'Show password'}
+          aria-label={shown ? t('setup.password.hide') : t('setup.password.show')}
+          title={shown ? t('setup.password.hide') : t('setup.password.show')}
           onClick={() => setShown(s => !s)}
         >
           {shown ? '🙈' : '👁'}
@@ -593,18 +596,16 @@ function HaOwnerForm() {
         <div class="sh-setup-welcome" aria-hidden="true">
           <span class="sh-setup-welcome-icon">👥</span>
         </div>
-        <h1 class="sh-setup-title">No people in Home Assistant yet</h1>
+        <h1 class="sh-setup-title">{t('setup.ha.no_people_title')}</h1>
         <p class="sh-setup-intro">
-          Social Home looks up household members from your Home
-          Assistant Person entities. Add at least one Person in HA,
-          then come back and retry.
+          {t('setup.ha.no_people_body')}
         </p>
         <a
           class="sh-link"
           href={addBase('/profile/person')}
           target="_blank"
           rel="noopener"
-        >Open HA Person settings →</a>
+        >{t('setup.ha.open_person_settings')}</a>
         <div style={{ marginTop: 'var(--sh-space-md)' }}>
           <Button onClick={reload}>{t('common.try_again')}</Button>
         </div>
