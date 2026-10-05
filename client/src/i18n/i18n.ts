@@ -20,21 +20,43 @@ export function t(key: string, params?: Record<string, string>): string {
   let text = translations.value[key] || EN_SOURCE[key] || key
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      text = text.replace(`{${k}}`, v)
+      // split/join, not replace(): a value is literal text — ``$&`` or
+      // ``$'`` in a name or search term must not act as a pattern — and
+      // every occurrence of the placeholder is filled, not just the first.
+      text = text.split(`{${k}}`).join(v)
     }
   }
   return text
 }
 
-/** The locale for dates, times and numbers: the browser's regional
- *  variant when its language matches the UI language (``en-GB`` keeps
- *  day-first dates under English, ``de-CH`` its own format), else the
- *  UI language itself — never a region from another language. */
+/** Label for a raw server value (a status, mode, quality…): its
+ *  translation under ``prefix.value``, or the raw value itself when the
+ *  catalog has no such key — never a dotted key on screen. */
+export function tValue(prefix: string, value: string): string {
+  const key = `${prefix}.${value}`
+  const text = t(key)
+  return text === key ? value : text
+}
+
+/** The locale for dates, times and numbers: the UI language with the
+ *  browser's region. A browser tag in the UI language wins as-is
+ *  (``en-GB``, ``de-CH``); otherwise the first browser region is borrowed
+ *  (an English UI in a ``de-DE`` browser formats as ``en-DE``: English
+ *  words, ``18:00`` and day-first dates). With no region, the UI language. */
 export function formatLocale(): string {
-  const ui = locale.value || 'en'
+  const ui = (locale.value || 'en').split('-')[0].toLowerCase()
   const prefs = typeof navigator === 'undefined' ? [] : (navigator.languages ?? [navigator.language])
   for (const tag of prefs) {
-    if (tag && tag.split('-')[0].toLowerCase() === ui.split('-')[0].toLowerCase()) return tag
+    if (tag && tag.split('-')[0].toLowerCase() === ui) return tag
+  }
+  for (const tag of prefs) {
+    const region = tag?.split('-').find((part, i) => i > 0 && /^[A-Za-z]{2}$/.test(part))
+    if (!region) continue
+    try {
+      return Intl.getCanonicalLocales(`${ui}-${region}`)[0]
+    } catch {
+      // A malformed browser tag: try the next one.
+    }
   }
   return ui
 }

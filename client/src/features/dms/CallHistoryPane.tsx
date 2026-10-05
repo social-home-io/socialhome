@@ -16,7 +16,7 @@ import {
   householdDisplayName,
   loadHouseholdUsers,
 } from '@/store/householdUsers'
-import { t, formatLocale } from '@/i18n/i18n'
+import { t, tValue, formatLocale } from '@/i18n/i18n'
 
 interface CallRow {
   call_id: string
@@ -113,7 +113,7 @@ export default function CallHistoryPane() {
               </span>
               <span class="sh-call-who">{householdDisplayName(c.initiator_user_id)}</span>
               <span class="sh-call-dur">{formatDuration(c.duration_seconds)}</span>
-              <span class="sh-call-status">{t(`calls.state.${c.status}`)}</span>
+              <span class="sh-call-status">{tValue('calls.state', c.status)}</span>
               {c.avg_rtt_ms != null && (
                 <span class={`sh-call-quality ${qBadge(c.avg_rtt_ms, c.avg_loss_pct)}`}>
                   {Math.round(c.avg_rtt_ms)}ms

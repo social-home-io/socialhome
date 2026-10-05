@@ -24,7 +24,7 @@ import {
   callPeers, callType, getPeerConnection, hangupCall, hasCamera, isCallLive,
   localStream, resetCall, type CallPeer, type CallPhase, type PeerState,
 } from './callSession'
-import { t } from '@/i18n/i18n'
+import { t, tValue } from '@/i18n/i18n'
 
 const durationSeconds  = signal<number>(0)
 const micMuted         = signal<boolean>(false)
@@ -223,7 +223,7 @@ export default function InCallPage() {
         </span>
         {live && (
           <span class={`sh-incall-quality sh-q-${quality.value}`}
-                aria-label={t('calls.page.quality')}>{t(`calls.quality.${quality.value}`)}</span>
+                aria-label={t('calls.page.quality')}>{tValue('calls.quality', quality.value)}</span>
         )}
       </header>
 

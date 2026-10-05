@@ -20,7 +20,7 @@ import { showToast } from './Toast'
 import { formatBazaarAmount } from './bazaarFormat'
 import type { BazaarListing, BazaarOffer } from '@/types'
 import { confirmDialog } from '@/components/confirm'
-import { t } from '@/i18n/i18n'
+import { t, tValue } from '@/i18n/i18n'
 
 interface Props {
   listing: BazaarListing
@@ -177,7 +177,7 @@ export function BazaarOffersPanel({
         </strong>
         {' · '}
         <span class={`sh-bazaar-offers-status-pill sh-bazaar-offers-status-pill--${newest.status}`}>
-          {t(`bazaar.offers.status.${newest.status}`)}
+          {tValue('bazaar.offers.status', newest.status)}
         </span>
       </span>
       {newest.status === 'pending' && (

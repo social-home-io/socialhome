@@ -11,7 +11,7 @@
  * frame so the grid updates live — no manual refresh needed.
  */
 import { useEffect } from 'preact/hooks'
-import { t } from '@/i18n/i18n'
+import { t, tValue } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
@@ -259,7 +259,7 @@ export function BazaarCard({
           : <span class="sh-bazaar-tile-placeholder">🛍</span>}
         {listing.status !== 'active' && (
           <span class={`sh-bazaar-tile-badge sh-bazaar-tile-badge--${listing.status}`}>
-            {t(`bazaar.status.${listing.status}`)}
+            {tValue('bazaar.status', listing.status)}
           </span>
         )}
       </div>
@@ -273,7 +273,7 @@ export function BazaarCard({
               : formatBazaarAmount(listing.price, listing.currency)}
         </div>
         <span class={`sh-bazaar-mode-chip sh-bazaar-mode-chip--${listing.mode}`}>
-          {t(`bazaar.card.mode.${listing.mode}`)}
+          {tValue('bazaar.card.mode', listing.mode)}
         </span>
       </div>
     </button>

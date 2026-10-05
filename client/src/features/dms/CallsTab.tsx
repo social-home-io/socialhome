@@ -19,7 +19,7 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { active, type ActiveCall } from '@/store/calls'
-import { t } from '@/i18n/i18n'
+import { t, tValue } from '@/i18n/i18n'
 
 const loading = signal(true)
 const inProgress = computed(() =>
@@ -90,7 +90,7 @@ function ActiveCallRow({
       <span class="sh-call-peer">
         {call.caller} → {call.callee || t('calls.tab.group')}
       </span>
-      <span class="sh-call-status">{t(`calls.state.${call.status}`)}</span>
+      <span class="sh-call-status">{tValue('calls.state', call.status)}</span>
       <Button onClick={onReturn}>{t('calls.tab.return')}</Button>
       <Button onClick={() => hangUp(call.call_id)}>{t('calls.hang_up')}</Button>
     </div>
