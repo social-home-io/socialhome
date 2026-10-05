@@ -44,6 +44,7 @@ import { t, isOne, locale } from '@/i18n/i18n'
 import { isSupervisorAddon } from '@/platform'
 import { confirmDialog } from '@/components/confirm'
 import { relativeDocsTime } from '@/utils/relativeTime'
+import { featureLabels } from '@/utils/capabilityLabels'
 
 const FederationMap = lazy(() => import('./FederationMap'))
 
@@ -195,7 +196,7 @@ function compatBadge(peer: CompatPeer | undefined) {
     return <span class="sh-chip sh-chip--success">{t('connections.compat.up_to_date')}</span>
   }
   return (
-    <span class="sh-chip sh-chip--update" title={peer.lacking_features.join(', ')}>
+    <span class="sh-chip sh-chip--update" title={featureLabels(peer.lacking_features, peer.lacking_feature_keys).join(', ')}>
       {behindLabel(peer.lacking_features.length)}
     </span>
   )

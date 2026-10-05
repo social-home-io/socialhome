@@ -485,12 +485,14 @@ class SpaceCompatView(BaseView):
                 "ours": c.ours,
                 "min_member_proto_version": c.min_member_proto_version,
                 "lagging_features": list(c.lagging_features),
+                "lagging_feature_keys": list(c.lagging_feature_keys),
                 "behind_members": [
                     {
                         "instance_id": b.instance_id,
                         "display_name": b.display_name,
                         "proto_version": b.proto_version,
                         "lacking_features": list(b.lacking_features),
+                        "lacking_feature_keys": list(b.lacking_feature_keys),
                     }
                     for b in c.behind_members
                 ],

@@ -43,6 +43,7 @@ from ..domain.federation import FederationEventType, PairingStatus
 from ..domain.federation_capabilities import (
     OURS,
     FederationCapability,
+    feature_keys_missing_below,
     features_missing_below,
 )
 from ..security import error_response
@@ -69,6 +70,9 @@ class AdminFederationCompatView(BaseView):
                         "last_reachable_at": p.last_reachable_at,
                         "capabilities_known": p.capabilities_seen_at is not None,
                         "lacking_features": features_missing_below(p.proto_version),
+                        "lacking_feature_keys": feature_keys_missing_below(
+                            p.proto_version
+                        ),
                     }
                     for p in peers
                 ],

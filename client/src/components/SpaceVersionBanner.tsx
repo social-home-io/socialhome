@@ -17,18 +17,23 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { t } from '@/i18n/i18n'
+import { featureLabels } from '@/utils/capabilityLabels'
 
 export interface BehindMember {
   instance_id: string
   display_name: string
   proto_version: number
   lacking_features: string[]
+  /** Stable slugs of ``lacking_features``, same order. */
+  lacking_feature_keys?: string[]
 }
 
 export interface SpaceCompat {
   ours: number
   min_member_proto_version: number | null
   lagging_features: string[]
+  /** Stable slugs of ``lagging_features``, same order. */
+  lagging_feature_keys?: string[]
   behind_members: BehindMember[]
 }
 
@@ -71,7 +76,7 @@ export function SpaceVersionBanner({ spaceId }: Props) {
             <strong>{t('space.version_banner.title')}</strong>
             <p class="sh-muted">
               {t('space.version_banner.body')}{' '}
-              {compat.lagging_features.map((f, i) => (
+              {featureLabels(compat.lagging_features, compat.lagging_feature_keys).map((f, i) => (
                 <span key={f}>
                   {i > 0 ? ', ' : ''}
                   <strong>{f}</strong>

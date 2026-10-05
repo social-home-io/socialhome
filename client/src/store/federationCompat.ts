@@ -18,7 +18,11 @@ export interface CompatPeer {
   status:            string
   last_reachable_at: string | null
   capabilities_known: boolean
+  /** English labels of the features this peer's version lacks. */
   lacking_features:  string[]
+  /** Stable slugs of the same features, same order (translated by
+   *  ``utils/capabilityLabels``). */
+  lacking_feature_keys?: string[]
 }
 
 export const compatPeers   = signal<CompatPeer[]>([])
@@ -58,11 +62,15 @@ export function peersBehindCount(): number {
 }
 
 /**
- * Feature label (must match the backend ``CAPABILITY_FEATURES`` entry for
+ * Feature slug (the backend ``CAPABILITY_FEATURE_KEYS`` entry for
  * ``MIN_FOR_INSTANCE_RESYNC``) — a peer that still *lacks* this can't honor a
  * resync request, so the "Re-check" affordance is hidden for it.
+ *
+ * Matched by slug only, with no fallback to the English label: the SPA is
+ * served by the backend it talks to, so the compat endpoint always sends
+ * ``lacking_feature_keys``. The slug, unlike the label, never changes.
  */
-export const RESYNC_FEATURE = 'Asking a household to send updates again'
+export const RESYNC_FEATURE = 'household_resync'
 
 /**
  * True iff we can ask this peer to re-advertise (it understands the v_19
@@ -70,7 +78,7 @@ export const RESYNC_FEATURE = 'Asking a household to send updates again'
  * number duplicated in the client.
  */
 export function peerSupportsResync(p: CompatPeer): boolean {
-  return p.capabilities_known && !p.lacking_features.includes(RESYNC_FEATURE)
+  return p.capabilities_known && !(p.lacking_feature_keys ?? []).includes(RESYNC_FEATURE)
 }
 
 /**

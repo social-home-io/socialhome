@@ -18,6 +18,7 @@ from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 from socialhome.domain.federation_capabilities import (
     OURS,
+    space_feature_keys_missing_below,
     space_features_missing_below,
 )
 
@@ -147,6 +148,32 @@ async def test_compat_flags_behind_member_household(client):
     assert bm["lacking_features"] == space_features_missing_below(13)
 
 
+async def test_compat_sends_stable_feature_keys_next_to_the_labels(client):
+    """``lagging_feature_keys`` / ``lacking_feature_keys`` carry the stable
+    slugs of the same features, in the same order, so the SPA can translate
+    them; the English fields stay as they were for older clients."""
+    sid = await _make_space(client)
+    await _seed_member_household(
+        client,
+        sid,
+        instance_id="peer-13",
+        display_name="Brother's house",
+        proto_version=13,
+        capabilities_seen_at="2026-06-01T00:00:00+00:00",
+    )
+    resp = await client.get(
+        f"/api/spaces/{sid}/compat", headers=_auth(client._admin_token)
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["lagging_feature_keys"] == space_feature_keys_missing_below(13)
+    assert len(body["lagging_feature_keys"]) == len(body["lagging_features"])
+    assert "fast_media_transfer" in body["lagging_feature_keys"]
+    bm = body["behind_members"][0]
+    assert bm["lacking_feature_keys"] == space_feature_keys_missing_below(13)
+    assert len(bm["lacking_feature_keys"]) == len(bm["lacking_features"])
+
+
 async def test_compat_excludes_mid_handshake_member(client):
     """A member that never advertised capabilities is excluded entirely."""
     sid = await _make_space(client)
@@ -172,6 +199,7 @@ async def test_compat_excludes_mid_handshake_member(client):
     body = await resp.json()
     assert body["min_member_proto_version"] == OURS
     assert body["lagging_features"] == []
+    assert body["lagging_feature_keys"] == []
     assert body["behind_members"] == []
 
 

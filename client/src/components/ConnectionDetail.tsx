@@ -5,6 +5,7 @@ import { signal } from '@preact/signals'
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { normaliseTimestamp, relativeDocsTime } from '@/utils/relativeTime'
+import { featureLabels } from '@/utils/capabilityLabels'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -295,7 +296,7 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             compat.lacking_features.length === 0 ? (
               <><dt>{t('connections.detail.compatibility')}</dt><dd><span class="sh-chip sh-chip--success">{t('connections.compat.up_to_date')}</span></dd></>
             ) : (
-              <><dt>{t('connections.detail.missing_features')}</dt><dd>{compat.lacking_features.join(', ')}</dd></>
+              <><dt>{t('connections.detail.missing_features')}</dt><dd>{featureLabels(compat.lacking_features, compat.lacking_feature_keys).join(', ')}</dd></>
             )
           )}
           {/* Absolute timestamp AND a relative hint: the absolute one is

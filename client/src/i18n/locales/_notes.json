@@ -315,5 +315,7 @@
   "welcome.sub.all_clear": "Lowercase; follows the date: 'Sunday, October 4 · all clear'.",
   "welcome.ago.minutes": "Very short age of a post in a list ('5m'). Keep ≤ 6 chars. Same for hours and days.",
   "welcome.chip.messages": "Word after a bold number in a chip ('3 messages'). welcome.chip.messages_one is the singular.",
-  "welcome.card.catch_up": "Card heading on the home page with unread messages, alerts and new space posts."
+  "welcome.card.catch_up": "Card heading on the home page with unread messages, alerts and new space posts.",
+
+  "capability.calendar_time_zones": "One of the 'Missing features' a household on an older Social Home version lacks (connection details, space banner). Every capability.* key is a short noun phrase, under ~50 characters, joined with ', ' in a list."
 }

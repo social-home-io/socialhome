@@ -7,7 +7,11 @@ capabilities (NULL ``capabilities_seen_at`` ⇒ never).
 
 from __future__ import annotations
 
-from socialhome.domain.federation_capabilities import OURS, features_missing_below
+from socialhome.domain.federation_capabilities import (
+    OURS,
+    feature_keys_missing_below,
+    features_missing_below,
+)
 
 from .conftest import _auth
 
@@ -85,6 +89,10 @@ async def test_compat_lists_peer_below_ours(client):
     assert p["capabilities_known"] is True
     assert p["lacking_features"] == features_missing_below(13)
     assert p["lacking_features"]  # non-empty
+    # Stable slugs of the same features, same order, for the SPA to translate.
+    assert p["lacking_feature_keys"] == feature_keys_missing_below(13)
+    assert len(p["lacking_feature_keys"]) == len(p["lacking_features"])
+    assert "household_resync" in p["lacking_feature_keys"]
 
 
 async def test_compat_peer_at_ours_lacks_nothing(client):
@@ -101,6 +109,7 @@ async def test_compat_peer_at_ours_lacks_nothing(client):
     body = await resp.json()
     peers = {p["instance_id"]: p for p in body["peers"]}
     assert peers["peer-current"]["lacking_features"] == []
+    assert peers["peer-current"]["lacking_feature_keys"] == []
 
 
 async def test_compat_capabilities_known_distinguishes_never_advertised(client):

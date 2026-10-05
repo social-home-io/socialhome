@@ -1258,7 +1258,8 @@ class FederationCapability:
 #: Single source of truth mapping each ``MIN_FOR_*`` threshold to a short
 #: plain-language feature label (what the user gets, not the mechanism),
 #: for the admin compatibility panel. The labels reach the SPA as English
-#: text. Built FROM the :class:`FederationCapability` constants so the
+#: text, next to the stable slugs of :data:`CAPABILITY_FEATURE_KEYS` that the
+#: SPA translates. Built FROM the :class:`FederationCapability` constants so the
 #: version numbers live in exactly one place — adding a feature means
 #: appending one ``(FederationCapability.MIN_FOR_X, "Label")`` tuple here.
 #: v_4 (pairing-via-inbox) has no entry for the same reason it has no
@@ -1304,8 +1305,6 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (FederationCapability.MIN_FOR_APP_CHANNEL, "Apps that work across households"),
     (FederationCapability.MIN_FOR_APP_USER_ROUTING, "Apps that reach the right person"),
-    # The SPA matches this label (``RESYNC_FEATURE`` in
-    # client/src/store/federationCompat.ts) — rename both together.
     (
         FederationCapability.MIN_FOR_INSTANCE_RESYNC,
         "Asking a household to send updates again",
@@ -1445,6 +1444,69 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
 ]
 
 
+#: A stable snake_case slug for every :data:`CAPABILITY_FEATURES` entry,
+#: keyed by the same ``MIN_FOR_*`` threshold. The slugs reach the SPA next to
+#: the English labels (``lacking_feature_keys`` / ``lagging_feature_keys``),
+#: which translates them as ``capability.<slug>``. **They are an API contract:
+#: never rename one.** Adding a feature means one tuple in
+#: :data:`CAPABILITY_FEATURES` plus one slug here (a test pins the set, and
+#: that both cover the same versions).
+CAPABILITY_FEATURE_KEYS: dict[int, str] = {
+    FederationCapability.MIN_FOR_CALENDAR_TZ: "calendar_time_zones",
+    FederationCapability.MIN_FOR_DM_MEDIA_SYNC: "photos_in_dms",
+    FederationCapability.MIN_FOR_HOME_LOCATION_BROADCAST: "home_location_sharing",
+    FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM: "invite_links_other_households",
+    FederationCapability.MIN_FOR_SPACE_KEY_REKEY: "space_rekey_on_leave",
+    FederationCapability.MIN_FOR_REMOTE_MEMBER_ROLE: "remote_member_roles",
+    FederationCapability.MIN_FOR_REMOTE_ADMIN_KICK: "remote_member_removal",
+    FederationCapability.MIN_FOR_BAZAAR_LISTING: "bazaar_listings",
+    FederationCapability.MIN_FOR_BAZAAR_STATUS: "bazaar_sold_status",
+    FederationCapability.MIN_FOR_BAZAAR_BIDS: "bazaar_bids",
+    FederationCapability.MIN_FOR_SYNC_HTTPS_FALLBACK: "sync_https_fallback",
+    FederationCapability.MIN_FOR_MEDIA_CHANNEL: "fast_media_transfer",
+    FederationCapability.MIN_FOR_REMOTE_ADMIN_ACTION: "remote_admin_actions",
+    FederationCapability.MIN_FOR_ADMIN_PROPOSALS: "admin_proposals",
+    FederationCapability.MIN_FOR_APP_CHANNEL: "cross_household_apps",
+    FederationCapability.MIN_FOR_APP_USER_ROUTING: "app_user_routing",
+    # The SPA matches this slug (``RESYNC_FEATURE_KEY`` in
+    # client/src/store/federationCompat.ts).
+    FederationCapability.MIN_FOR_INSTANCE_RESYNC: "household_resync",
+    FederationCapability.MIN_FOR_SPACE_SYNC_REJECTED: "space_sync_repair",
+    FederationCapability.MIN_FOR_AUTHENTICATED_ROUTE_DISCOVERY: "safe_route_discovery",
+    FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE: "admin_key_share",
+    FederationCapability.MIN_FOR_SPACE_ROSTER_GOSSIP: "roster_gossip",
+    FederationCapability.MIN_FOR_ADMIN_AUTHORITATIVE_OPS: "admin_ops_without_owner",
+    FederationCapability.MIN_FOR_USER_IDENTITY_KEY: "user_identity_keys",
+    FederationCapability.MIN_FOR_IDENTITY_ANCHOR: "identity_anchor",
+    FederationCapability.MIN_FOR_USER_MOVE: "user_move",
+    FederationCapability.MIN_FOR_ROUTE_STALE_NACK: "route_break_notice",
+    FederationCapability.MIN_FOR_INVITE_BOOTSTRAP_REDEEM: "invite_link_bootstrap",
+    FederationCapability.MIN_FOR_REMOTE_SUBSCRIBER_ROLE: "remote_followers",
+    FederationCapability.MIN_FOR_ROUTED_ORIGIN_SIGNATURE: "routed_origin_check",
+    FederationCapability.MIN_FOR_ROSTER_SNAPSHOT: "roster_snapshot",
+    FederationCapability.MIN_FOR_GALLERY_ALBUM_SYNC: "gallery_albums",
+    FederationCapability.MIN_FOR_OWNER_BOUND_ALBUM_ID: "album_owner_binding",
+    FederationCapability.MIN_FOR_MOMENT_ORIGIN_SIGNATURE: "moment_origin_check",
+    FederationCapability.MIN_FOR_OWNER_BOUND_CONTENT_ID: "content_owner_binding",
+    FederationCapability.MIN_FOR_CROSS_HOUSEHOLD_GROUP_DM: "cross_household_group_chats",
+    FederationCapability.MIN_FOR_MOMENT_NO_RELAY: "moment_no_relay",
+    FederationCapability.MIN_FOR_SPACE_TIMETABLE: "space_timetables",
+    FederationCapability.MIN_FOR_TASK_PRIORITY_LABELS: "task_priority_labels",
+    FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE: "space_moderators",
+    FederationCapability.MIN_FOR_CONTENT_ACCESS_ENFORCEMENT: "admin_only_features",
+    FederationCapability.MIN_FOR_FEDERATED_MODERATION: "federated_moderation",
+    FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION: "removed_admin_lockout",
+    FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE: "space_reports",
+    FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO: "security_update_catch_up",
+    FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE: "forwarded_role_changes",
+    FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES: "shared_pages_no_lost_edits",
+    FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH: "member_publish",
+    FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH: "anonymous_gfs_posting",
+    FederationCapability.MIN_FOR_PRIVATE_CHANNELS: "private_gfs_spaces",
+    FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK: "forwarded_invite_links",
+}
+
+
 def features_missing_below(version: int) -> list[str]:
     """Return the feature labels a peer at ``version`` lacks vs :data:`OURS`.
 
@@ -1455,6 +1517,16 @@ def features_missing_below(version: int) -> list[str]:
     first.
     """
     return [label for ver, label in sorted(CAPABILITY_FEATURES) if ver > version]
+
+
+def feature_keys_missing_below(version: int) -> list[str]:
+    """The :data:`CAPABILITY_FEATURE_KEYS` slugs of
+    :func:`features_missing_below`, in the same order."""
+    return [
+        CAPABILITY_FEATURE_KEYS[ver]
+        for ver, _label in sorted(CAPABILITY_FEATURES)
+        if ver > version
+    ]
 
 
 #: The ``MIN_FOR_*`` thresholds whose feature is **shared-space scoped** — a
@@ -1531,5 +1603,15 @@ def space_features_missing_below(version: int) -> list[str]:
     return [
         label
         for ver, label in sorted(CAPABILITY_FEATURES)
+        if ver > version and ver in SPACE_SCOPED_MIN_VERSIONS
+    ]
+
+
+def space_feature_keys_missing_below(version: int) -> list[str]:
+    """The :data:`CAPABILITY_FEATURE_KEYS` slugs of
+    :func:`space_features_missing_below`, in the same order."""
+    return [
+        CAPABILITY_FEATURE_KEYS[ver]
+        for ver, _label in sorted(CAPABILITY_FEATURES)
         if ver > version and ver in SPACE_SCOPED_MIN_VERSIONS
     ]
