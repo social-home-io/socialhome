@@ -32,6 +32,7 @@ from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.space import SPACE_CATEGORIES
 from . import app_keys as K
 from .config import DEFAULT_TRUSTED_PROXIES
+from .html_page import css_color, html_response
 from .invites import build_invite_code
 from .markdown_lite import render_markdown
 from .repositories import PAIR_TOKEN_TTL_SECONDS as REPO_PAIR_TOKEN_TTL_SECONDS
@@ -507,6 +508,11 @@ def _render_qr_png_data_uri_sync(payload: str) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+#: Wires every ``<button data-copy-target=…>`` on the page. A file under
+#: ``static/``, never an inline ``<script>`` — the public-page CSP is
+#: ``script-src 'self'`` (``html_page.py``).
+_COPY_BUTTON_SCRIPT_TAG = '<script src="/static/copy_button.js"></script>'
+
 #: Styling for the "here is a code, here is a button that copies it" widget.
 #: ONE definition shared by the landing's pairing code and the invite page's
 #: ``socialhome://invite#…`` code — the two surfaces are the same affordance
@@ -526,52 +532,6 @@ _COPY_WIDGET_CSS = """
     .copy-btn:hover { filter: brightness(0.95); }
     .copy-btn.copied { background: #2D8F4E; }
 """
-
-#: The copy-to-clipboard shim, parameterised by element id. Tiny and inline on
-#: purpose: these are server-rendered pages a first-time visitor loads once, so
-#: shipping a bundle to power one button would be absurd. Falls back to
-#: selecting the code text where the clipboard API is unavailable (older
-#: Safari, ``file://``).
-_COPY_BUTTON_SCRIPT = """
-    <script>
-      (function() {
-        var btn = document.getElementById("__BTN_ID__");
-        var target = document.getElementById("__CODE_ID__");
-        if (!btn || !target) return;
-        btn.addEventListener("click", function() {
-          var text = target.textContent || "";
-          var done = function() {
-            btn.textContent = btn.dataset.copiedLabel || "Copied";
-            btn.classList.add("copied");
-            setTimeout(function() {
-              btn.textContent = btn.dataset.defaultLabel || "Copy code";
-              btn.classList.remove("copied");
-            }, 1800);
-          };
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(done).catch(function() {
-              var r = document.createRange(); r.selectNode(target);
-              window.getSelection().removeAllRanges();
-              window.getSelection().addRange(r);
-            });
-          } else {
-            var r = document.createRange(); r.selectNode(target);
-            window.getSelection().removeAllRanges();
-            window.getSelection().addRange(r);
-          }
-        });
-      })();
-    </script>
-"""
-
-
-def _copy_button_script(button_id: str, code_id: str) -> str:
-    """The inline copy shim wired to *button_id* / *code_id*."""
-    return _COPY_BUTTON_SCRIPT.replace("__BTN_ID__", button_id).replace(
-        "__CODE_ID__",
-        code_id,
-    )
-
 
 #: Discovery categories (§23.50) as ``(value, label)`` pairs. The values
 #: mirror ``socialhome.domain.space.SPACE_CATEGORIES``; this ordered list
@@ -610,13 +570,22 @@ def _render_landing(
     search: str,
     category: str,
     base_url: str,
-) -> str:
+) -> tuple[str, str]:
+    """The ``GET /`` page as ``(html, css)`` — ``css`` is the exact text of
+    its one ``<style>``, for the CSP hash."""
     rows = []
-    for sp in spaces:
-        accent = _escape(sp.get("accent_color") or "#ce5d3e")
+    # Per-card accent stripe: a class + a rule in the page's hashed
+    # ``<style>``, not a ``style=`` attribute (the public-page CSP refuses
+    # those). ``css_color`` keeps owner-supplied text out of the CSS.
+    accent_rules = []
+    for i, sp in enumerate(spaces):
+        accent = css_color(sp.get("accent_color"), "#ce5d3e")
+        accent_rules.append(
+            f"    .card.accent-{i} {{ border-left: 6px solid {accent}; }}"
+        )
         cat_label = _escape(_category_label(sp.get("category")))
         rows.append(f"""
-          <li class="card" style="border-left:6px solid {accent}">
+          <li class="card accent-{i}">
             <a href="/spaces/{_escape(sp["space_id"])}">
               <strong>{_escape(sp.get("name") or "—")}</strong>
             </a>
@@ -634,25 +603,13 @@ def _render_landing(
             f'<a href="/?category={value}" class="{active}">{_escape(label)}</a>'
         )
     cat_tabs_html = "\n        ".join(cat_tabs)
+    accent_css = "\n".join(accent_rules)
     header_html = (
         f'<img src="{_escape(header_image_url)}" alt="" class="hero-image" />'
         if header_image_url
         else ""
     )
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>{_escape(server_name)}</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <meta http-equiv="refresh" content="600" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
-  />
-  <style>
+    css = f"""
     /* GFS public theme — mirrors the SH SPA design tokens (see
      * ``client/src/styles/tokens.css``) so the public landing feels
      * like part of the same product family as the app. Pure CSS, no
@@ -760,7 +717,22 @@ def _render_landing(
       text-align: center; padding: 14px 0 32px;
       color: var(--ink-soft); font-size: 12px;
     }}
-  </style>
+{accent_css}
+"""
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{_escape(server_name)}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="refresh" content="600" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
+  />
+  <style>{css}</style>
 </head>
 <body>
   {header_html}
@@ -792,7 +764,7 @@ def _render_landing(
         </div>
       </div>
     </section>
-{_copy_button_script("copy-pair-btn", "pair-code")}
+    {_COPY_BUTTON_SCRIPT_TAG}
 
     <section>
       <h2>Spaces</h2>
@@ -824,6 +796,7 @@ def _render_landing(
 </body>
 </html>
 """
+    return html, css
 
 
 def _render_space_page(
@@ -831,8 +804,8 @@ def _render_space_page(
     space: dict,
     server_name: str,
     base_url: str,
-) -> str:
-    """The ``GET /spaces/{slug}`` page.
+) -> tuple[str, str]:
+    """The ``GET /spaces/{slug}`` page as ``(html, css)``.
 
     The call to action points at this server's landing page, not at a
     ``socialhome://`` deep link. There is no invite code to hand over here —
@@ -843,35 +816,19 @@ def _render_space_page(
     device it was ever clicked on. The surface that DOES carry a pasteable
     ``socialhome://invite#…`` code is an owner-minted ``/join`` link.
     """
-    primary = _escape(
-        space.get("primary_color") or space.get("accent_color") or "#D2542A"
+    # Owner-supplied colours land in the page's hashed ``<style>`` —
+    # ``css_color`` admits only a plain hex colour.
+    primary = css_color(
+        space.get("primary_color"),
+        css_color(space.get("accent_color"), "#D2542A"),
     )
-    accent = _escape(space.get("accent_color") or primary)
+    accent = css_color(space.get("accent_color"), primary)
     icon_url = _escape(space.get("icon_url") or "")
     cover_uri = _escape(space.get("cover_url") or "")
     og_image = cover_uri or icon_url
     og_title = _escape(f"{space.get('name') or ''} — {server_name}")
     og_desc = _escape(space.get("description") or "")
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>{og_title}</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <meta property="og:title"       content="{og_title}" />
-  <meta property="og:description" content="{og_desc}" />
-  <meta property="og:image"       content="{og_image}" />
-  <meta property="og:url"         content="{_escape(base_url)}/spaces/{
-        _escape(space["space_id"])
-    }" />
-  <meta name="twitter:card"       content="summary_large_image" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
-  />
-  <style>
+    css = f"""
     /* GFS per-space public page — same SH design tokens as the
      * landing (see the matching ``:root`` block in
      * ``handle_landing``'s template). The CTA + accent-bar pick
@@ -952,7 +909,27 @@ def _render_space_page(
       color: var(--ink-soft); font-size: 12px;
     }}
     .footer-brand a {{ color: var(--primary); }}
-  </style>
+"""
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{og_title}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta property="og:title"       content="{og_title}" />
+  <meta property="og:description" content="{og_desc}" />
+  <meta property="og:image"       content="{og_image}" />
+  <meta property="og:url"         content="{_escape(base_url)}/spaces/{
+        _escape(space["space_id"])
+    }" />
+  <meta name="twitter:card"       content="summary_large_image" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
+  />
+  <style>{css}</style>
 </head>
 <body>
   {'<img class="cover" src="' + cover_uri + '" alt="" />' if cover_uri else ""}
@@ -991,6 +968,7 @@ def _render_space_page(
 </body>
 </html>
 """
+    return html, css
 
 
 def _render_invite_page(
@@ -999,8 +977,8 @@ def _render_invite_page(
     invite_code: str,
     invite_qr_data_uri: str,
     server_name: str,
-) -> str:
-    """The ``GET /join/{gfs_token}`` page.
+) -> tuple[str, str]:
+    """The ``GET /join/{gfs_token}`` page as ``(html, css)``.
 
     Renders the space's already-public directory metadata (name, icon,
     accent) next to the one thing this page exists to hand over: the
@@ -1033,7 +1011,7 @@ def _render_invite_page(
     passed its expiry date, or was taken back by whoever created it.</p>
     <p class="muted">Ask whoever shared it for a fresh link.</p>""",
         )
-    accent = _escape(space.get("accent_color") or "#D2542A")
+    accent = css_color(space.get("accent_color"), "#D2542A")
     icon_url = _escape(space.get("icon_url") or "")
     return _invite_page_html(
         title=f"Join {_escape(space.get('name') or '')} \u2014 {_escape(server_name)}",
@@ -1061,13 +1039,13 @@ def _render_invite_page(
         </p>
       </div>
     </div>
-{_copy_button_script("copy-invite-btn", "invite-code")}
+    {_COPY_BUTTON_SCRIPT_TAG}
     <p class="muted">You join from your own household \u2014 this code is what
     tells it where to knock.</p>""",
     )
 
 
-def _invite_page_html(*, title: str, accent: str, body: str) -> str:
+def _invite_page_html(*, title: str, accent: str, body: str) -> tuple[str, str]:
     """The shared shell for both ``GET /join/{gfs_token}`` outcomes.
 
     One shell, so "here is your code" and "this link is dead" are
@@ -1076,19 +1054,7 @@ def _invite_page_html(*, title: str, accent: str, body: str) -> str:
     arrive pre-escaped from the caller \u2014 the space name and the server
     name are both operator- or owner-supplied.
     """
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>{title}</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
-  />
-  <style>
+    css = f"""
     /* Same SH design tokens as the landing + per-space pages so
      * the invite-link handoff feels continuous with the rest of
      * the GFS surface and the SH SPA. */
@@ -1137,7 +1103,20 @@ def _invite_page_html(*, title: str, accent: str, body: str) -> str:
                        border-radius: 8px; }}
     {_COPY_WIDGET_CSS}
     .muted {{ color: var(--ink-soft); font-size: 13px; }}
-  </style>
+"""
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{title}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
+  />
+  <style>{css}</style>
 </head>
 <body>
   <main>
@@ -1146,6 +1125,7 @@ def _invite_page_html(*, title: str, accent: str, body: str) -> str:
 </body>
 </html>
 """
+    return html, css
 
 
 # ─── Handlers ────────────────────────────────────────────────────────────
@@ -1210,10 +1190,10 @@ async def handle_landing(request: web.Request) -> web.Response:
             }
         )
 
-    header_image_url = (
-        f"{cfg.base_url}/media/{header_image_file}" if header_image_file else ""
-    )
-    html = _render_landing(
+    # Root-relative, so ``img-src 'self'`` covers it whatever host the
+    # configured ``base_url`` names.
+    header_image_url = f"/media/{header_image_file}" if header_image_file else ""
+    html, css = _render_landing(
         server_name=server_name,
         landing_markdown=_escape(landing_markdown),
         header_image_url=header_image_url,
@@ -1225,7 +1205,7 @@ async def handle_landing(request: web.Request) -> web.Response:
         category=category,
         base_url=cfg.base_url,
     )
-    return web.Response(text=html, content_type="text/html")
+    return html_response(html, inline_styles=[css])
 
 
 async def handle_space_page(request: web.Request) -> web.Response:
@@ -1254,12 +1234,12 @@ async def handle_space_page(request: web.Request) -> web.Response:
         "subscriber_count": space.subscriber_count,
         "category": space.category,
     }
-    html = _render_space_page(
+    html, css = _render_space_page(
         space=space_dict,
         server_name=server_name,
         base_url=cfg.base_url,
     )
-    return web.Response(text=html, content_type="text/html")
+    return html_response(html, inline_styles=[css])
 
 
 async def handle_invite_page(request: web.Request) -> web.Response:
@@ -1314,14 +1294,10 @@ async def handle_invite_page(request: web.Request) -> web.Response:
             invite_code = build_invite_code(invite.blob)
     server_name = (await admin_repo.get_config("server_name")) or cfg.server_name
     qr_data = await _render_qr_png_data_uri(invite_code) if space else ""
-    html = _render_invite_page(
+    html, css = _render_invite_page(
         space=space,
         invite_code=invite_code,
         invite_qr_data_uri=qr_data,
         server_name=server_name,
     )
-    return web.Response(
-        text=html,
-        content_type="text/html",
-        status=200 if space else 404,
-    )
+    return html_response(html, inline_styles=[css], status=200 if space else 404)

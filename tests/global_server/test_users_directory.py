@@ -16,6 +16,8 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
 
+from .conftest import assert_strict_public_page
+
 
 def _config(tmp_dir):
     return GfsConfig(
@@ -284,3 +286,14 @@ async def test_picture_fetch_404_when_unset(client, author):
     await _register(client, author)
     resp = await client.get("/gfs/moments/users/u-author/picture")
     assert resp.status == 404
+
+
+# ── Strict CSP on the directory + detail pages ──────────────────────────
+
+
+async def test_directory_and_detail_pages_have_strict_csp(client, author):
+    await _register(client, author, bio="Hi")
+    for path in ("/moments", "/moments/u-author"):
+        resp = await client.get(path)
+        assert resp.status == 200
+        assert_strict_public_page(resp, await resp.text())
