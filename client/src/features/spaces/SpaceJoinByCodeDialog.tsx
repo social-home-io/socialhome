@@ -155,7 +155,7 @@ export function SpaceJoinByCodeDialog() {
         // Prefer the backend's specific reason — e.g. the child-protection
         // age gate's "This space is restricted to users aged 18+." — so a
         // blocked minor sees WHY, not a misleading "invite revoked".
-        errorMsg.value = e.detail || t('space.join_code.forbidden')
+        errorMsg.value = e.detail ? e.message : t('space.join_code.forbidden')
       } else {
         errorMsg.value = (e as Error)?.message ?? t('space.join_code.failed')
       }

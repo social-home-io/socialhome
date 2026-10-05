@@ -24,6 +24,7 @@ from ..domain.calendar import (
     Calendar,
     CalendarEvent,
     CalendarEventCopy,
+    RsvpPastError,
     CalendarEventCreate,
     CalendarRSVP,
     EventReminder,
@@ -38,6 +39,7 @@ from ..domain.space import (
     ModerationTargetGoneError,
     Space,
     SpaceModerationItem,
+    SpaceArchivedError,
     SpacePermissionError,
 )
 from ..domain.events import (
@@ -1625,9 +1627,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         if space is None or space.dissolved:
             raise KeyError(f"space {space_id!r} not found")
         if space.archived:
-            raise SpacePermissionError(
-                "space is archived (read-only) — unarchive it to make changes",
-            )
+            raise SpaceArchivedError()
         return space
 
     async def require_writer(
@@ -1967,9 +1967,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         # different code path so this guard doesn't block it.
         duration = event.end - event.start
         if occ_dt + duration < datetime.now(timezone.utc):
-            raise ValueError(
-                "cannot RSVP to an occurrence that has already ended",
-            )
+            raise RsvpPastError()
         occ_iso = occ_dt.isoformat()
         now_iso = datetime.now(timezone.utc).isoformat()
         # Phase C: capacity-aware "going" routing. Only "going" is

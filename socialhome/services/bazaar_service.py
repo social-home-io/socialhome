@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from ..domain.child_protection import ProtectedCapability
+from ..domain.errors import CodedError
 from ..domain.events import (
     BazaarBidPlaced,
     BazaarBidWithdrawn,
@@ -69,6 +70,36 @@ class BidNotFoundError(BazaarServiceError):
 
 class OfferNotFoundError(BazaarServiceError):
     """Raised when a fixed-price offer reference is unknown."""
+
+
+class BidTooLowError(CodedError):
+    """A bid below the listing's floor (start price, or the high bid plus
+    the step). ``params`` carry the floor in the listing's stored units
+    (minor units — cents — except zero-decimal currencies) and the
+    currency, so the SPA can format it as money."""
+
+    status = 422
+    code = "BID_TOO_LOW"
+
+    def __init__(self, floor: int, currency: str) -> None:
+        super().__init__(
+            f"amount must be at least {floor}",
+            params={"floor_amount": floor, "currency": currency},
+        )
+
+
+class OwnListingError(CodedError):
+    """A seller bidding on, or making an offer for, their own listing."""
+
+    code = "OWN_LISTING"
+    detail = "seller cannot bid on or offer for own listing"
+
+
+class ListingNotActiveError(CodedError):
+    """A bid or offer on a listing that is sold, expired or cancelled."""
+
+    code = "LISTING_NOT_ACTIVE"
+    detail = "listing is not active"
 
 
 class _Unset:
@@ -410,9 +441,9 @@ class BazaarService(ProtectionGateMixin):
         await self._require_unrestricted(bidder_user_id, ProtectedCapability.BAZAAR)
         listing = await self.get_listing(listing_post_id)
         if listing.status is not BazaarStatus.ACTIVE:
-            raise ValueError("listing is not active")
+            raise ListingNotActiveError(status=422)
         if listing.seller_user_id == bidder_user_id:
-            raise ValueError("seller cannot bid on own listing")
+            raise OwnListingError(status=422)
         if int(amount) <= 0:
             raise ValueError("amount must be positive")
         if listing.mode in (BazaarMode.AUCTION, BazaarMode.BID_FROM):
@@ -422,9 +453,7 @@ class BazaarService(ProtectionGateMixin):
             if highest is not None:
                 floor = max(floor, int(highest.amount) + step)
             if int(amount) < floor:
-                raise ValueError(
-                    f"amount must be at least {floor}",
-                )
+                raise BidTooLowError(floor, listing.currency)
 
         bid = new_bid(
             listing_post_id=listing_post_id,
@@ -558,16 +587,13 @@ class BazaarService(ProtectionGateMixin):
         await self._require_unrestricted(offerer_user_id, ProtectedCapability.BAZAAR)
         listing = await self.get_listing(listing_post_id)
         if listing.status != BazaarStatus.ACTIVE:
-            raise BazaarServiceError(
-                f"listing {listing_post_id!r} is {listing.status.value}, "
-                "no new offers accepted",
-            )
+            raise ListingNotActiveError(status=409)
         if listing.mode == BazaarMode.AUCTION:
             raise BazaarServiceError(
                 "auction listings accept bids, not offers — use POST /bids",
             )
         if offerer_user_id == listing.seller_user_id:
-            raise PermissionError("cannot offer on your own listing")
+            raise OwnListingError(status=403)
         if int(amount) <= 0:
             raise ValueError("amount must be positive")
 

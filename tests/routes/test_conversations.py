@@ -1055,6 +1055,9 @@ async def test_a_person_on_an_older_household_is_refused_with_a_reason(
     assert r.status == 422
     assert "GROUP_MEMBER_UNSUPPORTED" in await r.text()
     assert "needs a Social Home update" in await r.text()
+    err = (await r.json())["error"]
+    # The SPA words the reason itself, in the user's language.
+    assert err["params"] == {"reason": "too_old", "name": "Olaf"}
     assert households == []
 
 

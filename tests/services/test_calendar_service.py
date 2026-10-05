@@ -13,6 +13,7 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import (
+    RsvpPastError,
     CalendarEvent,
     CalendarEventCreate,
     CalendarRSVP,
@@ -1392,7 +1393,7 @@ async def test_rsvp_to_ended_event_rejected(space_cal_env):
         "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
         ("bob", "uid-bob", "Bob"),
     )
-    with pytest.raises(ValueError, match="already ended"):
+    with pytest.raises(RsvpPastError, match="already ended"):
         await env.space_cal_svc.rsvp(
             event_id=event.id,
             user_id="uid-bob",

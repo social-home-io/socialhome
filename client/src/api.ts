@@ -2,7 +2,7 @@
 // static dependency on auth.ts — breaks the api↔auth import cycle.
 import { token } from '@/store/token'
 import { showToast } from '@/components/Toast'
-import { accessNote } from '@/features/spaces/spaceAccess'
+import { apiErrorMessage, type ApiErrorBody } from '@/apiErrors'
 import { t } from '@/i18n/i18n'
 
 // Logout handler, registered by store/auth at module load. Lets the 401 path
@@ -52,6 +52,24 @@ async function _parseJsonOrNull<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** The ``error`` object of a canonical ``{"error": {"code", "detail"}}``
+ *  body, or ``null`` when the body is missing / not JSON / another shape
+ *  (proxy errors, upstream 502s). Never throws. */
+async function _parseErrorBody(
+  res: Response,
+): Promise<ApiErrorBody | null> {
+  try {
+    const body = await res.json() as { error?: unknown }
+    if (body && typeof body === 'object'
+        && body.error && typeof body.error === 'object') {
+      return body.error as ApiErrorBody
+    }
+  } catch {
+    // Non-JSON body.
+  }
+  return null
+}
+
 /**
  * Error thrown by ``ApiClient`` for non-2xx responses.
  *
@@ -63,18 +81,19 @@ async function _parseJsonOrNull<T>(res: Response): Promise<T> {
  * ``detail`` fields so call sites can branch on the machine-readable
  * code while showing the human-readable detail to the user.
  *
- * ``message`` defaults to the ``detail`` when present so the common
- * ``showToast(err.message)`` pattern lands the friendly text the
- * backend already provides (e.g. "Home Assistant has no picture for
- * this user.") instead of the bare ``"API 422: /api/..."`` string.
+ * ``message`` is the user-facing text in the user's language
+ * (``apiErrorMessage``): the translated ``error.<code>`` line for a known
+ * code, a per-status line for a generic answer, else the server's
+ * ``detail`` — so the common ``showToast(err.message)`` needs no mapping
+ * of its own. ``detail`` stays the server's (English) string.
  */
 export class ApiError extends Error {
   /** Machine-readable code from ``{"error": {"code": ...}}`` (e.g.
    *  ``"UNPROCESSABLE"``, ``"NOT_IMPLEMENTED"``). ``null`` if the
    *  response body wasn't in the canonical shape. */
   public readonly code: string | null
-  /** Human-readable string safe to display in the UI. ``null`` if the
-   *  body had no ``detail`` field. */
+  /** The server's (English) ``detail``. ``null`` if the body had none.
+   *  Show ``message`` to users, not this. */
   public readonly detail: string | null
   /** Every other field of the ``error`` object — the machine-readable
    *  hints ``error_response(extra=…)`` merges in (``count``,
@@ -84,17 +103,13 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly path: string,
-    parsed?: { code?: unknown; detail?: unknown; [extra: string]: unknown } | null,
+    parsed?: ApiErrorBody | null,
   ) {
     const code = typeof parsed?.code === 'string' ? parsed.code : null
     const detail = typeof parsed?.detail === 'string' ? parsed.detail : null
-    // Prefer the backend's detail string as the ``Error.message`` so
-    // call sites that do ``err.message`` (which is most of them — toast
-    // strings, status banners) light up with the friendly text.
-    // Fall back to the historic ``"API <status>: <path>"`` shape so a
-    // body-less / non-JSON error still produces an actionable string
-    // rather than ``""`` or ``undefined``.
-    super(detail || `API ${status}: ${path}`)
+    // Call sites show ``err.message`` (toasts, status banners) — make it
+    // the translated, user-facing line.
+    super(apiErrorMessage(status, path, parsed ?? null))
     this.name = 'ApiError'
     this.code = code
     this.detail = detail
@@ -146,54 +161,18 @@ class ApiClient {
         // api↔auth cycle (auth already imports api). DI keeps the graph acyclic.
         _onUnauthorized?.()
       }
-      throw new Error('Unauthorized')
+      // A real ``ApiError`` carrying the status + parsed code, so callers
+      // can branch on ``err.status === 401`` (the login form shows its
+      // translated "invalid credentials" copy) — a bare ``Error`` here
+      // lost the status and leaked the English "Unauthorized" text.
+      throw new ApiError(401, path, await _parseErrorBody(res))
     }
     if (!res.ok) {
-      // Try to parse the canonical ``{"error": {"code", "detail"}}``
-      // body so the thrown ``ApiError`` carries the friendly detail
-      // the backend already provides. Falls back to a body-less
-      // ``ApiError`` when the response isn't JSON (proxy errors,
-      // upstream 502s, etc.) — callers still get the historic
-      // ``"API <status>: <path>"`` message in that case.
-      let parsed: { code?: unknown; detail?: unknown } | null = null
-      try {
-        const body = await res.json() as { error?: unknown }
-        if (body && typeof body === 'object'
-            && body.error && typeof body.error === 'object') {
-          parsed = body.error as { code?: unknown; detail?: unknown }
-          if (parsed.code === 'ACCESS_ADMIN_ONLY') {
-            // §4.3: an ADMIN_ONLY feature refused the write. Every
-            // surface toasts ``err.message`` — give it the translated
-            // "only admins can …" note for that feature.
-            const feature = (parsed as { feature?: unknown }).feature
-            parsed = { ...parsed, detail: accessNote(String(feature ?? '')) }
-          } else if (parsed.code === 'HOST_UNREACHABLE') {
-            // A forward to the space's host went nowhere — nothing was
-            // queued, so never say "sent".
-            const reason = (parsed as { reason?: unknown }).reason
-            parsed = {
-              ...parsed,
-              detail: reason === 'unknown_host'
-                ? t('space.host.unknown')
-                : t('space.host.unreachable'),
-            }
-          } else if (parsed.code === 'HOST_TOO_OLD') {
-            // The space's host is too old for what this household asked:
-            // v_43 review submissions, or a v_47 forwarded role change
-            // (``feature: 'role_change'``) — the toast says why, translated.
-            const feature = (parsed as { feature?: unknown }).feature
-            parsed = {
-              ...parsed,
-              detail: feature === 'role_change'
-                ? t('space.member.role_host_too_old')
-                : t('moderation.error.host_too_old'),
-            }
-          }
-        }
-      } catch {
-        // Non-JSON body — leave ``parsed`` as null.
-      }
-      throw new ApiError(res.status, path, parsed)
+      // ``ApiError`` turns the canonical ``{"error": {"code", "detail"}}``
+      // body into the translated message (``apiErrors.ts``); a body-less
+      // / non-JSON answer (proxy errors, upstream 502s) still gets a
+      // per-status line.
+      throw new ApiError(res.status, path, await _parseErrorBody(res))
     }
     return res
   }

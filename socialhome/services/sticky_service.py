@@ -42,6 +42,7 @@ from ..domain.space import (
     ModerationTargetGoneError,
     Space,
     SpaceModerationItem,
+    SpaceArchivedError,
     SpacePermissionError,
 )
 from ..domain.sticky import (
@@ -128,9 +129,7 @@ class StickyService(BusPublisherMixin, ContentAccessMixin):
         if space is None or space.dissolved:
             raise KeyError(f"space {space_id!r} not found")
         if space.archived:
-            raise SpacePermissionError(
-                "space is archived (read-only) — unarchive it to make changes",
-            )
+            raise SpaceArchivedError()
         member = await self._spaces.get_member(space_id, user_id)
         if member is None:
             raise SpacePermissionError("not a member of this space")

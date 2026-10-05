@@ -528,7 +528,7 @@ function CatalogRow({
       await installApp(entry.app_id)
     } catch (err: unknown) {
       const msg = err instanceof ApiError && err.detail
-        ? err.detail
+        ? err.message
         : (err as Error).message ?? t('apps.install_failed')
       showToast(msg, 'error')
     } finally {

@@ -138,6 +138,16 @@ from ..domain.space import (
     INVITE_VIA_INTERNAL,
     INVITE_VIAS,
     AccessDecision,
+    AlreadyMemberError,
+    BannedFromSpaceError,
+    HostNotPairedError,
+    InviteExpiredError,
+    InviteOnlyError,
+    SpaceArchivedError,
+    SubscribeNotAllowedError,
+    SubscriberReadOnlyError,
+    UserAlreadyMemberError,
+    UserBannedError,
     ContentAction,
     PeersTooOldError,
     PrivateGfsLinkMembersError,
@@ -2746,10 +2756,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         if await self._spaces.is_banned(space_id, user_id):
-            raise SpacePermissionError(
-                f"user {user_id!r} is banned from this space",
-                banned=True,
-            )
+            raise UserBannedError()
         # §CP.F1 — block underage minors when CP is wired in.
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
@@ -2820,15 +2827,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
         if await self._spaces.is_banned(space_id, user_id):
-            raise SpacePermissionError(
-                f"user {user_id!r} is banned from this space",
-                banned=True,
-            )
+            raise UserBannedError()
         # Already a member → 409-shape error so the route can map.
         if await self._spaces.get_member(space_id, user_id) is not None:
-            raise SpacePermissionError(
-                f"user {user_id!r} is already a member",
-            )
+            raise UserAlreadyMemberError()
         # §CP.F1 — block underage minors here too, so they never see
         # the accept prompt for a space they couldn't actually join.
         if self._child_protection is not None:
@@ -2889,10 +2891,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 invitation_id,
                 "declined",
             )
-            raise SpacePermissionError(
-                f"user {user_id!r} is banned from this space",
-                banned=True,
-            )
+            raise BannedFromSpaceError()
         # §CP.F1 — invite creation gates the invitee, but protection may be
         # enabled *after* the invite was sent; re-check at acceptance so a
         # newly-protected minor can't accept a stale invite into an
@@ -5683,7 +5682,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise RuntimeError("federation not attached")
         invite = await self._spaces.get_invitation_by_token(token)
         if invite is None:
-            raise KeyError("invite token invalid or expired")
+            raise InviteExpiredError()
         host_instance = invite.get("remote_instance_id")
         if not host_instance:
             raise ValueError("not a cross-household invite")
@@ -5792,7 +5791,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise RuntimeError("federation not attached")
         invite = await self._spaces.get_invitation_by_token(token)
         if invite is None:
-            raise KeyError("invite token invalid or expired")
+            raise InviteExpiredError()
         host_instance = invite.get("remote_instance_id")
         if not host_instance:
             raise ValueError("not a cross-household invite")
@@ -5968,11 +5967,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 str(peek["space_id"]),
                 user_id,
             ):
-                raise SpacePermissionError(
-                    "banned from this space",
-                    banned=True,
-                )
-            raise KeyError("invite token invalid, expired, or exhausted")
+                raise BannedFromSpaceError()
+            raise InviteExpiredError()
         space_id = row["space_id"]
         seat = SpaceRole(row.get("role") or SpaceRole.MEMBER.value)
         # §CP.F1 — an invite link must not seat an under-age protected minor
@@ -6097,12 +6093,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     ) -> str:
         space = await self._require_space(space_id)
         if space.join_mode is JoinMode.INVITE_ONLY:
-            raise SpacePermissionError("space is invite-only")
+            raise InviteOnlyError()
         if await self._spaces.is_banned(space_id, user_id):
-            raise SpacePermissionError("banned from this space", banned=True)
+            raise BannedFromSpaceError()
         existing = await self._spaces.get_member(space_id, user_id)
         if existing is not None:
-            raise ValueError("already a member")
+            raise AlreadyMemberError()
         request_id = await self._spaces.save_join_request(
             space_id,
             user_id,
@@ -6387,9 +6383,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise RuntimeError("federation not attached")
         peer = await self._federation_repo.get_instance(host_instance_id)
         if peer is None or peer.status is not PairingStatus.CONFIRMED:
-            raise SpacePermissionError(
-                "host household is not a CONFIRMED peer — pair first",
-            )
+            raise HostNotPairedError()
         # Persist locally so the inbound APPROVED handler can look up
         # the applicant_user_id; there's no host-side space row locally.
         # §Audit #11: route through ``save_join_request`` rather than
@@ -7128,14 +7122,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 gfs_id = mirrored[1]
         space = await self._require_space(space_id)
         if space.space_type not in PUBLIC_SPACE_TIERS:
-            raise SpacePermissionError(
+            raise SubscribeNotAllowedError(
                 "only public / global spaces can be subscribed to",
             )
         if await self._spaces.is_banned(space_id, user_id):
-            raise SpacePermissionError(
-                f"user {user_id!r} is banned from this space",
-                banned=True,
-            )
+            raise BannedFromSpaceError()
         existing = await self._spaces.get_member(space_id, user_id)
         if existing is not None:
             # Already a member (any role) — no-op. Never demote. Deliberately
@@ -7152,9 +7143,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # (``GfsSpaceMirrorService._meta_from_gfs_body``), failing closed when
         # an older GFS reports none.
         if not space.features.allow_subscribers:
-            raise SpacePermissionError(
-                "this space does not allow subscribers",
-            )
+            raise SubscribeNotAllowedError()
         if self._child_protection is not None:
             await self._child_protection.check_space_age_gate(space_id, user_id)
         # ORDER MATTERS: the GFS-side subscriber registration happens only
@@ -7367,9 +7356,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         is unarchived. Reads keep using :meth:`_require_space`."""
         space = await self._require_space(space_id)
         if space.archived:
-            raise SpacePermissionError(
-                "space is archived (read-only) — unarchive it to make changes",
-            )
+            raise SpaceArchivedError()
         return space
 
     async def _require_member(
@@ -7439,9 +7426,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 return
             if action == "comment" and space.features.allow_subscriber_comment:
                 return
-        raise SpacePermissionError(
-            f"subscribers can only read — joining as a member is required to {action}",
-        )
+        raise SubscriberReadOnlyError(action)
 
     async def _require_admin_or_owner(
         self,

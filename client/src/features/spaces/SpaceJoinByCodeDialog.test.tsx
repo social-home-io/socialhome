@@ -300,9 +300,14 @@ describe('SpaceJoinByCodeDialog', () => {
 
   it('surfaces the backend reason on a 403 (age gate), not a generic message', async () => {
     // A protected minor blocked by §CP.F1 must see WHY, not a misleading
-    // "invite revoked". The backend's detail carries the real reason.
+    // "invite revoked". The error's (translated) message carries the real
+    // reason — ``AGE_RESTRICTED`` → ``error.age_restricted``.
     api.post.mockRejectedValueOnce(
-      new ApiError(403, 'forbidden', 'This space is restricted to users aged 18+.'),
+      new ApiError(
+        403,
+        'This space is for people aged 18 and up.',
+        'This space is restricted to users aged 18+.',
+      ),
     )
     const { container, getByText } = await renderAndOpen()
     const input = container.querySelector('[data-testid="join-by-code-input"]') as HTMLTextAreaElement
@@ -312,7 +317,7 @@ describe('SpaceJoinByCodeDialog', () => {
     await act(async () => { fireEvent.click(getByText('Join')) })
     await waitFor(() => {
       expect(container.querySelector('.sh-scan-error-inline')?.textContent)
-        .toContain('restricted to users aged 18+')
+        .toContain('aged 18 and up')
     })
     expect(routeSpy).not.toHaveBeenCalled()
   })

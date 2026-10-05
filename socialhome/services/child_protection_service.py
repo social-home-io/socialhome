@@ -46,7 +46,7 @@ from ..domain.events import (
     CpSpaceAgeGateChanged,
     SpaceMemberLeft,
 )
-from ..domain.space import SpacePermissionError
+from ..domain.space import AgeRestrictedError, SpacePermissionError
 from ..infrastructure.event_bus import EventBus
 from ..repositories.cp_repo import AbstractCpRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -718,9 +718,7 @@ class ChildProtectionService:
         gate = await self.get_space_age_gate(space_id)
         min_age = int(gate["min_age"] or 0)
         if not await self.is_age_allowed(user_id, min_age):
-            raise SpacePermissionError(
-                f"This space is restricted to users aged {min_age}+."
-            )
+            raise AgeRestrictedError(min_age)
 
     # ─── Protected-account restrictions (§CP.R) ──────────────────────────
 

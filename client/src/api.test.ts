@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { api, ApiError } from './api'
+import { api, ApiError, _resetApiLoggedOut, setUnauthorizedHandler } from './api'
 
 describe('api — surface', () => {
   it('exports an ApiClient instance', () => {
@@ -87,7 +87,7 @@ describe('ApiError — friendly-detail unwrap', () => {
     }
   })
 
-  it('falls back to "API <status>: <path>" when the body is not the canonical shape', async () => {
+  it('shows the translated server line for a 5xx whose body is not the canonical shape', async () => {
     stubFetch(502, '<html>Bad Gateway</html>')
     try {
       await api.get('/api/whatever')
@@ -98,11 +98,11 @@ describe('ApiError — friendly-detail unwrap', () => {
       expect(err.status).toBe(502)
       expect(err.code).toBeNull()
       expect(err.detail).toBeNull()
-      expect(err.message).toBe('API 502: /api/whatever')
+      expect(err.message).toBe('Something went wrong on the server. Try again in a moment.')
     }
   })
 
-  it('falls back to "API <status>: <path>" when the body is empty / unparseable', async () => {
+  it('shows the translated server line when a 500 body is empty / unparseable', async () => {
     const res = {
       ok: false,
       status: 500,
@@ -115,7 +115,7 @@ describe('ApiError — friendly-detail unwrap', () => {
     } catch (e) {
       expect(e).toBeInstanceOf(ApiError)
       const err = e as ApiError
-      expect(err.message).toBe('API 500: /api/foo')
+      expect(err.message).toBe('Something went wrong on the server. Try again in a moment.')
     }
   })
 
@@ -129,8 +129,8 @@ describe('ApiError — friendly-detail unwrap', () => {
       expect(err.code).toBeNull()
       expect(err.detail).toBeNull()
       expect(err.status).toBe(404)
-      // No friendly detail to use — fall back to the historic shape.
-      expect(err.message).toBe('API 404: /api/foo')
+      // No usable detail — the translated per-status line.
+      expect(err.message).toBe('Not found — it may have been deleted or moved.')
     }
   })
 
@@ -325,5 +325,54 @@ describe('ApiClient — request options (keepalive)', () => {
     await api.delete('/api/a')
     expect(f.mock.calls.slice(0, 3).every(c => c[1].keepalive === true)).toBe(true)
     expect(f.mock.calls[3][1].keepalive).toBeUndefined()
+  })
+})
+
+describe('ApiClient — 401 responses', () => {
+  function stub401() {
+    const res = {
+      ok: false,
+      status: 401,
+      json: vi.fn().mockResolvedValue({
+        error: { code: 'UNAUTHENTICATED', detail: 'Invalid credentials.' },
+      }),
+    } as unknown as Response
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res))
+  }
+
+  beforeEach(async () => {
+    vi.unstubAllGlobals()
+    const { token } = await import('@/store/token')
+    token.value = null
+    _resetApiLoggedOut()
+  })
+
+  it('throws an ApiError carrying status 401 + the code (not a bare "Unauthorized")', async () => {
+    stub401()
+    const err = await api.post('/api/auth/token', {}).catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(401)
+    expect(err.code).toBe('UNAUTHENTICATED')
+    expect(err.message).not.toBe('Unauthorized')
+  })
+
+  it('without a token (sign-in, ingress probe) it never logs out', async () => {
+    stub401()
+    const onUnauth = vi.fn()
+    setUnauthorizedHandler(onUnauth)
+    await api.get('/api/me').catch(() => {})
+    expect(onUnauth).not.toHaveBeenCalled()
+  })
+
+  it('with a stashed token it logs out once (session expired)', async () => {
+    const { token } = await import('@/store/token')
+    token.value = 'tok'
+    stub401()
+    const onUnauth = vi.fn()
+    setUnauthorizedHandler(onUnauth)
+    await api.get('/api/me').catch(() => {})
+    await api.get('/api/feed').catch(() => {})
+    expect(onUnauth).toHaveBeenCalledTimes(1)
+    token.value = null
   })
 })

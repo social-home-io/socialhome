@@ -69,7 +69,7 @@ export function HandleEditor() {
       // message.
       if (err instanceof ApiError) {
         error.value =
-          err.detail || err.message || t('handle.change_failed')
+          err.message || t('handle.change_failed')
       } else {
         error.value = (err as Error).message || t('handle.change_failed')
       }
