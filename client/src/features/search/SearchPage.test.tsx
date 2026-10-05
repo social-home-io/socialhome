@@ -60,3 +60,54 @@ describe('SearchPage', () => {
     window.history.replaceState(null, '', '/')
   })
 })
+
+describe('snippetParts', () => {
+  const parts = async (s: string) => (await import('./SearchPage')).snippetParts(s)
+
+  it('splits server <mark> delimiters into highlighted runs', async () => {
+    expect(await parts('a <mark>b</mark> c <mark>d</mark>')).toEqual([
+      { text: 'a ', mark: false },
+      { text: 'b', mark: true },
+      { text: ' c ', mark: false },
+      { text: 'd', mark: true },
+    ])
+  })
+
+  it('keeps markup inside a forged <mark> as literal text', async () => {
+    // An author can type ``<mark>`` themselves; it is indistinguishable
+    // from a delimiter, so it highlights — but what sits inside stays text.
+    expect(await parts('<mark><img src=x onerror=alert(1)></mark>')).toEqual([
+      { text: '<img src=x onerror=alert(1)>', mark: true },
+    ])
+  })
+
+  it('never treats a <mark> with attributes as a delimiter', async () => {
+    expect(await parts('<mark class="sh-modal" onclick=x>hi</mark>')).toEqual([
+      { text: '<mark class="sh-modal" onclick=x>hi</mark>', mark: false },
+    ])
+  })
+
+  it('leaves an unclosed <mark> as plain text', async () => {
+    expect(await parts('before <mark>never closed')).toEqual([
+      { text: 'before <mark>never closed', mark: false },
+    ])
+  })
+
+  it('leaves a stray </mark> as plain text', async () => {
+    expect(await parts('x </mark> y')).toEqual([
+      { text: 'x </mark> y', mark: false },
+    ])
+  })
+
+  it('closes a nested <mark> at the first </mark>, the rest stays text', async () => {
+    expect(await parts('<mark>a<mark>b</mark>c</mark>')).toEqual([
+      { text: 'a<mark>b', mark: true },
+      { text: 'c</mark>', mark: false },
+    ])
+  })
+
+  it('spans newlines inside a match and handles an empty snippet', async () => {
+    expect(await parts('<mark>a\nb</mark>')).toEqual([{ text: 'a\nb', mark: true }])
+    expect(await parts('')).toEqual([])
+  })
+})

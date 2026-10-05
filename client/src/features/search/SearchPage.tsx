@@ -95,7 +95,7 @@ function emptyMessage(type: string, q: string): string {
  *  Preact text nodes, never via ``innerHTML``. A literal ``<mark>``
  *  typed by an author is indistinguishable from a delimiter and gets
  *  highlighted — harmless, it carries no attributes. */
-function snippetParts(snippet: string): { text: string, mark: boolean }[] {
+export function snippetParts(snippet: string): { text: string, mark: boolean }[] {
   const out: { text: string, mark: boolean }[] = []
   const re = /<mark>([\s\S]*?)<\/mark>/g
   let last = 0
