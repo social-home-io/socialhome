@@ -9,6 +9,7 @@ from socialhome.csp import (
     INLINE_MEDIA_TYPES,
     MEDIA_CSP,
     PLAYABLE_MEDIA_CSP,
+    PLAYABLE_MEDIA_TYPES,
     SPA_CSP_DIRECTIVES,
     build_spa_csp,
     media_response_headers,
@@ -129,6 +130,8 @@ def test_media_csp_blocks_script_and_sandboxes():
     assert d["media-src"] == ["'self'"]
     assert d["style-src"] == ["'unsafe-inline'"]
     assert d["sandbox"] == []
+    # ``form-action`` does not fall back to ``default-src``.
+    assert d["form-action"] == ["'none'"]
     assert "script-src" not in d
 
 
@@ -153,7 +156,20 @@ def test_safe_types_are_served_inline_and_sandboxed(mime):
     assert h["Content-Security-Policy"] == MEDIA_CSP
 
 
-@pytest.mark.parametrize("mime", ["video/webm", "video/mp4", "audio/ogg", "audio/webm"])
+def test_playable_media_csp_refuses_form_submission():
+    assert _parse(PLAYABLE_MEDIA_CSP)["form-action"] == ["'none'"]
+
+
+def test_playable_types_are_exactly_what_the_server_writes():
+    """``VideoProcessor`` → ``.webm``; ``AudioProcessor`` → ``.ogg`` /
+    ``.webm`` / ``.m4a`` (served as ``audio/ogg`` / ``video/webm`` /
+    ``audio/mp4``); a received DM voice note keeps ``audio/webm``."""
+    assert PLAYABLE_MEDIA_TYPES == frozenset(
+        {"video/webm", "audio/ogg", "audio/webm", "audio/mp4"},
+    )
+
+
+@pytest.mark.parametrize("mime", sorted(PLAYABLE_MEDIA_TYPES))
 def test_video_and_audio_are_inline_and_playable(mime):
     h = media_response_headers(mime, "clip")
     assert h["Content-Type"] == mime
@@ -174,6 +190,17 @@ def test_video_and_audio_are_inline_and_playable(mime):
         "application/x-unknown",
         "image/heic",
         "multipart/x-mixed-replace",
+        # audio / video the server never writes itself
+        "video/mp4",
+        "video/quicktime",
+        "audio/mpeg",
+        "audio/flac",
+        "audio/x-mpegurl",
+        "video/vnd.mpegurl",
+        "audio/x-scpls",
+        "video/x-ms-asf",
+        "video/",
+        "audio/",
         "",
         None,
     ],

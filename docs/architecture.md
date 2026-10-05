@@ -1037,13 +1037,19 @@ script.
   (`/api/media/{filename}`, which serves feed / DM / gallery / link-preview
   files; the GFS picture proxy `/api/gfs/{gfs_id}/moments/users/{user_id}/picture`;
   the GFS's own `/gfs/moments/users/{user_id}/picture`). Only
-  `image/jpeg|png|webp|gif|avif`, `video/*`, `audio/*`, `application/pdf`,
-  `text/plain` and `text/csv` are served inline. Anything else (SVG, HTML,
-  XML, JS, unknown) becomes `Content-Type: application/octet-stream` +
+  `image/jpeg|png|webp|gif|avif`, `application/pdf`, `text/plain`,
+  `text/csv` and the audio / video the server writes itself
+  (`PLAYABLE_MEDIA_TYPES`: `video/webm` from the transcoder, voice notes
+  as `audio/ogg` / `.webm` / `audio/mp4` (`.m4a`), and `audio/webm`) are
+  served inline. Anything else (SVG, HTML, XML, JS, `.mp3` / `.mov` /
+  playlists stored through the file passthrough, unknown) becomes
+  `Content-Type: application/octet-stream` +
   `Content-Disposition: attachment`, so it downloads. Every response
   carries `default-src 'none'; img-src 'self' data:; media-src 'self';
-  style-src 'unsafe-inline'; sandbox` (`MEDIA_CSP`). The exception is
-  `video/*` / `audio/*`, which drop `sandbox` (`PLAYABLE_MEDIA_CSP`):
+  style-src 'unsafe-inline'; form-action 'none'; sandbox` (`MEDIA_CSP`;
+  `form-action` is spelled out because it does not fall back to
+  `default-src`). The exception is `PLAYABLE_MEDIA_TYPES`, which drop
+  `sandbox` (`PLAYABLE_MEDIA_CSP`):
   Chromium's sandboxed (opaque-origin) media document re-fetches its own
   `src` cross-origin and fails CORS, so the file would not play. A media
   document runs no page script, and `default-src 'none'` still refuses

@@ -419,6 +419,48 @@ async def test_video_is_inline_without_sandbox_so_it_plays(client):
     assert r.headers["Content-Security-Policy"] == PLAYABLE_MEDIA_CSP
 
 
+@pytest.mark.parametrize(
+    ("name", "data", "mime"),
+    [
+        # Voice notes — ``AudioProcessor`` keeps the container extension.
+        ("0a1b.ogg", b"OggS\x00\x02", "audio/ogg"),  # Firefox
+        ("0a1c.webm", b"\x1a\x45\xdf\xa3", "video/webm"),  # Chromium
+        ("0a1d.m4a", b"\x00\x00\x00\x20ftypM4A ", "audio/mp4"),  # Safari
+        # Video post — ``MediaTranscodeService`` writes ``<stem>.webm``.
+        ("0b2c.webm", b"\x1a\x45\xdf\xa3", "video/webm"),
+        # DM video / voice note received over federation —
+        # ``<message_id><ext>`` from ``_mime_to_ext``.
+        ("msg-123.webm", b"\x1a\x45\xdf\xa3", "video/webm"),
+        ("msg-124.ogg", b"OggS\x00\x02", "audio/ogg"),
+        ("msg-125.m4a", b"\x00\x00\x00\x20ftypM4A ", "audio/mp4"),
+    ],
+)
+async def test_server_written_audio_and_video_play_inline(client, name, data, mime):
+    url = _store(client, name, data)
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.status == 200
+    assert r.headers["Content-Type"] == mime
+    assert r.headers["Content-Disposition"] == f'inline; filename="{name}"'
+    assert r.headers["Content-Security-Policy"] == PLAYABLE_MEDIA_CSP
+    assert "form-action 'none'" in r.headers["Content-Security-Policy"]
+    assert await r.read() == data
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["song.mp3", "clip.mov", "clip.mp4", "list.m3u8", "list.m3u", "a.flac"],
+)
+async def test_foreign_audio_and_video_download_sandboxed(client, name):
+    """The file passthrough can store any extension; only the types
+    the server itself writes play unsandboxed."""
+    url = _store(client, name, b"\x00\x01")
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.status == 200
+    assert r.headers["Content-Type"] == "application/octet-stream"
+    assert r.headers["Content-Disposition"] == f'attachment; filename="{name}"'
+    assert r.headers["Content-Security-Policy"] == MEDIA_CSP
+
+
 async def test_pdf_and_text_are_inline(client):
     for name, mime in (("doc.pdf", "application/pdf"), ("notes.txt", "text/plain")):
         url = _store(client, name, b"%PDF-1.4" if name.endswith("pdf") else b"hi")
