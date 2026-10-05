@@ -52,6 +52,24 @@ async function _parseJsonOrNull<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** The ``error`` object of a canonical ``{"error": {"code", "detail"}}``
+ *  body, or ``null`` when the body is missing / not JSON / another shape
+ *  (proxy errors, upstream 502s). Never throws. */
+async function _parseErrorBody(
+  res: Response,
+): Promise<{ code?: unknown; detail?: unknown; [extra: string]: unknown } | null> {
+  try {
+    const body = await res.json() as { error?: unknown }
+    if (body && typeof body === 'object'
+        && body.error && typeof body.error === 'object') {
+      return body.error as { code?: unknown; detail?: unknown }
+    }
+  } catch {
+    // Non-JSON body.
+  }
+  return null
+}
+
 /**
  * Error thrown by ``ApiClient`` for non-2xx responses.
  *
@@ -146,7 +164,11 @@ class ApiClient {
         // api↔auth cycle (auth already imports api). DI keeps the graph acyclic.
         _onUnauthorized?.()
       }
-      throw new Error('Unauthorized')
+      // A real ``ApiError`` carrying the status + parsed code, so callers
+      // can branch on ``err.status === 401`` (the login form shows its
+      // translated "invalid credentials" copy) — a bare ``Error`` here
+      // lost the status and leaked the English "Unauthorized" text.
+      throw new ApiError(401, path, await _parseErrorBody(res))
     }
     if (!res.ok) {
       // Try to parse the canonical ``{"error": {"code", "detail"}}``
@@ -155,43 +177,36 @@ class ApiClient {
       // ``ApiError`` when the response isn't JSON (proxy errors,
       // upstream 502s, etc.) — callers still get the historic
       // ``"API <status>: <path>"`` message in that case.
-      let parsed: { code?: unknown; detail?: unknown } | null = null
-      try {
-        const body = await res.json() as { error?: unknown }
-        if (body && typeof body === 'object'
-            && body.error && typeof body.error === 'object') {
-          parsed = body.error as { code?: unknown; detail?: unknown }
-          if (parsed.code === 'ACCESS_ADMIN_ONLY') {
-            // §4.3: an ADMIN_ONLY feature refused the write. Every
-            // surface toasts ``err.message`` — give it the translated
-            // "only admins can …" note for that feature.
-            const feature = (parsed as { feature?: unknown }).feature
-            parsed = { ...parsed, detail: accessNote(String(feature ?? '')) }
-          } else if (parsed.code === 'HOST_UNREACHABLE') {
-            // A forward to the space's host went nowhere — nothing was
-            // queued, so never say "sent".
-            const reason = (parsed as { reason?: unknown }).reason
-            parsed = {
-              ...parsed,
-              detail: reason === 'unknown_host'
-                ? t('space.host.unknown')
-                : t('space.host.unreachable'),
-            }
-          } else if (parsed.code === 'HOST_TOO_OLD') {
-            // The space's host is too old for what this household asked:
-            // v_43 review submissions, or a v_47 forwarded role change
-            // (``feature: 'role_change'``) — the toast says why, translated.
-            const feature = (parsed as { feature?: unknown }).feature
-            parsed = {
-              ...parsed,
-              detail: feature === 'role_change'
-                ? t('space.member.role_host_too_old')
-                : t('moderation.error.host_too_old'),
-            }
+      let parsed = await _parseErrorBody(res)
+      if (parsed) {
+        if (parsed.code === 'ACCESS_ADMIN_ONLY') {
+          // §4.3: an ADMIN_ONLY feature refused the write. Every
+          // surface toasts ``err.message`` — give it the translated
+          // "only admins can …" note for that feature.
+          const feature = (parsed as { feature?: unknown }).feature
+          parsed = { ...parsed, detail: accessNote(String(feature ?? '')) }
+        } else if (parsed.code === 'HOST_UNREACHABLE') {
+          // A forward to the space's host went nowhere — nothing was
+          // queued, so never say "sent".
+          const reason = (parsed as { reason?: unknown }).reason
+          parsed = {
+            ...parsed,
+            detail: reason === 'unknown_host'
+              ? t('space.host.unknown')
+              : t('space.host.unreachable'),
           }
-        }
-      } catch {
-        // Non-JSON body — leave ``parsed`` as null.
+        } else if (parsed.code === 'HOST_TOO_OLD') {
+          // The space's host is too old for what this household asked:
+          // v_43 review submissions, or a v_47 forwarded role change
+          // (``feature: 'role_change'``) — the toast says why, translated.
+          const feature = (parsed as { feature?: unknown }).feature
+          parsed = {
+            ...parsed,
+            detail: feature === 'role_change'
+              ? t('space.member.role_host_too_old')
+              : t('moderation.error.host_too_old'),
+          }
+          }
       }
       throw new ApiError(res.status, path, parsed)
     }

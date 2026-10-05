@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { api, ApiError } from './api'
+import { api, ApiError, _resetApiLoggedOut, setUnauthorizedHandler } from './api'
 
 describe('api — surface', () => {
   it('exports an ApiClient instance', () => {
@@ -325,5 +325,54 @@ describe('ApiClient — request options (keepalive)', () => {
     await api.delete('/api/a')
     expect(f.mock.calls.slice(0, 3).every(c => c[1].keepalive === true)).toBe(true)
     expect(f.mock.calls[3][1].keepalive).toBeUndefined()
+  })
+})
+
+describe('ApiClient — 401 responses', () => {
+  function stub401() {
+    const res = {
+      ok: false,
+      status: 401,
+      json: vi.fn().mockResolvedValue({
+        error: { code: 'UNAUTHENTICATED', detail: 'Invalid credentials.' },
+      }),
+    } as unknown as Response
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res))
+  }
+
+  beforeEach(async () => {
+    vi.unstubAllGlobals()
+    const { token } = await import('@/store/token')
+    token.value = null
+    _resetApiLoggedOut()
+  })
+
+  it('throws an ApiError carrying status 401 + the code (not a bare "Unauthorized")', async () => {
+    stub401()
+    const err = await api.post('/api/auth/token', {}).catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(401)
+    expect(err.code).toBe('UNAUTHENTICATED')
+    expect(err.message).not.toBe('Unauthorized')
+  })
+
+  it('without a token (sign-in, ingress probe) it never logs out', async () => {
+    stub401()
+    const onUnauth = vi.fn()
+    setUnauthorizedHandler(onUnauth)
+    await api.get('/api/me').catch(() => {})
+    expect(onUnauth).not.toHaveBeenCalled()
+  })
+
+  it('with a stashed token it logs out once (session expired)', async () => {
+    const { token } = await import('@/store/token')
+    token.value = 'tok'
+    stub401()
+    const onUnauth = vi.fn()
+    setUnauthorizedHandler(onUnauth)
+    await api.get('/api/me').catch(() => {})
+    await api.get('/api/feed').catch(() => {})
+    expect(onUnauth).toHaveBeenCalledTimes(1)
+    token.value = null
   })
 })
