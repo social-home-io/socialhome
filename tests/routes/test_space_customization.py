@@ -119,6 +119,7 @@ async def test_create_link_rejects_a_non_http_url(client, bad):
     assert r.status == 422
     body = await r.json()
     assert body["error"]["code"] == "INVALID_LINK"
+    assert bad not in body["error"]["detail"]
     r2 = await client.get("/api/spaces/sp-cust/links", headers=_auth(client._tok))
     assert (await r2.json())["links"] == []
 

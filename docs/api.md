@@ -83,11 +83,13 @@ Coded refusals (`socialhome/domain/errors.py` `CodedError` subclasses):
 | `SUBSCRIBE_NOT_ALLOWED` | 403 | — | `POST /api/spaces/{id}/subscribe` on a space that takes no followers |
 | `SUBSCRIBER_READ_ONLY` | 403 | `action` (`post` / `comment` / `react` …) | A follower writing to a space |
 | `SPACE_ARCHIVED` | 403 | — | Any write to an archived space (posts, pages, tasks, stickies, calendar) |
+| `INVALID_LINK` | 422 | — | `POST` / `PATCH /api/spaces/{id}/links…` with an empty label or a URL that isn't an absolute http(s) address (the detail names the rule, never the value) |
 | `NOT_PAIRED` | 403 | — | `POST /api/public_spaces/{space_id}/join-request` when the host household isn't a confirmed connection |
 | `AGE_RESTRICTED` | 403 | `min_age` | §CP.F1 age gate on joining a space |
 | `DM_SELF` | 422 | — | `POST /api/conversations/dm` to yourself |
 | `GROUP_TOO_SMALL` | 422 | `min` | `POST /api/conversations/group` with fewer than 3 people |
 | `DM_TOO_LONG` | 422 | `max` | Sending / editing a message over the length cap |
+| `INVALID_MEDIA_URL` | 422 | — | `POST /api/conversations/{id}/messages` with a `media_url` that isn't a local upload (`api/media/<name>`); the detail names the rule, never the value |
 | `DM_BLOCKED` | 403 | — | The recipient blocked you (a guardian block reads the same) |
 | `DM_YOU_BLOCKED` | 403 | — | You blocked the recipient |
 | `DM_NOT_ALLOWED` | 403 | — | A protected account messaging someone its guardian blocked |
@@ -270,7 +272,7 @@ events these routes fire.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST | `/api/spaces/{id}/links` | List / create admin-configured sidebar quick-links. Members see; admin/owner writes. Body: `{label, url, position?}`. `label` must be non-empty; `url` must be an absolute `http://` or `https://` address with a host — at most 2048 characters, no spaces or control characters, no `user:password@` — otherwise `422 INVALID_LINK` (`error.detail` names the rule, never the value; nothing is stored). The SPA's links strip skips any stored link that is not http(s). |
+| GET / POST | `/api/spaces/{id}/links` | List / create admin-configured sidebar quick-links. Members see; admin/owner writes. Body: `{label, url, position?}`. `label` must be non-empty; `url` must be an absolute `http://` or `https://` address with a host — at most 2048 characters, no spaces or control characters, no `user:password@` — otherwise `422 INVALID_LINK` (`error.detail` names the rule in English, never the value; the SPA shows its translated `error.invalid_link` line; nothing is stored). The SPA's links strip skips any stored link that is not http(s). |
 | PATCH / DELETE | `/api/spaces/{id}/links/{link_id}` | Update or remove a link. Admin/owner. PATCH re-validates the resulting `label` / `url` with the same rules (`422 INVALID_LINK`). |
 | GET / PUT | `/api/spaces/{id}/notif-prefs` | Caller's per-space notification level. Body: `{level}` where level ∈ `"all"` \| `"mentions"` \| `"muted"`. Applies to space posts **and** space comments. `all` → a `space_post_created` / `space_comment_added` bell for every post / comment by someone else; `mentions` → only posts / comments that @-mention the caller; `muted` → nothing, mentioned or not. A mentioned member (level `all` or `mentions`) gets one `space_mention` bell ("{author} mentioned you in {space}" / "… in a comment in {space}") **instead of** the generic one. Mentions resolve against the space's members only (never a non-member), the author is never notified of a self-mention, and `@here` — only when the space's `allow_here_mention` is on and the author is an owner/admin by the receiving household's own roster — gives every member at `all` / `mentions` (not `muted`, not the author) one `space_here` bell ("{author} notified everyone in {space}"), replaced by the `space_mention` bell for a member also mentioned directly; at most one `@here` per author per space per 10 min pages anyone (a later one notifies like a plain post). Push carries the title only (§25.3). |
 

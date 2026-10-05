@@ -37,6 +37,7 @@ from socialhome.domain.space import (
     validate_space_link_url,
 )
 from socialhome.domain.post import PostType
+from socialhome.domain.errors import CodedError
 
 
 def test_remote_admin_outcome_values():
@@ -734,8 +735,16 @@ def test_validate_space_link_url_rejects(bad):
         validate_space_link_url(bad)
 
 
-def test_invalid_space_link_error_is_a_value_error():
+def test_invalid_space_link_error_is_a_coded_value_error():
+    """Coded (422 ``INVALID_LINK``) for the SPA's translated line, and
+    still a ``ValueError`` for existing callers."""
     assert issubclass(InvalidSpaceLinkError, ValueError)
+    assert issubclass(InvalidSpaceLinkError, CodedError)
+    exc = InvalidSpaceLinkError("url must be an http(s) web address")
+    assert (exc.status, exc.code) == (422, "INVALID_LINK")
+    assert exc.detail == "url must be an http(s) web address"
+    assert exc.params == {}
+    assert InvalidSpaceLinkError().detail.startswith("A link needs")
 
 
 @pytest.mark.parametrize(

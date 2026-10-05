@@ -1620,10 +1620,14 @@ MAX_SPACE_LINK_URL_LENGTH: int = 2048
 _LINK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 
-class InvalidSpaceLinkError(ValueError):
-    """A space quick link was refused (422 ``INVALID_LINK``). The message
-    names the rule, never the submitted value, so the settings form can
-    show it verbatim."""
+class InvalidSpaceLinkError(CodedError, ValueError):
+    """A space quick link was refused (422 ``INVALID_LINK``). Each raise
+    site passes a fixed English detail naming the rule, never the
+    submitted value; the SPA shows its own translated line."""
+
+    status = 422
+    code = "INVALID_LINK"
+    detail = "A link needs a name and an http(s) web address."
 
 
 def validate_space_link_url(url: object) -> str:

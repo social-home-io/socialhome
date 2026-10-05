@@ -13,11 +13,13 @@ from socialhome.domain.conversation import (
     ConversationMember,
     ConversationMessage,
     ConversationType,
+    InvalidMediaRefError,
     MESSAGE_TYPES,
     RemoteConversationMember,
     mute_active,
     mute_until_for,
 )
+from socialhome.domain.errors import CodedError
 
 
 # ── Mute ─────────────────────────────────────────────────────────────────────
@@ -193,3 +195,14 @@ def test_remote_conversation_member_construction():
     )
     assert remote.instance_id == "inst-abc"
     assert remote.history_visible_from is None
+
+
+def test_invalid_media_ref_error_is_coded():
+    """422 ``INVALID_MEDIA_URL`` with a fixed detail (never the submitted
+    URL), and still a ``ValueError`` for existing callers."""
+    exc = InvalidMediaRefError()
+    assert isinstance(exc, CodedError)
+    assert isinstance(exc, ValueError)
+    assert (exc.status, exc.code) == (422, "INVALID_MEDIA_URL")
+    assert exc.detail == "media_url must be a file uploaded via /api/media/upload"
+    assert exc.params == {}

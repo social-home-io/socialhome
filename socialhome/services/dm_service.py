@@ -704,9 +704,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             # leak. Normalised to ``api/media/<name>``.
             ref = local_media_ref(media_url)
             if ref is None:
-                raise InvalidMediaRefError(
-                    "media_url must be a file uploaded via /api/media/upload"
-                )
+                raise InvalidMediaRefError()
             media_url = ref
         if type == "location":
             # Structured pin — validated and rounded (4-dp coords, coarse
