@@ -21,7 +21,7 @@
  * or screen-reader still gets the full stamp.
  */
 
-import { isOne, locale, t } from '@/i18n/i18n'
+import { isOne, formatLocale, t } from '@/i18n/i18n'
 
 const MS_PER_MIN = 60_000
 const MS_PER_DAY = 86_400_000
@@ -124,7 +124,7 @@ export function relativeDocsTime(iso: string): string {
     return t(isOne(days) ? 'time.days_ago_long_one' : 'time.days_ago_long', { n: String(days) })
   }
   const sameYear = new Date(d.t).getFullYear() === new Date(d.now).getFullYear()
-  return new Date(d.t).toLocaleDateString(locale.value || undefined, {
+  return new Date(d.t).toLocaleDateString(formatLocale(), {
     month: 'short',
     day: 'numeric',
     year: sameYear ? undefined : 'numeric',
@@ -156,7 +156,7 @@ export function relativeFutureTime(iso: string): string {
   const days = Math.round(ms / MS_PER_DAY)
   if (days >= 30) {
     return t('time.on_date', {
-      date: new Date(at).toLocaleDateString(locale.value || undefined, {
+      date: new Date(at).toLocaleDateString(formatLocale(), {
         month: 'short',
         day: 'numeric',
         year: 'numeric',
@@ -169,7 +169,7 @@ export function relativeFutureTime(iso: string): string {
       ? [Math.round(hr), 'hour']
       : [days, 'day']
   try {
-    return new Intl.RelativeTimeFormat(locale.value || undefined, { numeric: 'always' })
+    return new Intl.RelativeTimeFormat(formatLocale(), { numeric: 'always' })
       .format(value, unit)
   } catch {
     return `in ${value} ${unit}${value === 1 ? '' : 's'}`

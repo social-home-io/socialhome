@@ -5,12 +5,12 @@
  * - due today → ``"Today"``, tone ``today`` (amber)
  * - otherwise → the date, no tone
  *
- * Dates are formatted in the UI language (``locale``); the year shows
+ * Dates are formatted in the UI language (``formatLocale()``); the year shows
  * only when it isn't the current one. ``due_date`` is a calendar day
  * (``YYYY-MM-DD``), read as a LOCAL date — ``new Date('2026-10-03')``
  * would parse it as UTC midnight and show the day before west of UTC.
  */
-import { locale, t } from '@/i18n/i18n'
+import { formatLocale, t } from '@/i18n/i18n'
 
 export interface DueLabel {
   text: string
@@ -34,7 +34,7 @@ export function dueLabel(due: string, now: Date = new Date()): DueLabel {
   const day = parseDueDate(due)
   if (!day) return { text: due, short: due, tone: null, title: due }
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const lang = locale.value || undefined
+  const lang = formatLocale()
   const date = day.toLocaleDateString(lang, day.getFullYear() === today.getFullYear()
     ? { day: 'numeric', month: 'short' }
     : { day: 'numeric', month: 'short', year: 'numeric' })

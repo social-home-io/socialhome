@@ -637,7 +637,9 @@ async def test_a_stamped_reaction_lands_only_over_an_older_stamp(env):
     from socialhome.domain.space_item import StaleItemStamp
 
     await env.repo.save(env.space_id, _post("p1"))
-    s1, s2 = "2026-10-03 12:00:01.000000", "2026-10-03 12:00:02.000000"
+    # Stamps relative to now: a removal older than the tombstone horizon is
+    # pruned on write by design, so fixed dates turn this test red later.
+    s1, s2 = _ago(0.002), _ago(0.001)
     await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id, stamp=s1)
     await env.repo.remove_reaction("p1", "👍", "u-bob", space_id=env.space_id, stamp=s2)
     # A duplicate of the older add — another server's copy, a queued copy,

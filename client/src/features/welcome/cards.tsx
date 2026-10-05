@@ -11,7 +11,7 @@
  * own data fetching, hero copy, and section orchestration.
  */
 import { Avatar } from '@/components/Avatar'
-import { isOne, locale, t } from '@/i18n/i18n'
+import { isOne, formatLocale, t } from '@/i18n/i18n'
 import type { EffectiveLesson, TimetableColor } from '@/types'
 import { addBase } from '@/baseUrl'
 
@@ -101,7 +101,7 @@ export function firstName(displayName: string | undefined | null): string {
 
 /** The UI language for ``Intl`` formatters (browser default when unset). */
 function lang(): string | undefined {
-  return locale.value || undefined
+  return formatLocale()
 }
 
 /** Long-form date in the UI language — "Friday, May 8" /

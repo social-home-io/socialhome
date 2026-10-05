@@ -5,7 +5,7 @@
  * grouping rule in one place means the two surfaces always render the
  * same day buckets — no drift between the household and a space.
  */
-import { locale, t } from '@/i18n/i18n'
+import { formatLocale, t } from '@/i18n/i18n'
 import type { CalendarEvent } from '@/types'
 import { utcIsoToLocalParts } from './timezone'
 import { currentWeekStart, startOfWeek, type WeekStart } from './week'
@@ -368,7 +368,7 @@ export interface DayPortionLabels {
  *  :func:`groupEventsByDay` buckets timed rows with, so the printed
  *  clock and the day card it sits under can't disagree. */
 function clockIn(iso: string): string {
-  return new Date(iso).toLocaleTimeString(locale.value || undefined, {
+  return new Date(iso).toLocaleTimeString(formatLocale(), {
     hour: '2-digit', minute: '2-digit',
   })
 }
@@ -412,7 +412,7 @@ export function formatDayPortion(entry: DayEventEntry): DayPortionLabels {
   // ``22:00 → next-day 00:00`` span can't print a range one day longer
   // than the midnight-exclusive ``dayCount`` the badge claims.
   const effectiveEnd = lastInclusiveMoment(event.end as string)
-  const range = new Intl.DateTimeFormat(locale.value || undefined, {
+  const range = new Intl.DateTimeFormat(formatLocale(), {
     day: 'numeric', month: 'short', timeZone: zone,
   }).formatRange(startDate, effectiveEnd)
 
@@ -488,7 +488,7 @@ export function formatEventBounds(event: CalendarEvent): EventBounds {
   }
   const zone = safeTimeZone(event.tz)
   const day = (d: Date) =>
-    d.toLocaleDateString(locale.value || undefined, { dateStyle: 'full', timeZone: zone })
+    d.toLocaleDateString(formatLocale(), { dateStyle: 'full', timeZone: zone })
   const starts = day(startDate)
   const rawEnd = event.end ? new Date(event.end) : null
   // The exclusive-end rule again (:func:`lastInclusiveMoment`): an
@@ -624,7 +624,7 @@ export function formatDayLabel(dayKey: string): FriendlyDayLabel {
   tomorrow.setDate(today.getDate() + 1)
   const isToday = sameDay(date, today)
   const isTomorrow = sameDay(date, tomorrow)
-  const long = date.toLocaleDateString(locale.value || undefined, {
+  const long = date.toLocaleDateString(formatLocale(), {
     weekday: 'long',
     day: 'numeric',
     month: 'long',
@@ -639,7 +639,7 @@ export function formatDayLabel(dayKey: string): FriendlyDayLabel {
 
 /** Heading for a month-view month strip — "April 2026", localised. */
 export function formatMonthHeading(date: Date): string {
-  return date.toLocaleDateString(locale.value || undefined, {
+  return date.toLocaleDateString(formatLocale(), {
     month: 'long',
     year: 'numeric',
   })
@@ -688,13 +688,13 @@ export function formatRangeHeading(
     const start = startOfWeek(date, weekStart)
     const end = new Date(start)
     end.setDate(start.getDate() + 6)
-    return `${start.toLocaleDateString(locale.value || undefined, {
+    return `${start.toLocaleDateString(formatLocale(), {
       month: 'short', day: 'numeric',
-    })} – ${end.toLocaleDateString(locale.value || undefined, {
+    })} – ${end.toLocaleDateString(formatLocale(), {
       month: 'short', day: 'numeric', year: 'numeric',
     })}`
   }
-  return date.toLocaleDateString(locale.value || undefined, {
+  return date.toLocaleDateString(formatLocale(), {
     weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
   })
 }

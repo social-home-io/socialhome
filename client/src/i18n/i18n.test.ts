@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { t, locale } from './i18n'
+import { t, locale, formatLocale } from './i18n'
 
 describe('i18n', () => {
   it('returns the key for known translations', () => {
@@ -67,5 +67,34 @@ describe('setLocale / initLocale', () => {
     await setLocale('es')
     expect(loc.value).toBe('es')
     spy.mockRestore(); spy2.mockRestore()
+  })
+})
+
+describe('formatLocale', () => {
+  const setLangs = (langs: string[]) =>
+    vi.spyOn(navigator, 'languages', 'get').mockReturnValue(langs)
+  afterEach(() => {
+    vi.restoreAllMocks()
+    locale.value = 'en'
+  })
+
+  it('keeps an English user in the UK on day-first dates (en-GB)', () => {
+    setLangs(['en-GB', 'en'])
+    locale.value = 'en'
+    expect(formatLocale()).toBe('en-GB')
+    expect(new Date(Date.UTC(2026, 9, 4)).toLocaleDateString(formatLocale(), { timeZone: 'UTC' }))
+      .toBe('04/10/2026')
+  })
+
+  it('uses the browser region only when it matches the UI language', () => {
+    setLangs(['en-GB', 'de-CH'])
+    locale.value = 'de'
+    expect(formatLocale()).toBe('de-CH')
+  })
+
+  it('falls back to the UI language when no browser language matches', () => {
+    setLangs(['en-US'])
+    locale.value = 'fr'
+    expect(formatLocale()).toBe('fr')
   })
 })

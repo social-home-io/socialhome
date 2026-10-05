@@ -8,7 +8,7 @@
  *
  * No DOM, no signals: everything here is unit-testable on its own.
  */
-import { locale, t } from '@/i18n/i18n'
+import { formatLocale, t } from '@/i18n/i18n'
 
 export type ModerationFeature = 'posts' | 'pages' | 'tasks' | 'stickies' | 'calendar'
 export type ModerationAction = 'create' | 'edit' | 'delete'
@@ -196,7 +196,7 @@ export function formatFieldValue(
   if ((field === 'start' || field === 'end') && typeof value === 'string') {
     const d = new Date(value)
     if (!Number.isNaN(d.getTime())) {
-      return d.toLocaleString(locale.value || undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      return d.toLocaleString(formatLocale(), { dateStyle: 'medium', timeStyle: 'short' })
     }
   }
   return fmtScalar(value)
@@ -264,7 +264,7 @@ export function expiryLabel(iso: string, now: number = Date.now()): string {
   const hours = ms / 3_600_000
   let when: string
   try {
-    const rtf = new Intl.RelativeTimeFormat(locale.value || undefined, { numeric: 'always' })
+    const rtf = new Intl.RelativeTimeFormat(formatLocale(), { numeric: 'always' })
     when = hours < 1
       ? rtf.format(Math.max(1, Math.round(ms / 60_000)), 'minute')
       : hours < 23.5

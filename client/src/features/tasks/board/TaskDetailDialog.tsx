@@ -18,7 +18,7 @@ import { openReport } from '@/components/ReportDialog'
 import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { PeoplePicker, type Person } from '@/components/PeoplePicker'
 import { currentUser } from '@/store/auth'
-import { locale, t } from '@/i18n/i18n'
+import { formatLocale, locale, t } from '@/i18n/i18n'
 import type { TaskPatch, TaskStatus } from '@/store/tasks'
 import type { TaskItem, TaskPriority } from '@/types'
 import { useAutofocus } from '@/features/timetable/useAutofocus'
@@ -120,7 +120,7 @@ export function TaskDetailDialog({
               : <dd class="sh-task-edit__empty">{t('tasks.edit.no_notes')}</dd>}
             <dt>{t('tasks.edit.due')}</dt>
             {base.due_date
-              ? <dd>{due ? due.toLocaleDateString(locale.value || undefined, { dateStyle: 'full' }) : base.due_date}</dd>
+              ? <dd>{due ? due.toLocaleDateString(formatLocale(), { dateStyle: 'full' }) : base.due_date}</dd>
               : <dd class="sh-task-edit__empty">{t('tasks.edit.no_due')}</dd>}
             <dt>{t('tasks.priority.title')}</dt>
             {base.priority
