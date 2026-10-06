@@ -20,6 +20,8 @@ from ..cluster import (
     NODE_SYNC_CLIENT,
     NODE_SYNC_REPORT,
     NODE_SYNC_SPACE,
+    UnsupportedClusterSigSuite,
+    parse_cluster_sig_suite,
     verify_node_signature,
 )
 from ..public import SlidingWindowCounter
@@ -100,6 +102,15 @@ class ClusterSyncView(GfsBaseView):
         ):
             return _reject(
                 web.json_response({"error": "invalid_message"}, status=400),
+            )
+
+        # The signature suite — unknown is refused, never defaulted (a
+        # missing field is an older sender and means Ed25519).
+        try:
+            parse_cluster_sig_suite(body.get("sig_suite"))
+        except UnsupportedClusterSigSuite:
+            return _reject(
+                web.json_response({"error": "unsupported_sig_suite"}, status=400),
             )
 
         # Freshness of the signed ``ts`` — cheap, so before any key lookup

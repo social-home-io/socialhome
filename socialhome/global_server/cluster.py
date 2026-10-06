@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import secrets
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -68,6 +69,36 @@ CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN: int = 30
 #: how long a captured frame can be replayed. Cluster nodes must keep their
 #: clocks within this window of each other (NTP) or they partition.
 CLUSTER_TS_SKEW_S: int = 300
+
+#: Signature suite of a ``/cluster/sync`` frame, carried as ``sig_suite`` in
+#: the signed body. Today the GFS identity key is Ed25519; a PQ-hybrid suite
+#: (``ed25519+mldsa65``) is added by growing the frozenset. A receiver rejects
+#: any suite it does not list — no default fallback — but a frame with NO
+#: ``sig_suite`` is from a sender older than the field and can only be Ed25519.
+CLUSTER_SIG_SUITE_ED25519: str = "ed25519"
+SUPPORTED_CLUSTER_SIG_SUITES: frozenset[str] = frozenset({CLUSTER_SIG_SUITE_ED25519})
+
+#: Random bytes in each frame's ``nonce`` — two frames sent in the same
+#: second differ, so the replay cache never mistakes them for one.
+CLUSTER_NONCE_BYTES: int = 16
+
+
+class UnsupportedClusterSigSuite(ValueError):
+    """A ``/cluster/sync`` frame named a signature suite we don't support."""
+
+
+def parse_cluster_sig_suite(raw: object) -> str:
+    """Return the frame's suite; ``None`` (field absent) → Ed25519.
+
+    Raises :class:`UnsupportedClusterSigSuite` for anything not in
+    :data:`SUPPORTED_CLUSTER_SIG_SUITES`, including a non-string.
+    """
+    if raw is None:
+        return CLUSTER_SIG_SUITE_ED25519
+    if not isinstance(raw, str) or raw not in SUPPORTED_CLUSTER_SIG_SUITES:
+        raise UnsupportedClusterSigSuite(f"unsupported cluster sig suite: {raw!r}")
+    return raw
+
 
 #: Slack below this process's start time for the boot floor: a frame whose
 #: ``ts`` predates our start by more than this is refused, because the
@@ -1183,6 +1214,8 @@ class ClusterService:
             "type": msg_type,
             "from": self._node_id,
             "ts": int(self._wall_clock()),
+            "nonce": b64url_encode(secrets.token_bytes(CLUSTER_NONCE_BYTES)),
+            "sig_suite": CLUSTER_SIG_SUITE_ED25519,
             "payload": payload,
         }
         canonical = json.dumps(

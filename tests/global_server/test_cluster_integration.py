@@ -729,3 +729,69 @@ async def test_replay_cache_is_sized_from_the_cluster_constants(gfs_db):
     svc = ClusterService(SqliteClusterRepo(gfs_db))
     assert svc._seen_frames._cap == CLUSTER_REPLAY_MAX_ENTRIES
     assert svc._seen_frames._ttl == CLUSTER_REPLAY_TTL_S
+
+
+# ─── sig_suite + old-sender compatibility ─────────────────────────────
+
+
+def _sign_body(body: dict, seed: bytes) -> tuple[bytes, str]:
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    return canonical, b64url_encode(sign_ed25519(seed, canonical))
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("suite", ["ed25519+mldsa65", "ED25519", "", 7])
+async def test_unknown_sig_suite_is_refused_without_fallback(client, suite):
+    """Receivers reject a suite they don't know — never fall back to
+    ed25519 — and charge the address."""
+    seed = await _register_peer(client)
+    canonical, sig = _sign_body(
+        {
+            "type": NODE_HEARTBEAT,
+            "from": PEER,
+            "ts": int(time.time()),
+            "nonce": secrets.token_urlsafe(16),
+            "sig_suite": suite,
+            "payload": {},
+        },
+        seed,
+    )
+    resp = await _post_raw(client, canonical, sig, ATTACKER_IP)
+    assert resp.status == 400
+    assert (await resp.json())["error"] == "unsupported_sig_suite"
+    assert ATTACKER_IP in client._app[gfs_cluster_key]._sync_unverified_limiter
+
+
+@pytest.mark.security
+async def test_current_frame_with_ed25519_suite_is_accepted(client):
+    seed = await _register_peer(client)
+    canonical, sig = _sign_body(
+        {
+            "type": NODE_HEARTBEAT,
+            "from": PEER,
+            "ts": int(time.time()),
+            "nonce": secrets.token_urlsafe(16),
+            "sig_suite": "ed25519",
+            "payload": {},
+        },
+        seed,
+    )
+    resp = await _post_raw(client, canonical, sig, GENUINE_IP)
+    assert resp.status == 200
+
+
+@pytest.mark.security
+async def test_old_shape_frame_without_nonce_or_suite_still_syncs(client):
+    """A node on the previous release signs ``{type, from, ts, payload}``
+    with no ``nonce`` and no ``sig_suite``; a missing suite means ed25519,
+    so a mixed-version cluster keeps syncing during a rolling upgrade."""
+    seed = await _register_peer(client)
+    canonical, sig = _sign_body(
+        {"type": NODE_HEARTBEAT, "from": PEER, "ts": int(time.time()), "payload": {}},
+        seed,
+    )
+    resp = await _post_raw(client, canonical, sig, GENUINE_IP)
+    assert resp.status == 200
+    # Without a nonce, a resend of the same bytes is still a replay.
+    resp = await _post_raw(client, canonical, sig, GENUINE_IP)
+    assert resp.status == 409

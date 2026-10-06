@@ -2,21 +2,31 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
 
-from socialhome.crypto import generate_identity_keypair
+from socialhome.crypto import (
+    b64url_decode,
+    generate_identity_keypair,
+    verify_ed25519,
+)
 from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     verify_capabilities,
 )
 from socialhome.global_server.cluster import (
     CLUSTER_RATE_LIMIT_PER_MIN,
+    CLUSTER_SIG_SUITE_ED25519,
+    SUPPORTED_CLUSTER_SIG_SUITES,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
     MAX_SIGNALING_SESSIONS,
+    NODE_HEARTBEAT,
     NODE_HELLO,
     ClusterService,
+    UnsupportedClusterSigSuite,
+    parse_cluster_sig_suite,
 )
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.repositories import SqliteClusterRepo
@@ -605,3 +615,65 @@ async def test_unverified_sync_budget_gates_the_address_read_only(gfs_db):
     assert svc.charge_verified_sync("203.0.113.9")
     clock.now += 60.5
     assert not svc.sync_source_exhausted("203.0.113.9")
+
+
+# ─── Frame wire shape: nonce + sig_suite ─────────────────────────────
+
+
+class _FakeResp:
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, bytes, dict]] = []
+
+    def post(self, url, *, data, headers, **_kw):
+        self.posts.append((url, data, headers))
+        return _FakeResp()
+
+
+async def test_outbound_frame_carries_nonce_suite_and_wall_clock_ts(gfs_db):
+    """Each frame is unique (16-byte nonce), names its signature suite, takes
+    ``ts`` from the injected wall clock, and is signed over the exact bytes
+    sent — with no unsigned sender-id header."""
+    kp = generate_identity_keypair()
+    svc = ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        signing_key=kp.private_key,
+        own_public_key_hex=kp.public_key.hex(),
+        wall_clock=lambda: 1_900_000_000.7,
+    )
+    session = _FakeSession()
+    for _ in range(2):
+        await svc._post_to_peer("https://b.test", NODE_HEARTBEAT, {}, session=session)
+    (url, raw, headers), (_, raw2, _) = session.posts
+    assert url == "https://b.test/cluster/sync"
+    body = json.loads(raw)
+    assert body["from"] == "node-a"
+    assert body["ts"] == 1_900_000_000
+    assert body["sig_suite"] == CLUSTER_SIG_SUITE_ED25519
+    assert len(b64url_decode(body["nonce"])) == 16
+    assert json.loads(raw2)["nonce"] != body["nonce"]
+    assert "X-Node-Id" not in headers
+    assert verify_ed25519(
+        kp.public_key, raw, b64url_decode(headers["X-Node-Signature"])
+    )
+
+
+def test_cluster_sig_suite_parse():
+    assert SUPPORTED_CLUSTER_SIG_SUITES == frozenset({CLUSTER_SIG_SUITE_ED25519})
+    # An older sender ships no suite: it can only have been ed25519.
+    assert parse_cluster_sig_suite(None) == CLUSTER_SIG_SUITE_ED25519
+    assert parse_cluster_sig_suite("ed25519") == CLUSTER_SIG_SUITE_ED25519
+    for bad in ("ed25519+mldsa65", "ED25519", "", 1, ["ed25519"]):
+        with pytest.raises(UnsupportedClusterSigSuite):
+            parse_cluster_sig_suite(bad)
+    assert issubclass(UnsupportedClusterSigSuite, ValueError)
