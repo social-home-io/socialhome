@@ -30,6 +30,8 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_routing_secret,
     generate_x25519_keypair,
+    is_small_order_ed25519_key,
+    is_valid_ed25519_public_key,
     keyed_hash,
     random_token,
     sha256_hex,
@@ -47,6 +49,8 @@ from socialhome.crypto import (
     verify_user_self,
     x25519_exchange,
 )
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from socialhome.domain.user import UserIdentityAssertion
 
 
@@ -129,6 +133,116 @@ def test_ed25519_wrong_key():
     b = generate_identity_keypair()
     sig = sign_ed25519(a.private_key, b"msg")
     assert not verify_ed25519(b.public_key, b"msg", sig)
+
+
+# ─── Small-order Ed25519 public keys ─────────────────────────────────────
+#
+# An independent, test-local model of the Ed25519 curve: decode a point,
+# multiply by the cofactor (8) and check for the identity. Used to prove the
+# encodings below really are the small-order points, so the production
+# rejection is checked against the maths, not against a copy of its table.
+
+_P = 2**255 - 19
+_D = (-121665 * pow(121666, _P - 2, _P)) % _P
+_SQRT_M1 = pow(2, (_P - 1) // 4, _P)
+
+
+def _decode_point(enc: bytes) -> tuple[int, int]:
+    """RFC 8032 §5.1.3 decode, reducing a non-canonical y mod p."""
+    y = (int.from_bytes(enc, "little") & ((1 << 255) - 1)) % _P
+    sign = enc[31] >> 7
+    u = (y * y - 1) % _P
+    v = (_D * y * y + 1) % _P
+    x = (u * pow(v, 3, _P) * pow(u * pow(v, 7, _P), (_P - 5) // 8, _P)) % _P
+    if (v * x * x - u) % _P != 0:
+        x = (x * _SQRT_M1) % _P
+    assert (v * x * x - u) % _P == 0, "not on the curve"
+    if x & 1 != sign:
+        x = (-x) % _P
+    return x, y
+
+
+def _add(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    (x1, y1), (x2, y2) = a, b
+    t = (_D * x1 * x2 * y1 * y2) % _P
+    x3 = ((x1 * y2 + x2 * y1) * pow(1 + t, _P - 2, _P)) % _P
+    y3 = ((y1 * y2 + x1 * x2) * pow(1 - t, _P - 2, _P)) % _P
+    return x3, y3
+
+
+def _times_cofactor_is_identity(enc: bytes) -> bool:
+    pt = _decode_point(enc)
+    for _ in range(3):  # 8 = 2^3
+        pt = _add(pt, pt)
+    return pt == (0, 1)
+
+
+def _with_sign(enc: bytes) -> bytes:
+    out = bytearray(enc)
+    out[31] |= 0x80
+    return bytes(out)
+
+
+_Y8 = 2707385501144840649318225287225658788936804267575313519463743609750303402022
+
+#: Every 32-byte encoding of a small-order point: the 8 torsion points
+#: (identity, order 2, both order 4, the four order 8), their sign-bit
+#: variants, and the non-canonical ``y >= p`` aliases of y = 0 and y = 1.
+SMALL_ORDER_ENCODINGS: list[bytes] = [
+    enc
+    for y in (1, _P - 1, 0, _Y8, _P - _Y8, _P, _P + 1)
+    for enc in (y.to_bytes(32, "little"), _with_sign(y.to_bytes(32, "little")))
+]
+
+
+@pytest.mark.parametrize("enc", SMALL_ORDER_ENCODINGS, ids=lambda e: e.hex())
+def test_small_order_encodings_really_are_small_order(enc):
+    """The fixture list is the torsion subgroup: 8·P is the identity."""
+    assert _times_cofactor_is_identity(enc)
+
+
+@pytest.mark.parametrize("enc", SMALL_ORDER_ENCODINGS, ids=lambda e: e.hex())
+def test_small_order_ed25519_keys_rejected(enc):
+    """Every small-order encoding — canonical or not — is not a valid key."""
+    assert is_small_order_ed25519_key(enc)
+    assert not is_valid_ed25519_public_key(enc)
+
+
+def test_real_ed25519_keys_are_valid():
+    for _ in range(32):
+        kp = generate_identity_keypair()
+        assert not is_small_order_ed25519_key(kp.public_key)
+        assert is_valid_ed25519_public_key(kp.public_key)
+
+
+def test_wrong_length_key_is_not_valid():
+    assert not is_valid_ed25519_public_key(b"\x01" * 31)
+    assert not is_valid_ed25519_public_key(b"\x01" * 33)
+
+
+@pytest.mark.parametrize("enc", SMALL_ORDER_ENCODINGS, ids=lambda e: e.hex())
+def test_verify_ed25519_refuses_every_small_order_key(enc):
+    """No signature — however chosen — verifies under a small-order key.
+
+    For each key, try R ∈ every small-order point with S = 0: that pair
+    satisfies the (cofactorless) verification equation for a sizeable share
+    of messages, so the raw library accepts some of them.
+    """
+    forged = [r + bytes(32) for r in SMALL_ORDER_ENCODINGS]
+    for msg in (b"a", b"hello", b"xyz", b"NODE_POLICY_PUSH"):
+        for sig in forged:
+            assert not verify_ed25519(enc, msg, sig)
+
+
+def test_universal_forgery_under_identity_key_is_refused():
+    """Pubkey = identity, sig = identity || 0 verifies any message in raw
+    OpenSSL. ``verify_ed25519`` must refuse it."""
+    pk = (1).to_bytes(32, "little")
+    sig = (1).to_bytes(32, "little") + bytes(32)
+    raw = Ed25519PublicKey.from_public_bytes(pk)
+    for msg in (b"a", b"hello", b'{"type":"NODE_POLICY_PUSH"}'):
+        raw.verify(sig, msg)  # the library alone accepts the forgery …
+        assert not verify_ed25519(pk, msg, sig)  # … we do not
 
 
 def test_x25519_shared_secret_agreement():

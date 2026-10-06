@@ -28,10 +28,15 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 import aiohttp
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
-from ..crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
+from ..crypto import (
+    b64url_decode,
+    b64url_encode,
+    is_valid_ed25519_public_key,
+    sign_ed25519,
+    verify_ed25519,
+)
 from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
@@ -191,12 +196,11 @@ def _validated_peer(
     if not isinstance(public_key, str):
         raise InvalidClusterPeer("invalid_public_key")
     key = public_key.strip().lower()
-    if not _HEX_ED25519_KEY.fullmatch(key):
+    # A small-order key would let anyone forge this node's frames.
+    if not _HEX_ED25519_KEY.fullmatch(key) or not is_valid_ed25519_public_key(
+        bytes.fromhex(key)
+    ):
         raise InvalidClusterPeer("invalid_public_key")
-    try:
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(key))
-    except ValueError as exc:
-        raise InvalidClusterPeer("invalid_public_key") from exc
     return node_id, url, key
 
 

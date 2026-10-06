@@ -316,3 +316,57 @@ async def test_an_existing_peer_still_works(gfs):
         ),
     )
     assert status == 200
+
+
+# ─── Small-order Ed25519 keys (universal forgeries) ─────────────────────
+
+#: The identity point: OpenSSL accepts it as a key, and the signature
+#: ``identity ‖ 0`` then verifies under it for EVERY message.
+_IDENTITY_KEY = (1).to_bytes(32, "little")
+_FORGED_SIG = b64url_encode((1).to_bytes(32, "little") + bytes(32))
+
+#: Every canonical small-order encoding (see ``tests/test_crypto.py`` for
+#: the proof that 8·P is the identity for each).
+_P = 2**255 - 19
+_Y8 = 2707385501144840649318225287225658788936804267575313519463743609750303402022
+_SMALL_ORDER_KEYS = [
+    y.to_bytes(32, "little").hex() for y in (1, _P - 1, 0, _Y8, _P - _Y8, _P, _P + 1)
+]
+
+
+@pytest.mark.parametrize("key", _SMALL_ORDER_KEYS)
+async def test_admin_cannot_pin_a_small_order_key(gfs, key):
+    status, body = await _admin_add_peer(
+        gfs, {"node_id": "node-x", "url": _UNREACHABLE, "public_key": key}
+    )
+    assert (status, body) == (422, {"error": "invalid_public_key"})
+    assert await _roster(gfs) == {}
+
+
+async def test_a_forged_frame_under_a_small_order_pin_is_refused(gfs):
+    """Even a small-order pin already on disk (a pre-upgrade TOFU row)
+    verifies nothing: the forged policy push is refused, nothing applied."""
+    await gfs.app[gfs_cluster_repo_key].upsert_node(
+        ClusterNode(
+            node_id="forger",
+            url=_UNREACHABLE,
+            public_key=_IDENTITY_KEY.hex(),
+            status="online",
+        )
+    )
+    admin_repo = gfs.app[gfs_admin_repo_key]
+    before = await admin_repo.get_config("fraud_threshold")
+    raw = json.dumps(
+        {
+            "type": "NODE_POLICY_PUSH",
+            "from": "forger",
+            "ts": int(time.time()),
+            "nonce": b64url_encode(secrets.token_bytes(16)),
+            "sig_suite": "ed25519",
+            "payload": {"fraud_threshold": 999999},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    assert await _post(gfs, raw, _FORGED_SIG) == (401, {"error": "invalid_signature"})
+    assert await admin_repo.get_config("fraud_threshold") == before

@@ -70,6 +70,29 @@ addresses. See the last section of this document.
 | Password hash | scrypt | N=2^14, r=8, p=1 | Standalone-mode user passwords | `socialhome/platform/standalone/adapter.py` |
 | Web Push | VAPID (P-256 ECDSA) | P-256 | Push-notification JWT signing | `socialhome/services/push_service.py` |
 
+### Ed25519 public keys: small-order points are refused
+
+OpenSSL (and so `cryptography`) loads any 32-byte Ed25519 public key,
+including the 8 small-order points of the curve's torsion subgroup and
+their non-canonical `y ≥ p` aliases. Under such a key a signature can be
+forged for any message without a private key — e.g. key `01 00…00` with
+signature `01 00…00 ‖ 00…00` verifies everything. Nobody holds a real key
+of that shape, so Social Home refuses them everywhere:
+
+- `crypto.verify_ed25519` — the single Ed25519 verifier every signature
+  path calls (federation envelopes, pairing, GFS household and cluster
+  frames, space authority certs, writer certs, user assertions, SDP,
+  capability blocks, …) — returns `False` for a small-order key before the
+  library sees it;
+- `crypto.is_valid_ed25519_public_key` is the shared check for keys an
+  operator pins (GFS cluster `POST /admin/api/cluster/peers` → 422
+  `invalid_public_key`).
+
+The check is `y mod p ∈ {0, 1, p−1, ±y₈}` (the y-coordinates of the 8
+torsion points; the sign bit is irrelevant) — the same set libsodium's
+`has_small_order` blacklists. Mixed-order keys are not refused: a forgery
+under one still needs the prime-order part's private key.
+
 ### Quantum safety at a glance
 
 - **Quantum-safe today:** AES-256-GCM (Grover ⇒ effective 128-bit),
