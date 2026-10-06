@@ -65,7 +65,7 @@ def _render_link(m: re.Match[str]) -> str:
         return m.group(0)
     # ``url`` is already HTML-escaped (quotes → &quot;) so it cannot break
     # out of the attribute; the scheme allow-list blocks script URLs.
-    return f'<a href="{url}" rel="noopener nofollow ugc" target="_blank">{text}</a>'
+    return f'<a href="{url}" rel="noopener noreferrer nofollow ugc" target="_blank">{text}</a>'
 
 
 def _inline(text: str) -> str:
