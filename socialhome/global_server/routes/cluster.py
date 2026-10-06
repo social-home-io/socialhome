@@ -21,6 +21,7 @@ from ..cluster import (
     NODE_SYNC_REPORT,
     NODE_SYNC_SPACE,
     UnsupportedClusterSigSuite,
+    authorize_frame,
     parse_cluster_sig_suite,
     verify_node_signature,
 )
@@ -47,25 +48,39 @@ def _rate_limited() -> web.Response:
 class ClusterSyncView(GfsBaseView):
     """``POST /cluster/sync`` — NODE_* dispatch with signature + rate limit.
 
-    Body is the raw canonical JSON ``{type, from, ts, payload}``; the
-    ``X-Node-Signature`` header carries the Ed25519 signature. The sender
-    id is the signed ``from`` — there is no header fallback.
+    Body is the raw canonical JSON ``{type, from, ts, nonce, sig_suite,
+    payload}`` (an older sender omits ``nonce`` + ``sig_suite``); the
+    ``X-Node-Signature`` header carries the signature over those exact
+    bytes. The sender id is the signed ``from`` — there is no header
+    fallback.
+
+    Membership (spec §24.10): a node is a member if and only if its frames
+    verify under a key this GFS already holds — its own identity key (the
+    shared seed) or a key pinned on the node's ``cluster_nodes`` row by an
+    operator. See :func:`~socialhome.global_server.cluster.authorize_frame`.
 
     Order matters (spec §24.10.4):
 
-    1. A source address that has spent its unverified budget is shed
-       before anything else — no parse, no DB read, no signature work.
-    2. Cheap structural checks: JSON object, ``type`` + ``from``, and a
-       known sender (NODE_HELLO excepted — TOFU). Unknown peers → 403
-       without verifying the sig (CPU-burn DoS guard).
-    3. Signature verification.
-    4. Only then a budget is spent: the per-node one keyed on the id
-       whose pinned key verified the request. A first-contact HELLO is
-       self-signed under the key it carries — it proves nothing about the
-       sender — so it spends the source address's budget instead.
+    1. Source address over its unverified budget → 429, before any parse,
+       DB read or signature work.
+    2. Not a JSON object → 400 ``invalid_json``; ``type`` / ``from`` /
+       ``payload`` missing or mistyped → 400 ``invalid_message``.
+    3. Unknown ``sig_suite`` → 400 ``unsupported_sig_suite``.
+    4. ``ts`` not an int → 400 ``invalid_timestamp``; more than ±300 s off
+       our wall clock, or before this process started → 401
+       ``stale_timestamp``.
+    5. Membership → 403 ``unknown_node`` (non-HELLO, no row),
+       ``unapproved_node`` (HELLO under a key we don't hold; nothing is
+       written) or ``key_mismatch`` (HELLO for a known node under a key
+       other than its pin; WARNING).
+    6. Signature under the key step 5 chose → 401 ``invalid_signature``.
+    7. Already-accepted bytes → 409 ``replay``.
+    8. The verified node's budget → 429.
+    9. Record the frame digest, then dispatch.
 
-    Every failure in 2–3 spends the source address's budget, never a
-    node's: forged traffic naming a real peer cannot lock it out.
+    Every failure in 2–7 spends the source address's budget, never a
+    node's: forged or replayed traffic naming a real peer cannot lock it
+    out.
     """
 
     async def post(self) -> web.Response:
@@ -124,26 +139,38 @@ class ClusterSyncView(GfsBaseView):
                 ),
             )
 
-        # Look up the peer's pinned key. NODE_HELLO is special-cased: a
-        # first-contact sender isn't in the DB yet, so it is verified under
-        # the key it carries (TOFU) — which proves the message is
-        # self-consistent, not who sent it.
+        # Membership (spec §24.10): which key, if any, this frame must
+        # verify under — our own identity key (shared seed) or the key
+        # pinned on the sender's row. Decided before any signature work, so
+        # an outsider cannot make us burn verify CPU; nothing is written for
+        # a refused sender.
         cluster_repo = self.svc(K.gfs_cluster_repo_key)
         nodes = await cluster_repo.list_nodes()
-        match = next((n for n in nodes if n.node_id == from_node), None)
-        if msg_type == NODE_HELLO:
-            pk_hex = str(payload.get("public_key") or "")
-            proven = match is not None and bool(pk_hex) and match.public_key == pk_hex
-        elif match is None:
+        pinned = next((n for n in nodes if n.node_id == from_node), None)
+        carried = payload.get("public_key") if msg_type == NODE_HELLO else ""
+        verdict = authorize_frame(
+            msg_type=msg_type,
+            from_node=from_node,
+            carried_key=carried if isinstance(carried, str) else "",
+            pinned=pinned,
+            own_key=svc.own_public_key_hex,
+        )
+        if verdict.error:
+            if verdict.error == "key_mismatch":
+                log.warning(
+                    "cluster: key_mismatch — NODE_HELLO for known node %r from "
+                    "%s carries a key other than its pin; refused. If the node "
+                    "really rotated its key, remove the peer and re-add it "
+                    "with the new key.",
+                    from_node,
+                    client_ip,
+                )
             return _reject(
-                web.json_response({"error": "unknown_node"}, status=403),
+                web.json_response({"error": verdict.error}, status=403),
             )
-        else:
-            pk_hex = match.public_key
-            proven = True
 
         signature = self.request.headers.get("X-Node-Signature", "")
-        if not verify_node_signature(raw, signature, pk_hex):
+        if not verify_node_signature(raw, signature, verdict.verify_key):
             return _reject(
                 web.json_response({"error": "invalid_signature"}, status=401),
             )
@@ -153,12 +180,9 @@ class ClusterSyncView(GfsBaseView):
         if svc.frame_seen(raw):
             return _reject(web.json_response({"error": "replay"}, status=409))
 
-        within_budget = (
-            svc.charge_verified_sync(from_node)
-            if proven
-            else svc.charge_unverified_sync(client_ip)
-        )
-        if not within_budget:
+        # The frame verified under a key we already held, so it is the
+        # member's own traffic: spend that node's budget.
+        if not svc.charge_verified_sync(from_node):
             return _rate_limited()
         svc.record_frame(raw)
 
@@ -167,7 +191,7 @@ class ClusterSyncView(GfsBaseView):
             await svc.handle_hello(
                 from_node_id=from_node,
                 url=str(payload.get("url") or ""),
-                public_key_hex=pk_hex,
+                public_key_hex=verdict.verify_key,
             )
         elif msg_type == NODE_HEARTBEAT:
             await svc.handle_heartbeat(from_node, payload)

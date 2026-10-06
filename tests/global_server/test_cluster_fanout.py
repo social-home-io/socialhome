@@ -75,6 +75,22 @@ async def _stop_node(server: TestServer) -> None:
     await server.close()
 
 
+async def _pin_each_other(a: TestServer, b: TestServer) -> None:
+    """Operator approval: each node's roster pins the other's identity key.
+
+    Two test nodes have distinct data dirs, so distinct seeds — a HELLO from
+    one is only accepted by the other under a pinned key.
+    """
+    for here, there, there_id in ((a, b, "B"), (b, a, "A")):
+        await here.app[gfs_cluster_repo_key].upsert_node(
+            ClusterNode(
+                node_id=there_id,
+                url=str(there.make_url("")).rstrip("/"),
+                public_key=there.app[gfs_cluster_key].own_public_key_hex,
+            )
+        )
+
+
 @pytest.fixture
 def fast_sync_retry(monkeypatch):
     """Shrink the production 5 s ``_broadcast`` retry back-off.
@@ -108,7 +124,8 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_ret
         cluster_a: ClusterService = a.app[gfs_cluster_key]
         cluster_b: ClusterService = b.app[gfs_cluster_key]
 
-        # Mutual TOFU — each admin-add the other. `add_peer` stores the
+        await _pin_each_other(a, b)
+        # Each admin-adds the other. `add_peer` stores the
         # peer row locally + fires a NODE_HELLO with our own pk so the
         # other side records us + our key.
         await cluster_a.add_peer(url_b)
@@ -287,6 +304,7 @@ async def test_heartbeat_loop_tracks_peer_liveness(
         url_b = str(b.make_url("")).rstrip("/")
         cluster_a: ClusterService = a.app[gfs_cluster_key]
         cluster_b: ClusterService = b.app[gfs_cluster_key]
+        await _pin_each_other(a, b)
         await cluster_a.add_peer(url_b)
         await cluster_b.add_peer(str(a.make_url("")).rstrip("/"))
         repo_a = a.app[gfs_cluster_repo_key]

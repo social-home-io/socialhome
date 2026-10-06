@@ -25,7 +25,9 @@ from socialhome.global_server.cluster import (
     NODE_HEARTBEAT,
     NODE_HELLO,
     ClusterService,
+    FrameVerdict,
     UnsupportedClusterSigSuite,
+    authorize_frame,
     parse_cluster_sig_suite,
 )
 from socialhome.global_server.domain import ClusterNode
@@ -677,3 +679,68 @@ def test_cluster_sig_suite_parse():
         with pytest.raises(UnsupportedClusterSigSuite):
             parse_cluster_sig_suite(bad)
     assert issubclass(UnsupportedClusterSigSuite, ValueError)
+
+
+# ─── Membership rule (authorize_frame) ───────────────────────────────
+
+_OWN = "a1" * 32
+_PIN = "b2" * 32
+_OTHER = "c3" * 32
+
+
+def _row(key: str) -> ClusterNode:
+    return ClusterNode(node_id="node-b", url="https://b.test", public_key=key)
+
+
+def _hello(carried: str, pinned: ClusterNode | None, own: str = _OWN):
+    return authorize_frame(
+        msg_type=NODE_HELLO,
+        from_node="node-b",
+        carried_key=carried,
+        pinned=pinned,
+        own_key=own,
+    )
+
+
+def test_hello_under_our_own_key_is_a_member():
+    """Shared seed: holding our identity key IS the operator's approval."""
+    assert _hello(_OWN, None) == FrameVerdict(verify_key=_OWN)
+    assert _hello(_OWN.upper(), None) == FrameVerdict(verify_key=_OWN)
+    # An empty pin (a row with no key yet) is filled by the shared seed.
+    assert _hello(_OWN, _row("")) == FrameVerdict(verify_key=_OWN)
+
+
+def test_hello_under_the_admin_pinned_key_is_a_member():
+    assert _hello(_PIN, _row(_PIN)) == FrameVerdict(verify_key=_PIN)
+
+
+def test_hello_under_an_unknown_key_is_unapproved():
+    assert _hello(_OTHER, None) == FrameVerdict(error="unapproved_node")
+    assert _hello(_OTHER, _row("")) == FrameVerdict(error="unapproved_node")
+    assert _hello("", None) == FrameVerdict(error="unapproved_node")
+    # No identity configured: nothing is our own key.
+    assert _hello("", None, own="") == FrameVerdict(error="unapproved_node")
+
+
+def test_hello_never_moves_a_pin():
+    """A known node id with a different key is refused — even our own key:
+    rotation is delete then re-add, never an in-band swap."""
+    assert _hello(_OTHER, _row(_PIN)) == FrameVerdict(error="key_mismatch")
+    assert _hello(_OWN, _row(_PIN)) == FrameVerdict(error="key_mismatch")
+
+
+def test_non_hello_verifies_under_the_pin_or_our_own_key():
+    def _hb(pinned, own=_OWN):
+        return authorize_frame(
+            msg_type=NODE_HEARTBEAT,
+            from_node="node-b",
+            carried_key="",
+            pinned=pinned,
+            own_key=own,
+        )
+
+    assert _hb(None) == FrameVerdict(error="unknown_node")
+    assert _hb(_row(_PIN)) == FrameVerdict(verify_key=_PIN)
+    # A sibling row stored with no key is a shared-seed sibling.
+    assert _hb(_row("")) == FrameVerdict(verify_key=_OWN)
+    assert _hb(_row(""), own="") == FrameVerdict(error="unknown_node")

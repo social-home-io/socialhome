@@ -21,7 +21,7 @@ import logging
 import secrets
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -148,6 +148,71 @@ NODE_POLICY_PUSH = "NODE_POLICY_PUSH"
 #: a banner instead).
 NODE_PARTITION_CATCHUP = "NODE_PARTITION_CATCHUP"
 NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
+
+
+# ─── Membership rule ─────────────────────────────────────────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class FrameVerdict:
+    """Outcome of :func:`authorize_frame`.
+
+    Exactly one field is set: ``verify_key`` (hex Ed25519 key the frame's
+    signature must verify under) when the sender is a member, else
+    ``error`` — ``unknown_node``, ``unapproved_node`` or ``key_mismatch``.
+    """
+
+    verify_key: str = ""
+    error: str = ""
+
+
+def authorize_frame(
+    *,
+    msg_type: str,
+    from_node: str,
+    carried_key: str,
+    pinned: ClusterNode | None,
+    own_key: str,
+) -> FrameVerdict:
+    """Decide which key a ``/cluster/sync`` frame must verify under (§24.10).
+
+    Pure: no I/O, no logging. A node is a cluster member if and only if its
+    frames verify under a key this GFS already holds:
+
+    * our OWN identity key — the shared seed; an operator who gave a node
+      the seed approved it; or
+    * the key an operator pinned on the node's ``cluster_nodes`` row
+      (``POST /admin/api/cluster/peers``), or a grandfathered pin.
+
+    ``NODE_HELLO`` names the key it is signed under (``carried_key``):
+
+    * the node's non-empty pin → member; any other key → ``key_mismatch``
+      (a pin never moves in-band, not even to our own key — rotation is
+      delete then re-add);
+    * no row, or an empty pin → member only under our own key, else
+      ``unapproved_node`` (the caller writes nothing).
+
+    Every other frame needs a row (``unknown_node`` otherwise) and verifies
+    under its pin, or under our own key when the row carries none (a
+    shared-seed sibling).
+    """
+    own = own_key.lower()
+    if msg_type == NODE_HELLO:
+        carried = carried_key.lower()
+        pin = (pinned.public_key if pinned is not None else "").lower()
+        if pin:
+            if carried == pin:
+                return FrameVerdict(verify_key=pin)
+            return FrameVerdict(error="key_mismatch")
+        if own and carried == own:
+            return FrameVerdict(verify_key=own)
+        return FrameVerdict(error="unapproved_node")
+    if pinned is None:
+        return FrameVerdict(error="unknown_node")
+    key = pinned.public_key.lower() or own
+    if not key:
+        return FrameVerdict(error="unknown_node")
+    return FrameVerdict(verify_key=key)
 
 
 class ClusterService:
@@ -324,6 +389,11 @@ class ClusterService:
         return (
             self._ws_registry.connection_count() if self._ws_registry is not None else 0
         )
+
+    @property
+    def node_id(self) -> str:
+        """This node's cluster id (unique per node)."""
+        return self._node_id
 
     @property
     def own_public_key_hex(self) -> str:

@@ -145,29 +145,103 @@ async def test_cluster_health_returns_this_node(client):
 
 
 async def test_node_hello_registers_peer(client, outbound_hellos):
-    seed, pub_hex = _keypair()
+    """A HELLO signed with this GFS's own identity seed (the shared seed the
+    operator handed the node) registers the peer and is answered."""
+    svc = client._app[gfs_cluster_key]
+    seed = svc._signing_key
     canonical, sig = _post_node_payload(
         NODE_HELLO,
-        {"node_id": "gfs-node-b", "url": "http://b.test", "public_key": pub_hex},
+        {
+            "node_id": "gfs-node-b",
+            "url": "http://b.test",
+            "public_key": svc.own_public_key_hex,
+        },
         from_node="gfs-node-b",
         signing_key=seed,
     )
     resp = await client.post(
         "/cluster/sync",
         data=canonical,
-        headers={
-            "Content-Type": "application/json",
-            "X-Node-Signature": sig,
-            "X-Node-Id": "gfs-node-b",
+        headers={"Content-Type": "application/json", "X-Node-Signature": sig},
+    )
+    assert resp.status == 200
+    nodes = await client._app[gfs_cluster_repo_key].list_nodes()
+    (row,) = [n for n in nodes if n.node_id == "gfs-node-b"]
+    assert row.public_key == svc.own_public_key_hex
+    # First contact → we HELLO back (stopped at the boundary, never sent).
+    assert outbound_hellos == [("http://b.test", NODE_HELLO)]
+
+
+@pytest.mark.security
+async def test_node_hello_under_an_unknown_key_is_refused(client, outbound_hellos):
+    """A self-signed HELLO under a key nobody approved writes nothing."""
+    seed, pub_hex = _keypair()
+    resp = await _sync(
+        client,
+        from_node="gfs-node-x",
+        seed=seed,
+        ip=ATTACKER_IP,
+        type_=NODE_HELLO,
+        payload={
+            "node_id": "gfs-node-x",
+            "url": "http://x.test",
+            "public_key": pub_hex,
+        },
+    )
+    assert resp.status == 403
+    assert (await resp.json())["error"] == "unapproved_node"
+    assert await client._app[gfs_cluster_repo_key].list_nodes() == []
+    assert outbound_hellos == []
+    assert ATTACKER_IP in client._app[gfs_cluster_key]._sync_unverified_limiter
+
+
+@pytest.mark.security
+async def test_node_hello_with_a_different_key_is_a_mismatch(client, caplog):
+    """A known node id announcing a key other than its pin is refused, the
+    pin is untouched, and the operator sees a WARNING."""
+    pinned_seed = await _register_peer(client)
+    pinned_hex = ed25519_public_key(pinned_seed).hex()
+    seed, pub_hex = _keypair()
+    with caplog.at_level("WARNING"):
+        resp = await _sync(
+            client,
+            from_node=PEER,
+            seed=seed,
+            ip=ATTACKER_IP,
+            type_=NODE_HELLO,
+            payload={"node_id": PEER, "url": "http://evil.test", "public_key": pub_hex},
+        )
+    assert resp.status == 403
+    assert (await resp.json())["error"] == "key_mismatch"
+    (row,) = await client._app[gfs_cluster_repo_key].list_nodes()
+    assert row.public_key == pinned_hex
+    assert row.url == f"http://{PEER}.test"
+    assert any(
+        r.levelname == "WARNING" and "key_mismatch" in r.getMessage()
+        for r in caplog.records
+    )
+    svc = client._app[gfs_cluster_key]
+    assert PEER not in svc._sync_node_limiter
+
+
+async def test_self_hello_is_a_no_op(client, outbound_hellos):
+    """The Nomad template lists this node too, so it HELLOs itself."""
+    svc = client._app[gfs_cluster_key]
+    resp = await _sync(
+        client,
+        from_node="gfs-node-a",
+        seed=svc._signing_key,
+        ip=GENUINE_IP,
+        type_=NODE_HELLO,
+        payload={
+            "node_id": "gfs-node-a",
+            "url": "http://gfs.test",
+            "public_key": svc.own_public_key_hex,
         },
     )
     assert resp.status == 200
-    # Peer is now in cluster_nodes.
-    cluster_repo = client._app[gfs_cluster_repo_key]
-    nodes = await cluster_repo.list_nodes()
-    assert any(n.node_id == "gfs-node-b" for n in nodes)
-    # First contact → we HELLO back (stopped at the boundary, never sent).
-    assert outbound_hellos == [("http://b.test", NODE_HELLO)]
+    assert await client._app[gfs_cluster_repo_key].list_nodes() == []
+    assert outbound_hellos == []
 
 
 async def test_cluster_sync_unknown_node_is_403(client):
@@ -493,12 +567,12 @@ async def test_malformed_bodies_count_against_the_address(client):
 
 
 @pytest.mark.security
-async def test_tofu_hellos_spend_the_address_budget_not_a_node_budget(
+async def test_unapproved_hellos_spend_the_address_budget_not_a_node_budget(
     client, outbound_hellos
 ):
-    """A first-contact HELLO is self-signed under the key it carries, so it
-    proves nothing about who sent it — it is charged to the source address.
-    A HELLO from a known peer under its pinned key is that peer's traffic."""
+    """HELLOs under unapproved keys are refused, write nothing and are
+    charged to the source address until it is shed. A HELLO from a known
+    peer under its pinned key is that peer's own (verified) traffic."""
     for i in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN):
         seed, pub_hex = _keypair()
         node = f"sybil-{i}"
@@ -510,7 +584,7 @@ async def test_tofu_hellos_spend_the_address_budget_not_a_node_budget(
             type_=NODE_HELLO,
             payload={"node_id": node, "url": "", "public_key": pub_hex},
         )
-        assert resp.status == 200
+        assert resp.status == 403
     seed, pub_hex = _keypair()
     resp = await _sync(
         client,
@@ -523,8 +597,8 @@ async def test_tofu_hellos_spend_the_address_budget_not_a_node_budget(
     assert resp.status == 429
     svc = client._app[gfs_cluster_key]
     assert len(svc._sync_node_limiter) == 0
-    # A known peer re-announcing under its pinned key is that peer's own
-    # (verified) traffic — charged to its node budget, not to an address.
+    assert await client._app[gfs_cluster_repo_key].list_nodes() == []
+    assert outbound_hellos == []
     peer_seed = await _register_peer(client)
     resp = await _sync(
         client,
