@@ -175,9 +175,69 @@ def sign_ed25519(seed: bytes, message: bytes) -> bytes:
     return sk.sign(message)
 
 
-def verify_ed25519(public_key: bytes, message: bytes, signature: bytes) -> bool:
-    """Return ``True`` iff ``signature`` is a valid Ed25519 signature."""
+#: Field prime of Curve25519 / Ed25519.
+_ED25519_P: int = 2**255 - 19
+
+#: y-coordinate of one order-8 point; the other order-8 y is ``p - y``.
+_ED25519_ORDER8_Y: int = (
+    2707385501144840649318225287225658788936804267575313519463743609750303402022
+)
+
+#: y-coordinates (mod p) of the 8 points of Ed25519's small-order (torsion)
+#: subgroup: identity (y = 1), order 2 (y = -1), the two order-4 points
+#: (y = 0) and the four order-8 points (y = ±y8). Each y carries both signs
+#: of x, so the sign bit is irrelevant; reducing y mod p also catches the
+#: non-canonical ``y >= p`` aliases of 0 and 1. Same set libsodium's
+#: ``has_small_order`` blacklists.
+_ED25519_SMALL_ORDER_Y: frozenset[int] = frozenset(
+    {
+        1,
+        _ED25519_P - 1,
+        0,
+        _ED25519_ORDER8_Y,
+        _ED25519_P - _ED25519_ORDER8_Y,
+    }
+)
+
+
+def is_small_order_ed25519_key(public_key: bytes) -> bool:
+    """Whether *public_key* encodes a small-order point (8·A = identity).
+
+    OpenSSL accepts these keys, and under one a signature can be forged
+    for any message without a private key (e.g. key ``01 00…00`` with
+    signature ``01 00…00 ‖ 00…00``). Nobody holds a real key of that shape,
+    so every Ed25519 public key that enters Social Home is refused if this
+    returns ``True`` (see :func:`is_valid_ed25519_public_key`).
+    """
     if len(public_key) != 32:
+        return False
+    y = int.from_bytes(public_key, "little") & ((1 << 255) - 1)
+    return y % _ED25519_P in _ED25519_SMALL_ORDER_Y
+
+
+def is_valid_ed25519_public_key(public_key: bytes) -> bool:
+    """Whether *public_key* is a usable Ed25519 public key.
+
+    32 bytes, loadable by the library, and NOT a small-order point. The
+    shared check for every key we pin, store or verify under.
+    """
+    if len(public_key) != 32 or is_small_order_ed25519_key(public_key):
+        return False
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key)
+    except ValueError:
+        return False
+    return True
+
+
+def verify_ed25519(public_key: bytes, message: bytes, signature: bytes) -> bool:
+    """Return ``True`` iff ``signature`` is a valid Ed25519 signature.
+
+    A small-order *public_key* never verifies anything — the library alone
+    would accept forged signatures under one (see
+    :func:`is_small_order_ed25519_key`).
+    """
+    if not is_valid_ed25519_public_key(public_key):
         return False
     try:
         Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)

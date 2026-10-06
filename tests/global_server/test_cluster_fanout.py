@@ -15,6 +15,7 @@ import asyncio
 import time
 from dataclasses import replace
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -22,11 +23,13 @@ from socialhome.authority_cert import sign_authority_cert
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.global_server import cluster as cluster_mod
 from socialhome.global_server.app_keys import (
+    gfs_admin_repo_key,
     gfs_cluster_key,
     gfs_cluster_repo_key,
     gfs_fed_repo_key,
 )
 from socialhome.global_server.cluster import (
+    NODE_HEARTBEAT,
     ClusterService,
     _report_to_wire,
     _wire_to_client,
@@ -64,15 +67,33 @@ def _config(tmp, *, instance_id: str, cluster_peers=()):
 
 
 async def _start_node(tmp_dir, instance_id: str) -> TestServer:
-    """Create + start a GFS TestServer for the given instance_id."""
+    """Create + start a GFS TestServer for the given instance_id.
+
+    The port is only known once the server listens, so the node's own URL
+    (what its HELLO advertises, and where a peer answers it) is set then.
+    """
     app = create_gfs_app(_config(tmp_dir, instance_id=instance_id))
     server = TestServer(app)
     await server.start_server()
+    app[gfs_cluster_key]._self_url = str(server.make_url("")).rstrip("/")
     return server
 
 
 async def _stop_node(server: TestServer) -> None:
     await server.close()
+
+
+async def _approve(here: TestServer, there: TestServer, there_id: str) -> None:
+    """Operator approval on *here*: pin *there*'s id, URL and identity key.
+
+    Two test nodes have distinct data dirs, so distinct seeds — each must
+    pin the other's key before the other's frames are accepted.
+    """
+    await here.app[gfs_cluster_key].add_peer(
+        there_id,
+        str(there.make_url("")).rstrip("/"),
+        there.app[gfs_cluster_key].own_public_key_hex,
+    )
 
 
 @pytest.fixture
@@ -102,17 +123,15 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_ret
     a = await _start_node(dir_a, "A")
     b = await _start_node(dir_b, "B")
     try:
-        url_a = str(a.make_url("")).rstrip("/")
         url_b = str(b.make_url("")).rstrip("/")
 
         cluster_a: ClusterService = a.app[gfs_cluster_key]
-        cluster_b: ClusterService = b.app[gfs_cluster_key]
 
-        # Mutual TOFU — each admin-add the other. `add_peer` stores the
-        # peer row locally + fires a NODE_HELLO with our own pk so the
-        # other side records us + our key.
-        await cluster_a.add_peer(url_b)
-        await cluster_b.add_peer(url_a)
+        # Each operator approves the other node (id + URL + key). `add_peer`
+        # pins the peer row locally + fires a NODE_HELLO so the other side
+        # marks us online.
+        await _approve(a, b, "B")
+        await _approve(b, a, "A")
         # After the symmetric HELLO round-trip both nodes know each other.
         peers_a = await a.app[gfs_cluster_repo_key].list_nodes()
         peers_b = await b.app[gfs_cluster_repo_key].list_nodes()
@@ -214,6 +233,32 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_ret
         await _stop_node(b)
 
 
+@pytest.mark.parametrize("first", ["A", "B"])
+async def test_admin_approval_converges_in_either_order(tmp_path_factory, first):
+    """Approving each node on the other converges whichever side the
+    operator does first: the first HELLO is refused (the other side has
+    not approved us yet), the second is accepted and — the row never seen
+    before — answered, so both rows end up online."""
+    a = await _start_node(tmp_path_factory.mktemp("conv-a"), "A")
+    b = await _start_node(tmp_path_factory.mktemp("conv-b"), "B")
+    try:
+        nodes = {"A": a, "B": b}
+        second = "B" if first == "A" else "A"
+        await _approve(nodes[first], nodes[second], second)
+        # Not yet approved on the other side: nothing was written there.
+        assert await nodes[second].app[gfs_cluster_repo_key].list_nodes() == []
+        await _approve(nodes[second], nodes[first], first)
+        for here, there_id, there in ((a, "B", b), (b, "A", a)):
+            (row,) = await here.app[gfs_cluster_repo_key].list_nodes()
+            assert row.node_id == there_id
+            assert row.public_key == there.app[gfs_cluster_key].own_public_key_hex
+            assert row.status == "online"
+            assert row.last_seen is not None
+    finally:
+        await _stop_node(a)
+        await _stop_node(b)
+
+
 async def test_post_to_peer_raises_on_non_2xx(
     tmp_dir, tmp_path_factory, fast_sync_retry
 ):
@@ -227,11 +272,12 @@ async def test_post_to_peer_raises_on_non_2xx(
         # iterates through it.
         from socialhome.global_server.domain import ClusterNode
 
-        await a.app[gfs_cluster_repo_key].upsert_node(
+        await a.app[gfs_cluster_repo_key].insert_node(
             ClusterNode(
                 node_id="ghost",
                 url="http://127.0.0.1:1",
-                public_key="",
+                # A shared-seed sibling: only members get fan-out.
+                public_key=a.app[gfs_cluster_key].own_public_key_hex,
                 status="online",
             )
         )
@@ -285,16 +331,15 @@ async def test_heartbeat_loop_tracks_peer_liveness(
     b = await _start_node(tmp_path_factory.mktemp("hb-b"), "B")
     try:
         url_b = str(b.make_url("")).rstrip("/")
-        cluster_a: ClusterService = a.app[gfs_cluster_key]
-        cluster_b: ClusterService = b.app[gfs_cluster_key]
-        await cluster_a.add_peer(url_b)
-        await cluster_b.add_peer(str(a.make_url("")).rstrip("/"))
+        await _approve(a, b, "B")
+        await _approve(b, a, "A")
         repo_a = a.app[gfs_cluster_repo_key]
-        await repo_a.upsert_node(
+        await repo_a.insert_node(
             ClusterNode(
                 node_id="ghost",
                 url="http://127.0.0.1:1",
-                public_key="",
+                # A shared-seed sibling: only members are pinged.
+                public_key=a.app[gfs_cluster_key].own_public_key_hex,
                 status="online",
             )
         )
@@ -315,11 +360,11 @@ async def test_heartbeat_loop_tracks_peer_liveness(
         # A reachable peer recorded offline is probed and comes back. Its own
         # row id ("B-alias") is one B never heartbeats as, so only the probe
         # can flip it back.
-        await repo_a.upsert_node(
+        await repo_a.insert_node(
             ClusterNode(
                 node_id="B-alias",
                 url=url_b,
-                public_key="",
+                public_key=a.app[gfs_cluster_key].own_public_key_hex,
                 status="offline",
             )
         )
@@ -550,7 +595,7 @@ async def test_handle_heartbeat_updates_last_seen(started_app):
     svc: ClusterService = started_app[gfs_cluster_key]
     from socialhome.global_server.domain import ClusterNode
 
-    await started_app[gfs_cluster_repo_key].upsert_node(
+    await started_app[gfs_cluster_repo_key].insert_node(
         ClusterNode(
             node_id="peer",
             url="http://peer",
@@ -777,3 +822,62 @@ async def test_cluster_sync_never_moves_the_rotation_seq_backwards(started_app):
     wire["authority_rotation_seq"] = "lots"
     await svc.apply_sync_space("upsert", wire)
     assert (await fed.get_space("rot")).authority_rotation_seq == 8
+
+
+async def test_a_frame_for_one_node_is_refused_by_another(tmp_path_factory):
+    """Cross-node replay: B's frame for A, captured and replayed to C (which
+    also approved B), is refused — the signed ``to`` names A. Old-shape
+    frames without ``to`` still reach both."""
+    a = await _start_node(tmp_path_factory.mktemp("xr-a"), "A")
+    b = await _start_node(tmp_path_factory.mktemp("xr-b"), "B")
+    c = await _start_node(tmp_path_factory.mktemp("xr-c"), "C")
+    try:
+        for here in (a, c):
+            await _approve(here, b, "B")
+        cluster_b: ClusterService = b.app[gfs_cluster_key]
+        raw, sig = cluster_b._signed_frame(NODE_HEARTBEAT, {}, to="A")
+        headers = {"Content-Type": "application/json", "X-Node-Signature": sig}
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"{str(c.make_url('')).rstrip('/')}/cluster/sync",
+                data=raw,
+                headers=headers,
+            ) as resp:
+                assert (resp.status, await resp.json()) == (
+                    409,
+                    {"error": "wrong_recipient"},
+                )
+            async with http.post(
+                f"{str(a.make_url('')).rstrip('/')}/cluster/sync",
+                data=raw,
+                headers=headers,
+            ) as resp:
+                assert resp.status == 200
+    finally:
+        for node in (a, b, c):
+            await _stop_node(node)
+
+
+async def test_fan_out_with_recipients_converges_across_three_nodes(
+    tmp_path_factory, fast_sync_retry
+):
+    """Every node approves every other; a policy push from A, sent with a
+    per-recipient ``to``, lands on both B and C."""
+    nodes = {
+        nid: await _start_node(tmp_path_factory.mktemp(f"fan-{nid}"), nid)
+        for nid in ("A", "B", "C")
+    }
+    try:
+        for here_id, here in nodes.items():
+            for there_id, there in nodes.items():
+                if here_id != there_id:
+                    await _approve(here, there, there_id)
+        await nodes["A"].app[gfs_cluster_key].sync_policy({"fraud_threshold": 7})
+        for nid in ("B", "C"):
+            assert (
+                await nodes[nid].app[gfs_admin_repo_key].get_config("fraud_threshold")
+                == "7"
+            )
+    finally:
+        for node in nodes.values():
+            await _stop_node(node)

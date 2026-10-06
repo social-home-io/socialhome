@@ -182,11 +182,23 @@ class ClusterNode:
 
     node_id: str
     url: str
+    #: Legacy / display only — NOT a trust anchor. Older builds (and
+    #: old-version nodes sharing the DB during a rolling upgrade) write it
+    #: by trust-on-first-use; membership never reads it.
     public_key: str = ""
     status: str = "unknown"  # 'online' | 'offline' | 'syncing' | 'unknown'
     last_seen: str | None = None
     added_at: str = ""
     active_sync_sessions: int = 0
+    #: The key an operator approved (``POST /admin/api/cluster/peers``) —
+    #: written only by admin add-peer; ``""`` = none (the node is a member
+    #: only if it holds our own identity key).
+    approved_key: str = ""
+    #: The URL the operator approved with that key — written only by admin
+    #: add-peer, together with ``approved_key``. Outbound traffic to an
+    #: approved node goes here, never to ``url``: an old-version node
+    #: sharing the DB rewrites ``url`` on any HELLO it TOFU-verifies.
+    approved_url: str = ""
 
     @property
     def address(self) -> str:

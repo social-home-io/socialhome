@@ -35,12 +35,17 @@ pull in any core services.
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
+
+from .peer_url import normalized_peer_url
+
+log = logging.getLogger(__name__)
 
 
 DEFAULT_DATA_DIR = "/var/lib/sh-gfs"
@@ -193,7 +198,7 @@ class GfsConfig:
             turn_secret=str(webrtc.get("turn_secret") or ""),
             cluster_enabled=bool(cluster.get("enabled", False)),
             cluster_node_id=str(cluster.get("node_id") or ""),
-            cluster_peers=tuple(cluster.get("peers") or ()),
+            cluster_peers=_normalized_peers(cluster.get("peers") or ()),
             write_batch_window_ms=_window_ms(
                 server.get("write_batch_window_ms", DEFAULT_WRITE_BATCH_WINDOW_MS)
             ),
@@ -295,6 +300,25 @@ class GfsConfig:
         return cls.from_env_fallback()
 
 
+def _normalized_peers(raw: object) -> tuple[str, ...]:
+    """``[cluster] peers``, each through the same normaliser as an admin
+    add-peer — so a configured URL matches the stored row's URL and the
+    announce HELLO can name its recipient. An unusable entry is dropped
+    with a WARNING (logged with ``ascii()``, so no raw control character
+    reaches the log)."""
+    if not isinstance(raw, (list, tuple)):
+        log.warning("GFS: [cluster] peers must be a list; ignoring %s", ascii(raw))
+        return ()
+    peers: list[str] = []
+    for entry in raw:
+        url = normalized_peer_url(entry)
+        if not url:
+            log.warning("GFS: ignoring unusable [cluster] peers entry %s", ascii(entry))
+        elif url not in peers:
+            peers.append(url)
+    return tuple(peers)
+
+
 def _window_ms(raw: int | str) -> int:
     """Parse ``write_batch_window_ms``; a negative window is a config error."""
     value = int(raw)
@@ -373,6 +397,30 @@ turn_url    = ""
 turn_secret = ""
 
 [cluster]
+# Several GFS nodes can gossip state over POST /cluster/sync. Membership is
+# operator-approved — a node is a member only if its frames verify under a
+# key this node already holds:
+#   * the shared seed: nodes started with the same identity seed
+#     (gfs_identity.seed / [server] signing_seed_hex) trust each other; or
+#   * an admin-approved key: POST /admin/api/cluster/peers with the other
+#     node's node_id, url and public_key (its own GET /admin/api/cluster
+#     shows it). Do this on BOTH nodes.
+# Anything else is refused; there is no trust-on-first-use. An approved key
+# never changes in place — to rotate, remove the peer and add it again.
+# Frames carry a timestamp that must be within 300 s of the receiver's
+# clock: keep every node on NTP, or they stop syncing with each other.
+# node_id must be unique per node (defaults to instance_id) — two nodes
+# with the same id cannot be told apart.
+# Set [server] trusted_proxies EXPLICITLY on every cluster node.
+# /cluster/sync budgets failed requests per client address (and failed
+# verifies per node + address), and trusted_proxies decides that address. A
+# peer whose address is flooded with junk still gets through (its frames
+# verify), but forged frames from that same address can delay it, so keep
+# the address hard to claim: list ONLY your real proxy in trusted_proxies
+# (the default trusts every private range, so anything on a shared private
+# network can claim any address through X-Forwarded-For), and make sure that
+# proxy writes the client address into X-Forwarded-For itself — a TCP proxy
+# that passes the client's header through needs trusted_proxies = [].
 enabled = false
 node_id = ""
 peers   = []

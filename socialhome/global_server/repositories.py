@@ -1159,9 +1159,30 @@ class SqliteGfsAdminRepo:
 
 @runtime_checkable
 class AbstractClusterRepo(Protocol):
-    async def upsert_node(self, node: ClusterNode) -> None: ...
+    async def approve_node(self, node_id: str, url: str, approved_key: str) -> None: ...
     async def list_nodes(self) -> list[ClusterNode]: ...
+    async def insert_node(self, node: ClusterNode) -> None: ...
+    async def touch_node(
+        self,
+        node_id: str,
+        *,
+        status: str,
+        last_seen: str | None,
+        url_if_empty: str = "",
+    ) -> None: ...
+    async def reclaim_node(
+        self,
+        node_id: str,
+        *,
+        url: str,
+        public_key: str,
+        status: str,
+        last_seen: str,
+    ) -> None: ...
     async def remove_node(self, node_id: str) -> None: ...
+    async def remove_stale_siblings(
+        self, *, own_key: str, seen_before: str, keep_node_id: str
+    ) -> int: ...
     async def update_active_sync_sessions(
         self,
         node_id: str,
@@ -1177,19 +1198,117 @@ class SqliteClusterRepo:
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
 
-    async def upsert_node(self, node: ClusterNode) -> None:
+    async def approve_node(self, node_id: str, url: str, approved_key: str) -> None:
+        """Admin add-peer: create or update the row with its approved key
+        and URL.
+
+        The ONLY writer of ``approved_key`` and ``approved_url`` (the URL
+        every outbound frame to the node goes to) — the node's cluster-membership
+        credential (spec §24.10). Once set it never moves, and neither does
+        the URL approved with it: an approval under a different key changes
+        nothing (the caller re-reads the row to tell — a losing race between
+        two approvals), a re-add under the same key only refreshes the URL,
+        and rotation is
+        :meth:`remove_node` then a fresh approval. ``public_key`` is set to
+        the approved key as well, so a node still on the previous release
+        and sharing this DB (which trusts ``public_key``) honours the
+        approval during a rolling upgrade.
+        """
+        await self._db.enqueue(
+            """
+            INSERT INTO cluster_nodes(
+                node_id, url, public_key, approved_key, approved_url
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(node_id) DO UPDATE SET
+                url=CASE
+                    WHEN cluster_nodes.approved_key IN ('', excluded.approved_key)
+                    THEN excluded.url
+                    ELSE cluster_nodes.url
+                END,
+                approved_url=CASE
+                    WHEN cluster_nodes.approved_key IN ('', excluded.approved_key)
+                    THEN excluded.approved_url
+                    ELSE cluster_nodes.approved_url
+                END,
+                public_key=CASE
+                    WHEN cluster_nodes.approved_key IN ('', excluded.approved_key)
+                    THEN excluded.public_key
+                    ELSE cluster_nodes.public_key
+                END,
+                approved_key=COALESCE(
+                    NULLIF(cluster_nodes.approved_key, ''),
+                    excluded.approved_key
+                )
+            """,
+            (node_id, url, approved_key, approved_key, url),
+        )
+
+    async def insert_node(self, node: ClusterNode) -> None:
+        """Create a row for a node we have no row for; an existing row is
+        left exactly as it is (``ON CONFLICT DO NOTHING``).
+
+        Never used to refresh a row: a refresh that re-created one would
+        undo an admin removal that landed while it was in flight.
+        """
         await self._db.enqueue(
             """
             INSERT INTO cluster_nodes(
                 node_id, url, public_key, status, last_seen
             ) VALUES(?, ?, ?, ?, ?)
-            ON CONFLICT(node_id) DO UPDATE SET
-                url=excluded.url,
-                public_key=excluded.public_key,
-                status=excluded.status,
-                last_seen=excluded.last_seen
+            ON CONFLICT(node_id) DO NOTHING
             """,
             (node.node_id, node.url, node.public_key, node.status, node.last_seen),
+        )
+
+    async def touch_node(
+        self,
+        node_id: str,
+        *,
+        status: str,
+        last_seen: str | None,
+        url_if_empty: str = "",
+    ) -> None:
+        """Refresh an EXISTING row's liveness — UPDATE only.
+
+        Writes ``status`` + ``last_seen`` (and fills an empty ``url`` with
+        *url_if_empty*); never inserts and never touches a key. A row an
+        admin removed while the caller was pinging or verifying stays
+        removed, and a re-added row keeps its new key.
+        """
+        await self._db.enqueue(
+            """
+            UPDATE cluster_nodes SET
+                status=?,
+                last_seen=?,
+                url=CASE WHEN url='' THEN ? ELSE url END
+            WHERE node_id=?
+            """,
+            (status, last_seen, url_if_empty, node_id),
+        )
+
+    async def reclaim_node(
+        self,
+        node_id: str,
+        *,
+        url: str,
+        public_key: str,
+        status: str,
+        last_seen: str,
+    ) -> None:
+        """Re-key an EXISTING row with no approval to our own *public_key*
+        and the *url* a HELLO verified under that key carried — UPDATE only.
+
+        For a shared-seed sibling whose row an old-version node sharing the
+        DB rewrote by trust-on-first-use. A row an admin approved (or
+        removed) meanwhile is left alone.
+        """
+        await self._db.enqueue(
+            """
+            UPDATE cluster_nodes SET
+                url=?, public_key=?, status=?, last_seen=?
+            WHERE node_id=? AND approved_key=''
+            """,
+            (url, public_key, status, last_seen, node_id),
         )
 
     async def list_nodes(self) -> list[ClusterNode]:
@@ -1201,6 +1320,8 @@ class SqliteClusterRepo:
                 node_id=r["node_id"],
                 url=r["url"],
                 public_key=r["public_key"] or "",
+                approved_key=r["approved_key"] or "",
+                approved_url=r["approved_url"] or "",
                 status=r["status"],
                 last_seen=r["last_seen"],
                 added_at=r["added_at"],
@@ -1213,6 +1334,29 @@ class SqliteClusterRepo:
         await self._db.enqueue(
             "DELETE FROM cluster_nodes WHERE node_id=?",
             (node_id,),
+        )
+
+    async def remove_stale_siblings(
+        self, *, own_key: str, seen_before: str, keep_node_id: str
+    ) -> int:
+        """Delete shared-seed sibling rows — no approval, ``public_key`` our
+        own *own_key* — last seen (or, never seen, added) before
+        *seen_before* (naive UTC ``YYYY-MM-DD HH:MM:SS``). Returns the count.
+
+        One statement, so a row an admin approves concurrently is never
+        deleted. ``datetime()`` normalises both timestamp shapes a row may
+        hold (naive, or an older build's tz-aware ISO); an unparsable one
+        is kept.
+        """
+        return await self._db.enqueue_rowcount(
+            """
+            DELETE FROM cluster_nodes
+            WHERE approved_key=''
+              AND lower(public_key)=?
+              AND node_id<>?
+              AND datetime(COALESCE(last_seen, added_at)) < datetime(?)
+            """,
+            (own_key.lower(), keep_node_id, seen_before),
         )
 
     async def update_active_sync_sessions(

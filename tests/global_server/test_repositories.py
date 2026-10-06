@@ -10,12 +10,14 @@ import pytest
 
 from socialhome.global_server.domain import (
     ClientInstance,
+    ClusterNode,
     GfsAppeal,
     GfsFraudReport,
     GfsSubscriberWithKeys,
     GlobalSpace,
 )
 from socialhome.global_server.repositories import (
+    SqliteClusterRepo,
     SqliteGfsAdminRepo,
     SqliteGfsChannelRepo,
     SqliteGfsEnvelopeQueueRepo,
@@ -1248,3 +1250,164 @@ async def test_channel_repo_pin_epoch_writer_key_and_idle_sweep(gfs_db):
     assert await repo.get("space-id-like") is None
     assert await repo.prune_idle(older_than=200) == 1
     assert await repo.get(cid) is None
+
+
+# ── Cluster node approval ─────────────────────────────────────────────
+
+
+@pytest.mark.security
+async def test_cluster_approve_never_moves_an_approved_key(gfs_db):
+    """An approved cluster key is immutable in SQL too: a second approval
+    under another key keeps the first. Rotation is delete then re-add."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.approve_node("b", "http://b", "aa" * 32)
+    await repo.approve_node("b", "http://b2", "bb" * 32)
+    (row,) = await repo.list_nodes()
+    assert (row.approved_key, row.public_key) == ("aa" * 32, "aa" * 32)
+    # Nor does the losing approval move the URL the key was approved with.
+    assert (row.url, row.approved_url) == ("http://b", "http://b")
+    # Re-approving the SAME key refreshes the URL.
+    await repo.approve_node("b", "http://b3", "aa" * 32)
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.approved_url) == ("http://b3", "http://b3")
+
+
+async def test_cluster_approve_fills_a_row_without_approval(gfs_db):
+    """A shared-seed or pre-upgrade row (no approval, any legacy
+    ``public_key``) takes the admin's key — in both columns, so an
+    old-version node sharing the DB honours it too."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="ee" * 32)
+    )
+    await repo.approve_node("b", "http://b", "cc" * 32)
+    (row,) = await repo.list_nodes()
+    assert (row.approved_key, row.public_key) == ("cc" * 32, "cc" * 32)
+
+
+async def test_cluster_insert_never_approves(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="aa" * 32)
+    )
+    assert (await repo.list_nodes())[0].approved_key == ""
+
+
+async def test_cluster_remove_then_re_approve_rotates_the_key(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.approve_node("b", "http://b", "aa" * 32)
+    await repo.remove_node("b")
+    await repo.approve_node("b", "http://b", "dd" * 32)
+    (row,) = await repo.list_nodes()
+    assert row.approved_key == "dd" * 32
+
+
+async def test_cluster_touch_node_updates_only_an_existing_row(gfs_db):
+    """A liveness refresh never creates a row and never touches a key."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.touch_node("ghost", status="online", last_seen="2026-01-01 00:00:00")
+    assert await repo.list_nodes() == []
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="aa" * 32)
+    )
+    await repo.touch_node(
+        "b", status="online", last_seen="2026-01-02 00:00:00", url_if_empty="http://x"
+    )
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.public_key, row.status, row.last_seen) == (
+        "http://b",
+        "aa" * 32,
+        "online",
+        "2026-01-02 00:00:00",
+    )
+
+
+async def test_cluster_touch_node_fills_only_an_empty_url(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(ClusterNode(node_id="b", url=""))
+    await repo.touch_node(
+        "b", status="online", last_seen=None, url_if_empty="http://b.test"
+    )
+    assert (await repo.list_nodes())[0].url == "http://b.test"
+
+
+async def test_cluster_insert_node_never_overwrites_a_row(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="aa" * 32)
+    )
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://evil", public_key="bb" * 32)
+    )
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.public_key) == ("http://b", "aa" * 32)
+
+
+async def test_cluster_reclaim_node_rekeys_only_an_unapproved_row(gfs_db):
+    """A shared-seed sibling reclaims a row an old-version node rewrote;
+    an approved row — and a missing one — is left alone."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://evil", public_key="ee" * 32)
+    )
+    await repo.approve_node("c", "http://c", "cc" * 32)
+    for node_id in ("b", "c", "ghost"):
+        await repo.reclaim_node(
+            node_id,
+            url="http://b",
+            public_key="aa" * 32,
+            status="online",
+            last_seen="2026-01-02 00:00:00",
+        )
+    rows = {r.node_id: r for r in await repo.list_nodes()}
+    assert set(rows) == {"b", "c"}
+    assert (rows["b"].url, rows["b"].public_key, rows["b"].status) == (
+        "http://b",
+        "aa" * 32,
+        "online",
+    )
+    assert (rows["c"].url, rows["c"].public_key) == ("http://c", "cc" * 32)
+
+
+async def test_cluster_approve_writes_the_approved_url_alone(gfs_db):
+    """``approved_url`` is the operator's: approval writes it, and nothing a
+    HELLO or a liveness refresh does moves it."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.approve_node("b", "http://b", "aa" * 32)
+    await repo.touch_node("b", status="online", last_seen=None, url_if_empty="http://x")
+    await repo.reclaim_node(
+        "b", url="http://evil", public_key="ee" * 32, status="online", last_seen=""
+    )
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.approved_url) == ("http://b", "http://b")
+
+
+async def test_cluster_remove_stale_siblings_drops_only_stale_own_key_rows(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    own, other = "aa" * 32, "bb" * 32
+    old, new = "2026-01-01 00:00:00", "2026-06-01 00:00:00"
+    rows = [
+        ("stale", own, old),
+        ("stale-tz-aware", own, "2026-01-01T00:00:00+00:00"),
+        ("fresh", own, new),
+        ("self", own, old),
+        ("foreign", other, old),
+        ("garbled", own, "not a date"),
+    ]
+    for node_id, key, seen in rows:
+        await repo.insert_node(
+            ClusterNode(node_id=node_id, url="", public_key=key, last_seen=seen)
+        )
+    await repo.approve_node("approved", "http://a", own)
+    await repo.touch_node("approved", status="offline", last_seen=old)
+    removed = await repo.remove_stale_siblings(
+        own_key=own.upper(), seen_before="2026-03-01 00:00:00", keep_node_id="self"
+    )
+    assert removed == 2
+    assert {r.node_id for r in await repo.list_nodes()} == {
+        "fresh",
+        "self",
+        "foreign",
+        "garbled",
+        "approved",
+    }

@@ -15,6 +15,12 @@ from pathlib import Path
 from aiohttp import BodyPartReader, web
 
 from .. import app_keys as K
+from ..cluster import (
+    ClusterPeerKeyMismatch,
+    InvalidClusterPeer,
+    is_member,
+    member_url,
+)
 from ..config import GfsConfig
 from ...domain.space import ModerationAlreadyDecidedError
 from ...media.image_processor import ImageProcessor
@@ -365,20 +371,30 @@ class AdminClusterCollectionView(GfsBaseView):
 
 
 class AdminClusterPeerCollectionView(GfsBaseView):
-    """``POST /admin/api/cluster/peers`` — add a peer."""
+    """``POST /admin/api/cluster/peers`` — approve a peer node.
+
+    Body ``{node_id, url, public_key}``: the node's unique id, its base URL
+    (http/https) and its hex Ed25519 identity key (64 hex chars) — shown
+    as ``public_key`` on that node's own ``GET /admin/api/cluster``.
+    422 ``{error}`` for bad input, 409 ``key_mismatch`` when the node is
+    already approved under a different key, 201 on success.
+    """
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_cluster_key)
         body = await self.body()
-        peer_url = str(body.get("url") or "").rstrip("/")
-        if not peer_url:
-            return web.json_response(
-                {"error": "missing_url"},
-                status=422,
+        try:
+            node = await svc.add_peer(
+                body.get("node_id"),
+                body.get("url"),
+                body.get("public_key"),
             )
-        node = await svc.add_peer(peer_url)
+        except InvalidClusterPeer as exc:
+            return web.json_response({"error": exc.code}, status=422)
+        except ClusterPeerKeyMismatch:
+            return web.json_response({"error": "key_mismatch"}, status=409)
         return web.json_response(
-            {"node_id": node.node_id, "url": node.url},
+            {"node_id": node.node_id, "url": node.url, "public_key": node.public_key},
             status=201,
         )
 
@@ -405,5 +421,9 @@ class AdminClusterPeerPingView(GfsBaseView):
                 {"error": "not_found"},
                 status=404,
             )
-        ok = await svc.ping_peer(match.url)
+        # A non-member row's URL was never validated (an old-version node
+        # may have written it by TOFU) — never send a request there.
+        if not is_member(match, svc.own_public_key_hex):
+            return web.json_response({"error": "not_a_member"}, status=409)
+        ok = await svc.ping_peer(member_url(match))
         return web.json_response({"node_id": node_id, "online": ok})

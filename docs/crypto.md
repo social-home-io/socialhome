@@ -70,6 +70,29 @@ addresses. See the last section of this document.
 | Password hash | scrypt | N=2^14, r=8, p=1 | Standalone-mode user passwords | `socialhome/platform/standalone/adapter.py` |
 | Web Push | VAPID (P-256 ECDSA) | P-256 | Push-notification JWT signing | `socialhome/services/push_service.py` |
 
+### Ed25519 public keys: small-order points are refused
+
+OpenSSL (and so `cryptography`) loads any 32-byte Ed25519 public key,
+including the 8 small-order points of the curve's torsion subgroup and
+their non-canonical `y ≥ p` aliases. Under such a key a signature can be
+forged for any message without a private key — e.g. key `01 00…00` with
+signature `01 00…00 ‖ 00…00` verifies everything. Nobody holds a real key
+of that shape, so Social Home refuses them everywhere:
+
+- `crypto.verify_ed25519` — the single Ed25519 verifier every signature
+  path calls (federation envelopes, pairing, GFS household and cluster
+  frames, space authority certs, writer certs, user assertions, SDP,
+  capability blocks, …) — returns `False` for a small-order key before the
+  library sees it;
+- `crypto.is_valid_ed25519_public_key` is the shared check for keys an
+  operator approves (GFS cluster `POST /admin/api/cluster/peers` → 422
+  `invalid_public_key`).
+
+The check is `y mod p ∈ {0, 1, p−1, ±y₈}` (the y-coordinates of the 8
+torsion points; the sign bit is irrelevant) — the same set libsodium's
+`has_small_order` blacklists. Mixed-order keys are not refused: a forgery
+under one still needs the prime-order part's private key.
+
 ### Quantum safety at a glance
 
 - **Quantum-safe today:** AES-256-GCM (Grover ⇒ effective 128-bit),
@@ -815,6 +838,34 @@ owner_user_id ‖ nonce, NUL-separated). Forging a claim for another owner
 means a 60-bit preimage per attempt, and the claimed owner must still be
 seated on the signing household. A commitment, not a signature — hash-based,
 so no PQ migration is needed beyond a suite bump if SHA-256 ever is.
+
+**GFS cluster frames** (`global_server/cluster.py`) — node-to-node gossip on
+`POST /cluster/sync` is signed with the GFS identity seed
+(`gfs_identity.seed`) over the exact canonical-JSON body bytes, signature in
+the `X-Node-Signature` header:
+
+```
+{type, from, to, ts, nonce, sig_suite, payload}   # sort_keys, separators=(",", ":")
+to        : recipient node id  # another node → 409 wrong_recipient; absent → accepted
+ts        : int unix seconds   # ±300 s of the receiver, not before its start
+nonce     : b64url(16 random bytes)
+sig_suite : "ed25519"          # unknown value → 400, no fallback
+```
+
+`CLUSTER_SIG_SUITE_ED25519` / `SUPPORTED_CLUSTER_SIG_SUITES` /
+`UnsupportedClusterSigSuite`. A frame with **no** `sig_suite` is from a node
+older than the field and is read as Ed25519 — the migration tripwire once
+every node ships it; the PQ sibling (`ed25519+mldsa65`) is a suite bump. The
+verify key is one the receiver already holds — its own identity key (shared
+seed) or the key an operator approved for that node — never one the frame
+carries (see `docs/architecture.md`, "GFS cluster membership"). Replay
+defence is the `ts` window, a per-node cache of BLAKE2b-256 digests of
+accepted frame bytes (each kept until its own `ts` + 301 s on the wall clock;
+anything forgotten raises a `ts` floor, so a wall-clock step back never
+reopens a replay), and the signed recipient `to`: a frame for node A is
+refused by node B. `to` is left out only by older senders and by a HELLO to
+a configured URL whose node id the sender does not know yet — those can be
+replayed once to each other node inside their window.
 
 **Standalone auth** — `StandaloneAdapter` hashes passwords with scrypt
 and embeds parameters in the stored hash: `scrypt$16384$8$1$<salt

@@ -20,12 +20,20 @@ from ..cluster import (
     NODE_SYNC_CLIENT,
     NODE_SYNC_REPORT,
     NODE_SYNC_SPACE,
+    FrameVerdict,
+    UnsupportedClusterSigSuite,
+    authorize_frame,
+    parse_cluster_sig_suite,
     verify_node_signature,
 )
 from ..public import SlidingWindowCounter
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
+
+#: Marks a frame without a ``to`` field (an older sender) — distinct from an
+#: explicit ``"to": null``, which is malformed.
+_NO_RECIPIENT = object()
 
 
 class ClusterHealthView(GfsBaseView):
@@ -45,35 +53,71 @@ def _rate_limited() -> web.Response:
 class ClusterSyncView(GfsBaseView):
     """``POST /cluster/sync`` — NODE_* dispatch with signature + rate limit.
 
-    Body is the raw canonical JSON ``{type, from, ts, payload}``; the
-    ``X-Node-Signature`` header carries the Ed25519 signature.
+    Body is the raw canonical JSON ``{type, from, to, ts, nonce, sig_suite,
+    payload}`` (an older sender omits ``to``, ``nonce`` + ``sig_suite``); the
+    ``X-Node-Signature`` header carries the signature over those exact
+    bytes. The sender id is the signed ``from`` — there is no header
+    fallback.
+
+    Membership (spec §24.10): a node is a member if and only if its frames
+    verify under a key this GFS already holds — its own identity key (the
+    shared seed) or the key an operator approved for the node
+    (``cluster_nodes.approved_key``; the legacy ``public_key`` column is never
+    trusted). See :func:`~socialhome.global_server.cluster.authorize_frame`.
 
     Order matters (spec §24.10.4):
 
-    1. A source address that has spent its unverified budget is shed
-       before anything else — no parse, no DB read, no signature work.
-    2. Cheap structural checks: JSON object, ``type`` + ``from``, and a
-       known sender (NODE_HELLO excepted — TOFU). Unknown peers → 403
-       without verifying the sig (CPU-burn DoS guard).
-    3. Signature verification.
-    4. Only then a budget is spent: the per-node one keyed on the id
-       whose pinned key verified the request. A first-contact HELLO is
-       self-signed under the key it carries — it proves nothing about the
-       sender — so it spends the source address's budget instead.
+    1. Note whether the source address has spent its unverified budget
+       ("shed"). A shed address's frames still go through the cheap checks
+       below, but every rejection is answered 429.
+    2. Not a JSON object → 400 ``invalid_json``; ``type`` / ``from`` /
+       ``payload`` / ``to`` missing or mistyped → 400 ``invalid_message``.
+    3. Unknown ``sig_suite`` → 400 ``unsupported_sig_suite``.
+    4. ``ts`` not an int → 400 ``invalid_timestamp``; more than ±300 s off
+       our wall clock, or before this process started → 401
+       ``stale_timestamp``; ``to`` present and not our node id → 409
+       ``wrong_recipient`` (a frame for another node, replayed to us).
+    5. Already-accepted bytes → 409 ``replay`` (in-memory, no crypto).
+    6. Membership → 403 ``unknown_node`` (non-HELLO, no row),
+       ``unapproved_node`` (HELLO under a key we don't hold — nothing is
+       written — or a non-HELLO from a row that is no member, see
+       :func:`~socialhome.global_server.cluster.is_member`), ``key_mismatch`` (HELLO for a known node under a key
+       other than its approved key; WARNING) or ``cluster_full`` (a first
+       own-key HELLO while :data:`~socialhome.global_server.cluster.CLUSTER_MAX_NODES`
+       peers already have rows).
+    7. Signature under the key step 6 chose → 401 ``invalid_signature``
+       (429 from a shed address, like every rejection there). From a shed
+       address the verify runs only while the failed-verify budget of
+       (named node, source address) and the node's global ceiling last
+       (else 429, no verify), and a failure spends both.
+    8. The verified node's budget → 429.
+    9. Record the frame digest — 503 ``replay_cache_full`` when the replay
+       cache, or this node's share of it, has no room (a live digest is
+       never evicted) — then dispatch.
 
-    Every failure in 2–3 spends the source address's budget, never a
-    node's: forged traffic naming a real peer cannot lock it out.
+    Every failure in 2–7 spends the source address's budget, never a
+    node's verified budget: forged or replayed traffic naming a real peer
+    cannot lock it out, and junk from a member's own address cannot either —
+    a frame that verifies under the member's key is accepted even from a
+    shed address. Verify CPU on forgeries stays bounded: per address until
+    it is shed, then per (approved node, address)
+    (:data:`~socialhome.global_server.cluster.CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`)
+    under a per-node ceiling
+    (:data:`~socialhome.global_server.cluster.CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN`).
     """
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_cluster_key)
         client_ip = self.client_ip()
-        if svc.sync_source_exhausted(client_ip):
-            return _rate_limited()
+        # A shed address is not dropped outright: a member syncing from an
+        # address someone filled with junk must still get through. Its
+        # frames take the cheap checks; anything that does not verify as an
+        # approved node is answered 429.
+        shed = svc.sync_source_exhausted(client_ip)
 
         def _reject(response: web.Response) -> web.Response:
             svc.charge_unverified_sync(client_ip)
-            return response
+            return _rate_limited() if shed else response
 
         raw = await self.request.read()
         try:
@@ -85,54 +129,145 @@ class ClusterSyncView(GfsBaseView):
                 web.json_response({"error": "invalid_json"}, status=400),
             )
 
-        from_node = str(
-            body.get("from") or self.request.headers.get("X-Node-Id") or "",
-        )
-        msg_type = str(body.get("type") or "")
-        payload = body.get("payload") or {}
-        if not from_node or not msg_type or not isinstance(payload, dict):
+        # The sender id comes from the SIGNED body only — never from an
+        # unsigned header a forger fully controls.
+        from_node = body.get("from")
+        msg_type = body.get("type")
+        # ``payload`` is an object; absent reads as empty, but any other
+        # value (``[]``, ``0``, ``null``…) is malformed, never coerced.
+        payload = body.get("payload", {})
+        # ``to`` (the recipient's node id) is optional — a sender older
+        # than the field, or a HELLO to a configured URL, omits it — but
+        # when present it must be a string.
+        to = body.get("to", _NO_RECIPIENT)
+        if (
+            not isinstance(from_node, str)
+            or not from_node
+            or not isinstance(msg_type, str)
+            or not msg_type
+            or not isinstance(payload, dict)
+            or (to is not _NO_RECIPIENT and not isinstance(to, str))
+        ):
             return _reject(
                 web.json_response({"error": "invalid_message"}, status=400),
             )
 
-        # Look up the peer's pinned key. NODE_HELLO is special-cased: a
-        # first-contact sender isn't in the DB yet, so it is verified under
-        # the key it carries (TOFU) — which proves the message is
-        # self-consistent, not who sent it.
+        # The signature suite — unknown is refused, never defaulted (a
+        # missing field is an older sender and means Ed25519).
+        try:
+            parse_cluster_sig_suite(body.get("sig_suite"))
+        except UnsupportedClusterSigSuite:
+            return _reject(
+                web.json_response({"error": "unsupported_sig_suite"}, status=400),
+            )
+
+        # Freshness of the signed ``ts`` — cheap, so before any key lookup
+        # or signature work.
+        ts_error = svc.frame_ts_error(body.get("ts"))
+        if ts_error:
+            return _reject(
+                web.json_response(
+                    {"error": ts_error},
+                    status=400 if ts_error == "invalid_timestamp" else 401,
+                ),
+            )
+
+        # Recipient binding: a frame signed for another node is a replay
+        # across the cluster. Refused before any key lookup or signature
+        # work, and charged to the address like any other replay.
+        #
+        # DEPRECATED: a non-HELLO frame WITHOUT ``to`` is still accepted —
+        # senders older than the field omit it. TODO: refuse it (400
+        # ``missing_recipient``) once every cluster node runs a release that
+        # sends ``to`` on every non-HELLO frame — i.e. starting with the
+        # release AFTER the first one that shipped the field, so a rolling
+        # upgrade never meets an old sender. A HELLO keeps ``to`` optional
+        # for good: a configured peer URL names no node id. Pinned by
+        # ``test_frame_without_a_recipient_is_accepted_from_an_older_sender``.
+        if to is not _NO_RECIPIENT and to != svc.node_id:
+            return _reject(
+                web.json_response({"error": "wrong_recipient"}, status=409),
+            )
+
+        # Replay: these exact signed bytes were already accepted. In-memory
+        # and crypto-free, so before any key lookup or verify. Charged to
+        # the address — a replay proves nothing about who sent it.
+        if svc.frame_seen(raw, body["ts"]):
+            return _reject(web.json_response({"error": "replay"}, status=409))
+
+        # Membership (spec §24.10): which key, if any, this frame must
+        # verify under — our own identity key (shared seed) or the key
+        # approved on the sender's row. Decided before any signature work, so
+        # an outsider cannot make us burn verify CPU; nothing is written for
+        # a refused sender.
         cluster_repo = self.svc(K.gfs_cluster_repo_key)
         nodes = await cluster_repo.list_nodes()
-        match = next((n for n in nodes if n.node_id == from_node), None)
-        if msg_type == NODE_HELLO:
-            pk_hex = str(payload.get("public_key") or "")
-            proven = match is not None and bool(pk_hex) and match.public_key == pk_hex
-        elif match is None:
+        row = next((n for n in nodes if n.node_id == from_node), None)
+        carried = payload.get("public_key") if msg_type == NODE_HELLO else ""
+        verdict = authorize_frame(
+            msg_type=msg_type,
+            from_node=from_node,
+            carried_key=carried if isinstance(carried, str) else "",
+            row=row,
+            own_key=svc.own_public_key_hex,
+        )
+        # A first own-key HELLO creates a row: bounded, so a seed holder
+        # cannot grow the roster (and the replay cache's sizing) without end.
+        if (
+            not verdict.error
+            and msg_type == NODE_HELLO
+            and row is None
+            and from_node != svc.node_id
+            and svc.roster_full(nodes)
+        ):
+            verdict = FrameVerdict(error="cluster_full")
+        if verdict.error:
+            if verdict.error == "key_mismatch" and not shed:
+                log.warning(
+                    "cluster: key_mismatch — NODE_HELLO for known node %r from "
+                    "%r carries a key other than its approved key; refused. If the node "
+                    "really rotated its key, remove the peer and re-add it "
+                    "with the new key.",
+                    from_node,
+                    client_ip,
+                )
             return _reject(
-                web.json_response({"error": "unknown_node"}, status=403),
+                web.json_response({"error": verdict.error}, status=403),
             )
-        else:
-            pk_hex = match.public_key
-            proven = True
 
+        # From a shed address, verify only while the failed-verify budget of
+        # (named node, this address) and the node's global ceiling last:
+        # that bounds the CPU forgeries can burn without ever spending the
+        # node's own (verified) budget, and forgeries "from" other addresses
+        # cannot spend the budget the member's own address uses.
+        if shed and svc.failed_verify_exhausted(from_node, client_ip):
+            return _rate_limited()
         signature = self.request.headers.get("X-Node-Signature", "")
-        if not verify_node_signature(raw, signature, pk_hex):
+        if not verify_node_signature(raw, signature, verdict.verify_key):
+            if shed:
+                svc.charge_failed_verify(from_node, client_ip)
             return _reject(
                 web.json_response({"error": "invalid_signature"}, status=401),
             )
 
-        within_budget = (
-            svc.charge_verified_sync(from_node)
-            if proven
-            else svc.charge_unverified_sync(client_ip)
-        )
-        if not within_budget:
+        # The frame verified under a key we already held, so it is the
+        # member's own traffic: spend that node's budget.
+        if not svc.charge_verified_sync(from_node):
             return _rate_limited()
+        # No room to remember the frame → refuse it rather than evict a live
+        # digest (which would reopen a replay). 503, not 429: the sender is
+        # within its own rate budget; this is our capacity, so it retries.
+        if not svc.record_frame(raw, body["ts"], from_node):
+            resp = web.json_response({"error": "replay_cache_full"}, status=503)
+            resp.headers["Retry-After"] = "60"
+            return resp
 
         # Dispatch by message type.
         if msg_type == NODE_HELLO:
             await svc.handle_hello(
                 from_node_id=from_node,
                 url=str(payload.get("url") or ""),
-                public_key_hex=pk_hex,
+                public_key_hex=verdict.verify_key,
             )
         elif msg_type == NODE_HEARTBEAT:
             await svc.handle_heartbeat(from_node, payload)
@@ -166,7 +301,7 @@ class ClusterSyncView(GfsBaseView):
             await svc.apply_partition_gap(payload)
         else:
             log.debug(
-                "cluster: unknown NODE_* type %s from %s",
+                "cluster: unknown NODE_* type %r from %r",
                 msg_type,
                 from_node,
             )
@@ -247,9 +382,9 @@ class ClusterSignalingBeginView(GfsBaseView):
         # Distinguish single-node (None and not enabled) from cap-hit
         # (None and enabled).
         if chosen_url is None:
-            cluster_repo = self.svc(K.gfs_cluster_repo_key)
-            nodes = await cluster_repo.list_nodes()
-            online_peers = [n for n in nodes if n.status != "offline"]
+            online_peers = [
+                n for n in await cluster.member_peers() if n.status != "offline"
+            ]
             if online_peers:
                 # Cluster mode + every peer at cap → S-8 capacity reject.
                 return web.json_response(
@@ -262,8 +397,7 @@ class ClusterSignalingBeginView(GfsBaseView):
             )
 
         # Map URL back to node_id so we can bump the right counter.
-        cluster_repo = self.svc(K.gfs_cluster_repo_key)
-        chosen_node_id = await _node_id_for_url(cluster_repo, chosen_url)
+        chosen_node_id = await cluster.node_id_for_url(chosen_url)
         await cluster.note_signaling_started(chosen_node_id)
         return web.json_response(
             {"signaling_node": chosen_url, "session_id": sync_id},
@@ -291,19 +425,7 @@ class ClusterSignalingEndView(GfsBaseView):
         _check_signaling_rate(instance_id)
 
         cluster = self.svc(K.gfs_cluster_key)
-        cluster_repo = self.svc(K.gfs_cluster_repo_key)
-        node_id = await _node_id_for_url(cluster_repo, signaling_node)
+        node_id = await cluster.node_id_for_url(signaling_node)
         if node_id:
             await cluster.note_signaling_ended(node_id)
         return web.json_response({"status": "released"})
-
-
-async def _node_id_for_url(cluster_repo, url: str) -> str:
-    """Resolve a cluster-node URL back to its node_id, or empty string."""
-    if not url:
-        return ""
-    nodes = await cluster_repo.list_nodes()
-    for n in nodes:
-        if n.url == url:
-            return n.node_id
-    return ""

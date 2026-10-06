@@ -15,22 +15,34 @@ callable so the admin portal's cluster tab + ``/cluster/health`` work.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import heapq
 import json
 import logging
+import math
+import re
+import secrets
 import time
 from collections.abc import Callable
-from dataclasses import replace
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import aiohttp
 
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
-from ..crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
+from ..crypto import (
+    b64url_decode,
+    b64url_encode,
+    is_valid_ed25519_public_key,
+    sign_ed25519,
+    verify_ed25519,
+)
 from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .federation import certified_authority_repin
+from .peer_url import normalized_peer_url
 from .public import SlidingWindowCounter
 
 if TYPE_CHECKING:
@@ -48,18 +60,133 @@ HEARTBEAT_INTERVAL_S: int = 30
 HEARTBEAT_FAIL_THRESHOLD: int = 3
 SYNC_RETRY_DELAY_S: int = 5
 #: Spec §24.10.4 — ``/cluster/sync`` messages per minute per VERIFIED peer
-#: node (signature checked against the key pinned for that node). Never keyed
+#: node (signature checked against the key that node is trusted under). Never keyed
 #: on a claimed id: an unverified request must not spend a real node's budget.
 CLUSTER_RATE_LIMIT_PER_MIN: int = 60
 
 #: ``/cluster/sync`` requests per minute per source address that did NOT prove
-#: a known peer: malformed bodies, unknown senders, bad signatures, and
-#: first-contact (TOFU) NODE_HELLOs — self-signed under the key they carry, so
-#: they prove nothing about who sent them. Once spent, the address is shed
-#: before any parse, DB read or signature verification, which bounds the
-#: verify CPU a forged flood can burn. Genuine peers never touch it except for
-#: their one first-contact HELLO, so 30/min is far above real use.
+#: a member: malformed bodies, unknown suites, stale timestamps, wrong
+#: recipients, unknown or unapproved senders, key mismatches, bad signatures
+#: and replays. Once spent, the address is SHED: a frame from it is still
+#: parsed and checked (cheap, no crypto) against the roster, and every frame
+#: that does not name an approved node is answered 429 without a signature
+#: verify. Only a frame naming an approved node is verified — see
+#: :data:`CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN` — so junk sent from a
+#: member's address can never lock the member out. Genuine peers never touch
+#: this budget, so 30/min is far above real use.
 CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN: int = 30
+
+#: Failed signature verifies per minute per (approved node, source address),
+#: counted only for frames from a SHED address (see above). Such a frame
+#: names an approved node, so it is verified: one that verifies is the
+#: member's own traffic and is accepted (then capped by
+#: :data:`CLUSTER_RATE_LIMIT_PER_MIN`); one that fails spends this budget for
+#: that node AND that address only. Once spent, further frames naming that
+#: node from that address are answered 429 without a verify. Keyed on the
+#: pair, not the node: under a ``trusted_proxies`` that believes
+#: ``X-Forwarded-For`` from a whole private network, any host there can claim
+#: any address — forgeries "from" other addresses must not spend the budget
+#: the member's own address uses. Residual: an attacker who can send from
+#: the member's own address AND forge more than this per minute delays that
+#: member until the window slides (list only the real proxy in
+#: ``trusted_proxies``).
+CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN: int = 30
+
+#: Global ceiling on failed verifies per approved node per minute, across
+#: every shed address — the CPU bound the per-pair budget alone cannot give
+#: (an attacker can claim many addresses). Far above
+#: :data:`CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN` so forgeries from a few
+#: hosts never reach it; at ~50 µs per Ed25519 verify it costs well under a
+#: tenth of a CPU-second per node per minute.
+CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN: int = 1200
+
+#: ``/cluster/sync`` frames carry the sender's wall-clock ``ts`` (unix
+#: seconds, int) inside the signed body. A frame more than this far from the
+#: receiver's wall clock is refused (401 ``stale_timestamp``), which bounds
+#: how long a captured frame can be replayed. Cluster nodes must keep their
+#: clocks within this window of each other (NTP) or they partition.
+CLUSTER_TS_SKEW_S: int = 300
+
+#: Signature suite of a ``/cluster/sync`` frame, carried as ``sig_suite`` in
+#: the signed body. Today the GFS identity key is Ed25519; a PQ-hybrid suite
+#: (``ed25519+mldsa65``) is added by growing the frozenset. A receiver rejects
+#: any suite it does not list — no default fallback — but a frame with NO
+#: ``sig_suite`` is from a sender older than the field and can only be Ed25519.
+CLUSTER_SIG_SUITE_ED25519: str = "ed25519"
+SUPPORTED_CLUSTER_SIG_SUITES: frozenset[str] = frozenset({CLUSTER_SIG_SUITE_ED25519})
+
+#: Random bytes in each frame's ``nonce`` — two frames sent in the same
+#: second differ, so the replay cache never mistakes them for one.
+CLUSTER_NONCE_BYTES: int = 16
+
+
+class UnsupportedClusterSigSuite(ValueError):
+    """A ``/cluster/sync`` frame named a signature suite we don't support."""
+
+
+def parse_cluster_sig_suite(raw: object) -> str:
+    """Return the frame's suite; ``None`` (field absent) → Ed25519.
+
+    Raises :class:`UnsupportedClusterSigSuite` for anything not in
+    :data:`SUPPORTED_CLUSTER_SIG_SUITES`, including a non-string.
+    """
+    if raw is None:
+        return CLUSTER_SIG_SUITE_ED25519
+    if not isinstance(raw, str) or raw not in SUPPORTED_CLUSTER_SIG_SUITES:
+        raise UnsupportedClusterSigSuite(f"unsupported cluster sig suite: {raw!r}")
+    return raw
+
+
+#: Slack below this process's start time for the boot floor: a frame whose
+#: ``ts`` predates our start by more than this is refused, because the
+#: in-memory replay cache was empty then and cannot vouch for it.
+CLUSTER_BOOT_FLOOR_SLACK_S: int = 5
+
+#: Seconds past ``ts + CLUSTER_TS_SKEW_S`` an accepted frame's digest is kept.
+#: ``ts`` is whole seconds and the wall clock is not, so the entry must
+#: outlive the last instant the frame is still fresh.
+CLUSTER_REPLAY_SLACK_S: int = 1
+
+#: Longest an accepted frame's digest can be kept: a frame dated
+#: ``now + CLUSTER_TS_SKEW_S`` stays fresh for ``2 × CLUSTER_TS_SKEW_S``.
+#: Used to size the cache (see :class:`ClusterReplayCache` for the expiry).
+CLUSTER_REPLAY_TTL_S: float = float(2 * CLUSTER_TS_SKEW_S + CLUSTER_REPLAY_SLACK_S)
+
+#: Most frames one verified node can have accepted within one replay TTL:
+#: :data:`CLUSTER_RATE_LIMIT_PER_MIN` caps it at 60 in any 60 s window, so
+#: at most ``60 × ceil(TTL / 60)`` = 660 inside a 601 s TTL. Only ACCEPTED
+#: frames are recorded, so an honest node never reaches it.
+CLUSTER_REPLAY_MAX_PER_NODE: int = CLUSTER_RATE_LIMIT_PER_MIN * math.ceil(
+    CLUSTER_REPLAY_TTL_S / 60
+)
+
+#: Most shared-seed siblings on the roster: an own-key ``NODE_HELLO`` (a
+#: sibling's first contact) creates no row while this many sibling rows —
+#: rows with no operator approval, holding our own key — exist (403
+#: ``cluster_full``). Operator-approved rows do not count (each one is an
+#: explicit admin act), nor do rows that are no member at all.
+CLUSTER_MAX_NODES: int = 32
+
+#: A shared-seed sibling's row unseen this long is dropped by the heartbeat
+#: loop: every Nomad allocation is a new node id under the shared seed, so
+#: without it the roster fills with dead allocations and the next sibling
+#: gets ``cluster_full`` for good. Ten heartbeat intervals — a live sibling
+#: is refreshed every interval (our ping, its heartbeat or HELLO), and a
+#: dropped one that comes back simply rejoins with its next HELLO.
+#: Operator-approved rows are never dropped.
+CLUSTER_STALE_SIBLING_S: int = 10 * HEARTBEAT_INTERVAL_S
+
+#: Replay-cache capacity across all nodes: ``None`` — the per-node share
+#: (:data:`CLUSTER_REPLAY_MAX_PER_NODE`, ~110 KB) is the binding bound. Only
+#: frames that verified under a member's key are recorded, so the nodes with
+#: live entries are the members of the last TTL: the operator-approved rows
+#: plus at most :data:`CLUSTER_MAX_NODES` siblings at a time (a stale one is
+#: dropped after :data:`CLUSTER_STALE_SIBLING_S`, so a few generations of
+#: them within one TTL). A global cap would refuse honest frames from a
+#: large approved roster for no gain; a node at its share is REFUSED
+#: (503 ``replay_cache_full``), never let in by evicting a live digest (see
+#: :class:`ClusterReplayCache`).
+CLUSTER_REPLAY_MAX_ENTRIES: int | None = None
 
 #: Spec §24.10.7 / S-8 — per-node ceiling on concurrent sync signaling
 #: sessions. ``pick_signaling_node`` filters out any node already at this
@@ -86,12 +213,270 @@ NODE_PARTITION_CATCHUP = "NODE_PARTITION_CATCHUP"
 NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
 
 
+#: Longest ``node_id`` the admin API accepts for a peer.
+CLUSTER_NODE_ID_MAX_LEN: int = 128
+
+_HEX_ED25519_KEY = re.compile(r"[0-9a-f]{64}")
+
+#: Characters a peer ``node_id`` may use: what config-set ids look like in
+#: practice (``gfs-node-0``, UUIDs, ``host:port``, URL-shaped ids), and
+#: nothing that renders deceptively in the admin UI or a log line —
+#: no whitespace, control, bidi or other non-ASCII characters.
+_NODE_ID_RE = re.compile(r"[A-Za-z0-9._:/-]+")
+
+
+class InvalidClusterPeer(ValueError):
+    """Admin add-peer input is malformed; ``code`` is the API error."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class ClusterPeerKeyMismatch(Exception):
+    """Admin add-peer named a node already approved under a different key."""
+
+
+def _validated_peer(
+    node_id: object, url: object, public_key: object, *, own_node_id: str
+) -> tuple[str, str, str]:
+    """Normalise + validate an admin add-peer request, or raise
+    :class:`InvalidClusterPeer`. Returns ``(node_id, url, public_key)``."""
+    if not isinstance(node_id, str):
+        raise InvalidClusterPeer("invalid_node_id")
+    node_id = node_id.strip()
+    if len(node_id) > CLUSTER_NODE_ID_MAX_LEN or not _NODE_ID_RE.fullmatch(node_id):
+        raise InvalidClusterPeer("invalid_node_id")
+    if node_id == own_node_id:
+        raise InvalidClusterPeer("node_id_is_self")
+    url = normalized_peer_url(url)
+    if not url:
+        raise InvalidClusterPeer("invalid_url")
+    if not isinstance(public_key, str):
+        raise InvalidClusterPeer("invalid_public_key")
+    key = public_key.strip().lower()
+    # A small-order key would let anyone forge this node's frames.
+    if not _HEX_ED25519_KEY.fullmatch(key) or not is_valid_ed25519_public_key(
+        bytes.fromhex(key)
+    ):
+        raise InvalidClusterPeer("invalid_public_key")
+    return node_id, url, key
+
+
+# ─── Membership rule ─────────────────────────────────────────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class FrameVerdict:
+    """Outcome of :func:`authorize_frame`.
+
+    Exactly one field is set: ``verify_key`` (hex Ed25519 key the frame's
+    signature must verify under) when the sender is a member, else
+    ``error`` — ``unknown_node``, ``unapproved_node`` or ``key_mismatch``.
+    """
+
+    verify_key: str = ""
+    error: str = ""
+
+
+def is_member(row: ClusterNode, own_key: str) -> bool:
+    """Whether the ``cluster_nodes`` *row* is a cluster member (spec §24.10).
+
+    The one membership rule, for both directions: :func:`authorize_frame`
+    takes frames only from a member row, and every outbound path —
+    fan-out, heartbeats, partition catch-up, the signaling pick and the
+    public ``/cluster/health`` list — targets member rows only. A row is a
+    member if and only if
+
+    * an operator approved a key for it (``approved_key`` non-empty —
+      written by admin add-peer alone, never by old-version code), or
+    * its ``public_key`` is our OWN identity key: a shared-seed sibling.
+      Every writer of that value proved the seed first — this build's
+      :meth:`ClusterService.handle_hello` inserts or reclaims a row with
+      our key only after a HELLO verified under it, and an old-version
+      node sharing the DB writes ``public_key`` only as the key the HELLO
+      verified under (trust-on-first-use checks the signature against the
+      carried key), so writing OUR key takes a signature by our seed. Old
+      code's other writes copy a row's own snapshot back or write ``''``.
+
+    Everything else — a TOFU row an old-version node inserted for some
+    self-signed HELLO, a sibling row such a node rewrote to an attacker's
+    key, a keyless row from the old add-peer — is not a member: it gets
+    no traffic and its frames are refused until a HELLO under our key
+    reclaims it, or an operator approves it.
+    """
+    if row.approved_key:
+        return True
+    own = own_key.lower()
+    return bool(own) and row.public_key.lower() == own
+
+
+def member_url(row: ClusterNode) -> str:
+    """The base URL outbound traffic to *row* goes to.
+
+    An approved node: ``approved_url``, the URL the operator approved with
+    its key — written only by admin add-peer. Never ``url``: an
+    old-version node sharing the DB rewrites ``url`` on any HELLO it
+    TOFU-verifies, so it would let an outsider redirect the node's traffic.
+    A shared-seed sibling: ``url``. An old-version node can rewrite that
+    only together with ``public_key`` (the key the HELLO verified under —
+    not our own without our seed), which makes the row no member
+    (:func:`is_member`), so no traffic follows it.
+    """
+    return row.approved_url if row.approved_key else row.url
+
+
+def authorize_frame(
+    *,
+    msg_type: str,
+    from_node: str,
+    carried_key: str,
+    row: ClusterNode | None,
+    own_key: str,
+) -> FrameVerdict:
+    """Decide which key a ``/cluster/sync`` frame must verify under (§24.10).
+
+    Pure: no I/O, no logging. A node is a cluster member if and only if its
+    frames verify under a key this GFS already holds:
+
+    * our OWN identity key — the shared seed; an operator who gave a node
+      the seed approved it; or
+    * the key an operator approved for the node — ``approved_key`` on its
+      ``cluster_nodes`` *row*, written only by admin add-peer
+      (``POST /admin/api/cluster/peers``).
+
+    The row's ``public_key`` is never consulted: older builds, and
+    old-version nodes sharing the DB during a rolling upgrade, write it by
+    trust-on-first-use.
+
+    ``NODE_HELLO`` names the key it is signed under (``carried_key``):
+
+    * the node's approved key → member; any other key → ``key_mismatch``
+      (an approval never moves in-band, not even to our own key — rotation
+      is delete then re-add);
+    * no row, or no approved key → member only under our own key, else
+      ``unapproved_node`` (the caller writes nothing).
+
+    Every other frame needs a row (``unknown_node`` otherwise) that is a
+    member (:func:`is_member`; ``unapproved_node`` otherwise) and verifies
+    under its approved key, or under our own key when it has none (a
+    shared-seed sibling).
+    """
+    own = own_key.lower()
+    approved = (row.approved_key if row is not None else "").lower()
+    if msg_type == NODE_HELLO:
+        carried = carried_key.lower()
+        if approved:
+            if carried == approved:
+                return FrameVerdict(verify_key=approved)
+            return FrameVerdict(error="key_mismatch")
+        if own and carried == own:
+            return FrameVerdict(verify_key=own)
+        return FrameVerdict(error="unapproved_node")
+    if row is None:
+        return FrameVerdict(error="unknown_node")
+    if not is_member(row, own):
+        return FrameVerdict(error="unapproved_node")
+    return FrameVerdict(verify_key=approved or own)
+
+
+class ClusterReplayCache:
+    """Digests of accepted ``/cluster/sync`` frames, keyed on the frame's
+    own signed ``ts`` and expired on the WALL clock — the clock the
+    freshness check reads, so the two windows can never drift apart.
+
+    An entry is kept until wall-clock ``ts + CLUSTER_TS_SKEW_S + slack``,
+    the first instant its frame is stale. An expired entry raises a
+    ``floor``: a frame whose ``ts`` is at or below it counts as seen, so a
+    frame the cache no longer holds can never be accepted again, even if
+    the wall clock later steps back (making it "fresh" once more). Under a
+    steady clock the floor trails the freshness window and refuses nothing
+    a fresh frame could have; it is built from peers' ``ts`` values, not
+    our clock, so a bogus forward jump of our clock does not partition the
+    cluster once it is corrected.
+
+    The cache never evicts a live entry. Evicting one would have to raise
+    the floor to its ``ts`` — and a member dating its frames ``now + 300``
+    could then push the floor past every honest frame. Instead, when the
+    cache holds ``cap`` entries (``None``: no total cap), or the sending
+    node holds ``per_node_cap``, :meth:`record` refuses the NEW frame; the caller answers 503 and the
+    sender retries. A node is capped at its own share, so one node cannot
+    crowd out another. In-memory, per process — the boot floor covers a
+    restart.
+    """
+
+    __slots__ = (
+        "_cap",
+        "_per_node_cap",
+        "_entries",
+        "_per_node",
+        "_expiry_heap",
+        "_floor",
+    )
+
+    def __init__(self, *, cap: int | None, per_node_cap: int) -> None:
+        self._cap = cap
+        self._per_node_cap = per_node_cap
+        #: digest → sending node id.
+        self._entries: dict[bytes, str] = {}
+        #: node id → live entries.
+        self._per_node: dict[str, int] = {}
+        self._expiry_heap: list[tuple[int, bytes]] = []
+        self._floor: int | None = None
+
+    def seen(self, digest: bytes, ts: int, *, now: float) -> bool:
+        """Whether a frame with *digest* and signed *ts* may be a replay."""
+        self._expire(now)
+        if self._floor is not None and ts <= self._floor:
+            return True
+        return digest in self._entries
+
+    def record(self, digest: bytes, ts: int, node_id: str, *, now: float) -> bool:
+        """Remember an accepted frame until its ``ts`` window closes.
+
+        Returns ``False`` — the frame must be refused — when there is no
+        room: the cache or *node_id*'s share is full of live entries.
+        """
+        self._expire(now)
+        if digest in self._entries:
+            return True
+        if (
+            self._cap is not None and len(self._entries) >= self._cap
+        ) or self._per_node.get(node_id, 0) >= self._per_node_cap:
+            return False
+        self._entries[digest] = node_id
+        self._per_node[node_id] = self._per_node.get(node_id, 0) + 1
+        heapq.heappush(self._expiry_heap, (ts, digest))
+        return True
+
+    def _expire(self, now: float) -> None:
+        horizon = now - CLUSTER_TS_SKEW_S - CLUSTER_REPLAY_SLACK_S
+        while self._expiry_heap and self._expiry_heap[0][0] <= horizon:
+            ts, digest = heapq.heappop(self._expiry_heap)
+            node_id = self._entries.pop(digest, None)
+            if node_id is not None:
+                left = self._per_node[node_id] - 1
+                if left:
+                    self._per_node[node_id] = left
+                else:
+                    del self._per_node[node_id]
+            self._floor = ts if self._floor is None else max(self._floor, ts)
+
+    @property
+    def floor(self) -> int | None:
+        """Highest ``ts`` the cache has forgotten (``None``: nothing yet)."""
+        return self._floor
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
 class ClusterService:
     """Spec-shape :class:`ClusterService`.
 
     All nodes are equal — no leader election or consensus protocol
-    (spec §28431). ``announce`` / ``list_nodes`` work whether cluster
-    mode is enabled or not.
+    (spec §28431). ``list_nodes`` works whether cluster mode is enabled
+    or not.
     """
 
     __slots__ = (
@@ -117,6 +502,11 @@ class ClusterService:
         "_clock",
         "_sync_node_limiter",
         "_sync_unverified_limiter",
+        "_sync_failed_verify_limiter",
+        "_sync_failed_verify_node_limiter",
+        "_wall_clock",
+        "_process_start",
+        "_seen_frames",
     )
 
     def __init__(
@@ -133,6 +523,7 @@ class ClusterService:
         enabled: bool = False,
         ws_registry: "GfsWebSocketRegistry | None" = None,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._repo = repo
         self._admin_repo = admin_repo
@@ -178,6 +569,17 @@ class ClusterService:
         #: Monotonic clock for the ``/cluster/sync`` windows — injectable so
         #: a window test never depends on wall time.
         self._clock = clock
+        #: Unix wall clock for the frame ``ts`` window (signed by the sender,
+        #: checked by the receiver) — injectable so tests never race it.
+        self._wall_clock = wall_clock
+        #: Boot floor (see :data:`CLUSTER_BOOT_FLOOR_SLACK_S`).
+        self._process_start = wall_clock()
+        #: Digests of accepted ``/cluster/sync`` frames (raw signed bytes).
+        #: In-memory, per process — the boot floor covers a restart.
+        #: Accepted-frame digests (see :class:`ClusterReplayCache`).
+        self._seen_frames = ClusterReplayCache(
+            cap=CLUSTER_REPLAY_MAX_ENTRIES, per_node_cap=CLUSTER_REPLAY_MAX_PER_NODE
+        )
         #: Per VERIFIED node id (spec §24.10.4). Capped LRU, like every GFS
         #: limiter, though only proven peers ever get a bucket here.
         self._sync_node_limiter = SlidingWindowCounter(CLUSTER_RATE_LIMIT_PER_MIN)
@@ -186,38 +588,126 @@ class ClusterService:
         self._sync_unverified_limiter = SlidingWindowCounter(
             CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN
         )
+        #: Per (approved node id, source address): failed verifies of frames
+        #: from shed addresses (see
+        #: :data:`CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`).
+        self._sync_failed_verify_limiter = SlidingWindowCounter(
+            CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN
+        )
+        #: Per approved node id, across addresses — the CPU ceiling (see
+        #: :data:`CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN`).
+        self._sync_failed_verify_node_limiter = SlidingWindowCounter(
+            CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN
+        )
 
     # ─── /cluster/sync budgets ───────────────────────────────────────
 
     def sync_source_exhausted(self, client_ip: str) -> bool:
         """Whether *client_ip* has spent its unverified budget.
 
-        Read-only — checked first, before the body is parsed or any
-        signature verified, so a shed request costs nothing.
+        Read-only — checked first. A shed address still has its frames
+        parsed and matched against the roster (no crypto); only a frame
+        naming an approved node is then verified.
         """
         return self._sync_unverified_limiter.exhausted(client_ip, now=self._clock())
 
     def charge_unverified_sync(self, client_ip: str) -> bool:
         """Spend one unit of *client_ip*'s unverified budget.
 
-        Called for every request that did not prove a known peer. Returns
-        whether the request is still within budget (a TOFU HELLO is refused
-        when it is not; a request already being rejected ignores it).
+        Called for every request that did not prove a member. Returns
+        whether the request is still within budget (a request already being
+        rejected ignores it).
         """
         return self._sync_unverified_limiter.allow(client_ip, now=self._clock())
+
+    def failed_verify_exhausted(self, node_id: str, client_ip: str) -> bool:
+        """Whether forged frames from shed addresses have spent the
+        failed-verify budget of (*node_id*, *client_ip*) or *node_id*'s
+        global ceiling (read-only, checked before a verify)."""
+        now = self._clock()
+        return self._sync_failed_verify_limiter.exhausted(
+            _node_address_key(node_id, client_ip), now=now
+        ) or self._sync_failed_verify_node_limiter.exhausted(node_id, now=now)
+
+    def charge_failed_verify(self, node_id: str, client_ip: str) -> None:
+        """Spend one unit of the (*node_id*, *client_ip*) failed-verify
+        budget and of *node_id*'s ceiling: a frame from a shed address named
+        the node but did not verify under its key."""
+        now = self._clock()
+        self._sync_failed_verify_limiter.allow(
+            _node_address_key(node_id, client_ip), now=now
+        )
+        self._sync_failed_verify_node_limiter.allow(node_id, now=now)
 
     def charge_verified_sync(self, node_id: str) -> bool:
         """Spend one unit of a VERIFIED peer's budget; ``False`` → 429.
 
-        *node_id* must be the id whose pinned key just verified the
+        *node_id* must be the id whose trusted key just verified the
         request's signature — never a claimed one.
         """
         return self._sync_node_limiter.allow(node_id, now=self._clock())
+
+    def frame_ts_error(self, ts: object) -> str:
+        """Check a ``/cluster/sync`` frame's signed ``ts``; ``""`` if fine.
+
+        ``invalid_timestamp`` — not an int (a bool, float or string is
+        malformed, never coerced). ``stale_timestamp`` — more than
+        :data:`CLUSTER_TS_SKEW_S` from our wall clock, either way.
+        """
+        if isinstance(ts, bool) or not isinstance(ts, int):
+            return "invalid_timestamp"
+        if abs(ts - self._wall_clock()) > CLUSTER_TS_SKEW_S:
+            return "stale_timestamp"
+        if ts < self._process_start - CLUSTER_BOOT_FLOOR_SLACK_S:
+            return "stale_timestamp"
+        return ""
+
+    def frame_seen(self, raw: bytes, ts: int) -> bool:
+        """Whether these exact signed frame bytes (signed *ts*) were already
+        accepted — or may have been, and the cache has since forgotten."""
+        return self._seen_frames.seen(_frame_digest(raw), ts, now=self._wall_clock())
+
+    def record_frame(self, raw: bytes, ts: int, node_id: str) -> bool:
+        """Remember a frame *node_id* sent, so a byte-identical resend is
+        refused; ``False`` → no room, refuse the frame (503).
+
+        Called only once the frame passed every check, right before
+        dispatch — a rejected frame never poisons the cache. The entry
+        lives until wall-clock ``ts + CLUSTER_TS_SKEW_S + slack``: as long
+        as *ts* can still pass :meth:`frame_ts_error`.
+        """
+        return self._seen_frames.record(
+            _frame_digest(raw), ts, node_id, now=self._wall_clock()
+        )
+
+    def roster_full(self, nodes: list[ClusterNode]) -> bool:
+        """Whether *nodes* already hold :data:`CLUSTER_MAX_NODES` shared-seed
+        siblings, so an own-key HELLO may not create another row.
+
+        Counts only rows with no approval that hold our own key: an
+        approved row is the operator's, and a row that is no member (an
+        old-version node's TOFU row) must not lock siblings out.
+        """
+        return (
+            sum(
+                1
+                for n in nodes
+                if n.node_id != self._node_id
+                and not n.approved_key
+                and is_member(n, self._own_pk_hex)
+            )
+            >= CLUSTER_MAX_NODES
+        )
 
     def _own_connected_clients(self) -> int:
         return (
             self._ws_registry.connection_count() if self._ws_registry is not None else 0
         )
+
+    @property
+    def node_id(self) -> str:
+        """This node's cluster id (unique per node)."""
+        return self._node_id
 
     @property
     def own_public_key_hex(self) -> str:
@@ -253,17 +743,29 @@ class ClusterService:
 
     # ─── Node registry API ────────────────────────────────────────────
 
-    async def announce(self, node_id: str, address: str) -> None:
-        await self._repo.upsert_node(
-            ClusterNode(
-                node_id=node_id,
-                url=address,
-                status="online",
-            )
-        )
-
     async def list_nodes(self) -> list[ClusterNode]:
         return await self._repo.list_nodes()
+
+    async def member_peers(self) -> list[ClusterNode]:
+        """Every OTHER node that is a cluster member (:func:`is_member`) —
+        the only rows outbound traffic may go to."""
+        return [
+            r
+            for r in await self._repo.list_nodes()
+            if r.node_id != self._node_id and is_member(r, self._own_pk_hex)
+        ]
+
+    async def node_id_for_url(self, url: str) -> str:
+        """The node id whose outbound URL is *url* (ours included), or
+        ``""`` — members only."""
+        if not url:
+            return ""
+        if url == self._self_url:
+            return self._node_id
+        for r in await self.member_peers():
+            if member_url(r) == url:
+                return r.node_id
+        return ""
 
     # ─── Cluster lifecycle ────────────────────────────────────────────
 
@@ -302,19 +804,23 @@ class ClusterService:
                 setattr(self, attr, None)
 
     async def health(self) -> dict:
-        """Return this node's cluster status (public ``GET /cluster/health``)."""
-        rows = await self._repo.list_nodes()
+        """Return this node's cluster status (public ``GET /cluster/health``).
+
+        Lists cluster members only (:func:`is_member`): a row nobody
+        approved — an old-version node's TOFU row — is neither a peer nor
+        something to advertise.
+        """
         return {
             "node_id": self._node_id,
             "status": "online" if self._enabled else "single-node",
             "peers": [
                 {
                     "node_id": r.node_id,
-                    "url": r.url,
+                    "url": member_url(r),
                     "status": r.status,
                     "last_seen": r.last_seen,
                 }
-                for r in rows
+                for r in await self.member_peers()
             ],
         }
 
@@ -339,7 +845,7 @@ class ClusterService:
             nodes.append(
                 {
                     "node_id": r.node_id,
-                    "url": r.url,
+                    "url": member_url(r),
                     "status": self_status if is_self else r.status,
                     "last_seen": r.last_seen,
                     "connected_clients": (
@@ -356,6 +862,11 @@ class ClusterService:
                         )
                     ),
                     "is_self": is_self,
+                    **(
+                        {"public_key": self._own_pk_hex, "key_source": "own"}
+                        if is_self
+                        else _key_view(r, self._own_pk_hex.lower())
+                    ),
                 }
             )
         if not saw_self:
@@ -372,10 +883,15 @@ class ClusterService:
                         0,
                     ),
                     "is_self": True,
+                    "public_key": self._own_pk_hex,
+                    "key_source": "own",
                 },
             )
         return {
             "node_id": self._node_id,
+            # Our own identity key — what an operator approves for this node on
+            # every other node (``POST /admin/api/cluster/peers``).
+            "public_key": self._own_pk_hex,
             "status": self_status,
             "nodes": nodes,
         }
@@ -404,13 +920,11 @@ class ClusterService:
             return None
         if not self._node_id or not self._self_url:
             return None
-        rows = await self._repo.list_nodes()
         candidates: list[tuple[int, str, str]] = []
-        for r in rows:
+        # Members only — and never our own row: self is added below with
+        # the in-memory authoritative count.
+        for r in await self.member_peers():
             if r.status == "offline":
-                continue
-            if r.node_id == self._node_id:
-                # Own row — prefer the in-memory authoritative count.
                 continue
             count = self._active_sync_count.get(
                 r.node_id,
@@ -418,7 +932,7 @@ class ClusterService:
             )
             if count >= MAX_SIGNALING_SESSIONS:
                 continue
-            candidates.append((count, r.node_id, r.url))
+            candidates.append((count, r.node_id, member_url(r)))
         own_count = self._active_sync_count.get(self._node_id, 0)
         if own_count < MAX_SIGNALING_SESSIONS:
             candidates.append((own_count, self._node_id, self._self_url))
@@ -464,7 +978,7 @@ class ClusterService:
             await self._repo.update_active_sync_sessions(self._node_id, count)
         except Exception as exc:
             log.debug(
-                "cluster: failed to persist active_sync_sessions for self: %s",
+                "cluster: failed to persist active_sync_sessions for self: %r",
                 exc,
             )
 
@@ -539,27 +1053,66 @@ class ClusterService:
 
     # ─── Admin-portal entry points ────────────────────────────────────
 
-    async def add_peer(self, peer_url: str) -> ClusterNode:
-        """Admin added a peer URL via the portal. Upsert + send NODE_HELLO."""
-        node = ClusterNode(
-            node_id=peer_url,
-            url=peer_url,
-            status="unknown",
+    async def add_peer(
+        self,
+        node_id: object,
+        url: object,
+        public_key: object,
+    ) -> ClusterNode:
+        """Operator approval of a peer node: approve its key, then HELLO it.
+
+        The approved key is the node's cluster membership — its frames
+        verify under it (:func:`authorize_frame`). A node already approved
+        under a different key raises :class:`ClusterPeerKeyMismatch` (rotation is
+        :meth:`remove_peer` then re-add); bad input raises
+        :class:`InvalidClusterPeer`. Re-adding the same key only refreshes
+        the URL.
+        """
+        node_id, url, key = _validated_peer(
+            node_id, url, public_key, own_node_id=self._node_id
         )
-        await self._repo.upsert_node(node)
+        existing = next(
+            (n for n in await self._repo.list_nodes() if n.node_id == node_id),
+            None,
+        )
+        if existing is not None and existing.approved_key:
+            if existing.approved_key.lower() != key:
+                raise ClusterPeerKeyMismatch(node_id)
+        await self._repo.approve_node(node_id, url, key)
+        # The read above and the write are not atomic: another approval may
+        # have landed in between. The SQL keeps whichever key was stored
+        # first (and its URL), so read back which one won.
+        stored = next(
+            (n for n in await self._repo.list_nodes() if n.node_id == node_id),
+            None,
+        )
+        if stored is not None and stored.approved_key.lower() != key:
+            raise ClusterPeerKeyMismatch(node_id)
+        node = (
+            replace(
+                existing, url=url, public_key=key, approved_key=key, approved_url=url
+            )
+            if existing is not None
+            else ClusterNode(
+                node_id=node_id,
+                url=url,
+                public_key=key,
+                approved_key=key,
+                approved_url=url,
+            )
+        )
         try:
             await self._post_to_peer(
-                peer_url,
+                url,
                 NODE_HELLO,
-                {
-                    "node_id": self._node_id,
-                    "url": self._self_url,
-                    "public_key": self._own_pk_hex,
-                },
+                self._hello_payload(),
+                to=node_id,
                 session=None,
             )
-        except Exception:
-            log.debug("cluster: initial NODE_HELLO to %s failed", peer_url)
+        except Exception as exc:
+            # Expected until the operator approves us on the other side too;
+            # its own add-peer HELLO then reaches us and we answer it.
+            log.debug("cluster: initial NODE_HELLO to %r failed: %r", url, exc)
         return node
 
     async def remove_peer(self, node_id: str) -> None:
@@ -576,6 +1129,14 @@ class ClusterService:
         url: str,
         public_key_hex: str,
     ) -> None:
+        """Record a member's HELLO (online, ``last_seen`` now).
+
+        Only called once :func:`authorize_frame` accepted the HELLO and its
+        signature verified, so *public_key_hex* is the key it verified
+        under — one this node already held. An existing row is refreshed
+        (UPDATE only); a missing row is created only for a HELLO under our
+        own key.
+        """
         # Discovery must be bidirectional on first contact. ``_announce_to_peers``
         # only fires once, at startup, against the CONFIGURED peer URLs — so a
         # node whose peer was still down at that instant loses that HELLO and is
@@ -595,17 +1156,67 @@ class ClusterService:
         # (the URL may not match ``base_url`` exactly).
         if from_node_id == self._node_id:
             return
-        existing = await self._repo.list_nodes()
-        already_known = any(n.node_id == from_node_id for n in existing)
-        await self._repo.upsert_node(
-            ClusterNode(
-                node_id=from_node_id,
-                url=url,
-                public_key=public_key_hex,
-                status="online",
-                last_seen=_now_iso(),
-            )
+        # "Known" means we have heard from it before. An admin-added row has
+        # never been seen (``last_seen`` is None) — answer its first HELLO so
+        # the two sides converge whichever the operator added first.
+        row = next(
+            (n for n in await self._repo.list_nodes() if n.node_id == from_node_id),
+            None,
         )
+        now = _now_iso()
+        if row is None:
+            # Only a HELLO under our OWN key may create a row (a shared-seed
+            # sibling's first contact). An approved peer's row is created by
+            # the admin alone, so if it is gone the admin removed it while
+            # this HELLO was in flight — and it stays removed.
+            own = self._own_pk_hex.lower()
+            if not own or public_key_hex.lower() != own:
+                return
+            url = normalized_peer_url(url)
+            await self._repo.insert_node(
+                ClusterNode(
+                    node_id=from_node_id,
+                    url=url,
+                    public_key=own,
+                    status="online",
+                    last_seen=now,
+                )
+            )
+            already_known = False
+        elif (
+            not row.approved_key
+            and public_key_hex.lower() == self._own_pk_hex.lower()
+            and not is_member(row, self._own_pk_hex)
+        ):
+            # A row with no approval that is not a member — an old-version
+            # node sharing the DB rewrote it (``url`` + ``public_key``) for
+            # some self-signed HELLO, or it predates this build. This HELLO
+            # verified under our own key, so the sender holds the seed:
+            # reclaim the row with our key and the URL the HELLO carries
+            # (both proven together, so never a URL an outsider chose).
+            # UPDATE only, and never on a row an admin approved meanwhile.
+            url = normalized_peer_url(url)
+            await self._repo.reclaim_node(
+                from_node_id,
+                url=url,
+                public_key=self._own_pk_hex.lower(),
+                status="online",
+                last_seen=now,
+            )
+            already_known = False
+        else:
+            # The URL never moves in-band: a member's HELLO must not point
+            # its row — and with it every later heartbeat and fan-out POST —
+            # at another address. An approved node is reached at the URL the
+            # operator approved; a sibling row with no URL yet takes the one
+            # the HELLO carries, and only if it is a usable base URL.
+            # UPDATE only.
+            fill = "" if row.url or row.approved_key else normalized_peer_url(url)
+            url = member_url(row) or fill
+            await self._repo.touch_node(
+                from_node_id, status="online", last_seen=now, url_if_empty=fill
+            )
+            already_known = row.last_seen is not None
         if not already_known and url and self._enabled and self._node_id:
             # Reply only on FIRST contact so this can't ping-pong: the peer
             # already knows us by the time it processes this, so its own
@@ -614,15 +1225,12 @@ class ClusterService:
                 await self._post_to_peer(
                     url,
                     NODE_HELLO,
-                    {
-                        "node_id": self._node_id,
-                        "url": self._self_url,
-                        "public_key": self._own_pk_hex,
-                    },
+                    self._hello_payload(),
+                    to=from_node_id,
                     session=None,
                 )
             except Exception as exc:
-                log.debug("cluster: reply NODE_HELLO to %s failed: %s", url, exc)
+                log.debug("cluster: reply NODE_HELLO to %r failed: %r", url, exc)
 
     async def handle_heartbeat(
         self,
@@ -654,16 +1262,9 @@ class ClusterService:
         rows = await self._repo.list_nodes()
         for r in rows:
             if r.node_id == from_node_id:
-                await self._repo.upsert_node(
-                    ClusterNode(
-                        node_id=r.node_id,
-                        url=r.url,
-                        public_key=r.public_key,
-                        status="online",
-                        last_seen=_now_iso(),
-                        added_at=r.added_at,
-                        active_sync_sessions=r.active_sync_sessions,
-                    )
+                # UPDATE only: an admin removal since the read stays removed.
+                await self._repo.touch_node(
+                    r.node_id, status="online", last_seen=_now_iso()
                 )
                 if peer_count is not None:
                     self._active_sync_count[from_node_id] = peer_count
@@ -838,11 +1439,12 @@ class ClusterService:
                     peer_url,
                     NODE_PARTITION_GAP,
                     gap,
+                    to=from_node_id,
                     session=session,
                 )
             except Exception as exc:
                 log.debug(
-                    "cluster: NODE_PARTITION_GAP to %s failed: %s",
+                    "cluster: NODE_PARTITION_GAP to %r failed: %r",
                     peer_url,
                     exc,
                 )
@@ -881,6 +1483,7 @@ class ClusterService:
         self,
         peer_url: str,
         *,
+        to: str = "",
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         """Send ``NODE_PARTITION_CATCHUP`` to a peer that just came back.
@@ -897,11 +1500,12 @@ class ClusterService:
                 peer_url,
                 NODE_PARTITION_CATCHUP,
                 {"last_relay_ts": snapshot},
+                to=to,
                 session=session,
             )
         except Exception as exc:
             log.debug(
-                "cluster: NODE_PARTITION_CATCHUP to %s failed: %s",
+                "cluster: NODE_PARTITION_CATCHUP to %r failed: %r",
                 peer_url,
                 exc,
             )
@@ -909,10 +1513,9 @@ class ClusterService:
     async def _lookup_node_url(self, node_id: str) -> str:
         if not node_id:
             return ""
-        nodes = await self._repo.list_nodes()
-        for n in nodes:
+        for n in await self.member_peers():
             if n.node_id == node_id:
-                return n.url
+                return member_url(n)
         return ""
 
     # ─── Internals ────────────────────────────────────────────────────
@@ -933,26 +1536,7 @@ class ClusterService:
         restarts or a transient partition. Fail-soft per peer.
         """
         while not self._stop.is_set():
-            for peer_url in self._peers:
-                if not peer_url or peer_url == self._self_url:
-                    continue
-                try:
-                    await self._post_to_peer(
-                        peer_url,
-                        NODE_HELLO,
-                        {
-                            "node_id": self._node_id,
-                            "url": self._self_url,
-                            "public_key": self._own_pk_hex,
-                        },
-                        session=None,
-                    )
-                except Exception as exc:
-                    log.debug(
-                        "cluster: re-announce HELLO to %s failed: %s",
-                        peer_url,
-                        exc,
-                    )
+            await self._announce_to_peers()
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
@@ -962,19 +1546,38 @@ class ClusterService:
             except asyncio.TimeoutError:
                 pass
 
-    async def _announce_to_peers(self) -> None:
-        msg = {
+    def _hello_payload(self) -> dict:
+        return {
             "node_id": self._node_id,
             "url": self._self_url,
             "public_key": self._own_pk_hex,
         }
+
+    async def _announce_to_peers(self) -> None:
+        """HELLO every configured peer URL (fail-soft per peer).
+
+        A URL we already hold a row for names that node as the recipient
+        (``to``) — config peers are normalised at load exactly like stored
+        URLs, so the two match; a URL we have never heard from is HELLOed
+        without one —
+        the configured peer list (Nomad renders it) carries no node ids,
+        and it may include this node itself, whose own HELLO is ignored.
+        """
+        known = {member_url(n): n.node_id for n in await self.member_peers()}
+        self_url = normalized_peer_url(self._self_url)
         for peer_url in self._peers:
-            if peer_url == self._self_url:
+            if not peer_url or peer_url in (self._self_url, self_url):
                 continue
             try:
-                await self._post_to_peer(peer_url, NODE_HELLO, msg, session=None)
+                await self._post_to_peer(
+                    peer_url,
+                    NODE_HELLO,
+                    self._hello_payload(),
+                    to=known.get(peer_url, ""),
+                    session=None,
+                )
             except Exception as exc:
-                log.debug("cluster: NODE_HELLO to %s failed: %s", peer_url, exc)
+                log.debug("cluster: NODE_HELLO to %r failed: %r", peer_url, exc)
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -987,79 +1590,96 @@ class ClusterService:
                     return
                 except asyncio.TimeoutError:
                     pass
-                rows = await self._repo.list_nodes()
-                for r in rows:
-                    if r.status == "offline":
-                        # Probe offline peers too — coming back triggers
-                        # a partition-catchup handshake (spec §4.4.6).
-                        if await self._ping_peer(r.url):
-                            self._fail_counts[r.url] = 0
-                            await self._repo.upsert_node(
-                                ClusterNode(
-                                    node_id=r.node_id,
-                                    url=r.url,
-                                    public_key=r.public_key,
-                                    status="online",
-                                    last_seen=_now_iso(),
-                                    added_at=r.added_at,
-                                    active_sync_sessions=r.active_sync_sessions,
-                                ),
-                            )
-                            await self.announce_partition_catchup(r.url)
-                        continue
-                    ok = await self._ping_peer(r.url)
-                    fails = self._fail_counts.get(r.url, 0)
-                    if ok:
-                        self._fail_counts[r.url] = 0
-                        await self._repo.upsert_node(
-                            ClusterNode(
-                                node_id=r.node_id,
-                                url=r.url,
-                                public_key=r.public_key,
-                                status="online",
-                                last_seen=_now_iso(),
-                                added_at=r.added_at,
-                                active_sync_sessions=r.active_sync_sessions,
-                            )
-                        )
-                        # Spec §24.10.7 — propagate own sync-signaling load
-                        # via NODE_HEARTBEAT so peers' selectors see fresh
-                        # counts on the next ``pick_signaling_node``.
-                        try:
-                            await self._post_to_peer(
-                                r.url,
-                                NODE_HEARTBEAT,
-                                {
-                                    "active_sync_sessions": self._active_sync_count.get(
-                                        self._node_id,
-                                        0,
-                                    ),
-                                    "connected_clients": self._own_connected_clients(),
-                                },
-                                session=None,
-                            )
-                        except Exception as exc:
-                            log.debug(
-                                "cluster: NODE_HEARTBEAT to %s failed: %s",
-                                r.url,
-                                exc,
-                            )
-                    else:
-                        self._fail_counts[r.url] = fails + 1
-                        if fails + 1 >= HEARTBEAT_FAIL_THRESHOLD:
-                            await self._repo.upsert_node(
-                                ClusterNode(
-                                    node_id=r.node_id,
-                                    url=r.url,
-                                    public_key=r.public_key,
-                                    status="offline",
-                                    last_seen=r.last_seen,
-                                    added_at=r.added_at,
-                                    active_sync_sessions=r.active_sync_sessions,
-                                )
-                            )
+                await self._heartbeat_tick()
         except asyncio.CancelledError:
             return
+
+    async def _heartbeat_tick(self) -> None:
+        """Ping every known peer once and record its liveness.
+
+        Liveness writes are UPDATE-only (``touch_node``): a ping can take
+        seconds, and an admin may remove — or remove and re-add under a new
+        key — the peer meanwhile. Re-writing the row read before the ping
+        would undo that.
+
+        First drops shared-seed sibling rows unseen for
+        :data:`CLUSTER_STALE_SIBLING_S` (never an approved row).
+        """
+        await self._collect_stale_siblings()
+        for r in await self.member_peers():
+            url = member_url(r)
+            if r.status == "offline":
+                # Probe offline peers too — coming back triggers
+                # a partition-catchup handshake (spec §4.4.6).
+                if await self._ping_peer(url):
+                    self._fail_counts[url] = 0
+                    await self._repo.touch_node(
+                        r.node_id, status="online", last_seen=_now_iso()
+                    )
+                    await self.announce_partition_catchup(url, to=r.node_id)
+                continue
+            ok = await self._ping_peer(url)
+            fails = self._fail_counts.get(url, 0)
+            if ok:
+                self._fail_counts[url] = 0
+                await self._repo.touch_node(
+                    r.node_id, status="online", last_seen=_now_iso()
+                )
+                # Spec §24.10.7 — propagate own sync-signaling load
+                # via NODE_HEARTBEAT so peers' selectors see fresh
+                # counts on the next ``pick_signaling_node``.
+                try:
+                    await self._post_to_peer(
+                        url,
+                        NODE_HEARTBEAT,
+                        {
+                            "active_sync_sessions": self._active_sync_count.get(
+                                self._node_id,
+                                0,
+                            ),
+                            "connected_clients": self._own_connected_clients(),
+                        },
+                        to=r.node_id,
+                        session=None,
+                    )
+                except Exception as exc:
+                    log.debug(
+                        "cluster: NODE_HEARTBEAT to %r failed: %r",
+                        url,
+                        exc,
+                    )
+            else:
+                self._fail_counts[url] = fails + 1
+                if fails + 1 >= HEARTBEAT_FAIL_THRESHOLD:
+                    await self._repo.touch_node(
+                        r.node_id, status="offline", last_seen=r.last_seen
+                    )
+
+    async def _collect_stale_siblings(self) -> None:
+        """Delete shared-seed sibling rows (no approval, our own key) whose
+        last sign of life is older than :data:`CLUSTER_STALE_SIBLING_S`.
+
+        A removed sibling that is still alive rejoins with its next HELLO —
+        its re-announce loop sends one every few seconds. Rows an operator
+        approved are never touched, nor rows that are no member (the admin
+        view shows them so a distinct-key peer can be re-added).
+        """
+        if not self._own_pk_hex:
+            return
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=CLUSTER_STALE_SIBLING_S)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            removed = await self._repo.remove_stale_siblings(
+                own_key=self._own_pk_hex.lower(),
+                seen_before=cutoff,
+                keep_node_id=self._node_id,
+            )
+        except Exception as exc:
+            log.warning("cluster: stale sibling cleanup failed: %r", exc)
+            return
+        if removed:
+            log.info("cluster: dropped %d stale shared-seed sibling row(s)", removed)
 
     async def _broadcast(
         self,
@@ -1069,47 +1689,55 @@ class ClusterService:
         ignore_errors: bool = False,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
-        rows = await self._repo.list_nodes()
-        for r in rows:
+        for r in await self.member_peers():
             if r.status == "offline":
                 continue
+            url = member_url(r)
             try:
-                await self._post_to_peer(r.url, msg_type, payload, session=session)
-                self._fail_counts[r.url] = 0
+                await self._post_to_peer(
+                    url, msg_type, payload, to=r.node_id, session=session
+                )
+                self._fail_counts[url] = 0
             except Exception as exc:
                 if ignore_errors:
-                    log.debug("cluster: %s to %s failed: %s", msg_type, r.url, exc)
+                    log.debug("cluster: %s to %r failed: %r", msg_type, url, exc)
                     continue
                 await asyncio.sleep(SYNC_RETRY_DELAY_S)
                 try:
                     await self._post_to_peer(
-                        r.url,
+                        url,
                         msg_type,
                         payload,
+                        to=r.node_id,
                         session=session,
                     )
                 except Exception as exc2:
                     log.warning(
-                        "cluster: %s to %s dropped after retry: %s",
+                        "cluster: %s to %r dropped after retry: %r",
                         msg_type,
-                        r.url,
+                        url,
                         exc2,
                     )
 
-    async def _post_to_peer(
-        self,
-        peer_url: str,
-        msg_type: str,
-        payload: dict,
-        *,
-        session: aiohttp.ClientSession | None = None,
-    ) -> None:
-        body = {
+    def _signed_frame(
+        self, msg_type: str, payload: dict, *, to: str = ""
+    ) -> tuple[bytes, str]:
+        """Build a ``/cluster/sync`` frame: ``(canonical bytes, signature)``.
+
+        *to* is the recipient's node id, signed into the body so the frame
+        is refused by any other node (409 ``wrong_recipient``). Left out
+        when the caller only knows a URL (a HELLO to a configured peer).
+        """
+        body: dict = {
             "type": msg_type,
             "from": self._node_id,
-            "ts": int(time.time()),
+            "ts": int(self._wall_clock()),
+            "nonce": b64url_encode(secrets.token_bytes(CLUSTER_NONCE_BYTES)),
+            "sig_suite": CLUSTER_SIG_SUITE_ED25519,
             "payload": payload,
         }
+        if to:
+            body["to"] = to
         canonical = json.dumps(
             body,
             separators=(",", ":"),
@@ -1120,6 +1748,18 @@ class ClusterService:
             if self._signing_key
             else ""
         )
+        return canonical, sig
+
+    async def _post_to_peer(
+        self,
+        peer_url: str,
+        msg_type: str,
+        payload: dict,
+        *,
+        to: str = "",
+        session: aiohttp.ClientSession | None = None,
+    ) -> None:
+        canonical, sig = self._signed_frame(msg_type, payload, to=to)
         own_session = session is None
         active = session if session is not None else aiohttp.ClientSession()
         try:
@@ -1130,7 +1770,6 @@ class ClusterService:
                 headers={
                     "Content-Type": "application/json",
                     "X-Node-Signature": sig,
-                    "X-Node-Id": self._node_id,
                 },
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
@@ -1161,6 +1800,50 @@ class ClusterService:
 
 
 # ─── Wire shape helpers ──────────────────────────────────────────────────
+
+
+def _key_view(row: ClusterNode, own_key_lower: str) -> dict:
+    """``{public_key, key_source}`` for a peer row in the admin view.
+
+    ``key_source`` says which key the row's frames verify under:
+
+    * ``approved`` — the key an admin approved (``approved_key``);
+    * ``own`` — our own identity key: the admin approved our key for it,
+      or it has no approval and its last HELLO verified under our key (a
+      shared-seed sibling);
+    * ``none`` — no approval and no sign of the shared seed: an older row
+      (TOFU or a distinct-key peer from before approvals). Its frames
+      verify only under our own key, so a peer with its own key must be
+      re-added.
+
+    ``public_key`` is the key shown: the approved key, ours for ``own``, or
+    ``""``. The legacy ``public_key`` column only tells ``own`` from
+    ``none`` for display — it can only hold our key if a HELLO verified
+    under it (or the operator approved it), and it never grants anything.
+    """
+    approved = row.approved_key.lower()
+    if approved:
+        if own_key_lower and approved == own_key_lower:
+            return {"public_key": approved, "key_source": "own"}
+        return {"public_key": approved, "key_source": "approved"}
+    if own_key_lower and row.public_key.lower() == own_key_lower:
+        return {"public_key": own_key_lower, "key_source": "own"}
+    return {"public_key": "", "key_source": "none"}
+
+
+def _node_address_key(node_id: str, client_ip: str) -> str:
+    """Unambiguous limiter key for a (node id, address) pair — a node id
+    may contain any character, so no separator would do."""
+    return json.dumps([node_id, client_ip])
+
+
+def _frame_digest(raw: bytes) -> bytes:
+    """BLAKE2b-256 of a frame's raw signed bytes — the replay-cache key.
+
+    The signature covers exactly these bytes, so any re-encoding fails
+    verification; the digest needs no canonicalisation.
+    """
+    return hashlib.blake2b(raw, digest_size=32).digest()
 
 
 def _now_iso() -> str:

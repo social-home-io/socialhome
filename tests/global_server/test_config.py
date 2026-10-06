@@ -360,3 +360,34 @@ def test_example_toml_documents_write_batch_window():
     from socialhome.global_server.config import EXAMPLE_TOML
 
     assert f"write_batch_window_ms = {DEFAULT_WRITE_BATCH_WINDOW_MS}\n" in EXAMPLE_TOML
+
+
+def test_cluster_peers_are_normalised_at_load(tmp_dir, caplog):
+    """``[cluster] peers`` go through the same normaliser as an admin
+    add-peer, so a configured URL matches the stored row's URL (and the
+    HELLO names its recipient); an unusable entry is dropped with a
+    WARNING, never sent to."""
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        """
+[server]
+base_url = "https://gfs.example.com"
+
+[cluster]
+enabled = true
+peers = [
+  "HTTP://Peer-B.Example:8080/",
+  "https://peer-c.example",
+  "http://169.254.169.254",
+  "http://h:80\\r\\nX-Inj: 1",
+  42,
+]
+"""
+    )
+    with caplog.at_level("WARNING"):
+        cfg = GfsConfig.from_toml(p)
+    assert cfg.cluster_peers == ("http://peer-b.example:8080", "https://peer-c.example")
+    warned = " ".join(r.getMessage() for r in caplog.records)
+    assert "169.254.169.254" in warned
+    # The unsafe value is logged escaped: no raw line break reaches the log.
+    assert "\r" not in warned and "\n" not in warned

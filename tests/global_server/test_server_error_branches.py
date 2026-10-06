@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from dataclasses import replace
 
 import pytest
@@ -358,20 +359,19 @@ async def test_cluster_sync_known_node_bad_sig_is_401(client):
     # Register a peer node with a valid public key, then send a body
     # signed with a DIFFERENT key so verification fails.
     from socialhome.global_server.app_keys import gfs_cluster_repo_key
-    from socialhome.global_server.domain import ClusterNode
 
     _real_seed, real_pub = _gen_ed25519()
-    await client._app[gfs_cluster_repo_key].upsert_node(
-        ClusterNode(
-            node_id="peer",
-            url="http://peer",
-            public_key=real_pub,
-            status="online",
-        )
+    await client._app[gfs_cluster_repo_key].approve_node(
+        "peer", "http://peer", real_pub
     )
     wrong_seed, _ = _gen_ed25519()
     canonical, sig = _sign_canonical(
-        {"type": "NODE_HEARTBEAT", "from": "peer", "ts": 0, "payload": {}},
+        {
+            "type": "NODE_HEARTBEAT",
+            "from": "peer",
+            "ts": int(time.time()),
+            "payload": {},
+        },
         wrong_seed,
     )
     resp = await client.post(
@@ -390,19 +390,16 @@ async def test_cluster_sync_unknown_node_type_dispatches_silently(client):
     # Register the peer so sig verification passes, then send a NODE_*
     # type that isn't in the match list — server logs + 200s.
     from socialhome.global_server.app_keys import gfs_cluster_repo_key
-    from socialhome.global_server.domain import ClusterNode
 
     seed, pub = _gen_ed25519()
-    await client._app[gfs_cluster_repo_key].upsert_node(
-        ClusterNode(
-            node_id="peer2",
-            url="http://peer2",
-            public_key=pub,
-            status="online",
-        )
-    )
+    await client._app[gfs_cluster_repo_key].approve_node("peer2", "http://peer2", pub)
     canonical, sig = _sign_canonical(
-        {"type": "NODE_FLYING_SPAGHETTI", "from": "peer2", "ts": 0, "payload": {}},
+        {
+            "type": "NODE_FLYING_SPAGHETTI",
+            "from": "peer2",
+            "ts": int(time.time()),
+            "payload": {},
+        },
         seed,
     )
     resp = await client.post(

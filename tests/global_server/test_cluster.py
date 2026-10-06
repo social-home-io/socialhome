@@ -2,22 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 
 import pytest
 
-from socialhome.crypto import generate_identity_keypair
+from socialhome.crypto import (
+    b64url_decode,
+    generate_identity_keypair,
+    verify_ed25519,
+)
 from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     verify_capabilities,
 )
 from socialhome.global_server.cluster import (
     CLUSTER_RATE_LIMIT_PER_MIN,
+    CLUSTER_SIG_SUITE_ED25519,
+    ClusterReplayCache,
+    CLUSTER_TS_SKEW_S,
+    SUPPORTED_CLUSTER_SIG_SUITES,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
     MAX_SIGNALING_SESSIONS,
+    NODE_HEARTBEAT,
     NODE_HELLO,
+    NODE_POLICY_PUSH,
     ClusterService,
+    FrameVerdict,
+    UnsupportedClusterSigSuite,
+    authorize_frame,
+    is_member,
+    parse_cluster_sig_suite,
 )
+from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.repositories import SqliteClusterRepo
 
@@ -42,10 +60,11 @@ async def enabled_cluster(gfs_db):
         node_id="node-a",
         self_url="https://a.gfs.test",
         peers=(),
+        own_public_key_hex=_OWN,
         enabled=True,
     )
     # Self row exists so update_active_sync_sessions can target it.
-    await repo.upsert_node(
+    await repo.insert_node(
         ClusterNode(
             node_id="node-a",
             url="https://a.gfs.test",
@@ -61,33 +80,11 @@ async def test_list_nodes_empty_initially(cluster):
     assert nodes == []
 
 
-async def test_announce_single_node(cluster):
-    """announce() registers a node that appears in list_nodes()."""
-    await cluster.announce("node-1", "https://gfs1.example.com")
-    nodes = await cluster.list_nodes()
-    assert len(nodes) == 1
-    assert nodes[0].node_id == "node-1"
-    assert nodes[0].address == "https://gfs1.example.com"
-
-
-async def test_announce_multiple_nodes(cluster):
-    """Multiple nodes are all returned by list_nodes()."""
-    await cluster.announce("node-a", "https://gfs-a.example.com")
-    await cluster.announce("node-b", "https://gfs-b.example.com")
-    nodes = await cluster.list_nodes()
-    node_ids = {n.node_id for n in nodes}
-    assert "node-a" in node_ids
-    assert "node-b" in node_ids
-
-
-async def test_announce_is_idempotent(cluster):
-    """Announcing the same node_id twice updates the address without duplicating."""
-    await cluster.announce("node-dup", "https://old.example.com")
-    await cluster.announce("node-dup", "https://new.example.com")
-    nodes = await cluster.list_nodes()
-    matching = [n for n in nodes if n.node_id == "node-dup"]
-    assert len(matching) == 1
-    assert matching[0].address == "https://new.example.com"
+def test_no_keyless_registration_entry_point():
+    """``announce`` upserted a peer row with no key and no approval; nothing
+    called it but tests. Membership only enters through ``add_peer``
+    (admin, with a key) or a verified HELLO."""
+    assert not hasattr(ClusterService, "announce")
 
 
 # ─── Spec §24.10.7 — round-robin sync signaling ────────────────────────
@@ -108,17 +105,19 @@ async def test_pick_signaling_node_picks_self_when_no_peers(enabled_cluster):
 async def test_pick_signaling_node_picks_least_loaded(enabled_cluster, gfs_db):
     """A peer with a lower active count wins over self."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
+    await repo.insert_node(
         ClusterNode(
             node_id="node-b",
             url="https://b.gfs.test",
+            public_key=_OWN,
             status="online",
         )
     )
-    await repo.upsert_node(
+    await repo.insert_node(
         ClusterNode(
             node_id="node-c",
             url="https://c.gfs.test",
+            public_key=_OWN,
             status="online",
         )
     )
@@ -133,11 +132,15 @@ async def test_pick_signaling_node_picks_least_loaded(enabled_cluster, gfs_db):
 async def test_pick_signaling_node_deterministic_tiebreak(enabled_cluster, gfs_db):
     """Equal counts → break ties by node_id ascending."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="node-z", url="https://z.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-z", url="https://z.gfs.test", public_key=_OWN, status="online"
+        ),
     )
-    await repo.upsert_node(
-        ClusterNode(node_id="node-m", url="https://m.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-m", url="https://m.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     chosen = await enabled_cluster.pick_signaling_node()
     # All three (a, m, z) have count 0 → 'node-a' wins by node_id sort.
@@ -147,7 +150,7 @@ async def test_pick_signaling_node_deterministic_tiebreak(enabled_cluster, gfs_d
 async def test_pick_signaling_node_skips_offline_peers(enabled_cluster, gfs_db):
     """Offline peers are excluded from the candidate set even at zero load."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
+    await repo.insert_node(
         ClusterNode(
             node_id="node-dead",
             url="https://dead.gfs.test",
@@ -166,8 +169,10 @@ async def test_pick_signaling_node_returns_none_when_all_at_cap(
 ):
     """Every candidate at MAX_SIGNALING_SESSIONS → None (S-8 reject)."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     enabled_cluster._active_sync_count["node-a"] = MAX_SIGNALING_SESSIONS
     enabled_cluster._active_sync_count["node-b"] = MAX_SIGNALING_SESSIONS
@@ -194,8 +199,10 @@ async def test_note_signaling_started_peer_does_not_persist(
 ):
     """A peer's count moves only in-memory; the DB row is the peer's truth."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.note_signaling_started("node-b")
     assert enabled_cluster._active_sync_count["node-b"] == 1
@@ -217,8 +224,10 @@ async def test_handle_heartbeat_updates_peer_active_count(
 ):
     """NODE_HEARTBEAT carries the peer's live count → cluster_nodes row."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat(
         "node-b",
@@ -236,8 +245,10 @@ async def test_handle_heartbeat_without_payload_is_compat(
 ):
     """Older peers that omit the count still get a fresh last_seen."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat("node-b", None)
     nodes = await repo.list_nodes()
@@ -262,8 +273,10 @@ async def test_handle_heartbeat_last_seen_matches_added_at_naive_utc_shape(
     offset.
     """
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat("node-b", None)
     nodes = await repo.list_nodes()
@@ -294,8 +307,10 @@ async def test_handle_heartbeat_stores_connected_clients(
 ):
     """NODE_HEARTBEAT carrying connected_clients records it in-memory."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat(
         "node-b",
@@ -310,8 +325,10 @@ async def test_handle_heartbeat_missing_connected_clients_no_clobber(
 ):
     """An older peer omitting connected_clients does not overwrite a prior value."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat("node-b", {"connected_clients": 7})
     assert enabled_cluster._connected_clients["node-b"] == 7
@@ -331,8 +348,10 @@ async def test_admin_cluster_includes_self_and_peer_counts(gfs_db):
         enabled=True,
         ws_registry=_StubWsRegistry(11),
     )
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     svc._connected_clients["node-b"] = 5
     svc._active_sync_count["node-b"] = 3
@@ -363,11 +382,13 @@ async def test_admin_cluster_self_with_row_emitted_once(gfs_db):
         ws_registry=_StubWsRegistry(11),
     )
     # self is announced into the table (the enabled-cluster case)
-    await repo.upsert_node(
+    await repo.insert_node(
         ClusterNode(node_id="node-a", url="https://a.gfs.test", status="online"),
     )
-    await repo.upsert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
 
     result = await svc.admin_cluster()
@@ -512,18 +533,19 @@ async def test_handle_hello_replies_on_first_contact_so_discovery_is_bidirection
     """
     posted: list[tuple] = []
 
-    async def fake_post(self, url, msg_type, payload, *, session=None):
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
         posted.append((url, msg_type, payload))
 
     # ClusterService is __slots__-ed, so patch the class method, not the
     # instance.
     monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
 
-    # First contact from an unknown peer → we register it AND HELLO back.
+    # First contact from an unknown shared-seed sibling → we register it
+    # AND HELLO back.
     await enabled_cluster.handle_hello(
         from_node_id="node-b",
         url="https://b.gfs.test",
-        public_key_hex="bb" * 32,
+        public_key_hex=_OWN,
     )
     node_ids = {n.node_id for n in await enabled_cluster.list_nodes()}
     assert "node-b" in node_ids
@@ -537,7 +559,7 @@ async def test_handle_hello_replies_on_first_contact_so_discovery_is_bidirection
     await enabled_cluster.handle_hello(
         from_node_id="node-b",
         url="https://b.gfs.test",
-        public_key_hex="bb" * 32,
+        public_key_hex=_OWN,
     )
     assert [p for p in posted if p[1] == NODE_HELLO] == []
 
@@ -551,7 +573,7 @@ async def test_handle_hello_ignores_a_message_from_this_node_itself(
     """
     posted: list = []
 
-    async def fake_post(self, url, msg_type, payload, *, session=None):
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
         posted.append((url, msg_type))
 
     monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
@@ -605,3 +627,672 @@ async def test_unverified_sync_budget_gates_the_address_read_only(gfs_db):
     assert svc.charge_verified_sync("203.0.113.9")
     clock.now += 60.5
     assert not svc.sync_source_exhausted("203.0.113.9")
+
+
+# ─── Frame wire shape: nonce + sig_suite ─────────────────────────────
+
+
+class _FakeResp:
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, bytes, dict]] = []
+
+    def post(self, url, *, data, headers, **_kw):
+        self.posts.append((url, data, headers))
+        return _FakeResp()
+
+
+async def test_outbound_frame_carries_nonce_suite_and_wall_clock_ts(gfs_db):
+    """Each frame is unique (16-byte nonce), names its signature suite, takes
+    ``ts`` from the injected wall clock, and is signed over the exact bytes
+    sent — with no unsigned sender-id header."""
+    kp = generate_identity_keypair()
+    svc = ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        signing_key=kp.private_key,
+        own_public_key_hex=kp.public_key.hex(),
+        wall_clock=lambda: 1_900_000_000.7,
+    )
+    session = _FakeSession()
+    for _ in range(2):
+        await svc._post_to_peer("https://b.test", NODE_HEARTBEAT, {}, session=session)
+    (url, raw, headers), (_, raw2, _) = session.posts
+    assert url == "https://b.test/cluster/sync"
+    body = json.loads(raw)
+    assert body["from"] == "node-a"
+    assert body["ts"] == 1_900_000_000
+    assert body["sig_suite"] == CLUSTER_SIG_SUITE_ED25519
+    assert len(b64url_decode(body["nonce"])) == 16
+    assert json.loads(raw2)["nonce"] != body["nonce"]
+    assert "X-Node-Id" not in headers
+    assert verify_ed25519(
+        kp.public_key, raw, b64url_decode(headers["X-Node-Signature"])
+    )
+
+
+async def test_outbound_frame_binds_its_recipient_when_known(gfs_db):
+    """``to`` is signed into the body when the caller knows the recipient's
+    node id, and left out otherwise (a HELLO to a configured URL)."""
+    kp = generate_identity_keypair()
+    svc = ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        signing_key=kp.private_key,
+        own_public_key_hex=kp.public_key.hex(),
+    )
+    session = _FakeSession()
+    await svc._post_to_peer(
+        "https://b.test", NODE_HEARTBEAT, {}, to="node-b", session=session
+    )
+    await svc._post_to_peer("https://b.test", NODE_HELLO, {}, session=session)
+    (_, raw, headers), (_, raw2, _) = session.posts
+    assert json.loads(raw)["to"] == "node-b"
+    assert verify_ed25519(
+        kp.public_key, raw, b64url_decode(headers["X-Node-Signature"])
+    )
+    assert "to" not in json.loads(raw2)
+
+
+async def test_every_known_peer_send_names_its_recipient(enabled_cluster, monkeypatch):
+    """Fan-out, HELLO replies, admin add-peer and re-announces to a URL we
+    already have a row for all name the recipient node id."""
+    posted: list[tuple[str, str, str]] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        posted.append((url, msg_type, to))
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    repo = enabled_cluster._repo
+    await repo.insert_node(
+        ClusterNode(
+            node_id="node-b",
+            url="https://b.gfs.test",
+            public_key=_OWN,
+            status="online",
+        )
+    )
+    await enabled_cluster.sync_policy({"fraud_threshold": 3})
+    assert ("https://b.gfs.test", NODE_POLICY_PUSH, "node-b") in posted
+    assert all(to for _, t, to in posted if t == NODE_POLICY_PUSH)
+    posted.clear()
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_OWN
+    )
+    assert posted == [("https://c.gfs.test", NODE_HELLO, "node-c")]
+    posted.clear()
+    await enabled_cluster.add_peer("node-d", "https://d.gfs.test", _PIN)
+    assert posted == [("https://d.gfs.test", NODE_HELLO, "node-d")]
+    posted.clear()
+    enabled_cluster._peers = ("https://b.gfs.test", "https://new.gfs.test")
+    await enabled_cluster._announce_to_peers()
+    assert posted == [
+        ("https://b.gfs.test", NODE_HELLO, "node-b"),
+        ("https://new.gfs.test", NODE_HELLO, ""),
+    ]
+
+
+def test_cluster_sig_suite_parse():
+    assert SUPPORTED_CLUSTER_SIG_SUITES == frozenset({CLUSTER_SIG_SUITE_ED25519})
+    # An older sender ships no suite: it can only have been ed25519.
+    assert parse_cluster_sig_suite(None) == CLUSTER_SIG_SUITE_ED25519
+    assert parse_cluster_sig_suite("ed25519") == CLUSTER_SIG_SUITE_ED25519
+    for bad in ("ed25519+mldsa65", "ED25519", "", 1, ["ed25519"]):
+        with pytest.raises(UnsupportedClusterSigSuite):
+            parse_cluster_sig_suite(bad)
+    assert issubclass(UnsupportedClusterSigSuite, ValueError)
+
+
+# ─── Membership rule (authorize_frame) ───────────────────────────────
+
+_OWN = "a1" * 32
+_PIN = "b2" * 32
+_OTHER = "c3" * 32
+
+
+def _row(key: str, *, legacy_public_key: str = "") -> ClusterNode:
+    return ClusterNode(
+        node_id="node-b",
+        url="https://b.test",
+        approved_key=key,
+        public_key=legacy_public_key,
+    )
+
+
+def _hello(carried: str, pinned: ClusterNode | None, own: str = _OWN):
+    return authorize_frame(
+        msg_type=NODE_HELLO,
+        from_node="node-b",
+        carried_key=carried,
+        row=pinned,
+        own_key=own,
+    )
+
+
+def test_hello_under_our_own_key_is_a_member():
+    """Shared seed: holding our identity key IS the operator's approval."""
+    assert _hello(_OWN, None) == FrameVerdict(verify_key=_OWN)
+    assert _hello(_OWN.upper(), None) == FrameVerdict(verify_key=_OWN)
+    # An empty pin (a row with no key yet) is filled by the shared seed.
+    assert _hello(_OWN, _row("")) == FrameVerdict(verify_key=_OWN)
+
+
+def test_hello_under_the_admin_pinned_key_is_a_member():
+    assert _hello(_PIN, _row(_PIN)) == FrameVerdict(verify_key=_PIN)
+
+
+def test_hello_under_an_unknown_key_is_unapproved():
+    assert _hello(_OTHER, None) == FrameVerdict(error="unapproved_node")
+    assert _hello(_OTHER, _row("")) == FrameVerdict(error="unapproved_node")
+    assert _hello("", None) == FrameVerdict(error="unapproved_node")
+    # No identity configured: nothing is our own key.
+    assert _hello("", None, own="") == FrameVerdict(error="unapproved_node")
+
+
+def test_hello_never_moves_a_pin():
+    """A known node id with a different key is refused — even our own key:
+    rotation is delete then re-add, never an in-band swap."""
+    assert _hello(_OTHER, _row(_PIN)) == FrameVerdict(error="key_mismatch")
+    assert _hello(_OWN, _row(_PIN)) == FrameVerdict(error="key_mismatch")
+
+
+def test_non_hello_verifies_under_the_pin_or_our_own_key():
+    def _hb(pinned, own=_OWN):
+        return authorize_frame(
+            msg_type=NODE_HEARTBEAT,
+            from_node="node-b",
+            carried_key="",
+            row=pinned,
+            own_key=own,
+        )
+
+    assert _hb(None) == FrameVerdict(error="unknown_node")
+    assert _hb(_row(_PIN)) == FrameVerdict(verify_key=_PIN)
+    # A shared-seed sibling's row holds our own key (a HELLO under it
+    # created the row) and verifies under it.
+    assert _hb(_row("", legacy_public_key=_OWN)) == FrameVerdict(verify_key=_OWN)
+    # A row with neither is no member (:func:`is_member`).
+    assert _hb(_row("")) == FrameVerdict(error="unapproved_node")
+    assert _hb(_row(""), own="") == FrameVerdict(error="unapproved_node")
+
+
+@pytest.mark.security
+def test_the_legacy_public_key_column_is_never_trusted():
+    """``public_key`` is written by trust-on-first-use in older builds (and
+    by old-version nodes sharing the DB): it must grant nothing."""
+    legacy = _row("", legacy_public_key=_OTHER)
+    assert _hello(_OTHER, legacy) == FrameVerdict(error="unapproved_node")
+    assert authorize_frame(
+        msg_type=NODE_HEARTBEAT,
+        from_node="node-b",
+        carried_key="",
+        row=legacy,
+        own_key=_OWN,
+    ) == FrameVerdict(error="unapproved_node")
+    # An approved row whose public_key an old node overwrote.
+    overwritten = _row(_PIN, legacy_public_key=_OTHER)
+    assert _hello(_OTHER, overwritten) == FrameVerdict(error="key_mismatch")
+    assert _hello(_PIN, overwritten) == FrameVerdict(verify_key=_PIN)
+
+
+def test_is_member_needs_an_approval_or_our_own_key():
+    """The one membership rule, shared by inbound and outbound."""
+    assert is_member(_row(_PIN), _OWN)
+    assert is_member(_row(_OWN), _OWN)
+    assert is_member(_row("", legacy_public_key=_OWN), _OWN)
+    assert is_member(_row("", legacy_public_key=_OWN.upper()), _OWN)
+    # A TOFU row an old-version node wrote, a keyless row, no identity.
+    assert not is_member(_row("", legacy_public_key=_OTHER), _OWN)
+    assert not is_member(_row(""), _OWN)
+    assert not is_member(_row(""), "")
+    assert is_member(_row(_PIN), "")
+
+
+# ─── key_source in the admin view ────────────────────────────────────
+
+
+async def _svc_with_rows(gfs_db, *, enabled: bool = True) -> ClusterService:
+    repo = SqliteClusterRepo(gfs_db)
+    svc = ClusterService(
+        repo,
+        node_id="node-a",
+        self_url="https://a.gfs.test",
+        own_public_key_hex=_OWN,
+        enabled=enabled,
+    )
+    # A shared-seed sibling's HELLO row, and legacy rows from before
+    # approvals (a TOFU key, no key).
+    for node_id, key in (("sibling", _OWN), ("legacy-tofu", _OTHER), ("blank", "")):
+        await repo.insert_node(
+            ClusterNode(node_id=node_id, url=f"https://{node_id}.test", public_key=key)
+        )
+    await repo.approve_node("admin-added", "https://admin-added.test", _PIN)
+    await repo.approve_node("approved-own", "https://approved-own.test", _OWN)
+    return svc
+
+
+async def test_admin_cluster_marks_each_node_key_source(gfs_db):
+    """``approved`` = an admin-approved key; ``own`` = our identity key
+    (shared seed); ``none`` = neither — a row from before approvals that a
+    peer with its own key needs re-adding for."""
+    svc = await _svc_with_rows(gfs_db)
+    nodes = {n["node_id"]: n for n in (await svc.admin_cluster())["nodes"]}
+    view = {k: (n["key_source"], n["public_key"]) for k, n in nodes.items()}
+    assert view == {
+        "node-a": ("own", _OWN),
+        "sibling": ("own", _OWN),
+        "approved-own": ("own", _OWN),
+        "admin-added": ("approved", _PIN),
+        # The legacy TOFU key is not shown as the node's key.
+        "legacy-tofu": ("none", ""),
+        "blank": ("none", ""),
+    }
+
+
+async def test_startup_does_not_warn_about_pinned_peers(gfs_db, caplog):
+    """Every pin is admin-approved now (migration 0017 cleared the older
+    ones), so start-up has nothing to flag."""
+    svc = await _svc_with_rows(gfs_db, enabled=False)
+    with caplog.at_level("WARNING"):
+        await svc.start()
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+# ─── Replay window vs. freshness window (injected clocks) ─────────────
+
+
+class _Clocks:
+    """A monotonic and a wall clock the test moves independently."""
+
+    def __init__(self, wall: float = 1_900_000_000.0) -> None:
+        self.mono = 1000.0
+        self.wall = wall
+
+    def advance(self, seconds: float) -> None:
+        self.mono += seconds
+        self.wall += seconds
+
+
+def _replay_svc(gfs_db, clocks: _Clocks) -> ClusterService:
+    return ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        clock=lambda: clocks.mono,
+        wall_clock=lambda: clocks.wall,
+    )
+
+
+def _accept(svc: ClusterService, raw: bytes, ts: int) -> bool:
+    """Mirror the route: fresh and not seen → record and accept."""
+    if svc.frame_ts_error(ts) or svc.frame_seen(raw, ts):
+        return False
+    return svc.record_frame(raw, ts, "node-b")
+
+
+async def test_a_future_dated_frame_is_not_replayable_while_still_fresh(gfs_db):
+    """``ts = now + 300`` is fresh until wall ``now + 600``; the digest must
+    be remembered at least that long."""
+    clocks = _Clocks()
+    svc = _replay_svc(gfs_db, clocks)
+    ts = int(clocks.wall) + CLUSTER_TS_SKEW_S
+    raw = b'{"frame":"future"}'
+    assert _accept(svc, raw, ts)
+    for _ in range(2 * CLUSTER_TS_SKEW_S + 5):
+        clocks.advance(1)
+        assert not _accept(svc, raw, ts), clocks.wall - ts
+
+
+async def test_a_wall_clock_step_back_does_not_reopen_the_replay_window(gfs_db):
+    """Monotonic time runs on while the wall clock steps back 60 s: the
+    frame is fresh again by the wall clock, so it must still be seen."""
+    clocks = _Clocks()
+    svc = _replay_svc(gfs_db, clocks)
+    ts = int(clocks.wall) + CLUSTER_TS_SKEW_S
+    raw = b'{"frame":"stepped"}'
+    assert _accept(svc, raw, ts)
+    clocks.advance(2 * CLUSTER_TS_SKEW_S - 10)
+    clocks.wall -= 60
+    assert svc.frame_ts_error(ts) == ""  # fresh again by the wall clock …
+    assert not _accept(svc, raw, ts)  # … and still refused as a replay
+    for _ in range(200):
+        clocks.advance(1)
+        assert not _accept(svc, raw, ts)
+
+
+async def test_a_replay_entry_expires_only_once_its_frame_is_stale(gfs_db):
+    """For any ``ts`` in the window: whenever the cache has forgotten the
+    frame, the frame is already stale — under either clock moving."""
+    clocks = _Clocks()
+    svc = _replay_svc(gfs_db, clocks)
+    clocks.advance(CLUSTER_TS_SKEW_S)  # past the boot floor
+    base = int(clocks.wall)
+    offsets = range(-CLUSTER_TS_SKEW_S, CLUSTER_TS_SKEW_S + 1, 37)
+    for offset in offsets:
+        assert _accept(svc, f"frame-{offset}".encode(), base + offset)
+    for step in range(3 * CLUSTER_TS_SKEW_S):
+        clocks.advance(1)
+        if step == CLUSTER_TS_SKEW_S:
+            clocks.wall -= 60  # a wall-clock step back mid-way
+        for offset in offsets:
+            raw = f"frame-{offset}".encode()
+            assert svc.frame_seen(raw, base + offset) or svc.frame_ts_error(
+                base + offset
+            )
+
+
+@pytest.mark.security
+def test_a_full_replay_cache_refuses_new_frames_and_keeps_its_floor():
+    """At capacity the NEW frame is refused; no live digest is evicted and
+    the floor does not move, so nothing already accepted can replay and
+    nothing fresh is mistaken for a replay."""
+    cache = ClusterReplayCache(cap=3, per_node_cap=10)
+    now = 1_900_000_000.0
+    for i, ts in enumerate((100, 50, 300)):
+        assert cache.record(f"d{i}".encode(), int(now) + ts, f"n{i}", now=now)
+    assert not cache.record(b"d3", int(now) + 200, "n3", now=now)
+    assert len(cache) == 3
+    assert cache.floor is None
+    assert not cache.seen(b"d3", int(now) + 200, now=now)
+    for i, ts in ((0, 100), (1, 50), (2, 300)):
+        assert cache.seen(f"d{i}".encode(), int(now) + ts, now=now)
+    # A digest already held is a no-op, not a refusal.
+    assert cache.record(b"d0", int(now) + 100, "n0", now=now)
+
+
+@pytest.mark.security
+def test_one_node_cannot_crowd_another_out_of_the_replay_cache():
+    cache = ClusterReplayCache(cap=100, per_node_cap=2)
+    now = 1_900_000_000.0
+    assert cache.record(b"a1", int(now), "a", now=now)
+    assert cache.record(b"a2", int(now), "a", now=now)
+    assert not cache.record(b"a3", int(now), "a", now=now)
+    assert cache.record(b"b1", int(now), "b", now=now)
+    # Once a's entries expire, its share frees up again.
+    later = now + 2 * CLUSTER_TS_SKEW_S
+    assert cache.record(b"a3", int(later), "a", now=later)
+
+
+def test_replay_cache_expires_on_the_frames_ts_not_insertion_order():
+    cache = ClusterReplayCache(cap=10, per_node_cap=10)
+    now = 1_900_000_000.0
+    cache.record(b"late", int(now) + 300, "n", now=now)
+    cache.record(b"early", int(now) - 290, "n", now=now)
+    # ``early`` is stale at now + 11 and forgotten; ``late`` is kept.
+    later = now + 12
+    assert cache.seen(b"late", int(now) + 300, now=later)
+    assert cache.seen(b"early", int(now) - 290, now=later)  # via the floor
+    assert len(cache) == 1
+    assert cache.floor == int(now) - 290
+
+
+# ─── In-band URL updates (HELLO) ─────────────────────────────────────
+
+
+@pytest.fixture
+def hello_replies(monkeypatch):
+    sent: list[str] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        sent.append(url)
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    return sent
+
+
+async def _node_row(svc: ClusterService, node_id: str) -> ClusterNode:
+    (row,) = [n for n in await svc.list_nodes() if n.node_id == node_id]
+    return row
+
+
+@pytest.mark.security
+async def test_hello_never_overwrites_a_known_url(enabled_cluster, hello_replies):
+    """The admin's URL wins: a member's HELLO cannot point its row (and so
+    every later heartbeat and fan-out POST) at another address."""
+    await enabled_cluster.add_peer("node-b", "https://b.gfs.test", _PIN)
+    hello_replies.clear()
+    await enabled_cluster.handle_hello(
+        from_node_id="node-b",
+        url="http://169.254.169.254/latest/meta-data",
+        public_key_hex=_PIN,
+    )
+    assert (await _node_row(enabled_cluster, "node-b")).url == "https://b.gfs.test"
+    assert hello_replies == ["https://b.gfs.test"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "ftp://c.gfs.test",
+        "http://",
+        "http://user:pw@c.gfs.test",
+        "javascript:alert(1)",
+        "https://c.gfs.test/?q=1",
+        "https://c.gfs.test/#frag",
+        "c.gfs.test",
+    ],
+)
+async def test_first_hello_with_an_invalid_url_stores_none_and_sends_nothing(
+    enabled_cluster, hello_replies, bad
+):
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url=bad, public_key_hex=_OWN
+    )
+    assert (await _node_row(enabled_cluster, "node-c")).url == ""
+    assert hello_replies == []
+
+
+async def test_first_hello_with_a_valid_url_records_it(enabled_cluster, hello_replies):
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test/", public_key_hex=_OWN
+    )
+    assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test"
+    assert hello_replies == ["https://c.gfs.test"]
+
+
+# ─── Admin removal vs. stale liveness writes ─────────────────────────
+#
+# A liveness refresh reads the roster, awaits I/O (a ping, a HELLO
+# verify), then writes. An admin removal that lands in between must stay
+# removed: a refresh never re-creates a row, and never puts back the key it
+# read before the removal.
+
+
+class _RemovesAfterRead:
+    """Repo wrapper: the first ``list_nodes`` returns its snapshot, then
+    the node is removed — an admin DELETE landing right after the read."""
+
+    def __init__(self, repo: SqliteClusterRepo, node_id: str) -> None:
+        self._repo = repo
+        self._node_id = node_id
+        self.armed = True
+
+    async def list_nodes(self) -> list[ClusterNode]:
+        rows = await self._repo.list_nodes()
+        if self.armed:
+            self.armed = False
+            await self._repo.remove_node(self._node_id)
+        return rows
+
+    def __getattr__(self, name: str):
+        return getattr(self._repo, name)
+
+
+async def _member_verdict(svc: ClusterService, node_id: str) -> FrameVerdict:
+    row = next((n for n in await svc.list_nodes() if n.node_id == node_id), None)
+    return authorize_frame(
+        msg_type=NODE_HEARTBEAT,
+        from_node=node_id,
+        carried_key="",
+        row=row,
+        own_key=svc.own_public_key_hex,
+    )
+
+
+@pytest.fixture
+def held_ping(monkeypatch):
+    """``_ping_peer`` blocks until the test releases it (a slow peer)."""
+
+    class _Held:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.result = True
+
+    held = _Held()
+
+    async def slow_ping(self, peer_url):
+        held.entered.set()
+        await held.release.wait()
+        return held.result
+
+    monkeypatch.setattr(ClusterService, "_ping_peer", slow_ping)
+    return held
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("ping_ok", [True, False])
+async def test_removal_during_a_held_heartbeat_ping_stays_removed(
+    enabled_cluster, hello_replies, held_ping, ping_ok
+):
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    held_ping.result = ping_ok
+    # A failing ping marks the peer offline on this tick.
+    svc._fail_counts["https://b.gfs.test"] = 2
+    tick = asyncio.create_task(svc._heartbeat_tick())
+    await held_ping.entered.wait()
+    await svc.remove_peer("node-b")
+    held_ping.release.set()
+    await tick
+    assert "node-b" not in {n.node_id for n in await svc.list_nodes()}
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(error="unknown_node")
+
+
+@pytest.mark.security
+async def test_removal_during_a_held_ping_of_an_offline_peer_stays_removed(
+    enabled_cluster, hello_replies, held_ping, gfs_db
+):
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    await gfs_db.enqueue(
+        "UPDATE cluster_nodes SET status='offline' WHERE node_id='node-b'"
+    )
+    tick = asyncio.create_task(svc._heartbeat_tick())
+    await held_ping.entered.wait()
+    await svc.remove_peer("node-b")
+    held_ping.release.set()
+    await tick
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(error="unknown_node")
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("re_add_before_release", [True, False])
+async def test_a_key_rotation_is_not_reverted_by_a_held_heartbeat(
+    enabled_cluster, hello_replies, held_ping, re_add_before_release
+):
+    """Remove, then re-add under a new key: the in-flight refresh must not
+    put the old key back (nor make the re-add a key mismatch)."""
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    tick = asyncio.create_task(svc._heartbeat_tick())
+    await held_ping.entered.wait()
+    await svc.remove_peer("node-b")
+    if re_add_before_release:
+        await svc.add_peer("node-b", "https://b.gfs.test", _OTHER)
+    held_ping.release.set()
+    await tick
+    if not re_add_before_release:
+        await svc.add_peer("node-b", "https://b.gfs.test", _OTHER)
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(verify_key=_OTHER)
+
+
+@pytest.mark.security
+async def test_removal_racing_a_hello_stays_removed(enabled_cluster, hello_replies):
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    svc._repo = _RemovesAfterRead(svc._repo, "node-b")
+    await svc.handle_hello(
+        from_node_id="node-b", url="https://b.gfs.test", public_key_hex=_PIN
+    )
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(error="unknown_node")
+
+
+@pytest.mark.security
+async def test_removal_racing_a_heartbeat_stays_removed(enabled_cluster, hello_replies):
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    svc._repo = _RemovesAfterRead(svc._repo, "node-b")
+    await svc.handle_heartbeat("node-b", {"active_sync_sessions": 1})
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(error="unknown_node")
+
+
+async def test_a_hello_from_an_approved_node_without_a_row_creates_nothing(
+    enabled_cluster, hello_replies
+):
+    """Only a HELLO under our OWN key may create a row; an approved node's
+    row is created by the admin alone."""
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_PIN
+    )
+    assert "node-c" not in {n.node_id for n in await enabled_cluster.list_nodes()}
+    assert hello_replies == []
+
+
+# ─── Replay-cache capacity: refuse, never evict ──────────────────────
+
+
+@pytest.mark.security
+async def test_a_full_replay_cache_never_refuses_a_fresh_honest_frame(gfs_db):
+    """The review's probe: 19 200 accepted digests dated ``now + 300`` (a
+    member, or many own-key node ids, saturating the cache with
+    future-dated frames). Evicting them used to raise the floor to
+    ``now + 300``, so every honest frame was refused as a replay for ten
+    minutes. A fresh honest frame from another node must be accepted."""
+    clocks = _Clocks()
+    svc = _replay_svc(gfs_db, clocks)
+    clocks.advance(CLUSTER_TS_SKEW_S)  # past the boot floor
+    future = int(clocks.wall) + CLUSTER_TS_SKEW_S
+    for i in range(19_200):
+        svc.record_frame(f"attack-{i}".encode(), future, f"attacker-{i % 32}")
+    now = int(clocks.wall)
+    for n in range(3):
+        raw = f"honest-{n}".encode()
+        assert not svc.frame_seen(raw, now)
+        assert svc.record_frame(raw, now, "honest")
+        assert svc.frame_seen(raw, now)
+
+
+async def test_announce_names_the_recipient_for_a_differently_spelled_peer_url(
+    tmp_dir, gfs_db, monkeypatch
+):
+    """A configured peer URL spelled differently from the stored row's
+    (case, trailing slash) still resolves to the row, so the HELLO is bound
+    to its recipient."""
+    toml = tmp_dir / "global_server.toml"
+    toml.write_text(
+        '[server]\nbase_url = "https://a.gfs.test"\n'
+        '[cluster]\nenabled = true\npeers = ["HTTPS://B.GFS.test/"]\n'
+    )
+    cfg = GfsConfig.from_toml(toml)
+    posted: list[tuple[str, str]] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        posted.append((url, to))
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.approve_node("node-b", "https://b.gfs.test", _PIN)
+    svc = ClusterService(
+        repo, node_id="node-a", self_url=cfg.base_url, peers=cfg.cluster_peers
+    )
+    await svc._announce_to_peers()
+    assert posted == [("https://b.gfs.test", "node-b")]

@@ -695,6 +695,101 @@ holding the item checks that the release equals it in every applied field
 (`federation/moderation_approval.py`), against its own copy of the row for
 an edit.
 
+### GFS cluster membership
+
+A GFS can run as several symmetric nodes (§24.10) — in production several
+processes share one `gfs.db` and one identity seed behind a load balancer —
+that gossip state over `POST /cluster/sync`. Membership is operator-approved,
+never trust-on-first-use: a node is a member **if and only if** its frames
+verify under a key the receiving node already holds. That is either the
+GFS's own identity key (`gfs_identity.seed`: an operator who gave a node the
+seed approved it) or the key an operator approved for the node through
+`POST /admin/api/cluster/peers` (`node_id` + `url` + `public_key`), stored in
+`cluster_nodes.approved_key` — a column only that admin call writes. The
+row's legacy `public_key` column is never a trust anchor: older builds wrote
+it by trust-on-first-use, and an old-version node still sharing `gfs.db`
+during a rolling upgrade keeps doing so, harmlessly. The decision is one pure function,
+`global_server/cluster.py:authorize_frame`, taken before any signature work:
+a `NODE_HELLO` under a key the node does not hold is refused
+(`unapproved_node`) and writes nothing; any other frame needs a row that is a
+member (`is_member`: an approved key, or our own identity key on the row —
+which only a HELLO verified under our seed can have written, in this build or
+an old one); the same predicate gates every OUTBOUND path too (fan-out,
+heartbeats, partition catch-up, the signaling pick and the public
+`/cluster/health` list), so a row an old-version node inserted by
+trust-on-first-use never receives a fraud report, a relay or a heartbeat. A
+sibling row such an old node rewrote to another key is reclaimed by the
+sibling's next HELLO under our key (key and URL together); a HELLO for a known node under a
+different key is refused (`key_mismatch`, WARNING) — an approval never moves
+in-band, and the repo's `approve_node` keeps a non-empty `approved_key` in SQL
+as well, so rotation is delete then re-add. Liveness refreshes (a HELLO, a heartbeat, the heartbeat loop's ping) are UPDATE-only (`touch_node`), so an admin removal that lands while a ping or a verify is in flight stays removed and a re-added key is never reverted; only add-peer and a first HELLO under our own key create a row. A row's URL does not move in-band either: a
+HELLO fills it only while it is empty (and only with a valid base URL), so a
+member cannot point our heartbeats and fan-out at another address. Every peer URL (admin add-peer, HELLO, `[cluster] peers`) goes through `global_server/peer_url.py:normalized_peer_url`: printable ASCII re-serialised from validated parts (no whitespace, control or bidi characters, an IDNA host, a real port), and never a link-local or cloud-metadata address (`169.254.0.0/16`, `100.100.100.200`, `fe80::/10`, `fd00:ec2::254`, in any IPv6-mapped, SIIT, NAT64 or legacy numeric spelling, the local-use NAT64 range `64:ff9b:1::/48`, or a metadata host name such as `metadata.google.internal`; the IP checks run again on the IDNA-encoded host, so a fullwidth or circled-digit spelling cannot slip an address past them) — private and loopback addresses stay allowed; a DNS name that resolves to a metadata address is not caught (no lookup at validation time). Each frame signs `{type, from, to, ts, nonce,
+sig_suite, payload}`: the sender id is the signed `from` only, `to` names the
+recipient node (another node refuses it, 409 `wrong_recipient`; absent from
+older senders — deprecated, refused once every node runs the release after the first one shipping `to` — and from a HELLO to a not-yet-known configured URL; `[cluster] peers` are normalised at load like stored URLs, so a HELLO to a known peer always names it), `ts` must sit
+within ±300 s of the receiver's wall clock and not before the receiving
+process started, and an accepted frame's digest is remembered until its own
+`ts` + 301 s on the wall clock — the clock the freshness check reads — so a
+byte-identical resend is a 409 for as long as it could still be fresh
+(`ClusterReplayCache`). Whatever the cache forgets (expired) raises a floor:
+a frame with a `ts` at or below it counts as seen, so a wall-clock step back
+never reopens a replay. A live digest is never evicted — evicting would have
+to raise the floor to its `ts`, and a member dating frames `now + 300` could
+then push it past every honest frame — so when the sending node's 660-entry share is full, the NEW frame is
+refused (503 `replay_cache_full`, the sender retries). There is no total
+cap: only members' verified frames are recorded, so the per-node share
+bounds it. A first own-key HELLO creates a row only while fewer than 32
+shared-seed siblings (rows with no approval holding our key) are on the
+roster (403 `cluster_full`); approved rows and non-member rows do not count.
+Every Nomad allocation is a new node id under the shared seed, so the
+heartbeat loop drops a sibling row unseen for 10 heartbeat intervals
+(`CLUSTER_STALE_SIBLING_S`, 300 s) — never an approved row. Removing a
+sibling, by hand or by that cleanup, is therefore temporary: a live sibling
+rejoins with its next HELLO. Every refusal is charged to the source
+address, never to the node it names. An address that spent its budget is
+shed, but not blindly: its frames still take the cheap checks, and one that
+names an approved node is verified — accepted if it verifies, so junk from a
+member's own address cannot lock the member out; a failed verify spends a
+small failed-verify budget keyed on the (node, source address) pair — so
+forgeries "from" other addresses cannot spend the one the member's address
+uses — under a per-node ceiling across addresses (1200 / min), so forgery CPU
+stays bounded. **Cluster listeners should set an explicit
+`[server] trusted_proxies`** (only the real proxy, or `[]`): the default
+trusts every private range, so any host there can claim any address through
+`X-Forwarded-For`. **Upgrade (breaking):** every key
+stored before this rule came from first-contact TOFU or from a pre-#677 key
+derived from the public instance id, and the old add-peer never stored one,
+so GFS migration `0017_cluster_approved_key.sql` adds `approved_key` and
+`approved_url` empty for every row (additive `ADD COLUMN`s; nothing is
+cleared, because `public_key` is no longer trusted). Outbound traffic to an
+approved node goes to `approved_url` — the URL approved with its key — never
+to `url`, which an old-version node rewrites on any HELLO it trusts on first
+use; a sibling's `url` can only be rewritten together with its `public_key`,
+which makes the row no member. A shared-seed sibling stays a member
+through our own key; a peer with its own distinct key must be re-added by an
+operator. `key_source` in the admin cluster view is `approved` (an
+admin-approved key), `own` (our key: approved, or a shared-seed sibling's
+HELLO) or `none` (neither — re-add it if it has its own key).
+**Rolling upgrades:** the guarantee holds for nodes on this version. While a
+node on an older version still serves the same `gfs.db`, that old node keeps
+its old behaviour — it accepts first-contact HELLOs, sends cluster traffic to
+the rows they create and accepts replays of old frames — and a captured
+seed-signed HELLO replayed through it can bring back a decommissioned
+sibling's row at that sibling's former address. New nodes never send to or
+accept from rows that are not members, but finish a rolling upgrade promptly
+and do not reuse a decommissioned node's address while old nodes run.
+**Residual risks:** an attacker who can send from a member's own
+address and forge more than 30 frames a minute naming it — or forge 1200 a
+minute naming it from many shed addresses while the member's own address is
+shed — delays that member (keep `trusted_proxies` to the real proxy); a frame without `to` (older
+sender, or a HELLO to a configured URL not yet known) can be replayed once to
+each other node inside its 300 s window (the replay cache is per process); clock skew above 300 s partitions
+the cluster (run NTP); two nodes sharing a `node_id` are indistinguishable;
+and a seed holder can churn sibling node ids, holding up to 32 sibling rows at a time,
+each with its own 660-digest replay share (it holds our identity, so this
+is no escalation).
+
 ### Database writer (write coalescing)
 
 Every process (household or GFS node) owns one `AsyncDatabase`
