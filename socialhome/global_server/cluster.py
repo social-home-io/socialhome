@@ -63,12 +63,28 @@ SYNC_RETRY_DELAY_S: int = 5
 CLUSTER_RATE_LIMIT_PER_MIN: int = 60
 
 #: ``/cluster/sync`` requests per minute per source address that did NOT prove
-#: a member: malformed bodies, unknown suites, stale timestamps, unknown or
-#: unapproved senders, key mismatches, bad signatures and replays. Once spent,
-#: the address is shed before any parse, DB read or signature verification,
-#: which bounds the verify CPU a forged flood can burn. Genuine peers never
-#: touch it, so 30/min is far above real use.
+#: a member: malformed bodies, unknown suites, stale timestamps, wrong
+#: recipients, unknown or unapproved senders, key mismatches, bad signatures
+#: and replays. Once spent, the address is SHED: a frame from it is still
+#: parsed and checked (cheap, no crypto) against the roster, and every frame
+#: that does not name an approved node is answered 429 without a signature
+#: verify. Only a frame naming an approved node is verified — see
+#: :data:`CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN` — so junk sent from a
+#: member's address can never lock the member out. Genuine peers never touch
+#: this budget, so 30/min is far above real use.
 CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN: int = 30
+
+#: Failed signature verifies per minute per approved node, counted only for
+#: frames from a SHED address (see above). Such a frame names an approved
+#: node, so it is verified: one that verifies is the member's own traffic and
+#: is accepted (then capped by :data:`CLUSTER_RATE_LIMIT_PER_MIN`); one that
+#: fails spends this budget. Once it is spent, further frames naming that node
+#: from shed addresses are dropped without a verify. Verify CPU spent on
+#: forgeries is therefore bounded at this many per approved node per minute,
+#: and the node's own budget is never touched. Residual: an attacker who can
+#: send from the member's own address AND forge more than this per minute
+#: delays that member until the window slides.
+CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN: int = 30
 
 #: ``/cluster/sync`` frames carry the sender's wall-clock ``ts`` (unix
 #: seconds, int) inside the signed body. A frame more than this far from the
@@ -301,6 +317,7 @@ class ClusterService:
         "_clock",
         "_sync_node_limiter",
         "_sync_unverified_limiter",
+        "_sync_failed_verify_limiter",
         "_wall_clock",
         "_process_start",
         "_seen_frames",
@@ -385,14 +402,20 @@ class ClusterService:
         self._sync_unverified_limiter = SlidingWindowCounter(
             CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN
         )
+        #: Per approved node id: failed verifies of frames from shed
+        #: addresses (see :data:`CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`).
+        self._sync_failed_verify_limiter = SlidingWindowCounter(
+            CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN
+        )
 
     # ─── /cluster/sync budgets ───────────────────────────────────────
 
     def sync_source_exhausted(self, client_ip: str) -> bool:
         """Whether *client_ip* has spent its unverified budget.
 
-        Read-only — checked first, before the body is parsed or any
-        signature verified, so a shed request costs nothing.
+        Read-only — checked first. A shed address still has its frames
+        parsed and matched against the roster (no crypto); only a frame
+        naming an approved node is then verified.
         """
         return self._sync_unverified_limiter.exhausted(client_ip, now=self._clock())
 
@@ -404,6 +427,16 @@ class ClusterService:
         rejected ignores it).
         """
         return self._sync_unverified_limiter.allow(client_ip, now=self._clock())
+
+    def failed_verify_exhausted(self, node_id: str) -> bool:
+        """Whether forged frames from shed addresses have spent *node_id*'s
+        failed-verify budget (read-only, checked before a verify)."""
+        return self._sync_failed_verify_limiter.exhausted(node_id, now=self._clock())
+
+    def charge_failed_verify(self, node_id: str) -> None:
+        """Spend one unit of *node_id*'s failed-verify budget: a frame from a
+        shed address named it but did not verify under its key."""
+        self._sync_failed_verify_limiter.allow(node_id, now=self._clock())
 
     def charge_verified_sync(self, node_id: str) -> bool:
         """Spend one unit of a VERIFIED peer's budget; ``False`` → 429.

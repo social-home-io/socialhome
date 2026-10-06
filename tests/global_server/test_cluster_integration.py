@@ -27,6 +27,7 @@ from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
 )
 from socialhome.global_server.cluster import (
+    CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN,
     CLUSTER_RATE_LIMIT_PER_MIN,
     CLUSTER_REPLAY_MAX_ENTRIES,
     CLUSTER_REPLAY_SIZED_NODES,
@@ -41,6 +42,7 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.public import RATE_LIMIT_MAX_TRACKED_IPS
 from socialhome.global_server.repositories import SqliteClusterRepo
+from socialhome.global_server.routes import cluster as cluster_routes
 from socialhome.global_server.server import SIGNING_SEED_FILENAME, create_gfs_app
 
 _GFS_MIGRATIONS_DIR = (
@@ -670,24 +672,102 @@ async def test_verified_peer_over_budget_is_rate_limited(client, clock):
     assert resp.status == 200
 
 
+@pytest.fixture
+def verify_calls(monkeypatch):
+    """Count every signature verification the sync route performs."""
+    calls: list[str] = []
+    real = cluster_routes.verify_node_signature
+
+    def _counting(raw, sig, key):
+        calls.append(key)
+        return real(raw, sig, key)
+
+    monkeypatch.setattr(cluster_routes, "verify_node_signature", _counting)
+    return calls
+
+
 @pytest.mark.security
-async def test_unverified_flood_hits_the_per_address_bound(client, clock):
-    """Failed requests are shed per source address BEFORE any parse, DB read
-    or signature verification, so a forged flood can't burn verify CPU."""
+async def test_unverified_flood_hits_the_per_address_bound(client, clock, verify_calls):
+    """Once an address has spent its unverified budget, every frame that
+    does not name an approved node is shed with 429 — no signature work."""
     await _register_peer(client)
     for _ in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN):
-        resp = await _sync(client, from_node=PEER, seed=None, ip=ATTACKER_IP)
-        assert resp.status == 401
+        resp = await _sync(client, from_node="ghost", seed=None, ip=ATTACKER_IP)
+        assert resp.status == 403
     for bad in (b"not json", b"[]", b'{"type": "x"}'):
         resp = await client.post(
             "/cluster/sync", data=bad, headers={"X-Forwarded-For": ATTACKER_IP}
         )
         assert resp.status == 429
-    resp = await _sync(client, from_node="ghost", seed=None, ip=ATTACKER_IP)
+    for node in ("ghost", "ghost-2"):
+        resp = await _sync(client, from_node=node, seed=None, ip=ATTACKER_IP)
+        assert resp.status == 429
+    seed, pub = _keypair()
+    resp = await _sync(
+        client,
+        from_node="sybil",
+        seed=seed,
+        ip=ATTACKER_IP,
+        type_=NODE_HELLO,
+        payload={"node_id": "sybil", "url": "", "public_key": pub},
+    )
     assert resp.status == 429
+    assert verify_calls == []
     # Another address still gets a real answer.
     resp = await _sync(client, from_node="ghost", seed=None, ip=GENUINE_IP)
     assert resp.status == 403
+    clock.now += 61
+    resp = await _sync(client, from_node="ghost", seed=None, ip=ATTACKER_IP)
+    assert resp.status == 403
+
+
+@pytest.mark.security
+async def test_junk_from_a_peers_address_cannot_lock_the_peer_out(client):
+    """Junk (malformed, unknown senders, stale) from the address a member
+    syncs from spends that address's budget — but a frame that verifies
+    under the member's pin is still accepted once the address is shed."""
+    seed = await _register_peer(client)
+    for i in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN + 1):
+        resp = await client.post(
+            "/cluster/sync",
+            data=b"not json" if i % 2 else b'{"from": "x"}',
+            headers={"X-Forwarded-For": GENUINE_IP},
+        )
+        assert resp.status in (400, 429)
+    assert resp.status == 429
+    resp = await _sync(client, from_node=PEER, seed=seed, ip=GENUINE_IP)
+    assert resp.status == 200
+    # …and keeps being accepted, within its own (verified) budget.
+    resp = await _sync(client, from_node=PEER, seed=seed, ip=GENUINE_IP)
+    assert resp.status == 200
+
+
+@pytest.mark.security
+async def test_forged_frames_naming_a_peer_from_a_shed_address_are_bounded(
+    client, clock, verify_calls
+):
+    """From a shed address, frames naming an approved node are verified
+    (so the real node gets through) but each FAILED verify spends a small
+    per-node budget; once spent, more forgeries are shed without a verify.
+    The node's own verified budget is never touched."""
+    seed = await _register_peer(client)
+    for _ in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN):
+        await client.post(
+            "/cluster/sync", data=b"junk", headers={"X-Forwarded-For": ATTACKER_IP}
+        )
+    verify_calls.clear()
+    statuses = [
+        (await _sync(client, from_node=PEER, seed=None, ip=ATTACKER_IP)).status
+        for _ in range(CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN + 20)
+    ]
+    assert statuses == [401] * CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN + [429] * 20
+    assert len(verify_calls) == CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN
+    svc = client._app[gfs_cluster_key]
+    assert PEER not in svc._sync_node_limiter
+    # From an address that is NOT shed, the genuine node is unaffected.
+    resp = await _sync(client, from_node=PEER, seed=seed, ip=GENUINE_IP)
+    assert resp.status == 200
+    # The bound is per minute.
     clock.now += 61
     resp = await _sync(client, from_node=PEER, seed=None, ip=ATTACKER_IP)
     assert resp.status == 401

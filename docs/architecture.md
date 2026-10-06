@@ -718,14 +718,20 @@ older senders and from a HELLO to a not-yet-known configured URL), `ts` must sit
 within ±300 s of the receiver's wall clock and not before the receiving
 process started, and an accepted frame's digest is remembered for 600 s so a
 byte-identical resend is a 409. Every refusal is charged to the source
-address, never to the node it names. **Upgrade (breaking):** every pin
+address, never to the node it names. An address that spent its budget is
+shed, but not blindly: its frames still take the cheap checks, and one that
+names an approved node is verified — accepted if it verifies, so junk from a
+member's own address cannot lock the member out; a failed verify spends a
+small per-node failed-verify budget, so forgery CPU stays bounded. **Upgrade (breaking):** every pin
 written before this rule came from first-contact TOFU or from a pre-#677 key
 derived from the public instance id, so GFS migration
 `0017_cluster_pin_reset.sql` clears them all once. A shared-seed sibling's
 frames verify under our own key meanwhile and its next HELLO re-pins it; a
 peer with its own distinct key must be re-added by an operator. Afterwards
 `key_source` in the admin cluster view is `own` (our key), `pinned` (only
-ever admin-added) or `none` (no pin yet). **Residual risks:** a frame without `to` (older
+ever admin-added) or `none` (no pin yet). **Residual risks:** an attacker who can send from a member's own
+address and forge more than 30 frames a minute naming it delays that member
+(keep `trusted_proxies` to the real proxy); a frame without `to` (older
 sender, or a HELLO to a configured URL not yet known) can be replayed once to
 each other node inside its 300 s window (the replay cache is per process); clock skew above 300 s partitions
 the cluster (run NTP); two nodes sharing a `node_id` are indistinguishable;

@@ -65,8 +65,9 @@ class ClusterSyncView(GfsBaseView):
 
     Order matters (spec §24.10.4):
 
-    1. Source address over its unverified budget → 429, before any parse,
-       DB read or signature work.
+    1. Note whether the source address has spent its unverified budget
+       ("shed"). A shed address's frames still go through the cheap checks
+       below, but every rejection is answered 429.
     2. Not a JSON object → 400 ``invalid_json``; ``type`` / ``from`` /
        ``payload`` / ``to`` missing or mistyped → 400 ``invalid_message``.
     3. Unknown ``sig_suite`` → 400 ``unsupported_sig_suite``.
@@ -74,29 +75,39 @@ class ClusterSyncView(GfsBaseView):
        our wall clock, or before this process started → 401
        ``stale_timestamp``; ``to`` present and not our node id → 409
        ``wrong_recipient`` (a frame for another node, replayed to us).
-    5. Membership → 403 ``unknown_node`` (non-HELLO, no row),
+    5. Already-accepted bytes → 409 ``replay`` (in-memory, no crypto).
+    6. Membership → 403 ``unknown_node`` (non-HELLO, no row),
        ``unapproved_node`` (HELLO under a key we don't hold; nothing is
        written) or ``key_mismatch`` (HELLO for a known node under a key
        other than its pin; WARNING).
-    6. Signature under the key step 5 chose → 401 ``invalid_signature``.
-    7. Already-accepted bytes → 409 ``replay``.
+    7. Signature under the key step 6 chose → 401 ``invalid_signature``.
+       From a shed address the verify runs only while the named node's
+       failed-verify budget lasts (else 429, no verify), and a failure
+       spends it.
     8. The verified node's budget → 429.
     9. Record the frame digest, then dispatch.
 
     Every failure in 2–7 spends the source address's budget, never a
-    node's: forged or replayed traffic naming a real peer cannot lock it
-    out.
+    node's verified budget: forged or replayed traffic naming a real peer
+    cannot lock it out, and junk from a member's own address cannot either —
+    a frame that verifies under the member's pin is accepted even from a
+    shed address. Verify CPU on forgeries stays bounded: per address until
+    it is shed, then per approved node
+    (:data:`~socialhome.global_server.cluster.CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`).
     """
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_cluster_key)
         client_ip = self.client_ip()
-        if svc.sync_source_exhausted(client_ip):
-            return _rate_limited()
+        # A shed address is not dropped outright: a member syncing from an
+        # address someone filled with junk must still get through. Its
+        # frames take the cheap checks; anything that does not verify as an
+        # approved node is answered 429.
+        shed = svc.sync_source_exhausted(client_ip)
 
         def _reject(response: web.Response) -> web.Response:
             svc.charge_unverified_sync(client_ip)
-            return response
+            return _rate_limited() if shed else response
 
         raw = await self.request.read()
         try:
@@ -157,6 +168,12 @@ class ClusterSyncView(GfsBaseView):
                 web.json_response({"error": "wrong_recipient"}, status=409),
             )
 
+        # Replay: these exact signed bytes were already accepted. In-memory
+        # and crypto-free, so before any key lookup or verify. Charged to
+        # the address — a replay proves nothing about who sent it.
+        if svc.frame_seen(raw):
+            return _reject(web.json_response({"error": "replay"}, status=409))
+
         # Membership (spec §24.10): which key, if any, this frame must
         # verify under — our own identity key (shared seed) or the key
         # pinned on the sender's row. Decided before any signature work, so
@@ -174,7 +191,7 @@ class ClusterSyncView(GfsBaseView):
             own_key=svc.own_public_key_hex,
         )
         if verdict.error:
-            if verdict.error == "key_mismatch":
+            if verdict.error == "key_mismatch" and not shed:
                 log.warning(
                     "cluster: key_mismatch — NODE_HELLO for known node %r from "
                     "%s carries a key other than its pin; refused. If the node "
@@ -187,16 +204,17 @@ class ClusterSyncView(GfsBaseView):
                 web.json_response({"error": verdict.error}, status=403),
             )
 
+        # From a shed address, verify only while the named node's
+        # failed-verify budget lasts: that bounds the CPU forgeries can burn
+        # without ever spending the node's own (verified) budget.
+        if shed and svc.failed_verify_exhausted(from_node):
+            return _rate_limited()
         signature = self.request.headers.get("X-Node-Signature", "")
         if not verify_node_signature(raw, signature, verdict.verify_key):
-            return _reject(
-                web.json_response({"error": "invalid_signature"}, status=401),
-            )
-
-        # Replay: these exact signed bytes were already accepted. Charged
-        # to the address — a replay proves nothing about who sent it.
-        if svc.frame_seen(raw):
-            return _reject(web.json_response({"error": "replay"}, status=409))
+            svc.charge_unverified_sync(client_ip)
+            if shed:
+                svc.charge_failed_verify(from_node)
+            return web.json_response({"error": "invalid_signature"}, status=401)
 
         # The frame verified under a key we already held, so it is the
         # member's own traffic: spend that node's budget.
