@@ -1004,3 +1004,42 @@ async def test_old_shape_frame_without_nonce_or_suite_still_syncs(client):
     # Without a nonce, a resend of the same bytes is still a replay.
     resp = await _post_raw(client, canonical, sig, GENUINE_IP)
     assert resp.status == 409
+
+
+# ─── Upgrade compatibility ────────────────────────────────────────────
+
+
+@pytest.mark.security
+async def test_grandfathered_tofu_row_keeps_syncing(client, outbound_hellos):
+    """A row a first-contact HELLO pinned before this release (a key that is
+    not ours, never approved through the admin API) is kept: its HELLO and
+    its sync frames verify under the pin, so an upgrade never partitions a
+    working cluster."""
+    seed, pub_hex = _keypair()
+    await client._app[gfs_cluster_repo_key].upsert_node(
+        ClusterNode(
+            node_id="old-peer",
+            url="http://old-peer.test",
+            public_key=pub_hex,
+            status="online",
+            last_seen="2026-01-01 00:00:00",
+        )
+    )
+    resp = await _sync(
+        client,
+        from_node="old-peer",
+        seed=seed,
+        ip=GENUINE_IP,
+        type_=NODE_HELLO,
+        payload={
+            "node_id": "old-peer",
+            "url": "http://old-peer.test",
+            "public_key": pub_hex,
+        },
+    )
+    assert resp.status == 200
+    resp = await _sync(client, from_node="old-peer", seed=seed, ip=GENUINE_IP)
+    assert resp.status == 200
+    body = await (await client.get("/admin/api/cluster")).json()
+    (row,) = [n for n in body["nodes"] if n["node_id"] == "old-peer"]
+    assert row["key_source"] == "pinned"

@@ -497,8 +497,9 @@ class ClusterService:
     async def start(self) -> None:
         """Announce to seed peers + start the heartbeat loop.
 
-        No-op if cluster mode is disabled.
+        No-op (beyond the pin audit) if cluster mode is disabled.
         """
+        await self._warn_foreign_pins()
         if not self._enabled or not self._node_id:
             return
         if self._heartbeat_task is not None and not self._heartbeat_task.done():
@@ -514,6 +515,32 @@ class ClusterService:
         # DB, and a HELLO is the only thing that puts one there. So keep
         # HELLOing configured peers we do not yet know until they answer.
         self._announce_task = loop.create_task(self._reannounce_loop())
+
+    async def _warn_foreign_pins(self) -> None:
+        """WARN about peers trusted under a key that is not our own.
+
+        Before membership needed operator approval, a first-contact HELLO
+        pinned whatever key it carried (TOFU). Those rows are kept — they
+        keep syncing, so an upgrade never partitions a working cluster —
+        but nobody approved them. An admin-pinned key looks the same on
+        disk, so the list is for the operator to confirm, not a verdict.
+        """
+        own = self._own_pk_hex.lower()
+        foreign = [
+            r.node_id
+            for r in await self._repo.list_nodes()
+            if _key_source(r.public_key, own) == "pinned"
+        ]
+        if foreign:
+            log.warning(
+                "cluster: %d peer(s) are trusted under a key that is not this "
+                "GFS's own: %s. A pin like this was either added by an admin "
+                "or grandfathered from first-contact TOFU before cluster "
+                "membership needed approval — remove any you do not recognise "
+                "(DELETE /admin/api/cluster/peers/{node_id}).",
+                len(foreign),
+                ", ".join(sorted(foreign)),
+            )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -583,6 +610,12 @@ class ClusterService:
                         )
                     ),
                     "is_self": is_self,
+                    "public_key": self._own_pk_hex if is_self else r.public_key,
+                    "key_source": (
+                        "own"
+                        if is_self
+                        else _key_source(r.public_key, self._own_pk_hex.lower())
+                    ),
                 }
             )
         if not saw_self:
@@ -599,6 +632,8 @@ class ClusterService:
                         0,
                     ),
                     "is_self": True,
+                    "public_key": self._own_pk_hex,
+                    "key_source": "own",
                 },
             )
         return {
@@ -1420,6 +1455,18 @@ class ClusterService:
 
 
 # ─── Wire shape helpers ──────────────────────────────────────────────────
+
+
+def _key_source(public_key: str, own_key_lower: str) -> str:
+    """How a peer row is trusted: ``own`` (our identity key — the shared
+    seed), ``pinned`` (another key: admin-pinned or grandfathered TOFU) or
+    ``none`` (no key; only our own key can verify its frames)."""
+    key = public_key.lower()
+    if not key:
+        return "none"
+    if own_key_lower and key == own_key_lower:
+        return "own"
+    return "pinned"
 
 
 def _frame_digest(raw: bytes) -> bytes:

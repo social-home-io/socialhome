@@ -744,3 +744,67 @@ def test_non_hello_verifies_under_the_pin_or_our_own_key():
     # A sibling row stored with no key is a shared-seed sibling.
     assert _hb(_row("")) == FrameVerdict(verify_key=_OWN)
     assert _hb(_row(""), own="") == FrameVerdict(error="unknown_node")
+
+
+# ─── Upgrade: grandfathered TOFU pins ────────────────────────────────
+
+
+async def _svc_with_rows(gfs_db, *, enabled: bool = True) -> ClusterService:
+    repo = SqliteClusterRepo(gfs_db)
+    svc = ClusterService(
+        repo,
+        node_id="node-a",
+        self_url="https://a.gfs.test",
+        own_public_key_hex=_OWN,
+        enabled=enabled,
+    )
+    for node_id, key in (("sibling", _OWN), ("tofu", _PIN), ("legacy", "")):
+        await repo.upsert_node(
+            ClusterNode(node_id=node_id, url=f"https://{node_id}.test", public_key=key)
+        )
+    return svc
+
+
+async def test_admin_cluster_marks_each_node_key_source(gfs_db):
+    """The UI marks a peer trusted under a key other than our own: before
+    this release such a pin could only come from first-contact TOFU, so the
+    operator should confirm it (an admin-pinned key shows the same way)."""
+    svc = await _svc_with_rows(gfs_db)
+    nodes = {n["node_id"]: n for n in (await svc.admin_cluster())["nodes"]}
+    assert nodes["node-a"]["key_source"] == "own"
+    assert nodes["node-a"]["public_key"] == _OWN
+    assert nodes["sibling"]["key_source"] == "own"
+    assert nodes["tofu"]["key_source"] == "pinned"
+    assert nodes["tofu"]["public_key"] == _PIN
+    assert nodes["legacy"]["key_source"] == "none"
+    assert nodes["legacy"]["public_key"] == ""
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_startup_warns_about_peers_pinned_to_a_foreign_key(
+    gfs_db, caplog, monkeypatch, enabled
+):
+    """Upgrade path: rows a TOFU HELLO pinned before membership needed
+    approval keep syncing, but the operator is told about each one."""
+
+    async def _no_post(self, *a, **kw):
+        return None
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", _no_post)
+    svc = await _svc_with_rows(gfs_db, enabled=enabled)
+    with caplog.at_level("WARNING"):
+        await svc.start()
+    await svc.stop()
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1, warnings
+    assert "tofu" in warnings[0]
+    assert "sibling" not in warnings[0] and "legacy" not in warnings[0]
+
+
+async def test_startup_is_quiet_without_foreign_pins(gfs_db, caplog):
+    repo = SqliteClusterRepo(gfs_db)
+    svc = ClusterService(repo, node_id="node-a", own_public_key_hex=_OWN)
+    await repo.upsert_node(ClusterNode(node_id="s", url="https://s", public_key=_OWN))
+    with caplog.at_level("WARNING"):
+        await svc.start()
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
