@@ -571,7 +571,7 @@
   "pages.md.italic": "italique",
   "pages.md.link": "un lien vers une adresse web",
   "pages.md.lists": "listes",
-  "pages.md.image": "une image",
+  "pages.md.image": "les images que vous importez s’affichent, celles d’autres sites deviennent des liens",
   "pages.md.page_link": "un lien vers une autre page",
   "post.edit": "Modifier",
   "post.edit.label": "Modifier le texte de la publication",

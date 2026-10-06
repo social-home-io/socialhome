@@ -264,6 +264,22 @@ describe('PagesView — space scope', () => {
     expect(space({ archived: true }).canWrite).toBe(false)
   })
 
+  it('the formatting help says outside pictures become links', async () => {
+    // Pictures from other websites never load (owner decision 2026-10-05);
+    // the help line must not promise "an image" for any URL.
+    wire()
+    const r = render(<PagesView scope={space()} />)
+    const help = await waitFor(() => {
+      const el = r.container.querySelector('.sh-pages-help')
+      if (!el) throw new Error('help not rendered yet')
+      return el
+    })
+    const line = Array.from(help.querySelectorAll('li'))
+      .find(li => li.textContent?.includes('![alt](url)'))!
+    expect(line.textContent).toMatch(/uploaded pictures show/i)
+    expect(line.textContent).toMatch(/other websites become links/i)
+  })
+
   it('a failed list load offers Retry', async () => {
     apiGet.mockRejectedValueOnce(new Error('boom'))
     const r = render(<PagesView scope={space()} />)

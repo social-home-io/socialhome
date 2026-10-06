@@ -644,7 +644,7 @@
   "pages.md.italic": "italic",
   "pages.md.link": "a link to a web address",
   "pages.md.lists": "lists",
-  "pages.md.image": "an image",
+  "pages.md.image": "uploaded pictures show, pictures from other websites become links",
   "pages.md.page_link": "a link to another page",
   "post.edit": "Edit",
   "post.edit.label": "Edit post text",

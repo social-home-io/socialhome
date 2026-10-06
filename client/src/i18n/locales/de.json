@@ -571,7 +571,7 @@
   "pages.md.italic": "kursiv",
   "pages.md.link": "ein Link zu einer Webadresse",
   "pages.md.lists": "Listen",
-  "pages.md.image": "ein Bild",
+  "pages.md.image": "hochgeladene Bilder werden angezeigt, Bilder von anderen Websites werden zu Links",
   "pages.md.page_link": "ein Link zu einer anderen Seite",
   "post.edit": "Bearbeiten",
   "post.edit.label": "Beitragstext bearbeiten",
