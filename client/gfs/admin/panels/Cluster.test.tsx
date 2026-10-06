@@ -197,12 +197,14 @@ describe('ClusterPanel — peer list', () => {
     expect(rowFor(container, 'node-d').textContent).toContain('no key yet')
   })
 
-  it('asks the operator to double-check pinned rows (they may be grandfathered)', async () => {
+  it('tells the operator to re-add a peer that has no key yet, not a pinned one', async () => {
     stubApi()
     const { container, findByText } = render(<ClusterPanel />)
     await findByText('node-b')
-    expect(rowFor(container, 'node-c').textContent).toContain('Make sure you added this node yourself.')
-    expect(rowFor(container, 'node-b').textContent).not.toContain('Make sure you added')
+    expect(rowFor(container, 'node-d').textContent).toContain('Add it again with its public key')
+    expect(rowFor(container, 'node-c').textContent).not.toContain('Add it again')
+    expect(rowFor(container, 'node-c').textContent).not.toContain('Make sure you added')
+    expect(rowFor(container, 'node-b').textContent).not.toContain('Add it again')
   })
 
   it('shows no Ping/Remove on the self row but does on a peer row', async () => {

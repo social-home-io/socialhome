@@ -57,11 +57,11 @@ export function keyFingerprint(key: string | null | undefined): string {
 
 const PEER_ERRORS: Record<string, string> = {
   invalid_node_id:
-    "Enter the peer's node id as shown on its Cluster page (up to 128 characters).",
+    "Enter the peer's node id as shown on its Cluster page: up to 128 letters, digits and . _ : / -",
   node_id_is_self:
     "That is this server's own node id. Enter the node id of the other GFS.",
   invalid_url:
-    "Enter the peer's address, starting with http:// or https://.",
+    "Enter the peer's address, starting with http:// or https://, without a user name, ? or #.",
   invalid_public_key:
     "That isn't a valid public key. Copy the 64-character key from the peer's Cluster page.",
   key_mismatch:
@@ -114,8 +114,11 @@ function KeyCell({ node }: { node: ClusterNode }) {
       <div class={`key-source key-source-${node.key_source}`}>
         {node.is_self ? "this server's key" : KEY_SOURCE_LABEL[node.key_source]}
       </div>
-      {!node.is_self && node.key_source === 'pinned' && (
-        <div class="muted key-hint">Make sure you added this node yourself.</div>
+      {!node.is_self && node.key_source === 'none' && (
+        <div class="muted key-hint">
+          Add it again with its public key if it has its own key. Nodes that share
+          this server's key rejoin by themselves.
+        </div>
       )}
     </td>
   )
