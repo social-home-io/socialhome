@@ -31,11 +31,19 @@ from aiohttp import web
 
 from .. import app_keys as K
 from ..auth import require_admin
+from ..hardening import DEFAULT_MEDIA_MAX_BYTES, read_body_capped
 from ..services.backup_service import (
     BackupError,
     BackupRestoreNotEmpty,
 )
 from .base import BaseView
+
+#: Cap on an uploaded archive. Equals the non-JSON ``Content-Length`` cap of
+#: ``build_body_size_middleware`` so the two never disagree;
+#: ``restore_from_bytes`` buffers the archive in memory anyway. Enforced
+#: while streaming — ``request.read()`` would stop at aiohttp's 1 MiB
+#: ``client_max_size``, which no real archive (DB + media) fits in.
+BACKUP_IMPORT_MAX_BYTES: int = DEFAULT_MEDIA_MAX_BYTES
 
 
 class BackupPreView(BaseView):
@@ -86,7 +94,7 @@ class BackupImportView(BaseView):
 
     async def post(self) -> web.Response:
         require_admin(self.request)
-        body = await self.request.read()
+        body = await read_body_capped(self.request, BACKUP_IMPORT_MAX_BYTES)
         if not body:
             return web.json_response({"error": "empty body"}, status=422)
         svc = self.svc(K.backup_service_key)

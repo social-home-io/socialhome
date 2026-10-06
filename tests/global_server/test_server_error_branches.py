@@ -9,13 +9,16 @@ unknown-NODE_* branches that the success-path tests skip — plus
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import os
 import sys
 import time
 from dataclasses import replace
 
 import pytest
-from aiohttp import web
+from aiohttp import FormData, web
+from PIL import Image
 from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -676,6 +679,30 @@ async def test_header_image_upload_rejects_oversize(client):
         data=fd,
     )
     assert resp.status == 413
+
+
+async def test_header_image_between_1mib_and_2mib_passes_aiohttp_client_max_size(
+    client,
+):
+    """Regression: aiohttp >= 3.13.3 (aio-libs/aiohttp#11889) makes
+    ``BodyPartReader.read()`` 413 past the app's 1 MiB ``client_max_size``,
+    so the view's own 2 MiB check never ran for a 1–2 MiB header image.
+    The part is streamed under the 2 MiB cap now, so it reaches the image
+    pipeline and succeeds."""
+    # Random noise does not compress — 1700x1300 at q80 lands at ~1.5 MiB.
+    img = Image.frombytes("RGB", (1700, 1300), os.urandom(1700 * 1300 * 3))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=80)
+    data = buf.getvalue()
+    assert 1_048_576 < len(data) < 2 * 1024 * 1024
+    fd = FormData()
+    fd.add_field("file", data, filename="hero.jpg", content_type="image/jpeg")
+    resp = await client.post(
+        "/admin/api/branding/header-image",
+        data=fd,
+    )
+    assert resp.status == 200, await resp.text()
+    assert (await resp.json())["header_image_file"].endswith(".webp")
 
 
 async def test_header_image_upload_rejects_non_image(client):

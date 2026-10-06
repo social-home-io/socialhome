@@ -102,6 +102,7 @@ Coded refusals (`socialhome/domain/errors.py` `CodedError` subclasses):
 | `OWN_LISTING` | 422 (bids) / 403 (offers) | — | A seller bidding on / offering for their own listing |
 | `LISTING_NOT_ACTIVE` | 422 (bids) / 409 (offers) | — | A bid or offer on a sold, expired or cancelled listing |
 | `IMAGE_TOO_LARGE` | 422 | `max_mb` | `POST /api/me/picture`, `/api/spaces/{id}/members/me/picture`, `/cover`, `/icon` over the size limit |
+| `PAYLOAD_TOO_LARGE` | 413 | `max_mb` | `POST /api/gallery/albums/{id}/items`, `POST /api/backup/import` over the size limit — refused while streaming, so a chunked body (no `Content-Length`) is bounded too. `POST /api/media/upload` answers the same code without params |
 | `IMAGE_UNREADABLE` | 422 | — | The same picture endpoints and `POST /api/media/upload`, when the file isn't a supported image or the image library can't open it (the library's error text and the file name stay in the server log) |
 
 ## HFS — Authentication & self

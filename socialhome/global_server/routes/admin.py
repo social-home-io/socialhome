@@ -22,7 +22,9 @@ from ..cluster import (
     member_url,
 )
 from ..config import GfsConfig
+from ...domain.errors import PayloadTooLargeError
 from ...domain.space import ModerationAlreadyDecidedError
+from ...hardening import read_part_capped
 from ...media.image_processor import ImageProcessor
 from .base import GfsBaseView
 
@@ -214,8 +216,12 @@ class AdminBrandingHeaderImageView(GfsBaseView):
                 continue
             if part.name == "file":
                 filename = part.filename or "upload"
-                file_bytes = await part.read(decode=False)
-                if len(file_bytes) > max_bytes:
+                # Streamed under this view's own cap: ``part.read()`` would
+                # 413 at aiohttp's 1 MiB ``client_max_size`` first. The GFS
+                # base view maps no ``CodedError``, so keep the wire shape.
+                try:
+                    file_bytes = await read_part_capped(part, max_bytes)
+                except PayloadTooLargeError:
                     return web.json_response(
                         {"error": "too_large", "limit_bytes": max_bytes},
                         status=413,

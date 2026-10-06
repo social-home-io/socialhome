@@ -9,9 +9,12 @@ Also tests the HA-only mounting guard via the standalone client.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from socialhome.app import create_app
+from socialhome.app_keys import config_key as _config_key
 from socialhome.app_keys import db_key as _db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
@@ -190,6 +193,50 @@ async def test_import_existing_db_409(ha_client):
         headers={**_auth(ha_client._tok), "Content-Type": "application/gzip"},
     )
     assert r.status == 409
+
+
+async def _export_over_1mib(ha_client) -> bytes:
+    """Export an archive that is over aiohttp's 1 MiB ``client_max_size``
+    by planting a 2 MiB random (incompressible) media file first."""
+    media_dir = ha_client.app[_config_key].media_path
+    os.makedirs(media_dir, exist_ok=True)
+    with open(os.path.join(media_dir, "big.bin"), "wb") as f:
+        f.write(os.urandom(2 * 1024 * 1024))
+    r = await ha_client.get("/api/backup/export", headers=_auth(ha_client._tok))
+    assert r.status == 200
+    blob = await r.read()
+    assert len(blob) > 1_048_576
+    return blob
+
+
+async def test_import_archive_over_1mib_is_not_413(ha_client):
+    """Regression: this used to 413 (``Maximum request body size 1048576
+    exceeded``) because ``request.read()`` honours aiohttp's 1 MiB
+    ``client_max_size`` — so any real backup archive, which carries the
+    household's media, could never be restored. The route now streams the
+    body under ``BACKUP_IMPORT_MAX_BYTES`` and gets as far as the
+    not-empty check (409), same as the small round-trip above."""
+    blob = await _export_over_1mib(ha_client)
+    r = await ha_client.post(
+        "/api/backup/import",
+        data=blob,
+        headers={**_auth(ha_client._tok), "Content-Type": "application/gzip"},
+    )
+    assert r.status == 409, await r.text()
+
+
+async def test_import_archive_over_cap_is_413_payload_too_large(ha_client, monkeypatch):
+    monkeypatch.setattr("socialhome.routes.backup.BACKUP_IMPORT_MAX_BYTES", 64 * 1024)
+    blob = await _export_over_1mib(ha_client)
+    r = await ha_client.post(
+        "/api/backup/import",
+        data=blob,
+        headers={**_auth(ha_client._tok), "Content-Type": "application/gzip"},
+    )
+    assert r.status == 413
+    err = (await r.json())["error"]
+    assert err["code"] == "PAYLOAD_TOO_LARGE"
+    assert err["params"] == {"max_mb": 1}
 
 
 async def test_import_non_admin_403(ha_client):

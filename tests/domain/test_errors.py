@@ -14,6 +14,7 @@ from socialhome.domain.errors import (
     CodedError,
     ImageTooLargeError,
     ImageUnreadableError,
+    PayloadTooLargeError,
 )
 from socialhome.domain.space import (
     AgeRestrictedError,
@@ -84,6 +85,19 @@ def test_image_too_large_reports_whole_megabytes():
     assert not isinstance(exc, ValueError)
     # Never rounds down to zero.
     assert ImageTooLargeError(1000).params == {"max_mb": 1}
+
+
+def test_payload_too_large_is_a_413_with_whole_megabytes():
+    """A body/part over a route's cap (gallery items, backup import) —
+    413, not 422: the whole request is refused before it is buffered."""
+    exc = PayloadTooLargeError(100 * 1024 * 1024)
+    assert isinstance(exc, CodedError)
+    assert (exc.status, exc.code) == (413, "PAYLOAD_TOO_LARGE")
+    assert exc.detail == "Upload exceeds size limit."
+    assert exc.params == {"max_mb": 100}
+    assert not isinstance(exc, ValueError)
+    # Never rounds down to zero.
+    assert PayloadTooLargeError(1000).params == {"max_mb": 1}
 
 
 def test_image_unreadable_is_a_value_error_with_a_fixed_detail():

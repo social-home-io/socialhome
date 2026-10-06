@@ -2,8 +2,14 @@
 
 * :func:`build_body_size_middleware` — caps inbound bodies at
   ``json_max_bytes`` for ``application/json`` requests and
-  ``media_max_bytes`` for everything else. The cap is best-effort —
-  aiohttp's own ``client_max_size`` setting is the hard ceiling.
+  ``media_max_bytes`` for everything else, from ``Content-Length`` alone.
+* :func:`read_body_capped` / :func:`read_part_capped` — stream a raw body
+  or one multipart part under a per-route cap. Every whole-body read
+  (``request.read()`` / ``json()`` / ``post()`` and, since aiohttp 3.13.3,
+  ``BodyPartReader.read()``) is ceilinged by the app-wide
+  ``client_max_size`` (:data:`DEFAULT_JSON_MAX_BYTES`); a route that takes
+  a bigger body goes through these helpers instead of widening that
+  ceiling for every route.
 * :func:`build_cors_deny_middleware` — refuses any request whose
   ``Origin`` header is not in the operator's allowlist. The default
   policy is "deny everything", which is correct for a single-tenant
@@ -23,7 +29,10 @@ import logging
 from collections.abc import Iterable
 from urllib.parse import urlparse
 
+import aiohttp
 from aiohttp import web
+
+from .domain.errors import PayloadTooLargeError
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +42,11 @@ DEFAULT_JSON_MAX_BYTES: int = 1 * 1024 * 1024
 
 #: Default media-upload body cap — 200 MiB matches the per-handler limit.
 DEFAULT_MEDIA_MAX_BYTES: int = 200 * 1024 * 1024
+
+#: Read granularity for the capped streaming readers. Large enough that a
+#: legitimate body is a handful of chunks, small enough that an oversized
+#: body is refused within one chunk of the cap.
+_BODY_CHUNK_BYTES: int = 64 * 1024
 
 
 # ─── Body-size middleware ────────────────────────────────────────────────
@@ -45,9 +59,15 @@ def build_body_size_middleware(
 ):
     """Build an aiohttp middleware that returns 413 for oversized bodies.
 
-    The check is on ``Content-Length`` only — chunked uploads bypass
-    it (aiohttp's own ``client_max_size`` covers those).  The
-    federation inbox has its own per-route limit on top.
+    The check is on ``Content-Length`` only — a chunked upload (no
+    length declared) passes straight through. What then bounds it is how
+    the route reads the body: every whole-body read (``request.read()`` /
+    ``json()`` / ``post()`` and ``BodyPartReader.read()``) is capped by
+    aiohttp's ``client_max_size`` (1 MiB, :data:`DEFAULT_JSON_MAX_BYTES`);
+    a route that takes a bigger body must stream through
+    :func:`read_body_capped` / :func:`read_part_capped`, which enforce the
+    route's own cap chunk by chunk. The federation inbox has its own
+    per-route limit on top.
     """
 
     @web.middleware
@@ -75,6 +95,63 @@ def build_body_size_middleware(
         return await handler(request)
 
     return middleware
+
+
+# ─── Capped streaming readers ────────────────────────────────────────────
+
+
+async def read_body_capped(request: web.BaseRequest, max_bytes: int) -> bytes:
+    """Read the raw request body, refusing anything over *max_bytes*.
+
+    Independent of the app-wide ``client_max_size``: ``request.read()``
+    buffers the whole body and raises 413 past that ceiling (1 MiB by
+    default), so a route that takes a bigger body (gallery items, backup
+    archives) streams it here under its own cap instead. A declared
+    ``Content-Length`` over the cap is refused before a byte is read; a
+    chunked body (no length — what Home Assistant ingress forwards) is
+    bounded while streaming. The ``Content-Length`` precheck is an early
+    out only: aiohttp auto-decompresses a ``Content-Encoding: gzip``
+    request body, so the declared length is the *compressed* size — the
+    streaming cap on the decompressed bytes is the actual guarantee. Either
+    way
+    :class:`~socialhome.domain.errors.PayloadTooLargeError` is raised the
+    moment the total crosses the cap — the rest of the body is never
+    buffered.
+    """
+    declared = request.content_length
+    if declared is not None and declared > max_bytes:
+        raise PayloadTooLargeError(max_bytes)
+    raw = bytearray()
+    # ``StreamReader.read(n)`` returns only what is buffered, so the cap is
+    # enforced by accumulating chunk by chunk and bailing the moment the
+    # total crosses it.
+    async for chunk in request.content.iter_chunked(_BODY_CHUNK_BYTES):
+        raw += chunk
+        if len(raw) > max_bytes:
+            raise PayloadTooLargeError(max_bytes)
+    return bytes(raw)
+
+
+async def read_part_capped(part: aiohttp.BodyPartReader, max_bytes: int) -> bytes:
+    """Read one multipart part, refusing anything over *max_bytes*.
+
+    Since aiohttp 3.13.3 (aio-libs/aiohttp#11889, "Enforce client_max_size
+    over entire multipart form") ``BodyPartReader.read()`` raises 413 once
+    the part exceeds the app-wide ``client_max_size`` (1 MiB by default).
+    ``read_chunk()`` is not covered by that ceiling, so this streams the
+    part under the route's own cap and raises
+    :class:`~socialhome.domain.errors.PayloadTooLargeError` the moment the
+    total crosses it — the rest of the part is never buffered.
+    """
+    raw = bytearray()
+    while True:
+        chunk = await part.read_chunk(_BODY_CHUNK_BYTES)
+        if not chunk:
+            break
+        raw += chunk
+        if len(raw) > max_bytes:
+            raise PayloadTooLargeError(max_bytes)
+    return bytes(raw)
 
 
 # ─── CORS-deny middleware ────────────────────────────────────────────────

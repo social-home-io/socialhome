@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import aiohttp
 import pytest
 from aiohttp import web
 
+from socialhome.domain.errors import PayloadTooLargeError
 from socialhome.hardening import (
     DEFAULT_JSON_MAX_BYTES,
     DEFAULT_MEDIA_MAX_BYTES,
     build_body_size_middleware,
     build_cors_deny_middleware,
     install_security_headers,
+    read_body_capped,
+    read_part_capped,
 )
 
 # pytest-homeassistant-custom-component (a transitive dev dep when this
@@ -104,6 +108,155 @@ async def test_body_size_no_content_length_passes(body_client):
     """Chunked / no length → middleware lets it through (aiohttp guards it)."""
     r = await body_client.post("/")
     assert r.status == 200
+
+
+# ─── Capped streaming readers ────────────────────────────────────────────
+#
+# ``read_body_capped`` / ``read_part_capped`` stream the request instead
+# of calling ``request.read()`` / ``BodyPartReader.read()``, so a route's
+# own cap — not aiohttp's app-wide ``client_max_size`` (1 MiB default) —
+# decides what it accepts.
+
+
+@pytest.fixture
+async def capped_client(aiohttp_client):
+    """Default ``client_max_size`` (1 MiB) + handlers that stream through
+    the helpers with a 10 MiB cap of their own."""
+
+    cap = 10 * 1024 * 1024
+
+    async def raw(request: web.Request) -> web.Response:
+        try:
+            data = await read_body_capped(request, cap)
+        except PayloadTooLargeError as exc:
+            return web.json_response({"max_mb": exc.params["max_mb"]}, status=413)
+        return web.json_response({"n": len(data), "sha": data[:4].hex()})
+
+    async def part(request: web.Request) -> web.Response:
+        reader = await request.multipart()
+        field = await reader.next()
+        assert isinstance(field, aiohttp.BodyPartReader)
+        try:
+            data = await read_part_capped(field, cap)
+        except PayloadTooLargeError as exc:
+            return web.json_response({"max_mb": exc.params["max_mb"]}, status=413)
+        return web.json_response({"n": len(data), "sha": data[:4].hex()})
+
+    app = web.Application()
+    app.router.add_post("/raw", raw)
+    app.router.add_post("/part", part)
+    return await aiohttp_client(app)
+
+
+@pytest.fixture
+async def tiny_cap_client(aiohttp_client):
+    """Same handlers with a 4 KiB cap so the over-cap branches are cheap."""
+
+    cap = 4096
+
+    async def raw(request: web.Request) -> web.Response:
+        if request.headers.get("X-Expect-Chunked"):
+            # The chunked test proves the no-Content-Length shape.
+            assert request.content_length is None
+        try:
+            data = await read_body_capped(request, cap)
+        except PayloadTooLargeError as exc:
+            return web.json_response({"max_mb": exc.params["max_mb"]}, status=413)
+        return web.Response(text=str(len(data)))
+
+    async def part(request: web.Request) -> web.Response:
+        reader = await request.multipart()
+        field = await reader.next()
+        assert isinstance(field, aiohttp.BodyPartReader)
+        try:
+            data = await read_part_capped(field, cap)
+        except PayloadTooLargeError as exc:
+            return web.json_response({"max_mb": exc.params["max_mb"]}, status=413)
+        return web.Response(text=str(len(data)))
+
+    app = web.Application()
+    app.router.add_post("/raw", raw)
+    app.router.add_post("/part", part)
+    return await aiohttp_client(app)
+
+
+def _form(data: bytes) -> aiohttp.FormData:
+    fd = aiohttp.FormData()
+    fd.add_field(
+        "file", data, filename="f.bin", content_type="application/octet-stream"
+    )
+    return fd
+
+
+async def test_read_body_capped_under_cap_returns_exact_bytes(tiny_cap_client):
+    body = bytes(range(256)) * 8  # 2 KiB
+    r = await tiny_cap_client.post("/raw", data=body)
+    assert r.status == 200
+    assert await r.text() == str(len(body))
+
+
+async def test_read_body_capped_refuses_declared_content_length_over_cap(
+    tiny_cap_client,
+):
+    body = b"x" * 5000
+    r = await tiny_cap_client.post("/raw", data=body)
+    assert r.status == 413
+    assert await r.json() == {"max_mb": 1}
+
+
+async def test_read_body_capped_refuses_chunked_body_over_cap(tiny_cap_client):
+    """No ``Content-Length`` (what HA ingress forwards) — the cap is
+    enforced while streaming, not from a header the request lacks."""
+
+    async def gen():
+        for _ in range(10):
+            yield b"y" * 1000
+
+    r = await tiny_cap_client.post(
+        "/raw", data=gen(), headers={"X-Expect-Chunked": "1"}
+    )
+    assert r.status == 413
+    assert await r.json() == {"max_mb": 1}
+
+
+async def test_read_part_capped_under_cap_returns_bytes(tiny_cap_client):
+    body = b"z" * 3000
+    r = await tiny_cap_client.post("/part", data=_form(body))
+    assert r.status == 200
+    assert await r.text() == str(len(body))
+
+
+async def test_read_part_capped_refuses_part_over_cap(tiny_cap_client):
+    r = await tiny_cap_client.post("/part", data=_form(b"z" * 5000))
+    assert r.status == 413
+    assert await r.json() == {"max_mb": 1}
+
+
+async def test_read_part_capped_reads_past_aiohttp_default_client_max_size(
+    capped_client,
+):
+    """aiohttp >= 3.13.3 (aio-libs/aiohttp#11889) makes
+    ``BodyPartReader.read()`` raise 413 once a part exceeds the app's
+    ``client_max_size`` (1 MiB by default). The helper streams the part in
+    chunks, so a 3 MiB part under the route's own 10 MiB cap is accepted
+    by an app that never widened ``client_max_size``."""
+    body = b"\x01\x02\x03\x04" + b"m" * (3 * 1024 * 1024)
+    assert len(body) > DEFAULT_JSON_MAX_BYTES
+    r = await capped_client.post("/part", data=_form(body))
+    assert r.status == 200
+    assert await r.json() == {"n": len(body), "sha": "01020304"}
+
+
+async def test_read_body_capped_reads_past_aiohttp_default_client_max_size(
+    capped_client,
+):
+    """``request.read()`` has always honoured ``client_max_size``; the
+    streaming helper does not, so a 3 MiB raw body passes a 10 MiB cap."""
+    body = b"\x0a\x0b\x0c\x0d" + b"r" * (3 * 1024 * 1024)
+    assert len(body) > DEFAULT_JSON_MAX_BYTES
+    r = await capped_client.post("/raw", data=body)
+    assert r.status == 200
+    assert await r.json() == {"n": len(body), "sha": "0a0b0c0d"}
 
 
 # ─── CORS-deny middleware ────────────────────────────────────────────────

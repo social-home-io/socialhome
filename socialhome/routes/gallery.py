@@ -22,11 +22,20 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
 from .. import app_keys as K
+from ..domain.errors import PayloadTooLargeError
+from ..hardening import read_body_capped, read_part_capped
 from ..media_signer import sign_media_urls_in
 from .base import BaseView
 from .media_status import READY, media_filename
 
 _GALLERY_SECTION = "gallery"
+
+#: Hard cap on one uploaded item — prevents OOM on a hostile client trying
+#: to upload a 2 GB file. 100 MiB mirrors what the browser guard enforces
+#: client-side. Enforced while streaming (``read_*_capped``), so it holds
+#: for chunked bodies too and is independent of aiohttp's 1 MiB
+#: ``client_max_size``.
+GALLERY_MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024
 
 
 def _album_dict(a) -> dict:
@@ -254,19 +263,18 @@ class AlbumItemCollectionView(BaseView):
         album_id = self.match("album_id")
         caption = self.request.query.get("caption")
 
-        # Hard cap on the request body — prevents OOM on a hostile client
-        # trying to upload a 2 GB file. 100 MiB mirrors what the browser
-        # guard enforces client-side.
-        MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+        # A declared ``Content-Length`` over the cap is refused before the
+        # body is touched — on both paths, so the multipart reader is never
+        # even opened for it. (``read_body_capped`` repeats the check for
+        # the raw path; it is cheap.)
         declared = self.request.content_length
-        if declared is not None and declared > MAX_UPLOAD_BYTES:
-            return web.json_response(
-                {"error": "file_too_large", "limit_bytes": MAX_UPLOAD_BYTES},
-                status=413,
-            )
+        if declared is not None and declared > GALLERY_MAX_UPLOAD_BYTES:
+            raise PayloadTooLargeError(GALLERY_MAX_UPLOAD_BYTES)
 
         # Accept multipart upload (preferred — frontend uses FormData)
         # or raw image bytes with a Content-Type header (CLI/scripts).
+        # Both paths stream under ``GALLERY_MAX_UPLOAD_BYTES``; an over-cap
+        # body raises ``PayloadTooLargeError`` (413) via ``_iter``.
         content_type = self.request.headers.get("Content-Type", "")
         if content_type.startswith("multipart/"):
             try:
@@ -278,18 +286,12 @@ class AlbumItemCollectionView(BaseView):
                 return web.json_response({"error": "missing file"}, status=422)
             if not isinstance(field, BodyPartReader):
                 return web.json_response({"error": "expected file part"}, status=400)
-            data = await field.read(decode=False)
+            data = await read_part_capped(field, GALLERY_MAX_UPLOAD_BYTES)
             content_type = field.headers.get("Content-Type", "image/jpeg")
         else:
-            data = await self.request.read()
+            data = await read_body_capped(self.request, GALLERY_MAX_UPLOAD_BYTES)
             if not content_type:
                 content_type = "application/octet-stream"
-
-        if len(data) > MAX_UPLOAD_BYTES:
-            return web.json_response(
-                {"error": "file_too_large", "limit_bytes": MAX_UPLOAD_BYTES},
-                status=413,
-            )
 
         item = await self.svc(K.gallery_service_key).upload_item(
             album_id,
