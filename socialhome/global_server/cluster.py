@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -30,6 +31,7 @@ from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .federation import certified_authority_repin
+from .public import SlidingWindowCounter
 
 if TYPE_CHECKING:
     from .repositories import (
@@ -45,7 +47,19 @@ log = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_S: int = 30
 HEARTBEAT_FAIL_THRESHOLD: int = 3
 SYNC_RETRY_DELAY_S: int = 5
+#: Spec §24.10.4 — ``/cluster/sync`` messages per minute per VERIFIED peer
+#: node (signature checked against the key pinned for that node). Never keyed
+#: on a claimed id: an unverified request must not spend a real node's budget.
 CLUSTER_RATE_LIMIT_PER_MIN: int = 60
+
+#: ``/cluster/sync`` requests per minute per source address that did NOT prove
+#: a known peer: malformed bodies, unknown senders, bad signatures, and
+#: first-contact (TOFU) NODE_HELLOs — self-signed under the key they carry, so
+#: they prove nothing about who sent them. Once spent, the address is shed
+#: before any parse, DB read or signature verification, which bounds the
+#: verify CPU a forged flood can burn. Genuine peers never touch it except for
+#: their one first-contact HELLO, so 30/min is far above real use.
+CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN: int = 30
 
 #: Spec §24.10.7 / S-8 — per-node ceiling on concurrent sync signaling
 #: sessions. ``pick_signaling_node`` filters out any node already at this
@@ -100,6 +114,9 @@ class ClusterService:
         "_partition_gaps",
         "_ws_registry",
         "_connected_clients",
+        "_clock",
+        "_sync_node_limiter",
+        "_sync_unverified_limiter",
     )
 
     def __init__(
@@ -115,6 +132,7 @@ class ClusterService:
         own_public_key_hex: str = "",
         enabled: bool = False,
         ws_registry: "GfsWebSocketRegistry | None" = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._repo = repo
         self._admin_repo = admin_repo
@@ -157,6 +175,44 @@ class ClusterService:
         #: counts are refreshed from incoming ``NODE_HEARTBEAT`` payloads.
         #: In-memory only — ephemeral, never persisted.
         self._connected_clients: dict[str, int] = {}
+        #: Monotonic clock for the ``/cluster/sync`` windows — injectable so
+        #: a window test never depends on wall time.
+        self._clock = clock
+        #: Per VERIFIED node id (spec §24.10.4). Capped LRU, like every GFS
+        #: limiter, though only proven peers ever get a bucket here.
+        self._sync_node_limiter = SlidingWindowCounter(CLUSTER_RATE_LIMIT_PER_MIN)
+        #: Per source address, spent only by requests that proved no known
+        #: peer (see :data:`CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN`).
+        self._sync_unverified_limiter = SlidingWindowCounter(
+            CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN
+        )
+
+    # ─── /cluster/sync budgets ───────────────────────────────────────
+
+    def sync_source_exhausted(self, client_ip: str) -> bool:
+        """Whether *client_ip* has spent its unverified budget.
+
+        Read-only — checked first, before the body is parsed or any
+        signature verified, so a shed request costs nothing.
+        """
+        return self._sync_unverified_limiter.exhausted(client_ip, now=self._clock())
+
+    def charge_unverified_sync(self, client_ip: str) -> bool:
+        """Spend one unit of *client_ip*'s unverified budget.
+
+        Called for every request that did not prove a known peer. Returns
+        whether the request is still within budget (a TOFU HELLO is refused
+        when it is not; a request already being rejected ignores it).
+        """
+        return self._sync_unverified_limiter.allow(client_ip, now=self._clock())
+
+    def charge_verified_sync(self, node_id: str) -> bool:
+        """Spend one unit of a VERIFIED peer's budget; ``False`` → 429.
+
+        *node_id* must be the id whose pinned key just verified the
+        request's signature — never a claimed one.
+        """
+        return self._sync_node_limiter.allow(node_id, now=self._clock())
 
     def _own_connected_clients(self) -> int:
         return (

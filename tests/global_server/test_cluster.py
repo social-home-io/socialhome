@@ -12,6 +12,8 @@ from socialhome.capabilities_sig import (
     verify_capabilities,
 )
 from socialhome.global_server.cluster import (
+    CLUSTER_RATE_LIMIT_PER_MIN,
+    CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
     MAX_SIGNALING_SESSIONS,
     NODE_HELLO,
     ClusterService,
@@ -564,3 +566,42 @@ async def test_handle_hello_ignores_a_message_from_this_node_itself(
     # No new node, and no reply-hello to ourselves.
     assert after == before
     assert posted == []
+
+
+# ─── /cluster/sync budgets (injected clock) ──────────────────────────
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 5000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_verified_sync_budget_is_per_node_and_slides(gfs_db):
+    clock = _Clock()
+    svc = ClusterService(SqliteClusterRepo(gfs_db), clock=clock)
+    for _ in range(CLUSTER_RATE_LIMIT_PER_MIN):
+        assert svc.charge_verified_sync("node-b")
+    assert not svc.charge_verified_sync("node-b")
+    assert svc.charge_verified_sync("node-c")
+    clock.now += 60.5
+    assert svc.charge_verified_sync("node-b")
+
+
+async def test_unverified_sync_budget_gates_the_address_read_only(gfs_db):
+    clock = _Clock()
+    svc = ClusterService(SqliteClusterRepo(gfs_db), clock=clock)
+    # Looking never spends: an address with no failures is never shed.
+    for _ in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN * 2):
+        assert not svc.sync_source_exhausted("203.0.113.9")
+    for _ in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN):
+        assert svc.charge_unverified_sync("203.0.113.9")
+    assert svc.sync_source_exhausted("203.0.113.9")
+    assert not svc.charge_unverified_sync("203.0.113.9")
+    assert not svc.sync_source_exhausted("198.51.100.7")
+    # The two budgets are independent: a node name is not an address.
+    assert svc.charge_verified_sync("203.0.113.9")
+    clock.now += 60.5
+    assert not svc.sync_source_exhausted("203.0.113.9")

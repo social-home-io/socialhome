@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import orjson
 import logging
-import time
+
+import orjson
 
 from aiohttp import web
 
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
 from ..cluster import (
-    CLUSTER_RATE_LIMIT_PER_MIN,
     NODE_HEARTBEAT,
     NODE_HELLO,
     NODE_PARTITION_CATCHUP,
@@ -23,12 +22,10 @@ from ..cluster import (
     NODE_SYNC_SPACE,
     verify_node_signature,
 )
+from ..public import SlidingWindowCounter
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
-
-#: Per-node inbound message window for NODE_* (spec §24.10.4).
-_CLUSTER_SYNC_HITS: dict[str, list[float]] = {}
 
 
 class ClusterHealthView(GfsBaseView):
@@ -39,59 +36,96 @@ class ClusterHealthView(GfsBaseView):
         return web.json_response(await svc.health())
 
 
+def _rate_limited() -> web.Response:
+    resp = web.json_response({"error": "rate_limited"}, status=429)
+    resp.headers["Retry-After"] = "60"
+    return resp
+
+
 class ClusterSyncView(GfsBaseView):
     """``POST /cluster/sync`` — NODE_* dispatch with signature + rate limit.
 
     Body is the raw canonical JSON ``{type, from, ts, payload}``; the
-    ``X-Node-Signature`` header carries the Ed25519 signature. Unknown
-    peers → 403 without verifying the sig (CPU-burn DoS guard).
+    ``X-Node-Signature`` header carries the Ed25519 signature.
+
+    Order matters (spec §24.10.4):
+
+    1. A source address that has spent its unverified budget is shed
+       before anything else — no parse, no DB read, no signature work.
+    2. Cheap structural checks: JSON object, ``type`` + ``from``, and a
+       known sender (NODE_HELLO excepted — TOFU). Unknown peers → 403
+       without verifying the sig (CPU-burn DoS guard).
+    3. Signature verification.
+    4. Only then a budget is spent: the per-node one keyed on the id
+       whose pinned key verified the request. A first-contact HELLO is
+       self-signed under the key it carries — it proves nothing about the
+       sender — so it spends the source address's budget instead.
+
+    Every failure in 2–3 spends the source address's budget, never a
+    node's: forged traffic naming a real peer cannot lock it out.
     """
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_cluster_key)
+        client_ip = self.client_ip()
+        if svc.sync_source_exhausted(client_ip):
+            return _rate_limited()
+
+        def _reject(response: web.Response) -> web.Response:
+            svc.charge_unverified_sync(client_ip)
+            return response
+
         raw = await self.request.read()
         try:
-            body = orjson.loads(raw.decode("utf-8"))
-        except Exception as exc:
-            raise web.HTTPBadRequest(reason="Invalid JSON body") from exc
+            body = orjson.loads(raw)
+        except orjson.JSONDecodeError:
+            body = None
+        if not isinstance(body, dict):
+            return _reject(
+                web.json_response({"error": "invalid_json"}, status=400),
+            )
 
         from_node = str(
             body.get("from") or self.request.headers.get("X-Node-Id") or "",
         )
         msg_type = str(body.get("type") or "")
         payload = body.get("payload") or {}
-        if not from_node or not msg_type:
-            raise web.HTTPBadRequest(reason="Missing 'type' or 'from'")
+        if not from_node or not msg_type or not isinstance(payload, dict):
+            return _reject(
+                web.json_response({"error": "invalid_message"}, status=400),
+            )
 
-        # Rate-limit per node (60 msgs / minute).
-        now = time.monotonic()
-        hits = [t for t in _CLUSTER_SYNC_HITS.get(from_node, []) if now - t < 60.0]
-        if len(hits) >= CLUSTER_RATE_LIMIT_PER_MIN:
-            return web.json_response({"error": "rate_limited"}, status=429)
-        hits.append(now)
-        _CLUSTER_SYNC_HITS[from_node] = hits
-
-        # Look up the peer's public key. NODE_HELLO is special-cased: the
-        # sender isn't yet in the DB, so we trust the payload (TOFU).
+        # Look up the peer's pinned key. NODE_HELLO is special-cased: a
+        # first-contact sender isn't in the DB yet, so it is verified under
+        # the key it carries (TOFU) — which proves the message is
+        # self-consistent, not who sent it.
         cluster_repo = self.svc(K.gfs_cluster_repo_key)
+        nodes = await cluster_repo.list_nodes()
+        match = next((n for n in nodes if n.node_id == from_node), None)
         if msg_type == NODE_HELLO:
             pk_hex = str(payload.get("public_key") or "")
+            proven = match is not None and bool(pk_hex) and match.public_key == pk_hex
+        elif match is None:
+            return _reject(
+                web.json_response({"error": "unknown_node"}, status=403),
+            )
         else:
-            nodes = await cluster_repo.list_nodes()
-            match = next((n for n in nodes if n.node_id == from_node), None)
-            if match is None:
-                return web.json_response(
-                    {"error": "unknown_node"},
-                    status=403,
-                )
             pk_hex = match.public_key
+            proven = True
 
         signature = self.request.headers.get("X-Node-Signature", "")
         if not verify_node_signature(raw, signature, pk_hex):
-            return web.json_response(
-                {"error": "invalid_signature"},
-                status=401,
+            return _reject(
+                web.json_response({"error": "invalid_signature"}, status=401),
             )
+
+        within_budget = (
+            svc.charge_verified_sync(from_node)
+            if proven
+            else svc.charge_unverified_sync(client_ip)
+        )
+        if not within_budget:
+            return _rate_limited()
 
         # Dispatch by message type.
         if msg_type == NODE_HELLO:
@@ -142,11 +176,11 @@ class ClusterSyncView(GfsBaseView):
 # ─── Sync-signaling round-robin (spec §24.10.7) ──────────────────────────
 
 
-#: Per-instance window for ``/cluster/signaling-session*`` calls.
-#: Same shape as ``_CLUSTER_SYNC_HITS`` but keyed by paired client
-#: instance_id (not cluster node_id).
-_SIGNALING_HITS: dict[str, list[float]] = {}
 _SIGNALING_LIMIT_PER_MIN: int = 60
+#: Per-instance window for ``/cluster/signaling-session*`` calls, keyed by
+#: the paired client instance_id whose signature already verified. The
+#: shared capped-LRU counter, so idle keys don't accumulate.
+_SIGNALING_LIMITER = SlidingWindowCounter(_SIGNALING_LIMIT_PER_MIN)
 
 
 async def _verify_caller(view: GfsBaseView, body: dict) -> tuple[str, dict]:
@@ -173,12 +207,8 @@ async def _verify_caller(view: GfsBaseView, body: dict) -> tuple[str, dict]:
 
 
 def _check_signaling_rate(instance_id: str) -> None:
-    now = time.monotonic()
-    hits = [t for t in _SIGNALING_HITS.get(instance_id, []) if now - t < 60.0]
-    if len(hits) >= _SIGNALING_LIMIT_PER_MIN:
+    if not _SIGNALING_LIMITER.allow(instance_id):
         raise web.HTTPTooManyRequests(reason="rate_limited")
-    hits.append(now)
-    _SIGNALING_HITS[instance_id] = hits
 
 
 class ClusterSignalingBeginView(GfsBaseView):

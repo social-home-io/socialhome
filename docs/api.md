@@ -1265,7 +1265,7 @@ sync. The GFS holds no PeerConnection.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/cluster/sync` | Cluster-node state sync. |
+| POST | `/cluster/sync` | Cluster-node state sync: a signed `NODE_*` message `{type, from, ts, payload}` with the Ed25519 signature in `X-Node-Signature`. Checked in this order: source address over its unverified budget → 429; not a JSON object / missing `type` or `from` → 400; unknown sender (anything but `NODE_HELLO`) → 403; bad signature → 401; then the rate limit (see Rate limits). A first-contact `NODE_HELLO` is verified under the key it carries (TOFU). |
 | GET | `/cluster/health` | Node health. |
 | POST | `/cluster/signaling-session` | **Legacy.** Pick a least-loaded signaling node for a sync session (spec §24.10.7). Kept for older households; current households never call it (a sync tells the GFS nothing — see `protocol/sync.md`). |
 | POST | `/cluster/signaling-session/release` | **Legacy.** Release a signaling session on `SPACE_SYNC_DIRECT_READY` / `DIRECT_FAILED`. Older households only. |
@@ -1331,6 +1331,7 @@ These pages are server-rendered HTML and require no auth.
 | `GET /api/calls/ice-servers` | 30 / min / user |
 | `POST /api/link-preview` | 30 / min / user — on top, the service caps **fresh page fetches** (cache misses, including the ones a post create causes) at 20 / 5 min per member and 60 / 5 min per household; over budget the answer is simply "no card". |
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
+| `POST /cluster/sync` | 60 / min per **verified** peer node — counted only after the signature verified under the key pinned for that node, never on the `from` a request claims, so forged traffic naming a real peer cannot lock it out. Every request that proves no known peer — malformed body, unknown sender, bad signature, or a first-contact (TOFU) `NODE_HELLO`, which is self-signed and so proves nothing about its sender — spends a separate 30 / min per **source address** budget instead; once that is spent the address is shed with 429 before any parse, database read or signature verification. Genuine peers only touch it with their one first-contact HELLO. Behind a shared reverse proxy configure `trusted_proxies` (below) so the budget keys on the real client. |
 | `POST /cluster/signaling-session{,/release}` (legacy) | 60 / min / paired instance |
 | `GET /` + `GET /spaces/{id}` + `GET /join/{token}` (GFS public pages) | 30 / min / IP — `/join/` rides the same window: it is the page an attacker would hammer to walk the token space, and since it writes nothing there is no household identity to key a limiter on. |
 | `GET /api/invite-links/{token}/code` | 30 / min / IP — the endpoint is unauthenticated (the token IS the credential), so the client address is the only handle. Not brute-force protection: a token is a uuid4 hex and is not guessable. It is ordinary anonymous-endpoint shedding, and one visitor legitimately hits it once per link they open. Live and dead tokens answer identically apart from the status code. |

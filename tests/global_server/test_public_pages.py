@@ -647,6 +647,27 @@ def test_rate_limit_counter_drops_expired_hits():
     assert counter.allow("a", now=1061.0)
 
 
+def test_rate_limit_counter_exhausted_is_a_read_only_peek():
+    """``exhausted`` answers "would the next hit be refused?" without
+    recording a hit or refreshing the key's recency."""
+    counter = SlidingWindowCounter(limit=2, max_keys=2)
+    assert not counter.exhausted("a", now=1000.0)
+    assert "a" not in counter
+    counter.allow("a", now=1000.0)
+    assert not counter.exhausted("a", now=1000.1)
+    counter.allow("a", now=1000.2)
+    assert counter.exhausted("a", now=1000.3)
+    # Peeking repeatedly never adds hits — the window still rolls over.
+    for _ in range(10):
+        counter.exhausted("a", now=1030.0)
+    assert not counter.exhausted("a", now=1061.0)
+    # And never refreshes recency: "a" is still the oldest, evicted first.
+    counter.allow("b", now=1001.0)
+    counter.exhausted("a", now=1002.0)
+    counter.allow("c", now=1003.0)
+    assert "a" not in counter
+
+
 def test_rate_limit_counter_evicts_least_recent_first():
     counter = SlidingWindowCounter(limit=5, max_keys=3)
     for key in ("a", "b", "c"):
