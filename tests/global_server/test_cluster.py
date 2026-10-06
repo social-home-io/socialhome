@@ -32,6 +32,7 @@ from socialhome.global_server.cluster import (
     FrameVerdict,
     UnsupportedClusterSigSuite,
     authorize_frame,
+    is_member,
     parse_cluster_sig_suite,
 )
 from socialhome.global_server.config import GfsConfig
@@ -108,6 +109,7 @@ async def test_pick_signaling_node_picks_least_loaded(enabled_cluster, gfs_db):
         ClusterNode(
             node_id="node-b",
             url="https://b.gfs.test",
+            public_key=_OWN,
             status="online",
         )
     )
@@ -115,6 +117,7 @@ async def test_pick_signaling_node_picks_least_loaded(enabled_cluster, gfs_db):
         ClusterNode(
             node_id="node-c",
             url="https://c.gfs.test",
+            public_key=_OWN,
             status="online",
         )
     )
@@ -130,10 +133,14 @@ async def test_pick_signaling_node_deterministic_tiebreak(enabled_cluster, gfs_d
     """Equal counts → break ties by node_id ascending."""
     repo = SqliteClusterRepo(gfs_db)
     await repo.insert_node(
-        ClusterNode(node_id="node-z", url="https://z.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-z", url="https://z.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await repo.insert_node(
-        ClusterNode(node_id="node-m", url="https://m.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-m", url="https://m.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     chosen = await enabled_cluster.pick_signaling_node()
     # All three (a, m, z) have count 0 → 'node-a' wins by node_id sort.
@@ -163,7 +170,9 @@ async def test_pick_signaling_node_returns_none_when_all_at_cap(
     """Every candidate at MAX_SIGNALING_SESSIONS → None (S-8 reject)."""
     repo = SqliteClusterRepo(gfs_db)
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     enabled_cluster._active_sync_count["node-a"] = MAX_SIGNALING_SESSIONS
     enabled_cluster._active_sync_count["node-b"] = MAX_SIGNALING_SESSIONS
@@ -191,7 +200,9 @@ async def test_note_signaling_started_peer_does_not_persist(
     """A peer's count moves only in-memory; the DB row is the peer's truth."""
     repo = SqliteClusterRepo(gfs_db)
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.note_signaling_started("node-b")
     assert enabled_cluster._active_sync_count["node-b"] == 1
@@ -214,7 +225,9 @@ async def test_handle_heartbeat_updates_peer_active_count(
     """NODE_HEARTBEAT carries the peer's live count → cluster_nodes row."""
     repo = SqliteClusterRepo(gfs_db)
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat(
         "node-b",
@@ -233,7 +246,9 @@ async def test_handle_heartbeat_without_payload_is_compat(
     """Older peers that omit the count still get a fresh last_seen."""
     repo = SqliteClusterRepo(gfs_db)
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat("node-b", None)
     nodes = await repo.list_nodes()
@@ -259,7 +274,9 @@ async def test_handle_heartbeat_last_seen_matches_added_at_naive_utc_shape(
     """
     repo = SqliteClusterRepo(gfs_db)
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat("node-b", None)
     nodes = await repo.list_nodes()
@@ -291,7 +308,9 @@ async def test_handle_heartbeat_stores_connected_clients(
     """NODE_HEARTBEAT carrying connected_clients records it in-memory."""
     repo = SqliteClusterRepo(gfs_db)
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat(
         "node-b",
@@ -307,7 +326,9 @@ async def test_handle_heartbeat_missing_connected_clients_no_clobber(
     """An older peer omitting connected_clients does not overwrite a prior value."""
     repo = SqliteClusterRepo(gfs_db)
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     await enabled_cluster.handle_heartbeat("node-b", {"connected_clients": 7})
     assert enabled_cluster._connected_clients["node-b"] == 7
@@ -328,7 +349,9 @@ async def test_admin_cluster_includes_self_and_peer_counts(gfs_db):
         ws_registry=_StubWsRegistry(11),
     )
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
     svc._connected_clients["node-b"] = 5
     svc._active_sync_count["node-b"] = 3
@@ -363,7 +386,9 @@ async def test_admin_cluster_self_with_row_emitted_once(gfs_db):
         ClusterNode(node_id="node-a", url="https://a.gfs.test", status="online"),
     )
     await repo.insert_node(
-        ClusterNode(node_id="node-b", url="https://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="node-b", url="https://b.gfs.test", public_key=_OWN, status="online"
+        ),
     )
 
     result = await svc.admin_cluster()
@@ -692,7 +717,7 @@ async def test_every_known_peer_send_names_its_recipient(enabled_cluster, monkey
         ClusterNode(
             node_id="node-b",
             url="https://b.gfs.test",
-            public_key=_PIN,
+            public_key=_OWN,
             status="online",
         )
     )
@@ -792,9 +817,12 @@ def test_non_hello_verifies_under_the_pin_or_our_own_key():
 
     assert _hb(None) == FrameVerdict(error="unknown_node")
     assert _hb(_row(_PIN)) == FrameVerdict(verify_key=_PIN)
-    # A sibling row stored with no key is a shared-seed sibling.
-    assert _hb(_row("")) == FrameVerdict(verify_key=_OWN)
-    assert _hb(_row(""), own="") == FrameVerdict(error="unknown_node")
+    # A shared-seed sibling's row holds our own key (a HELLO under it
+    # created the row) and verifies under it.
+    assert _hb(_row("", legacy_public_key=_OWN)) == FrameVerdict(verify_key=_OWN)
+    # A row with neither is no member (:func:`is_member`).
+    assert _hb(_row("")) == FrameVerdict(error="unapproved_node")
+    assert _hb(_row(""), own="") == FrameVerdict(error="unapproved_node")
 
 
 @pytest.mark.security
@@ -809,11 +837,24 @@ def test_the_legacy_public_key_column_is_never_trusted():
         carried_key="",
         row=legacy,
         own_key=_OWN,
-    ) == FrameVerdict(verify_key=_OWN)
+    ) == FrameVerdict(error="unapproved_node")
     # An approved row whose public_key an old node overwrote.
     overwritten = _row(_PIN, legacy_public_key=_OTHER)
     assert _hello(_OTHER, overwritten) == FrameVerdict(error="key_mismatch")
     assert _hello(_PIN, overwritten) == FrameVerdict(verify_key=_PIN)
+
+
+def test_is_member_needs_an_approval_or_our_own_key():
+    """The one membership rule, shared by inbound and outbound."""
+    assert is_member(_row(_PIN), _OWN)
+    assert is_member(_row(_OWN), _OWN)
+    assert is_member(_row("", legacy_public_key=_OWN), _OWN)
+    assert is_member(_row("", legacy_public_key=_OWN.upper()), _OWN)
+    # A TOFU row an old-version node wrote, a keyless row, no identity.
+    assert not is_member(_row("", legacy_public_key=_OTHER), _OWN)
+    assert not is_member(_row(""), _OWN)
+    assert not is_member(_row(""), "")
+    assert is_member(_row(_PIN), "")
 
 
 # ─── key_source in the admin view ────────────────────────────────────

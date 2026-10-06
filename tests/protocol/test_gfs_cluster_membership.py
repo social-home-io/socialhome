@@ -35,7 +35,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from aiohttp import ClientSession, CookieJar
+from aiohttp import ClientSession, CookieJar, web
 from aiohttp.test_utils import TestServer
 
 from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
@@ -52,7 +52,7 @@ from socialhome.global_server.cluster import (
     ClusterService,
 )
 from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClusterNode
+from socialhome.global_server.domain import ClusterNode, GfsFraudReport
 from socialhome.global_server.server import create_gfs_app
 
 pytestmark = pytest.mark.security
@@ -83,6 +83,15 @@ class _Roster:
         if row is not None:
             self.rows[node_id] = replace(
                 row, status=status, last_seen=last_seen, url=row.url or url_if_empty
+            )
+
+    async def reclaim_node(
+        self, node_id: str, *, url: str, public_key: str, status: str, last_seen: str
+    ) -> None:
+        row = self.rows.get(node_id)
+        if row is not None and not row.approved_key:
+            self.rows[node_id] = replace(
+                row, url=url, public_key=public_key, status=status, last_seen=last_seen
             )
 
     async def list_nodes(self) -> list[ClusterNode]:
@@ -253,7 +262,7 @@ async def test_after_upgrade_only_the_shared_seed_sibling_rejoins(gfs):
     assert await _post(
         gfs,
         *_frame(foreign_seed, type_=NODE_HEARTBEAT, from_node="old-peer", payload={}),
-    ) == (401, {"error": "invalid_signature"})
+    ) == (403, {"error": "unapproved_node"})
     assert (await _roster(gfs))["old-peer"].approved_key == ""
 
 
@@ -481,4 +490,155 @@ async def test_an_old_version_tofu_row_grants_nothing(gfs, tmp_dir):
     ) == (403, {"error": "unapproved_node"})
     assert await _post(
         gfs, *_frame(attacker, type_=NODE_HEARTBEAT, from_node="tofu", payload={})
-    ) == (401, {"error": "invalid_signature"})
+    ) == (403, {"error": "unapproved_node"})
+
+
+# ─── Outbound: a non-member row receives nothing ─────────────────────────
+
+
+class _Listener:
+    """A stub node that records every request it gets."""
+
+    def __init__(self) -> None:
+        self.hits: list[tuple[str, str, bytes]] = []
+        app = web.Application()
+        app.router.add_route("*", "/{tail:.*}", self._record)
+        self.server = TestServer(app)
+
+    async def _record(self, request: web.Request) -> web.Response:
+        self.hits.append((request.method, request.path, await request.read()))
+        if request.path == "/cluster/health":
+            return web.json_response({"node_id": "stub", "peers": []})
+        return web.json_response({"status": "ok"})
+
+    @property
+    def url(self) -> str:
+        return _url(self.server)
+
+    def types(self) -> list[str]:
+        """The ``type`` of every ``/cluster/sync`` frame received."""
+        return [
+            json.loads(body)["type"]
+            for method, path, body in self.hits
+            if method == "POST" and path == "/cluster/sync"
+        ]
+
+
+@pytest.fixture
+async def listeners() -> AsyncIterator[tuple[_Listener, _Listener]]:
+    """``(member, tofu)``: a shared-seed sibling and an old-version TOFU row."""
+    pair = (_Listener(), _Listener())
+    for listener in pair:
+        await listener.server.start_server()
+    try:
+        yield pair
+    finally:
+        for listener in pair:
+            await listener.server.close()
+
+
+async def _member_and_tofu_rows(gfs, tmp_dir, member, tofu) -> None:
+    """node-b: a shared-seed sibling (joined through our own key). tofu: a
+    row an old-version node inserted for an attacker's self-signed HELLO."""
+    await gfs.app[gfs_cluster_repo_key].insert_node(
+        ClusterNode(
+            node_id="node-b",
+            url=member.url,
+            public_key=_own_key(gfs),
+            status="online",
+            last_seen="2026-01-01 00:00:00",
+        )
+    )
+    attacker_key = ed25519_public_key(secrets.token_bytes(32)).hex()
+    _old_version_write(
+        tmp_dir,
+        "INSERT INTO cluster_nodes(node_id, url, public_key, status, last_seen)"
+        " VALUES('tofu', ?, ?, 'online', datetime('now'))",
+        (tofu.url, attacker_key),
+    )
+
+
+def _report() -> GfsFraudReport:
+    return GfsFraudReport(
+        id="r1",
+        target_type="space",
+        target_id="space-1",
+        category="spam",
+        notes=None,
+        reporter_instance_id="reporter-household",
+        reporter_user_id="reporter-user",
+        status="pending",
+        created_at=int(time.time()),
+    )
+
+
+async def test_a_tofu_row_receives_no_broadcast(gfs, tmp_dir, listeners):
+    """A fraud report names its reporter: it must reach members only."""
+    member, tofu = listeners
+    await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)
+    await gfs.app[gfs_cluster_key].sync_report(_report())
+    assert member.types() == ["NODE_SYNC_REPORT"]
+    assert tofu.hits == []
+
+
+async def test_a_tofu_row_receives_no_heartbeat(gfs, tmp_dir, listeners):
+    member, tofu = listeners
+    await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)
+    await gfs.app[gfs_cluster_key]._heartbeat_tick()
+    assert member.types() == [NODE_HEARTBEAT]
+    assert tofu.hits == []
+
+
+async def test_a_tofu_row_receives_no_partition_catchup(gfs, tmp_dir, listeners):
+    member, tofu = listeners
+    await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)
+    svc = gfs.app[gfs_cluster_key]
+    svc.record_relay_ts("space-1")
+    for node_id in ("node-b", "tofu"):
+        await svc.apply_partition_catchup(node_id, {"space-1": 0})
+    assert member.types() == ["NODE_PARTITION_GAP"]
+    assert tofu.hits == []
+
+
+async def test_a_tofu_row_is_never_the_signaling_node(gfs, tmp_dir, listeners):
+    member, tofu = listeners
+    await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)
+    svc = gfs.app[gfs_cluster_key]
+    # The idle TOFU row would win the least-connections pick.
+    svc._active_sync_count.update({"node-a": 3, "node-b": 2})
+    assert await svc.pick_signaling_node() == member.url
+    svc._active_sync_count["node-b"] = 4
+    assert await svc.pick_signaling_node() == _UNREACHABLE
+
+
+async def test_a_tofu_row_is_not_listed_on_cluster_health(gfs, tmp_dir, listeners):
+    member, tofu = listeners
+    await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)
+    async with ClientSession() as http:
+        async with http.get(f"{_url(gfs)}/cluster/health") as resp:
+            body = await resp.json()
+    assert [p["node_id"] for p in body["peers"]] == ["node-b"]
+    assert tofu.url not in json.dumps(body)
+
+
+async def test_a_tofu_row_cannot_send_frames_even_under_our_key(
+    gfs, tmp_dir, listeners
+):
+    """Inbound applies the same rule: a row that is not a member takes no
+    non-HELLO frame. A real sibling whose row an old version rewrote is a
+    member again once its next HELLO — signed under our key — reclaims it."""
+    member, tofu = listeners
+    await _member_and_tofu_rows(gfs, tmp_dir, member, tofu)
+    seed = _own_seed(gfs)
+    assert await _post(
+        gfs, *_frame(seed, type_=NODE_HEARTBEAT, from_node="tofu", payload={})
+    ) == (403, {"error": "unapproved_node"})
+    hello = {"node_id": "tofu", "url": member.url, "public_key": _own_key(gfs)}
+    assert await _post(
+        gfs, *_frame(seed, type_=NODE_HELLO, from_node="tofu", payload=hello)
+    ) == (200, {"status": "ok"})
+    row = (await _roster(gfs))["tofu"]
+    assert (row.public_key, row.url) == (_own_key(gfs), member.url)
+    assert await _post(
+        gfs, *_frame(seed, type_=NODE_HEARTBEAT, from_node="tofu", payload={})
+    ) == (200, {"status": "ok"})

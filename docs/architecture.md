@@ -711,7 +711,15 @@ it by trust-on-first-use, and an old-version node still sharing `gfs.db`
 during a rolling upgrade keeps doing so, harmlessly. The decision is one pure function,
 `global_server/cluster.py:authorize_frame`, taken before any signature work:
 a `NODE_HELLO` under a key the node does not hold is refused
-(`unapproved_node`) and writes nothing; a HELLO for a known node under a
+(`unapproved_node`) and writes nothing; any other frame needs a row that is a
+member (`is_member`: an approved key, or our own identity key on the row —
+which only a HELLO verified under our seed can have written, in this build or
+an old one); the same predicate gates every OUTBOUND path too (fan-out,
+heartbeats, partition catch-up, the signaling pick and the public
+`/cluster/health` list), so a row an old-version node inserted by
+trust-on-first-use never receives a fraud report, a relay or a heartbeat. A
+sibling row such an old node rewrote to another key is reclaimed by the
+sibling's next HELLO under our key (key and URL together); a HELLO for a known node under a
 different key is refused (`key_mismatch`, WARNING) — an approval never moves
 in-band, and the repo's `approve_node` keeps a non-empty `approved_key` in SQL
 as well, so rotation is delete then re-add. Liveness refreshes (a HELLO, a heartbeat, the heartbeat loop's ping) are UPDATE-only (`touch_node`), so an admin removal that lands while a ping or a verify is in flight stays removed and a re-added key is never reverted; only add-peer and a first HELLO under our own key create a row. A row's URL does not move in-band either: a

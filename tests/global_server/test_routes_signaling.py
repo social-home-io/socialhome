@@ -106,7 +106,12 @@ async def test_signaling_session_picks_least_loaded_peer(signed_caller):
     cluster = tc._app[gfs_cluster_key]
     # Add an idle peer; load self up so the peer wins.
     await cluster_repo.insert_node(
-        ClusterNode(node_id="gfs-node-b", url="http://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="gfs-node-b",
+            url="http://b.gfs.test",
+            public_key=cluster.own_public_key_hex,
+            status="online",
+        ),
     )
     cluster._active_sync_count["gfs-node-a"] = 50
 
@@ -123,7 +128,12 @@ async def test_signaling_session_returns_503_when_all_at_cap(signed_caller):
     cluster_repo = tc._app[gfs_cluster_repo_key]
     cluster = tc._app[gfs_cluster_key]
     await cluster_repo.insert_node(
-        ClusterNode(node_id="gfs-node-b", url="http://b.gfs.test", status="online"),
+        ClusterNode(
+            node_id="gfs-node-b",
+            url="http://b.gfs.test",
+            public_key=cluster.own_public_key_hex,
+            status="online",
+        ),
     )
     cluster._active_sync_count["gfs-node-a"] = MAX_SIGNALING_SESSIONS
     cluster._active_sync_count["gfs-node-b"] = MAX_SIGNALING_SESSIONS

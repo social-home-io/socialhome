@@ -1249,7 +1249,7 @@ async def test_upgrade_trusts_no_pre_existing_key_and_shared_seed_siblings_stay(
         resp = await hello("old-peer", foreign_seed, foreign_key)
         assert (resp.status, await resp.json()) == (403, {"error": "unapproved_node"})
         resp = await _sync(tc, from_node="old-peer", seed=foreign_seed, ip=GENUINE_IP)
-        assert (resp.status, await resp.json()) == (401, {"error": "invalid_signature"})
+        assert (resp.status, await resp.json()) == (403, {"error": "unapproved_node"})
 
         # A forger holding the legacy derived key gets nowhere either.
         resp = await hello("legacy-node", derived_seed, derived_key)
@@ -1257,7 +1257,7 @@ async def test_upgrade_trusts_no_pre_existing_key_and_shared_seed_siblings_stay(
         resp = await _sync(
             tc, from_node="legacy-node", seed=derived_seed, ip=GENUINE_IP
         )
-        assert (resp.status, await resp.json()) == (401, {"error": "invalid_signature"})
+        assert (resp.status, await resp.json()) == (403, {"error": "unapproved_node"})
 
         # The admin view: the sibling shares our key; the others need re-adding.
         view = await app[gfs_cluster_key].admin_cluster()
@@ -1283,7 +1283,7 @@ async def test_a_foreign_peer_rejoins_once_an_admin_re_adds_it(client, outbound_
         )
     )
     resp = await _sync(client, from_node="old-peer", seed=seed, ip=GENUINE_IP)
-    assert resp.status == 401
+    assert (resp.status, await resp.json()) == (403, {"error": "unapproved_node"})
     resp = await client.post(
         "/admin/api/cluster/peers",
         json={

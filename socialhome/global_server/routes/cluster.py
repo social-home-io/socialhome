@@ -79,8 +79,9 @@ class ClusterSyncView(GfsBaseView):
        ``wrong_recipient`` (a frame for another node, replayed to us).
     5. Already-accepted bytes → 409 ``replay`` (in-memory, no crypto).
     6. Membership → 403 ``unknown_node`` (non-HELLO, no row),
-       ``unapproved_node`` (HELLO under a key we don't hold; nothing is
-       written), ``key_mismatch`` (HELLO for a known node under a key
+       ``unapproved_node`` (HELLO under a key we don't hold — nothing is
+       written — or a non-HELLO from a row that is no member, see
+       :func:`~socialhome.global_server.cluster.is_member`), ``key_mismatch`` (HELLO for a known node under a key
        other than its approved key; WARNING) or ``cluster_full`` (a first
        own-key HELLO while :data:`~socialhome.global_server.cluster.CLUSTER_MAX_NODES`
        peers already have rows).
@@ -381,9 +382,9 @@ class ClusterSignalingBeginView(GfsBaseView):
         # Distinguish single-node (None and not enabled) from cap-hit
         # (None and enabled).
         if chosen_url is None:
-            cluster_repo = self.svc(K.gfs_cluster_repo_key)
-            nodes = await cluster_repo.list_nodes()
-            online_peers = [n for n in nodes if n.status != "offline"]
+            online_peers = [
+                n for n in await cluster.member_peers() if n.status != "offline"
+            ]
             if online_peers:
                 # Cluster mode + every peer at cap → S-8 capacity reject.
                 return web.json_response(
@@ -396,8 +397,7 @@ class ClusterSignalingBeginView(GfsBaseView):
             )
 
         # Map URL back to node_id so we can bump the right counter.
-        cluster_repo = self.svc(K.gfs_cluster_repo_key)
-        chosen_node_id = await _node_id_for_url(cluster_repo, chosen_url)
+        chosen_node_id = await cluster.node_id_for_url(chosen_url)
         await cluster.note_signaling_started(chosen_node_id)
         return web.json_response(
             {"signaling_node": chosen_url, "session_id": sync_id},
@@ -425,19 +425,7 @@ class ClusterSignalingEndView(GfsBaseView):
         _check_signaling_rate(instance_id)
 
         cluster = self.svc(K.gfs_cluster_key)
-        cluster_repo = self.svc(K.gfs_cluster_repo_key)
-        node_id = await _node_id_for_url(cluster_repo, signaling_node)
+        node_id = await cluster.node_id_for_url(signaling_node)
         if node_id:
             await cluster.note_signaling_ended(node_id)
         return web.json_response({"status": "released"})
-
-
-async def _node_id_for_url(cluster_repo, url: str) -> str:
-    """Resolve a cluster-node URL back to its node_id, or empty string."""
-    if not url:
-        return ""
-    nodes = await cluster_repo.list_nodes()
-    for n in nodes:
-        if n.url == url:
-            return n.node_id
-    return ""

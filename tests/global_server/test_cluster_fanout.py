@@ -276,7 +276,8 @@ async def test_post_to_peer_raises_on_non_2xx(
             ClusterNode(
                 node_id="ghost",
                 url="http://127.0.0.1:1",
-                public_key="",
+                # A shared-seed sibling: only members get fan-out.
+                public_key=a.app[gfs_cluster_key].own_public_key_hex,
                 status="online",
             )
         )
@@ -337,7 +338,8 @@ async def test_heartbeat_loop_tracks_peer_liveness(
             ClusterNode(
                 node_id="ghost",
                 url="http://127.0.0.1:1",
-                public_key="",
+                # A shared-seed sibling: only members are pinged.
+                public_key=a.app[gfs_cluster_key].own_public_key_hex,
                 status="online",
             )
         )
@@ -362,7 +364,7 @@ async def test_heartbeat_loop_tracks_peer_liveness(
             ClusterNode(
                 node_id="B-alias",
                 url=url_b,
-                public_key="",
+                public_key=a.app[gfs_cluster_key].own_public_key_hex,
                 status="offline",
             )
         )

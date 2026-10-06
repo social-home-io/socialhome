@@ -1337,3 +1337,29 @@ async def test_cluster_insert_node_never_overwrites_a_row(gfs_db):
     )
     (row,) = await repo.list_nodes()
     assert (row.url, row.public_key) == ("http://b", "aa" * 32)
+
+
+async def test_cluster_reclaim_node_rekeys_only_an_unapproved_row(gfs_db):
+    """A shared-seed sibling reclaims a row an old-version node rewrote;
+    an approved row — and a missing one — is left alone."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://evil", public_key="ee" * 32)
+    )
+    await repo.approve_node("c", "http://c", "cc" * 32)
+    for node_id in ("b", "c", "ghost"):
+        await repo.reclaim_node(
+            node_id,
+            url="http://b",
+            public_key="aa" * 32,
+            status="online",
+            last_seen="2026-01-02 00:00:00",
+        )
+    rows = {r.node_id: r for r in await repo.list_nodes()}
+    assert set(rows) == {"b", "c"}
+    assert (rows["b"].url, rows["b"].public_key, rows["b"].status) == (
+        "http://b",
+        "aa" * 32,
+        "online",
+    )
+    assert (rows["c"].url, rows["c"].public_key) == ("http://c", "cc" * 32)

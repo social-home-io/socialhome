@@ -1170,6 +1170,15 @@ class AbstractClusterRepo(Protocol):
         last_seen: str | None,
         url_if_empty: str = "",
     ) -> None: ...
+    async def reclaim_node(
+        self,
+        node_id: str,
+        *,
+        url: str,
+        public_key: str,
+        status: str,
+        last_seen: str,
+    ) -> None: ...
     async def remove_node(self, node_id: str) -> None: ...
     async def update_active_sync_sessions(
         self,
@@ -1257,6 +1266,31 @@ class SqliteClusterRepo:
             WHERE node_id=?
             """,
             (status, last_seen, url_if_empty, node_id),
+        )
+
+    async def reclaim_node(
+        self,
+        node_id: str,
+        *,
+        url: str,
+        public_key: str,
+        status: str,
+        last_seen: str,
+    ) -> None:
+        """Re-key an EXISTING row with no approval to our own *public_key*
+        and the *url* a HELLO verified under that key carried — UPDATE only.
+
+        For a shared-seed sibling whose row an old-version node sharing the
+        DB rewrote by trust-on-first-use. A row an admin approved (or
+        removed) meanwhile is left alone.
+        """
+        await self._db.enqueue(
+            """
+            UPDATE cluster_nodes SET
+                url=?, public_key=?, status=?, last_seen=?
+            WHERE node_id=? AND approved_key=''
+            """,
+            (url, public_key, status, last_seen, node_id),
         )
 
     async def list_nodes(self) -> list[ClusterNode]:

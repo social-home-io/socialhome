@@ -264,6 +264,43 @@ class FrameVerdict:
     error: str = ""
 
 
+def is_member(row: ClusterNode, own_key: str) -> bool:
+    """Whether the ``cluster_nodes`` *row* is a cluster member (spec §24.10).
+
+    The one membership rule, for both directions: :func:`authorize_frame`
+    takes frames only from a member row, and every outbound path —
+    fan-out, heartbeats, partition catch-up, the signaling pick and the
+    public ``/cluster/health`` list — targets member rows only. A row is a
+    member if and only if
+
+    * an operator approved a key for it (``approved_key`` non-empty —
+      written by admin add-peer alone, never by old-version code), or
+    * its ``public_key`` is our OWN identity key: a shared-seed sibling.
+      Every writer of that value proved the seed first — this build's
+      :meth:`ClusterService.handle_hello` inserts or reclaims a row with
+      our key only after a HELLO verified under it, and an old-version
+      node sharing the DB writes ``public_key`` only as the key the HELLO
+      verified under (trust-on-first-use checks the signature against the
+      carried key), so writing OUR key takes a signature by our seed. Old
+      code's other writes copy a row's own snapshot back or write ``''``.
+
+    Everything else — a TOFU row an old-version node inserted for some
+    self-signed HELLO, a sibling row such a node rewrote to an attacker's
+    key, a keyless row from the old add-peer — is not a member: it gets
+    no traffic and its frames are refused until a HELLO under our key
+    reclaims it, or an operator approves it.
+    """
+    if row.approved_key:
+        return True
+    own = own_key.lower()
+    return bool(own) and row.public_key.lower() == own
+
+
+def member_url(row: ClusterNode) -> str:
+    """The base URL outbound traffic to member *row* goes to."""
+    return row.url
+
+
 def authorize_frame(
     *,
     msg_type: str,
@@ -295,7 +332,8 @@ def authorize_frame(
     * no row, or no approved key → member only under our own key, else
       ``unapproved_node`` (the caller writes nothing).
 
-    Every other frame needs a row (``unknown_node`` otherwise) and verifies
+    Every other frame needs a row (``unknown_node`` otherwise) that is a
+    member (:func:`is_member`; ``unapproved_node`` otherwise) and verifies
     under its approved key, or under our own key when it has none (a
     shared-seed sibling).
     """
@@ -312,10 +350,9 @@ def authorize_frame(
         return FrameVerdict(error="unapproved_node")
     if row is None:
         return FrameVerdict(error="unknown_node")
-    key = approved or own
-    if not key:
-        return FrameVerdict(error="unknown_node")
-    return FrameVerdict(verify_key=key)
+    if not is_member(row, own):
+        return FrameVerdict(error="unapproved_node")
+    return FrameVerdict(verify_key=approved or own)
 
 
 class ClusterReplayCache:
@@ -671,6 +708,27 @@ class ClusterService:
     async def list_nodes(self) -> list[ClusterNode]:
         return await self._repo.list_nodes()
 
+    async def member_peers(self) -> list[ClusterNode]:
+        """Every OTHER node that is a cluster member (:func:`is_member`) —
+        the only rows outbound traffic may go to."""
+        return [
+            r
+            for r in await self._repo.list_nodes()
+            if r.node_id != self._node_id and is_member(r, self._own_pk_hex)
+        ]
+
+    async def node_id_for_url(self, url: str) -> str:
+        """The node id whose outbound URL is *url* (ours included), or
+        ``""`` — members only."""
+        if not url:
+            return ""
+        if url == self._self_url:
+            return self._node_id
+        for r in await self.member_peers():
+            if member_url(r) == url:
+                return r.node_id
+        return ""
+
     # ─── Cluster lifecycle ────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -708,19 +766,23 @@ class ClusterService:
                 setattr(self, attr, None)
 
     async def health(self) -> dict:
-        """Return this node's cluster status (public ``GET /cluster/health``)."""
-        rows = await self._repo.list_nodes()
+        """Return this node's cluster status (public ``GET /cluster/health``).
+
+        Lists cluster members only (:func:`is_member`): a row nobody
+        approved — an old-version node's TOFU row — is neither a peer nor
+        something to advertise.
+        """
         return {
             "node_id": self._node_id,
             "status": "online" if self._enabled else "single-node",
             "peers": [
                 {
                     "node_id": r.node_id,
-                    "url": r.url,
+                    "url": member_url(r),
                     "status": r.status,
                     "last_seen": r.last_seen,
                 }
-                for r in rows
+                for r in await self.member_peers()
             ],
         }
 
@@ -820,13 +882,11 @@ class ClusterService:
             return None
         if not self._node_id or not self._self_url:
             return None
-        rows = await self._repo.list_nodes()
         candidates: list[tuple[int, str, str]] = []
-        for r in rows:
+        # Members only — and never our own row: self is added below with
+        # the in-memory authoritative count.
+        for r in await self.member_peers():
             if r.status == "offline":
-                continue
-            if r.node_id == self._node_id:
-                # Own row — prefer the in-memory authoritative count.
                 continue
             count = self._active_sync_count.get(
                 r.node_id,
@@ -834,7 +894,7 @@ class ClusterService:
             )
             if count >= MAX_SIGNALING_SESSIONS:
                 continue
-            candidates.append((count, r.node_id, r.url))
+            candidates.append((count, r.node_id, member_url(r)))
         own_count = self._active_sync_count.get(self._node_id, 0)
         if own_count < MAX_SIGNALING_SESSIONS:
             candidates.append((own_count, self._node_id, self._self_url))
@@ -1066,6 +1126,27 @@ class ClusterService:
                     status="online",
                     last_seen=now,
                 )
+            )
+            already_known = False
+        elif (
+            not row.approved_key
+            and public_key_hex.lower() == self._own_pk_hex.lower()
+            and not is_member(row, self._own_pk_hex)
+        ):
+            # A row with no approval that is not a member — an old-version
+            # node sharing the DB rewrote it (``url`` + ``public_key``) for
+            # some self-signed HELLO, or it predates this build. This HELLO
+            # verified under our own key, so the sender holds the seed:
+            # reclaim the row with our key and the URL the HELLO carries
+            # (both proven together, so never a URL an outsider chose).
+            # UPDATE only, and never on a row an admin approved meanwhile.
+            url = normalized_peer_url(url)
+            await self._repo.reclaim_node(
+                from_node_id,
+                url=url,
+                public_key=self._own_pk_hex.lower(),
+                status="online",
+                last_seen=now,
             )
             already_known = False
         else:
@@ -1376,10 +1457,9 @@ class ClusterService:
     async def _lookup_node_url(self, node_id: str) -> str:
         if not node_id:
             return ""
-        nodes = await self._repo.list_nodes()
-        for n in nodes:
+        for n in await self.member_peers():
             if n.node_id == node_id:
-                return n.url
+                return member_url(n)
         return ""
 
     # ─── Internals ────────────────────────────────────────────────────
@@ -1427,7 +1507,7 @@ class ClusterService:
         the configured peer list (Nomad renders it) carries no node ids,
         and it may include this node itself, whose own HELLO is ignored.
         """
-        known = {n.url: n.node_id for n in await self._repo.list_nodes()}
+        known = {member_url(n): n.node_id for n in await self.member_peers()}
         self_url = normalized_peer_url(self._self_url)
         for peer_url in self._peers:
             if not peer_url or peer_url in (self._self_url, self_url):
@@ -1466,22 +1546,22 @@ class ClusterService:
         key — the peer meanwhile. Re-writing the row read before the ping
         would undo that.
         """
-        rows = await self._repo.list_nodes()
-        for r in rows:
+        for r in await self.member_peers():
+            url = member_url(r)
             if r.status == "offline":
                 # Probe offline peers too — coming back triggers
                 # a partition-catchup handshake (spec §4.4.6).
-                if await self._ping_peer(r.url):
-                    self._fail_counts[r.url] = 0
+                if await self._ping_peer(url):
+                    self._fail_counts[url] = 0
                     await self._repo.touch_node(
                         r.node_id, status="online", last_seen=_now_iso()
                     )
-                    await self.announce_partition_catchup(r.url, to=r.node_id)
+                    await self.announce_partition_catchup(url, to=r.node_id)
                 continue
-            ok = await self._ping_peer(r.url)
-            fails = self._fail_counts.get(r.url, 0)
+            ok = await self._ping_peer(url)
+            fails = self._fail_counts.get(url, 0)
             if ok:
-                self._fail_counts[r.url] = 0
+                self._fail_counts[url] = 0
                 await self._repo.touch_node(
                     r.node_id, status="online", last_seen=_now_iso()
                 )
@@ -1490,7 +1570,7 @@ class ClusterService:
                 # counts on the next ``pick_signaling_node``.
                 try:
                     await self._post_to_peer(
-                        r.url,
+                        url,
                         NODE_HEARTBEAT,
                         {
                             "active_sync_sessions": self._active_sync_count.get(
@@ -1505,11 +1585,11 @@ class ClusterService:
                 except Exception as exc:
                     log.debug(
                         "cluster: NODE_HEARTBEAT to %r failed: %r",
-                        r.url,
+                        url,
                         exc,
                     )
             else:
-                self._fail_counts[r.url] = fails + 1
+                self._fail_counts[url] = fails + 1
                 if fails + 1 >= HEARTBEAT_FAIL_THRESHOLD:
                     await self._repo.touch_node(
                         r.node_id, status="offline", last_seen=r.last_seen
@@ -1523,23 +1603,23 @@ class ClusterService:
         ignore_errors: bool = False,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
-        rows = await self._repo.list_nodes()
-        for r in rows:
+        for r in await self.member_peers():
             if r.status == "offline":
                 continue
+            url = member_url(r)
             try:
                 await self._post_to_peer(
-                    r.url, msg_type, payload, to=r.node_id, session=session
+                    url, msg_type, payload, to=r.node_id, session=session
                 )
-                self._fail_counts[r.url] = 0
+                self._fail_counts[url] = 0
             except Exception as exc:
                 if ignore_errors:
-                    log.debug("cluster: %s to %r failed: %r", msg_type, r.url, exc)
+                    log.debug("cluster: %s to %r failed: %r", msg_type, url, exc)
                     continue
                 await asyncio.sleep(SYNC_RETRY_DELAY_S)
                 try:
                     await self._post_to_peer(
-                        r.url,
+                        url,
                         msg_type,
                         payload,
                         to=r.node_id,
@@ -1549,7 +1629,7 @@ class ClusterService:
                     log.warning(
                         "cluster: %s to %r dropped after retry: %r",
                         msg_type,
-                        r.url,
+                        url,
                         exc2,
                     )
 
