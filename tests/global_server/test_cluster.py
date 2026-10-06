@@ -964,3 +964,67 @@ def test_replay_cache_expires_on_the_frames_ts_not_insertion_order():
     assert cache.seen(b"early", int(now) - 290, now=later)  # via the floor
     assert len(cache) == 1
     assert cache.floor == int(now) - 290
+
+
+# ─── In-band URL updates (HELLO) ─────────────────────────────────────
+
+
+@pytest.fixture
+def hello_replies(monkeypatch):
+    sent: list[str] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        sent.append(url)
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    return sent
+
+
+async def _node_row(svc: ClusterService, node_id: str) -> ClusterNode:
+    (row,) = [n for n in await svc.list_nodes() if n.node_id == node_id]
+    return row
+
+
+@pytest.mark.security
+async def test_hello_never_overwrites_a_known_url(enabled_cluster, hello_replies):
+    """The admin's URL wins: a member's HELLO cannot point its row (and so
+    every later heartbeat and fan-out POST) at another address."""
+    await enabled_cluster.add_peer("node-b", "https://b.gfs.test", _PIN)
+    hello_replies.clear()
+    await enabled_cluster.handle_hello(
+        from_node_id="node-b",
+        url="http://169.254.169.254/latest/meta-data",
+        public_key_hex=_PIN,
+    )
+    assert (await _node_row(enabled_cluster, "node-b")).url == "https://b.gfs.test"
+    assert hello_replies == ["https://b.gfs.test"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "ftp://c.gfs.test",
+        "http://",
+        "http://user:pw@c.gfs.test",
+        "javascript:alert(1)",
+        "https://c.gfs.test/?q=1",
+        "https://c.gfs.test/#frag",
+        "c.gfs.test",
+    ],
+)
+async def test_first_hello_with_an_invalid_url_stores_none_and_sends_nothing(
+    enabled_cluster, hello_replies, bad
+):
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url=bad, public_key_hex=_PIN
+    )
+    assert (await _node_row(enabled_cluster, "node-c")).url == ""
+    assert hello_replies == []
+
+
+async def test_first_hello_with_a_valid_url_records_it(enabled_cluster, hello_replies):
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test/", public_key_hex=_PIN
+    )
+    assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test"
+    assert hello_replies == ["https://c.gfs.test"]

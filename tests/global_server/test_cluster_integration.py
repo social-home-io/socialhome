@@ -458,6 +458,18 @@ _VALID_KEY = ed25519_public_key(b"\x01" * 32).hex()
             "invalid_url",
         ),
         ({"node_id": "c", "url": "http://", "public_key": _VALID_KEY}, "invalid_url"),
+        (
+            {"node_id": "c", "url": "http://u:p@c.test", "public_key": _VALID_KEY},
+            "invalid_url",
+        ),
+        (
+            {"node_id": "c", "url": "http://c.test/?x=1", "public_key": _VALID_KEY},
+            "invalid_url",
+        ),
+        (
+            {"node_id": "c", "url": "http://c.test/#f", "public_key": _VALID_KEY},
+            "invalid_url",
+        ),
         ({"node_id": "c", "url": "http://c.test"}, "invalid_public_key"),
         (
             {"node_id": "c", "url": "http://c.test", "public_key": "ab" * 31},

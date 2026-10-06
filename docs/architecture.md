@@ -711,7 +711,9 @@ a `NODE_HELLO` under a key the node does not hold is refused
 (`unapproved_node`) and writes nothing; a HELLO for a known node under a
 different key is refused (`key_mismatch`, WARNING) — a pin never moves
 in-band, and the repo's upsert keeps a non-empty pin in SQL as well, so
-rotation is delete then re-add. Each frame signs `{type, from, to, ts, nonce,
+rotation is delete then re-add. A row's URL does not move in-band either: a
+HELLO fills it only while it is empty (and only with a valid base URL), so a
+member cannot point our heartbeats and fan-out at another address. Each frame signs `{type, from, to, ts, nonce,
 sig_suite, payload}`: the sender id is the signed `from` only, `to` names the
 recipient node (another node refuses it, 409 `wrong_recipient`; absent from
 older senders and from a HELLO to a not-yet-known configured URL), `ts` must sit

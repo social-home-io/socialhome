@@ -197,6 +197,34 @@ class ClusterPeerKeyMismatch(Exception):
     """Admin add-peer named a node already pinned to a different key."""
 
 
+def normalized_peer_url(url: object) -> str:
+    """A peer node's base URL, normalised, or ``""`` if unusable.
+
+    ``http``/``https`` with a host; no userinfo, query or fragment (none
+    has a meaning for a base URL, and userinfo would ship credentials in
+    every sync POST). A trailing ``/`` is dropped.
+    """
+    if not isinstance(url, str):
+        return ""
+    url = url.strip().rstrip("/")
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return ""
+    if (
+        parts.scheme not in ("http", "https")
+        or not host
+        or "@" in parts.netloc
+        or parts.query
+        or parts.fragment
+        or "?" in url
+        or "#" in url
+    ):
+        return ""
+    return url
+
+
 def _validated_peer(
     node_id: object, url: object, public_key: object, *, own_node_id: str
 ) -> tuple[str, str, str]:
@@ -209,11 +237,8 @@ def _validated_peer(
         raise InvalidClusterPeer("invalid_node_id")
     if node_id == own_node_id:
         raise InvalidClusterPeer("node_id_is_self")
-    if not isinstance(url, str):
-        raise InvalidClusterPeer("invalid_url")
-    url = url.strip().rstrip("/")
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    url = normalized_peer_url(url)
+    if not url:
         raise InvalidClusterPeer("invalid_url")
     if not isinstance(public_key, str):
         raise InvalidClusterPeer("invalid_public_key")
@@ -967,10 +992,20 @@ class ClusterService:
         # "Known" means we have heard from it before. An admin-added row has
         # never been seen (``last_seen`` is None) — answer its first HELLO so
         # the two sides converge whichever the operator added first.
-        existing = await self._repo.list_nodes()
-        already_known = any(
-            n.node_id == from_node_id and n.last_seen is not None for n in existing
+        row = next(
+            (n for n in await self._repo.list_nodes() if n.node_id == from_node_id),
+            None,
         )
+        already_known = row is not None and row.last_seen is not None
+        # The URL is set out-of-band by an operator and never moves in-band:
+        # a member's HELLO must not point its row — and with it every later
+        # heartbeat and fan-out POST — at another address. Only a row with
+        # no URL yet (a shared-seed sibling's first HELLO) takes the one
+        # the HELLO carries, and only if it is a usable base URL.
+        if row is not None and row.url:
+            url = row.url
+        else:
+            url = normalized_peer_url(url)
         await self._repo.upsert_node(
             ClusterNode(
                 node_id=from_node_id,
