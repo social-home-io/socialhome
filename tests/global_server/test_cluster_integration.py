@@ -492,6 +492,64 @@ async def test_admin_cluster_add_peer_rejects_bad_input(client, body, error):
     assert await client._app[gfs_cluster_repo_key].list_nodes() == []
 
 
+@pytest.mark.parametrize(
+    "node_id",
+    [
+        "a\x00b",
+        "a\u202eb",  # RIGHT-TO-LEFT OVERRIDE
+        "a\u200bb",  # zero-width space
+        "a b",
+        "a\nb",
+        "nöde",
+        "a\tb",
+    ],
+)
+async def test_admin_cluster_add_peer_rejects_unsafe_node_id_characters(
+    client, node_id
+):
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={"node_id": node_id, "url": "http://c.test", "public_key": _VALID_KEY},
+    )
+    assert (resp.status, await resp.json()) == (422, {"error": "invalid_node_id"})
+
+
+@pytest.mark.parametrize(
+    "node_id",
+    [
+        "gfs-node-0",
+        "3f2a9c1e-7b4d-4e8f-9a6b-1c2d3e4f5a6b",
+        "gfs_1.eu:8765",
+        "https://gfs-1.example.com:8443",
+    ],
+)
+async def test_admin_cluster_add_peer_accepts_existing_node_id_shapes(client, node_id):
+    seed, pub_hex = _keypair()
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={"node_id": node_id, "url": "http://c.test", "public_key": pub_hex},
+    )
+    assert resp.status == 201
+    assert (await resp.json())["node_id"] == node_id
+
+
+@pytest.mark.parametrize("payload", [[], 0, "x", None, [{"a": 1}], True])
+async def test_non_object_payload_is_malformed(client, payload):
+    seed = await _register_peer(client)
+    canonical, sig = _sign_body(
+        {
+            "type": NODE_HEARTBEAT,
+            "from": PEER,
+            "ts": int(time.time()),
+            "nonce": secrets.token_urlsafe(16),
+            "payload": payload,
+        },
+        seed,
+    )
+    resp = await _post_raw(client, canonical, sig, GENUINE_IP)
+    assert (resp.status, await resp.json()) == (400, {"error": "invalid_message"})
+
+
 @pytest.mark.security
 async def test_admin_cluster_add_peer_never_moves_a_pin(client):
     """Re-adding a node id under a different key is a 409; rotation is

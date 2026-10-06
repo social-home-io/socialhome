@@ -123,7 +123,9 @@ class ClusterSyncView(GfsBaseView):
         # unsigned header a forger fully controls.
         from_node = body.get("from")
         msg_type = body.get("type")
-        payload = body.get("payload") or {}
+        # ``payload`` is an object; absent reads as empty, but any other
+        # value (``[]``, ``0``, ``null``…) is malformed, never coerced.
+        payload = body.get("payload", {})
         # ``to`` (the recipient's node id) is optional — a sender older
         # than the field, or a HELLO to a configured URL, omits it — but
         # when present it must be a string.
@@ -194,7 +196,7 @@ class ClusterSyncView(GfsBaseView):
             if verdict.error == "key_mismatch" and not shed:
                 log.warning(
                     "cluster: key_mismatch — NODE_HELLO for known node %r from "
-                    "%s carries a key other than its pin; refused. If the node "
+                    "%r carries a key other than its pin; refused. If the node "
                     "really rotated its key, remove the peer and re-add it "
                     "with the new key.",
                     from_node,
@@ -261,7 +263,7 @@ class ClusterSyncView(GfsBaseView):
             await svc.apply_partition_gap(payload)
         else:
             log.debug(
-                "cluster: unknown NODE_* type %s from %s",
+                "cluster: unknown NODE_* type %r from %r",
                 msg_type,
                 from_node,
             )

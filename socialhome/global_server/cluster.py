@@ -184,6 +184,12 @@ CLUSTER_NODE_ID_MAX_LEN: int = 128
 
 _HEX_ED25519_KEY = re.compile(r"[0-9a-f]{64}")
 
+#: Characters a peer ``node_id`` may use: what config-set ids look like in
+#: practice (``gfs-node-0``, UUIDs, ``host:port``, URL-shaped ids), and
+#: nothing that renders deceptively in the admin UI or a log line —
+#: no whitespace, control, bidi or other non-ASCII characters.
+_NODE_ID_RE = re.compile(r"[A-Za-z0-9._:/-]+")
+
 
 class InvalidClusterPeer(ValueError):
     """Admin add-peer input is malformed; ``code`` is the API error."""
@@ -233,7 +239,7 @@ def _validated_peer(
     if not isinstance(node_id, str):
         raise InvalidClusterPeer("invalid_node_id")
     node_id = node_id.strip()
-    if not node_id or len(node_id) > CLUSTER_NODE_ID_MAX_LEN:
+    if len(node_id) > CLUSTER_NODE_ID_MAX_LEN or not _NODE_ID_RE.fullmatch(node_id):
         raise InvalidClusterPeer("invalid_node_id")
     if node_id == own_node_id:
         raise InvalidClusterPeer("node_id_is_self")
@@ -382,8 +388,8 @@ class ClusterService:
     """Spec-shape :class:`ClusterService`.
 
     All nodes are equal — no leader election or consensus protocol
-    (spec §28431). ``announce`` / ``list_nodes`` work whether cluster
-    mode is enabled or not.
+    (spec §28431). ``list_nodes`` works whether cluster mode is enabled
+    or not.
     """
 
     __slots__ = (
@@ -610,15 +616,6 @@ class ClusterService:
 
     # ─── Node registry API ────────────────────────────────────────────
 
-    async def announce(self, node_id: str, address: str) -> None:
-        await self._repo.upsert_node(
-            ClusterNode(
-                node_id=node_id,
-                url=address,
-                status="online",
-            )
-        )
-
     async def list_nodes(self) -> list[ClusterNode]:
         return await self._repo.list_nodes()
 
@@ -832,7 +829,7 @@ class ClusterService:
             await self._repo.update_active_sync_sessions(self._node_id, count)
         except Exception as exc:
             log.debug(
-                "cluster: failed to persist active_sync_sessions for self: %s",
+                "cluster: failed to persist active_sync_sessions for self: %r",
                 exc,
             )
 
@@ -947,7 +944,7 @@ class ClusterService:
         except Exception as exc:
             # Expected until the operator approves us on the other side too;
             # its own add-peer HELLO then reaches us and we answer it.
-            log.debug("cluster: initial NODE_HELLO to %s failed: %s", url, exc)
+            log.debug("cluster: initial NODE_HELLO to %r failed: %r", url, exc)
         return node
 
     async def remove_peer(self, node_id: str) -> None:
@@ -1249,7 +1246,7 @@ class ClusterService:
                 )
             except Exception as exc:
                 log.debug(
-                    "cluster: NODE_PARTITION_GAP to %s failed: %s",
+                    "cluster: NODE_PARTITION_GAP to %r failed: %r",
                     peer_url,
                     exc,
                 )
@@ -1310,7 +1307,7 @@ class ClusterService:
             )
         except Exception as exc:
             log.debug(
-                "cluster: NODE_PARTITION_CATCHUP to %s failed: %s",
+                "cluster: NODE_PARTITION_CATCHUP to %r failed: %r",
                 peer_url,
                 exc,
             )

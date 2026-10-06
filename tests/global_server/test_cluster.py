@@ -76,33 +76,11 @@ async def test_list_nodes_empty_initially(cluster):
     assert nodes == []
 
 
-async def test_announce_single_node(cluster):
-    """announce() registers a node that appears in list_nodes()."""
-    await cluster.announce("node-1", "https://gfs1.example.com")
-    nodes = await cluster.list_nodes()
-    assert len(nodes) == 1
-    assert nodes[0].node_id == "node-1"
-    assert nodes[0].address == "https://gfs1.example.com"
-
-
-async def test_announce_multiple_nodes(cluster):
-    """Multiple nodes are all returned by list_nodes()."""
-    await cluster.announce("node-a", "https://gfs-a.example.com")
-    await cluster.announce("node-b", "https://gfs-b.example.com")
-    nodes = await cluster.list_nodes()
-    node_ids = {n.node_id for n in nodes}
-    assert "node-a" in node_ids
-    assert "node-b" in node_ids
-
-
-async def test_announce_is_idempotent(cluster):
-    """Announcing the same node_id twice updates the address without duplicating."""
-    await cluster.announce("node-dup", "https://old.example.com")
-    await cluster.announce("node-dup", "https://new.example.com")
-    nodes = await cluster.list_nodes()
-    matching = [n for n in nodes if n.node_id == "node-dup"]
-    assert len(matching) == 1
-    assert matching[0].address == "https://new.example.com"
+def test_no_keyless_registration_entry_point():
+    """``announce`` upserted a peer row with no key and no approval; nothing
+    called it but tests. Membership only enters through ``add_peer``
+    (admin, with a key) or a verified HELLO."""
+    assert not hasattr(ClusterService, "announce")
 
 
 # ─── Spec §24.10.7 — round-robin sync signaling ────────────────────────
