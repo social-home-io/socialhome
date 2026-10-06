@@ -35,12 +35,17 @@ pull in any core services.
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
+
+from .peer_url import normalized_peer_url
+
+log = logging.getLogger(__name__)
 
 
 DEFAULT_DATA_DIR = "/var/lib/sh-gfs"
@@ -193,7 +198,7 @@ class GfsConfig:
             turn_secret=str(webrtc.get("turn_secret") or ""),
             cluster_enabled=bool(cluster.get("enabled", False)),
             cluster_node_id=str(cluster.get("node_id") or ""),
-            cluster_peers=tuple(cluster.get("peers") or ()),
+            cluster_peers=_normalized_peers(cluster.get("peers") or ()),
             write_batch_window_ms=_window_ms(
                 server.get("write_batch_window_ms", DEFAULT_WRITE_BATCH_WINDOW_MS)
             ),
@@ -293,6 +298,25 @@ class GfsConfig:
             if candidate.is_file():
                 return cls.from_toml(candidate)._with_env_overrides()
         return cls.from_env_fallback()
+
+
+def _normalized_peers(raw: object) -> tuple[str, ...]:
+    """``[cluster] peers``, each through the same normaliser as an admin
+    add-peer — so a configured URL matches the stored row's URL and the
+    announce HELLO can name its recipient. An unusable entry is dropped
+    with a WARNING (logged with ``ascii()``, so no raw control character
+    reaches the log)."""
+    if not isinstance(raw, (list, tuple)):
+        log.warning("GFS: [cluster] peers must be a list; ignoring %s", ascii(raw))
+        return ()
+    peers: list[str] = []
+    for entry in raw:
+        url = normalized_peer_url(entry)
+        if not url:
+            log.warning("GFS: ignoring unusable [cluster] peers entry %s", ascii(entry))
+        elif url not in peers:
+            peers.append(url)
+    return tuple(peers)
 
 
 def _window_ms(raw: int | str) -> int:

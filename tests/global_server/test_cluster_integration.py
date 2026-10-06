@@ -1353,8 +1353,11 @@ async def test_mistyped_recipient_is_malformed(client, bad):
 
 
 async def test_frame_without_a_recipient_is_accepted_from_an_older_sender(client):
-    """Senders older than ``to`` omit it; the frame is still accepted (the
-    compatibility tripwire, like a missing ``sig_suite``)."""
+    """DEPRECATED behaviour, pinned on purpose: senders older than ``to``
+    omit it, and a non-HELLO frame without it is still accepted (the
+    compatibility tripwire, like a missing ``sig_suite``). The TODO at the
+    recipient check in ``routes/cluster.py`` says when this flips to a 400
+    ``missing_recipient`` — update this test then."""
     seed = await _register_peer(client)
     canonical, sig = _sign_body(
         {

@@ -719,7 +719,7 @@ HELLO fills it only while it is empty (and only with a valid base URL), so a
 member cannot point our heartbeats and fan-out at another address. Every peer URL (admin add-peer, HELLO, `[cluster] peers`) goes through `global_server/peer_url.py:normalized_peer_url`: printable ASCII re-serialised from validated parts (no whitespace, control or bidi characters, an IDNA host, a real port), and never a link-local or cloud-metadata address (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, in any IPv6-mapped or legacy numeric spelling) — private and loopback addresses stay allowed; a DNS name that resolves to a metadata address is not caught (no lookup at validation time). Each frame signs `{type, from, to, ts, nonce,
 sig_suite, payload}`: the sender id is the signed `from` only, `to` names the
 recipient node (another node refuses it, 409 `wrong_recipient`; absent from
-older senders and from a HELLO to a not-yet-known configured URL), `ts` must sit
+older senders — deprecated, refused once every node runs the release after the first one shipping `to` — and from a HELLO to a not-yet-known configured URL; `[cluster] peers` are normalised at load like stored URLs, so a HELLO to a known peer always names it), `ts` must sit
 within ±300 s of the receiver's wall clock and not before the receiving
 process started, and an accepted frame's digest is remembered until its own
 `ts` + 301 s on the wall clock — the clock the freshness check reads — so a

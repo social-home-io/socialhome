@@ -34,6 +34,7 @@ from socialhome.global_server.cluster import (
     authorize_frame,
     parse_cluster_sig_suite,
 )
+from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.repositories import SqliteClusterRepo
 
@@ -1227,3 +1228,30 @@ async def test_a_full_replay_cache_never_refuses_a_fresh_honest_frame(gfs_db):
         assert not svc.frame_seen(raw, now)
         assert svc.record_frame(raw, now, "honest")
         assert svc.frame_seen(raw, now)
+
+
+async def test_announce_names_the_recipient_for_a_differently_spelled_peer_url(
+    tmp_dir, gfs_db, monkeypatch
+):
+    """A configured peer URL spelled differently from the stored row's
+    (case, trailing slash) still resolves to the row, so the HELLO is bound
+    to its recipient."""
+    toml = tmp_dir / "global_server.toml"
+    toml.write_text(
+        '[server]\nbase_url = "https://a.gfs.test"\n'
+        '[cluster]\nenabled = true\npeers = ["HTTPS://B.GFS.test/"]\n'
+    )
+    cfg = GfsConfig.from_toml(toml)
+    posted: list[tuple[str, str]] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        posted.append((url, to))
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.approve_node("node-b", "https://b.gfs.test", _PIN)
+    svc = ClusterService(
+        repo, node_id="node-a", self_url=cfg.base_url, peers=cfg.cluster_peers
+    )
+    await svc._announce_to_peers()
+    assert posted == [("https://b.gfs.test", "node-b")]

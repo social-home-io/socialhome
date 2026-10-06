@@ -1421,13 +1421,16 @@ class ClusterService:
         """HELLO every configured peer URL (fail-soft per peer).
 
         A URL we already hold a row for names that node as the recipient
-        (``to``); a URL we have never heard from is HELLOed without one —
+        (``to``) — config peers are normalised at load exactly like stored
+        URLs, so the two match; a URL we have never heard from is HELLOed
+        without one —
         the configured peer list (Nomad renders it) carries no node ids,
         and it may include this node itself, whose own HELLO is ignored.
         """
         known = {n.url: n.node_id for n in await self._repo.list_nodes()}
+        self_url = normalized_peer_url(self._self_url)
         for peer_url in self._peers:
-            if not peer_url or peer_url == self._self_url:
+            if not peer_url or peer_url in (self._self_url, self_url):
                 continue
             try:
                 await self._post_to_peer(

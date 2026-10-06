@@ -174,6 +174,15 @@ class ClusterSyncView(GfsBaseView):
         # Recipient binding: a frame signed for another node is a replay
         # across the cluster. Refused before any key lookup or signature
         # work, and charged to the address like any other replay.
+        #
+        # DEPRECATED: a non-HELLO frame WITHOUT ``to`` is still accepted —
+        # senders older than the field omit it. TODO: refuse it (400
+        # ``missing_recipient``) once every cluster node runs a release that
+        # sends ``to`` on every non-HELLO frame — i.e. starting with the
+        # release AFTER the first one that shipped the field, so a rolling
+        # upgrade never meets an old sender. A HELLO keeps ``to`` optional
+        # for good: a configured peer URL names no node id. Pinned by
+        # ``test_frame_without_a_recipient_is_accepted_from_an_older_sender``.
         if to is not _NO_RECIPIENT and to != svc.node_id:
             return _reject(
                 web.json_response({"error": "wrong_recipient"}, status=409),
