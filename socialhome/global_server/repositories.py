@@ -1178,6 +1178,13 @@ class SqliteClusterRepo:
         self._db = db
 
     async def upsert_node(self, node: ClusterNode) -> None:
+        """Insert or refresh a node row; a pinned ``public_key`` never moves.
+
+        The key is the node's cluster-membership credential (spec §24.10):
+        once set, no upsert — a HELLO, a heartbeat refresh, an admin re-add —
+        can swap it. An empty pin may be filled. Rotation is
+        :meth:`remove_node` then a fresh insert.
+        """
         await self._db.enqueue(
             """
             INSERT INTO cluster_nodes(
@@ -1185,7 +1192,10 @@ class SqliteClusterRepo:
             ) VALUES(?, ?, ?, ?, ?)
             ON CONFLICT(node_id) DO UPDATE SET
                 url=excluded.url,
-                public_key=excluded.public_key,
+                public_key=COALESCE(
+                    NULLIF(cluster_nodes.public_key, ''),
+                    excluded.public_key
+                ),
                 status=excluded.status,
                 last_seen=excluded.last_seen
             """,

@@ -10,12 +10,14 @@ import pytest
 
 from socialhome.global_server.domain import (
     ClientInstance,
+    ClusterNode,
     GfsAppeal,
     GfsFraudReport,
     GfsSubscriberWithKeys,
     GlobalSpace,
 )
 from socialhome.global_server.repositories import (
+    SqliteClusterRepo,
     SqliteGfsAdminRepo,
     SqliteGfsChannelRepo,
     SqliteGfsEnvelopeQueueRepo,
@@ -1248,3 +1250,52 @@ async def test_channel_repo_pin_epoch_writer_key_and_idle_sweep(gfs_db):
     assert await repo.get("space-id-like") is None
     assert await repo.prune_idle(older_than=200) == 1
     assert await repo.get(cid) is None
+
+
+# ── Cluster node pin ──────────────────────────────────────────────────
+
+
+@pytest.mark.security
+async def test_cluster_upsert_never_moves_a_pinned_key(gfs_db):
+    """A pinned cluster key is immutable: no upsert (a HELLO, a heartbeat
+    refresh, an admin re-add) can swap it. Rotation is delete then re-add."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.upsert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="aa" * 32, status="online")
+    )
+    await repo.upsert_node(
+        ClusterNode(
+            node_id="b", url="http://b2", public_key="bb" * 32, status="offline"
+        )
+    )
+    await repo.upsert_node(
+        ClusterNode(node_id="b", url="http://b3", public_key="", status="online")
+    )
+    (row,) = await repo.list_nodes()
+    assert row.public_key == "aa" * 32
+    # The rest of the row still refreshes.
+    assert row.url == "http://b3"
+    assert row.status == "online"
+
+
+async def test_cluster_upsert_fills_an_empty_pin(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.upsert_node(ClusterNode(node_id="b", url="http://b"))
+    await repo.upsert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="cc" * 32)
+    )
+    (row,) = await repo.list_nodes()
+    assert row.public_key == "cc" * 32
+
+
+async def test_cluster_remove_then_re_add_rotates_the_pin(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.upsert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="aa" * 32)
+    )
+    await repo.remove_node("b")
+    await repo.upsert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="dd" * 32)
+    )
+    (row,) = await repo.list_nodes()
+    assert row.public_key == "dd" * 32
