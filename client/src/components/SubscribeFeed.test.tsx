@@ -68,12 +68,13 @@ describe('SubscribeFeed', () => {
     expect(container.querySelector('a[href^="webcal:"]')).toBeNull()
   })
 
-  it('under the HA add-on, says the add-on is only reachable through HA (no admin hint)', async () => {
+  it('under the Home Assistant App, says the app is only reachable through HA (no admin hint)', async () => {
     platformMock.addon = true
     apiMock.post.mockResolvedValueOnce({ token: 't', url: FEED_URL, external_url: null })
     const { getByRole, findByText, container } = render(<SubscribeFeed spaceId="sp1" />)
     fireEvent.click(getByRole('button', { name: 'Create my link' }))
-    await findByText(/runs as a Home Assistant add-on/)
+    await findByText(/runs as the Home Assistant App/)
+    expect(container.textContent).not.toContain('add-on')
     expect(container.textContent).not.toContain('Connections page')
   })
 

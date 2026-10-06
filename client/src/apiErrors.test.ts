@@ -110,6 +110,17 @@ describe('apiErrorMessage — fallbacks', () => {
       .toBe('Your Social Home is out of storage space. Free up space or ask your admin.')
   })
 
+  it.each([
+    [502, 'GFS_UNREACHABLE', "Couldn't reach the GFS. Try again in a moment."],
+    [409, 'GFS_SIGNUP_CLOSED', "This GFS isn't taking sign-ups right now. Ask its operator for a pairing code."],
+    [503, 'GFS_BUSY', 'The GFS is busy. Try again in a minute.'],
+    [422, 'GFS_IDENTITY_MISMATCH', "This doesn't look like the Social Home GFS. Check the address."],
+    [422, 'GFS_PAIRING_FAILED', "The GFS didn't accept this household."],
+    [409, 'ALREADY_CONNECTED', "You're already connected to this GFS."],
+  ])('a GFS connect refusal (%i %s) is translated, never the server detail', (status, code, text) => {
+    expect(apiErrorMessage(status, '/api/gfs/connections', { code, detail: 'server words' })).toBe(text)
+  })
+
   it('a 5xx with a specific code keeps its detail; a generic one gets the server line', () => {
     expect(apiErrorMessage(504, '/x', { code: 'ISSUER_TIMEOUT', detail: 'The issuer did not answer.' }))
       .toBe('The issuer did not answer.')

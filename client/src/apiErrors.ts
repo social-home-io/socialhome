@@ -112,6 +112,14 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   // Pictures.
   IMAGE_TOO_LARGE: (_b, p) => t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
   IMAGE_UNREADABLE: () => t('error.image_unreadable'),
+  // Connecting to a GFS (QR / pasted code, or onboarding's open sign-up).
+  // Our own words for every refusal, never the GFS's (``routes/gfs.py``).
+  GFS_UNREACHABLE: () => t('error.gfs_unavailable'),
+  GFS_SIGNUP_CLOSED: () => t('error.gfs_signup_closed'),
+  GFS_BUSY: () => t('error.gfs_busy'),
+  GFS_IDENTITY_MISMATCH: () => t('error.gfs_identity_mismatch'),
+  GFS_PAIRING_FAILED: () => t('error.gfs_pairing_failed'),
+  ALREADY_CONNECTED: () => t('error.gfs_already_connected'),
   // Server-side outages the user can act on or wait out.
   GFS_UNAVAILABLE: () => t('error.gfs_unavailable'),
   STORAGE_FULL: () => t('error.storage_full'),
