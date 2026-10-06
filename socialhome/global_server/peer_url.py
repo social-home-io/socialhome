@@ -25,16 +25,43 @@ _HOST_LABEL_RE = re.compile(r"[a-z0-9_-]{1,63}")
 
 #: Addresses a peer URL may never point at: link-local (where cloud
 #: instance-metadata services live — 169.254.169.254, and AWS's IPv6
-#: ``fd00:ec2::254``). RFC 1918, ULA and loopback stay allowed: cluster
-#: nodes legitimately sit on private networks.
+#: ``fd00:ec2::254``), Alibaba Cloud's metadata address, and the RFC 8215
+#: local-use NAT64 range ``64:ff9b:1::/48`` (where the embedded v4 address
+#: sits depends on the operator's prefix length, so it cannot be checked —
+#: a cluster peer has no reason to sit behind one). RFC 1918, ULA and
+#: loopback stay allowed: cluster nodes legitimately sit on private networks.
 _REFUSED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("100.100.100.200/32"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("fd00:ec2::254/128"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
 )
 
 #: RFC 6052 well-known NAT64 prefix: ``64:ff9b::a.b.c.d`` reaches v4 a.b.c.d.
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+#: SIIT IPv4-translated addresses (RFC 2765): ``::ffff:0:a.b.c.d``.
+_SIIT = ipaddress.ip_network("::ffff:0:0:0/96")
+
+#: Host names that resolve to a cloud instance-metadata service from inside
+#: the instance: GCE (``metadata.google.internal`` and its short form
+#: ``metadata``) and EC2 (``instance-data``, ``instance-data.ec2.internal``).
+#: Azure, Oracle and DigitalOcean publish their metadata service on the
+#: link-local IP only (refused above). Exact names, compared after IDNA
+#: encoding and lower-casing; a name that merely RESOLVES to a metadata
+#: address is still not caught (no lookup at validation time).
+_METADATA_HOSTS: frozenset[str] = frozenset(
+    {
+        "metadata.google.internal",
+        "metadata",
+        "instance-data",
+        "instance-data.ec2.internal",
+    }
+)
+
+#: A host made of digits and dots only — an IPv4 spelling.
+_NUMERIC_HOST_RE = re.compile(r"[0-9.]+")
 
 
 def _unsafe_char(ch: str) -> bool:
@@ -53,7 +80,7 @@ def _refused_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         packed = ip.packed
         if packed[:12] == bytes(12) and int(ip) > 1:  # IPv4-compatible ::a.b.c.d
             candidates.append(ipaddress.IPv4Address(packed[12:]))
-        if ip in _NAT64:
+        if ip in _NAT64 or ip in _SIIT:
             candidates.append(ipaddress.IPv4Address(packed[12:]))
     return any(c in net for c in candidates for net in _REFUSED_NETWORKS)
 
@@ -94,7 +121,18 @@ def _ascii_host(host: str, *, bracketed: bool) -> str:
     labels = encoded.lower().split(".")
     if not all(_HOST_LABEL_RE.fullmatch(label) for label in labels):
         return ""
-    return ".".join(labels)
+    ascii_host = ".".join(labels)
+    # IDNA nameprep (NFKC) can turn a non-ASCII host into an IP address —
+    # fullwidth digits and dots, ``。``, ``⑯`` — after the IP check above
+    # saw only a name. An address must be written in ASCII: refuse any
+    # non-ASCII host that encodes to one, in any spelling.
+    if not host.isascii() and (
+        _NUMERIC_HOST_RE.fullmatch(ascii_host) or _legacy_ipv4(ascii_host) is not None
+    ):
+        return ""
+    if ascii_host in _METADATA_HOSTS:
+        return ""
+    return ascii_host
 
 
 def normalized_peer_url(url: object) -> str:
@@ -105,10 +143,14 @@ def normalized_peer_url(url: object) -> str:
     every sync POST). Refused outright: any whitespace, control, bidi or
     other format character anywhere (surrounding whitespace is stripped
     first), non-ASCII outside the host, a host IDNA cannot encode, a
-    port that is out of range or 0, and a link-local or cloud-metadata
-    address (``169.254.0.0/16``, ``fe80::/10``, ``fd00:ec2::254``, also as
-    an IPv4-mapped, -compatible or NAT64 IPv6 address, or a legacy numeric
-    IPv4 spelling). Private and loopback addresses are allowed. A DNS name
+    port that is out of range or 0, a link-local or cloud-metadata
+    address (``169.254.0.0/16``, ``100.100.100.200``, ``fe80::/10``,
+    ``fd00:ec2::254``, also as an IPv4-mapped, -compatible, -translated
+    (SIIT) or NAT64 IPv6 address, any address in the local-use NAT64 range
+    ``64:ff9b:1::/48``, or a legacy numeric IPv4 spelling), a cloud
+    metadata host name (``metadata.google.internal``, ``metadata``,
+    ``instance-data``, ``instance-data.ec2.internal``), and a non-ASCII
+    host that IDNA maps onto an IP address (``１２７.０.０.１``). Private and loopback addresses are allowed. A DNS name
     that RESOLVES to a refused address is not caught here (no lookup). The host is IDNA-encoded and
     lower-cased, a trailing ``/`` is dropped, and the result is rebuilt
     with ``urlunsplit`` from the validated parts.

@@ -138,3 +138,74 @@ def test_link_local_and_metadata_addresses_are_refused(raw):
 )
 def test_private_and_loopback_addresses_stay_allowed(raw, want):
     assert normalized_peer_url(raw) == want
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # IDNA nameprep (NFKC) maps these onto a numeric address AFTER the
+        # IP check used to run: fullwidth digits and dots, ideographic dots,
+        # circled numbers.
+        "http://１６９．２５４．１６９．２５４",
+        "http://169。254。169。254",
+        "http://⑯⑨.254.169.254",
+        "http://169.254.169.２５４/latest/meta-data",
+        "http://０xa9fea9fe",
+        # An IP literal must be written in ASCII — even an allowed one.
+        "http://１２７.０.０.１",
+        "http://１０.０.０.５:8000",
+    ],
+)
+def test_non_ascii_spellings_of_an_ip_address_are_refused(raw):
+    assert normalized_peer_url(raw) == ""
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # RFC 8215 local-use NAT64 (64:ff9b:1::/48): where the v4 address
+        # sits depends on the operator's prefix length, so the whole range
+        # is refused.
+        "http://[64:ff9b:1::a9fe:a9fe]",
+        "http://[64:ff9b:1:a9fe:a9:fe00::]",
+        # SIIT IPv4-translated (::ffff:0:0/96, RFC 2765).
+        "http://[::ffff:0:a9fe:a9fe]",
+        "http://[::ffff:0:169.254.169.254]",
+    ],
+)
+def test_translated_ipv6_spellings_of_a_metadata_address_are_refused(raw):
+    assert normalized_peer_url(raw) == ""
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://metadata.google.internal",
+        "http://METADATA.google.internal/computeMetadata/v1",
+        "http://metadata",
+        "http://metadata:80",
+        "http://instance-data",
+        "http://instance-data.ec2.internal",
+    ],
+)
+def test_cloud_metadata_host_names_are_refused(raw):
+    assert normalized_peer_url(raw) == ""
+
+
+@pytest.mark.parametrize(
+    "raw, want",
+    [
+        # Near-misses stay allowed: only the exact metadata names are refused.
+        ("http://metadata-sync.example", "http://metadata-sync.example"),
+        ("http://gfs.metadata.example", "http://gfs.metadata.example"),
+        # A real IDN host is still IDNA-encoded.
+        ("http://bücher.example", "http://xn--bcher-kva.example"),
+        # NAT64 / SIIT spellings of a private v4 address stay allowed.
+        ("http://[64:ff9b::a00:5]", "http://[64:ff9b::a00:5]"),
+    ],
+)
+def test_near_misses_stay_allowed(raw, want):
+    assert normalized_peer_url(raw) == want
