@@ -36,19 +36,18 @@ from socialhome.services.gfs_connection_service import (
 OWN = {
     "own_instance_id": "alpha.home",
     "own_public_key_hex": "aa" * 32,
-    "own_inbox_url": "https://alpha.example/federation/inbox",
     "own_display_name": "Alpha House",
     "own_keywrap_public_key_hex": "cc" * 32,
     "own_keywrap_sig": "sig-over-keywrap",
 }
 
 #: The fields QR pairing already sends to ``/gfs/register``. Open sign-up must
-#: not add a single one.
+#: not add a single one — and neither sends the household's address
+#: (``inbox_url``): the GFS has no use for it.
 QR_REGISTER_FIELDS = {
     "token",
     "instance_id",
     "public_key",
-    "inbox_url",
     "display_name",
     "keywrap_public_key",
     "kem_suite",
@@ -125,10 +124,10 @@ async def test_open_signup_pairs_with_the_real_gfs(tmp_dir, repo):
         assert rec.calls[1][2] is None
         # Registration sends what QR pairing sends, and nothing new.
         assert set(rec.calls[2][2]) == QR_REGISTER_FIELDS  # type: ignore[arg-type]
+        assert "inbox_url" not in rec.calls[2][2]  # type: ignore[operator]
 
         registered = await tc.server.app[gfs_fed_repo_key].get_instance("alpha.home")
         assert registered is not None
-        assert registered.inbox_url == OWN["own_inbox_url"]
         assert registered.display_name == "Alpha House"
 
 
@@ -393,7 +392,9 @@ async def test_capability_block_without_a_suite_is_not_trusted(repo):
 async def test_missing_own_identity_sends_nothing(repo):
     stub = _Stub({})
     with pytest.raises(GfsSignupError) as exc:
-        await _svc(repo, stub).pair_open_signup(GFS_URL, **{**OWN, "own_inbox_url": ""})
+        await _svc(repo, stub).pair_open_signup(
+            GFS_URL, **{**OWN, "own_instance_id": ""}
+        )
     assert exc.value.reason == "refused"
     assert stub.calls == []
 

@@ -9,8 +9,9 @@ The pairing flow (simpler than HFS):
    ``{gfs_instance_id, public_key}`` so it can pin them before
    trusting any future relay.
 3. Instance POSTs to ``{gfs_url}/gfs/register`` with
-   ``{token, instance_id (own), public_key (own), inbox_url,
-   display_name}``.
+   ``{token, instance_id (own), public_key (own), display_name}`` (plus
+   the key-wrap fields when provisioned). No household address: the GFS
+   relays over the WebSocket the household opens, so it never needs one.
 4. GFS validates the token (single-use), registers the client,
    responds ``{status, instance_id}``.
 5. Connection saved with ``status=active`` (or ``pending`` if the
@@ -176,7 +177,7 @@ class GfsSignupError(GfsConnectionError):
     ``reason`` is the machine-readable cause the onboarding route maps to a
     plain message — never the GFS's own words:
 
-    * ``invalid_url`` — the GFS or own inbox URL fails the transport rules;
+    * ``invalid_url`` — the GFS URL fails the transport rules;
     * ``already_connected`` — this household already has that GFS;
     * ``unreachable`` — no answer, or a 5xx;
     * ``identity_mismatch`` — ``/gfs/info`` names another id / key than the
@@ -185,7 +186,7 @@ class GfsSignupError(GfsConnectionError):
       endpoint said no (403/404);
     * ``busy`` — the GFS rate-limited the token request (429);
     * ``refused`` — the GFS turned the registration down (e.g. an expired
-      token or an inbox URL it can't use).
+      token).
     """
 
     __slots__ = ("reason",)
@@ -421,7 +422,6 @@ class GfsConnectionService:
         *,
         own_instance_id: str,
         own_public_key_hex: str,
-        own_inbox_url: str,
         own_display_name: str = "",
         own_keywrap_public_key_hex: str = "",
         own_keywrap_sig: str = "",
@@ -440,9 +440,9 @@ class GfsConnectionService:
             raise GfsConnectionError(
                 "gfs_url and token are required in the QR payload",
             )
-        if not own_instance_id or not own_public_key_hex or not own_inbox_url:
+        if not own_instance_id or not own_public_key_hex:
             raise GfsConnectionError(
-                "own_instance_id, own_public_key_hex, and own_inbox_url"
+                "own_instance_id and own_public_key_hex"
                 " are required for GFS registration",
             )
         # Transport check BEFORE the first byte leaves: over public plain
@@ -450,7 +450,6 @@ class GfsConnectionService:
         # the TOFU key swapped, so there is nothing to pin. LAN / loopback is
         # still fine (the demo harness pairs ``http://127.0.0.1:<port>``).
         _require_secure_url(gfs_url, field="gfs_url")
-        _require_secure_url(own_inbox_url, field="own_inbox_url")
 
         info = await self._fetch_descriptor(gfs_url)
         return await self._register(
@@ -459,7 +458,6 @@ class GfsConnectionService:
             token,
             own_instance_id=own_instance_id,
             own_public_key_hex=own_public_key_hex,
-            own_inbox_url=own_inbox_url,
             own_display_name=own_display_name,
             own_keywrap_public_key_hex=own_keywrap_public_key_hex,
             own_keywrap_sig=own_keywrap_sig,
@@ -471,7 +469,6 @@ class GfsConnectionService:
         *,
         own_instance_id: str,
         own_public_key_hex: str,
-        own_inbox_url: str,
         own_display_name: str = "",
         own_keywrap_public_key_hex: str = "",
         own_keywrap_sig: str = "",
@@ -501,18 +498,17 @@ class GfsConnectionService:
         plain message: ``invalid_url``, ``already_connected``,
         ``unreachable``, ``identity_mismatch``, ``closed``, ``busy`` or
         ``refused``. Nothing leaves
-        this household before the URL checks pass.
+        this household before the URL check passes.
         """
         gfs_url = str(gfs_url or "").rstrip("/")
-        if not own_instance_id or not own_public_key_hex or not own_inbox_url:
+        if not own_instance_id or not own_public_key_hex:
             raise GfsSignupError(
-                "own_instance_id, own_public_key_hex, and own_inbox_url"
+                "own_instance_id and own_public_key_hex"
                 " are required for GFS registration",
                 reason="refused",
             )
         try:
             _require_secure_url(gfs_url, field="gfs_url")
-            _require_secure_url(own_inbox_url, field="own_inbox_url")
         except GfsConnectionError as exc:
             raise GfsSignupError(str(exc), reason="invalid_url") from exc
         for existing in await self._repo.list_all():
@@ -560,7 +556,6 @@ class GfsConnectionService:
                 token,
                 own_instance_id=own_instance_id,
                 own_public_key_hex=own_public_key_hex,
-                own_inbox_url=own_inbox_url,
                 own_display_name=own_display_name,
                 own_keywrap_public_key_hex=own_keywrap_public_key_hex,
                 own_keywrap_sig=own_keywrap_sig,
@@ -664,7 +659,6 @@ class GfsConnectionService:
         *,
         own_instance_id: str,
         own_public_key_hex: str,
-        own_inbox_url: str,
         own_display_name: str,
         own_keywrap_public_key_hex: str,
         own_keywrap_sig: str,
@@ -673,7 +667,10 @@ class GfsConnectionService:
 
         Shared by QR pairing and open sign-up so the two can never send
         different fields: the register body below is the whole of what a
-        GFS learns about this household at pairing time.
+        GFS learns about this household at pairing time. It carries no
+        household address — the GFS relays over the WebSocket this
+        household opens (``/gfs/ws``), so an External URL is neither
+        required nor sent.
         """
         gfs_instance_id = str(info.get("gfs_instance_id") or "")
         gfs_public_key = str(info.get("public_key") or "")
@@ -693,7 +690,6 @@ class GfsConnectionService:
             "token": token,
             "instance_id": own_instance_id,
             "public_key": own_public_key_hex,
-            "inbox_url": own_inbox_url,
             "display_name": own_display_name,
         }
         if own_keywrap_public_key_hex:

@@ -261,14 +261,15 @@ The Social Home ↔ GFS link is split by direction:
     |---|---|---|
     | **New household** | identity-free body; nothing to learn | legacy body + **one** WARNING per connection naming the *server* (never the space) |
     | **Old household** | legacy body accepted: verified, then discarded | legacy body, as before |
-  - **`https://` at pair time.** A GFS URL (from the QR or pasted) and the
-    household's own federation base must be `https://` unless the host is
-    loopback, `localhost`, RFC1918, `fc00::/7` or `fe80::/10` — a LAN or
-    demo-harness GFS on `http://127.0.0.1:<port>` stays allowed, a public one
-    must be TLS. Enforced before the first byte leaves
-    (`GfsConnectionService.pair`); DNS is never resolved, so the check can't
-    be turned into a rebinding oracle. Without it the very fetch that pins the
-    key and reads the signed block is rewritable on-path.
+  - **`https://` at pair time.** A GFS URL (from the QR or pasted) must be
+    `https://` unless the host is loopback, `localhost`, RFC1918, `fc00::/7`
+    or `fe80::/10` — a LAN or demo-harness GFS on `http://127.0.0.1:<port>`
+    stays allowed, a public one must be TLS. Enforced before the first byte
+    leaves (`GfsConnectionService.pair`); DNS is never resolved, so the
+    check can't be turned into a rebinding oracle. Without it the very fetch
+    that pins the key and reads the signed block is rewritable on-path. The
+    household's own address is not part of the exchange — registration
+    carries no `inbox_url`.
   - **NULL-pin self-heal.** A space whose GFS row pinned no authority key
     `403`s every relay, and nothing else re-publishes its metadata. So on
     every GFS-WS (re)connect the household re-publishes the metadata of each
@@ -344,11 +345,13 @@ token** (10-minute TTL). There are two ways to get one:
 
 The onboarding step is **opt-in and unchecked**: nothing is sent to any GFS
 unless an admin ticks it and confirms (`tests/protocol/
-test_gfs_onboarding_opt_in.py`). It needs the External URL (a household-side
-prerequisite for federating at all — the address itself is never sent to the
-GFS); without one the step explains that and offers nothing. The
-household learns whether to offer the step from local facts only
-(`GET /api/gfs/connections/default`) — it never probes the GFS to decide.
+test_gfs_onboarding_opt_in.py`). It needs no External URL: the GFS relays
+over the WebSocket the household opens, so registration carries no household
+address — which is what lets the Home Assistant App connect during first-run
+onboarding, before it has any public URL. The household learns whether to
+offer the step from local facts only (`GET /api/gfs/connections/default`:
+`reason` is `disabled` or `already_connected`, else the step is available)
+— it never probes the GFS to decide.
 
 ```mermaid
 sequenceDiagram

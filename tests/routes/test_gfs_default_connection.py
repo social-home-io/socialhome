@@ -139,7 +139,10 @@ async def test_get_empty_default_url_hides_the_step(aiohttp_client, tmp_dir):
     assert body["url"] == ""
 
 
-async def test_get_without_external_url_explains_why(aiohttp_client, tmp_dir):
+async def test_get_offers_the_step_without_an_external_url(aiohttp_client, tmp_dir):
+    """GFS registration needs no household address: on the Home Assistant
+    add-on the External URL doesn't exist at onboarding time, and the step
+    must still be offered."""
     home = await _household(
         aiohttp_client,
         tmp_dir,
@@ -147,8 +150,8 @@ async def test_get_without_external_url_explains_why(aiohttp_client, tmp_dir):
         external_url=None,
     )
     body = await (await home.get(PATH, headers=ADMIN)).json()
-    assert body["available"] is False
-    assert body["reason"] == "no_external_url"
+    assert body["available"] is True
+    assert body["reason"] is None
 
 
 async def test_get_is_admin_only(aiohttp_client, tmp_dir):
@@ -172,10 +175,9 @@ async def test_post_connects_through_open_signup(aiohttp_client, tmp_dir):
     assert body["inbox_url"] == _url(gfs)
     assert "public_key" not in body
 
-    # The GFS registered this household with its External URL inbox.
+    # The GFS registered this household under its id and display name.
     instances = await gfs.server.app[gfs_fed_repo_key].list_instances()
     assert len(instances) == 1
-    assert instances[0].inbox_url.startswith("https://home.example")
     assert instances[0].display_name == "Alpha House"
 
     # It now shows in the list, and GET reports it (no second offer).
@@ -250,15 +252,18 @@ async def test_post_disabled(aiohttp_client, tmp_dir):
     assert (await r.json())["error"]["code"] == "GFS_DEFAULT_DISABLED"
 
 
-async def test_post_without_external_url(aiohttp_client, tmp_dir):
+async def test_post_connects_without_an_external_url(aiohttp_client, tmp_dir):
+    """The regression: a household with no External URL (the HA add-on at
+    onboarding time) registers with the real GFS — no ``NOT_CONFIGURED``."""
     gfs = await _gfs(aiohttp_client, tmp_dir)
     home = await _household(
         aiohttp_client, tmp_dir, default_url=_url(gfs), external_url=None
     )
     r = await home.post(PATH, headers=ADMIN)
-    assert r.status == 422
-    assert (await r.json())["error"]["code"] == "NOT_CONFIGURED"
-    assert await gfs.server.app[gfs_fed_repo_key].list_instances() == []
+    assert r.status == 201, await r.text()
+    assert (await r.json())["status"] == "active"
+    instances = await gfs.server.app[gfs_fed_repo_key].list_instances()
+    assert [i.display_name for i in instances] == ["Alpha House"]
 
 
 @pytest.mark.parametrize("headers", [MEMBER, {}])

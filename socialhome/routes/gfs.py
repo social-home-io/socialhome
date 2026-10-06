@@ -80,35 +80,26 @@ _SIGNUP_ERRORS: dict[str, tuple[int, str, str]] = {
 }
 
 
-async def _own_registration_identity(view: BaseView) -> dict | None:
-    """What this household tells a GFS when it pairs, or ``None`` when the
-    External URL (the inbox the GFS relays to) isn't configured.
+def _own_registration_identity(view: BaseView) -> dict:
+    """What this household tells a GFS when it pairs.
 
     One source for QR pairing and open sign-up, so the two can never send
-    different things.
+    different things. Deliberately no household address: the GFS relays
+    over the WebSocket the household opens, so it has no use for an
+    External URL — and on the Home Assistant add-on there is none at
+    onboarding time. (Household↔household pairing still needs one; see
+    ``routes/pairing.py``.)
     """
-    own_base = await view.svc(K.platform_adapter_key).get_federation_base()
-    if not own_base:
-        return None
     app = view.request.app
     own_pk: bytes = app[K.instance_public_key_key]
     own_keywrap_pk: bytes = app[K.instance_keywrap_public_key_key]
     return {
         "own_instance_id": app[K.instance_id_key],
         "own_public_key_hex": own_pk.hex(),
-        "own_inbox_url": own_base,
         "own_display_name": app[K.config_key].instance_name,
         "own_keywrap_public_key_hex": own_keywrap_pk.hex(),
         "own_keywrap_sig": app[K.instance_keywrap_sig_key],
     }
-
-
-def _not_configured() -> web.Response:
-    return error_response(
-        422,
-        "NOT_CONFIGURED",
-        "External URL is not configured — set it before pairing a GFS.",
-    )
 
 
 def _pub_dict(pub) -> dict:
@@ -152,9 +143,7 @@ class GfsConnectionCollectionView(BaseView):
         if not ctx.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
         body = await self.body()
-        own = await _own_registration_identity(self)
-        if own is None:
-            return _not_configured()
+        own = _own_registration_identity(self)
         svc = self.svc(K.gfs_connection_service_key)
         try:
             conn = await svc.pair(body, **own)
@@ -170,17 +159,17 @@ class GfsDefaultConnectionView(BaseView):
     ``{url, available, reason, connection}``. Answers from LOCAL facts only
     and never contacts the GFS: nothing reaches a GFS unless an admin says
     yes. ``reason`` is ``null`` when ``available``, else ``"disabled"``
-    (``[gfs] default_url`` is empty), ``"no_external_url"`` (pairing needs
-    the External URL, the inbox the GFS relays to) or
-    ``"already_connected"`` (``connection`` then carries that row, so the
-    SPA can say "waiting for approval" for a pending one).
+    (``[gfs] default_url`` is empty) or ``"already_connected"``
+    (``connection`` then carries that row, so the SPA can say "waiting for
+    approval" for a pending one). No External URL is needed — registration
+    sends no household address.
 
     ``POST /api/gfs/connections/default`` — pair with the default GFS through
     its open sign-up (:meth:`GfsConnectionService.pair_open_signup`). ``201``
     with the connection (``status`` ``active`` or ``pending``), or an error
     code the SPA turns into plain words: ``GFS_DEFAULT_DISABLED`` (404),
-    ``NOT_CONFIGURED`` (422), ``ALREADY_CONNECTED`` (409),
-    ``GFS_SIGNUP_CLOSED`` (409), ``GFS_UNREACHABLE`` (502), ``GFS_BUSY``
+    ``ALREADY_CONNECTED`` (409), ``GFS_SIGNUP_CLOSED`` (409),
+    ``GFS_UNREACHABLE`` (502), ``GFS_BUSY``
     (503), ``GFS_IDENTITY_MISMATCH`` (422 — ``/gfs/info`` doesn't match the
     pinned ``[gfs] default_instance_id`` / ``default_public_key``) or
     ``GFS_PAIRING_FAILED`` (422).
@@ -208,8 +197,6 @@ class GfsDefaultConnectionView(BaseView):
             reason = "disabled"
         elif existing is not None:
             reason = "already_connected"
-        elif not await self.svc(K.platform_adapter_key).get_federation_base():
-            reason = "no_external_url"
         return web.json_response(
             {
                 "url": url,
@@ -233,9 +220,7 @@ class GfsDefaultConnectionView(BaseView):
                 "GFS_DEFAULT_DISABLED",
                 "No default GFS is configured for this household.",
             )
-        own = await _own_registration_identity(self)
-        if own is None:
-            return _not_configured()
+        own = _own_registration_identity(self)
         svc = self.svc(K.gfs_connection_service_key)
         try:
             pin_id, pin_key = config.gfs_default_pin()

@@ -393,7 +393,10 @@ What that string actually is depends on the platform adapter:
 
 Every adapter returns `None` until the URL is configured; the
 pairing route surfaces that as a 422 `NOT_CONFIGURED` so the admin
-knows to wire it up before issuing a QR.
+knows to wire it up before issuing a QR. This applies to
+household↔household pairing only — connecting to a GFS
+(`/api/gfs/connections*`) never consults the federation base, so a
+Home Assistant add-on can join the GFS before it has a public URL.
 
 ## URL rotation — `URL_UPDATED`
 
