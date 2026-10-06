@@ -1409,3 +1409,16 @@ async def test_an_unsafe_hello_url_is_never_stored_or_echoed(client, url):
     assert peers["sibling"]["url"] == ""
     for needle in ("X-Inj", "evil", "\\u202e", "\\r", "\\n", "\\u0000"):
         assert needle not in health
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "url",
+    ["http://169.254.169.254", "http://[fe80::1]:8000", "http://[fd00:ec2::254]"],
+)
+async def test_admin_add_peer_refuses_a_link_local_or_metadata_url(client, url):
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={"node_id": "c", "url": url, "public_key": _VALID_KEY},
+    )
+    assert (resp.status, await resp.json()) == (422, {"error": "invalid_url"})

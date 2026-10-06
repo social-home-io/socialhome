@@ -716,7 +716,7 @@ different key is refused (`key_mismatch`, WARNING) — an approval never moves
 in-band, and the repo's `approve_node` keeps a non-empty `approved_key` in SQL
 as well, so rotation is delete then re-add. Liveness refreshes (a HELLO, a heartbeat, the heartbeat loop's ping) are UPDATE-only (`touch_node`), so an admin removal that lands while a ping or a verify is in flight stays removed and a re-added key is never reverted; only add-peer and a first HELLO under our own key create a row. A row's URL does not move in-band either: a
 HELLO fills it only while it is empty (and only with a valid base URL), so a
-member cannot point our heartbeats and fan-out at another address. Each frame signs `{type, from, to, ts, nonce,
+member cannot point our heartbeats and fan-out at another address. Every peer URL (admin add-peer, HELLO, `[cluster] peers`) goes through `global_server/peer_url.py:normalized_peer_url`: printable ASCII re-serialised from validated parts (no whitespace, control or bidi characters, an IDNA host, a real port), and never a link-local or cloud-metadata address (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, in any IPv6-mapped or legacy numeric spelling) — private and loopback addresses stay allowed; a DNS name that resolves to a metadata address is not caught (no lookup at validation time). Each frame signs `{type, from, to, ts, nonce,
 sig_suite, payload}`: the sender id is the signed `from` only, `to` names the
 recipient node (another node refuses it, 409 `wrong_recipient`; absent from
 older senders and from a HELLO to a not-yet-known configured URL), `ts` must sit

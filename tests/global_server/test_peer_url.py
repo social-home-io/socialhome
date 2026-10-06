@@ -92,3 +92,49 @@ def test_the_result_is_printable_ascii():
     out = normalized_peer_url("HTTP://Bücher.Example:8443/x/")
     assert out == "http://xn--bcher-kva.example:8443/x"
     assert out.isascii() and out.isprintable()
+
+
+# ─── Link-local and cloud-metadata addresses ─────────────────────────
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://169.254.169.254",
+        "http://169.254.169.254/latest/meta-data",
+        "http://169.254.0.1:8080",
+        "http://[fe80::1]",
+        "http://[febf:ffff::1]:8000",
+        "http://[fd00:ec2::254]",
+        # IPv4-mapped / -compatible / NAT64 spellings of a link-local v4.
+        "http://[::ffff:169.254.169.254]",
+        "http://[::ffff:a9fe:a9fe]",
+        "http://[::169.254.169.254]",
+        "http://[64:ff9b::169.254.169.254]",
+        # Legacy IPv4 spellings the system resolver still accepts.
+        "http://2852039166",
+        "http://0xa9fea9fe",
+        "http://0251.0376.0251.0376",
+        "http://169.254.43518",
+    ],
+)
+def test_link_local_and_metadata_addresses_are_refused(raw):
+    assert normalized_peer_url(raw) == ""
+
+
+@pytest.mark.parametrize(
+    "raw, want",
+    [
+        ("http://10.0.0.5:8000", "http://10.0.0.5:8000"),
+        ("http://172.16.3.4", "http://172.16.3.4"),
+        ("http://192.168.1.10", "http://192.168.1.10"),
+        ("http://127.0.0.1:9000", "http://127.0.0.1:9000"),
+        ("http://[::1]:9000", "http://[::1]:9000"),
+        ("http://[fd00::5]", "http://[fd00::5]"),
+        # A legacy spelling of an allowed address is re-serialised canonically.
+        ("http://2130706433:9000", "http://127.0.0.1:9000"),
+    ],
+)
+def test_private_and_loopback_addresses_stay_allowed(raw, want):
+    assert normalized_peer_url(raw) == want

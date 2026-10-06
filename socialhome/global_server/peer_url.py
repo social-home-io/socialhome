@@ -15,12 +15,26 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
 #: One DNS label after IDNA encoding. ``_`` is allowed: container and
 #: service names (``gfs_node``) use it, and it can't inject anything.
 _HOST_LABEL_RE = re.compile(r"[a-z0-9_-]{1,63}")
+
+#: Addresses a peer URL may never point at: link-local (where cloud
+#: instance-metadata services live — 169.254.169.254, and AWS's IPv6
+#: ``fd00:ec2::254``). RFC 1918, ULA and loopback stay allowed: cluster
+#: nodes legitimately sit on private networks.
+_REFUSED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("fd00:ec2::254/128"),
+)
+
+#: RFC 6052 well-known NAT64 prefix: ``64:ff9b::a.b.c.d`` reaches v4 a.b.c.d.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 
 def _unsafe_char(ch: str) -> bool:
@@ -30,19 +44,46 @@ def _unsafe_char(ch: str) -> bool:
     return ch.isspace() or unicodedata.category(ch)[0] in ("C", "Z")
 
 
+def _refused_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Link-local / metadata, including an IPv6 spelling of a v4 one."""
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [ip]
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            candidates.append(ip.ipv4_mapped)
+        packed = ip.packed
+        if packed[:12] == bytes(12) and int(ip) > 1:  # IPv4-compatible ::a.b.c.d
+            candidates.append(ipaddress.IPv4Address(packed[12:]))
+        if ip in _NAT64:
+            candidates.append(ipaddress.IPv4Address(packed[12:]))
+    return any(c in net for c in candidates for net in _REFUSED_NETWORKS)
+
+
+def _legacy_ipv4(host: str) -> ipaddress.IPv4Address | None:
+    """An IPv4 address in a spelling the system resolver accepts but
+    ``ipaddress`` does not (``2852039166``, ``0xa9fea9fe``, octal,
+    ``a.b.c`` short forms), or ``None``. Pure parsing — no DNS."""
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(host))
+    except OSError, ValueError:
+        return None
+
+
 def _ascii_host(host: str, *, bracketed: bool) -> str:
-    """The host in ASCII (IDNA for a name, canonical for an IP), or ``""``."""
+    """The host in ASCII (IDNA for a name, canonical for an IP), or ``""``.
+
+    A link-local or metadata address is ``""`` too, in any spelling.
+    """
     if "%" in host:  # an IPv6 zone id, or a percent-escape in a name
         return ""
     if bracketed:
         try:
-            return str(ipaddress.IPv6Address(host))
+            ip6 = ipaddress.IPv6Address(host)
         except ValueError:
             return ""
-    try:
-        return str(ipaddress.IPv4Address(host))
-    except ValueError:
-        pass
+        return "" if _refused_ip(ip6) else str(ip6)
+    ip4 = _legacy_ipv4(host) if host.isascii() else None
+    if ip4 is not None:
+        return "" if _refused_ip(ip4) else str(ip4)
     try:
         encoded = host.encode("idna").decode("ascii")
         # Round-trip: catches ASCII labels the encoder passes through
@@ -63,8 +104,12 @@ def normalized_peer_url(url: object) -> str:
     has a meaning for a base URL, and userinfo would ship credentials in
     every sync POST). Refused outright: any whitespace, control, bidi or
     other format character anywhere (surrounding whitespace is stripped
-    first), non-ASCII outside the host, a host IDNA cannot encode, and a
-    port that is out of range or 0. The host is IDNA-encoded and
+    first), non-ASCII outside the host, a host IDNA cannot encode, a
+    port that is out of range or 0, and a link-local or cloud-metadata
+    address (``169.254.0.0/16``, ``fe80::/10``, ``fd00:ec2::254``, also as
+    an IPv4-mapped, -compatible or NAT64 IPv6 address, or a legacy numeric
+    IPv4 spelling). Private and loopback addresses are allowed. A DNS name
+    that RESOLVES to a refused address is not caught here (no lookup). The host is IDNA-encoded and
     lower-cased, a trailing ``/`` is dropped, and the result is rebuilt
     with ``urlunsplit`` from the validated parts.
     """
