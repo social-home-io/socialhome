@@ -138,13 +138,22 @@ const ALLOWED_ATTR = [
 // and ``httpsx:`` all have a scheme that is not on the list.
 const ALLOWED_URI = /^(?:https?:|mailto:|[^a-z]|[a-z][a-z0-9+.-]*(?:[^a-z0-9+.\-:]|$))/i
 
-/** Keep only ``<input type=checkbox>`` (GFM task lists) and pin it
- *  disabled; any other input type is removed outright. */
+/** The only attributes a task box keeps. ``ALLOWED_ATTR`` is shared by
+ *  every tag, so ``src`` / ``width`` / ``id``… would otherwise survive on
+ *  an ``<input>`` too. */
+const _TASK_BOX_ATTRS = new Set(['type', 'checked', 'disabled'])
+
+/** Keep only ``<input type=checkbox>`` (GFM task lists), strip every
+ *  other attribute, and pin it disabled; any other input type is removed
+ *  outright. */
 function _onlyTaskBoxes(root: DocumentFragment): void {
   for (const input of Array.from(root.querySelectorAll('input'))) {
     if ((input.getAttribute('type') || '').toLowerCase() !== 'checkbox') {
       input.remove()
       continue
+    }
+    for (const name of input.getAttributeNames()) {
+      if (!_TASK_BOX_ATTRS.has(name)) input.removeAttribute(name)
     }
     input.setAttribute('disabled', '')
   }

@@ -118,6 +118,19 @@ describe('renderMarkdown', () => {
       }
     })
 
+    it('strips every task-box attribute but type / checked / disabled', () => {
+      // ``src`` / ``width`` / ``title`` / ``id`` are allowed for other
+      // tags; on an <input> they serve no purpose (``src`` would fetch on
+      // ``type=image`` if anything ever flipped the type).
+      const d = host(renderMarkdown(
+        '<input type="checkbox" checked src="https://tracker.example/p.gif"'
+        + ' width="1" height="1" title="t" id="x" alt="a" align="left">',
+      ))
+      const [box] = Array.from(d.querySelectorAll('input'))
+      expect(box).toBeDefined()
+      expect(box.getAttributeNames().sort()).toEqual(['checked', 'disabled', 'type'])
+    })
+
     it.each([
       ['javascript:alert(1)'],
       ['JaVaScRiPt:alert(1)'],
