@@ -1376,3 +1376,34 @@ async def test_cluster_approve_writes_the_approved_url_alone(gfs_db):
     )
     (row,) = await repo.list_nodes()
     assert (row.url, row.approved_url) == ("http://b", "http://b")
+
+
+async def test_cluster_remove_stale_siblings_drops_only_stale_own_key_rows(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    own, other = "aa" * 32, "bb" * 32
+    old, new = "2026-01-01 00:00:00", "2026-06-01 00:00:00"
+    rows = [
+        ("stale", own, old),
+        ("stale-tz-aware", own, "2026-01-01T00:00:00+00:00"),
+        ("fresh", own, new),
+        ("self", own, old),
+        ("foreign", other, old),
+        ("garbled", own, "not a date"),
+    ]
+    for node_id, key, seen in rows:
+        await repo.insert_node(
+            ClusterNode(node_id=node_id, url="", public_key=key, last_seen=seen)
+        )
+    await repo.approve_node("approved", "http://a", own)
+    await repo.touch_node("approved", status="offline", last_seen=old)
+    removed = await repo.remove_stale_siblings(
+        own_key=own.upper(), seen_before="2026-03-01 00:00:00", keep_node_id="self"
+    )
+    assert removed == 2
+    assert {r.node_id for r in await repo.list_nodes()} == {
+        "fresh",
+        "self",
+        "foreign",
+        "garbled",
+        "approved",
+    }

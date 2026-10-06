@@ -104,6 +104,11 @@ class _Roster:
     async def remove_node(self, node_id: str) -> None:
         self.rows.pop(node_id, None)
 
+    async def remove_stale_siblings(
+        self, *, own_key: str, seen_before: str, keep_node_id: str
+    ) -> int:
+        return 0
+
     async def update_active_sync_sessions(self, node_id: str, count: int) -> None:
         return None
 
@@ -550,7 +555,7 @@ async def _member_and_tofu_rows(gfs, tmp_dir, member, tofu) -> None:
             url=member.url,
             public_key=_own_key(gfs),
             status="online",
-            last_seen="2026-01-01 00:00:00",
+            last_seen=_recently(),
         )
     )
     attacker_key = ed25519_public_key(secrets.token_bytes(32)).hex()
@@ -560,6 +565,11 @@ async def _member_and_tofu_rows(gfs, tmp_dir, member, tofu) -> None:
         " VALUES('tofu', ?, ?, 'online', datetime('now'))",
         (tofu.url, attacker_key),
     )
+
+
+def _recently() -> str:
+    """A ``last_seen`` a live sibling has (naive UTC, like the column)."""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 
 def _report() -> GfsFraudReport:
@@ -703,7 +713,7 @@ async def test_an_old_version_rewrite_of_a_sibling_row_makes_it_no_member(
             url=member.url,
             public_key=_own_key(gfs),
             status="online",
-            last_seen="2026-01-01 00:00:00",
+            last_seen=_recently(),
         )
     )
     attacker = secrets.token_bytes(32)

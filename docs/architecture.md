@@ -736,11 +736,17 @@ byte-identical resend is a 409 for as long as it could still be fresh
 a frame with a `ts` at or below it counts as seen, so a wall-clock step back
 never reopens a replay. A live digest is never evicted — evicting would have
 to raise the floor to its `ts`, and a member dating frames `now + 300` could
-then push it past every honest frame — so when the cache (660 per node × 32
-nodes) or the sending node's 660-entry share is full, the NEW frame is
-refused (503 `replay_cache_full`, the sender retries). A first own-key HELLO
-creates a row only while fewer than 32 peers are on the roster (403
-`cluster_full`). Every refusal is charged to the source
+then push it past every honest frame — so when the sending node's 660-entry share is full, the NEW frame is
+refused (503 `replay_cache_full`, the sender retries). There is no total
+cap: only members' verified frames are recorded, so the per-node share
+bounds it. A first own-key HELLO creates a row only while fewer than 32
+shared-seed siblings (rows with no approval holding our key) are on the
+roster (403 `cluster_full`); approved rows and non-member rows do not count.
+Every Nomad allocation is a new node id under the shared seed, so the
+heartbeat loop drops a sibling row unseen for 10 heartbeat intervals
+(`CLUSTER_STALE_SIBLING_S`, 300 s) — never an approved row. Removing a
+sibling, by hand or by that cleanup, is therefore temporary: a live sibling
+rejoins with its next HELLO. Every refusal is charged to the source
 address, never to the node it names. An address that spent its budget is
 shed, but not blindly: its frames still take the cheap checks, and one that
 names an approved node is verified — accepted if it verifies, so junk from a
@@ -771,9 +777,9 @@ shed — delays that member (keep `trusted_proxies` to the real proxy); a frame 
 sender, or a HELLO to a configured URL not yet known) can be replayed once to
 each other node inside its 300 s window (the replay cache is per process); clock skew above 300 s partitions
 the cluster (run NTP); two nodes sharing a `node_id` are indistinguishable;
-and an admin-approved roster larger than 32 nodes, all saturating their
-budgets, can fill the replay cache, so some frames are refused 503 until
-digests expire (never a replay accepted).
+and a seed holder can churn sibling node ids, holding up to 32 sibling rows at a time,
+each with its own 660-digest replay share (it holds our identity, so this
+is no escalation).
 
 ### Database writer (write coalescing)
 

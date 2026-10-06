@@ -25,7 +25,7 @@ import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -160,18 +160,33 @@ CLUSTER_REPLAY_MAX_PER_NODE: int = CLUSTER_RATE_LIMIT_PER_MIN * math.ceil(
     CLUSTER_REPLAY_TTL_S / 60
 )
 
-#: Largest roster the cluster is sized for: own-key ``NODE_HELLO``s (a
-#: shared-seed sibling's first contact) create no row past this many peers
-#: (403 ``cluster_full``), and the replay cache holds this many saturating
-#: nodes without refusing anything.
+#: Most shared-seed siblings on the roster: an own-key ``NODE_HELLO`` (a
+#: sibling's first contact) creates no row while this many sibling rows —
+#: rows with no operator approval, holding our own key — exist (403
+#: ``cluster_full``). Operator-approved rows do not count (each one is an
+#: explicit admin act), nor do rows that are no member at all.
 CLUSTER_MAX_NODES: int = 32
 
-#: Replay-cache capacity: every frame the largest roster can have accepted
-#: within one TTL (660 × 32 = 21 120 digests, ~3.5 MB). When full — or when
-#: a node holds :data:`CLUSTER_REPLAY_MAX_PER_NODE` live digests — a new
-#: frame is REFUSED (503 ``replay_cache_full``), never let in by evicting a
-#: live digest (see :class:`ClusterReplayCache`).
-CLUSTER_REPLAY_MAX_ENTRIES: int = CLUSTER_REPLAY_MAX_PER_NODE * CLUSTER_MAX_NODES
+#: A shared-seed sibling's row unseen this long is dropped by the heartbeat
+#: loop: every Nomad allocation is a new node id under the shared seed, so
+#: without it the roster fills with dead allocations and the next sibling
+#: gets ``cluster_full`` for good. Ten heartbeat intervals — a live sibling
+#: is refreshed every interval (our ping, its heartbeat or HELLO), and a
+#: dropped one that comes back simply rejoins with its next HELLO.
+#: Operator-approved rows are never dropped.
+CLUSTER_STALE_SIBLING_S: int = 10 * HEARTBEAT_INTERVAL_S
+
+#: Replay-cache capacity across all nodes: ``None`` — the per-node share
+#: (:data:`CLUSTER_REPLAY_MAX_PER_NODE`, ~110 KB) is the binding bound. Only
+#: frames that verified under a member's key are recorded, so the nodes with
+#: live entries are the members of the last TTL: the operator-approved rows
+#: plus at most :data:`CLUSTER_MAX_NODES` siblings at a time (a stale one is
+#: dropped after :data:`CLUSTER_STALE_SIBLING_S`, so a few generations of
+#: them within one TTL). A global cap would refuse honest frames from a
+#: large approved roster for no gain; a node at its share is REFUSED
+#: (503 ``replay_cache_full``), never let in by evicting a live digest (see
+#: :class:`ClusterReplayCache`).
+CLUSTER_REPLAY_MAX_ENTRIES: int | None = None
 
 #: Spec §24.10.7 / S-8 — per-node ceiling on concurrent sync signaling
 #: sessions. ``pick_signaling_node`` filters out any node already at this
@@ -383,8 +398,8 @@ class ClusterReplayCache:
     The cache never evicts a live entry. Evicting one would have to raise
     the floor to its ``ts`` — and a member dating its frames ``now + 300``
     could then push the floor past every honest frame. Instead, when the
-    cache holds ``cap`` entries, or the sending node holds ``per_node_cap``,
-    :meth:`record` refuses the NEW frame; the caller answers 503 and the
+    cache holds ``cap`` entries (``None``: no total cap), or the sending
+    node holds ``per_node_cap``, :meth:`record` refuses the NEW frame; the caller answers 503 and the
     sender retries. A node is capped at its own share, so one node cannot
     crowd out another. In-memory, per process — the boot floor covers a
     restart.
@@ -399,7 +414,7 @@ class ClusterReplayCache:
         "_floor",
     )
 
-    def __init__(self, *, cap: int, per_node_cap: int) -> None:
+    def __init__(self, *, cap: int | None, per_node_cap: int) -> None:
         self._cap = cap
         self._per_node_cap = per_node_cap
         #: digest → sending node id.
@@ -426,9 +441,8 @@ class ClusterReplayCache:
         if digest in self._entries:
             return True
         if (
-            len(self._entries) >= self._cap
-            or self._per_node.get(node_id, 0) >= self._per_node_cap
-        ):
+            self._cap is not None and len(self._entries) >= self._cap
+        ) or self._per_node.get(node_id, 0) >= self._per_node_cap:
             return False
         self._entries[digest] = node_id
         self._per_node[node_id] = self._per_node.get(node_id, 0) + 1
@@ -667,9 +681,23 @@ class ClusterService:
         )
 
     def roster_full(self, nodes: list[ClusterNode]) -> bool:
-        """Whether *nodes* already hold :data:`CLUSTER_MAX_NODES` peers, so
-        an own-key HELLO may not create another row."""
-        return sum(1 for n in nodes if n.node_id != self._node_id) >= CLUSTER_MAX_NODES
+        """Whether *nodes* already hold :data:`CLUSTER_MAX_NODES` shared-seed
+        siblings, so an own-key HELLO may not create another row.
+
+        Counts only rows with no approval that hold our own key: an
+        approved row is the operator's, and a row that is no member (an
+        old-version node's TOFU row) must not lock siblings out.
+        """
+        return (
+            sum(
+                1
+                for n in nodes
+                if n.node_id != self._node_id
+                and not n.approved_key
+                and is_member(n, self._own_pk_hex)
+            )
+            >= CLUSTER_MAX_NODES
+        )
 
     def _own_connected_clients(self) -> int:
         return (
@@ -1564,7 +1592,11 @@ class ClusterService:
         seconds, and an admin may remove — or remove and re-add under a new
         key — the peer meanwhile. Re-writing the row read before the ping
         would undo that.
+
+        First drops shared-seed sibling rows unseen for
+        :data:`CLUSTER_STALE_SIBLING_S` (never an approved row).
         """
+        await self._collect_stale_siblings()
         for r in await self.member_peers():
             url = member_url(r)
             if r.status == "offline":
@@ -1613,6 +1645,32 @@ class ClusterService:
                     await self._repo.touch_node(
                         r.node_id, status="offline", last_seen=r.last_seen
                     )
+
+    async def _collect_stale_siblings(self) -> None:
+        """Delete shared-seed sibling rows (no approval, our own key) whose
+        last sign of life is older than :data:`CLUSTER_STALE_SIBLING_S`.
+
+        A removed sibling that is still alive rejoins with its next HELLO —
+        its re-announce loop sends one every few seconds. Rows an operator
+        approved are never touched, nor rows that are no member (the admin
+        view shows them so a distinct-key peer can be re-added).
+        """
+        if not self._own_pk_hex:
+            return
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=CLUSTER_STALE_SIBLING_S)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            removed = await self._repo.remove_stale_siblings(
+                own_key=self._own_pk_hex.lower(),
+                seen_before=cutoff,
+                keep_node_id=self._node_id,
+            )
+        except Exception as exc:
+            log.warning("cluster: stale sibling cleanup failed: %r", exc)
+            return
+        if removed:
+            log.info("cluster: dropped %d stale shared-seed sibling row(s)", removed)
 
     async def _broadcast(
         self,

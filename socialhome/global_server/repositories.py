@@ -1180,6 +1180,9 @@ class AbstractClusterRepo(Protocol):
         last_seen: str,
     ) -> None: ...
     async def remove_node(self, node_id: str) -> None: ...
+    async def remove_stale_siblings(
+        self, *, own_key: str, seen_before: str, keep_node_id: str
+    ) -> int: ...
     async def update_active_sync_sessions(
         self,
         node_id: str,
@@ -1320,6 +1323,29 @@ class SqliteClusterRepo:
         await self._db.enqueue(
             "DELETE FROM cluster_nodes WHERE node_id=?",
             (node_id,),
+        )
+
+    async def remove_stale_siblings(
+        self, *, own_key: str, seen_before: str, keep_node_id: str
+    ) -> int:
+        """Delete shared-seed sibling rows — no approval, ``public_key`` our
+        own *own_key* — last seen (or, never seen, added) before
+        *seen_before* (naive UTC ``YYYY-MM-DD HH:MM:SS``). Returns the count.
+
+        One statement, so a row an admin approves concurrently is never
+        deleted. ``datetime()`` normalises both timestamp shapes a row may
+        hold (naive, or an older build's tz-aware ISO); an unparsable one
+        is kept.
+        """
+        return await self._db.enqueue_rowcount(
+            """
+            DELETE FROM cluster_nodes
+            WHERE approved_key=''
+              AND lower(public_key)=?
+              AND node_id<>?
+              AND datetime(COALESCE(last_seen, added_at)) < datetime(?)
+            """,
+            (own_key.lower(), keep_node_id, seen_before),
         )
 
     async def update_active_sync_sessions(

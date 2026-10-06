@@ -39,6 +39,7 @@ from socialhome.global_server.cluster import (
     NODE_HEARTBEAT,
     NODE_HELLO,
     ClusterService,
+    _now_iso,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
@@ -1090,13 +1091,17 @@ async def test_frames_signed_before_this_process_started_are_refused(client):
 async def test_replay_cache_is_sized_from_the_cluster_constants(gfs_db):
     """The cache must outlive the ``ts`` window (else a frame replays after
     expiring but while still fresh), give each node room for every frame
-    its verified budget can admit within the TTL, and hold that for the
-    largest roster (else an honest frame is refused for want of room)."""
+    its verified budget can admit within the TTL, and never refuse a node
+    for want of total room (else an honest frame from a large approved
+    roster is refused)."""
     assert CLUSTER_REPLAY_TTL_S >= 2 * CLUSTER_TS_SKEW_S + CLUSTER_REPLAY_SLACK_S
     assert CLUSTER_REPLAY_MAX_PER_NODE >= CLUSTER_RATE_LIMIT_PER_MIN * (
         CLUSTER_REPLAY_TTL_S / 60
     )
-    assert CLUSTER_REPLAY_MAX_ENTRIES == CLUSTER_REPLAY_MAX_PER_NODE * CLUSTER_MAX_NODES
+    # No total cap: the per-node share is the binding bound (only members'
+    # verified frames are recorded), so a large approved roster is never
+    # refused for want of room.
+    assert CLUSTER_REPLAY_MAX_ENTRIES is None
     svc = ClusterService(SqliteClusterRepo(gfs_db))
     assert svc._seen_frames._cap == CLUSTER_REPLAY_MAX_ENTRIES
     assert svc._seen_frames._per_node_cap == CLUSTER_REPLAY_MAX_PER_NODE
@@ -1522,7 +1527,9 @@ async def test_own_key_hellos_cannot_grow_the_roster_without_bound(client):
     own_seed, own_key = svc._signing_key, svc.own_public_key_hex
     repo = client._app[gfs_cluster_repo_key]
     for i in range(CLUSTER_MAX_NODES):
-        await repo.insert_node(ClusterNode(node_id=f"sib-{i}", url=""))
+        await repo.insert_node(
+            ClusterNode(node_id=f"sib-{i}", url="", public_key=own_key)
+        )
 
     async def hello(node_id: str):
         return await _sync(
@@ -1542,3 +1549,111 @@ async def test_own_key_hellos_cannot_grow_the_roster_without_bound(client):
     # And once one is removed, a new one can join.
     await repo.remove_node("sib-1")
     assert (await hello("sib-new")).status == 200
+
+
+# ─── Stale shared-seed siblings (Nomad allocation churn) ─────────────────
+
+_LONG_AGO = "2026-01-01 00:00:00"
+
+
+async def _own_key_hello(client, node_id: str):
+    svc = client._app[gfs_cluster_key]
+    return await _sync(
+        client,
+        from_node=node_id,
+        seed=svc._signing_key,
+        ip=GENUINE_IP,
+        type_=NODE_HELLO,
+        payload={"node_id": node_id, "url": "", "public_key": svc.own_public_key_hex},
+    )
+
+
+async def test_stale_siblings_are_collected_so_a_new_one_can_join(client, monkeypatch):
+    """Every Nomad allocation is a new node id under the shared seed, and
+    rows were never cleaned up: after ``CLUSTER_MAX_NODES`` allocations the
+    next sibling got ``cluster_full`` for good. The heartbeat loop now drops
+    shared-seed rows unseen for :data:`CLUSTER_STALE_SIBLING_S`."""
+    svc = client._app[gfs_cluster_key]
+    monkeypatch.setattr(ClusterService, "_ping_peer", _never_reachable)
+    repo = client._app[gfs_cluster_repo_key]
+    for i in range(CLUSTER_MAX_NODES):
+        await repo.insert_node(
+            ClusterNode(
+                node_id=f"alloc-{i}",
+                url=f"http://alloc-{i}.test",
+                public_key=svc.own_public_key_hex,
+                status="offline",
+                last_seen=_LONG_AGO,
+            )
+        )
+    resp = await _own_key_hello(client, "alloc-new")
+    assert (resp.status, await resp.json()) == (403, {"error": "cluster_full"})
+    await svc._heartbeat_tick()
+    assert await repo.list_nodes() == []
+    assert (await _own_key_hello(client, "alloc-new")).status == 200
+
+
+async def _never_reachable(self, peer_url: str) -> bool:
+    return False
+
+
+async def test_collection_keeps_approved_active_and_unapproved_rows(
+    client, monkeypatch
+):
+    """Only a shared-seed sibling's row is collected, and only once stale:
+    an operator-approved row never is (however long it was offline), nor an
+    active sibling, nor a row that is no member — the admin view shows it
+    so the operator can re-add a distinct-key peer."""
+    svc = client._app[gfs_cluster_key]
+    monkeypatch.setattr(ClusterService, "_ping_peer", _never_reachable)
+    repo = client._app[gfs_cluster_repo_key]
+    seed, key = _keypair()
+    await repo.approve_node("approved", "http://approved.test", key)
+    await repo.touch_node("approved", status="offline", last_seen=_LONG_AGO)
+    await repo.insert_node(
+        ClusterNode(
+            node_id="active-sibling",
+            url="http://active.test",
+            public_key=svc.own_public_key_hex,
+            status="online",
+            last_seen=_now_iso(),
+        )
+    )
+    await repo.insert_node(
+        ClusterNode(
+            node_id="stale-sibling",
+            url="http://stale.test",
+            public_key=svc.own_public_key_hex,
+            status="offline",
+            last_seen=_LONG_AGO,
+        )
+    )
+    await repo.insert_node(
+        ClusterNode(
+            node_id="old-peer",
+            url="http://old-peer.test",
+            public_key=key,
+            status="offline",
+            last_seen=_LONG_AGO,
+        )
+    )
+    await svc._heartbeat_tick()
+    assert {n.node_id for n in await repo.list_nodes()} == {
+        "approved",
+        "active-sibling",
+        "old-peer",
+    }
+
+
+@pytest.mark.security
+async def test_only_shared_seed_rows_count_towards_cluster_full(client, tmp_dir):
+    """Rows an operator approved, and rows an old-version node wrote by
+    trust-on-first-use, do not fill the own-key HELLO cap."""
+    repo = client._app[gfs_cluster_repo_key]
+    for i in range(CLUSTER_MAX_NODES):
+        _, key = _keypair()
+        await repo.approve_node(f"approved-{i}", f"http://a{i}.test", key)
+        await repo.insert_node(
+            ClusterNode(node_id=f"tofu-{i}", url=f"http://t{i}.test", public_key=key)
+        )
+    assert (await _own_key_hello(client, "sibling")).status == 200
