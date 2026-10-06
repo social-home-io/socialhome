@@ -24,6 +24,7 @@ from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
 )
 from socialhome.config import Config
+from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.outbound_fetch import OutboundFetcher
 from socialhome.services.app_federation_service import AppFederationService
 
@@ -59,6 +60,16 @@ async def test_create_app_stores_config(cfg):
 
     app = create_app(cfg)
     assert app[config_key] is cfg
+
+
+async def test_create_app_pins_client_max_size_to_the_json_cap(cfg):
+    """``client_max_size`` is the ceiling for every whole-body read
+    (``request.read()/json()/post()`` and, since aiohttp 3.13.3,
+    ``BodyPartReader.read()``). It is pinned explicitly so nobody widens it
+    for one route — routes taking larger bodies stream through
+    ``read_body_capped`` / ``read_part_capped`` instead."""
+    app = create_app(cfg)
+    assert app._client_max_size == DEFAULT_JSON_MAX_BYTES == 1 * 1024 * 1024
 
 
 async def test_startup_hook_runs_without_error(tmp_dir):

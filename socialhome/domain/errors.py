@@ -27,6 +27,7 @@ __all__ = [
     "CodedError",
     "ImageTooLargeError",
     "ImageUnreadableError",
+    "PayloadTooLargeError",
 ]
 
 ParamValue = str | int | float | bool
@@ -62,6 +63,24 @@ class ImageTooLargeError(CodedError):
 
     status = 422
     code = "IMAGE_TOO_LARGE"
+    detail = "Upload exceeds size limit."
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__(params={"max_mb": max(1, max_bytes // (1024 * 1024))})
+
+
+class PayloadTooLargeError(CodedError):
+    """A request body (or one multipart part) is over the route's cap.
+
+    Raised by the streaming readers in :mod:`socialhome.hardening`
+    (``read_body_capped`` / ``read_part_capped``) the moment the bytes
+    read cross the cap — the rest of the body is never buffered. 413 like
+    aiohttp's own ``client_max_size`` refusal, but with the canonical
+    coded envelope so the SPA can tell the user the limit.
+    """
+
+    status = 413
+    code = "PAYLOAD_TOO_LARGE"
     detail = "Upload exceeds size limit."
 
     def __init__(self, max_bytes: int) -> None:

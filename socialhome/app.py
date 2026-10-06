@@ -53,6 +53,7 @@ from .federation.federation_service import FederationService
 from .federation.sync_manager import SyncSessionManager
 from .federation.transport import FederationTransport, HttpsInboxTransport
 from .hardening import (
+    DEFAULT_JSON_MAX_BYTES,
     build_body_size_middleware,
     build_cors_deny_middleware,
     install_security_headers,
@@ -2581,13 +2582,21 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Application ───────────────────────────────────────────────────────
     # Order matters: hardening runs first (cheap rejects), then auth,
     # then per-route rate limiting.
+    #
+    # ``client_max_size`` is the ceiling for every whole-body read —
+    # ``request.read()`` / ``json()`` / ``post()`` and, since aiohttp
+    # 3.13.3 (aio-libs/aiohttp#11889), ``BodyPartReader.read()``. Pinned
+    # at the JSON cap (aiohttp's default); routes that take larger bodies
+    # stream through ``read_body_capped`` / ``read_part_capped`` under
+    # their own cap instead of widening this for every route.
     app = web.Application(
+        client_max_size=DEFAULT_JSON_MAX_BYTES,
         middlewares=[
             body_size_middleware,
             cors_middleware,
             auth_middleware,
             rate_middleware,
-        ]
+        ],
     )
     # Security headers go on at prepare time, so streamed responses
     # (``/api/media/*``) and early rejects carry them too.
