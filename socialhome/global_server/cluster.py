@@ -15,6 +15,7 @@ callable so the admin portal's cluster tab + ``/cluster/health`` work.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -30,7 +31,7 @@ from ..crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
 from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
-from .federation import certified_authority_repin
+from .federation import SeenPayloadCache, certified_authority_repin
 from .public import SlidingWindowCounter
 
 if TYPE_CHECKING:
@@ -67,6 +68,31 @@ CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN: int = 30
 #: how long a captured frame can be replayed. Cluster nodes must keep their
 #: clocks within this window of each other (NTP) or they partition.
 CLUSTER_TS_SKEW_S: int = 300
+
+#: Slack below this process's start time for the boot floor: a frame whose
+#: ``ts`` predates our start by more than this is refused, because the
+#: in-memory replay cache was empty then and cannot vouch for it.
+CLUSTER_BOOT_FLOOR_SLACK_S: int = 5
+
+#: How long an accepted frame's digest is remembered. A frame is fresh for
+#: ``±CLUSTER_TS_SKEW_S`` around its ``ts``, so the cache must outlive the
+#: whole 600 s window or a captured frame would replay after expiring here.
+CLUSTER_REPLAY_TTL_S: float = float(2 * CLUSTER_TS_SKEW_S)
+
+#: Roster size the replay cache is sized for. Only ACCEPTED frames are
+#: recorded, and each verified node is capped at
+#: :data:`CLUSTER_RATE_LIMIT_PER_MIN`, so this many saturating nodes fit
+#: within one TTL without evicting a live digest. A bigger roster that
+#: saturates every budget at once would evict the oldest digests early.
+CLUSTER_REPLAY_SIZED_NODES: int = 32
+
+#: Replay-cache capacity: every frame the sized roster can have accepted
+#: within one TTL (60/min × 10 min × 32 = 19 200 digests, ~3 MB).
+CLUSTER_REPLAY_MAX_ENTRIES: int = (
+    CLUSTER_RATE_LIMIT_PER_MIN
+    * int(CLUSTER_REPLAY_TTL_S // 60)
+    * CLUSTER_REPLAY_SIZED_NODES
+)
 
 #: Spec §24.10.7 / S-8 — per-node ceiling on concurrent sync signaling
 #: sessions. ``pick_signaling_node`` filters out any node already at this
@@ -125,6 +151,8 @@ class ClusterService:
         "_sync_node_limiter",
         "_sync_unverified_limiter",
         "_wall_clock",
+        "_process_start",
+        "_seen_frames",
     )
 
     def __init__(
@@ -190,6 +218,14 @@ class ClusterService:
         #: Unix wall clock for the frame ``ts`` window (signed by the sender,
         #: checked by the receiver) — injectable so tests never race it.
         self._wall_clock = wall_clock
+        #: Boot floor (see :data:`CLUSTER_BOOT_FLOOR_SLACK_S`).
+        self._process_start = wall_clock()
+        #: Digests of accepted ``/cluster/sync`` frames (raw signed bytes).
+        #: In-memory, per process — the boot floor covers a restart.
+        self._seen_frames = SeenPayloadCache(
+            ttl_s=CLUSTER_REPLAY_TTL_S,
+            cap=CLUSTER_REPLAY_MAX_ENTRIES,
+        )
         #: Per VERIFIED node id (spec §24.10.4). Capped LRU, like every GFS
         #: limiter, though only proven peers ever get a bucket here.
         self._sync_node_limiter = SlidingWindowCounter(CLUSTER_RATE_LIMIT_PER_MIN)
@@ -237,7 +273,21 @@ class ClusterService:
             return "invalid_timestamp"
         if abs(ts - self._wall_clock()) > CLUSTER_TS_SKEW_S:
             return "stale_timestamp"
+        if ts < self._process_start - CLUSTER_BOOT_FLOOR_SLACK_S:
+            return "stale_timestamp"
         return ""
+
+    def frame_seen(self, raw: bytes) -> bool:
+        """Whether these exact signed frame bytes were already accepted."""
+        return self._seen_frames.seen(_frame_digest(raw), now=self._clock())
+
+    def record_frame(self, raw: bytes) -> None:
+        """Remember an accepted frame so a byte-identical resend is refused.
+
+        Called only once the frame passed every check, right before
+        dispatch — a rejected frame never poisons the cache.
+        """
+        self._seen_frames.record(_frame_digest(raw), now=self._clock())
 
     def _own_connected_clients(self) -> int:
         return (
@@ -1185,6 +1235,15 @@ class ClusterService:
 
 
 # ─── Wire shape helpers ──────────────────────────────────────────────────
+
+
+def _frame_digest(raw: bytes) -> bytes:
+    """BLAKE2b-256 of a frame's raw signed bytes — the replay-cache key.
+
+    The signature covers exactly these bytes, so any re-encoding fails
+    verification; the digest needs no canonicalisation.
+    """
+    return hashlib.blake2b(raw, digest_size=32).digest()
 
 
 def _now_iso() -> str:

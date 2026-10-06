@@ -24,6 +24,9 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.cluster import (
     CLUSTER_RATE_LIMIT_PER_MIN,
+    CLUSTER_REPLAY_MAX_ENTRIES,
+    CLUSTER_REPLAY_SIZED_NODES,
+    CLUSTER_REPLAY_TTL_S,
     CLUSTER_TS_SKEW_S,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
     NODE_HEARTBEAT,
@@ -117,6 +120,9 @@ def _post_node_payload(
         "type": type_,
         "from": from_node,
         "ts": int(time.time()) if ts is None else ts,
+        # Unique per call, so two calls in the same second are two frames,
+        # not a replay of one.
+        "nonce": secrets.token_urlsafe(16),
         "payload": payload,
     }
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
@@ -386,6 +392,7 @@ async def _sync(
                 "type": type_,
                 "from": from_node,
                 "ts": int(time.time()) if ts is None else ts,
+                "nonce": secrets.token_urlsafe(16),
                 "payload": {},
             },
             separators=(",", ":"),
@@ -641,3 +648,84 @@ async def test_timestamp_window_follows_the_injected_wall_clock(client):
     assert resp.status == 200
     resp = await _sync(client, from_node=PEER, seed=seed, ip=GENUINE_IP)
     assert resp.status == 401
+
+
+# ─── Replay cache ─────────────────────────────────────────────────────
+
+
+async def _post_raw(client, canonical: bytes, sig: str, ip: str):
+    return await client.post(
+        "/cluster/sync",
+        data=canonical,
+        headers={"X-Node-Signature": sig, "X-Forwarded-For": ip},
+    )
+
+
+@pytest.mark.security
+async def test_replayed_frame_is_refused_and_charged_to_the_address(client):
+    """Byte-identical signed frames are dispatched once. The replay is
+    charged to the replaying address — a replay proves nothing about who
+    sent it, so it must never spend the genuine node's budget."""
+    seed = await _register_peer(client)
+    canonical, sig = _post_node_payload(
+        NODE_HEARTBEAT, {}, from_node=PEER, signing_key=seed
+    )
+    resp = await _post_raw(client, canonical, sig, GENUINE_IP)
+    assert resp.status == 200
+    svc = client._app[gfs_cluster_key]
+    assert svc._sync_node_limiter.exhausted(PEER) is False
+    for _ in range(3):
+        resp = await _post_raw(client, canonical, sig, ATTACKER_IP)
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "replay"
+    assert ATTACKER_IP in svc._sync_unverified_limiter
+    # The node budget was spent once — by the genuine delivery.
+    assert len(svc._sync_node_limiter._hits[PEER]) == 1
+
+
+@pytest.mark.security
+async def test_a_rejected_frame_does_not_poison_the_replay_cache(client):
+    """The digest is recorded only once a frame is accepted, so bytes that
+    failed (here: over budget) are not later refused as a replay."""
+    seed = await _register_peer(client)
+    svc = client._app[gfs_cluster_key]
+    for _ in range(CLUSTER_RATE_LIMIT_PER_MIN):
+        svc.charge_verified_sync(PEER)
+    canonical, sig = _post_node_payload(
+        NODE_HEARTBEAT, {}, from_node=PEER, signing_key=seed
+    )
+    resp = await _post_raw(client, canonical, sig, GENUINE_IP)
+    assert resp.status == 429
+    assert len(svc._seen_frames) == 0
+
+
+@pytest.mark.security
+async def test_frames_signed_before_this_process_started_are_refused(client):
+    """Boot floor: the replay cache is empty after a restart, so a frame
+    signed before this process started (still inside ±300 s) is refused."""
+    seed = await _register_peer(client)
+    resp = await _sync(
+        client,
+        from_node=PEER,
+        seed=seed,
+        ip=GENUINE_IP,
+        ts=int(time.time()) - 60,
+    )
+    assert resp.status == 401
+    assert (await resp.json())["error"] == "stale_timestamp"
+
+
+async def test_replay_cache_is_sized_from_the_cluster_constants(gfs_db):
+    """The cache must outlive the ``ts`` window (else a frame replays after
+    expiring but while still fresh) and hold every frame the verified
+    budget can admit for the sized roster within its TTL (else eviction
+    reopens the window)."""
+    assert CLUSTER_REPLAY_TTL_S >= 2 * CLUSTER_TS_SKEW_S
+    assert CLUSTER_REPLAY_MAX_ENTRIES == (
+        CLUSTER_RATE_LIMIT_PER_MIN
+        * int(CLUSTER_REPLAY_TTL_S // 60)
+        * CLUSTER_REPLAY_SIZED_NODES
+    )
+    svc = ClusterService(SqliteClusterRepo(gfs_db))
+    assert svc._seen_frames._cap == CLUSTER_REPLAY_MAX_ENTRIES
+    assert svc._seen_frames._ttl == CLUSTER_REPLAY_TTL_S

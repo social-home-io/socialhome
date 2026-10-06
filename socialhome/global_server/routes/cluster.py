@@ -137,6 +137,11 @@ class ClusterSyncView(GfsBaseView):
                 web.json_response({"error": "invalid_signature"}, status=401),
             )
 
+        # Replay: these exact signed bytes were already accepted. Charged
+        # to the address — a replay proves nothing about who sent it.
+        if svc.frame_seen(raw):
+            return _reject(web.json_response({"error": "replay"}, status=409))
+
         within_budget = (
             svc.charge_verified_sync(from_node)
             if proven
@@ -144,6 +149,7 @@ class ClusterSyncView(GfsBaseView):
         )
         if not within_budget:
             return _rate_limited()
+        svc.record_frame(raw)
 
         # Dispatch by message type.
         if msg_type == NODE_HELLO:
