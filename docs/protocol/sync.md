@@ -327,7 +327,14 @@ signaling counters, plus each node's live connected-client count
 portal's Cluster tab shows per-node load across the whole cluster. That
 count is ephemeral (never persisted) and fail-soft — a heartbeat that
 omits it leaves the last-known value untouched, so an older peer never
-clobbers it to zero.
+clobbers it to zero. A heartbeat also carries `url`, the sender's advertised
+cluster URL (`[cluster] advertise_url`, else `base_url`): a shared-seed
+sibling's row URL follows it (as it does the sibling's `NODE_HELLO`), so a
+redeployed alloc on a new port is reached there within one heartbeat
+interval. A heartbeat always names its recipient (`to`), so replaying it to
+another node cannot roll a row back; an approved node's URL never moves, a
+sibling announcing the receiver's own URL is refused (WARNING), and an older
+peer that omits `url` leaves the row unchanged.
 
 Tripwire: `tests/protocol/test_gfs_no_sync_signaling.py` (§27.9) — no
 household module may name the endpoint or put `signaling_node` on the wire,

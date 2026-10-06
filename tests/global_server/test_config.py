@@ -391,3 +391,62 @@ peers = [
     assert "169.254.169.254" in warned
     # The unsafe value is logged escaped: no raw line break reaches the log.
     assert "\r" not in warned and "\n" not in warned
+
+
+def _cluster_toml(tmp_dir, cluster_body: str):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        f"""
+[server]
+base_url = "https://gfs.example.com"
+
+[cluster]
+enabled = true
+{cluster_body}
+"""
+    )
+    return p
+
+
+def test_cluster_advertise_url_is_loaded_and_normalised(tmp_dir):
+    p = _cluster_toml(tmp_dir, 'advertise_url = "HTTP://10.0.0.5:28467/"')
+    cfg = GfsConfig.from_toml(p)
+    assert cfg.cluster_advertise_url == "http://10.0.0.5:28467"
+    assert cfg.cluster_self_url == "http://10.0.0.5:28467"
+
+
+def test_cluster_self_url_defaults_to_base_url(tmp_dir):
+    cfg = GfsConfig.from_toml(_cluster_toml(tmp_dir, ""))
+    assert cfg.cluster_advertise_url == ""
+    assert cfg.cluster_self_url == "https://gfs.example.com"
+
+
+@pytest.mark.parametrize("bad", ["https://u:p@x.test", "not a url"])
+def test_cluster_advertise_url_unusable_is_a_config_error(tmp_dir, bad):
+    p = _cluster_toml(tmp_dir, f'advertise_url = "{bad}"')
+    with pytest.raises(ValueError, match="advertise_url"):
+        GfsConfig.from_toml(p)
+
+
+def test_env_cluster_advertise_url_overrides_the_file(tmp_dir, monkeypatch):
+    p = _cluster_toml(tmp_dir, 'advertise_url = "http://10.0.0.5:1"')
+    monkeypatch.setenv("GFS_CLUSTER_ADVERTISE_URL", "http://10.0.0.9:2/")
+    cfg = GfsConfig.from_toml(p)._with_env_overrides()
+    assert cfg.cluster_self_url == "http://10.0.0.9:2"
+
+
+def test_env_cluster_advertise_url_unusable_is_a_config_error(monkeypatch):
+    monkeypatch.setenv("GFS_CLUSTER_ADVERTISE_URL", "ftp://x.test")
+    with pytest.raises(ValueError, match="advertise_url"):
+        GfsConfig(base_url="https://gfs.example.com")._with_env_overrides()
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_env_cluster_advertise_url_empty_is_unset(tmp_dir, monkeypatch, blank):
+    """A templated-but-empty env var (e.g. a Nomad template that rendered
+    nothing) must not clear the file's value: falling back to ``base_url``
+    would advertise the load balancer — the failure advertise_url fixes."""
+    p = _cluster_toml(tmp_dir, 'advertise_url = "http://10.0.0.5:1"')
+    monkeypatch.setenv("GFS_CLUSTER_ADVERTISE_URL", blank)
+    cfg = GfsConfig.from_toml(p)._with_env_overrides()
+    assert cfg.cluster_self_url == "http://10.0.0.5:1"

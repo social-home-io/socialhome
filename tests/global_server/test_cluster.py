@@ -33,6 +33,7 @@ from socialhome.global_server.cluster import (
     UnsupportedClusterSigSuite,
     authorize_frame,
     is_member,
+    member_url,
     parse_cluster_sig_suite,
 )
 from socialhome.global_server.config import GfsConfig
@@ -1096,6 +1097,150 @@ async def test_first_hello_with_a_valid_url_records_it(enabled_cluster, hello_re
     )
     assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test"
     assert hello_replies == ["https://c.gfs.test"]
+
+
+@pytest.mark.security
+async def test_sibling_hello_refreshes_its_url(enabled_cluster, hello_replies):
+    """A shared-seed sibling's HELLO verified under our OWN key — the sender
+    is this GFS — so its URL follows the HELLO: a redeployed alloc on a new
+    port is reached there, not at the dead old one. No second reply."""
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test:1111", public_key_hex=_OWN
+    )
+    hello_replies.clear()
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test:2222/", public_key_hex=_OWN
+    )
+    assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test:2222"
+    assert hello_replies == []
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "bad", ["http://169.254.169.254/x", "javascript:alert(1)", "c.gfs.test"]
+)
+async def test_sibling_hello_with_an_unusable_url_keeps_the_old_one(
+    enabled_cluster, hello_replies, bad
+):
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test:1111", public_key_hex=_OWN
+    )
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url=bad, public_key_hex=_OWN
+    )
+    assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test:1111"
+
+
+@pytest.mark.security
+async def test_sibling_heartbeat_refreshes_its_url(enabled_cluster, hello_replies):
+    """A heartbeat carries the sender's URL and always names its recipient,
+    so a sibling's row converges on its current URL within one heartbeat
+    interval — even if a to-less HELLO replayed elsewhere rolled it back."""
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test:1111", public_key_hex=_OWN
+    )
+    await enabled_cluster.handle_heartbeat(
+        "node-c", {"url": "https://c.gfs.test:2222/", "active_sync_sessions": 0}
+    )
+    assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test:2222"
+
+
+@pytest.mark.security
+async def test_approved_node_heartbeat_never_moves_its_url(
+    enabled_cluster, hello_replies
+):
+    await enabled_cluster.add_peer("node-b", "https://b.gfs.test", _PIN)
+    await enabled_cluster.handle_heartbeat(
+        "node-b", {"url": "https://evil.gfs.test", "active_sync_sessions": 0}
+    )
+    row = await _node_row(enabled_cluster, "node-b")
+    assert (row.url, member_url(row)) == ("https://b.gfs.test", "https://b.gfs.test")
+
+
+async def test_heartbeat_without_url_keeps_the_url(enabled_cluster, hello_replies):
+    """An older peer's heartbeat carries no ``url`` — the row keeps its URL."""
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test:1111", public_key_hex=_OWN
+    )
+    await enabled_cluster.handle_heartbeat("node-c", {"active_sync_sessions": 0})
+    assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test:1111"
+
+
+@pytest.mark.security
+async def test_sibling_hello_to_our_own_url_is_refused_and_warned(
+    enabled_cluster, hello_replies, caplog
+):
+    """Two allocs rendering the same ``advertise_url``: a sibling announcing
+    OUR URL would make us HELLO and heartbeat ourselves. Refused, and the
+    operator sees one WARNING per node, not one per heartbeat."""
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test:1111", public_key_hex=_OWN
+    )
+    with caplog.at_level("WARNING"):
+        await enabled_cluster.handle_hello(
+            from_node_id="node-c", url="https://a.gfs.test/", public_key_hex=_OWN
+        )
+        await enabled_cluster.handle_heartbeat(
+            "node-c", {"url": "https://a.gfs.test", "active_sync_sessions": 0}
+        )
+    assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test:1111"
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and "advertise_url" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "node-c" in warnings[0].getMessage()
+
+
+@pytest.mark.security
+async def test_hello_under_a_foreign_key_never_moves_a_sibling_url(
+    enabled_cluster, hello_replies
+):
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test:1111", public_key_hex=_OWN
+    )
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://evil.gfs.test", public_key_hex=_PIN
+    )
+    assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test:1111"
+
+
+@pytest.mark.security
+async def test_approved_row_under_our_own_key_never_moves_its_url(
+    enabled_cluster, hello_replies
+):
+    """An operator-approved row is reached at the approved URL even when the
+    approved key is our own — approval freezes the URL."""
+    await enabled_cluster.add_peer("node-d", "https://d.gfs.test", _OWN)
+    await enabled_cluster.handle_hello(
+        from_node_id="node-d", url="https://other.gfs.test", public_key_hex=_OWN
+    )
+    row = await _node_row(enabled_cluster, "node-d")
+    assert member_url(row) == "https://d.gfs.test"
+    assert row.url == "https://d.gfs.test"
+
+
+async def test_heartbeat_carries_our_advertised_url(enabled_cluster, monkeypatch):
+    """Outbound NODE_HEARTBEAT names our cluster URL so a shared-seed
+    sibling's row for us follows a redeploy within one interval."""
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        sent.append((msg_type, payload))
+
+    async def fake_ping(self, url):
+        return True
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    monkeypatch.setattr(ClusterService, "_ping_peer", fake_ping)
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_OWN
+    )
+    sent.clear()
+    await enabled_cluster._heartbeat_tick()
+    (beat,) = [p for t, p in sent if t == NODE_HEARTBEAT]
+    assert beat["url"] == "https://a.gfs.test"
 
 
 # ─── Admin removal vs. stale liveness writes ─────────────────────────

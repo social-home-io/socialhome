@@ -318,10 +318,11 @@ def member_url(row: ClusterNode) -> str:
     its key — written only by admin add-peer. Never ``url``: an
     old-version node sharing the DB rewrites ``url`` on any HELLO it
     TOFU-verifies, so it would let an outsider redirect the node's traffic.
-    A shared-seed sibling: ``url``. An old-version node can rewrite that
-    only together with ``public_key`` (the key the HELLO verified under —
-    not our own without our seed), which makes the row no member
-    (:func:`is_member`), so no traffic follows it.
+    A shared-seed sibling: ``url``, which its own HELLO or heartbeat under our
+    key refreshes (its alloc may come back on a new port). An old-version
+    node can rewrite ``url`` only together with ``public_key`` (the key the
+    HELLO verified under — not our own without our seed), which makes the
+    row no member (:func:`is_member`), so no traffic follows it.
     """
     return row.approved_url if row.approved_key else row.url
 
@@ -507,6 +508,7 @@ class ClusterService:
         "_wall_clock",
         "_process_start",
         "_seen_frames",
+        "_dup_url_warned",
     )
 
     def __init__(
@@ -530,6 +532,9 @@ class ClusterService:
         self._fed_repo = fed_repo
         self._node_id = node_id
         self._self_url = self_url
+        #: Node ids we already WARNed about for announcing OUR url (a
+        #: duplicated ``advertise_url``) — once per node, not per heartbeat.
+        self._dup_url_warned: set[str] = set()
         self._peers = tuple(peers)
         self._signing_key = signing_key
         self._own_pk_hex = own_public_key_hex
@@ -808,7 +813,10 @@ class ClusterService:
 
         Lists cluster members only (:func:`is_member`): a row nobody
         approved — an old-version node's TOFU row — is neither a peer nor
-        something to advertise.
+        something to advertise. Each peer is ``node_id``, ``status`` and
+        ``last_seen`` — never its URL: with ``[cluster] advertise_url`` a
+        row holds an internal node address + port, and this page is
+        unauthenticated. URLs are admin-only (:meth:`admin_cluster`).
         """
         return {
             "node_id": self._node_id,
@@ -816,7 +824,6 @@ class ClusterService:
             "peers": [
                 {
                     "node_id": r.node_id,
-                    "url": member_url(r),
                     "status": r.status,
                     "last_seen": r.last_seen,
                 }
@@ -1205,16 +1212,27 @@ class ClusterService:
             )
             already_known = False
         else:
-            # The URL never moves in-band: a member's HELLO must not point
-            # its row — and with it every later heartbeat and fan-out POST —
-            # at another address. An approved node is reached at the URL the
-            # operator approved; a sibling row with no URL yet takes the one
-            # the HELLO carries, and only if it is a usable base URL.
-            # UPDATE only.
-            fill = "" if row.url or row.approved_key else normalized_peer_url(url)
-            url = member_url(row) or fill
+            # An approved node's URL never moves in-band: its HELLO must not
+            # point the row — and with it every later heartbeat and fan-out
+            # POST — at another address; it is reached at the URL the
+            # operator approved. A shared-seed sibling's URL follows its
+            # HELLO (and its heartbeats): this HELLO verified under our OWN
+            # seed, so the sender IS this GFS, and a shared-seed deployment
+            # redeploys its allocs on changing ports — a frozen URL would aim
+            # at a dead or wrong address. ``_sibling_url_refresh`` holds the
+            # rule (no approval, a member under our own key, a usable base
+            # URL that is not ours); the explicit key check here pins it to
+            # the key this HELLO verified under. UPDATE only, and the repo
+            # refuses to move a row an admin approved meanwhile.
+            own = self._own_pk_hex.lower()
+            refreshed = (
+                self._sibling_url_refresh(row, url)
+                if own and public_key_hex.lower() == own
+                else ""
+            )
+            url = refreshed or member_url(row)
             await self._repo.touch_node(
-                from_node_id, status="online", last_seen=now, url_if_empty=fill
+                from_node_id, status="online", last_seen=now, sibling_url=refreshed
             )
             already_known = row.last_seen is not None
         if not already_known and url and self._enabled and self._node_id:
@@ -1232,6 +1250,45 @@ class ClusterService:
             except Exception as exc:
                 log.debug("cluster: reply NODE_HELLO to %r failed: %r", url, exc)
 
+    def _sibling_url_refresh(self, row: ClusterNode, url: object) -> str:
+        """The URL to move a shared-seed sibling's *row* to, or ``""``.
+
+        Only a sibling's URL moves in-band: the row has no ``approved_key``
+        (an approved node is reached at the URL the operator approved) and
+        is a member under our OWN key (:func:`is_member`) — so
+        :func:`authorize_frame` verified the frame under our own key and the
+        sender holds our seed. *url* must normalise to a usable base URL
+        (:func:`normalized_peer_url`: never a metadata / link-local
+        address), and must not be OUR url: a sibling announcing it means
+        two nodes share one ``advertise_url``, and following it would make
+        us heartbeat ourselves. That is refused with one WARNING per node.
+        """
+        own = self._own_pk_hex.lower()
+        if row.approved_key or not own or not is_member(row, own):
+            return ""
+        refreshed = normalized_peer_url(url)
+        if not refreshed:
+            return ""
+        if refreshed in (self._self_url, normalized_peer_url(self._self_url)):
+            if row.node_id not in self._dup_url_warned:
+                self._dup_url_warned.add(row.node_id)
+                log.warning(
+                    "cluster: sibling %s announces our own URL %s — two nodes "
+                    "share one [cluster] advertise_url; give each node its "
+                    "own address. Keeping its old URL.",
+                    ascii(row.node_id),
+                    ascii(refreshed),
+                )
+            return ""
+        if refreshed != row.url:
+            log.info(
+                "cluster: sibling %s moved its URL %s -> %s",
+                ascii(row.node_id),
+                ascii(row.url),
+                ascii(refreshed),
+            )
+        return refreshed
+
     async def handle_heartbeat(
         self,
         from_node_id: str,
@@ -1244,6 +1301,9 @@ class ClusterService:
         into our in-memory ``_active_sync_count`` so the next
         ``pick_signaling_node`` reflects fresh load, and persisted to the
         ``cluster_nodes`` row so admin UIs stay accurate.
+        ``payload['url']`` is the sender's advertised cluster URL; a
+        shared-seed sibling's row follows it (:meth:`_sibling_url_refresh`).
+        Older peers omit it and the row keeps its URL.
         """
         peer_count: int | None = None
         if isinstance(payload, dict) and "active_sync_sessions" in payload:
@@ -1259,12 +1319,19 @@ class ClusterService:
                 peer_clients = max(0, int(payload["connected_clients"]))
             except TypeError, ValueError:
                 peer_clients = None
+        announced = payload.get("url") if isinstance(payload, dict) else None
         rows = await self._repo.list_nodes()
         for r in rows:
             if r.node_id == from_node_id:
                 # UPDATE only: an admin removal since the read stays removed.
+                # A shared-seed sibling's URL follows its heartbeat as it does
+                # its HELLO; a heartbeat always names its recipient, so a
+                # replay to another node is refused and cannot roll it back.
                 await self._repo.touch_node(
-                    r.node_id, status="online", last_seen=_now_iso()
+                    r.node_id,
+                    status="online",
+                    last_seen=_now_iso(),
+                    sibling_url=self._sibling_url_refresh(r, announced),
                 )
                 if peer_count is not None:
                     self._active_sync_count[from_node_id] = peer_count
@@ -1638,6 +1705,10 @@ class ClusterService:
                                 0,
                             ),
                             "connected_clients": self._own_connected_clients(),
+                            # Our advertised cluster URL: a shared-seed
+                            # sibling's row for us follows it. Older peers
+                            # ignore the key.
+                            "url": self._self_url,
                         },
                         to=r.node_id,
                         session=None,
