@@ -373,6 +373,20 @@ turn_url    = ""
 turn_secret = ""
 
 [cluster]
+# Several GFS nodes can gossip state over POST /cluster/sync. Membership is
+# operator-approved — a node is a member only if its frames verify under a
+# key this node already holds:
+#   * the shared seed: nodes started with the same identity seed
+#     (gfs_identity.seed / [server] signing_seed_hex) trust each other; or
+#   * an admin-pinned key: POST /admin/api/cluster/peers with the other
+#     node's node_id, url and public_key (its own GET /admin/api/cluster
+#     shows it). Do this on BOTH nodes.
+# Anything else is refused; there is no trust-on-first-use. A pinned key
+# never changes in place — to rotate, remove the peer and add it again.
+# Frames carry a timestamp that must be within 300 s of the receiver's
+# clock: keep every node on NTP, or they stop syncing with each other.
+# node_id must be unique per node (defaults to instance_id) — two nodes
+# with the same id cannot be told apart.
 enabled = false
 node_id = ""
 peers   = []

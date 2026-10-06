@@ -816,6 +816,29 @@ means a 60-bit preimage per attempt, and the claimed owner must still be
 seated on the signing household. A commitment, not a signature — hash-based,
 so no PQ migration is needed beyond a suite bump if SHA-256 ever is.
 
+**GFS cluster frames** (`global_server/cluster.py`) — node-to-node gossip on
+`POST /cluster/sync` is signed with the GFS identity seed
+(`gfs_identity.seed`) over the exact canonical-JSON body bytes, signature in
+the `X-Node-Signature` header:
+
+```
+{type, from, ts, nonce, sig_suite, payload}   # sort_keys, separators=(",", ":")
+ts        : int unix seconds   # ±300 s of the receiver, not before its start
+nonce     : b64url(16 random bytes)
+sig_suite : "ed25519"          # unknown value → 400, no fallback
+```
+
+`CLUSTER_SIG_SUITE_ED25519` / `SUPPORTED_CLUSTER_SIG_SUITES` /
+`UnsupportedClusterSigSuite`. A frame with **no** `sig_suite` is from a node
+older than the field and is read as Ed25519 — the migration tripwire once
+every node ships it; the PQ sibling (`ed25519+mldsa65`) is a suite bump. The
+verify key is one the receiver already holds — its own identity key (shared
+seed) or the key an operator pinned for that node — never one the frame
+carries (see `docs/architecture.md`, "GFS cluster membership"). Replay
+defence is the `ts` window plus a per-node cache of BLAKE2b-256 digests of
+accepted frame bytes (600 s); there is no recipient binding, so a frame can
+be replayed once to each other node inside its window.
+
 **Standalone auth** — `StandaloneAdapter` hashes passwords with scrypt
 and embeds parameters in the stored hash: `scrypt$16384$8$1$<salt
 hex>$<hash hex>`. Parameters can be bumped without a schema change.

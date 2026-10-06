@@ -695,6 +695,37 @@ holding the item checks that the release equals it in every applied field
 (`federation/moderation_approval.py`), against its own copy of the row for
 an edit.
 
+### GFS cluster membership
+
+A GFS can run as several symmetric nodes (§24.10) — in production several
+processes share one `gfs.db` and one identity seed behind a load balancer —
+that gossip state over `POST /cluster/sync`. Membership is operator-approved,
+never trust-on-first-use: a node is a member **if and only if** its frames
+verify under a key the receiving node already holds. That is either the
+GFS's own identity key (`gfs_identity.seed`: an operator who gave a node the
+seed approved it) or a key an operator pinned on the node's `cluster_nodes`
+row through `POST /admin/api/cluster/peers` (`node_id` + `url` +
+`public_key`). The decision is one pure function,
+`global_server/cluster.py:authorize_frame`, taken before any signature work:
+a `NODE_HELLO` under a key the node does not hold is refused
+(`unapproved_node`) and writes nothing; a HELLO for a known node under a
+different key is refused (`key_mismatch`, WARNING) — a pin never moves
+in-band, and the repo's upsert keeps a non-empty pin in SQL as well, so
+rotation is delete then re-add. Each frame signs `{type, from, ts, nonce,
+sig_suite, payload}`: the sender id is the signed `from` only, `ts` must sit
+within ±300 s of the receiver's wall clock and not before the receiving
+process started, and an accepted frame's digest is remembered for 600 s so a
+byte-identical resend is a 409. Every refusal is charged to the source
+address, never to the node it names. Rows pinned by first-contact TOFU before
+this rule are grandfathered: they keep syncing, and the GFS lists them at
+startup as a WARNING (`key_source: "pinned"` in the admin cluster view) for
+the operator to confirm. **Residual risks:** a frame names no recipient, so
+inside its 300 s window a captured frame can be replayed once to each other
+node (the replay cache is per process); clock skew above 300 s partitions
+the cluster (run NTP); two nodes sharing a `node_id` are indistinguishable;
+and a roster larger than the replay cache's sizing (32 nodes saturating
+their budgets) evicts digests early.
+
 ### Database writer (write coalescing)
 
 Every process (household or GFS node) owns one `AsyncDatabase`

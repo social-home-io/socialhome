@@ -58,12 +58,11 @@ SYNC_RETRY_DELAY_S: int = 5
 CLUSTER_RATE_LIMIT_PER_MIN: int = 60
 
 #: ``/cluster/sync`` requests per minute per source address that did NOT prove
-#: a known peer: malformed bodies, unknown senders, bad signatures, and
-#: first-contact (TOFU) NODE_HELLOs — self-signed under the key they carry, so
-#: they prove nothing about who sent them. Once spent, the address is shed
-#: before any parse, DB read or signature verification, which bounds the
-#: verify CPU a forged flood can burn. Genuine peers never touch it except for
-#: their one first-contact HELLO, so 30/min is far above real use.
+#: a member: malformed bodies, unknown suites, stale timestamps, unknown or
+#: unapproved senders, key mismatches, bad signatures and replays. Once spent,
+#: the address is shed before any parse, DB read or signature verification,
+#: which bounds the verify CPU a forged flood can burn. Genuine peers never
+#: touch it, so 30/min is far above real use.
 CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN: int = 30
 
 #: ``/cluster/sync`` frames carry the sender's wall-clock ``ts`` (unix
@@ -395,9 +394,9 @@ class ClusterService:
     def charge_unverified_sync(self, client_ip: str) -> bool:
         """Spend one unit of *client_ip*'s unverified budget.
 
-        Called for every request that did not prove a known peer. Returns
-        whether the request is still within budget (a TOFU HELLO is refused
-        when it is not; a request already being rejected ignores it).
+        Called for every request that did not prove a member. Returns
+        whether the request is still within budget (a request already being
+        rejected ignores it).
         """
         return self._sync_unverified_limiter.allow(client_ip, now=self._clock())
 
@@ -864,6 +863,12 @@ class ClusterService:
         url: str,
         public_key_hex: str,
     ) -> None:
+        """Record a member's HELLO (online, ``last_seen`` now).
+
+        Only called once :func:`authorize_frame` accepted the HELLO and its
+        signature verified, so *public_key_hex* is a key this node already
+        held; the upsert never moves an existing pin anyway.
+        """
         # Discovery must be bidirectional on first contact. ``_announce_to_peers``
         # only fires once, at startup, against the CONFIGURED peer URLs — so a
         # node whose peer was still down at that instant loses that HELLO and is
