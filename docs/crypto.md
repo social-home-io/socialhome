@@ -860,7 +860,9 @@ verify key is one the receiver already holds — its own identity key (shared
 seed) or the key an operator pinned for that node — never one the frame
 carries (see `docs/architecture.md`, "GFS cluster membership"). Replay
 defence is the `ts` window, a per-node cache of BLAKE2b-256 digests of
-accepted frame bytes, and the signed recipient `to`: a frame for node A is
+accepted frame bytes (each kept until its own `ts` + 301 s on the wall clock;
+anything forgotten raises a `ts` floor, so a wall-clock step back never
+reopens a replay), and the signed recipient `to`: a frame for node A is
 refused by node B. `to` is left out only by older senders and by a HELLO to
 a configured URL whose node id the sender does not know yet — those can be
 replayed once to each other node inside their window.

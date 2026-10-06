@@ -716,8 +716,12 @@ sig_suite, payload}`: the sender id is the signed `from` only, `to` names the
 recipient node (another node refuses it, 409 `wrong_recipient`; absent from
 older senders and from a HELLO to a not-yet-known configured URL), `ts` must sit
 within ±300 s of the receiver's wall clock and not before the receiving
-process started, and an accepted frame's digest is remembered for 600 s so a
-byte-identical resend is a 409. Every refusal is charged to the source
+process started, and an accepted frame's digest is remembered until its own
+`ts` + 301 s on the wall clock — the clock the freshness check reads — so a
+byte-identical resend is a 409 for as long as it could still be fresh
+(`ClusterReplayCache`). Whatever the cache forgets (expired, or evicted past
+its cap) raises a floor: a frame with a `ts` at or below it counts as seen,
+so neither a wall-clock step back nor a saturated cache reopens a replay. Every refusal is charged to the source
 address, never to the node it names. An address that spent its budget is
 shed, but not blindly: its frames still take the cheap checks, and one that
 names an approved node is verified — accepted if it verifies, so junk from a
@@ -736,7 +740,8 @@ sender, or a HELLO to a configured URL not yet known) can be replayed once to
 each other node inside its 300 s window (the replay cache is per process); clock skew above 300 s partitions
 the cluster (run NTP); two nodes sharing a `node_id` are indistinguishable;
 and a roster larger than the replay cache's sizing (32 nodes saturating
-their budgets) evicts digests early.
+their budgets) raises its floor early, so a peer whose clock lags may see
+its older frames refused as replays (never a replay accepted).
 
 ### Database writer (write coalescing)
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import heapq
 import json
 import logging
 import re
@@ -40,7 +41,7 @@ from ..crypto import (
 from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
-from .federation import SeenPayloadCache, certified_authority_repin
+from .federation import certified_authority_repin
 from .public import SlidingWindowCounter
 
 if TYPE_CHECKING:
@@ -128,10 +129,15 @@ def parse_cluster_sig_suite(raw: object) -> str:
 #: in-memory replay cache was empty then and cannot vouch for it.
 CLUSTER_BOOT_FLOOR_SLACK_S: int = 5
 
-#: How long an accepted frame's digest is remembered. A frame is fresh for
-#: ``±CLUSTER_TS_SKEW_S`` around its ``ts``, so the cache must outlive the
-#: whole 600 s window or a captured frame would replay after expiring here.
-CLUSTER_REPLAY_TTL_S: float = float(2 * CLUSTER_TS_SKEW_S)
+#: Seconds past ``ts + CLUSTER_TS_SKEW_S`` an accepted frame's digest is kept.
+#: ``ts`` is whole seconds and the wall clock is not, so the entry must
+#: outlive the last instant the frame is still fresh.
+CLUSTER_REPLAY_SLACK_S: int = 1
+
+#: Longest an accepted frame's digest can be kept: a frame dated
+#: ``now + CLUSTER_TS_SKEW_S`` stays fresh for ``2 × CLUSTER_TS_SKEW_S``.
+#: Used to size the cache (see :class:`ClusterReplayCache` for the expiry).
+CLUSTER_REPLAY_TTL_S: float = float(2 * CLUSTER_TS_SKEW_S + CLUSTER_REPLAY_SLACK_S)
 
 #: Roster size the replay cache is sized for. Only ACCEPTED frames are
 #: recorded, and each verified node is capped at
@@ -286,6 +292,67 @@ def authorize_frame(
     return FrameVerdict(verify_key=key)
 
 
+class ClusterReplayCache:
+    """Digests of accepted ``/cluster/sync`` frames, keyed on the frame's
+    own signed ``ts`` and expired on the WALL clock — the clock the
+    freshness check reads, so the two windows can never drift apart.
+
+    An entry is kept until wall-clock ``ts + CLUSTER_TS_SKEW_S + slack``,
+    the first instant its frame is stale. Whatever the cache forgets —
+    expired, or evicted past ``cap`` (smallest ``ts`` first) — raises a
+    ``floor``: a frame whose ``ts`` is at or below it counts as seen. So a
+    frame the cache no longer holds can never be accepted again, even if
+    the wall clock later steps back (making it "fresh" once more) or the
+    roster outgrows the cap. Under a steady clock the floor trails the
+    freshness window and refuses nothing a fresh frame could have; it is
+    built from peers' ``ts`` values, not our clock, so a bogus forward jump
+    of our clock does not partition the cluster once it is corrected.
+    In-memory, per process — the boot floor covers a restart.
+    """
+
+    __slots__ = ("_cap", "_entries", "_expiry_heap", "_floor")
+
+    def __init__(self, *, cap: int) -> None:
+        self._cap = cap
+        self._entries: dict[bytes, int] = {}
+        self._expiry_heap: list[tuple[int, bytes]] = []
+        self._floor: int | None = None
+
+    def seen(self, digest: bytes, ts: int, *, now: float) -> bool:
+        """Whether a frame with *digest* and signed *ts* may be a replay."""
+        self._expire(now)
+        if self._floor is not None and ts <= self._floor:
+            return True
+        return digest in self._entries
+
+    def record(self, digest: bytes, ts: int, *, now: float) -> None:
+        """Remember an accepted frame until its ``ts`` window closes."""
+        if digest not in self._entries:
+            self._entries[digest] = ts
+            heapq.heappush(self._expiry_heap, (ts, digest))
+        self._expire(now)
+        while len(self._entries) > self._cap:
+            self._forget_oldest()
+
+    def _expire(self, now: float) -> None:
+        horizon = now - CLUSTER_TS_SKEW_S - CLUSTER_REPLAY_SLACK_S
+        while self._expiry_heap and self._expiry_heap[0][0] <= horizon:
+            self._forget_oldest()
+
+    def _forget_oldest(self) -> None:
+        ts, digest = heapq.heappop(self._expiry_heap)
+        self._entries.pop(digest, None)
+        self._floor = ts if self._floor is None else max(self._floor, ts)
+
+    @property
+    def floor(self) -> int | None:
+        """Highest ``ts`` the cache has forgotten (``None``: nothing yet)."""
+        return self._floor
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
 class ClusterService:
     """Spec-shape :class:`ClusterService`.
 
@@ -390,10 +457,8 @@ class ClusterService:
         self._process_start = wall_clock()
         #: Digests of accepted ``/cluster/sync`` frames (raw signed bytes).
         #: In-memory, per process — the boot floor covers a restart.
-        self._seen_frames = SeenPayloadCache(
-            ttl_s=CLUSTER_REPLAY_TTL_S,
-            cap=CLUSTER_REPLAY_MAX_ENTRIES,
-        )
+        #: Accepted-frame digests (see :class:`ClusterReplayCache`).
+        self._seen_frames = ClusterReplayCache(cap=CLUSTER_REPLAY_MAX_ENTRIES)
         #: Per VERIFIED node id (spec §24.10.4). Capped LRU, like every GFS
         #: limiter, though only proven peers ever get a bucket here.
         self._sync_node_limiter = SlidingWindowCounter(CLUSTER_RATE_LIMIT_PER_MIN)
@@ -461,17 +526,20 @@ class ClusterService:
             return "stale_timestamp"
         return ""
 
-    def frame_seen(self, raw: bytes) -> bool:
-        """Whether these exact signed frame bytes were already accepted."""
-        return self._seen_frames.seen(_frame_digest(raw), now=self._clock())
+    def frame_seen(self, raw: bytes, ts: int) -> bool:
+        """Whether these exact signed frame bytes (signed *ts*) were already
+        accepted — or may have been, and the cache has since forgotten."""
+        return self._seen_frames.seen(_frame_digest(raw), ts, now=self._wall_clock())
 
-    def record_frame(self, raw: bytes) -> None:
+    def record_frame(self, raw: bytes, ts: int) -> None:
         """Remember an accepted frame so a byte-identical resend is refused.
 
         Called only once the frame passed every check, right before
-        dispatch — a rejected frame never poisons the cache.
+        dispatch — a rejected frame never poisons the cache. The entry
+        lives until wall-clock ``ts + CLUSTER_TS_SKEW_S + slack``: as long
+        as *ts* can still pass :meth:`frame_ts_error`.
         """
-        self._seen_frames.record(_frame_digest(raw), now=self._clock())
+        self._seen_frames.record(_frame_digest(raw), ts, now=self._wall_clock())
 
     def _own_connected_clients(self) -> int:
         return (

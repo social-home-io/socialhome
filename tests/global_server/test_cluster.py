@@ -19,6 +19,8 @@ from socialhome.capabilities_sig import (
 from socialhome.global_server.cluster import (
     CLUSTER_RATE_LIMIT_PER_MIN,
     CLUSTER_SIG_SUITE_ED25519,
+    ClusterReplayCache,
+    CLUSTER_TS_SKEW_S,
     SUPPORTED_CLUSTER_SIG_SUITES,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
     MAX_SIGNALING_SESSIONS,
@@ -849,3 +851,116 @@ async def test_startup_does_not_warn_about_pinned_peers(gfs_db, caplog):
     with caplog.at_level("WARNING"):
         await svc.start()
     assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+# ─── Replay window vs. freshness window (injected clocks) ─────────────
+
+
+class _Clocks:
+    """A monotonic and a wall clock the test moves independently."""
+
+    def __init__(self, wall: float = 1_900_000_000.0) -> None:
+        self.mono = 1000.0
+        self.wall = wall
+
+    def advance(self, seconds: float) -> None:
+        self.mono += seconds
+        self.wall += seconds
+
+
+def _replay_svc(gfs_db, clocks: _Clocks) -> ClusterService:
+    return ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        clock=lambda: clocks.mono,
+        wall_clock=lambda: clocks.wall,
+    )
+
+
+def _accept(svc: ClusterService, raw: bytes, ts: int) -> bool:
+    """Mirror the route: fresh and not seen → record and accept."""
+    if svc.frame_ts_error(ts) or svc.frame_seen(raw, ts):
+        return False
+    svc.record_frame(raw, ts)
+    return True
+
+
+async def test_a_future_dated_frame_is_not_replayable_while_still_fresh(gfs_db):
+    """``ts = now + 300`` is fresh until wall ``now + 600``; the digest must
+    be remembered at least that long."""
+    clocks = _Clocks()
+    svc = _replay_svc(gfs_db, clocks)
+    ts = int(clocks.wall) + CLUSTER_TS_SKEW_S
+    raw = b'{"frame":"future"}'
+    assert _accept(svc, raw, ts)
+    for _ in range(2 * CLUSTER_TS_SKEW_S + 5):
+        clocks.advance(1)
+        assert not _accept(svc, raw, ts), clocks.wall - ts
+
+
+async def test_a_wall_clock_step_back_does_not_reopen_the_replay_window(gfs_db):
+    """Monotonic time runs on while the wall clock steps back 60 s: the
+    frame is fresh again by the wall clock, so it must still be seen."""
+    clocks = _Clocks()
+    svc = _replay_svc(gfs_db, clocks)
+    ts = int(clocks.wall) + CLUSTER_TS_SKEW_S
+    raw = b'{"frame":"stepped"}'
+    assert _accept(svc, raw, ts)
+    clocks.advance(2 * CLUSTER_TS_SKEW_S - 10)
+    clocks.wall -= 60
+    assert svc.frame_ts_error(ts) == ""  # fresh again by the wall clock …
+    assert not _accept(svc, raw, ts)  # … and still refused as a replay
+    for _ in range(200):
+        clocks.advance(1)
+        assert not _accept(svc, raw, ts)
+
+
+async def test_a_replay_entry_expires_only_once_its_frame_is_stale(gfs_db):
+    """For any ``ts`` in the window: whenever the cache has forgotten the
+    frame, the frame is already stale — under either clock moving."""
+    clocks = _Clocks()
+    svc = _replay_svc(gfs_db, clocks)
+    clocks.advance(CLUSTER_TS_SKEW_S)  # past the boot floor
+    base = int(clocks.wall)
+    offsets = range(-CLUSTER_TS_SKEW_S, CLUSTER_TS_SKEW_S + 1, 37)
+    for offset in offsets:
+        assert _accept(svc, f"frame-{offset}".encode(), base + offset)
+    for step in range(3 * CLUSTER_TS_SKEW_S):
+        clocks.advance(1)
+        if step == CLUSTER_TS_SKEW_S:
+            clocks.wall -= 60  # a wall-clock step back mid-way
+        for offset in offsets:
+            raw = f"frame-{offset}".encode()
+            assert svc.frame_seen(raw, base + offset) or svc.frame_ts_error(
+                base + offset
+            )
+
+
+def test_replay_cache_eviction_past_the_cap_raises_the_floor():
+    """A digest evicted for space is never forgotten silently: its ``ts``
+    becomes the floor, so its frame (or any older one) counts as seen."""
+    cache = ClusterReplayCache(cap=3)
+    now = 1_900_000_000.0
+    for i, ts in enumerate((100, 50, 300, 200)):
+        cache.record(f"d{i}".encode(), int(now) + ts, now=now)
+    assert len(cache) == 3
+    # The smallest ts (50) was evicted, not the first inserted.
+    assert cache.floor == int(now) + 50
+    assert cache.seen(b"d1", int(now) + 50, now=now)
+    assert cache.seen(b"never-sent", int(now) + 49, now=now)
+    assert not cache.seen(b"never-sent", int(now) + 51, now=now)
+    for i, ts in ((0, 100), (2, 300), (3, 200)):
+        assert cache.seen(f"d{i}".encode(), int(now) + ts, now=now)
+
+
+def test_replay_cache_expires_on_the_frames_ts_not_insertion_order():
+    cache = ClusterReplayCache(cap=10)
+    now = 1_900_000_000.0
+    cache.record(b"late", int(now) + 300, now=now)
+    cache.record(b"early", int(now) - 290, now=now)
+    # ``early`` is stale at now + 11 and forgotten; ``late`` is kept.
+    later = now + 12
+    assert cache.seen(b"late", int(now) + 300, now=later)
+    assert cache.seen(b"early", int(now) - 290, now=later)  # via the floor
+    assert len(cache) == 1
+    assert cache.floor == int(now) - 290

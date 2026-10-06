@@ -31,6 +31,7 @@ from socialhome.global_server.cluster import (
     CLUSTER_RATE_LIMIT_PER_MIN,
     CLUSTER_REPLAY_MAX_ENTRIES,
     CLUSTER_REPLAY_SIZED_NODES,
+    CLUSTER_REPLAY_SLACK_S,
     CLUSTER_REPLAY_TTL_S,
     CLUSTER_TS_SKEW_S,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
@@ -1018,7 +1019,7 @@ async def test_replay_cache_is_sized_from_the_cluster_constants(gfs_db):
     expiring but while still fresh) and hold every frame the verified
     budget can admit for the sized roster within its TTL (else eviction
     reopens the window)."""
-    assert CLUSTER_REPLAY_TTL_S >= 2 * CLUSTER_TS_SKEW_S
+    assert CLUSTER_REPLAY_TTL_S >= 2 * CLUSTER_TS_SKEW_S + CLUSTER_REPLAY_SLACK_S
     assert CLUSTER_REPLAY_MAX_ENTRIES == (
         CLUSTER_RATE_LIMIT_PER_MIN
         * int(CLUSTER_REPLAY_TTL_S // 60)
@@ -1026,7 +1027,6 @@ async def test_replay_cache_is_sized_from_the_cluster_constants(gfs_db):
     )
     svc = ClusterService(SqliteClusterRepo(gfs_db))
     assert svc._seen_frames._cap == CLUSTER_REPLAY_MAX_ENTRIES
-    assert svc._seen_frames._ttl == CLUSTER_REPLAY_TTL_S
 
 
 # ─── sig_suite + old-sender compatibility ─────────────────────────────

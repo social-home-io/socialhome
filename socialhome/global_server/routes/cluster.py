@@ -171,7 +171,7 @@ class ClusterSyncView(GfsBaseView):
         # Replay: these exact signed bytes were already accepted. In-memory
         # and crypto-free, so before any key lookup or verify. Charged to
         # the address — a replay proves nothing about who sent it.
-        if svc.frame_seen(raw):
+        if svc.frame_seen(raw, body["ts"]):
             return _reject(web.json_response({"error": "replay"}, status=409))
 
         # Membership (spec §24.10): which key, if any, this frame must
@@ -220,7 +220,7 @@ class ClusterSyncView(GfsBaseView):
         # member's own traffic: spend that node's budget.
         if not svc.charge_verified_sync(from_node):
             return _rate_limited()
-        svc.record_frame(raw)
+        svc.record_frame(raw, body["ts"])
 
         # Dispatch by message type.
         if msg_type == NODE_HELLO:
