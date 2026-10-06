@@ -81,10 +81,11 @@ class ClusterSyncView(GfsBaseView):
        ``unapproved_node`` (HELLO under a key we don't hold; nothing is
        written) or ``key_mismatch`` (HELLO for a known node under a key
        other than its approved key; WARNING).
-    7. Signature under the key step 6 chose → 401 ``invalid_signature``.
-       From a shed address the verify runs only while the named node's
-       failed-verify budget lasts (else 429, no verify), and a failure
-       spends it.
+    7. Signature under the key step 6 chose → 401 ``invalid_signature``
+       (429 from a shed address, like every rejection there). From a shed
+       address the verify runs only while the failed-verify budget of
+       (named node, source address) and the node's global ceiling last
+       (else 429, no verify), and a failure spends both.
     8. The verified node's budget → 429.
     9. Record the frame digest, then dispatch.
 
@@ -93,8 +94,10 @@ class ClusterSyncView(GfsBaseView):
     cannot lock it out, and junk from a member's own address cannot either —
     a frame that verifies under the member's key is accepted even from a
     shed address. Verify CPU on forgeries stays bounded: per address until
-    it is shed, then per approved node
-    (:data:`~socialhome.global_server.cluster.CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`).
+    it is shed, then per (approved node, address)
+    (:data:`~socialhome.global_server.cluster.CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`)
+    under a per-node ceiling
+    (:data:`~socialhome.global_server.cluster.CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN`).
     """
 
     async def post(self) -> web.Response:
@@ -207,17 +210,20 @@ class ClusterSyncView(GfsBaseView):
                 web.json_response({"error": verdict.error}, status=403),
             )
 
-        # From a shed address, verify only while the named node's
-        # failed-verify budget lasts: that bounds the CPU forgeries can burn
-        # without ever spending the node's own (verified) budget.
-        if shed and svc.failed_verify_exhausted(from_node):
+        # From a shed address, verify only while the failed-verify budget of
+        # (named node, this address) and the node's global ceiling last:
+        # that bounds the CPU forgeries can burn without ever spending the
+        # node's own (verified) budget, and forgeries "from" other addresses
+        # cannot spend the budget the member's own address uses.
+        if shed and svc.failed_verify_exhausted(from_node, client_ip):
             return _rate_limited()
         signature = self.request.headers.get("X-Node-Signature", "")
         if not verify_node_signature(raw, signature, verdict.verify_key):
-            svc.charge_unverified_sync(client_ip)
             if shed:
-                svc.charge_failed_verify(from_node)
-            return web.json_response({"error": "invalid_signature"}, status=401)
+                svc.charge_failed_verify(from_node, client_ip)
+            return _reject(
+                web.json_response({"error": "invalid_signature"}, status=401),
+            )
 
         # The frame verified under a key we already held, so it is the
         # member's own traffic: spend that node's budget.

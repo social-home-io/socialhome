@@ -818,7 +818,8 @@ async def test_forged_frames_naming_a_peer_from_a_shed_address_are_bounded(
 ):
     """From a shed address, frames naming an approved node are verified
     (so the real node gets through) but each FAILED verify spends a small
-    per-node budget; once spent, more forgeries are shed without a verify.
+    per-(node, address) budget; once spent, more forgeries from that
+    address are shed without a verify.
     The node's own verified budget is never touched."""
     seed = await _register_peer(client)
     for _ in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN):
@@ -830,7 +831,9 @@ async def test_forged_frames_naming_a_peer_from_a_shed_address_are_bounded(
         (await _sync(client, from_node=PEER, seed=None, ip=ATTACKER_IP)).status
         for _ in range(CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN + 20)
     ]
-    assert statuses == [401] * CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN + [429] * 20
+    # Every rejection from a shed address is a 429; only the first 30 cost
+    # a verify.
+    assert statuses == [429] * (CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN + 20)
     assert len(verify_calls) == CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN
     svc = client._app[gfs_cluster_key]
     assert PEER not in svc._sync_node_limiter
@@ -1422,3 +1425,66 @@ async def test_admin_add_peer_refuses_a_link_local_or_metadata_url(client, url):
         json={"node_id": "c", "url": url, "public_key": _VALID_KEY},
     )
     assert (resp.status, await resp.json()) == (422, {"error": "invalid_url"})
+
+
+# ─── Failed-verify budget per (node, address) ─────────────────────────
+
+
+async def _shed(client, ip: str) -> None:
+    """Spend *ip*'s unverified budget with junk (XFF-spoofable under the
+    default ``trusted_proxies``)."""
+    for _ in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN):
+        await client.post(
+            "/cluster/sync", data=b"junk", headers={"X-Forwarded-For": ip}
+        )
+
+
+@pytest.mark.security
+async def test_forgeries_from_other_hosts_cannot_lock_a_member_out(client):
+    """The review's probe: 30 junk frames spoofing the member's address (it
+    is shed), then 30 forged frames naming the member from another shed
+    host — the member's genuine frame from its own address still gets 200.
+    The failed-verify budget is per (node, address), so forgeries from
+    elsewhere cannot spend the one the member's address uses."""
+    seed = await _register_peer(client)
+    await _shed(client, GENUINE_IP)
+    await _shed(client, ATTACKER_IP)
+    for _ in range(CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN):
+        resp = await _sync(client, from_node=PEER, seed=None, ip=ATTACKER_IP)
+        assert resp.status == 429
+    resp = await _sync(client, from_node=PEER, seed=seed, ip=GENUINE_IP)
+    assert resp.status == 200
+
+
+@pytest.mark.security
+async def test_failed_verifies_per_node_have_a_global_ceiling(
+    client, clock, verify_calls, monkeypatch
+):
+    """Forgeries spread over many shed addresses are bounded per node too,
+    so verify CPU stays bounded whatever the address count."""
+    monkeypatch.setattr(
+        client._app[gfs_cluster_key]._sync_failed_verify_node_limiter, "_limit", 40
+    )
+    await _register_peer(client)
+    ips = [f"10.9.0.{i}" for i in range(1, 4)]
+    for ip in ips:
+        await _shed(client, ip)
+    verify_calls.clear()
+    for ip in ips:
+        for _ in range(CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN):
+            await _sync(client, from_node=PEER, seed=None, ip=ip)
+    assert len(verify_calls) == 40
+    clock.now += 61
+    await _sync(client, from_node=PEER, seed=None, ip=ips[0])
+    assert len(verify_calls) == 41
+
+
+@pytest.mark.security
+async def test_every_rejection_from_a_shed_address_is_429(client):
+    """A failed verify from a shed address is answered like every other
+    rejection from it — 429, not 401."""
+    await _register_peer(client)
+    await _shed(client, ATTACKER_IP)
+    resp = await _sync(client, from_node=PEER, seed=None, ip=ATTACKER_IP)
+    assert (resp.status, await resp.json()) == (429, {"error": "rate_limited"})
+    assert resp.headers["Retry-After"] == "60"

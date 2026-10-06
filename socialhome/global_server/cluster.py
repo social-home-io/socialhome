@@ -75,17 +75,29 @@ CLUSTER_RATE_LIMIT_PER_MIN: int = 60
 #: this budget, so 30/min is far above real use.
 CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN: int = 30
 
-#: Failed signature verifies per minute per approved node, counted only for
-#: frames from a SHED address (see above). Such a frame names an approved
-#: node, so it is verified: one that verifies is the member's own traffic and
-#: is accepted (then capped by :data:`CLUSTER_RATE_LIMIT_PER_MIN`); one that
-#: fails spends this budget. Once it is spent, further frames naming that node
-#: from shed addresses are dropped without a verify. Verify CPU spent on
-#: forgeries is therefore bounded at this many per approved node per minute,
-#: and the node's own budget is never touched. Residual: an attacker who can
-#: send from the member's own address AND forge more than this per minute
-#: delays that member until the window slides.
+#: Failed signature verifies per minute per (approved node, source address),
+#: counted only for frames from a SHED address (see above). Such a frame
+#: names an approved node, so it is verified: one that verifies is the
+#: member's own traffic and is accepted (then capped by
+#: :data:`CLUSTER_RATE_LIMIT_PER_MIN`); one that fails spends this budget for
+#: that node AND that address only. Once spent, further frames naming that
+#: node from that address are answered 429 without a verify. Keyed on the
+#: pair, not the node: under a ``trusted_proxies`` that believes
+#: ``X-Forwarded-For`` from a whole private network, any host there can claim
+#: any address — forgeries "from" other addresses must not spend the budget
+#: the member's own address uses. Residual: an attacker who can send from
+#: the member's own address AND forge more than this per minute delays that
+#: member until the window slides (list only the real proxy in
+#: ``trusted_proxies``).
 CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN: int = 30
+
+#: Global ceiling on failed verifies per approved node per minute, across
+#: every shed address — the CPU bound the per-pair budget alone cannot give
+#: (an attacker can claim many addresses). Far above
+#: :data:`CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN` so forgeries from a few
+#: hosts never reach it; at ~50 µs per Ed25519 verify it costs well under a
+#: tenth of a CPU-second per node per minute.
+CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN: int = 1200
 
 #: ``/cluster/sync`` frames carry the sender's wall-clock ``ts`` (unix
 #: seconds, int) inside the signed body. A frame more than this far from the
@@ -392,6 +404,7 @@ class ClusterService:
         "_sync_node_limiter",
         "_sync_unverified_limiter",
         "_sync_failed_verify_limiter",
+        "_sync_failed_verify_node_limiter",
         "_wall_clock",
         "_process_start",
         "_seen_frames",
@@ -474,10 +487,16 @@ class ClusterService:
         self._sync_unverified_limiter = SlidingWindowCounter(
             CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN
         )
-        #: Per approved node id: failed verifies of frames from shed
-        #: addresses (see :data:`CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`).
+        #: Per (approved node id, source address): failed verifies of frames
+        #: from shed addresses (see
+        #: :data:`CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`).
         self._sync_failed_verify_limiter = SlidingWindowCounter(
             CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN
+        )
+        #: Per approved node id, across addresses — the CPU ceiling (see
+        #: :data:`CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN`).
+        self._sync_failed_verify_node_limiter = SlidingWindowCounter(
+            CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN
         )
 
     # ─── /cluster/sync budgets ───────────────────────────────────────
@@ -500,15 +519,24 @@ class ClusterService:
         """
         return self._sync_unverified_limiter.allow(client_ip, now=self._clock())
 
-    def failed_verify_exhausted(self, node_id: str) -> bool:
-        """Whether forged frames from shed addresses have spent *node_id*'s
-        failed-verify budget (read-only, checked before a verify)."""
-        return self._sync_failed_verify_limiter.exhausted(node_id, now=self._clock())
+    def failed_verify_exhausted(self, node_id: str, client_ip: str) -> bool:
+        """Whether forged frames from shed addresses have spent the
+        failed-verify budget of (*node_id*, *client_ip*) or *node_id*'s
+        global ceiling (read-only, checked before a verify)."""
+        now = self._clock()
+        return self._sync_failed_verify_limiter.exhausted(
+            _node_address_key(node_id, client_ip), now=now
+        ) or self._sync_failed_verify_node_limiter.exhausted(node_id, now=now)
 
-    def charge_failed_verify(self, node_id: str) -> None:
-        """Spend one unit of *node_id*'s failed-verify budget: a frame from a
-        shed address named it but did not verify under its key."""
-        self._sync_failed_verify_limiter.allow(node_id, now=self._clock())
+    def charge_failed_verify(self, node_id: str, client_ip: str) -> None:
+        """Spend one unit of the (*node_id*, *client_ip*) failed-verify
+        budget and of *node_id*'s ceiling: a frame from a shed address named
+        the node but did not verify under its key."""
+        now = self._clock()
+        self._sync_failed_verify_limiter.allow(
+            _node_address_key(node_id, client_ip), now=now
+        )
+        self._sync_failed_verify_node_limiter.allow(node_id, now=now)
 
     def charge_verified_sync(self, node_id: str) -> bool:
         """Spend one unit of a VERIFIED peer's budget; ``False`` → 429.
@@ -1584,6 +1612,12 @@ def _key_view(row: ClusterNode, own_key_lower: str) -> dict:
     if own_key_lower and row.public_key.lower() == own_key_lower:
         return {"public_key": own_key_lower, "key_source": "own"}
     return {"public_key": "", "key_source": "none"}
+
+
+def _node_address_key(node_id: str, client_ip: str) -> str:
+    """Unambiguous limiter key for a (node id, address) pair — a node id
+    may contain any character, so no separator would do."""
+    return json.dumps([node_id, client_ip])
 
 
 def _frame_digest(raw: bytes) -> bytes:

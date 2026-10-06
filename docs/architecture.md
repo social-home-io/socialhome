@@ -731,7 +731,13 @@ address, never to the node it names. An address that spent its budget is
 shed, but not blindly: its frames still take the cheap checks, and one that
 names an approved node is verified — accepted if it verifies, so junk from a
 member's own address cannot lock the member out; a failed verify spends a
-small per-node failed-verify budget, so forgery CPU stays bounded. **Upgrade (breaking):** every key
+small failed-verify budget keyed on the (node, source address) pair — so
+forgeries "from" other addresses cannot spend the one the member's address
+uses — under a per-node ceiling across addresses (1200 / min), so forgery CPU
+stays bounded. **Cluster listeners should set an explicit
+`[server] trusted_proxies`** (only the real proxy, or `[]`): the default
+trusts every private range, so any host there can claim any address through
+`X-Forwarded-For`. **Upgrade (breaking):** every key
 stored before this rule came from first-contact TOFU or from a pre-#677 key
 derived from the public instance id, and the old add-peer never stored one,
 so GFS migration `0017_cluster_approved_key.sql` adds `approved_key` empty
@@ -741,8 +747,9 @@ through our own key; a peer with its own distinct key must be re-added by an
 operator. `key_source` in the admin cluster view is `approved` (an
 admin-approved key), `own` (our key: approved, or a shared-seed sibling's
 HELLO) or `none` (neither — re-add it if it has its own key). **Residual risks:** an attacker who can send from a member's own
-address and forge more than 30 frames a minute naming it delays that member
-(keep `trusted_proxies` to the real proxy); a frame without `to` (older
+address and forge more than 30 frames a minute naming it — or forge 1200 a
+minute naming it from many shed addresses while the member's own address is
+shed — delays that member (keep `trusted_proxies` to the real proxy); a frame without `to` (older
 sender, or a HELLO to a configured URL not yet known) can be replayed once to
 each other node inside its 300 s window (the replay cache is per process); clock skew above 300 s partitions
 the cluster (run NTP); two nodes sharing a `node_id` are indistinguishable;

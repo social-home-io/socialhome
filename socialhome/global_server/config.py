@@ -387,15 +387,16 @@ turn_secret = ""
 # clock: keep every node on NTP, or they stop syncing with each other.
 # node_id must be unique per node (defaults to instance_id) — two nodes
 # with the same id cannot be told apart.
-# /cluster/sync budgets failed requests per client address, and [server]
-# trusted_proxies decides that address. A peer whose address is flooded with
-# junk still gets through (its frames verify), but forged frames from that
-# same address can delay it, so keep the address hard to claim: list ONLY
-# your real proxy in trusted_proxies (the default trusts every private range,
-# so anything on a shared private network can claim any address through
-# X-Forwarded-For), and make sure that proxy writes the client address into
-# X-Forwarded-For itself — a TCP proxy that passes the client's header through
-# needs trusted_proxies = [].
+# Set [server] trusted_proxies EXPLICITLY on every cluster node.
+# /cluster/sync budgets failed requests per client address (and failed
+# verifies per node + address), and trusted_proxies decides that address. A
+# peer whose address is flooded with junk still gets through (its frames
+# verify), but forged frames from that same address can delay it, so keep
+# the address hard to claim: list ONLY your real proxy in trusted_proxies
+# (the default trusts every private range, so anything on a shared private
+# network can claim any address through X-Forwarded-For), and make sure that
+# proxy writes the client address into X-Forwarded-For itself — a TCP proxy
+# that passes the client's header through needs trusted_proxies = [].
 enabled = false
 node_id = ""
 peers   = []
