@@ -18,14 +18,17 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import aiohttp
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
@@ -148,6 +151,54 @@ NODE_POLICY_PUSH = "NODE_POLICY_PUSH"
 #: a banner instead).
 NODE_PARTITION_CATCHUP = "NODE_PARTITION_CATCHUP"
 NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
+
+
+#: Longest ``node_id`` the admin API accepts for a peer.
+CLUSTER_NODE_ID_MAX_LEN: int = 128
+
+_HEX_ED25519_KEY = re.compile(r"[0-9a-f]{64}")
+
+
+class InvalidClusterPeer(ValueError):
+    """Admin add-peer input is malformed; ``code`` is the API error."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class ClusterPeerKeyMismatch(Exception):
+    """Admin add-peer named a node already pinned to a different key."""
+
+
+def _validated_peer(
+    node_id: object, url: object, public_key: object, *, own_node_id: str
+) -> tuple[str, str, str]:
+    """Normalise + validate an admin add-peer request, or raise
+    :class:`InvalidClusterPeer`. Returns ``(node_id, url, public_key)``."""
+    if not isinstance(node_id, str):
+        raise InvalidClusterPeer("invalid_node_id")
+    node_id = node_id.strip()
+    if not node_id or len(node_id) > CLUSTER_NODE_ID_MAX_LEN:
+        raise InvalidClusterPeer("invalid_node_id")
+    if node_id == own_node_id:
+        raise InvalidClusterPeer("node_id_is_self")
+    if not isinstance(url, str):
+        raise InvalidClusterPeer("invalid_url")
+    url = url.strip().rstrip("/")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise InvalidClusterPeer("invalid_url")
+    if not isinstance(public_key, str):
+        raise InvalidClusterPeer("invalid_public_key")
+    key = public_key.strip().lower()
+    if not _HEX_ED25519_KEY.fullmatch(key):
+        raise InvalidClusterPeer("invalid_public_key")
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(key))
+    except ValueError as exc:
+        raise InvalidClusterPeer("invalid_public_key") from exc
+    return node_id, url, key
 
 
 # ─── Membership rule ─────────────────────────────────────────────────────
@@ -552,6 +603,9 @@ class ClusterService:
             )
         return {
             "node_id": self._node_id,
+            # Our own identity key — what an operator pins for this node on
+            # every other node (``POST /admin/api/cluster/peers``).
+            "public_key": self._own_pk_hex,
             "status": self_status,
             "nodes": nodes,
         }
@@ -715,17 +769,38 @@ class ClusterService:
 
     # ─── Admin-portal entry points ────────────────────────────────────
 
-    async def add_peer(self, peer_url: str) -> ClusterNode:
-        """Admin added a peer URL via the portal. Upsert + send NODE_HELLO."""
-        node = ClusterNode(
-            node_id=peer_url,
-            url=peer_url,
-            status="unknown",
+    async def add_peer(
+        self,
+        node_id: object,
+        url: object,
+        public_key: object,
+    ) -> ClusterNode:
+        """Operator approval of a peer node: pin its key, then HELLO it.
+
+        The pinned key is the node's cluster membership — its frames verify
+        under it (:func:`authorize_frame`). A node already pinned to a
+        different key raises :class:`ClusterPeerKeyMismatch` (rotation is
+        :meth:`remove_peer` then re-add); bad input raises
+        :class:`InvalidClusterPeer`. Re-adding the same key only refreshes
+        the URL.
+        """
+        node_id, url, key = _validated_peer(
+            node_id, url, public_key, own_node_id=self._node_id
         )
+        existing = next(
+            (n for n in await self._repo.list_nodes() if n.node_id == node_id),
+            None,
+        )
+        if existing is not None and existing.public_key:
+            if existing.public_key.lower() != key:
+                raise ClusterPeerKeyMismatch(node_id)
+            node = replace(existing, url=url)
+        else:
+            node = ClusterNode(node_id=node_id, url=url, public_key=key)
         await self._repo.upsert_node(node)
         try:
             await self._post_to_peer(
-                peer_url,
+                url,
                 NODE_HELLO,
                 {
                     "node_id": self._node_id,
@@ -734,8 +809,10 @@ class ClusterService:
                 },
                 session=None,
             )
-        except Exception:
-            log.debug("cluster: initial NODE_HELLO to %s failed", peer_url)
+        except Exception as exc:
+            # Expected until the operator approves us on the other side too;
+            # its own add-peer HELLO then reaches us and we answer it.
+            log.debug("cluster: initial NODE_HELLO to %s failed: %s", url, exc)
         return node
 
     async def remove_peer(self, node_id: str) -> None:
@@ -771,8 +848,13 @@ class ClusterService:
         # (the URL may not match ``base_url`` exactly).
         if from_node_id == self._node_id:
             return
+        # "Known" means we have heard from it before. An admin-added row has
+        # never been seen (``last_seen`` is None) — answer its first HELLO so
+        # the two sides converge whichever the operator added first.
         existing = await self._repo.list_nodes()
-        already_known = any(n.node_id == from_node_id for n in existing)
+        already_known = any(
+            n.node_id == from_node_id and n.last_seen is not None for n in existing
+        )
         await self._repo.upsert_node(
             ClusterNode(
                 node_id=from_node_id,

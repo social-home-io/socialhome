@@ -64,10 +64,15 @@ def _config(tmp, *, instance_id: str, cluster_peers=()):
 
 
 async def _start_node(tmp_dir, instance_id: str) -> TestServer:
-    """Create + start a GFS TestServer for the given instance_id."""
+    """Create + start a GFS TestServer for the given instance_id.
+
+    The port is only known once the server listens, so the node's own URL
+    (what its HELLO advertises, and where a peer answers it) is set then.
+    """
     app = create_gfs_app(_config(tmp_dir, instance_id=instance_id))
     server = TestServer(app)
     await server.start_server()
+    app[gfs_cluster_key]._self_url = str(server.make_url("")).rstrip("/")
     return server
 
 
@@ -75,20 +80,17 @@ async def _stop_node(server: TestServer) -> None:
     await server.close()
 
 
-async def _pin_each_other(a: TestServer, b: TestServer) -> None:
-    """Operator approval: each node's roster pins the other's identity key.
+async def _approve(here: TestServer, there: TestServer, there_id: str) -> None:
+    """Operator approval on *here*: pin *there*'s id, URL and identity key.
 
-    Two test nodes have distinct data dirs, so distinct seeds — a HELLO from
-    one is only accepted by the other under a pinned key.
+    Two test nodes have distinct data dirs, so distinct seeds — each must
+    pin the other's key before the other's frames are accepted.
     """
-    for here, there, there_id in ((a, b, "B"), (b, a, "A")):
-        await here.app[gfs_cluster_repo_key].upsert_node(
-            ClusterNode(
-                node_id=there_id,
-                url=str(there.make_url("")).rstrip("/"),
-                public_key=there.app[gfs_cluster_key].own_public_key_hex,
-            )
-        )
+    await here.app[gfs_cluster_key].add_peer(
+        there_id,
+        str(there.make_url("")).rstrip("/"),
+        there.app[gfs_cluster_key].own_public_key_hex,
+    )
 
 
 @pytest.fixture
@@ -118,18 +120,15 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_ret
     a = await _start_node(dir_a, "A")
     b = await _start_node(dir_b, "B")
     try:
-        url_a = str(a.make_url("")).rstrip("/")
         url_b = str(b.make_url("")).rstrip("/")
 
         cluster_a: ClusterService = a.app[gfs_cluster_key]
-        cluster_b: ClusterService = b.app[gfs_cluster_key]
 
-        await _pin_each_other(a, b)
-        # Each admin-adds the other. `add_peer` stores the
-        # peer row locally + fires a NODE_HELLO with our own pk so the
-        # other side records us + our key.
-        await cluster_a.add_peer(url_b)
-        await cluster_b.add_peer(url_a)
+        # Each operator approves the other node (id + URL + key). `add_peer`
+        # pins the peer row locally + fires a NODE_HELLO so the other side
+        # marks us online.
+        await _approve(a, b, "B")
+        await _approve(b, a, "A")
         # After the symmetric HELLO round-trip both nodes know each other.
         peers_a = await a.app[gfs_cluster_repo_key].list_nodes()
         peers_b = await b.app[gfs_cluster_repo_key].list_nodes()
@@ -231,6 +230,32 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_ret
         await _stop_node(b)
 
 
+@pytest.mark.parametrize("first", ["A", "B"])
+async def test_admin_approval_converges_in_either_order(tmp_path_factory, first):
+    """Approving each node on the other converges whichever side the
+    operator does first: the first HELLO is refused (the other side has
+    not approved us yet), the second is accepted and — the row never seen
+    before — answered, so both rows end up online."""
+    a = await _start_node(tmp_path_factory.mktemp("conv-a"), "A")
+    b = await _start_node(tmp_path_factory.mktemp("conv-b"), "B")
+    try:
+        nodes = {"A": a, "B": b}
+        second = "B" if first == "A" else "A"
+        await _approve(nodes[first], nodes[second], second)
+        # Not yet approved on the other side: nothing was written there.
+        assert await nodes[second].app[gfs_cluster_repo_key].list_nodes() == []
+        await _approve(nodes[second], nodes[first], first)
+        for here, there_id, there in ((a, "B", b), (b, "A", a)):
+            (row,) = await here.app[gfs_cluster_repo_key].list_nodes()
+            assert row.node_id == there_id
+            assert row.public_key == there.app[gfs_cluster_key].own_public_key_hex
+            assert row.status == "online"
+            assert row.last_seen is not None
+    finally:
+        await _stop_node(a)
+        await _stop_node(b)
+
+
 async def test_post_to_peer_raises_on_non_2xx(
     tmp_dir, tmp_path_factory, fast_sync_retry
 ):
@@ -302,11 +327,8 @@ async def test_heartbeat_loop_tracks_peer_liveness(
     b = await _start_node(tmp_path_factory.mktemp("hb-b"), "B")
     try:
         url_b = str(b.make_url("")).rstrip("/")
-        cluster_a: ClusterService = a.app[gfs_cluster_key]
-        cluster_b: ClusterService = b.app[gfs_cluster_key]
-        await _pin_each_other(a, b)
-        await cluster_a.add_peer(url_b)
-        await cluster_b.add_peer(str(a.make_url("")).rstrip("/"))
+        await _approve(a, b, "B")
+        await _approve(b, a, "A")
         repo_a = a.app[gfs_cluster_repo_key]
         await repo_a.upsert_node(
             ClusterNode(

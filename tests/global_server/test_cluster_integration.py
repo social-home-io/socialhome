@@ -381,26 +381,161 @@ async def test_admin_cluster_list_returns_health(client):
     assert body["node_id"] == "gfs-node-a"
 
 
-async def test_admin_cluster_add_and_remove_peer(client):
+async def test_admin_cluster_add_and_remove_peer(client, outbound_hellos):
     from urllib.parse import quote
 
+    _seed, pub_hex = _keypair()
     resp = await client.post(
         "/admin/api/cluster/peers",
-        json={"url": "http://peer-c.test"},
+        json={
+            "node_id": "gfs-node-c",
+            "url": "http://peer-c.test/",
+            "public_key": pub_hex.upper(),
+        },
     )
     assert resp.status == 201
     body = await resp.json()
-    # Peer is now in cluster_nodes.
+    assert body == {
+        "node_id": "gfs-node-c",
+        "url": "http://peer-c.test",
+        "public_key": pub_hex,
+    }
     cluster_repo = client._app[gfs_cluster_repo_key]
-    nodes = await cluster_repo.list_nodes()
-    assert any(n.url == "http://peer-c.test" for n in nodes)
-    # Delete — the URL-shaped node_id must be percent-encoded in the path.
+    (row,) = await cluster_repo.list_nodes()
+    assert (row.node_id, row.url, row.public_key) == (
+        "gfs-node-c",
+        "http://peer-c.test",
+        pub_hex,
+    )
+    assert row.last_seen is None
+    # We HELLO the new peer so it learns us too.
+    assert outbound_hellos == [("http://peer-c.test", NODE_HELLO)]
     resp = await client.delete(
         f"/admin/api/cluster/peers/{quote(body['node_id'], safe='')}",
     )
     assert resp.status == 200
-    nodes_after = await cluster_repo.list_nodes()
-    assert not any(n.node_id == body["node_id"] for n in nodes_after)
+    assert await cluster_repo.list_nodes() == []
+
+
+_VALID_KEY = ed25519_public_key(b"\x01" * 32).hex()
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        ({"url": "http://c.test", "public_key": _VALID_KEY}, "invalid_node_id"),
+        (
+            {"node_id": "  ", "url": "http://c.test", "public_key": _VALID_KEY},
+            "invalid_node_id",
+        ),
+        (
+            {"node_id": 7, "url": "http://c.test", "public_key": _VALID_KEY},
+            "invalid_node_id",
+        ),
+        (
+            {"node_id": "x" * 129, "url": "http://c.test", "public_key": _VALID_KEY},
+            "invalid_node_id",
+        ),
+        (
+            {"node_id": "gfs-node-a", "url": "http://c.test", "public_key": _VALID_KEY},
+            "node_id_is_self",
+        ),
+        ({"node_id": "c", "public_key": _VALID_KEY}, "invalid_url"),
+        (
+            {"node_id": "c", "url": "ftp://c.test", "public_key": _VALID_KEY},
+            "invalid_url",
+        ),
+        ({"node_id": "c", "url": "http://", "public_key": _VALID_KEY}, "invalid_url"),
+        ({"node_id": "c", "url": "http://c.test"}, "invalid_public_key"),
+        (
+            {"node_id": "c", "url": "http://c.test", "public_key": "ab" * 31},
+            "invalid_public_key",
+        ),
+        (
+            {"node_id": "c", "url": "http://c.test", "public_key": "zz" * 32},
+            "invalid_public_key",
+        ),
+        (
+            {"node_id": "c", "url": "http://c.test", "public_key": _VALID_KEY + "00"},
+            "invalid_public_key",
+        ),
+    ],
+)
+async def test_admin_cluster_add_peer_rejects_bad_input(client, body, error):
+    resp = await client.post("/admin/api/cluster/peers", json=body)
+    assert resp.status == 422
+    assert (await resp.json())["error"] == error
+    assert await client._app[gfs_cluster_repo_key].list_nodes() == []
+
+
+@pytest.mark.security
+async def test_admin_cluster_add_peer_never_moves_a_pin(client):
+    """Re-adding a node id under a different key is a 409; rotation is
+    delete then re-add. Re-adding the same key is idempotent."""
+    peer_seed = await _register_peer(client)
+    pinned = ed25519_public_key(peer_seed).hex()
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={"node_id": PEER, "url": "http://b.test", "public_key": _VALID_KEY},
+    )
+    assert resp.status == 409
+    assert (await resp.json())["error"] == "key_mismatch"
+    (row,) = await client._app[gfs_cluster_repo_key].list_nodes()
+    assert row.public_key == pinned
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={"node_id": PEER, "url": "http://b2.test", "public_key": pinned},
+    )
+    assert resp.status == 201
+    (row,) = await client._app[gfs_cluster_repo_key].list_nodes()
+    assert (row.url, row.public_key, row.status) == ("http://b2.test", pinned, "online")
+
+
+async def test_admin_added_peer_is_answered_on_its_first_hello(client, outbound_hellos):
+    """An admin-added row has never been seen (``last_seen`` is None), so
+    the node's first HELLO is answered — the two sides converge whichever
+    was added first."""
+    seed, pub_hex = _keypair()
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={"node_id": "gfs-node-c", "url": "http://c.test", "public_key": pub_hex},
+    )
+    assert resp.status == 201
+    outbound_hellos.clear()
+    hello = {"node_id": "gfs-node-c", "url": "http://c.test", "public_key": pub_hex}
+    resp = await _sync(
+        client,
+        from_node="gfs-node-c",
+        seed=seed,
+        ip=GENUINE_IP,
+        type_=NODE_HELLO,
+        payload=hello,
+    )
+    assert resp.status == 200
+    assert outbound_hellos == [("http://c.test", NODE_HELLO)]
+    (row,) = await client._app[gfs_cluster_repo_key].list_nodes()
+    assert row.status == "online" and row.last_seen is not None
+    # Now known: a second HELLO is not answered (no ping-pong).
+    outbound_hellos.clear()
+    resp = await _sync(
+        client,
+        from_node="gfs-node-c",
+        seed=seed,
+        ip=GENUINE_IP,
+        type_=NODE_HELLO,
+        payload=hello,
+    )
+    assert resp.status == 200
+    assert outbound_hellos == []
+
+
+async def test_admin_cluster_publishes_our_own_key(client):
+    """The operator needs this node's key to pin it on the other nodes."""
+    resp = await client.get("/admin/api/cluster")
+    body = await resp.json()
+    svc = client._app[gfs_cluster_key]
+    assert body["public_key"] == svc.own_public_key_hex
+    assert len(body["public_key"]) == 64
 
 
 async def test_admin_cluster_ping_unknown_is_404(client):
