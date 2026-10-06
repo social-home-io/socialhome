@@ -23,10 +23,14 @@ Routes:
 
 from __future__ import annotations
 
+import re
+from urllib.parse import quote
+
 from aiohttp import web
 
-from ..app_keys import moment_public_service_key
+from ..app_keys import media_signer_key, moment_public_service_key
 from ..csp import media_response_headers
+from ..media_signer import sign_media_urls_in
 from ..services.moment_public_service import MomentPublicError
 from .base import BaseView
 
@@ -151,15 +155,51 @@ class MomentPublicFollowDetailView(BaseView):
         return web.Response(status=204)
 
 
+#: Ids we put into a signed proxy path verbatim. The signature covers
+#: the decoded ``request.path``, so an id that would need percent-
+#: encoding (or a ``..`` segment) gets no avatar rather than a URL that
+#: fails to verify or resolves somewhere else.
+_PATH_SAFE_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._:-]*$")
+
+
+def mirrored_picture_url(gfs_id: str, row: dict) -> str | None:
+    """Our own proxy URL for a directory row's GFS-mirrored picture.
+
+    The row's ``picture_url`` is whatever string the household
+    registered — a third-party tracker, or a relative path that would
+    resolve against *our* origin — so it is never handed to the
+    browser. Only a GFS-mirrored picture (``picture_digest``) gets a
+    URL, and it points at :class:`GfsUserPictureProxyView`.
+    """
+    user_id = row.get("user_id")
+    digest = row.get("picture_digest")
+    if not (isinstance(user_id, str) and isinstance(digest, str) and digest):
+        return None
+    if not (_PATH_SAFE_ID.match(gfs_id) and _PATH_SAFE_ID.match(user_id)):
+        return None
+    return (
+        f"api/gfs/{gfs_id}/moments/users/{user_id}/picture?v={quote(digest, safe='')}"
+    )
+
+
 class GfsUserDirectoryProxyView(BaseView):
     async def get(self) -> web.Response:
         svc = self.svc(moment_public_service_key)
+        gfs_id = self.match("gfs_id")
         q = self.request.query.get("q") or None
         try:
-            users = await svc.fetch_directory(self.match("gfs_id"), q=q)
+            users = await svc.fetch_directory(gfs_id, q=q)
         except MomentPublicError as exc:
             raise web.HTTPBadGateway(text=f'{{"error":"{exc!s}"}}') from exc
-        return self._json({"users": users})
+        for row in users:
+            if isinstance(row, dict):
+                row["picture_url"] = mirrored_picture_url(gfs_id, row)
+        payload = {"users": users}
+        # ``<img src>`` carries no bearer — sign so the avatar loads.
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(payload, signer)
+        return self._json(payload)
 
 
 class GfsUserPictureProxyView(BaseView):

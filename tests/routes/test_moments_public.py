@@ -246,8 +246,53 @@ async def test_directory_proxy_returns_users(client, stub):
     r = await client.get("/api/gfs/g1/moments/users", headers=_auth(client._tok))
     assert r.status == 200
     body = await r.json()
-    assert body == {"users": [{"user_id": "u-remote", "display_name": "Bob"}]}
+    assert body == {
+        "users": [{"user_id": "u-remote", "display_name": "Bob", "picture_url": None}]
+    }
     assert stub.directory_calls == ["g1"]
+
+
+async def test_directory_picture_url_loads_without_a_bearer(client, stub):
+    """The Momentum directory renders avatars via a plain ``<img src>``,
+    which carries no bearer. The response's ``picture_url`` must be our
+    own signed proxy path, so the browser loads it with a 200."""
+    stub.directory_users = [
+        {
+            "user_id": "u-remote",
+            "display_name": "Bob",
+            "picture_digest": "abc",
+            # The household's own string — never handed to the browser.
+            "picture_url": "https://tracker.example/pixel.gif",
+        }
+    ]
+    r = await client.get("/api/gfs/g1/moments/users", headers=_auth(client._tok))
+    assert r.status == 200
+    [user] = (await r.json())["users"]
+    pic = user["picture_url"]
+    assert pic.startswith("api/gfs/g1/moments/users/u-remote/picture?v=abc&"), pic
+    assert "exp=" in pic and "sig=" in pic
+    img = await client.get("/" + pic)  # no Authorization header
+    assert img.status == 200
+    assert (await img.read()) == b"\x00"
+    # The unsigned path still needs a bearer.
+    bare = await client.get("/api/gfs/g1/moments/users/u-remote/picture?v=abc")
+    assert bare.status == 401
+
+
+async def test_directory_drops_the_household_picture_url_without_digest(client, stub):
+    """No GFS-mirrored picture → no avatar URL at all; the household's
+    self-reported ``picture_url`` never reaches the browser."""
+    stub.directory_users = [
+        {
+            "user_id": "u-remote",
+            "picture_digest": None,
+            "picture_url": "api/media/local-file.webp",
+        },
+        {"user_id": "../../media/x", "picture_digest": "abc"},
+    ]
+    r = await client.get("/api/gfs/g1/moments/users", headers=_auth(client._tok))
+    users = (await r.json())["users"]
+    assert [u["picture_url"] for u in users] == [None, None]
 
 
 async def test_directory_proxy_failure_maps_to_502(client, stub):

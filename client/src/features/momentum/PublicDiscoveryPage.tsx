@@ -175,7 +175,7 @@ export default function PublicDiscoveryPage() {
         {filtered.value.map((u) => (
           <li key={u.user_id} class="sh-momentum-discover-row">
             <Avatar
-              src={discoveryAvatarUrl(u, selectedGfs.value)}
+              src={discoveryAvatarUrl(u)}
               name={u.display_name || u.username}
               size={48}
             />
@@ -198,17 +198,20 @@ export default function PublicDiscoveryPage() {
   )
 }
 
+/** Our own picture-proxy path, as the backend emits it (signed). */
+const PROXY_PICTURE_RE =
+  /^api\/gfs\/[A-Za-z0-9_-][A-Za-z0-9._:-]*\/moments\/users\/[A-Za-z0-9_-][A-Za-z0-9._:-]*\/picture\?/
+
 /** Avatar for a directory row: only the GFS-mirrored picture, fetched
- *  through our own backend. Never the row's ``picture_url`` — a household
- *  registers whatever string it likes there (a third-party tracker, or a
- *  path that resolves against our origin), and loading it would hand the
- *  viewer's IP to that host. No digest → the initials fallback. The
- *  path is relative so it resolves under the ingress ``<base href>``. */
-export function discoveryAvatarUrl(
-  u: MomentPublicDirectoryUser, gfs: string | null,
-): string | null {
-  if (!u.picture_digest || !gfs) return null
-  return `api/gfs/${encodeURIComponent(gfs)}/moments/users/${encodeURIComponent(
-    u.user_id,
-  )}/picture?v=${encodeURIComponent(u.picture_digest)}`
+ *  through our own backend. The backend replaces the household's
+ *  self-reported ``picture_url`` (a third-party tracker, or a path that
+ *  resolves against our origin) with its signed picture-proxy URL — an
+ *  ``<img>`` carries no bearer, so the signature is what lets it load.
+ *  Anything else is refused here too, so a stale backend can't leak the
+ *  viewer's IP. No URL → the initials fallback. The path is relative so
+ *  it resolves under the ingress ``<base href>``. */
+export function discoveryAvatarUrl(u: MomentPublicDirectoryUser): string | null {
+  const url = u.picture_url
+  if (!url || !PROXY_PICTURE_RE.test(url)) return null
+  return url
 }

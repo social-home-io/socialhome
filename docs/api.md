@@ -866,8 +866,8 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | DELETE / PATCH | `/api/moments/public/registrations/{gfs_id}` | Deregister / flip `default_share`. |
 | GET / POST | `/api/moments/public/follows` | List / follow public author. |
 | DELETE | `/api/moments/public/follows/{gfs_id}/{user_id}` | Unfollow. |
-| GET | `/api/gfs/{gfs_id}/moments/users` | Proxy GFS directory; passes `?q=<substr>` through. |
-| GET | `/api/gfs/{gfs_id}/moments/users/{user_id}/picture` | Proxy GFS-mirrored avatar bytes (used by Discover cards). |
+| GET | `/api/gfs/{gfs_id}/moments/users` | Proxy GFS directory; passes `?q=<substr>` through. Each row's `picture_url` is replaced with our own signed picture-proxy URL (or `null` without a mirrored picture) — the household's self-reported URL never reaches the browser. |
+| GET | `/api/gfs/{gfs_id}/moments/users/{user_id}/picture` | Proxy GFS-mirrored avatar bytes (used by Discover cards). Accepts the `?exp=&sig=` signed URL from the directory response. |
 
 ## HFS — Child protection
 
