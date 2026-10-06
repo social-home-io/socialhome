@@ -19,6 +19,20 @@
 export class UnauthorizedError extends Error {}
 
 
+/* A non-2xx answer. ``code`` carries the machine-readable ``{error}``
+ * field some endpoints return (e.g. ``key_mismatch``) so a panel can map
+ * it to a plain message; ``message`` stays the human-ish fallback. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(message)
+  }
+}
+
+
 export async function api<T = unknown>(
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
   path: string,
@@ -37,11 +51,13 @@ export async function api<T = unknown>(
   const text = await resp.text()
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`
+    let code: string | null = null
     try {
-      const parsed = JSON.parse(text) as { detail?: string }
+      const parsed = JSON.parse(text) as { detail?: string; error?: string }
       if (parsed?.detail) msg = parsed.detail
+      if (typeof parsed?.error === 'string') code = parsed.error
     } catch { /* ignore */ }
-    throw new Error(msg)
+    throw new ApiError(msg, resp.status, code)
   }
   return (text ? JSON.parse(text) : {}) as T
 }

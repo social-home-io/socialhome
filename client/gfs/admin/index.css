@@ -234,3 +234,105 @@ textarea { min-height: 110px; font-family: inherit; }
   border-bottom: 1px solid var(--sh-border);
 }
 .audit-row time { color: var(--sh-text-muted); font-size: 12px; }
+
+/* Visually hidden but read by screen readers (e.g. the actions column
+ * header in the cluster table). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Cluster panel — node identity, peer table, add-peer form. */
+.cluster-panel h3 {
+  margin: 18px 0 8px 0;
+  font-size: 15px;
+}
+.cluster-panel code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+.cluster-panel .wrap { overflow-wrap: anywhere; word-break: break-all; }
+.cluster-panel button,
+.cluster-panel input { min-height: 36px; }
+.cluster-panel button:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+}
+.cluster-panel input[aria-invalid='true'] { border-color: var(--sh-danger); }
+.cluster-panel input.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.self-node {
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-sm);
+  padding: 12px 16px;
+}
+.self-node h3 { margin-top: 0; }
+.self-node dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 10px 0 0 0;
+  align-items: center;
+}
+.self-node dt { font-weight: 600; color: var(--sh-text-muted); font-size: 13px; }
+.self-node dd {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.self-node dd code { min-width: 0; flex: 0 1 auto; }
+.self-node .copy-status { margin: 8px 0 0 0; min-height: 1.2em; }
+
+/* Mobile: stack term above value so the 64-char key gets the full width. */
+@media (max-width: 560px) {
+  .self-node dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .self-node dd { margin-bottom: 8px; }
+}
+
+/* ``position: relative`` makes this the containing block of the
+ * absolutely positioned ``.sr-only`` header text — otherwise it escapes
+ * the scroll box and widens the whole page on a phone. */
+.table-scroll { overflow-x: auto; position: relative; }
+.cluster-panel td { vertical-align: top; }
+.cluster-panel .node-cell { min-width: 11rem; max-width: 18rem; }
+.cluster-panel .node-id { overflow-wrap: anywhere; }
+.cluster-panel .node-url { overflow-wrap: anywhere; }
+.cluster-panel .key-cell { min-width: 170px; }
+.cluster-panel .fingerprint { white-space: nowrap; }
+.cluster-panel .key-source { font-size: 12px; margin-top: 2px; }
+.cluster-panel .key-source-own { color: var(--sh-success); }
+.cluster-panel .key-source-pinned { color: var(--sh-text); }
+.cluster-panel .key-source-none { color: color-mix(in srgb, var(--sh-warning) 75%, var(--sh-text)); }
+.cluster-panel .key-hint { font-size: 12px; }
+.cluster-panel .row-actions { white-space: nowrap; }
+
+.confirm-box {
+  border: 1px solid color-mix(in srgb, var(--sh-danger) 45%, transparent);
+  background: color-mix(in srgb, var(--sh-danger) 8%, var(--sh-bg));
+  border-radius: var(--sh-radius-sm);
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+.confirm-box p { margin: 0 0 8px 0; }
+.confirm-box .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.add-peer {
+  margin-top: 18px;
+  padding-top: 4px;
+  border-top: 1px solid var(--sh-border);
+  max-width: 640px;
+}
+.add-peer .field-error { margin: 4px 0 0 0; font-size: 13px; }
