@@ -661,7 +661,6 @@ async def test_count_published_spaces(env):
 _OWN_PAIR_KW = {
     "own_instance_id": "alpha.home",
     "own_public_key_hex": "aa" * 32,
-    "own_inbox_url": "https://alpha.example/federation/inbox",
     "own_display_name": "Alpha House",
 }
 
@@ -804,7 +803,6 @@ async def test_pair_missing_own_identity(env):
             {"gfs_url": "https://x.com", "token": "tok"},
             own_instance_id="",
             own_public_key_hex="ab",
-            own_inbox_url="https://x",
         )
 
 
@@ -889,19 +887,36 @@ async def test_pair_rejects_a_malformed_gfs_url(env, gfs_url):
     assert await repo.list_all() == []
 
 
-async def test_pair_rejects_a_public_plain_http_own_inbox_url(env):
-    """The household's own federation base travels to the GFS as the address
-    peers will POST to — a public plain-http inbox is the same downgrade
-    surface from the other side."""
+async def test_pair_registration_body_has_no_inbox_url(env):
+    """The GFS never needed the household's address (its relay runs over the
+    household-opened WebSocket), and on the Home Assistant add-on the address
+    doesn't exist at onboarding time. The register body is exactly the
+    identity + display name — no ``inbox_url`` key at all."""
     _, repo = env
-    session = _StubSession(method_responses={"GET": (200, {})})
+    session = _StubSession(
+        method_responses={
+            "GET": (
+                200,
+                {
+                    "gfs_instance_id": "remote",
+                    "public_key": "bb" * 32,
+                    "server_name": "GFS",
+                },
+            ),
+            "POST": (200, {"status": "registered"}),
+        },
+    )
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-    with pytest.raises(GfsConnectionError, match="https"):
-        await svc.pair(
-            {"gfs_url": "https://gfs.example.com", "token": "tok"},
-            **{**_OWN_PAIR_KW, "own_inbox_url": "http://alpha.example/federation"},
-        )
-    assert session.calls == []
+    await svc.pair(
+        {"gfs_url": "https://gfs.example.com", "token": "tok"}, **_OWN_PAIR_KW
+    )
+    body = session._last_body
+    assert body == {
+        "token": "tok",
+        "instance_id": "alpha.home",
+        "public_key": "aa" * 32,
+        "display_name": "Alpha House",
+    }
 
 
 async def test_pair_gfs_info_unreachable(env):
@@ -2734,7 +2749,6 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
                 {"gfs_url": gfs_base, "token": token},
                 own_instance_id=_E2E_OWN_INSTANCE,
                 own_public_key_hex=generate_identity_keypair().public_key.hex(),
-                own_inbox_url="https://alpha.example/federation/inbox",
                 own_display_name="Alpha House",
             )
             # Learned from the signed block, not the bare flag: the pinned key

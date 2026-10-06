@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from socialhome.app_keys import gfs_connection_service_key, gfs_ws_supervisor_key
+from socialhome.app import create_app
+from socialhome.app_keys import (
+    db_key,
+    gfs_connection_service_key,
+    gfs_ws_supervisor_key,
+)
 from socialhome.auth import sha256_token_hash
+from socialhome.config import Config
+from socialhome.crypto import derive_user_id
 from socialhome.domain.federation import GfsConnection
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
@@ -29,13 +36,31 @@ class _StubResp:
 
 
 class _StubSession:
-    """Minimal aiohttp-session stub for the publish round-trip."""
+    """Minimal aiohttp-session stub for the publish round-trip.
 
-    def __init__(self, *, status: int = 200, body: dict | None = None):
+    ``get_body`` answers ``GET`` (the ``/gfs/info`` descriptor at pair
+    time); ``posted`` records every JSON body handed to ``post`` so a test
+    can assert what left for the GFS.
+    """
+
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        body: dict | None = None,
+        get_body: dict | None = None,
+    ):
         self._status = status
         self._body = body or {}
+        self._get_body = get_body or {}
+        self.posted: list[dict] = []
+
+    def get(self, url, **kw):
+        return _StubResp(200, self._get_body)
 
     def post(self, url, **kw):
+        if "json" in kw:
+            self.posted.append(kw["json"])
         return _StubResp(self._status, self._body)
 
     def delete(self, url, **kw):
@@ -195,6 +220,81 @@ async def test_pair_missing_fields_returns_422(client):
         headers=_auth(client._tok),
     )
     assert r.status == 422
+
+
+_GFS_INFO = {
+    "gfs_instance_id": "inst-remote",
+    "public_key": "bb" * 32,
+    "server_name": "Test GFS",
+}
+
+
+async def _client_without_external_url(aiohttp_client, tmp_dir):
+    """An admin-authenticated household with NO ``[standalone].external_url``
+    — the shape of a Home Assistant add-on at onboarding time, where the
+    household's address isn't known yet."""
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        apps_path=str(tmp_dir / "apps"),
+        mode="standalone",
+        log_level="WARNING",
+        db_write_batch_timeout_ms=10,
+        instance_name="Alpha House",
+    )
+    tc = await aiohttp_client(create_app(cfg))
+    db = tc.app[db_key]
+    row = await db.fetchone(
+        "SELECT identity_public_key FROM instance_identity WHERE id='self'"
+    )
+    uid = derive_user_id(bytes.fromhex(row["identity_public_key"]), "admin")
+    await db.enqueue(
+        "INSERT OR REPLACE INTO users(username, user_id, display_name, is_admin) "
+        "VALUES(?,?,?,1)",
+        ("admin", uid, "Admin"),
+    )
+    await db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash) VALUES(?,?,?,?)",
+        ("t1", uid, "t", sha256_token_hash("admin-tok")),
+    )
+    return tc
+
+
+async def test_pair_succeeds_without_an_external_url(aiohttp_client, tmp_dir):
+    """The regression: QR pairing with a GFS needs no household address, so
+    a household without an External URL pairs — no ``422 NOT_CONFIGURED``."""
+    tc = await _client_without_external_url(aiohttp_client, tmp_dir)
+    session = _StubSession(get_body=_GFS_INFO, body={"status": "registered"})
+    tc.app[gfs_connection_service_key]._http_client = session
+    r = await tc.post(
+        "/api/gfs/connections",
+        json={"gfs_url": "https://gfs.example.com", "token": "tok"},
+        headers=_auth("admin-tok"),
+    )
+    assert r.status == 201, await r.text()
+    body = await r.json()
+    assert body["status"] == "active"
+    assert body["gfs_instance_id"] == "inst-remote"
+    assert "public_key" not in body
+
+
+async def test_pair_registration_body_carries_no_inbox_url(client):
+    """Even with an External URL configured, the household's address is not
+    the GFS's business: the register body has no ``inbox_url`` key at all."""
+    session = _StubSession(get_body=_GFS_INFO, body={"status": "registered"})
+    client.app[gfs_connection_service_key]._http_client = session
+    r = await client.post(
+        "/api/gfs/connections",
+        json={"gfs_url": "https://gfs.example.com", "token": "tok"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201, await r.text()
+    assert len(session.posted) == 1
+    register_body = session.posted[0]
+    assert "inbox_url" not in register_body
+    assert register_body["token"] == "tok"
+    assert register_body["display_name"]
 
 
 # ─── GET /api/gfs/connections/{id} ──────────────────────────────────

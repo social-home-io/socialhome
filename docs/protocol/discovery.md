@@ -261,14 +261,15 @@ The Social Home ↔ GFS link is split by direction:
     |---|---|---|
     | **New household** | identity-free body; nothing to learn | legacy body + **one** WARNING per connection naming the *server* (never the space) |
     | **Old household** | legacy body accepted: verified, then discarded | legacy body, as before |
-  - **`https://` at pair time.** A GFS URL (from the QR or pasted) and the
-    household's own federation base must be `https://` unless the host is
-    loopback, `localhost`, RFC1918, `fc00::/7` or `fe80::/10` — a LAN or
-    demo-harness GFS on `http://127.0.0.1:<port>` stays allowed, a public one
-    must be TLS. Enforced before the first byte leaves
-    (`GfsConnectionService.pair`); DNS is never resolved, so the check can't
-    be turned into a rebinding oracle. Without it the very fetch that pins the
-    key and reads the signed block is rewritable on-path.
+  - **`https://` at pair time.** A GFS URL (from the QR or pasted) must be
+    `https://` unless the host is loopback, `localhost`, RFC1918, `fc00::/7`
+    or `fe80::/10` — a LAN or demo-harness GFS on `http://127.0.0.1:<port>`
+    stays allowed, a public one must be TLS. Enforced before the first byte
+    leaves (`GfsConnectionService.pair`); DNS is never resolved, so the
+    check can't be turned into a rebinding oracle. Without it the very fetch
+    that pins the key and reads the signed block is rewritable on-path. The
+    household's own address is not part of the exchange — registration
+    carries no `inbox_url`.
   - **NULL-pin self-heal.** A space whose GFS row pinned no authority key
     `403`s every relay, and nothing else re-publishes its metadata. So on
     every GFS-WS (re)connect the household re-publishes the metadata of each
@@ -339,10 +340,13 @@ token** (10-minute TTL). There are two ways to get one:
 
 The onboarding step is **opt-in and unchecked**: nothing is sent to any GFS
 unless an admin ticks it and confirms (`tests/protocol/
-test_gfs_onboarding_opt_in.py`). It needs the External URL (the inbox the GFS
-relays to); without one the step explains that and offers nothing. The
-household learns whether to offer the step from local facts only
-(`GET /api/gfs/connections/default`) — it never probes the GFS to decide.
+test_gfs_onboarding_opt_in.py`). It needs no External URL: the GFS relays
+over the WebSocket the household opens, so registration carries no household
+address — which is what lets a Home Assistant add-on connect during first-run
+onboarding, before it has any public URL. The household learns whether to
+offer the step from local facts only (`GET /api/gfs/connections/default`:
+`reason` is `disabled` or `already_connected`, else the step is available)
+— it never probes the GFS to decide.
 
 ```mermaid
 sequenceDiagram
@@ -359,7 +363,7 @@ sequenceDiagram
     Note over H: verify signed capabilities against the key<br/>in this response (TOFU) — require open_signup
     H->>G: POST /gfs/signup-token (no body)
     G-->>H: {token, expires_in}
-    H->>G: POST /gfs/register {token, instance_id, public_key,<br/>inbox_url, display_name, keywrap_*}
+    H->>G: POST /gfs/register {token, instance_id, public_key,<br/>display_name, keywrap_*}
     G-->>H: {status: registered | pending}
     H-->>SPA: 201 {status: active | pending}
 ```
@@ -387,8 +391,9 @@ What the household checks and sends:
   one: there is no second descriptor fetch to swap.
 - **Nothing new reaches the GFS.** The token request has no body. The
   registration body is built by the same code as QR pairing: instance id,
-  public key, inbox URL, display name, and the key-wrap public key + its
-  self-signature — what any paired household already sends.
+  public key, display name, and the key-wrap public key + its
+  self-signature — what any paired household already sends. The household's
+  address is never among them.
 - **Approval still applies.** With `auto_accept_clients = false` the
   registration lands `pending` and onboarding says "waiting for the GFS to
   approve"; the connection turns active once the operator approves.
