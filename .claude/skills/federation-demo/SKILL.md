@@ -848,6 +848,14 @@ WS pushes across allocs. The step:
    re-announce loop HELLOs configured peers each tick until they answer,
    and ``handle_hello`` replies on first contact — otherwise the nodes
    deadlock one-directional (heartbeats rejected ``403 unknown_node``).
+   The nodes share the GFS signing seed, so they join **without operator
+   approval** — membership is operator-approved: a node is a member only
+   if its HELLO verifies under this GFS's own key (shared seed) or a key an
+   operator pinned (``POST /admin/api/cluster/peers``). The step then
+   asserts the gate: a ``NODE_HELLO`` signed with a **foreign seed** is
+   refused ``403 unapproved_node`` and no row for it appears on any node's
+   ``/cluster/health``; and a captured, validly signed frame re-POSTed
+   **verbatim** is accepted once and then refused ``409 replay``.
 3. Fires **24 registrations concurrently, split across both node ports**,
    so the two processes' writers collide on the shared DB's write lock,
    and asserts every one is accepted with **0 ``database is locked``**.

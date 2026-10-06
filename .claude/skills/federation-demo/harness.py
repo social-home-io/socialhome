@@ -763,6 +763,52 @@ def _gfs_cluster_down(*, preserve_logs: bool = False) -> None:
         shutil.rmtree(GFS_CLUSTER_DIR, ignore_errors=True)
 
 
+def _gfs_cluster_frame(
+    seed_hex: str,
+    from_node: str,
+    msg_type: str,
+    payload: dict,
+) -> tuple[bytes, str]:
+    """Build a ``/cluster/sync`` frame exactly as a node's ``_post_to_peer``
+    does — canonical JSON ``{type, from, ts, nonce, sig_suite, payload}`` —
+    signed with the Ed25519 *seed_hex*. Returns ``(raw body, signature)``:
+    the bytes a peer would see on the wire, so re-POSTing them is a capture
+    replay."""
+    from socialhome.crypto import b64url_encode, sign_ed25519
+
+    body = {
+        "type": msg_type,
+        "from": from_node,
+        "ts": int(time.time()),
+        "nonce": b64url_encode(secrets.token_bytes(16)),
+        "sig_suite": "ed25519",
+        "payload": payload,
+    }
+    raw = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return raw, b64url_encode(sign_ed25519(bytes.fromhex(seed_hex), raw))
+
+
+def _gfs_cluster_post_frame(base_url: str, raw: bytes, sig: str) -> tuple[int, Any]:
+    """POST pre-signed frame bytes VERBATIM to ``/cluster/sync`` (``_request``
+    re-serialises its body, which would change the signed bytes)."""
+    req = urllib.request.Request(
+        f"{base_url}/cluster/sync",
+        data=raw,
+        method="POST",
+        headers={"Content-Type": "application/json", "X-Node-Signature": sig},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as r:
+            text = r.read().decode("utf-8") or "{}"
+            return r.status, json.loads(text)
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8")
+        try:
+            return exc.code, json.loads(text)
+        except Exception:
+            return exc.code, {"_raw": text}
+
+
 def cmd_gfs_cluster() -> None:
     """Prove a MULTI-PROCESS GFS cluster serves writes without deadlocking.
 
@@ -774,7 +820,11 @@ def cmd_gfs_cluster() -> None:
       1. Boot node ``gfs-a`` (18770), wait for it to apply migrations, then
          node ``gfs-b`` (18771) on the SAME data_dir / DB.
       2. Assert the cluster forms — each ``/cluster/health`` is ``online``
-         and lists the peer.
+         and lists the peer. Shared-seed nodes need no operator approval.
+         Then membership is operator-approved: a NODE_HELLO signed with a
+         FOREIGN seed is refused ``403 unapproved_node`` and leaves no row;
+         a captured, validly signed frame re-POSTed verbatim is refused
+         ``409 replay``.
       3. Fire N registrations CONCURRENTLY, split across both node HTTP
          ports, so the two processes' writers collide on the shared DB's
          write lock. Assert every one succeeds and NEITHER log contains
@@ -862,6 +912,67 @@ def cmd_gfs_cluster() -> None:
         f"  {len(ports)}-node GFS cluster up, sharing one SQLite DB, "
         "every node discovered every other over HELLO ✓"
     )
+
+    # 2b. Membership is operator-approved. A node holding a seed nobody here
+    # pinned (not the shared seed, not an admin-approved key) is refused at
+    # HELLO and gets no row — before this change it was trusted on first use.
+    from socialhome.crypto import ed25519_public_key
+
+    foreign_seed = secrets.token_bytes(32).hex()
+    intruder = "gfs-intruder"
+    raw, sig = _gfs_cluster_frame(
+        foreign_seed,
+        intruder,
+        "NODE_HELLO",
+        {
+            "url": "http://127.0.0.1:9",
+            "public_key": ed25519_public_key(bytes.fromhex(foreign_seed)).hex(),
+        },
+    )
+    code, body = _gfs_cluster_post_frame(urls[0], raw, sig)
+    if code != 403 or (body or {}).get("error") != "unapproved_node":
+        _gfs_cluster_down(preserve_logs=True)
+        raise SystemExit(
+            f"gfs-cluster: a HELLO signed with a foreign seed → HTTP {code} "
+            f"{body!r}; want 403 unapproved_node (an unapproved node must not "
+            "join the cluster).",
+        )
+    for url in urls:
+        _c, health = _request(f"{url}/cluster/health", timeout=5.0)
+        ids = {pr.get("node_id") for pr in (health or {}).get("peers", [])}
+        if intruder in ids:
+            _gfs_cluster_down(preserve_logs=True)
+            raise SystemExit(
+                f"gfs-cluster: refused node {intruder!r} still got a "
+                f"cluster_nodes row (visible on {url}/cluster/health).",
+            )
+    print(
+        "  HELLO signed with a foreign seed → 403 unapproved_node, no row on any node ✓"
+    )
+
+    # 2c. Replay: a validly signed frame (shared seed, a real member's HELLO)
+    # is accepted once; the same bytes re-POSTed are refused.
+    raw, sig = _gfs_cluster_frame(
+        GFS_CLUSTER_SEED_HEX,
+        node_ids[0],
+        "NODE_HELLO",
+        {
+            "url": urls[0],
+            "public_key": ed25519_public_key(
+                bytes.fromhex(GFS_CLUSTER_SEED_HEX),
+            ).hex(),
+        },
+    )
+    first, first_body = _gfs_cluster_post_frame(urls[1], raw, sig)
+    again, again_body = _gfs_cluster_post_frame(urls[1], raw, sig)
+    if first != 200 or again != 409 or (again_body or {}).get("error") != "replay":
+        _gfs_cluster_down(preserve_logs=True)
+        raise SystemExit(
+            f"gfs-cluster: signed frame → HTTP {first} {first_body!r}, the "
+            f"same bytes again → HTTP {again} {again_body!r}; want 200 then "
+            "409 replay.",
+        )
+    print("  a captured signed frame re-POSTed verbatim → 409 replay ✓")
 
     # 3. Concurrent cross-process writes. Pre-mint tokens serially (so the
     # burst is purely register writes), then fire them all at once split
@@ -1032,7 +1143,8 @@ def cmd_gfs_cluster() -> None:
     _gfs_cluster_down()
     print(
         f"gfs-cluster: ok ({len(ports)} processes, one shared SQLite DB; "
-        "peers discovered incl. self-guard; concurrent cross-process "
+        "peers discovered incl. self-guard; foreign-seed HELLO refused, "
+        "replayed frame refused; concurrent cross-process "
         "registrations + space publishes serialise on the lock)"
     )
 
