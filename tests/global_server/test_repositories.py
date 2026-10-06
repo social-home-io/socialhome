@@ -1264,8 +1264,12 @@ async def test_cluster_approve_never_moves_an_approved_key(gfs_db):
     await repo.approve_node("b", "http://b2", "bb" * 32)
     (row,) = await repo.list_nodes()
     assert (row.approved_key, row.public_key) == ("aa" * 32, "aa" * 32)
-    # The URL still refreshes.
-    assert row.url == "http://b2"
+    # Nor does the losing approval move the URL the key was approved with.
+    assert (row.url, row.approved_url) == ("http://b", "http://b")
+    # Re-approving the SAME key refreshes the URL.
+    await repo.approve_node("b", "http://b3", "aa" * 32)
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.approved_url) == ("http://b3", "http://b3")
 
 
 async def test_cluster_approve_fills_a_row_without_approval(gfs_db):

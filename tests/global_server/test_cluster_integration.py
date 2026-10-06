@@ -1657,3 +1657,38 @@ async def test_only_shared_seed_rows_count_towards_cluster_full(client, tmp_dir)
             ClusterNode(node_id=f"tofu-{i}", url=f"http://t{i}.test", public_key=key)
         )
     assert (await _own_key_hello(client, "sibling")).status == 200
+
+
+# ─── Admin approval race ──────────────────────────────────────────────────
+
+
+@pytest.mark.security
+async def test_a_losing_concurrent_approval_moves_nothing_and_is_a_conflict(
+    client, monkeypatch
+):
+    """Two admins approve the same node id with different keys and URLs at
+    once: both pass the "already approved?" read before either writes. The
+    first write wins whole — key and URL — and the second gets 409
+    ``key_mismatch`` instead of a 201 for an approval that did not happen."""
+    repo = client._app[gfs_cluster_repo_key]
+    _, winner_key = _keypair()
+    _, loser_key = _keypair()
+    real_approve = SqliteClusterRepo.approve_node
+
+    async def racing_approve(self, node_id, url, approved_key):
+        # The other admin's approval commits between our read and write.
+        await real_approve(self, node_id, "http://winner.test", winner_key)
+        await real_approve(self, node_id, url, approved_key)
+
+    monkeypatch.setattr(SqliteClusterRepo, "approve_node", racing_approve)
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={"node_id": "node-c", "url": "http://loser.test", "public_key": loser_key},
+    )
+    assert (resp.status, await resp.json()) == (409, {"error": "key_mismatch"})
+    (row,) = await repo.list_nodes()
+    assert (row.approved_key, row.approved_url, row.url) == (
+        winner_key,
+        "http://winner.test",
+        "http://winner.test",
+    )

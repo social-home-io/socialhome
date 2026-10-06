@@ -1204,8 +1204,11 @@ class SqliteClusterRepo:
 
         The ONLY writer of ``approved_key`` and ``approved_url`` (the URL
         every outbound frame to the node goes to) — the node's cluster-membership
-        credential (spec §24.10). Once set it never moves: a re-add under
-        the same key only refreshes the URL, and rotation is
+        credential (spec §24.10). Once set it never moves, and neither does
+        the URL approved with it: an approval under a different key changes
+        nothing (the caller re-reads the row to tell — a losing race between
+        two approvals), a re-add under the same key only refreshes the URL,
+        and rotation is
         :meth:`remove_node` then a fresh approval. ``public_key`` is set to
         the approved key as well, so a node still on the previous release
         and sharing this DB (which trusts ``public_key``) honours the
@@ -1217,8 +1220,16 @@ class SqliteClusterRepo:
                 node_id, url, public_key, approved_key, approved_url
             ) VALUES(?, ?, ?, ?, ?)
             ON CONFLICT(node_id) DO UPDATE SET
-                url=excluded.url,
-                approved_url=excluded.approved_url,
+                url=CASE
+                    WHEN cluster_nodes.approved_key IN ('', excluded.approved_key)
+                    THEN excluded.url
+                    ELSE cluster_nodes.url
+                END,
+                approved_url=CASE
+                    WHEN cluster_nodes.approved_key IN ('', excluded.approved_key)
+                    THEN excluded.approved_url
+                    ELSE cluster_nodes.approved_url
+                END,
                 public_key=CASE
                     WHEN cluster_nodes.approved_key IN ('', excluded.approved_key)
                     THEN excluded.public_key

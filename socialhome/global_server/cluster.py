@@ -1079,6 +1079,15 @@ class ClusterService:
             if existing.approved_key.lower() != key:
                 raise ClusterPeerKeyMismatch(node_id)
         await self._repo.approve_node(node_id, url, key)
+        # The read above and the write are not atomic: another approval may
+        # have landed in between. The SQL keeps whichever key was stored
+        # first (and its URL), so read back which one won.
+        stored = next(
+            (n for n in await self._repo.list_nodes() if n.node_id == node_id),
+            None,
+        )
+        if stored is not None and stored.approved_key.lower() != key:
+            raise ClusterPeerKeyMismatch(node_id)
         node = (
             replace(
                 existing, url=url, public_key=key, approved_key=key, approved_url=url
