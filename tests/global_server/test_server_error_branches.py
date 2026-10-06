@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from dataclasses import replace
 
 import pytest
@@ -371,7 +372,12 @@ async def test_cluster_sync_known_node_bad_sig_is_401(client):
     )
     wrong_seed, _ = _gen_ed25519()
     canonical, sig = _sign_canonical(
-        {"type": "NODE_HEARTBEAT", "from": "peer", "ts": 0, "payload": {}},
+        {
+            "type": "NODE_HEARTBEAT",
+            "from": "peer",
+            "ts": int(time.time()),
+            "payload": {},
+        },
         wrong_seed,
     )
     resp = await client.post(
@@ -402,7 +408,12 @@ async def test_cluster_sync_unknown_node_type_dispatches_silently(client):
         )
     )
     canonical, sig = _sign_canonical(
-        {"type": "NODE_FLYING_SPAGHETTI", "from": "peer2", "ts": 0, "payload": {}},
+        {
+            "type": "NODE_FLYING_SPAGHETTI",
+            "from": "peer2",
+            "ts": int(time.time()),
+            "payload": {},
+        },
         seed,
     )
     resp = await client.post(

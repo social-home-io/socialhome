@@ -102,6 +102,17 @@ class ClusterSyncView(GfsBaseView):
                 web.json_response({"error": "invalid_message"}, status=400),
             )
 
+        # Freshness of the signed ``ts`` — cheap, so before any key lookup
+        # or signature work.
+        ts_error = svc.frame_ts_error(body.get("ts"))
+        if ts_error:
+            return _reject(
+                web.json_response(
+                    {"error": ts_error},
+                    status=400 if ts_error == "invalid_timestamp" else 401,
+                ),
+            )
+
         # Look up the peer's pinned key. NODE_HELLO is special-cased: a
         # first-contact sender isn't in the DB yet, so it is verified under
         # the key it carries (TOFU) — which proves the message is

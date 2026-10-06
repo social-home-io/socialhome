@@ -61,6 +61,13 @@ CLUSTER_RATE_LIMIT_PER_MIN: int = 60
 #: their one first-contact HELLO, so 30/min is far above real use.
 CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN: int = 30
 
+#: ``/cluster/sync`` frames carry the sender's wall-clock ``ts`` (unix
+#: seconds, int) inside the signed body. A frame more than this far from the
+#: receiver's wall clock is refused (401 ``stale_timestamp``), which bounds
+#: how long a captured frame can be replayed. Cluster nodes must keep their
+#: clocks within this window of each other (NTP) or they partition.
+CLUSTER_TS_SKEW_S: int = 300
+
 #: Spec §24.10.7 / S-8 — per-node ceiling on concurrent sync signaling
 #: sessions. ``pick_signaling_node`` filters out any node already at this
 #: count, and the GFS replies ``SPACE_SYNC_DIRECT_FAILED`` when nothing
@@ -117,6 +124,7 @@ class ClusterService:
         "_clock",
         "_sync_node_limiter",
         "_sync_unverified_limiter",
+        "_wall_clock",
     )
 
     def __init__(
@@ -133,6 +141,7 @@ class ClusterService:
         enabled: bool = False,
         ws_registry: "GfsWebSocketRegistry | None" = None,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._repo = repo
         self._admin_repo = admin_repo
@@ -178,6 +187,9 @@ class ClusterService:
         #: Monotonic clock for the ``/cluster/sync`` windows — injectable so
         #: a window test never depends on wall time.
         self._clock = clock
+        #: Unix wall clock for the frame ``ts`` window (signed by the sender,
+        #: checked by the receiver) — injectable so tests never race it.
+        self._wall_clock = wall_clock
         #: Per VERIFIED node id (spec §24.10.4). Capped LRU, like every GFS
         #: limiter, though only proven peers ever get a bucket here.
         self._sync_node_limiter = SlidingWindowCounter(CLUSTER_RATE_LIMIT_PER_MIN)
@@ -213,6 +225,19 @@ class ClusterService:
         request's signature — never a claimed one.
         """
         return self._sync_node_limiter.allow(node_id, now=self._clock())
+
+    def frame_ts_error(self, ts: object) -> str:
+        """Check a ``/cluster/sync`` frame's signed ``ts``; ``""`` if fine.
+
+        ``invalid_timestamp`` — not an int (a bool, float or string is
+        malformed, never coerced). ``stale_timestamp`` — more than
+        :data:`CLUSTER_TS_SKEW_S` from our wall clock, either way.
+        """
+        if isinstance(ts, bool) or not isinstance(ts, int):
+            return "invalid_timestamp"
+        if abs(ts - self._wall_clock()) > CLUSTER_TS_SKEW_S:
+            return "stale_timestamp"
+        return ""
 
     def _own_connected_clients(self) -> int:
         return (
@@ -1107,7 +1132,7 @@ class ClusterService:
         body = {
             "type": msg_type,
             "from": self._node_id,
-            "ts": int(time.time()),
+            "ts": int(self._wall_clock()),
             "payload": payload,
         }
         canonical = json.dumps(

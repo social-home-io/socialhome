@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -23,6 +24,7 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.cluster import (
     CLUSTER_RATE_LIMIT_PER_MIN,
+    CLUSTER_TS_SKEW_S,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
     NODE_HEARTBEAT,
     NODE_HELLO,
@@ -104,12 +106,17 @@ def _keypair() -> tuple[bytes, str]:
 
 
 def _post_node_payload(
-    type_: str, payload: dict, *, from_node: str, signing_key: bytes
+    type_: str,
+    payload: dict,
+    *,
+    from_node: str,
+    signing_key: bytes,
+    ts: object = None,
 ):
     body = {
         "type": type_,
         "from": from_node,
-        "ts": 1700000000,
+        "ts": int(time.time()) if ts is None else ts,
         "payload": payload,
     }
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
@@ -162,7 +169,12 @@ async def test_cluster_sync_unknown_node_is_403(client):
     else gets 403 without signature verification.
     """
     canonical = json.dumps(
-        {"type": NODE_HEARTBEAT, "from": "ghost", "ts": 1700000000, "payload": {}},
+        {
+            "type": NODE_HEARTBEAT,
+            "from": "ghost",
+            "ts": int(time.time()),
+            "payload": {},
+        },
         separators=(",", ":"),
         sort_keys=True,
     ).encode()
@@ -361,6 +373,7 @@ async def _sync(
     ip: str,
     type_: str = NODE_HEARTBEAT,
     payload: dict | None = None,
+    ts: object = None,
 ):
     """POST one NODE_* message; ``seed=None`` sends a forged signature.
 
@@ -369,14 +382,19 @@ async def _sync(
     """
     if seed is None:
         canonical = json.dumps(
-            {"type": type_, "from": from_node, "ts": 1700000000, "payload": {}},
+            {
+                "type": type_,
+                "from": from_node,
+                "ts": int(time.time()) if ts is None else ts,
+                "payload": {},
+            },
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
         sig = b64url_encode(b"\x00" * 64)
     else:
         canonical, sig = _post_node_payload(
-            type_, payload or {}, from_node=from_node, signing_key=seed
+            type_, payload or {}, from_node=from_node, signing_key=seed, ts=ts
         )
     return await client.post(
         "/cluster/sync",
@@ -550,7 +568,7 @@ async def test_sender_id_comes_only_from_the_signed_body(client):
     """``from`` is inside the signed body; the unsigned ``X-Node-Id`` header
     must never stand in for it — a body without ``from`` is malformed."""
     seed = await _register_peer(client)
-    body = {"type": NODE_HEARTBEAT, "ts": 1700000000, "payload": {}}
+    body = {"type": NODE_HEARTBEAT, "ts": int(time.time()), "payload": {}}
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
     resp = await client.post(
         "/cluster/sync",
@@ -564,3 +582,62 @@ async def test_sender_id_comes_only_from_the_signed_body(client):
     )
     assert resp.status == 400
     assert (await resp.json())["error"] == "invalid_message"
+
+
+# ─── Timestamp window ─────────────────────────────────────────────────
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("offset", [-(CLUSTER_TS_SKEW_S + 1), CLUSTER_TS_SKEW_S + 1])
+async def test_stale_or_future_timestamp_is_refused(client, offset):
+    """A frame signed more than ±300 s from our wall clock is refused before
+    the signature is checked, and charged to the address, not the node."""
+    seed = await _register_peer(client)
+    resp = await _sync(
+        client,
+        from_node=PEER,
+        seed=seed,
+        ip=ATTACKER_IP,
+        ts=int(time.time()) + offset,
+    )
+    assert resp.status == 401
+    assert (await resp.json())["error"] == "stale_timestamp"
+    svc = client._app[gfs_cluster_key]
+    assert ATTACKER_IP in svc._sync_unverified_limiter
+    assert PEER not in svc._sync_node_limiter
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("bad_ts", [True, "1700000000", 1.5e9, None])
+async def test_non_integer_timestamp_is_malformed(client, bad_ts):
+    seed = await _register_peer(client)
+    canonical, sig = _post_node_payload(
+        NODE_HEARTBEAT, {}, from_node=PEER, signing_key=seed, ts=bad_ts
+    )
+    if bad_ts is None:
+        # Drop the field entirely.
+        body = json.loads(canonical)
+        body.pop("ts")
+        canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+        sig = b64url_encode(sign_ed25519(seed, canonical))
+    resp = await client.post(
+        "/cluster/sync",
+        data=canonical,
+        headers={"X-Node-Signature": sig, "X-Forwarded-For": ATTACKER_IP},
+    )
+    assert resp.status == 400
+    assert (await resp.json())["error"] == "invalid_timestamp"
+    assert ATTACKER_IP in client._app[gfs_cluster_key]._sync_unverified_limiter
+
+
+async def test_timestamp_window_follows_the_injected_wall_clock(client):
+    """The window reads the injected wall clock, never ``time.time`` direct."""
+    seed = await _register_peer(client)
+    svc = client._app[gfs_cluster_key]
+    svc._wall_clock = lambda: 2_000_000_000.0
+    resp = await _sync(
+        client, from_node=PEER, seed=seed, ip=GENUINE_IP, ts=2_000_000_000 - 299
+    )
+    assert resp.status == 200
+    resp = await _sync(client, from_node=PEER, seed=seed, ip=GENUINE_IP)
+    assert resp.status == 401
