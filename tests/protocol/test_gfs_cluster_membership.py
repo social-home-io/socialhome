@@ -219,7 +219,7 @@ async def test_after_upgrade_only_the_shared_seed_sibling_rejoins(gfs):
         )
     sibling = _sender("node-b", _own_seed(gfs))
     await sibling.add_peer("node-a", _url(gfs), _own_key(gfs))
-    assert (await _roster(gfs))["node-b"].public_key == _own_key(gfs)
+    assert (await _roster(gfs))["node-b"].last_seen != "2026-01-01 00:00:00"
     foreign_key = ed25519_public_key(foreign_seed).hex()
     status, body = await _post(
         gfs,

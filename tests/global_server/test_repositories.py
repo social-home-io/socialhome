@@ -1299,3 +1299,44 @@ async def test_cluster_remove_then_re_add_rotates_the_pin(gfs_db):
     )
     (row,) = await repo.list_nodes()
     assert row.public_key == "dd" * 32
+
+
+async def test_cluster_touch_node_updates_only_an_existing_row(gfs_db):
+    """A liveness refresh never creates a row and never touches a key."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.touch_node("ghost", status="online", last_seen="2026-01-01 00:00:00")
+    assert await repo.list_nodes() == []
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="aa" * 32)
+    )
+    await repo.touch_node(
+        "b", status="online", last_seen="2026-01-02 00:00:00", url_if_empty="http://x"
+    )
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.public_key, row.status, row.last_seen) == (
+        "http://b",
+        "aa" * 32,
+        "online",
+        "2026-01-02 00:00:00",
+    )
+
+
+async def test_cluster_touch_node_fills_only_an_empty_url(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(ClusterNode(node_id="b", url=""))
+    await repo.touch_node(
+        "b", status="online", last_seen=None, url_if_empty="http://b.test"
+    )
+    assert (await repo.list_nodes())[0].url == "http://b.test"
+
+
+async def test_cluster_insert_node_never_overwrites_a_row(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="aa" * 32)
+    )
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://evil", public_key="bb" * 32)
+    )
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.public_key) == ("http://b", "aa" * 32)

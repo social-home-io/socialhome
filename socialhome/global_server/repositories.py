@@ -1161,6 +1161,15 @@ class SqliteGfsAdminRepo:
 class AbstractClusterRepo(Protocol):
     async def upsert_node(self, node: ClusterNode) -> None: ...
     async def list_nodes(self) -> list[ClusterNode]: ...
+    async def insert_node(self, node: ClusterNode) -> None: ...
+    async def touch_node(
+        self,
+        node_id: str,
+        *,
+        status: str,
+        last_seen: str | None,
+        url_if_empty: str = "",
+    ) -> None: ...
     async def remove_node(self, node_id: str) -> None: ...
     async def update_active_sync_sessions(
         self,
@@ -1200,6 +1209,49 @@ class SqliteClusterRepo:
                 last_seen=excluded.last_seen
             """,
             (node.node_id, node.url, node.public_key, node.status, node.last_seen),
+        )
+
+    async def insert_node(self, node: ClusterNode) -> None:
+        """Create a row for a node we have no row for; an existing row is
+        left exactly as it is (``ON CONFLICT DO NOTHING``).
+
+        Never used to refresh a row: a refresh that re-created one would
+        undo an admin removal that landed while it was in flight.
+        """
+        await self._db.enqueue(
+            """
+            INSERT INTO cluster_nodes(
+                node_id, url, public_key, status, last_seen
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(node_id) DO NOTHING
+            """,
+            (node.node_id, node.url, node.public_key, node.status, node.last_seen),
+        )
+
+    async def touch_node(
+        self,
+        node_id: str,
+        *,
+        status: str,
+        last_seen: str | None,
+        url_if_empty: str = "",
+    ) -> None:
+        """Refresh an EXISTING row's liveness — UPDATE only.
+
+        Writes ``status`` + ``last_seen`` (and fills an empty ``url`` with
+        *url_if_empty*); never inserts and never touches a key. A row an
+        admin removed while the caller was pinging or verifying stays
+        removed, and a re-added row keeps its new key.
+        """
+        await self._db.enqueue(
+            """
+            UPDATE cluster_nodes SET
+                status=?,
+                last_seen=?,
+                url=CASE WHEN url='' THEN ? ELSE url END
+            WHERE node_id=?
+            """,
+            (status, last_seen, url_if_empty, node_id),
         )
 
     async def list_nodes(self) -> list[ClusterNode]:

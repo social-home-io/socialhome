@@ -964,8 +964,10 @@ class ClusterService:
         """Record a member's HELLO (online, ``last_seen`` now).
 
         Only called once :func:`authorize_frame` accepted the HELLO and its
-        signature verified, so *public_key_hex* is a key this node already
-        held; the upsert never moves an existing pin anyway.
+        signature verified, so *public_key_hex* is the key it verified
+        under — one this node already held. An existing row is refreshed
+        (UPDATE only); a missing row is created only for a HELLO under our
+        own key.
         """
         # Discovery must be bidirectional on first contact. ``_announce_to_peers``
         # only fires once, at startup, against the CONFIGURED peer URLs — so a
@@ -993,25 +995,38 @@ class ClusterService:
             (n for n in await self._repo.list_nodes() if n.node_id == from_node_id),
             None,
         )
-        already_known = row is not None and row.last_seen is not None
-        # The URL is set out-of-band by an operator and never moves in-band:
-        # a member's HELLO must not point its row — and with it every later
-        # heartbeat and fan-out POST — at another address. Only a row with
-        # no URL yet (a shared-seed sibling's first HELLO) takes the one
-        # the HELLO carries, and only if it is a usable base URL.
-        if row is not None and row.url:
-            url = row.url
-        else:
+        now = _now_iso()
+        if row is None:
+            # Only a HELLO under our OWN key may create a row (a shared-seed
+            # sibling's first contact). An approved peer's row is created by
+            # the admin alone, so if it is gone the admin removed it while
+            # this HELLO was in flight — and it stays removed.
+            own = self._own_pk_hex.lower()
+            if not own or public_key_hex.lower() != own:
+                return
             url = normalized_peer_url(url)
-        await self._repo.upsert_node(
-            ClusterNode(
-                node_id=from_node_id,
-                url=url,
-                public_key=public_key_hex,
-                status="online",
-                last_seen=_now_iso(),
+            await self._repo.insert_node(
+                ClusterNode(
+                    node_id=from_node_id,
+                    url=url,
+                    public_key=own,
+                    status="online",
+                    last_seen=now,
+                )
             )
-        )
+            already_known = False
+        else:
+            # The URL is set out-of-band by an operator and never moves
+            # in-band: a member's HELLO must not point its row — and with it
+            # every later heartbeat and fan-out POST — at another address.
+            # Only a row with no URL yet takes the one the HELLO carries,
+            # and only if it is a usable base URL. UPDATE only.
+            fill = "" if row.url else normalized_peer_url(url)
+            url = row.url or fill
+            await self._repo.touch_node(
+                from_node_id, status="online", last_seen=now, url_if_empty=fill
+            )
+            already_known = row.last_seen is not None
         if not already_known and url and self._enabled and self._node_id:
             # Reply only on FIRST contact so this can't ping-pong: the peer
             # already knows us by the time it processes this, so its own
@@ -1057,16 +1072,9 @@ class ClusterService:
         rows = await self._repo.list_nodes()
         for r in rows:
             if r.node_id == from_node_id:
-                await self._repo.upsert_node(
-                    ClusterNode(
-                        node_id=r.node_id,
-                        url=r.url,
-                        public_key=r.public_key,
-                        status="online",
-                        last_seen=_now_iso(),
-                        added_at=r.added_at,
-                        active_sync_sessions=r.active_sync_sessions,
-                    )
+                # UPDATE only: an admin removal since the read stays removed.
+                await self._repo.touch_node(
+                    r.node_id, status="online", last_seen=_now_iso()
                 )
                 if peer_count is not None:
                     self._active_sync_count[from_node_id] = peer_count
@@ -1390,80 +1398,66 @@ class ClusterService:
                     return
                 except asyncio.TimeoutError:
                     pass
-                rows = await self._repo.list_nodes()
-                for r in rows:
-                    if r.status == "offline":
-                        # Probe offline peers too — coming back triggers
-                        # a partition-catchup handshake (spec §4.4.6).
-                        if await self._ping_peer(r.url):
-                            self._fail_counts[r.url] = 0
-                            await self._repo.upsert_node(
-                                ClusterNode(
-                                    node_id=r.node_id,
-                                    url=r.url,
-                                    public_key=r.public_key,
-                                    status="online",
-                                    last_seen=_now_iso(),
-                                    added_at=r.added_at,
-                                    active_sync_sessions=r.active_sync_sessions,
-                                ),
-                            )
-                            await self.announce_partition_catchup(r.url, to=r.node_id)
-                        continue
-                    ok = await self._ping_peer(r.url)
-                    fails = self._fail_counts.get(r.url, 0)
-                    if ok:
-                        self._fail_counts[r.url] = 0
-                        await self._repo.upsert_node(
-                            ClusterNode(
-                                node_id=r.node_id,
-                                url=r.url,
-                                public_key=r.public_key,
-                                status="online",
-                                last_seen=_now_iso(),
-                                added_at=r.added_at,
-                                active_sync_sessions=r.active_sync_sessions,
-                            )
-                        )
-                        # Spec §24.10.7 — propagate own sync-signaling load
-                        # via NODE_HEARTBEAT so peers' selectors see fresh
-                        # counts on the next ``pick_signaling_node``.
-                        try:
-                            await self._post_to_peer(
-                                r.url,
-                                NODE_HEARTBEAT,
-                                {
-                                    "active_sync_sessions": self._active_sync_count.get(
-                                        self._node_id,
-                                        0,
-                                    ),
-                                    "connected_clients": self._own_connected_clients(),
-                                },
-                                to=r.node_id,
-                                session=None,
-                            )
-                        except Exception as exc:
-                            log.debug(
-                                "cluster: NODE_HEARTBEAT to %r failed: %r",
-                                r.url,
-                                exc,
-                            )
-                    else:
-                        self._fail_counts[r.url] = fails + 1
-                        if fails + 1 >= HEARTBEAT_FAIL_THRESHOLD:
-                            await self._repo.upsert_node(
-                                ClusterNode(
-                                    node_id=r.node_id,
-                                    url=r.url,
-                                    public_key=r.public_key,
-                                    status="offline",
-                                    last_seen=r.last_seen,
-                                    added_at=r.added_at,
-                                    active_sync_sessions=r.active_sync_sessions,
-                                )
-                            )
+                await self._heartbeat_tick()
         except asyncio.CancelledError:
             return
+
+    async def _heartbeat_tick(self) -> None:
+        """Ping every known peer once and record its liveness.
+
+        Liveness writes are UPDATE-only (``touch_node``): a ping can take
+        seconds, and an admin may remove — or remove and re-add under a new
+        key — the peer meanwhile. Re-writing the row read before the ping
+        would undo that.
+        """
+        rows = await self._repo.list_nodes()
+        for r in rows:
+            if r.status == "offline":
+                # Probe offline peers too — coming back triggers
+                # a partition-catchup handshake (spec §4.4.6).
+                if await self._ping_peer(r.url):
+                    self._fail_counts[r.url] = 0
+                    await self._repo.touch_node(
+                        r.node_id, status="online", last_seen=_now_iso()
+                    )
+                    await self.announce_partition_catchup(r.url, to=r.node_id)
+                continue
+            ok = await self._ping_peer(r.url)
+            fails = self._fail_counts.get(r.url, 0)
+            if ok:
+                self._fail_counts[r.url] = 0
+                await self._repo.touch_node(
+                    r.node_id, status="online", last_seen=_now_iso()
+                )
+                # Spec §24.10.7 — propagate own sync-signaling load
+                # via NODE_HEARTBEAT so peers' selectors see fresh
+                # counts on the next ``pick_signaling_node``.
+                try:
+                    await self._post_to_peer(
+                        r.url,
+                        NODE_HEARTBEAT,
+                        {
+                            "active_sync_sessions": self._active_sync_count.get(
+                                self._node_id,
+                                0,
+                            ),
+                            "connected_clients": self._own_connected_clients(),
+                        },
+                        to=r.node_id,
+                        session=None,
+                    )
+                except Exception as exc:
+                    log.debug(
+                        "cluster: NODE_HEARTBEAT to %r failed: %r",
+                        r.url,
+                        exc,
+                    )
+            else:
+                self._fail_counts[r.url] = fails + 1
+                if fails + 1 >= HEARTBEAT_FAIL_THRESHOLD:
+                    await self._repo.touch_node(
+                        r.node_id, status="offline", last_seen=r.last_seen
+                    )
 
     async def _broadcast(
         self,

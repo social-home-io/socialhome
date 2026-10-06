@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -57,6 +58,7 @@ async def enabled_cluster(gfs_db):
         node_id="node-a",
         self_url="https://a.gfs.test",
         peers=(),
+        own_public_key_hex=_OWN,
         enabled=True,
     )
     # Self row exists so update_active_sync_sessions can target it.
@@ -512,11 +514,12 @@ async def test_handle_hello_replies_on_first_contact_so_discovery_is_bidirection
     # instance.
     monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
 
-    # First contact from an unknown peer → we register it AND HELLO back.
+    # First contact from an unknown shared-seed sibling → we register it
+    # AND HELLO back.
     await enabled_cluster.handle_hello(
         from_node_id="node-b",
         url="https://b.gfs.test",
-        public_key_hex="bb" * 32,
+        public_key_hex=_OWN,
     )
     node_ids = {n.node_id for n in await enabled_cluster.list_nodes()}
     assert "node-b" in node_ids
@@ -530,7 +533,7 @@ async def test_handle_hello_replies_on_first_contact_so_discovery_is_bidirection
     await enabled_cluster.handle_hello(
         from_node_id="node-b",
         url="https://b.gfs.test",
-        public_key_hex="bb" * 32,
+        public_key_hex=_OWN,
     )
     assert [p for p in posted if p[1] == NODE_HELLO] == []
 
@@ -697,7 +700,7 @@ async def test_every_known_peer_send_names_its_recipient(enabled_cluster, monkey
     assert all(to for _, t, to in posted if t == NODE_POLICY_PUSH)
     posted.clear()
     await enabled_cluster.handle_hello(
-        from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_PIN
+        from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_OWN
     )
     assert posted == [("https://c.gfs.test", NODE_HELLO, "node-c")]
     posted.clear()
@@ -994,7 +997,7 @@ async def test_first_hello_with_an_invalid_url_stores_none_and_sends_nothing(
     enabled_cluster, hello_replies, bad
 ):
     await enabled_cluster.handle_hello(
-        from_node_id="node-c", url=bad, public_key_hex=_PIN
+        from_node_id="node-c", url=bad, public_key_hex=_OWN
     )
     assert (await _node_row(enabled_cluster, "node-c")).url == ""
     assert hello_replies == []
@@ -1002,7 +1005,156 @@ async def test_first_hello_with_an_invalid_url_stores_none_and_sends_nothing(
 
 async def test_first_hello_with_a_valid_url_records_it(enabled_cluster, hello_replies):
     await enabled_cluster.handle_hello(
-        from_node_id="node-c", url="https://c.gfs.test/", public_key_hex=_PIN
+        from_node_id="node-c", url="https://c.gfs.test/", public_key_hex=_OWN
     )
     assert (await _node_row(enabled_cluster, "node-c")).url == "https://c.gfs.test"
     assert hello_replies == ["https://c.gfs.test"]
+
+
+# ─── Admin removal vs. stale liveness writes ─────────────────────────
+#
+# A liveness refresh reads the roster, awaits I/O (a ping, a HELLO
+# verify), then writes. An admin removal that lands in between must stay
+# removed: a refresh never re-creates a row, and never puts back the key it
+# read before the removal.
+
+
+class _RemovesAfterRead:
+    """Repo wrapper: the first ``list_nodes`` returns its snapshot, then
+    the node is removed — an admin DELETE landing right after the read."""
+
+    def __init__(self, repo: SqliteClusterRepo, node_id: str) -> None:
+        self._repo = repo
+        self._node_id = node_id
+        self.armed = True
+
+    async def list_nodes(self) -> list[ClusterNode]:
+        rows = await self._repo.list_nodes()
+        if self.armed:
+            self.armed = False
+            await self._repo.remove_node(self._node_id)
+        return rows
+
+    def __getattr__(self, name: str):
+        return getattr(self._repo, name)
+
+
+async def _member_verdict(svc: ClusterService, node_id: str) -> FrameVerdict:
+    row = next((n for n in await svc.list_nodes() if n.node_id == node_id), None)
+    return authorize_frame(
+        msg_type=NODE_HEARTBEAT,
+        from_node=node_id,
+        carried_key="",
+        pinned=row,
+        own_key=svc.own_public_key_hex,
+    )
+
+
+@pytest.fixture
+def held_ping(monkeypatch):
+    """``_ping_peer`` blocks until the test releases it (a slow peer)."""
+
+    class _Held:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.result = True
+
+    held = _Held()
+
+    async def slow_ping(self, peer_url):
+        held.entered.set()
+        await held.release.wait()
+        return held.result
+
+    monkeypatch.setattr(ClusterService, "_ping_peer", slow_ping)
+    return held
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("ping_ok", [True, False])
+async def test_removal_during_a_held_heartbeat_ping_stays_removed(
+    enabled_cluster, hello_replies, held_ping, ping_ok
+):
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    held_ping.result = ping_ok
+    # A failing ping marks the peer offline on this tick.
+    svc._fail_counts["https://b.gfs.test"] = 2
+    tick = asyncio.create_task(svc._heartbeat_tick())
+    await held_ping.entered.wait()
+    await svc.remove_peer("node-b")
+    held_ping.release.set()
+    await tick
+    assert "node-b" not in {n.node_id for n in await svc.list_nodes()}
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(error="unknown_node")
+
+
+@pytest.mark.security
+async def test_removal_during_a_held_ping_of_an_offline_peer_stays_removed(
+    enabled_cluster, hello_replies, held_ping, gfs_db
+):
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    await gfs_db.enqueue(
+        "UPDATE cluster_nodes SET status='offline' WHERE node_id='node-b'"
+    )
+    tick = asyncio.create_task(svc._heartbeat_tick())
+    await held_ping.entered.wait()
+    await svc.remove_peer("node-b")
+    held_ping.release.set()
+    await tick
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(error="unknown_node")
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("re_add_before_release", [True, False])
+async def test_a_key_rotation_is_not_reverted_by_a_held_heartbeat(
+    enabled_cluster, hello_replies, held_ping, re_add_before_release
+):
+    """Remove, then re-add under a new key: the in-flight refresh must not
+    put the old key back (nor make the re-add a key mismatch)."""
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    tick = asyncio.create_task(svc._heartbeat_tick())
+    await held_ping.entered.wait()
+    await svc.remove_peer("node-b")
+    if re_add_before_release:
+        await svc.add_peer("node-b", "https://b.gfs.test", _OTHER)
+    held_ping.release.set()
+    await tick
+    if not re_add_before_release:
+        await svc.add_peer("node-b", "https://b.gfs.test", _OTHER)
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(verify_key=_OTHER)
+
+
+@pytest.mark.security
+async def test_removal_racing_a_hello_stays_removed(enabled_cluster, hello_replies):
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    svc._repo = _RemovesAfterRead(svc._repo, "node-b")
+    await svc.handle_hello(
+        from_node_id="node-b", url="https://b.gfs.test", public_key_hex=_PIN
+    )
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(error="unknown_node")
+
+
+@pytest.mark.security
+async def test_removal_racing_a_heartbeat_stays_removed(enabled_cluster, hello_replies):
+    svc = enabled_cluster
+    await svc.add_peer("node-b", "https://b.gfs.test", _PIN)
+    svc._repo = _RemovesAfterRead(svc._repo, "node-b")
+    await svc.handle_heartbeat("node-b", {"active_sync_sessions": 1})
+    assert await _member_verdict(svc, "node-b") == FrameVerdict(error="unknown_node")
+
+
+async def test_a_hello_from_an_approved_node_without_a_row_creates_nothing(
+    enabled_cluster, hello_replies
+):
+    """Only a HELLO under our OWN key may create a row; an approved node's
+    row is created by the admin alone."""
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_PIN
+    )
+    assert "node-c" not in {n.node_id for n in await enabled_cluster.list_nodes()}
+    assert hello_replies == []

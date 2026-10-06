@@ -1234,10 +1234,8 @@ async def test_upgrade_clears_every_pin_and_only_shared_seed_siblings_rejoin(
                 payload={"node_id": node_id, "url": "", "public_key": key},
             )
 
-        # The shared-seed sibling re-pins under our own key.
+        # The shared-seed sibling is still a member, under our own key.
         assert (await hello("sibling", own_seed, own_key)).status == 200
-        pins = {n.node_id: n.public_key for n in await repo.list_nodes()}
-        assert pins["sibling"] == own_key
         assert (
             await _sync(tc, from_node="sibling", seed=own_seed, ip=GENUINE_IP)
         ).status == 200
