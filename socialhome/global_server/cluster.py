@@ -59,7 +59,7 @@ HEARTBEAT_INTERVAL_S: int = 30
 HEARTBEAT_FAIL_THRESHOLD: int = 3
 SYNC_RETRY_DELAY_S: int = 5
 #: Spec §24.10.4 — ``/cluster/sync`` messages per minute per VERIFIED peer
-#: node (signature checked against the key pinned for that node). Never keyed
+#: node (signature checked against the key that node is trusted under). Never keyed
 #: on a claimed id: an unverified request must not spend a real node's budget.
 CLUSTER_RATE_LIMIT_PER_MIN: int = 60
 
@@ -200,7 +200,7 @@ class InvalidClusterPeer(ValueError):
 
 
 class ClusterPeerKeyMismatch(Exception):
-    """Admin add-peer named a node already pinned to a different key."""
+    """Admin add-peer named a node already approved under a different key."""
 
 
 def normalized_peer_url(url: object) -> str:
@@ -278,7 +278,7 @@ def authorize_frame(
     msg_type: str,
     from_node: str,
     carried_key: str,
-    pinned: ClusterNode | None,
+    row: ClusterNode | None,
     own_key: str,
 ) -> FrameVerdict:
     """Decide which key a ``/cluster/sync`` frame must verify under (§24.10).
@@ -288,36 +288,40 @@ def authorize_frame(
 
     * our OWN identity key — the shared seed; an operator who gave a node
       the seed approved it; or
-    * the key an operator pinned on the node's ``cluster_nodes`` row
-      (``POST /admin/api/cluster/peers``). Every pin that predates operator
-      approval was cleared at upgrade (GFS migration 0017).
+    * the key an operator approved for the node — ``approved_key`` on its
+      ``cluster_nodes`` *row*, written only by admin add-peer
+      (``POST /admin/api/cluster/peers``).
+
+    The row's ``public_key`` is never consulted: older builds, and
+    old-version nodes sharing the DB during a rolling upgrade, write it by
+    trust-on-first-use.
 
     ``NODE_HELLO`` names the key it is signed under (``carried_key``):
 
-    * the node's non-empty pin → member; any other key → ``key_mismatch``
-      (a pin never moves in-band, not even to our own key — rotation is
-      delete then re-add);
-    * no row, or an empty pin → member only under our own key, else
+    * the node's approved key → member; any other key → ``key_mismatch``
+      (an approval never moves in-band, not even to our own key — rotation
+      is delete then re-add);
+    * no row, or no approved key → member only under our own key, else
       ``unapproved_node`` (the caller writes nothing).
 
     Every other frame needs a row (``unknown_node`` otherwise) and verifies
-    under its pin, or under our own key when the row carries none (a
+    under its approved key, or under our own key when it has none (a
     shared-seed sibling).
     """
     own = own_key.lower()
+    approved = (row.approved_key if row is not None else "").lower()
     if msg_type == NODE_HELLO:
         carried = carried_key.lower()
-        pin = (pinned.public_key if pinned is not None else "").lower()
-        if pin:
-            if carried == pin:
-                return FrameVerdict(verify_key=pin)
+        if approved:
+            if carried == approved:
+                return FrameVerdict(verify_key=approved)
             return FrameVerdict(error="key_mismatch")
         if own and carried == own:
             return FrameVerdict(verify_key=own)
         return FrameVerdict(error="unapproved_node")
-    if pinned is None:
+    if row is None:
         return FrameVerdict(error="unknown_node")
-    key = pinned.public_key.lower() or own
+    key = approved or own
     if not key:
         return FrameVerdict(error="unknown_node")
     return FrameVerdict(verify_key=key)
@@ -537,7 +541,7 @@ class ClusterService:
     def charge_verified_sync(self, node_id: str) -> bool:
         """Spend one unit of a VERIFIED peer's budget; ``False`` → 429.
 
-        *node_id* must be the id whose pinned key just verified the
+        *node_id* must be the id whose trusted key just verified the
         request's signature — never a claimed one.
         """
         return self._sync_node_limiter.allow(node_id, now=self._clock())
@@ -710,11 +714,10 @@ class ClusterService:
                         )
                     ),
                     "is_self": is_self,
-                    "public_key": self._own_pk_hex if is_self else r.public_key,
-                    "key_source": (
-                        "own"
+                    **(
+                        {"public_key": self._own_pk_hex, "key_source": "own"}
                         if is_self
-                        else _key_source(r.public_key, self._own_pk_hex.lower())
+                        else _key_view(r, self._own_pk_hex.lower())
                     ),
                 }
             )
@@ -738,7 +741,7 @@ class ClusterService:
             )
         return {
             "node_id": self._node_id,
-            # Our own identity key — what an operator pins for this node on
+            # Our own identity key — what an operator approves for this node on
             # every other node (``POST /admin/api/cluster/peers``).
             "public_key": self._own_pk_hex,
             "status": self_status,
@@ -910,11 +913,11 @@ class ClusterService:
         url: object,
         public_key: object,
     ) -> ClusterNode:
-        """Operator approval of a peer node: pin its key, then HELLO it.
+        """Operator approval of a peer node: approve its key, then HELLO it.
 
-        The pinned key is the node's cluster membership — its frames verify
-        under it (:func:`authorize_frame`). A node already pinned to a
-        different key raises :class:`ClusterPeerKeyMismatch` (rotation is
+        The approved key is the node's cluster membership — its frames
+        verify under it (:func:`authorize_frame`). A node already approved
+        under a different key raises :class:`ClusterPeerKeyMismatch` (rotation is
         :meth:`remove_peer` then re-add); bad input raises
         :class:`InvalidClusterPeer`. Re-adding the same key only refreshes
         the URL.
@@ -926,13 +929,15 @@ class ClusterService:
             (n for n in await self._repo.list_nodes() if n.node_id == node_id),
             None,
         )
-        if existing is not None and existing.public_key:
-            if existing.public_key.lower() != key:
+        if existing is not None and existing.approved_key:
+            if existing.approved_key.lower() != key:
                 raise ClusterPeerKeyMismatch(node_id)
-            node = replace(existing, url=url)
-        else:
-            node = ClusterNode(node_id=node_id, url=url, public_key=key)
-        await self._repo.upsert_node(node)
+        await self._repo.approve_node(node_id, url, key)
+        node = (
+            replace(existing, url=url, public_key=key, approved_key=key)
+            if existing is not None
+            else ClusterNode(node_id=node_id, url=url, public_key=key, approved_key=key)
+        )
         try:
             await self._post_to_peer(
                 url,
@@ -1580,17 +1585,33 @@ class ClusterService:
 # ─── Wire shape helpers ──────────────────────────────────────────────────
 
 
-def _key_source(public_key: str, own_key_lower: str) -> str:
-    """How a peer row is trusted: ``own`` (our identity key — the shared
-    seed), ``pinned`` (another key, which only an admin can pin — every
-    older pin was cleared at upgrade, GFS migration 0017) or ``none`` (no
-    key yet; only our own key can verify its frames)."""
-    key = public_key.lower()
-    if not key:
-        return "none"
-    if own_key_lower and key == own_key_lower:
-        return "own"
-    return "pinned"
+def _key_view(row: ClusterNode, own_key_lower: str) -> dict:
+    """``{public_key, key_source}`` for a peer row in the admin view.
+
+    ``key_source`` says which key the row's frames verify under:
+
+    * ``approved`` — the key an admin approved (``approved_key``);
+    * ``own`` — our own identity key: the admin approved our key for it,
+      or it has no approval and its last HELLO verified under our key (a
+      shared-seed sibling);
+    * ``none`` — no approval and no sign of the shared seed: an older row
+      (TOFU or a distinct-key peer from before approvals). Its frames
+      verify only under our own key, so a peer with its own key must be
+      re-added.
+
+    ``public_key`` is the key shown: the approved key, ours for ``own``, or
+    ``""``. The legacy ``public_key`` column only tells ``own`` from
+    ``none`` for display — it can only hold our key if a HELLO verified
+    under it (or the operator approved it), and it never grants anything.
+    """
+    approved = row.approved_key.lower()
+    if approved:
+        if own_key_lower and approved == own_key_lower:
+            return {"public_key": approved, "key_source": "own"}
+        return {"public_key": approved, "key_source": "approved"}
+    if own_key_lower and row.public_key.lower() == own_key_lower:
+        return {"public_key": own_key_lower, "key_source": "own"}
+    return {"public_key": "", "key_source": "none"}
 
 
 def _frame_digest(raw: bytes) -> bytes:

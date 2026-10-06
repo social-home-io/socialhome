@@ -314,7 +314,7 @@ textarea { min-height: 110px; font-family: inherit; }
 .cluster-panel .fingerprint { white-space: nowrap; }
 .cluster-panel .key-source { font-size: 12px; margin-top: 2px; }
 .cluster-panel .key-source-own { color: var(--sh-success); }
-.cluster-panel .key-source-pinned { color: var(--sh-text); }
+.cluster-panel .key-source-approved { color: var(--sh-text); }
 .cluster-panel .key-source-none { color: color-mix(in srgb, var(--sh-warning) 75%, var(--sh-text)); }
 .cluster-panel .key-hint { font-size: 12px; }
 .cluster-panel .row-actions { white-space: nowrap; }

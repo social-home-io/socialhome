@@ -372,7 +372,7 @@ class AdminClusterPeerCollectionView(GfsBaseView):
     (http/https) and its hex Ed25519 identity key (64 hex chars) — shown
     as ``public_key`` on that node's own ``GET /admin/api/cluster``.
     422 ``{error}`` for bad input, 409 ``key_mismatch`` when the node is
-    already pinned to a different key, 201 on success.
+    already approved under a different key, 201 on success.
     """
 
     async def post(self) -> web.Response:

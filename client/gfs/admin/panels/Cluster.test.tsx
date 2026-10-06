@@ -31,7 +31,7 @@ const clusterBody = {
       node_id: 'node-c', url: 'https://c.gfs.test', status: 'online',
       last_seen: null, connected_clients: 2,
       active_sync_sessions: 0, is_self: false,
-      public_key: PINNED_KEY, key_source: 'pinned',
+      public_key: PINNED_KEY, key_source: 'approved',
     },
     {
       node_id: 'node-d', url: 'https://d.gfs.test', status: 'unknown',
@@ -194,10 +194,12 @@ describe('ClusterPanel — peer list', () => {
     await findByText('node-b')
     expect(rowFor(container, 'node-b').textContent).toContain("shares this server's key")
     expect(rowFor(container, 'node-c').textContent).toContain('approved key')
-    expect(rowFor(container, 'node-d').textContent).toContain('no key yet')
+    expect(rowFor(container, 'node-d').textContent).toContain('not approved')
+    expect(rowFor(container, 'node-d').querySelector('.key-source-none')).not.toBeNull()
+    expect(rowFor(container, 'node-c').querySelector('.key-source-approved')).not.toBeNull()
   })
 
-  it('tells the operator to re-add a peer that has no key yet, not a pinned one', async () => {
+  it('tells the operator to re-add a peer that is not approved, not an approved one', async () => {
     stubApi()
     const { container, findByText } = render(<ClusterPanel />)
     await findByText('node-b')

@@ -703,15 +703,18 @@ that gossip state over `POST /cluster/sync`. Membership is operator-approved,
 never trust-on-first-use: a node is a member **if and only if** its frames
 verify under a key the receiving node already holds. That is either the
 GFS's own identity key (`gfs_identity.seed`: an operator who gave a node the
-seed approved it) or a key an operator pinned on the node's `cluster_nodes`
-row through `POST /admin/api/cluster/peers` (`node_id` + `url` +
-`public_key`). The decision is one pure function,
+seed approved it) or the key an operator approved for the node through
+`POST /admin/api/cluster/peers` (`node_id` + `url` + `public_key`), stored in
+`cluster_nodes.approved_key` — a column only that admin call writes. The
+row's legacy `public_key` column is never a trust anchor: older builds wrote
+it by trust-on-first-use, and an old-version node still sharing `gfs.db`
+during a rolling upgrade keeps doing so, harmlessly. The decision is one pure function,
 `global_server/cluster.py:authorize_frame`, taken before any signature work:
 a `NODE_HELLO` under a key the node does not hold is refused
 (`unapproved_node`) and writes nothing; a HELLO for a known node under a
-different key is refused (`key_mismatch`, WARNING) — a pin never moves
-in-band, and the repo's upsert keeps a non-empty pin in SQL as well, so
-rotation is delete then re-add. Liveness refreshes (a HELLO, a heartbeat, the heartbeat loop's ping) are UPDATE-only (`touch_node`), so an admin removal that lands while a ping or a verify is in flight stays removed and a re-added key is never reverted; only add-peer and a first HELLO under our own key create a row. A row's URL does not move in-band either: a
+different key is refused (`key_mismatch`, WARNING) — an approval never moves
+in-band, and the repo's `approve_node` keeps a non-empty `approved_key` in SQL
+as well, so rotation is delete then re-add. Liveness refreshes (a HELLO, a heartbeat, the heartbeat loop's ping) are UPDATE-only (`touch_node`), so an admin removal that lands while a ping or a verify is in flight stays removed and a re-added key is never reverted; only add-peer and a first HELLO under our own key create a row. A row's URL does not move in-band either: a
 HELLO fills it only while it is empty (and only with a valid base URL), so a
 member cannot point our heartbeats and fan-out at another address. Each frame signs `{type, from, to, ts, nonce,
 sig_suite, payload}`: the sender id is the signed `from` only, `to` names the
@@ -728,14 +731,16 @@ address, never to the node it names. An address that spent its budget is
 shed, but not blindly: its frames still take the cheap checks, and one that
 names an approved node is verified — accepted if it verifies, so junk from a
 member's own address cannot lock the member out; a failed verify spends a
-small per-node failed-verify budget, so forgery CPU stays bounded. **Upgrade (breaking):** every pin
-written before this rule came from first-contact TOFU or from a pre-#677 key
-derived from the public instance id, so GFS migration
-`0017_cluster_pin_reset.sql` clears them all once. A shared-seed sibling's
-frames verify under our own key meanwhile and its next HELLO re-pins it; a
-peer with its own distinct key must be re-added by an operator. Afterwards
-`key_source` in the admin cluster view is `own` (our key), `pinned` (only
-ever admin-added) or `none` (no pin yet). **Residual risks:** an attacker who can send from a member's own
+small per-node failed-verify budget, so forgery CPU stays bounded. **Upgrade (breaking):** every key
+stored before this rule came from first-contact TOFU or from a pre-#677 key
+derived from the public instance id, and the old add-peer never stored one,
+so GFS migration `0017_cluster_approved_key.sql` adds `approved_key` empty
+for every row (an additive `ADD COLUMN`; nothing is cleared, because
+`public_key` is no longer trusted). A shared-seed sibling stays a member
+through our own key; a peer with its own distinct key must be re-added by an
+operator. `key_source` in the admin cluster view is `approved` (an
+admin-approved key), `own` (our key: approved, or a shared-seed sibling's
+HELLO) or `none` (neither — re-add it if it has its own key). **Residual risks:** an attacker who can send from a member's own
 address and forge more than 30 frames a minute naming it delays that member
 (keep `trusted_proxies` to the real proxy); a frame without `to` (older
 sender, or a HELLO to a configured URL not yet known) can be replayed once to

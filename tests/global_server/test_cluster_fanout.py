@@ -272,7 +272,7 @@ async def test_post_to_peer_raises_on_non_2xx(
         # iterates through it.
         from socialhome.global_server.domain import ClusterNode
 
-        await a.app[gfs_cluster_repo_key].upsert_node(
+        await a.app[gfs_cluster_repo_key].insert_node(
             ClusterNode(
                 node_id="ghost",
                 url="http://127.0.0.1:1",
@@ -333,7 +333,7 @@ async def test_heartbeat_loop_tracks_peer_liveness(
         await _approve(a, b, "B")
         await _approve(b, a, "A")
         repo_a = a.app[gfs_cluster_repo_key]
-        await repo_a.upsert_node(
+        await repo_a.insert_node(
             ClusterNode(
                 node_id="ghost",
                 url="http://127.0.0.1:1",
@@ -358,7 +358,7 @@ async def test_heartbeat_loop_tracks_peer_liveness(
         # A reachable peer recorded offline is probed and comes back. Its own
         # row id ("B-alias") is one B never heartbeats as, so only the probe
         # can flip it back.
-        await repo_a.upsert_node(
+        await repo_a.insert_node(
             ClusterNode(
                 node_id="B-alias",
                 url=url_b,
@@ -593,7 +593,7 @@ async def test_handle_heartbeat_updates_last_seen(started_app):
     svc: ClusterService = started_app[gfs_cluster_key]
     from socialhome.global_server.domain import ClusterNode
 
-    await started_app[gfs_cluster_repo_key].upsert_node(
+    await started_app[gfs_cluster_repo_key].insert_node(
         ClusterNode(
             node_id="peer",
             url="http://peer",

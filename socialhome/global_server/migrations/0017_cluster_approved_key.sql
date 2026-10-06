@@ -1,0 +1,49 @@
+-- 0017 — cluster_nodes.approved_key: the operator-approved trust anchor.
+--
+-- Cluster membership is operator-approved: a node is a member only if its
+-- frames verify under this GFS's own identity key (the shared seed) or under
+-- the key an admin approved for it (``POST /admin/api/cluster/peers``). That
+-- approval lives in this new column, which ONLY admin add-peer writes; admin
+-- remove deletes the row.
+--
+-- Why a new column and not ``public_key``: in production several GFS
+-- processes share one ``gfs.db``. During a rolling upgrade, nodes still on
+-- the previous release keep serving ``/cluster/sync`` against the migrated
+-- DB, and they write ``public_key`` on a first-contact HELLO (TOFU) or
+-- overwrite it on any later one. Old code never names ``approved_key``, so
+-- nothing it writes — an UPDATE of ``public_key`` or an INSERT of a TOFU
+-- row (which takes the '' default) — can grant membership. ``public_key``
+-- stays for display and for old-version readers only; it is no longer a
+-- trust anchor.
+--
+-- Every existing row starts with ``approved_key = ''``: the old add-peer
+-- never stored a key, so no pre-existing key was ever admin-approved. A
+-- shared-seed sibling stays a member through our own key; a peer with its own
+-- distinct key must be re-added by the operator (breaking for operators).
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every path that touches ``cluster_nodes``:
+--       ``SqliteClusterRepo.approve_node`` (admin add-peer — the only writer
+--       of ``approved_key``), ``insert_node`` (first HELLO under our own key;
+--       leaves it ''), ``touch_node`` (liveness, UPDATE-only, never a key),
+--       ``remove_node`` (admin remove), ``update_active_sync_sessions``,
+--       ``list_nodes`` → ``authorize_frame`` (trusts ``approved_key`` or our
+--       own key, never ``public_key``) and ``admin_cluster`` (``key_source``).
+--       The previous release's repo writes ``node_id, url, public_key,
+--       status, last_seen`` with ``ON CONFLICT DO UPDATE`` of those columns
+--       only — it never touches ``approved_key``. No other table or
+--       federation event carries a cluster key.
+--   (2) Non-migration alternatives rejected: keeping the trust in
+--       ``public_key`` (and clearing it once at upgrade, this branch's first
+--       design) is undone by any old-version node still sharing the DB — it
+--       re-fills or overwrites ``public_key`` by TOFU right after the clear.
+--       A config-file allow-list would split the roster between the DB and
+--       every node's TOML. Nothing old code writes can be made untrusted
+--       except a column old code does not know.
+--   (3) Smallest change: one additive ``ADD COLUMN`` with a constant default
+--       (no table rewrite, no backfill, no row changed); the old
+--       "clear every pin" UPDATE is not needed, because ``public_key`` is
+--       no longer trusted.
+
+ALTER TABLE cluster_nodes ADD COLUMN approved_key TEXT NOT NULL DEFAULT '';

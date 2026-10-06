@@ -378,10 +378,10 @@ turn_secret = ""
 # key this node already holds:
 #   * the shared seed: nodes started with the same identity seed
 #     (gfs_identity.seed / [server] signing_seed_hex) trust each other; or
-#   * an admin-pinned key: POST /admin/api/cluster/peers with the other
+#   * an admin-approved key: POST /admin/api/cluster/peers with the other
 #     node's node_id, url and public_key (its own GET /admin/api/cluster
 #     shows it). Do this on BOTH nodes.
-# Anything else is refused; there is no trust-on-first-use. A pinned key
+# Anything else is refused; there is no trust-on-first-use. An approved key
 # never changes in place — to rotate, remove the peer and add it again.
 # Frames carry a timestamp that must be within 300 s of the receiver's
 # clock: keep every node on NTP, or they stop syncing with each other.

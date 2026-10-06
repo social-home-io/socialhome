@@ -1252,53 +1252,50 @@ async def test_channel_repo_pin_epoch_writer_key_and_idle_sweep(gfs_db):
     assert await repo.get(cid) is None
 
 
-# ── Cluster node pin ──────────────────────────────────────────────────
+# ── Cluster node approval ─────────────────────────────────────────────
 
 
 @pytest.mark.security
-async def test_cluster_upsert_never_moves_a_pinned_key(gfs_db):
-    """A pinned cluster key is immutable: no upsert (a HELLO, a heartbeat
-    refresh, an admin re-add) can swap it. Rotation is delete then re-add."""
+async def test_cluster_approve_never_moves_an_approved_key(gfs_db):
+    """An approved cluster key is immutable in SQL too: a second approval
+    under another key keeps the first. Rotation is delete then re-add."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
-        ClusterNode(node_id="b", url="http://b", public_key="aa" * 32, status="online")
-    )
-    await repo.upsert_node(
-        ClusterNode(
-            node_id="b", url="http://b2", public_key="bb" * 32, status="offline"
-        )
-    )
-    await repo.upsert_node(
-        ClusterNode(node_id="b", url="http://b3", public_key="", status="online")
-    )
+    await repo.approve_node("b", "http://b", "aa" * 32)
+    await repo.approve_node("b", "http://b2", "bb" * 32)
     (row,) = await repo.list_nodes()
-    assert row.public_key == "aa" * 32
-    # The rest of the row still refreshes.
-    assert row.url == "http://b3"
-    assert row.status == "online"
+    assert (row.approved_key, row.public_key) == ("aa" * 32, "aa" * 32)
+    # The URL still refreshes.
+    assert row.url == "http://b2"
 
 
-async def test_cluster_upsert_fills_an_empty_pin(gfs_db):
+async def test_cluster_approve_fills_a_row_without_approval(gfs_db):
+    """A shared-seed or pre-upgrade row (no approval, any legacy
+    ``public_key``) takes the admin's key — in both columns, so an
+    old-version node sharing the DB honours it too."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(ClusterNode(node_id="b", url="http://b"))
-    await repo.upsert_node(
-        ClusterNode(node_id="b", url="http://b", public_key="cc" * 32)
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://b", public_key="ee" * 32)
     )
+    await repo.approve_node("b", "http://b", "cc" * 32)
     (row,) = await repo.list_nodes()
-    assert row.public_key == "cc" * 32
+    assert (row.approved_key, row.public_key) == ("cc" * 32, "cc" * 32)
 
 
-async def test_cluster_remove_then_re_add_rotates_the_pin(gfs_db):
+async def test_cluster_insert_never_approves(gfs_db):
     repo = SqliteClusterRepo(gfs_db)
-    await repo.upsert_node(
+    await repo.insert_node(
         ClusterNode(node_id="b", url="http://b", public_key="aa" * 32)
     )
+    assert (await repo.list_nodes())[0].approved_key == ""
+
+
+async def test_cluster_remove_then_re_approve_rotates_the_key(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.approve_node("b", "http://b", "aa" * 32)
     await repo.remove_node("b")
-    await repo.upsert_node(
-        ClusterNode(node_id="b", url="http://b", public_key="dd" * 32)
-    )
+    await repo.approve_node("b", "http://b", "dd" * 32)
     (row,) = await repo.list_nodes()
-    assert row.public_key == "dd" * 32
+    assert row.approved_key == "dd" * 32
 
 
 async def test_cluster_touch_node_updates_only_an_existing_row(gfs_db):

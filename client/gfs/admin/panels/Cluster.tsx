@@ -8,7 +8,7 @@ import { normaliseTimestamp } from '@/utils/relativeTime'
    peer's operator), takes a key on add, and marks each row with where its
    key came from. Rotating a key = remove, then add again. */
 
-type KeySource = 'own' | 'pinned' | 'none'
+type KeySource = 'own' | 'approved' | 'none'
 
 interface ClusterNode {
   node_id: string
@@ -103,8 +103,8 @@ function validate(nodeId: string, url: string, key: string): FieldErrors {
 
 const KEY_SOURCE_LABEL: Record<KeySource, string> = {
   own: "shares this server's key",
-  pinned: 'approved key',
-  none: 'no key yet',
+  approved: 'approved key',
+  none: 'not approved',
 }
 
 function KeyCell({ node }: { node: ClusterNode }) {

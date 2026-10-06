@@ -226,7 +226,7 @@ async def test_node_hello_with_a_different_key_is_a_mismatch(client, caplog):
     assert resp.status == 403
     assert (await resp.json())["error"] == "key_mismatch"
     (row,) = await client._app[gfs_cluster_repo_key].list_nodes()
-    assert row.public_key == pinned_hex
+    assert row.approved_key == pinned_hex
     assert row.url == f"http://{PEER}.test"
     assert any(
         r.levelname == "WARNING" and "key_mismatch" in r.getMessage()
@@ -563,14 +563,18 @@ async def test_admin_cluster_add_peer_never_moves_a_pin(client):
     assert resp.status == 409
     assert (await resp.json())["error"] == "key_mismatch"
     (row,) = await client._app[gfs_cluster_repo_key].list_nodes()
-    assert row.public_key == pinned
+    assert row.approved_key == pinned
     resp = await client.post(
         "/admin/api/cluster/peers",
         json={"node_id": PEER, "url": "http://b2.test", "public_key": pinned},
     )
     assert resp.status == 201
     (row,) = await client._app[gfs_cluster_repo_key].list_nodes()
-    assert (row.url, row.public_key, row.status) == ("http://b2.test", pinned, "online")
+    assert (row.url, row.approved_key, row.status) == (
+        "http://b2.test",
+        pinned,
+        "online",
+    )
 
 
 async def test_admin_added_peer_is_answered_on_its_first_hello(client, outbound_hellos):
@@ -651,14 +655,9 @@ ATTACKER_IP = "203.0.113.9"
 async def _register_peer(client, node_id: str = PEER) -> bytes:
     """Seed a known cluster peer directly — no HELLO, no first-contact reply."""
     seed, pub_hex = _keypair()
-    await client._app[gfs_cluster_repo_key].upsert_node(
-        ClusterNode(
-            node_id=node_id,
-            url=f"http://{node_id}.test",
-            public_key=pub_hex,
-            status="online",
-        )
-    )
+    repo = client._app[gfs_cluster_repo_key]
+    await repo.approve_node(node_id, f"http://{node_id}.test", pub_hex)
+    await repo.touch_node(node_id, status="online", last_seen=None)
     return seed
 
 
@@ -1198,13 +1197,14 @@ def _pre_upgrade_gfs(tmp_dir, own_seed: bytes, rows: list[tuple[str, str]]) -> N
 
 
 @pytest.mark.security
-async def test_upgrade_clears_every_pin_and_only_shared_seed_siblings_rejoin(
+async def test_upgrade_trusts_no_pre_existing_key_and_shared_seed_siblings_stay(
     tmp_dir, outbound_hellos
 ):
-    """Pins from before operator approval may be TOFU intruders or legacy
-    DERIVED keys anyone can compute. The upgrade clears them all: a
-    shared-seed sibling re-pins on its next HELLO, while a distinct-key peer
-    — and a forger holding a derived key — must be re-added by an admin."""
+    """Keys stored before operator approval may be TOFU intruders or legacy
+    DERIVED keys anyone can compute. The upgrade adds ``approved_key`` empty
+    for every row and keeps ``public_key`` untrusted: a shared-seed sibling
+    stays a member through our own key, while a distinct-key peer — and a
+    forger holding a derived key — must be re-added by an admin."""
     own_seed = secrets.token_bytes(32)
     own_key = ed25519_public_key(own_seed).hex()
     foreign_seed, foreign_key = _keypair()
@@ -1218,10 +1218,11 @@ async def test_upgrade_clears_every_pin_and_only_shared_seed_siblings_rejoin(
     app = create_gfs_app(_config(tmp_dir))
     async with TestClient(TestServer(app)) as tc:
         repo = app[gfs_cluster_repo_key]
-        assert {n.node_id: n.public_key for n in await repo.list_nodes()} == {
-            "sibling": "",
-            "old-peer": "",
-            "legacy-node": "",
+        rows = {n.node_id: n for n in await repo.list_nodes()}
+        assert {k: (r.public_key, r.approved_key) for k, r in rows.items()} == {
+            "sibling": (own_key, ""),
+            "old-peer": (foreign_key, ""),
+            "legacy-node": (derived_key, ""),
         }
 
         async def hello(node_id: str, seed: bytes, key: str):
@@ -1253,21 +1254,26 @@ async def test_upgrade_clears_every_pin_and_only_shared_seed_siblings_rejoin(
             tc, from_node="legacy-node", seed=derived_seed, ip=GENUINE_IP
         )
         assert (resp.status, await resp.json()) == (401, {"error": "invalid_signature"})
-        pins = {n.node_id: n.public_key for n in await repo.list_nodes()}
-        assert pins["old-peer"] == pins["legacy-node"] == ""
+
+        # The admin view: the sibling shares our key; the others need re-adding.
+        view = await app[gfs_cluster_key].admin_cluster()
+        assert {
+            n["node_id"]: n["key_source"] for n in view["nodes"] if not n["is_self"]
+        } == {"sibling": "own", "old-peer": "none", "legacy-node": "none"}
 
 
 @pytest.mark.security
 async def test_a_foreign_peer_rejoins_once_an_admin_re_adds_it(client, outbound_hellos):
-    """After the upgrade a distinct-key peer's row has no pin; the operator
-    re-adds it with its key, and from then on it syncs under that pin."""
+    """After the upgrade a distinct-key peer's row has no approved key (its
+    legacy TOFU key is kept but untrusted); the operator re-adds it with its
+    key, and from then on it syncs under that key."""
     seed, pub_hex = _keypair()
     repo = client._app[gfs_cluster_repo_key]
-    await repo.upsert_node(
+    await repo.insert_node(
         ClusterNode(
             node_id="old-peer",
             url="http://old-peer.test",
-            public_key="",
+            public_key=pub_hex,
             status="online",
             last_seen="2026-01-01 00:00:00",
         )
@@ -1287,7 +1293,7 @@ async def test_a_foreign_peer_rejoins_once_an_admin_re_adds_it(client, outbound_
     assert resp.status == 200
     body = await (await client.get("/admin/api/cluster")).json()
     (row,) = [n for n in body["nodes"] if n["node_id"] == "old-peer"]
-    assert row["key_source"] == "pinned"
+    assert (row["key_source"], row["public_key"]) == ("approved", pub_hex)
 
 
 # ─── Recipient binding (signed ``to``) ────────────────────────────────

@@ -11,14 +11,16 @@ The rule these tests pin, end to end over a real GFS server with real
 
 * a node is a member if and only if its frames verify under a key the
   receiving GFS already holds — its own identity key (the shared seed the
-  operator gave the node) or a key an operator pinned through
+  operator gave the node) or a key an operator approved through
   ``POST /admin/api/cluster/peers``;
 * an unknown HELLO is refused and writes nothing;
-* a pinned key is never overwritten in-band;
+* an approved key is never overwritten in-band;
 * a replayed or stale frame is refused;
-* every pin from before the upgrade is cleared (GFS migration 0017): a
-  shared-seed sibling re-pins on its next HELLO, a distinct-key peer must be
-  re-added by an operator;
+* membership trusts only ``approved_key`` (written by admin add-peer
+  alone, GFS migration 0017) or our own key — never the legacy
+  ``public_key`` column, which an old-version node sharing the DB during a
+  rolling upgrade keeps writing by TOFU: a shared-seed sibling stays a
+  member, a distinct-key peer must be re-added by an operator;
 * an approved peer still on the old frame shape keeps syncing.
 """
 
@@ -26,8 +28,10 @@ from __future__ import annotations
 
 import json
 import secrets
+import sqlite3
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -64,8 +68,22 @@ class _Roster:
     def __init__(self) -> None:
         self.rows: dict[str, ClusterNode] = {}
 
-    async def upsert_node(self, node: ClusterNode) -> None:
-        self.rows[node.node_id] = node
+    async def approve_node(self, node_id: str, url: str, approved_key: str) -> None:
+        self.rows[node_id] = ClusterNode(
+            node_id=node_id, url=url, public_key=approved_key, approved_key=approved_key
+        )
+
+    async def insert_node(self, node: ClusterNode) -> None:
+        self.rows.setdefault(node.node_id, node)
+
+    async def touch_node(
+        self, node_id: str, *, status: str, last_seen: str | None, url_if_empty=""
+    ) -> None:
+        row = self.rows.get(node_id)
+        if row is not None:
+            self.rows[node_id] = replace(
+                row, status=status, last_seen=last_seen, url=row.url or url_if_empty
+            )
 
     async def list_nodes(self) -> list[ClusterNode]:
         return list(self.rows.values())
@@ -202,17 +220,19 @@ async def test_unknown_hello_is_refused_and_writes_nothing(gfs):
 
 
 async def test_after_upgrade_only_the_shared_seed_sibling_rejoins(gfs):
-    """Migration 0017 left every row without a pin. The shared-seed sibling
-    re-pins under our own key on its next HELLO; a peer whose distinct key
-    was pinned by TOFU before the upgrade is refused until re-added."""
+    """Migration 0017 left every row without an approved key, and kept the
+    legacy ``public_key`` — a TOFU pin included. The shared-seed sibling is
+    a member through our own key; the peer whose key was TOFU-pinned is
+    refused until an operator re-adds it."""
     foreign_seed = secrets.token_bytes(32)
+    foreign_key = ed25519_public_key(foreign_seed).hex()
     repo = gfs.app[gfs_cluster_repo_key]
-    for node_id in ("node-b", "old-peer"):
-        await repo.upsert_node(
+    for node_id, legacy_key in (("node-b", ""), ("old-peer", foreign_key)):
+        await repo.insert_node(
             ClusterNode(
                 node_id=node_id,
                 url=_UNREACHABLE,
-                public_key="",
+                public_key=legacy_key,
                 status="online",
                 last_seen="2026-01-01 00:00:00",
             )
@@ -220,7 +240,6 @@ async def test_after_upgrade_only_the_shared_seed_sibling_rejoins(gfs):
     sibling = _sender("node-b", _own_seed(gfs))
     await sibling.add_peer("node-a", _url(gfs), _own_key(gfs))
     assert (await _roster(gfs))["node-b"].last_seen != "2026-01-01 00:00:00"
-    foreign_key = ed25519_public_key(foreign_seed).hex()
     status, body = await _post(
         gfs,
         *_frame(
@@ -231,7 +250,11 @@ async def test_after_upgrade_only_the_shared_seed_sibling_rejoins(gfs):
         ),
     )
     assert (status, body) == (403, {"error": "unapproved_node"})
-    assert (await _roster(gfs))["old-peer"].public_key == ""
+    assert await _post(
+        gfs,
+        *_frame(foreign_seed, type_=NODE_HEARTBEAT, from_node="old-peer", payload={}),
+    ) == (401, {"error": "invalid_signature"})
+    assert (await _roster(gfs))["old-peer"].approved_key == ""
 
 
 async def test_shared_seed_node_joins(gfs):
@@ -239,14 +262,15 @@ async def test_shared_seed_node_joins(gfs):
     sibling = _sender("node-b", _own_seed(gfs))
     await sibling.add_peer("node-a", _url(gfs), _own_key(gfs))
     row = (await _roster(gfs))["node-b"]
-    assert row.public_key == _own_key(gfs)
+    # Joined through our own key: nothing was approved for it.
+    assert (row.public_key, row.approved_key) == (_own_key(gfs), "")
     assert row.status == "online"
     # Its sync frames are accepted (``_post_to_peer`` raises on non-2xx).
     await sibling._post_to_peer(_url(gfs), NODE_HEARTBEAT, {"connected_clients": 2})
 
 
-async def test_admin_pinned_node_with_its_own_key_joins(gfs):
-    """A node with a distinct key joins once an operator pins that key."""
+async def test_admin_approved_node_with_its_own_key_joins(gfs):
+    """A node with a distinct key joins once an operator approves that key."""
     seed = secrets.token_bytes(32)
     key = ed25519_public_key(seed).hex()
     node_c = _sender("node-c", seed)
@@ -256,12 +280,12 @@ async def test_admin_pinned_node_with_its_own_key_joins(gfs):
     assert status == 201
     await node_c.add_peer("node-a", _url(gfs), _own_key(gfs))
     row = (await _roster(gfs))["node-c"]
-    assert (row.public_key, row.status) == (key, "online")
+    assert (row.approved_key, row.status) == (key, "online")
     assert row.last_seen is not None
     await node_c._post_to_peer(_url(gfs), NODE_HEARTBEAT, {})
 
 
-async def test_a_pinned_key_cannot_be_overwritten(gfs):
+async def test_an_approved_key_cannot_be_overwritten(gfs):
     seed = secrets.token_bytes(32)
     key = ed25519_public_key(seed).hex()
     await _admin_add_peer(
@@ -290,7 +314,7 @@ async def test_a_pinned_key_cannot_be_overwritten(gfs):
     )
     assert (status, body) == (409, {"error": "key_mismatch"})
     row = (await _roster(gfs))["node-c"]
-    assert (row.public_key, row.url) == (key, _UNREACHABLE)
+    assert (row.approved_key, row.url) == (key, _UNREACHABLE)
 
 
 async def test_a_replayed_frame_is_refused(gfs):
@@ -366,7 +390,7 @@ _SMALL_ORDER_KEYS = [
 
 
 @pytest.mark.parametrize("key", _SMALL_ORDER_KEYS)
-async def test_admin_cannot_pin_a_small_order_key(gfs, key):
+async def test_admin_cannot_approve_a_small_order_key(gfs, key):
     status, body = await _admin_add_peer(
         gfs, {"node_id": "node-x", "url": _UNREACHABLE, "public_key": key}
     )
@@ -374,16 +398,12 @@ async def test_admin_cannot_pin_a_small_order_key(gfs, key):
     assert await _roster(gfs) == {}
 
 
-async def test_a_forged_frame_under_a_small_order_pin_is_refused(gfs):
-    """Even a small-order pin already on disk (a pre-upgrade TOFU row)
-    verifies nothing: the forged policy push is refused, nothing applied."""
-    await gfs.app[gfs_cluster_repo_key].upsert_node(
-        ClusterNode(
-            node_id="forger",
-            url=_UNREACHABLE,
-            public_key=_IDENTITY_KEY.hex(),
-            status="online",
-        )
+async def test_a_forged_frame_under_a_small_order_key_is_refused(gfs):
+    """Even a small-order approved key already on disk (written past the
+    admin API's check) verifies nothing: the forged policy push is refused,
+    nothing applied."""
+    await gfs.app[gfs_cluster_repo_key].approve_node(
+        "forger", _UNREACHABLE, _IDENTITY_KEY.hex()
     )
     admin_repo = gfs.app[gfs_admin_repo_key]
     before = await admin_repo.get_config("fraud_threshold")
@@ -401,3 +421,64 @@ async def test_a_forged_frame_under_a_small_order_pin_is_refused(gfs):
     ).encode()
     assert await _post(gfs, raw, _FORGED_SIG) == (401, {"error": "invalid_signature"})
     assert await admin_repo.get_config("fraud_threshold") == before
+
+
+# ─── Rolling upgrade on a shared DB: old-version writes grant nothing ─────
+
+
+def _old_version_write(tmp_dir: Path, sql: str, params: tuple = ()) -> None:
+    """A write exactly as a not-yet-upgraded node sharing ``gfs.db`` makes
+    it: plain SQL naming only the columns that build knows."""
+    conn = sqlite3.connect(tmp_dir / "gfs.db", isolation_level=None, timeout=5)
+    try:
+        conn.execute(sql, params)
+    finally:
+        conn.close()
+
+
+async def test_an_old_version_overwriting_public_key_grants_nothing(gfs, tmp_dir):
+    """An old node TOFU-overwrites an approved row's ``public_key`` with an
+    attacker's key: the attacker is still no member, the real node still
+    is."""
+    seed = secrets.token_bytes(32)
+    key = ed25519_public_key(seed).hex()
+    status, _ = await _admin_add_peer(
+        gfs, {"node_id": "node-c", "url": _UNREACHABLE, "public_key": key}
+    )
+    assert status == 201
+    attacker = secrets.token_bytes(32)
+    attacker_key = ed25519_public_key(attacker).hex()
+    _old_version_write(
+        tmp_dir,
+        "UPDATE cluster_nodes SET public_key=? WHERE node_id='node-c'",
+        (attacker_key,),
+    )
+    hello = {"node_id": "node-c", "url": "", "public_key": attacker_key}
+    assert await _post(
+        gfs, *_frame(attacker, type_=NODE_HELLO, from_node="node-c", payload=hello)
+    ) == (403, {"error": "key_mismatch"})
+    assert await _post(
+        gfs, *_frame(attacker, type_=NODE_HEARTBEAT, from_node="node-c", payload={})
+    ) == (401, {"error": "invalid_signature"})
+    assert await _post(
+        gfs, *_frame(seed, type_=NODE_HEARTBEAT, from_node="node-c", payload={})
+    ) == (200, {"status": "ok"})
+
+
+async def test_an_old_version_tofu_row_grants_nothing(gfs, tmp_dir):
+    """An old node INSERTs a TOFU row for an attacker's HELLO."""
+    attacker = secrets.token_bytes(32)
+    attacker_key = ed25519_public_key(attacker).hex()
+    _old_version_write(
+        tmp_dir,
+        "INSERT INTO cluster_nodes(node_id, url, public_key, status, last_seen)"
+        " VALUES('tofu', ?, ?, 'online', datetime('now'))",
+        (_UNREACHABLE, attacker_key),
+    )
+    hello = {"node_id": "tofu", "url": "", "public_key": attacker_key}
+    assert await _post(
+        gfs, *_frame(attacker, type_=NODE_HELLO, from_node="tofu", payload=hello)
+    ) == (403, {"error": "unapproved_node"})
+    assert await _post(
+        gfs, *_frame(attacker, type_=NODE_HEARTBEAT, from_node="tofu", payload={})
+    ) == (401, {"error": "invalid_signature"})

@@ -1159,7 +1159,7 @@ class SqliteGfsAdminRepo:
 
 @runtime_checkable
 class AbstractClusterRepo(Protocol):
-    async def upsert_node(self, node: ClusterNode) -> None: ...
+    async def approve_node(self, node_id: str, url: str, approved_key: str) -> None: ...
     async def list_nodes(self) -> list[ClusterNode]: ...
     async def insert_node(self, node: ClusterNode) -> None: ...
     async def touch_node(
@@ -1186,29 +1186,34 @@ class SqliteClusterRepo:
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
 
-    async def upsert_node(self, node: ClusterNode) -> None:
-        """Insert or refresh a node row; a pinned ``public_key`` never moves.
+    async def approve_node(self, node_id: str, url: str, approved_key: str) -> None:
+        """Admin add-peer: create or update the row with its approved key.
 
-        The key is the node's cluster-membership credential (spec §24.10):
-        once set, no upsert — a HELLO, a heartbeat refresh, an admin re-add —
-        can swap it. An empty pin may be filled. Rotation is
-        :meth:`remove_node` then a fresh insert.
+        The ONLY writer of ``approved_key`` — the node's cluster-membership
+        credential (spec §24.10). Once set it never moves: a re-add under
+        the same key only refreshes the URL, and rotation is
+        :meth:`remove_node` then a fresh approval. ``public_key`` is set to
+        the approved key as well, so a node still on the previous release
+        and sharing this DB (which trusts ``public_key``) honours the
+        approval during a rolling upgrade.
         """
         await self._db.enqueue(
             """
-            INSERT INTO cluster_nodes(
-                node_id, url, public_key, status, last_seen
-            ) VALUES(?, ?, ?, ?, ?)
+            INSERT INTO cluster_nodes(node_id, url, public_key, approved_key)
+            VALUES(?, ?, ?, ?)
             ON CONFLICT(node_id) DO UPDATE SET
                 url=excluded.url,
-                public_key=COALESCE(
-                    NULLIF(cluster_nodes.public_key, ''),
-                    excluded.public_key
-                ),
-                status=excluded.status,
-                last_seen=excluded.last_seen
+                public_key=CASE
+                    WHEN cluster_nodes.approved_key IN ('', excluded.approved_key)
+                    THEN excluded.public_key
+                    ELSE cluster_nodes.public_key
+                END,
+                approved_key=COALESCE(
+                    NULLIF(cluster_nodes.approved_key, ''),
+                    excluded.approved_key
+                )
             """,
-            (node.node_id, node.url, node.public_key, node.status, node.last_seen),
+            (node_id, url, approved_key, approved_key),
         )
 
     async def insert_node(self, node: ClusterNode) -> None:
@@ -1263,6 +1268,7 @@ class SqliteClusterRepo:
                 node_id=r["node_id"],
                 url=r["url"],
                 public_key=r["public_key"] or "",
+                approved_key=r["approved_key"] or "",
                 status=r["status"],
                 last_seen=r["last_seen"],
                 added_at=r["added_at"],

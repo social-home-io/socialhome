@@ -60,8 +60,9 @@ class ClusterSyncView(GfsBaseView):
 
     Membership (spec §24.10): a node is a member if and only if its frames
     verify under a key this GFS already holds — its own identity key (the
-    shared seed) or a key pinned on the node's ``cluster_nodes`` row by an
-    operator. See :func:`~socialhome.global_server.cluster.authorize_frame`.
+    shared seed) or the key an operator approved for the node
+    (``cluster_nodes.approved_key``; the legacy ``public_key`` column is never
+    trusted). See :func:`~socialhome.global_server.cluster.authorize_frame`.
 
     Order matters (spec §24.10.4):
 
@@ -79,7 +80,7 @@ class ClusterSyncView(GfsBaseView):
     6. Membership → 403 ``unknown_node`` (non-HELLO, no row),
        ``unapproved_node`` (HELLO under a key we don't hold; nothing is
        written) or ``key_mismatch`` (HELLO for a known node under a key
-       other than its pin; WARNING).
+       other than its approved key; WARNING).
     7. Signature under the key step 6 chose → 401 ``invalid_signature``.
        From a shed address the verify runs only while the named node's
        failed-verify budget lasts (else 429, no verify), and a failure
@@ -90,7 +91,7 @@ class ClusterSyncView(GfsBaseView):
     Every failure in 2–7 spends the source address's budget, never a
     node's verified budget: forged or replayed traffic naming a real peer
     cannot lock it out, and junk from a member's own address cannot either —
-    a frame that verifies under the member's pin is accepted even from a
+    a frame that verifies under the member's key is accepted even from a
     shed address. Verify CPU on forgeries stays bounded: per address until
     it is shed, then per approved node
     (:data:`~socialhome.global_server.cluster.CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN`).
@@ -178,25 +179,25 @@ class ClusterSyncView(GfsBaseView):
 
         # Membership (spec §24.10): which key, if any, this frame must
         # verify under — our own identity key (shared seed) or the key
-        # pinned on the sender's row. Decided before any signature work, so
+        # approved on the sender's row. Decided before any signature work, so
         # an outsider cannot make us burn verify CPU; nothing is written for
         # a refused sender.
         cluster_repo = self.svc(K.gfs_cluster_repo_key)
         nodes = await cluster_repo.list_nodes()
-        pinned = next((n for n in nodes if n.node_id == from_node), None)
+        row = next((n for n in nodes if n.node_id == from_node), None)
         carried = payload.get("public_key") if msg_type == NODE_HELLO else ""
         verdict = authorize_frame(
             msg_type=msg_type,
             from_node=from_node,
             carried_key=carried if isinstance(carried, str) else "",
-            pinned=pinned,
+            row=row,
             own_key=svc.own_public_key_hex,
         )
         if verdict.error:
             if verdict.error == "key_mismatch" and not shed:
                 log.warning(
                     "cluster: key_mismatch — NODE_HELLO for known node %r from "
-                    "%r carries a key other than its pin; refused. If the node "
+                    "%r carries a key other than its approved key; refused. If the node "
                     "really rotated its key, remove the peer and re-add it "
                     "with the new key.",
                     from_node,

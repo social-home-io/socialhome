@@ -85,7 +85,7 @@ of that shape, so Social Home refuses them everywhere:
   capability blocks, …) — returns `False` for a small-order key before the
   library sees it;
 - `crypto.is_valid_ed25519_public_key` is the shared check for keys an
-  operator pins (GFS cluster `POST /admin/api/cluster/peers` → 422
+  operator approves (GFS cluster `POST /admin/api/cluster/peers` → 422
   `invalid_public_key`).
 
 The check is `y mod p ∈ {0, 1, p−1, ±y₈}` (the y-coordinates of the 8
@@ -857,7 +857,7 @@ sig_suite : "ed25519"          # unknown value → 400, no fallback
 older than the field and is read as Ed25519 — the migration tripwire once
 every node ships it; the PQ sibling (`ed25519+mldsa65`) is a suite bump. The
 verify key is one the receiver already holds — its own identity key (shared
-seed) or the key an operator pinned for that node — never one the frame
+seed) or the key an operator approved for that node — never one the frame
 carries (see `docs/architecture.md`, "GFS cluster membership"). Replay
 defence is the `ts` window, a per-node cache of BLAKE2b-256 digests of
 accepted frame bytes (each kept until its own `ts` + 301 s on the wall clock;
