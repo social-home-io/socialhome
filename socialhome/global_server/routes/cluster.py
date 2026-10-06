@@ -20,6 +20,7 @@ from ..cluster import (
     NODE_SYNC_CLIENT,
     NODE_SYNC_REPORT,
     NODE_SYNC_SPACE,
+    FrameVerdict,
     UnsupportedClusterSigSuite,
     authorize_frame,
     parse_cluster_sig_suite,
@@ -79,15 +80,19 @@ class ClusterSyncView(GfsBaseView):
     5. Already-accepted bytes → 409 ``replay`` (in-memory, no crypto).
     6. Membership → 403 ``unknown_node`` (non-HELLO, no row),
        ``unapproved_node`` (HELLO under a key we don't hold; nothing is
-       written) or ``key_mismatch`` (HELLO for a known node under a key
-       other than its approved key; WARNING).
+       written), ``key_mismatch`` (HELLO for a known node under a key
+       other than its approved key; WARNING) or ``cluster_full`` (a first
+       own-key HELLO while :data:`~socialhome.global_server.cluster.CLUSTER_MAX_NODES`
+       peers already have rows).
     7. Signature under the key step 6 chose → 401 ``invalid_signature``
        (429 from a shed address, like every rejection there). From a shed
        address the verify runs only while the failed-verify budget of
        (named node, source address) and the node's global ceiling last
        (else 429, no verify), and a failure spends both.
     8. The verified node's budget → 429.
-    9. Record the frame digest, then dispatch.
+    9. Record the frame digest — 503 ``replay_cache_full`` when the replay
+       cache, or this node's share of it, has no room (a live digest is
+       never evicted) — then dispatch.
 
     Every failure in 2–7 spends the source address's budget, never a
     node's verified budget: forged or replayed traffic naming a real peer
@@ -196,6 +201,16 @@ class ClusterSyncView(GfsBaseView):
             row=row,
             own_key=svc.own_public_key_hex,
         )
+        # A first own-key HELLO creates a row: bounded, so a seed holder
+        # cannot grow the roster (and the replay cache's sizing) without end.
+        if (
+            not verdict.error
+            and msg_type == NODE_HELLO
+            and row is None
+            and from_node != svc.node_id
+            and svc.roster_full(nodes)
+        ):
+            verdict = FrameVerdict(error="cluster_full")
         if verdict.error:
             if verdict.error == "key_mismatch" and not shed:
                 log.warning(
@@ -229,7 +244,13 @@ class ClusterSyncView(GfsBaseView):
         # member's own traffic: spend that node's budget.
         if not svc.charge_verified_sync(from_node):
             return _rate_limited()
-        svc.record_frame(raw, body["ts"])
+        # No room to remember the frame → refuse it rather than evict a live
+        # digest (which would reopen a replay). 503, not 429: the sender is
+        # within its own rate budget; this is our capacity, so it retries.
+        if not svc.record_frame(raw, body["ts"], from_node):
+            resp = web.json_response({"error": "replay_cache_full"}, status=503)
+            resp.headers["Retry-After"] = "60"
+            return resp
 
         # Dispatch by message type.
         if msg_type == NODE_HELLO:

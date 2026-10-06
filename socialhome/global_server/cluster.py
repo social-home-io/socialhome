@@ -19,6 +19,7 @@ import hashlib
 import heapq
 import json
 import logging
+import math
 import re
 import secrets
 import time
@@ -151,20 +152,26 @@ CLUSTER_REPLAY_SLACK_S: int = 1
 #: Used to size the cache (see :class:`ClusterReplayCache` for the expiry).
 CLUSTER_REPLAY_TTL_S: float = float(2 * CLUSTER_TS_SKEW_S + CLUSTER_REPLAY_SLACK_S)
 
-#: Roster size the replay cache is sized for. Only ACCEPTED frames are
-#: recorded, and each verified node is capped at
-#: :data:`CLUSTER_RATE_LIMIT_PER_MIN`, so this many saturating nodes fit
-#: within one TTL without evicting a live digest. A bigger roster that
-#: saturates every budget at once would evict the oldest digests early.
-CLUSTER_REPLAY_SIZED_NODES: int = 32
-
-#: Replay-cache capacity: every frame the sized roster can have accepted
-#: within one TTL (60/min × 10 min × 32 = 19 200 digests, ~3 MB).
-CLUSTER_REPLAY_MAX_ENTRIES: int = (
-    CLUSTER_RATE_LIMIT_PER_MIN
-    * int(CLUSTER_REPLAY_TTL_S // 60)
-    * CLUSTER_REPLAY_SIZED_NODES
+#: Most frames one verified node can have accepted within one replay TTL:
+#: :data:`CLUSTER_RATE_LIMIT_PER_MIN` caps it at 60 in any 60 s window, so
+#: at most ``60 × ceil(TTL / 60)`` = 660 inside a 601 s TTL. Only ACCEPTED
+#: frames are recorded, so an honest node never reaches it.
+CLUSTER_REPLAY_MAX_PER_NODE: int = CLUSTER_RATE_LIMIT_PER_MIN * math.ceil(
+    CLUSTER_REPLAY_TTL_S / 60
 )
+
+#: Largest roster the cluster is sized for: own-key ``NODE_HELLO``s (a
+#: shared-seed sibling's first contact) create no row past this many peers
+#: (403 ``cluster_full``), and the replay cache holds this many saturating
+#: nodes without refusing anything.
+CLUSTER_MAX_NODES: int = 32
+
+#: Replay-cache capacity: every frame the largest roster can have accepted
+#: within one TTL (660 × 32 = 21 120 digests, ~3.5 MB). When full — or when
+#: a node holds :data:`CLUSTER_REPLAY_MAX_PER_NODE` live digests — a new
+#: frame is REFUSED (503 ``replay_cache_full``), never let in by evicting a
+#: live digest (see :class:`ClusterReplayCache`).
+CLUSTER_REPLAY_MAX_ENTRIES: int = CLUSTER_REPLAY_MAX_PER_NODE * CLUSTER_MAX_NODES
 
 #: Spec §24.10.7 / S-8 — per-node ceiling on concurrent sync signaling
 #: sessions. ``pick_signaling_node`` filters out any node already at this
@@ -317,23 +324,41 @@ class ClusterReplayCache:
     freshness check reads, so the two windows can never drift apart.
 
     An entry is kept until wall-clock ``ts + CLUSTER_TS_SKEW_S + slack``,
-    the first instant its frame is stale. Whatever the cache forgets —
-    expired, or evicted past ``cap`` (smallest ``ts`` first) — raises a
-    ``floor``: a frame whose ``ts`` is at or below it counts as seen. So a
+    the first instant its frame is stale. An expired entry raises a
+    ``floor``: a frame whose ``ts`` is at or below it counts as seen, so a
     frame the cache no longer holds can never be accepted again, even if
-    the wall clock later steps back (making it "fresh" once more) or the
-    roster outgrows the cap. Under a steady clock the floor trails the
-    freshness window and refuses nothing a fresh frame could have; it is
-    built from peers' ``ts`` values, not our clock, so a bogus forward jump
-    of our clock does not partition the cluster once it is corrected.
-    In-memory, per process — the boot floor covers a restart.
+    the wall clock later steps back (making it "fresh" once more). Under a
+    steady clock the floor trails the freshness window and refuses nothing
+    a fresh frame could have; it is built from peers' ``ts`` values, not
+    our clock, so a bogus forward jump of our clock does not partition the
+    cluster once it is corrected.
+
+    The cache never evicts a live entry. Evicting one would have to raise
+    the floor to its ``ts`` — and a member dating its frames ``now + 300``
+    could then push the floor past every honest frame. Instead, when the
+    cache holds ``cap`` entries, or the sending node holds ``per_node_cap``,
+    :meth:`record` refuses the NEW frame; the caller answers 503 and the
+    sender retries. A node is capped at its own share, so one node cannot
+    crowd out another. In-memory, per process — the boot floor covers a
+    restart.
     """
 
-    __slots__ = ("_cap", "_entries", "_expiry_heap", "_floor")
+    __slots__ = (
+        "_cap",
+        "_per_node_cap",
+        "_entries",
+        "_per_node",
+        "_expiry_heap",
+        "_floor",
+    )
 
-    def __init__(self, *, cap: int) -> None:
+    def __init__(self, *, cap: int, per_node_cap: int) -> None:
         self._cap = cap
-        self._entries: dict[bytes, int] = {}
+        self._per_node_cap = per_node_cap
+        #: digest → sending node id.
+        self._entries: dict[bytes, str] = {}
+        #: node id → live entries.
+        self._per_node: dict[str, int] = {}
         self._expiry_heap: list[tuple[int, bytes]] = []
         self._floor: int | None = None
 
@@ -344,24 +369,37 @@ class ClusterReplayCache:
             return True
         return digest in self._entries
 
-    def record(self, digest: bytes, ts: int, *, now: float) -> None:
-        """Remember an accepted frame until its ``ts`` window closes."""
-        if digest not in self._entries:
-            self._entries[digest] = ts
-            heapq.heappush(self._expiry_heap, (ts, digest))
+    def record(self, digest: bytes, ts: int, node_id: str, *, now: float) -> bool:
+        """Remember an accepted frame until its ``ts`` window closes.
+
+        Returns ``False`` — the frame must be refused — when there is no
+        room: the cache or *node_id*'s share is full of live entries.
+        """
         self._expire(now)
-        while len(self._entries) > self._cap:
-            self._forget_oldest()
+        if digest in self._entries:
+            return True
+        if (
+            len(self._entries) >= self._cap
+            or self._per_node.get(node_id, 0) >= self._per_node_cap
+        ):
+            return False
+        self._entries[digest] = node_id
+        self._per_node[node_id] = self._per_node.get(node_id, 0) + 1
+        heapq.heappush(self._expiry_heap, (ts, digest))
+        return True
 
     def _expire(self, now: float) -> None:
         horizon = now - CLUSTER_TS_SKEW_S - CLUSTER_REPLAY_SLACK_S
         while self._expiry_heap and self._expiry_heap[0][0] <= horizon:
-            self._forget_oldest()
-
-    def _forget_oldest(self) -> None:
-        ts, digest = heapq.heappop(self._expiry_heap)
-        self._entries.pop(digest, None)
-        self._floor = ts if self._floor is None else max(self._floor, ts)
+            ts, digest = heapq.heappop(self._expiry_heap)
+            node_id = self._entries.pop(digest, None)
+            if node_id is not None:
+                left = self._per_node[node_id] - 1
+                if left:
+                    self._per_node[node_id] = left
+                else:
+                    del self._per_node[node_id]
+            self._floor = ts if self._floor is None else max(self._floor, ts)
 
     @property
     def floor(self) -> int | None:
@@ -478,7 +516,9 @@ class ClusterService:
         #: Digests of accepted ``/cluster/sync`` frames (raw signed bytes).
         #: In-memory, per process — the boot floor covers a restart.
         #: Accepted-frame digests (see :class:`ClusterReplayCache`).
-        self._seen_frames = ClusterReplayCache(cap=CLUSTER_REPLAY_MAX_ENTRIES)
+        self._seen_frames = ClusterReplayCache(
+            cap=CLUSTER_REPLAY_MAX_ENTRIES, per_node_cap=CLUSTER_REPLAY_MAX_PER_NODE
+        )
         #: Per VERIFIED node id (spec §24.10.4). Capped LRU, like every GFS
         #: limiter, though only proven peers ever get a bucket here.
         self._sync_node_limiter = SlidingWindowCounter(CLUSTER_RATE_LIMIT_PER_MIN)
@@ -566,15 +606,23 @@ class ClusterService:
         accepted — or may have been, and the cache has since forgotten."""
         return self._seen_frames.seen(_frame_digest(raw), ts, now=self._wall_clock())
 
-    def record_frame(self, raw: bytes, ts: int) -> None:
-        """Remember an accepted frame so a byte-identical resend is refused.
+    def record_frame(self, raw: bytes, ts: int, node_id: str) -> bool:
+        """Remember a frame *node_id* sent, so a byte-identical resend is
+        refused; ``False`` → no room, refuse the frame (503).
 
         Called only once the frame passed every check, right before
         dispatch — a rejected frame never poisons the cache. The entry
         lives until wall-clock ``ts + CLUSTER_TS_SKEW_S + slack``: as long
         as *ts* can still pass :meth:`frame_ts_error`.
         """
-        self._seen_frames.record(_frame_digest(raw), ts, now=self._wall_clock())
+        return self._seen_frames.record(
+            _frame_digest(raw), ts, node_id, now=self._wall_clock()
+        )
+
+    def roster_full(self, nodes: list[ClusterNode]) -> bool:
+        """Whether *nodes* already hold :data:`CLUSTER_MAX_NODES` peers, so
+        an own-key HELLO may not create another row."""
+        return sum(1 for n in nodes if n.node_id != self._node_id) >= CLUSTER_MAX_NODES
 
     def _own_connected_clients(self) -> int:
         return (

@@ -893,8 +893,7 @@ def _accept(svc: ClusterService, raw: bytes, ts: int) -> bool:
     """Mirror the route: fresh and not seen → record and accept."""
     if svc.frame_ts_error(ts) or svc.frame_seen(raw, ts):
         return False
-    svc.record_frame(raw, ts)
-    return True
+    return svc.record_frame(raw, ts, "node-b")
 
 
 async def test_a_future_dated_frame_is_not_replayable_while_still_fresh(gfs_db):
@@ -948,28 +947,43 @@ async def test_a_replay_entry_expires_only_once_its_frame_is_stale(gfs_db):
             )
 
 
-def test_replay_cache_eviction_past_the_cap_raises_the_floor():
-    """A digest evicted for space is never forgotten silently: its ``ts``
-    becomes the floor, so its frame (or any older one) counts as seen."""
-    cache = ClusterReplayCache(cap=3)
+@pytest.mark.security
+def test_a_full_replay_cache_refuses_new_frames_and_keeps_its_floor():
+    """At capacity the NEW frame is refused; no live digest is evicted and
+    the floor does not move, so nothing already accepted can replay and
+    nothing fresh is mistaken for a replay."""
+    cache = ClusterReplayCache(cap=3, per_node_cap=10)
     now = 1_900_000_000.0
-    for i, ts in enumerate((100, 50, 300, 200)):
-        cache.record(f"d{i}".encode(), int(now) + ts, now=now)
+    for i, ts in enumerate((100, 50, 300)):
+        assert cache.record(f"d{i}".encode(), int(now) + ts, f"n{i}", now=now)
+    assert not cache.record(b"d3", int(now) + 200, "n3", now=now)
     assert len(cache) == 3
-    # The smallest ts (50) was evicted, not the first inserted.
-    assert cache.floor == int(now) + 50
-    assert cache.seen(b"d1", int(now) + 50, now=now)
-    assert cache.seen(b"never-sent", int(now) + 49, now=now)
-    assert not cache.seen(b"never-sent", int(now) + 51, now=now)
-    for i, ts in ((0, 100), (2, 300), (3, 200)):
+    assert cache.floor is None
+    assert not cache.seen(b"d3", int(now) + 200, now=now)
+    for i, ts in ((0, 100), (1, 50), (2, 300)):
         assert cache.seen(f"d{i}".encode(), int(now) + ts, now=now)
+    # A digest already held is a no-op, not a refusal.
+    assert cache.record(b"d0", int(now) + 100, "n0", now=now)
+
+
+@pytest.mark.security
+def test_one_node_cannot_crowd_another_out_of_the_replay_cache():
+    cache = ClusterReplayCache(cap=100, per_node_cap=2)
+    now = 1_900_000_000.0
+    assert cache.record(b"a1", int(now), "a", now=now)
+    assert cache.record(b"a2", int(now), "a", now=now)
+    assert not cache.record(b"a3", int(now), "a", now=now)
+    assert cache.record(b"b1", int(now), "b", now=now)
+    # Once a's entries expire, its share frees up again.
+    later = now + 2 * CLUSTER_TS_SKEW_S
+    assert cache.record(b"a3", int(later), "a", now=later)
 
 
 def test_replay_cache_expires_on_the_frames_ts_not_insertion_order():
-    cache = ClusterReplayCache(cap=10)
+    cache = ClusterReplayCache(cap=10, per_node_cap=10)
     now = 1_900_000_000.0
-    cache.record(b"late", int(now) + 300, now=now)
-    cache.record(b"early", int(now) - 290, now=now)
+    cache.record(b"late", int(now) + 300, "n", now=now)
+    cache.record(b"early", int(now) - 290, "n", now=now)
     # ``early`` is stale at now + 11 and forgotten; ``late`` is kept.
     later = now + 12
     assert cache.seen(b"late", int(now) + 300, now=later)
@@ -1189,3 +1203,27 @@ async def test_a_hello_from_an_approved_node_without_a_row_creates_nothing(
     )
     assert "node-c" not in {n.node_id for n in await enabled_cluster.list_nodes()}
     assert hello_replies == []
+
+
+# ─── Replay-cache capacity: refuse, never evict ──────────────────────
+
+
+@pytest.mark.security
+async def test_a_full_replay_cache_never_refuses_a_fresh_honest_frame(gfs_db):
+    """The review's probe: 19 200 accepted digests dated ``now + 300`` (a
+    member, or many own-key node ids, saturating the cache with
+    future-dated frames). Evicting them used to raise the floor to
+    ``now + 300``, so every honest frame was refused as a replay for ten
+    minutes. A fresh honest frame from another node must be accepted."""
+    clocks = _Clocks()
+    svc = _replay_svc(gfs_db, clocks)
+    clocks.advance(CLUSTER_TS_SKEW_S)  # past the boot floor
+    future = int(clocks.wall) + CLUSTER_TS_SKEW_S
+    for i in range(19_200):
+        svc.record_frame(f"attack-{i}".encode(), future, f"attacker-{i % 32}")
+    now = int(clocks.wall)
+    for n in range(3):
+        raw = f"honest-{n}".encode()
+        assert not svc.frame_seen(raw, now)
+        assert svc.record_frame(raw, now, "honest")
+        assert svc.frame_seen(raw, now)

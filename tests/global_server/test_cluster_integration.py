@@ -30,7 +30,8 @@ from socialhome.global_server.cluster import (
     CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN,
     CLUSTER_RATE_LIMIT_PER_MIN,
     CLUSTER_REPLAY_MAX_ENTRIES,
-    CLUSTER_REPLAY_SIZED_NODES,
+    CLUSTER_REPLAY_MAX_PER_NODE,
+    CLUSTER_MAX_NODES,
     CLUSTER_REPLAY_SLACK_S,
     CLUSTER_REPLAY_TTL_S,
     CLUSTER_TS_SKEW_S,
@@ -1088,17 +1089,17 @@ async def test_frames_signed_before_this_process_started_are_refused(client):
 
 async def test_replay_cache_is_sized_from_the_cluster_constants(gfs_db):
     """The cache must outlive the ``ts`` window (else a frame replays after
-    expiring but while still fresh) and hold every frame the verified
-    budget can admit for the sized roster within its TTL (else eviction
-    reopens the window)."""
+    expiring but while still fresh), give each node room for every frame
+    its verified budget can admit within the TTL, and hold that for the
+    largest roster (else an honest frame is refused for want of room)."""
     assert CLUSTER_REPLAY_TTL_S >= 2 * CLUSTER_TS_SKEW_S + CLUSTER_REPLAY_SLACK_S
-    assert CLUSTER_REPLAY_MAX_ENTRIES == (
-        CLUSTER_RATE_LIMIT_PER_MIN
-        * int(CLUSTER_REPLAY_TTL_S // 60)
-        * CLUSTER_REPLAY_SIZED_NODES
+    assert CLUSTER_REPLAY_MAX_PER_NODE >= CLUSTER_RATE_LIMIT_PER_MIN * (
+        CLUSTER_REPLAY_TTL_S / 60
     )
+    assert CLUSTER_REPLAY_MAX_ENTRIES == CLUSTER_REPLAY_MAX_PER_NODE * CLUSTER_MAX_NODES
     svc = ClusterService(SqliteClusterRepo(gfs_db))
     assert svc._seen_frames._cap == CLUSTER_REPLAY_MAX_ENTRIES
+    assert svc._seen_frames._per_node_cap == CLUSTER_REPLAY_MAX_PER_NODE
 
 
 # ─── sig_suite + old-sender compatibility ─────────────────────────────
@@ -1488,3 +1489,53 @@ async def test_every_rejection_from_a_shed_address_is_429(client):
     resp = await _sync(client, from_node=PEER, seed=None, ip=ATTACKER_IP)
     assert (resp.status, await resp.json()) == (429, {"error": "rate_limited"})
     assert resp.headers["Retry-After"] == "60"
+
+
+# ─── Replay-cache room and roster size ────────────────────────────────
+
+
+@pytest.mark.security
+async def test_a_node_over_its_replay_share_is_refused_503(client, monkeypatch):
+    """A frame the replay cache has no room for is refused — never let in
+    by evicting a live digest — and another node is unaffected."""
+    seed = await _register_peer(client)
+    other = await _register_peer(client, "gfs-node-c")
+    monkeypatch.setattr(client._app[gfs_cluster_key]._seen_frames, "_per_node_cap", 2)
+    for _ in range(2):
+        resp = await _sync(client, from_node=PEER, seed=seed, ip=GENUINE_IP)
+        assert resp.status == 200
+    resp = await _sync(client, from_node=PEER, seed=seed, ip=GENUINE_IP)
+    assert (resp.status, await resp.json()) == (503, {"error": "replay_cache_full"})
+    assert resp.headers["Retry-After"] == "60"
+    resp = await _sync(client, from_node="gfs-node-c", seed=other, ip=GENUINE_IP)
+    assert resp.status == 200
+
+
+@pytest.mark.security
+async def test_own_key_hellos_cannot_grow_the_roster_without_bound(client):
+    """A seed holder's first HELLO creates a row only while fewer than
+    ``CLUSTER_MAX_NODES`` peers are on the roster."""
+    svc = client._app[gfs_cluster_key]
+    own_seed, own_key = svc._signing_key, svc.own_public_key_hex
+    repo = client._app[gfs_cluster_repo_key]
+    for i in range(CLUSTER_MAX_NODES):
+        await repo.insert_node(ClusterNode(node_id=f"sib-{i}", url=""))
+
+    async def hello(node_id: str):
+        return await _sync(
+            client,
+            from_node=node_id,
+            seed=own_seed,
+            ip=GENUINE_IP,
+            type_=NODE_HELLO,
+            payload={"node_id": node_id, "url": "", "public_key": own_key},
+        )
+
+    resp = await hello("sib-new")
+    assert (resp.status, await resp.json()) == (403, {"error": "cluster_full"})
+    assert "sib-new" not in {n.node_id for n in await repo.list_nodes()}
+    # A sibling already on the roster still gets through.
+    assert (await hello("sib-0")).status == 200
+    # And once one is removed, a new one can join.
+    await repo.remove_node("sib-1")
+    assert (await hello("sib-new")).status == 200
