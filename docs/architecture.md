@@ -770,7 +770,16 @@ which makes the row no member. A shared-seed sibling stays a member
 through our own key; a peer with its own distinct key must be re-added by an
 operator. `key_source` in the admin cluster view is `approved` (an
 admin-approved key), `own` (our key: approved, or a shared-seed sibling's
-HELLO) or `none` (neither — re-add it if it has its own key). **Residual risks:** an attacker who can send from a member's own
+HELLO) or `none` (neither — re-add it if it has its own key).
+**Rolling upgrades:** the guarantee holds for nodes on this version. While a
+node on an older version still serves the same `gfs.db`, that old node keeps
+its old behaviour — it accepts first-contact HELLOs, sends cluster traffic to
+the rows they create and accepts replays of old frames — and a captured
+seed-signed HELLO replayed through it can bring back a decommissioned
+sibling's row at that sibling's former address. New nodes never send to or
+accept from rows that are not members, but finish a rolling upgrade promptly
+and do not reuse a decommissioned node's address while old nodes run.
+**Residual risks:** an attacker who can send from a member's own
 address and forge more than 30 frames a minute naming it — or forge 1200 a
 minute naming it from many shed addresses while the member's own address is
 shed — delays that member (keep `trusted_proxies` to the real proxy); a frame without `to` (older

@@ -222,6 +222,15 @@ describe('ClusterPanel — peer list', () => {
     expect(rowFor(container, 'node-b').textContent).toContain('Remove')
   })
 
+  it('offers no Ping on a row that is not approved (its address was never checked)', async () => {
+    stubApi()
+    const { container, findByText } = render(<ClusterPanel />)
+    await findByText('node-b')
+    expect(rowFor(container, 'node-d').textContent).not.toContain('Ping')
+    expect(rowFor(container, 'node-d').textContent).toContain('Remove')
+    expect(rowFor(container, 'node-c').textContent).toContain('Ping')
+  })
+
   it('renders last_seen as UTC regardless of the viewer\'s local timezone', async () => {
     // Backend `cluster_nodes.last_seen` is the naive SQLite `datetime('now')`
     // shape (UTC by invariant). `new Date()` would parse it as local time.

@@ -402,9 +402,11 @@ export function ClusterPanel() {
                 <td class="row-actions">
                   {!n.is_self && (
                     <>
-                      <button type="button" class="secondary" onClick={() => void pingPeer(n.node_id)}>
-                        Ping
-                      </button>
+                      {n.key_source !== 'none' && (
+                        <button type="button" class="secondary" onClick={() => void pingPeer(n.node_id)}>
+                          Ping
+                        </button>
+                      )}
                       <button type="button" class="danger" onClick={() => setConfirming(n)}>
                         Remove
                       </button>

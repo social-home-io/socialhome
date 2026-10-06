@@ -631,6 +631,32 @@ async def test_admin_cluster_ping_unknown_is_404(client):
     assert resp.status == 404
 
 
+@pytest.mark.security
+async def test_admin_ping_refuses_a_row_that_is_not_a_member(client, monkeypatch):
+    """A non-member row (e.g. one an old-version node wrote by TOFU) carries a
+    URL nobody validated; an admin click must not send a request there."""
+    pinged: list[str] = []
+
+    async def _record(self, url):
+        pinged.append(url)
+        return True
+
+    monkeypatch.setattr(ClusterService, "_ping_peer", _record)
+    _seed, pub_hex = _keypair()
+    await client._app[gfs_cluster_repo_key].insert_node(
+        ClusterNode(
+            node_id="tofu",
+            url="http://169.254.169.254/latest",
+            public_key=pub_hex,
+            status="online",
+            last_seen="2026-01-01 00:00:00",
+        )
+    )
+    resp = await client.post("/admin/api/cluster/peers/tofu/ping")
+    assert (resp.status, await resp.json()) == (409, {"error": "not_a_member"})
+    assert pinged == []
+
+
 async def test_admin_cluster_add_peer_missing_url_422(client):
     resp = await client.post("/admin/api/cluster/peers", json={})
     assert resp.status == 422

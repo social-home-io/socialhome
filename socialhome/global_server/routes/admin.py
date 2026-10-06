@@ -15,7 +15,12 @@ from pathlib import Path
 from aiohttp import BodyPartReader, web
 
 from .. import app_keys as K
-from ..cluster import ClusterPeerKeyMismatch, InvalidClusterPeer, member_url
+from ..cluster import (
+    ClusterPeerKeyMismatch,
+    InvalidClusterPeer,
+    is_member,
+    member_url,
+)
 from ..config import GfsConfig
 from ...domain.space import ModerationAlreadyDecidedError
 from ...media.image_processor import ImageProcessor
@@ -416,5 +421,9 @@ class AdminClusterPeerPingView(GfsBaseView):
                 {"error": "not_found"},
                 status=404,
             )
+        # A non-member row's URL was never validated (an old-version node
+        # may have written it by TOFU) — never send a request there.
+        if not is_member(match, svc.own_public_key_hex):
+            return web.json_response({"error": "not_a_member"}, status=409)
         ok = await svc.ping_peer(member_url(match))
         return web.json_response({"node_id": node_id, "online": ok})
