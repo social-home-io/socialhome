@@ -1196,9 +1196,11 @@ class SqliteClusterRepo:
         self._db = db
 
     async def approve_node(self, node_id: str, url: str, approved_key: str) -> None:
-        """Admin add-peer: create or update the row with its approved key.
+        """Admin add-peer: create or update the row with its approved key
+        and URL.
 
-        The ONLY writer of ``approved_key`` — the node's cluster-membership
+        The ONLY writer of ``approved_key`` and ``approved_url`` (the URL
+        every outbound frame to the node goes to) — the node's cluster-membership
         credential (spec §24.10). Once set it never moves: a re-add under
         the same key only refreshes the URL, and rotation is
         :meth:`remove_node` then a fresh approval. ``public_key`` is set to
@@ -1208,10 +1210,12 @@ class SqliteClusterRepo:
         """
         await self._db.enqueue(
             """
-            INSERT INTO cluster_nodes(node_id, url, public_key, approved_key)
-            VALUES(?, ?, ?, ?)
+            INSERT INTO cluster_nodes(
+                node_id, url, public_key, approved_key, approved_url
+            ) VALUES(?, ?, ?, ?, ?)
             ON CONFLICT(node_id) DO UPDATE SET
                 url=excluded.url,
+                approved_url=excluded.approved_url,
                 public_key=CASE
                     WHEN cluster_nodes.approved_key IN ('', excluded.approved_key)
                     THEN excluded.public_key
@@ -1222,7 +1226,7 @@ class SqliteClusterRepo:
                     excluded.approved_key
                 )
             """,
-            (node_id, url, approved_key, approved_key),
+            (node_id, url, approved_key, approved_key, url),
         )
 
     async def insert_node(self, node: ClusterNode) -> None:
@@ -1303,6 +1307,7 @@ class SqliteClusterRepo:
                 url=r["url"],
                 public_key=r["public_key"] or "",
                 approved_key=r["approved_key"] or "",
+                approved_url=r["approved_url"] or "",
                 status=r["status"],
                 last_seen=r["last_seen"],
                 added_at=r["added_at"],

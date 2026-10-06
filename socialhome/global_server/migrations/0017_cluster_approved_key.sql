@@ -1,10 +1,21 @@
--- 0017 — cluster_nodes.approved_key: the operator-approved trust anchor.
+-- 0017 — cluster_nodes.approved_key + approved_url: the operator's approval.
 --
 -- Cluster membership is operator-approved: a node is a member only if its
 -- frames verify under this GFS's own identity key (the shared seed) or under
 -- the key an admin approved for it (``POST /admin/api/cluster/peers``). That
--- approval lives in this new column, which ONLY admin add-peer writes; admin
--- remove deletes the row.
+-- approval lives in two new columns, which ONLY admin add-peer writes; admin
+-- remove deletes the row:
+--
+--   * ``approved_key`` — the key the node's frames must verify under;
+--   * ``approved_url`` — the URL every outbound frame to the node goes to.
+--     ``url`` is not used for an approved node: the previous release's
+--     ``upsert_node`` sets ``url=excluded.url`` on any HELLO it
+--     TOFU-verifies, so an attacker's self-signed HELLO naming an approved
+--     node id, sent to an old-version node, would point our traffic for
+--     that node at the attacker. A shared-seed sibling (no approval) keeps
+--     using ``url``: old code can rewrite it only together with
+--     ``public_key`` — the key the HELLO verified under, never our own
+--     without our seed — which makes the row no member, so nothing is sent.
 --
 -- Why a new column and not ``public_key``: in production several GFS
 -- processes share one ``gfs.db``. During a rolling upgrade, nodes still on
@@ -16,8 +27,9 @@
 -- stays for display and for old-version readers only; it is no longer a
 -- trust anchor.
 --
--- Every existing row starts with ``approved_key = ''``: the old add-peer
--- never stored a key, so no pre-existing key was ever admin-approved. A
+-- Every existing row starts with ``approved_key = ''`` and
+-- ``approved_url = ''``: the old add-peer never stored a key, so no
+-- pre-existing key was ever admin-approved. A
 -- shared-seed sibling stays a member through our own key; a peer with its own
 -- distinct key must be re-added by the operator (breaking for operators).
 --
@@ -25,25 +37,36 @@
 --
 --   (1) Audited every path that touches ``cluster_nodes``:
 --       ``SqliteClusterRepo.approve_node`` (admin add-peer — the only writer
---       of ``approved_key``), ``insert_node`` (first HELLO under our own key;
---       leaves it ''), ``touch_node`` (liveness, UPDATE-only, never a key),
+--       of ``approved_key`` and ``approved_url``), ``insert_node`` (first
+--       HELLO under our own key; leaves both ''), ``touch_node`` (liveness,
+--       UPDATE-only, never a key, fills only an empty ``url``),
+--       ``reclaim_node`` (a sibling's HELLO under our own key re-keys a row
+--       with no approval), every outbound path (fan-out, heartbeat,
+--       catch-up, signaling pick, ``/cluster/health``: members only, an
+--       approved node at ``approved_url``),
 --       ``remove_node`` (admin remove), ``update_active_sync_sessions``,
 --       ``list_nodes`` → ``authorize_frame`` (trusts ``approved_key`` or our
 --       own key, never ``public_key``) and ``admin_cluster`` (``key_source``).
 --       The previous release's repo writes ``node_id, url, public_key,
 --       status, last_seen`` with ``ON CONFLICT DO UPDATE`` of those columns
---       only — it never touches ``approved_key``. No other table or
---       federation event carries a cluster key.
+--       only — it never touches ``approved_key`` or ``approved_url``, but
+--       it DOES rewrite ``url`` (hence ``approved_url``). No other table or
+--       federation event carries a cluster key or URL.
 --   (2) Non-migration alternatives rejected: keeping the trust in
 --       ``public_key`` (and clearing it once at upgrade, this branch's first
 --       design) is undone by any old-version node still sharing the DB — it
 --       re-fills or overwrites ``public_key`` by TOFU right after the clear.
 --       A config-file allow-list would split the roster between the DB and
 --       every node's TOML. Nothing old code writes can be made untrusted
---       except a column old code does not know.
---   (3) Smallest change: one additive ``ADD COLUMN`` with a constant default
---       (no table rewrite, no backfill, no row changed); the old
---       "clear every pin" UPDATE is not needed, because ``public_key`` is
---       no longer trusted.
+--       except a column old code does not know. For the URL: reusing
+--       ``url`` is what old code rewrites; refusing to send when ``url``
+--       changed would need the approved value stored somewhere anyway;
+--       ``[cluster] peers`` config carries no node ids. So the approved URL
+--       lives beside the approved key, in a column old code does not know.
+--   (3) Smallest change: two additive ``ADD COLUMN``s with a constant
+--       default (no table rewrite, no backfill, no row changed); the old
+--       "clear every pin" UPDATE is not needed, because ``public_key`` and
+--       ``url`` are no longer trusted for an approved node.
 
 ALTER TABLE cluster_nodes ADD COLUMN approved_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE cluster_nodes ADD COLUMN approved_url TEXT NOT NULL DEFAULT '';

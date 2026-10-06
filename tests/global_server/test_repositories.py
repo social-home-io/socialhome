@@ -1363,3 +1363,16 @@ async def test_cluster_reclaim_node_rekeys_only_an_unapproved_row(gfs_db):
         "online",
     )
     assert (rows["c"].url, rows["c"].public_key) == ("http://c", "cc" * 32)
+
+
+async def test_cluster_approve_writes_the_approved_url_alone(gfs_db):
+    """``approved_url`` is the operator's: approval writes it, and nothing a
+    HELLO or a liveness refresh does moves it."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.approve_node("b", "http://b", "aa" * 32)
+    await repo.touch_node("b", status="online", last_seen=None, url_if_empty="http://x")
+    await repo.reclaim_node(
+        "b", url="http://evil", public_key="ee" * 32, status="online", last_seen=""
+    )
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.approved_url) == ("http://b", "http://b")

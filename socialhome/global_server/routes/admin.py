@@ -15,7 +15,7 @@ from pathlib import Path
 from aiohttp import BodyPartReader, web
 
 from .. import app_keys as K
-from ..cluster import ClusterPeerKeyMismatch, InvalidClusterPeer
+from ..cluster import ClusterPeerKeyMismatch, InvalidClusterPeer, member_url
 from ..config import GfsConfig
 from ...domain.space import ModerationAlreadyDecidedError
 from ...media.image_processor import ImageProcessor
@@ -416,5 +416,5 @@ class AdminClusterPeerPingView(GfsBaseView):
                 {"error": "not_found"},
                 status=404,
             )
-        ok = await svc.ping_peer(match.url)
+        ok = await svc.ping_peer(member_url(match))
         return web.json_response({"node_id": node_id, "online": ok})

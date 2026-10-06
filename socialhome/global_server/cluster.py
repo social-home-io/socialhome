@@ -297,8 +297,18 @@ def is_member(row: ClusterNode, own_key: str) -> bool:
 
 
 def member_url(row: ClusterNode) -> str:
-    """The base URL outbound traffic to member *row* goes to."""
-    return row.url
+    """The base URL outbound traffic to *row* goes to.
+
+    An approved node: ``approved_url``, the URL the operator approved with
+    its key — written only by admin add-peer. Never ``url``: an
+    old-version node sharing the DB rewrites ``url`` on any HELLO it
+    TOFU-verifies, so it would let an outsider redirect the node's traffic.
+    A shared-seed sibling: ``url``. An old-version node can rewrite that
+    only together with ``public_key`` (the key the HELLO verified under —
+    not our own without our seed), which makes the row no member
+    (:func:`is_member`), so no traffic follows it.
+    """
+    return row.approved_url if row.approved_key else row.url
 
 
 def authorize_frame(
@@ -807,7 +817,7 @@ class ClusterService:
             nodes.append(
                 {
                     "node_id": r.node_id,
-                    "url": r.url,
+                    "url": member_url(r),
                     "status": self_status if is_self else r.status,
                     "last_seen": r.last_seen,
                     "connected_clients": (
@@ -1042,9 +1052,17 @@ class ClusterService:
                 raise ClusterPeerKeyMismatch(node_id)
         await self._repo.approve_node(node_id, url, key)
         node = (
-            replace(existing, url=url, public_key=key, approved_key=key)
+            replace(
+                existing, url=url, public_key=key, approved_key=key, approved_url=url
+            )
             if existing is not None
-            else ClusterNode(node_id=node_id, url=url, public_key=key, approved_key=key)
+            else ClusterNode(
+                node_id=node_id,
+                url=url,
+                public_key=key,
+                approved_key=key,
+                approved_url=url,
+            )
         )
         try:
             await self._post_to_peer(
@@ -1150,13 +1168,14 @@ class ClusterService:
             )
             already_known = False
         else:
-            # The URL is set out-of-band by an operator and never moves
-            # in-band: a member's HELLO must not point its row — and with it
-            # every later heartbeat and fan-out POST — at another address.
-            # Only a row with no URL yet takes the one the HELLO carries,
-            # and only if it is a usable base URL. UPDATE only.
-            fill = "" if row.url else normalized_peer_url(url)
-            url = row.url or fill
+            # The URL never moves in-band: a member's HELLO must not point
+            # its row — and with it every later heartbeat and fan-out POST —
+            # at another address. An approved node is reached at the URL the
+            # operator approved; a sibling row with no URL yet takes the one
+            # the HELLO carries, and only if it is a usable base URL.
+            # UPDATE only.
+            fill = "" if row.url or row.approved_key else normalized_peer_url(url)
+            url = member_url(row) or fill
             await self._repo.touch_node(
                 from_node_id, status="online", last_seen=now, url_if_empty=fill
             )

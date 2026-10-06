@@ -194,6 +194,11 @@ class ClusterNode:
     #: written only by admin add-peer; ``""`` = none (the node is a member
     #: only if it holds our own identity key).
     approved_key: str = ""
+    #: The URL the operator approved with that key — written only by admin
+    #: add-peer, together with ``approved_key``. Outbound traffic to an
+    #: approved node goes here, never to ``url``: an old-version node
+    #: sharing the DB rewrites ``url`` on any HELLO it TOFU-verifies.
+    approved_url: str = ""
 
     @property
     def address(self) -> str:

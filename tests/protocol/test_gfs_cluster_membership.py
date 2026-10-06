@@ -70,7 +70,11 @@ class _Roster:
 
     async def approve_node(self, node_id: str, url: str, approved_key: str) -> None:
         self.rows[node_id] = ClusterNode(
-            node_id=node_id, url=url, public_key=approved_key, approved_key=approved_key
+            node_id=node_id,
+            url=url,
+            public_key=approved_key,
+            approved_key=approved_key,
+            approved_url=url,
         )
 
     async def insert_node(self, node: ClusterNode) -> None:
@@ -642,3 +646,75 @@ async def test_a_tofu_row_cannot_send_frames_even_under_our_key(
     assert await _post(
         gfs, *_frame(seed, type_=NODE_HEARTBEAT, from_node="tofu", payload={})
     ) == (200, {"status": "ok"})
+
+
+# ─── Outbound URL: an old version cannot redirect a member ───────────────
+
+
+async def test_an_old_version_url_rewrite_does_not_redirect_an_approved_node(
+    gfs, tmp_dir, listeners
+):
+    """An old node TOFU-accepts an attacker's HELLO for an approved node id
+    and upserts ``url`` + ``public_key``: traffic still goes to the URL the
+    operator approved, and the approved key still decides inbound."""
+    real, attacker_listener = listeners
+    seed = secrets.token_bytes(32)
+    key = ed25519_public_key(seed).hex()
+    status, _ = await _admin_add_peer(
+        gfs, {"node_id": "node-c", "url": real.url, "public_key": key}
+    )
+    assert status == 201
+    attacker = secrets.token_bytes(32)
+    _old_version_write(
+        tmp_dir,
+        "UPDATE cluster_nodes SET url=?, public_key=? WHERE node_id='node-c'",
+        (attacker_listener.url, ed25519_public_key(attacker).hex()),
+    )
+    real.hits.clear()
+    svc = gfs.app[gfs_cluster_key]
+    await svc.sync_report(_report())
+    await svc._heartbeat_tick()
+    assert real.types() == ["NODE_SYNC_REPORT", NODE_HEARTBEAT]
+    assert attacker_listener.hits == []
+    async with ClientSession() as http:
+        async with http.get(f"{_url(gfs)}/cluster/health") as resp:
+            body = await resp.json()
+    assert [p["url"] for p in body["peers"]] == [real.url]
+    assert await _post(
+        gfs, *_frame(attacker, type_=NODE_HEARTBEAT, from_node="node-c", payload={})
+    ) == (401, {"error": "invalid_signature"})
+    assert await _post(
+        gfs, *_frame(seed, type_=NODE_HEARTBEAT, from_node="node-c", payload={})
+    ) == (200, {"status": "ok"})
+
+
+async def test_an_old_version_rewrite_of_a_sibling_row_makes_it_no_member(
+    gfs, tmp_dir, listeners
+):
+    """A shared-seed sibling's row has no approval, so its outbound URL is
+    the ``url`` column — which an old node rewrites on a TOFU HELLO. It can
+    only do so together with ``public_key`` (the key that HELLO verified
+    under, never our own), so the rewritten row is no member: the
+    attacker's URL gets nothing."""
+    member, attacker_listener = listeners
+    await gfs.app[gfs_cluster_repo_key].insert_node(
+        ClusterNode(
+            node_id="node-b",
+            url=member.url,
+            public_key=_own_key(gfs),
+            status="online",
+            last_seen="2026-01-01 00:00:00",
+        )
+    )
+    attacker = secrets.token_bytes(32)
+    _old_version_write(
+        tmp_dir,
+        "UPDATE cluster_nodes SET url=?, public_key=? WHERE node_id='node-b'",
+        (attacker_listener.url, ed25519_public_key(attacker).hex()),
+    )
+    svc = gfs.app[gfs_cluster_key]
+    await svc.sync_report(_report())
+    await svc._heartbeat_tick()
+    assert member.hits == []
+    assert attacker_listener.hits == []
+    assert await svc.member_peers() == []

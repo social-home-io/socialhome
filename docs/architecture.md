@@ -754,9 +754,13 @@ trusts every private range, so any host there can claim any address through
 `X-Forwarded-For`. **Upgrade (breaking):** every key
 stored before this rule came from first-contact TOFU or from a pre-#677 key
 derived from the public instance id, and the old add-peer never stored one,
-so GFS migration `0017_cluster_approved_key.sql` adds `approved_key` empty
-for every row (an additive `ADD COLUMN`; nothing is cleared, because
-`public_key` is no longer trusted). A shared-seed sibling stays a member
+so GFS migration `0017_cluster_approved_key.sql` adds `approved_key` and
+`approved_url` empty for every row (additive `ADD COLUMN`s; nothing is
+cleared, because `public_key` is no longer trusted). Outbound traffic to an
+approved node goes to `approved_url` — the URL approved with its key — never
+to `url`, which an old-version node rewrites on any HELLO it trusts on first
+use; a sibling's `url` can only be rewritten together with its `public_key`,
+which makes the row no member. A shared-seed sibling stays a member
 through our own key; a peer with its own distinct key must be re-added by an
 operator. `key_source` in the admin cluster view is `approved` (an
 admin-approved key), `own` (our key: approved, or a shared-seed sibling's
