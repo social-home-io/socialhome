@@ -814,11 +814,8 @@ class ClusterService:
             await self._post_to_peer(
                 url,
                 NODE_HELLO,
-                {
-                    "node_id": self._node_id,
-                    "url": self._self_url,
-                    "public_key": self._own_pk_hex,
-                },
+                self._hello_payload(),
+                to=node_id,
                 session=None,
             )
         except Exception as exc:
@@ -890,15 +887,12 @@ class ClusterService:
                 await self._post_to_peer(
                     url,
                     NODE_HELLO,
-                    {
-                        "node_id": self._node_id,
-                        "url": self._self_url,
-                        "public_key": self._own_pk_hex,
-                    },
+                    self._hello_payload(),
+                    to=from_node_id,
                     session=None,
                 )
             except Exception as exc:
-                log.debug("cluster: reply NODE_HELLO to %s failed: %s", url, exc)
+                log.debug("cluster: reply NODE_HELLO to %r failed: %r", url, exc)
 
     async def handle_heartbeat(
         self,
@@ -1114,6 +1108,7 @@ class ClusterService:
                     peer_url,
                     NODE_PARTITION_GAP,
                     gap,
+                    to=from_node_id,
                     session=session,
                 )
             except Exception as exc:
@@ -1157,6 +1152,7 @@ class ClusterService:
         self,
         peer_url: str,
         *,
+        to: str = "",
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         """Send ``NODE_PARTITION_CATCHUP`` to a peer that just came back.
@@ -1173,6 +1169,7 @@ class ClusterService:
                 peer_url,
                 NODE_PARTITION_CATCHUP,
                 {"last_relay_ts": snapshot},
+                to=to,
                 session=session,
             )
         except Exception as exc:
@@ -1209,26 +1206,7 @@ class ClusterService:
         restarts or a transient partition. Fail-soft per peer.
         """
         while not self._stop.is_set():
-            for peer_url in self._peers:
-                if not peer_url or peer_url == self._self_url:
-                    continue
-                try:
-                    await self._post_to_peer(
-                        peer_url,
-                        NODE_HELLO,
-                        {
-                            "node_id": self._node_id,
-                            "url": self._self_url,
-                            "public_key": self._own_pk_hex,
-                        },
-                        session=None,
-                    )
-                except Exception as exc:
-                    log.debug(
-                        "cluster: re-announce HELLO to %s failed: %s",
-                        peer_url,
-                        exc,
-                    )
+            await self._announce_to_peers()
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
@@ -1238,19 +1216,35 @@ class ClusterService:
             except asyncio.TimeoutError:
                 pass
 
-    async def _announce_to_peers(self) -> None:
-        msg = {
+    def _hello_payload(self) -> dict:
+        return {
             "node_id": self._node_id,
             "url": self._self_url,
             "public_key": self._own_pk_hex,
         }
+
+    async def _announce_to_peers(self) -> None:
+        """HELLO every configured peer URL (fail-soft per peer).
+
+        A URL we already hold a row for names that node as the recipient
+        (``to``); a URL we have never heard from is HELLOed without one —
+        the configured peer list (Nomad renders it) carries no node ids,
+        and it may include this node itself, whose own HELLO is ignored.
+        """
+        known = {n.url: n.node_id for n in await self._repo.list_nodes()}
         for peer_url in self._peers:
-            if peer_url == self._self_url:
+            if not peer_url or peer_url == self._self_url:
                 continue
             try:
-                await self._post_to_peer(peer_url, NODE_HELLO, msg, session=None)
+                await self._post_to_peer(
+                    peer_url,
+                    NODE_HELLO,
+                    self._hello_payload(),
+                    to=known.get(peer_url, ""),
+                    session=None,
+                )
             except Exception as exc:
-                log.debug("cluster: NODE_HELLO to %s failed: %s", peer_url, exc)
+                log.debug("cluster: NODE_HELLO to %r failed: %r", peer_url, exc)
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -1281,7 +1275,7 @@ class ClusterService:
                                     active_sync_sessions=r.active_sync_sessions,
                                 ),
                             )
-                            await self.announce_partition_catchup(r.url)
+                            await self.announce_partition_catchup(r.url, to=r.node_id)
                         continue
                     ok = await self._ping_peer(r.url)
                     fails = self._fail_counts.get(r.url, 0)
@@ -1312,11 +1306,12 @@ class ClusterService:
                                     ),
                                     "connected_clients": self._own_connected_clients(),
                                 },
+                                to=r.node_id,
                                 session=None,
                             )
                         except Exception as exc:
                             log.debug(
-                                "cluster: NODE_HEARTBEAT to %s failed: %s",
+                                "cluster: NODE_HEARTBEAT to %r failed: %r",
                                 r.url,
                                 exc,
                             )
@@ -1350,11 +1345,13 @@ class ClusterService:
             if r.status == "offline":
                 continue
             try:
-                await self._post_to_peer(r.url, msg_type, payload, session=session)
+                await self._post_to_peer(
+                    r.url, msg_type, payload, to=r.node_id, session=session
+                )
                 self._fail_counts[r.url] = 0
             except Exception as exc:
                 if ignore_errors:
-                    log.debug("cluster: %s to %s failed: %s", msg_type, r.url, exc)
+                    log.debug("cluster: %s to %r failed: %r", msg_type, r.url, exc)
                     continue
                 await asyncio.sleep(SYNC_RETRY_DELAY_S)
                 try:
@@ -1362,25 +1359,27 @@ class ClusterService:
                         r.url,
                         msg_type,
                         payload,
+                        to=r.node_id,
                         session=session,
                     )
                 except Exception as exc2:
                     log.warning(
-                        "cluster: %s to %s dropped after retry: %s",
+                        "cluster: %s to %r dropped after retry: %r",
                         msg_type,
                         r.url,
                         exc2,
                     )
 
-    async def _post_to_peer(
-        self,
-        peer_url: str,
-        msg_type: str,
-        payload: dict,
-        *,
-        session: aiohttp.ClientSession | None = None,
-    ) -> None:
-        body = {
+    def _signed_frame(
+        self, msg_type: str, payload: dict, *, to: str = ""
+    ) -> tuple[bytes, str]:
+        """Build a ``/cluster/sync`` frame: ``(canonical bytes, signature)``.
+
+        *to* is the recipient's node id, signed into the body so the frame
+        is refused by any other node (409 ``wrong_recipient``). Left out
+        when the caller only knows a URL (a HELLO to a configured peer).
+        """
+        body: dict = {
             "type": msg_type,
             "from": self._node_id,
             "ts": int(self._wall_clock()),
@@ -1388,6 +1387,8 @@ class ClusterService:
             "sig_suite": CLUSTER_SIG_SUITE_ED25519,
             "payload": payload,
         }
+        if to:
+            body["to"] = to
         canonical = json.dumps(
             body,
             separators=(",", ":"),
@@ -1398,6 +1399,18 @@ class ClusterService:
             if self._signing_key
             else ""
         )
+        return canonical, sig
+
+    async def _post_to_peer(
+        self,
+        peer_url: str,
+        msg_type: str,
+        payload: dict,
+        *,
+        to: str = "",
+        session: aiohttp.ClientSession | None = None,
+    ) -> None:
+        canonical, sig = self._signed_frame(msg_type, payload, to=to)
         own_session = session is None
         active = session if session is not None else aiohttp.ClientSession()
         try:

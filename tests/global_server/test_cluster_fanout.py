@@ -15,6 +15,7 @@ import asyncio
 import time
 from dataclasses import replace
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -22,11 +23,13 @@ from socialhome.authority_cert import sign_authority_cert
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.global_server import cluster as cluster_mod
 from socialhome.global_server.app_keys import (
+    gfs_admin_repo_key,
     gfs_cluster_key,
     gfs_cluster_repo_key,
     gfs_fed_repo_key,
 )
 from socialhome.global_server.cluster import (
+    NODE_HEARTBEAT,
     ClusterService,
     _report_to_wire,
     _wire_to_client,
@@ -817,3 +820,62 @@ async def test_cluster_sync_never_moves_the_rotation_seq_backwards(started_app):
     wire["authority_rotation_seq"] = "lots"
     await svc.apply_sync_space("upsert", wire)
     assert (await fed.get_space("rot")).authority_rotation_seq == 8
+
+
+async def test_a_frame_for_one_node_is_refused_by_another(tmp_path_factory):
+    """Cross-node replay: B's frame for A, captured and replayed to C (which
+    also approved B), is refused — the signed ``to`` names A. Old-shape
+    frames without ``to`` still reach both."""
+    a = await _start_node(tmp_path_factory.mktemp("xr-a"), "A")
+    b = await _start_node(tmp_path_factory.mktemp("xr-b"), "B")
+    c = await _start_node(tmp_path_factory.mktemp("xr-c"), "C")
+    try:
+        for here in (a, c):
+            await _approve(here, b, "B")
+        cluster_b: ClusterService = b.app[gfs_cluster_key]
+        raw, sig = cluster_b._signed_frame(NODE_HEARTBEAT, {}, to="A")
+        headers = {"Content-Type": "application/json", "X-Node-Signature": sig}
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"{str(c.make_url('')).rstrip('/')}/cluster/sync",
+                data=raw,
+                headers=headers,
+            ) as resp:
+                assert (resp.status, await resp.json()) == (
+                    409,
+                    {"error": "wrong_recipient"},
+                )
+            async with http.post(
+                f"{str(a.make_url('')).rstrip('/')}/cluster/sync",
+                data=raw,
+                headers=headers,
+            ) as resp:
+                assert resp.status == 200
+    finally:
+        for node in (a, b, c):
+            await _stop_node(node)
+
+
+async def test_fan_out_with_recipients_converges_across_three_nodes(
+    tmp_path_factory, fast_sync_retry
+):
+    """Every node approves every other; a policy push from A, sent with a
+    per-recipient ``to``, lands on both B and C."""
+    nodes = {
+        nid: await _start_node(tmp_path_factory.mktemp(f"fan-{nid}"), nid)
+        for nid in ("A", "B", "C")
+    }
+    try:
+        for here_id, here in nodes.items():
+            for there_id, there in nodes.items():
+                if here_id != there_id:
+                    await _approve(here, there, there_id)
+        await nodes["A"].app[gfs_cluster_key].sync_policy({"fraud_threshold": 7})
+        for nid in ("B", "C"):
+            assert (
+                await nodes[nid].app[gfs_admin_repo_key].get_config("fraud_threshold")
+                == "7"
+            )
+    finally:
+        for node in nodes.values():
+            await _stop_node(node)

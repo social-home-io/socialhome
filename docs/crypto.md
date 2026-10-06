@@ -845,7 +845,8 @@ so no PQ migration is needed beyond a suite bump if SHA-256 ever is.
 the `X-Node-Signature` header:
 
 ```
-{type, from, ts, nonce, sig_suite, payload}   # sort_keys, separators=(",", ":")
+{type, from, to, ts, nonce, sig_suite, payload}   # sort_keys, separators=(",", ":")
+to        : recipient node id  # another node → 409 wrong_recipient; absent → accepted
 ts        : int unix seconds   # ±300 s of the receiver, not before its start
 nonce     : b64url(16 random bytes)
 sig_suite : "ed25519"          # unknown value → 400, no fallback
@@ -858,9 +859,11 @@ every node ships it; the PQ sibling (`ed25519+mldsa65`) is a suite bump. The
 verify key is one the receiver already holds — its own identity key (shared
 seed) or the key an operator pinned for that node — never one the frame
 carries (see `docs/architecture.md`, "GFS cluster membership"). Replay
-defence is the `ts` window plus a per-node cache of BLAKE2b-256 digests of
-accepted frame bytes (600 s); there is no recipient binding, so a frame can
-be replayed once to each other node inside its window.
+defence is the `ts` window, a per-node cache of BLAKE2b-256 digests of
+accepted frame bytes, and the signed recipient `to`: a frame for node A is
+refused by node B. `to` is left out only by older senders and by a HELLO to
+a configured URL whose node id the sender does not know yet — those can be
+replayed once to each other node inside their window.
 
 **Standalone auth** — `StandaloneAdapter` hashes passwords with scrypt
 and embeds parameters in the stored hash: `scrypt$16384$8$1$<salt

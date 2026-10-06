@@ -85,7 +85,7 @@ def outbound_hellos(monkeypatch):
     """
     sent: list[tuple[str, str]] = []
 
-    async def _fake_post(self, peer_url, msg_type, payload, *, session=None):
+    async def _fake_post(self, peer_url, msg_type, payload, *, to="", session=None):
         sent.append((peer_url, msg_type))
 
     monkeypatch.setattr(ClusterService, "_post_to_peer", _fake_post)
@@ -1140,3 +1140,72 @@ async def test_a_foreign_peer_rejoins_once_an_admin_re_adds_it(client, outbound_
     body = await (await client.get("/admin/api/cluster")).json()
     (row,) = [n for n in body["nodes"] if n["node_id"] == "old-peer"]
     assert row["key_source"] == "pinned"
+
+
+# ─── Recipient binding (signed ``to``) ────────────────────────────────
+
+
+def _frame_to(seed: bytes, to: object, *, from_node: str = PEER) -> tuple[bytes, str]:
+    return _sign_body(
+        {
+            "type": NODE_HEARTBEAT,
+            "from": from_node,
+            "to": to,
+            "ts": int(time.time()),
+            "nonce": secrets.token_urlsafe(16),
+            "sig_suite": "ed25519",
+            "payload": {},
+        },
+        seed,
+    )
+
+
+@pytest.mark.security
+async def test_frame_for_another_node_is_refused_and_charged_to_the_address(
+    client,
+):
+    """A frame signed for node X, replayed to us, is a 409 — charged to the
+    replaying address, never to the peer it names."""
+    seed = await _register_peer(client)
+    canonical, sig = _frame_to(seed, "gfs-node-x")
+    resp = await _post_raw(client, canonical, sig, ATTACKER_IP)
+    assert (resp.status, await resp.json()) == (409, {"error": "wrong_recipient"})
+    svc = client._app[gfs_cluster_key]
+    assert PEER not in svc._sync_node_limiter
+    for _ in range(CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN - 1):
+        canonical, sig = _frame_to(seed, "gfs-node-x")
+        resp = await _post_raw(client, canonical, sig, ATTACKER_IP)
+        assert resp.status == 409
+    canonical, sig = _frame_to(seed, "gfs-node-x")
+    assert (await _post_raw(client, canonical, sig, ATTACKER_IP)).status == 429
+
+
+async def test_frame_addressed_to_us_is_accepted(client):
+    seed = await _register_peer(client)
+    canonical, sig = _frame_to(seed, "gfs-node-a")
+    assert (await _post_raw(client, canonical, sig, GENUINE_IP)).status == 200
+
+
+@pytest.mark.parametrize("bad", [7, None, ["gfs-node-a"], {"id": "gfs-node-a"}])
+async def test_mistyped_recipient_is_malformed(client, bad):
+    seed = await _register_peer(client)
+    canonical, sig = _frame_to(seed, bad)
+    resp = await _post_raw(client, canonical, sig, GENUINE_IP)
+    assert (resp.status, await resp.json()) == (400, {"error": "invalid_message"})
+
+
+async def test_frame_without_a_recipient_is_accepted_from_an_older_sender(client):
+    """Senders older than ``to`` omit it; the frame is still accepted (the
+    compatibility tripwire, like a missing ``sig_suite``)."""
+    seed = await _register_peer(client)
+    canonical, sig = _sign_body(
+        {
+            "type": NODE_HEARTBEAT,
+            "from": PEER,
+            "ts": int(time.time()),
+            "nonce": secrets.token_urlsafe(16),
+            "payload": {},
+        },
+        seed,
+    )
+    assert (await _post_raw(client, canonical, sig, GENUINE_IP)).status == 200

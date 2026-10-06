@@ -711,8 +711,10 @@ a `NODE_HELLO` under a key the node does not hold is refused
 (`unapproved_node`) and writes nothing; a HELLO for a known node under a
 different key is refused (`key_mismatch`, WARNING) — a pin never moves
 in-band, and the repo's upsert keeps a non-empty pin in SQL as well, so
-rotation is delete then re-add. Each frame signs `{type, from, ts, nonce,
-sig_suite, payload}`: the sender id is the signed `from` only, `ts` must sit
+rotation is delete then re-add. Each frame signs `{type, from, to, ts, nonce,
+sig_suite, payload}`: the sender id is the signed `from` only, `to` names the
+recipient node (another node refuses it, 409 `wrong_recipient`; absent from
+older senders and from a HELLO to a not-yet-known configured URL), `ts` must sit
 within ±300 s of the receiver's wall clock and not before the receiving
 process started, and an accepted frame's digest is remembered for 600 s so a
 byte-identical resend is a 409. Every refusal is charged to the source
@@ -723,9 +725,9 @@ derived from the public instance id, so GFS migration
 frames verify under our own key meanwhile and its next HELLO re-pins it; a
 peer with its own distinct key must be re-added by an operator. Afterwards
 `key_source` in the admin cluster view is `own` (our key), `pinned` (only
-ever admin-added) or `none` (no pin yet). **Residual risks:** a frame names no recipient, so
-inside its 300 s window a captured frame can be replayed once to each other
-node (the replay cache is per process); clock skew above 300 s partitions
+ever admin-added) or `none` (no pin yet). **Residual risks:** a frame without `to` (older
+sender, or a HELLO to a configured URL not yet known) can be replayed once to
+each other node inside its 300 s window (the replay cache is per process); clock skew above 300 s partitions
 the cluster (run NTP); two nodes sharing a `node_id` are indistinguishable;
 and a roster larger than the replay cache's sizing (32 nodes saturating
 their budgets) evicts digests early.

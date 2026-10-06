@@ -24,6 +24,7 @@ from socialhome.global_server.cluster import (
     MAX_SIGNALING_SESSIONS,
     NODE_HEARTBEAT,
     NODE_HELLO,
+    NODE_POLICY_PUSH,
     ClusterService,
     FrameVerdict,
     UnsupportedClusterSigSuite,
@@ -524,7 +525,7 @@ async def test_handle_hello_replies_on_first_contact_so_discovery_is_bidirection
     """
     posted: list[tuple] = []
 
-    async def fake_post(self, url, msg_type, payload, *, session=None):
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
         posted.append((url, msg_type, payload))
 
     # ClusterService is __slots__-ed, so patch the class method, not the
@@ -563,7 +564,7 @@ async def test_handle_hello_ignores_a_message_from_this_node_itself(
     """
     posted: list = []
 
-    async def fake_post(self, url, msg_type, payload, *, session=None):
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
         posted.append((url, msg_type))
 
     monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
@@ -668,6 +669,67 @@ async def test_outbound_frame_carries_nonce_suite_and_wall_clock_ts(gfs_db):
     assert verify_ed25519(
         kp.public_key, raw, b64url_decode(headers["X-Node-Signature"])
     )
+
+
+async def test_outbound_frame_binds_its_recipient_when_known(gfs_db):
+    """``to`` is signed into the body when the caller knows the recipient's
+    node id, and left out otherwise (a HELLO to a configured URL)."""
+    kp = generate_identity_keypair()
+    svc = ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        signing_key=kp.private_key,
+        own_public_key_hex=kp.public_key.hex(),
+    )
+    session = _FakeSession()
+    await svc._post_to_peer(
+        "https://b.test", NODE_HEARTBEAT, {}, to="node-b", session=session
+    )
+    await svc._post_to_peer("https://b.test", NODE_HELLO, {}, session=session)
+    (_, raw, headers), (_, raw2, _) = session.posts
+    assert json.loads(raw)["to"] == "node-b"
+    assert verify_ed25519(
+        kp.public_key, raw, b64url_decode(headers["X-Node-Signature"])
+    )
+    assert "to" not in json.loads(raw2)
+
+
+async def test_every_known_peer_send_names_its_recipient(enabled_cluster, monkeypatch):
+    """Fan-out, HELLO replies, admin add-peer and re-announces to a URL we
+    already have a row for all name the recipient node id."""
+    posted: list[tuple[str, str, str]] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        posted.append((url, msg_type, to))
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    repo = enabled_cluster._repo
+    await repo.upsert_node(
+        ClusterNode(
+            node_id="node-b",
+            url="https://b.gfs.test",
+            public_key=_PIN,
+            status="online",
+        )
+    )
+    await enabled_cluster.sync_policy({"fraud_threshold": 3})
+    assert ("https://b.gfs.test", NODE_POLICY_PUSH, "node-b") in posted
+    assert all(to for _, t, to in posted if t == NODE_POLICY_PUSH)
+    posted.clear()
+    await enabled_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_PIN
+    )
+    assert posted == [("https://c.gfs.test", NODE_HELLO, "node-c")]
+    posted.clear()
+    await enabled_cluster.add_peer("node-d", "https://d.gfs.test", _PIN)
+    assert posted == [("https://d.gfs.test", NODE_HELLO, "node-d")]
+    posted.clear()
+    enabled_cluster._peers = ("https://b.gfs.test", "https://new.gfs.test")
+    await enabled_cluster._announce_to_peers()
+    assert posted == [
+        ("https://b.gfs.test", NODE_HELLO, "node-b"),
+        ("https://new.gfs.test", NODE_HELLO, ""),
+    ]
 
 
 def test_cluster_sig_suite_parse():

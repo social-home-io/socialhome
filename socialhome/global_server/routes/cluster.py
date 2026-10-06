@@ -30,6 +30,10 @@ from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
 
+#: Marks a frame without a ``to`` field (an older sender) — distinct from an
+#: explicit ``"to": null``, which is malformed.
+_NO_RECIPIENT = object()
+
 
 class ClusterHealthView(GfsBaseView):
     """``GET /cluster/health`` — public node + peer status."""
@@ -48,8 +52,8 @@ def _rate_limited() -> web.Response:
 class ClusterSyncView(GfsBaseView):
     """``POST /cluster/sync`` — NODE_* dispatch with signature + rate limit.
 
-    Body is the raw canonical JSON ``{type, from, ts, nonce, sig_suite,
-    payload}`` (an older sender omits ``nonce`` + ``sig_suite``); the
+    Body is the raw canonical JSON ``{type, from, to, ts, nonce, sig_suite,
+    payload}`` (an older sender omits ``to``, ``nonce`` + ``sig_suite``); the
     ``X-Node-Signature`` header carries the signature over those exact
     bytes. The sender id is the signed ``from`` — there is no header
     fallback.
@@ -64,11 +68,12 @@ class ClusterSyncView(GfsBaseView):
     1. Source address over its unverified budget → 429, before any parse,
        DB read or signature work.
     2. Not a JSON object → 400 ``invalid_json``; ``type`` / ``from`` /
-       ``payload`` missing or mistyped → 400 ``invalid_message``.
+       ``payload`` / ``to`` missing or mistyped → 400 ``invalid_message``.
     3. Unknown ``sig_suite`` → 400 ``unsupported_sig_suite``.
     4. ``ts`` not an int → 400 ``invalid_timestamp``; more than ±300 s off
        our wall clock, or before this process started → 401
-       ``stale_timestamp``.
+       ``stale_timestamp``; ``to`` present and not our node id → 409
+       ``wrong_recipient`` (a frame for another node, replayed to us).
     5. Membership → 403 ``unknown_node`` (non-HELLO, no row),
        ``unapproved_node`` (HELLO under a key we don't hold; nothing is
        written) or ``key_mismatch`` (HELLO for a known node under a key
@@ -108,12 +113,17 @@ class ClusterSyncView(GfsBaseView):
         from_node = body.get("from")
         msg_type = body.get("type")
         payload = body.get("payload") or {}
+        # ``to`` (the recipient's node id) is optional — a sender older
+        # than the field, or a HELLO to a configured URL, omits it — but
+        # when present it must be a string.
+        to = body.get("to", _NO_RECIPIENT)
         if (
             not isinstance(from_node, str)
             or not from_node
             or not isinstance(msg_type, str)
             or not msg_type
             or not isinstance(payload, dict)
+            or (to is not _NO_RECIPIENT and not isinstance(to, str))
         ):
             return _reject(
                 web.json_response({"error": "invalid_message"}, status=400),
@@ -137,6 +147,14 @@ class ClusterSyncView(GfsBaseView):
                     {"error": ts_error},
                     status=400 if ts_error == "invalid_timestamp" else 401,
                 ),
+            )
+
+        # Recipient binding: a frame signed for another node is a replay
+        # across the cluster. Refused before any key lookup or signature
+        # work, and charged to the address like any other replay.
+        if to is not _NO_RECIPIENT and to != svc.node_id:
+            return _reject(
+                web.json_response({"error": "wrong_recipient"}, status=409),
             )
 
         # Membership (spec §24.10): which key, if any, this frame must
