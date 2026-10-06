@@ -43,11 +43,18 @@ from socialhome.global_server.domain import (
 from socialhome.global_server.server import create_gfs_app
 
 
+#: Every node advertises this as its own URL in its HELLO, so each also learns
+#: a peer row it can never reach (see ``fast_sync_retry``). A closed loopback
+#: port refuses at once — ``http://gfs.test`` sent each of those posts out for
+#: a real DNS lookup.
+_UNREACHABLE_SELF_URL = "http://127.0.0.1:1"
+
+
 def _config(tmp, *, instance_id: str, cluster_peers=()):
     return GfsConfig(
         host="127.0.0.1",
         port=0,
-        base_url="http://gfs.test",
+        base_url=_UNREACHABLE_SELF_URL,
         data_dir=str(tmp),
         instance_id=instance_id,
         cluster_enabled=True,

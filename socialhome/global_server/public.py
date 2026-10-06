@@ -296,6 +296,20 @@ class SlidingWindowCounter:
         self._evict()
         return True
 
+    def exhausted(self, key: str, *, now: float | None = None) -> bool:
+        """Whether the next :meth:`allow` for *key* would be refused.
+
+        A read-only peek: it records no hit and leaves the key's recency
+        alone, so a gate can consult a budget that only FAILURES spend (the
+        caller records those with :meth:`allow`) without spending it.
+        """
+        hits = self._hits.get(key)
+        if not hits:
+            return False
+        stamp = time.monotonic() if now is None else now
+        live = sum(1 for t in hits if stamp - t < RATE_LIMIT_WINDOW_SECONDS)
+        return live >= self._limit
+
     def _evict(self) -> None:
         overflow = len(self._hits) - self._max_keys
         if overflow <= 0:

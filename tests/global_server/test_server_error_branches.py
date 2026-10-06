@@ -80,6 +80,11 @@ def _sign_canonical(body: dict, seed: bytes) -> tuple[bytes, str]:
     return canonical, b64url_encode(sign_ed25519(seed, canonical))
 
 
+#: A closed loopback port — a delivery attempt is refused immediately, with no
+#: DNS lookup and nothing leaving the host.
+_UNREACHABLE_INBOX = "http://127.0.0.1:1/wh"
+
+
 @pytest.fixture
 async def client(tmp_dir):
     """Authenticated GFS admin TestClient with one active peer registered."""
@@ -90,14 +95,16 @@ async def client(tmp_dir):
             hash_password("admin-pw"),
         )
         await tc.post("/admin/login", json={"password": "admin-pw"})
-        # Pre-register a single active peer for signature-aware tests.
+        # Pre-register a single active peer for signature-aware tests. Its
+        # inbox is a closed loopback port: a fan-out to it fails at once with
+        # no DNS lookup (``peer.home`` used to leave the process to resolve).
         seed, pub_hex = _gen_ed25519()
         await app[gfs_fed_repo_key].upsert_instance(
             ClientInstance(
                 instance_id="peer.home",
                 display_name="Peer",
                 public_key=pub_hex,
-                inbox_url="http://peer.home/wh",
+                inbox_url=_UNREACHABLE_INBOX,
                 status="active",
             )
         )
@@ -1067,7 +1074,7 @@ async def test_publish_response_never_leaks_the_subscriber_roster(client):
     assert "peer.home" not in raw
     body = json.loads(raw)
     # A COUNT, not the roster. (peer.home holds no GFS WebSocket here and its
-    # registered inbox is unreachable, so the count is 0 — the delivered=1 case
+    # registered inbox is a closed loopback port, so the count is 0 — the delivered=1 case
     # is covered by ``test_fan_out_delivers_to_real_subscriber_inbox``.)
     assert isinstance(body["delivered_to"], int)
     assert body["delivered_to"] == 0
